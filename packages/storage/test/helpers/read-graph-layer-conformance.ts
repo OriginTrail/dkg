@@ -12,6 +12,7 @@ import { readGraphCopy } from '../../src/read-graph/statements.js';
 import type { TripleStoreConfig } from '../../src/triple-store-composition.js';
 import type { Quad, TripleStore } from '../../src/triple-store.js';
 import { PlanningOxigraphStore } from './read-graph-planning-store.js';
+import { authorCommitInput, seedOldState } from '../rfc64-author-commit-cas-harness.js';
 import { propertyOptions } from '../../../../scripts/testing/property-options.js';
 
 export const AGENT = '0x' + 'ab'.repeat(20);
@@ -266,6 +267,32 @@ export function readGraphLayerConformance(backend: 'oxigraph' | 'blazegraph') {
       expect([state(fixture.readGraphs.wholeVm), state(fixture.readGraphs.wholeSwm), state(fixture.readGraphs.agentWm)]).toEqual(['dirty', 'dirty', 'dirty']);
       expect(state(fixture.readGraphs.codeVm)).toBe('ready');
       expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
+      await close();
+    }, 60_000);
+
+    it('maintains the read graphs of an RFC-64 author commit that wins, and changes nothing for one that loses its guard', async () => {
+      const fixture = freshFixture();
+      const { adapter, layer, store, close } = await open(fixture);
+      // Only an adapter that declares author commits runs one with read graphs.
+      if ((layer.adapterCapabilities?.methods as readonly string[] | undefined)?.includes('rfc64AuthorCommitCasV1') !== true) {
+        await close();
+        return;
+      }
+      // The commit replaces the context graph's shared-memory graph, a member of its whole-graph SWM read graph.
+      const projection = fixture.graphs[5]!;
+      await seedOldState(adapter);
+      const commit = (value: string) => authorCommitInput({ sharedProjectionGraph: projection, sharedProjectionQuads: [q('urn:s:commit', value, projection)] });
+      const held = async () => {
+        const result = await adapter.query(`SELECT ?s ?o WHERE { GRAPH <${projection}> { ?s <${P}> ?o } }`);
+        return (result.type === 'bindings' ? result.bindings : []).map((row) => `${row.s} ${row.o}`).sort();
+      };
+      await expect(store.rfc64AuthorCommitCasV1!(commit('"won"'))).resolves.toBe('committed');
+      expect(await held()).toEqual(['urn:s:commit "won"']);
+      await expectLayerUnions(adapter, layer, fixture, 'an author commit that won');
+      // Its guard is now stale: the head has moved on.
+      await expect(store.rfc64AuthorCommitCasV1!(commit('"lost"'))).resolves.toBe('conflict');
+      expect(await held()).toEqual(['urn:s:commit "won"']);
+      await expectLayerUnions(adapter, layer, fixture, 'an author commit that lost its guard');
       await close();
     }, 60_000);
 

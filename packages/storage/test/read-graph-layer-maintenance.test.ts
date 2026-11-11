@@ -80,6 +80,38 @@ describe('read-graph layer on embedded Oxigraph', () => {
     expect(await layer.innerStore.countQuads(fixture.graphs[1]!)).toBeGreaterThan(0);
   });
 
+  it('marks the read graphs dirty and deletes without a plan, on an adapter that cannot plan a delete naming a blank node', async () => {
+    class ByIdentity extends PlanningOxigraphStore {
+      override readonly readGraphCapabilities = { ...new PlanningOxigraphStore().readGraphCapabilities, plansBlankNodeDeletes: false };
+    }
+    const routed = async (remove: (store: TripleStore, member: string) => Promise<unknown>) => {
+      const { adapter, fixture, layer, store } = await layered(new ByIdentity());
+      const { wholeVm } = fixture.readGraphs;
+      await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(wholeVm)));
+      const planning = adapter as PlanningOxigraphStore;
+      planning.requests.length = 0;
+      const failed = await remove(store, fixture.graphs[2]!).then(() => false, () => true);
+      const result = await adapter.query(readGraphStateRowsQuery());
+      const stored = parseReadGraphStateRows(result.type === 'bindings' ? result.bindings : []).rows.find((row) => row.readGraph === wholeVm);
+      return {
+        failed,
+        planned: planning.requests.some((request) => request.includes(`GRAPH <${wholeVm}>`)),
+        mirror: `${layer.runtime.mirror.get(wholeVm)!.state}@${layer.runtime.mirror.get(wholeVm)!.generation}`,
+        stored: `${stored?.state}@${stored?.generation}`,
+      };
+    };
+    // An exact delete and a pattern delete that name a blank node go without read-graph operations, their read graphs dirty.
+    expect(await routed((store, member) => store.delete([q('_:anchor', '"anchored"', member)])))
+      .toEqual({ failed: false, planned: false, mirror: 'dirty@2', stored: 'dirty@2' });
+    // This test adapter writes a pattern delete in SPARQL, which cannot hold a blank node, so the delete itself fails
+    // after the read graph was marked; the embedded adapters delete such a pattern by identity.
+    expect(await routed((store, member) => store.deleteByPattern({ graph: member, object: '_:any' })))
+      .toEqual({ failed: true, planned: false, mirror: 'dirty@2', stored: 'dirty@2' });
+    // A delete of ground terms keeps its plan.
+    expect(await routed((store, member) => store.delete([q('urn:s:2', '"v2"', member)])))
+      .toEqual({ failed: false, planned: true, mirror: 'ready@1', stored: 'ready@1' });
+  });
+
   it('marks the read graphs of a write with an unknown outcome dirty, on an engine that may run it beside later requests', async () => {
     class Unsure extends PlanningOxigraphStore {
       override readonly readGraphCapabilities = { ...new PlanningOxigraphStore().readGraphCapabilities, serialUpdates: false };

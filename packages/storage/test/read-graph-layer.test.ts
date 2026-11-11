@@ -105,7 +105,12 @@ describe('read-graph backend runtime', () => {
     expect(readGraphBackendIdentity({ backend: 'oxigraph-worker', options: { path: '/tmp/store' } })).toBe('path:/tmp/store');
     expect(readGraphBackendIdentity({ backend: 'oxigraph-worker' })).toBeUndefined();
     expect(readGraphBackendIdentity({ backend: 'oxigraph', options: { path: '/tmp/store' } })).toBeUndefined();
-    expect(readGraphBackendIdentity({ backend: 'custom', options: { url: 'not a url ' } })).toBe('endpoint:not a url');
+    // Each backend's own location option only: a stray option changes nothing, and an unknown adapter has no identity.
+    expect(readGraphBackendIdentity({ backend: 'oxigraph-persistent', options: { path: '/tmp/store', url: 'http://h:7/sparql' } })).toBe('path:/tmp/store');
+    expect(readGraphBackendIdentity({ backend: 'blazegraph', options: { url: 'http://h:7/sparql', path: '/tmp/store' } })).toBe('endpoint:http://h:7/sparql');
+    expect(readGraphBackendIdentity({ backend: 'sparql-http', options: { url: 'http://h:7/other', queryEndpoint: 'http://h:7/query' } }))
+      .toBe('endpoint:http://h:7/query');
+    expect(readGraphBackendIdentity({ backend: 'custom', options: { url: 'http://h:7/sparql' } })).toBeUndefined();
   });
 
   it('records that a backend may hold partitions for every store object over it, and only over it', () => {
