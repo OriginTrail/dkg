@@ -54,7 +54,9 @@ function deleteDataUpdate(quads: readonly oxigraph.Quad[]): string {
   const byGraph = new Map<string, string[]>();
   for (const quad of quads) {
     const graph = quad.graph.termType === 'DefaultGraph' ? '' : String(quad.graph);
-    byGraph.set(graph, [...byGraph.get(graph) ?? [], `${String(quad.subject)} ${String(quad.predicate)} ${String(quad.object)} .`]);
+    let triples = byGraph.get(graph);
+    if (!triples) byGraph.set(graph, triples = []);
+    triples.push(`${String(quad.subject)} ${String(quad.predicate)} ${String(quad.object)} .`);
   }
   const blocks = [...byGraph].map(([graph, triples]) => (graph ? `GRAPH ${graph} { ${triples.join(' ')} }` : triples.join(' ')));
   return `DELETE DATA { ${blocks.join(' ')} }`;
