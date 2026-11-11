@@ -1,11 +1,10 @@
 // Word check for the text people read in the node UI (DESIGN.md · Writing).
 // A listed word fails wherever a person could read it: JSX text, the attributes
 // people see or hear, labels and messages in objects, and error messages.
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { COPY } from '../src/ui/marketplace/copy.generated';
+import { codeFiles, read, where } from './helpers/source.js';
 
 /** Words DESIGN.md · Writing rules out, with what to use instead. */
 const WORDS: [RegExp, string][] = [
@@ -243,28 +242,21 @@ const problemsIn = (lines: Line[]) => lines.flatMap(({ text, where }) => WORDS
   .map(([word, use]) => ({ where, text, word: word.source, use })));
 const asLines = (texts: string[]): Line[] => texts.map((text) => ({ text, where: 'example' }));
 
-const uiRoot = resolve(__dirname, '../src/ui');
-const walk = (dir: string): string[] => readdirSync(dir).flatMap((name) => {
-  const path = join(dir, name);
-  return statSync(path).isDirectory() ? walk(path) : [path];
-});
+// Findings name files from the package root (src/ui/…), so they can be opened as written.
+const fromPackage = (file: string) => `src/ui/${where(file)}`;
 // Sample data and the development-only reference page never reach a person using a node.
-const sources = walk(uiRoot)
-  .filter((path) => /\.tsx?$/.test(path))
-  .filter((path) => !/^(mocks|design-system)\b/.test(relative(uiRoot, path).replace(/\\/g, '/')));
-const packageRoot = resolve(__dirname, '..');
+const sources = codeFiles.filter((file) => !/^(mocks|design-system)\b/.test(where(file)));
 // The Marketplace keeps its text in one table that components read by key, so every value in it is shown.
 // The development-only component gallery is left out, like the reference page above.
-const copyPath = 'src/ui/marketplace/copy.generated.ts';
-const copySource = readFileSync(resolve(packageRoot, copyPath), 'utf8').split('\n');
+const copySource = read('marketplace/copy.generated.ts').split('\n');
 const copyLines: Line[] = Object.entries(COPY)
   .filter(([key]) => !key.startsWith('gallery.'))
   .map(([key, text]) => ({
     text: clean(String(text)),
-    where: `${copyPath}:${copySource.findIndex((line) => line.includes(`"${key}":`)) + 1}`,
+    where: `src/ui/marketplace/copy.generated.ts:${copySource.findIndex((line) => line.includes(`"${key}":`)) + 1}`,
   }));
 const allLines = [
-  ...sources.flatMap((path) => visibleLines(readFileSync(path, 'utf8'), relative(packageRoot, path).replace(/\\/g, '/'))),
+  ...sources.flatMap((file) => visibleLines(read(file), fromPackage(file))),
   ...copyLines,
 ];
 const allText = new Set(allLines.map((line) => line.text));
