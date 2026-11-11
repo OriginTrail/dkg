@@ -62,7 +62,11 @@ describe('fallback inventory materialization', () => {
     const lane = kind === 'enumeration' ? context : kind === 'catalog' ? context.catalog : context.withWithheldGraphRoots([]);
     await expect(lane.listGraphsByPrefix('urn:absent:')).resolves.toEqual([]);
     await expect(lane.listGraphsByPrefix(slicePrefix)).resolves.toEqual(slice);
-    await expect(lane.listGraphsByPrefix(slicePrefix)).rejects.toMatchObject({
+    // The request's enumeration reads a prefix once: reading it again is not charged, the next
+    // prefix is. The catalog and withheld lanes read, and charge, every time.
+    if (kind === 'enumeration') await expect(lane.listGraphsByPrefix(slicePrefix)).resolves.toEqual(slice);
+    const next = kind === 'enumeration' ? 'urn:unrelated:998:' : slicePrefix;
+    await expect(lane.listGraphsByPrefix(next)).rejects.toMatchObject({
       code: 'QUERY_MATERIALIZATION_TOO_LARGE', maxBytes: 1024, actualBytes: emptyBytes + 2 * sliceBytes,
     });
   });
