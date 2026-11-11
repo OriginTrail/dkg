@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
+import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
 import { checkReadGraph } from '../src/read-graph/check.js';
 import { ReadGraphCheckSchedule, startReadGraphChecks } from '../src/read-graph/check-schedule.js';
+import { readGraphStateCompareAndSet } from '../src/read-graph/state.js';
 import type { QueryOptions, QueryResult } from '../src/triple-store.js';
 import { captureMetrics, readGraphCheckConformance } from './helpers/read-graph-check-conformance.js';
-import { layerFixture, layeredStore, q } from './helpers/read-graph-layer-conformance.js';
+import { AGENT, layerFixture, layeredStore, q, readyRow } from './helpers/read-graph-layer-conformance.js';
 import { PlanningOxigraphStore } from './helpers/read-graph-planning-store.js';
 
 readGraphCheckConformance('oxigraph');
@@ -31,6 +33,23 @@ const isSizeQuery = (sparql: string) => sparql.startsWith('SELECT (COUNT(*) AS ?
 const isMissingProbe = (sparql: string) => sparql.startsWith('ASK {') && sparql.includes('FILTER NOT EXISTS { GRAPH <');
 
 describe('read-graph checks under concurrent writes', () => {
+  it('finds equal-sized corruption beside a member graph that a warm catalog does not know', async () => {
+    const { adapter, fixture, layer, store } = await hooked();
+    const { wholeVm } = fixture.readGraphs;
+    await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(wholeVm)));
+    const indexed = new GraphSetIndexStore(store);
+    // Warm the catalog, then change the store below every decorator.
+    await indexed.listGraphsByPrefix(`${fixture.root}/`);
+    const newMember = `${fixture.root}/_verifiable_memory/${AGENT}/9`;
+    // The read graph keeps a triple no member holds any more, and lacks one of a new member: its size is unchanged.
+    await adapter.delete([q('urn:s:1', '"v1"', fixture.graphs[1]!)]);
+    await adapter.insert([q('urn:s:new', '"new"', newMember)]);
+    expect(await indexed.listGraphsByPrefix(`${fixture.root}/`)).not.toContain(newMember);
+    expect(await checkReadGraph(indexed, wholeVm, 'full')).toEqual({ readGraph: wholeVm, mode: 'full', outcome: 'mismatch', direction: 'missing' });
+    expect(layer.runtime.mirror.get(wholeVm)).toMatchObject({ state: 'dirty', generation: 2 });
+    await adapter.close();
+  });
+
   it('runs the count again when a write lands while it runs, so the write is no mismatch', async () => {
     const { adapter, fixture, store } = await hooked();
     const { wholeVm } = fixture.readGraphs;

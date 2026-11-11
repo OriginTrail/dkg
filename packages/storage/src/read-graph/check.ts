@@ -79,7 +79,7 @@ interface CheckContext {
   readonly layer: ReadGraphStore;
   /** The adapter below the layer: probes, counts and the dirty mark go here. */
   readonly target: TripleStore;
-  /** The store as given: its catalog lists member graphs cheaply. */
+  /** The store as given: its catalog lists member graphs cheaply, for samples only, since it may lag behind the store. */
   readonly catalog: TripleStore;
   readonly row: ReadGraphStateRow;
   readonly read: ReadGraphTarget;
@@ -142,7 +142,11 @@ async function contextOf(store: TripleStore, readGraph: string, options: ReadGra
 
 type Verdict = 'consistent' | 'skipped' | 'interrupted' | { readonly direction: ReadGraphCheckDirection };
 
-/** Probe a sample of member graphs, and a sample of their subjects, under the read graph's lock. */
+/**
+ * Probe a sample of member graphs, and a sample of their subjects, under the
+ * read graph's lock. The sample comes from the catalog: a member it has not
+ * seen yet waits for a later sample or the full check.
+ */
 async function sampled(context: CheckContext, options: ReadGraphCheckOptions): Promise<Verdict> {
   const members = await memberGraphs(context, context.catalog);
   const sample = pick(members, options.sampleGraphs ?? DEFAULTS.sampleGraphs, options.random ?? Math.random);
@@ -160,28 +164,38 @@ async function sampled(context: CheckContext, options: ReadGraphCheckOptions): P
 }
 
 /** Every member graph, then the read graph's size against its members' distinct triples, without holding the lock. */
+/**
+ * Equal sizes prove equality only once every member counted is known to hold
+ * no triple the read graph lacks. Both phases therefore list the members from
+ * the store itself, never from a catalog that may lag behind it, and a member
+ * that appears after its chunk ran is probed in the window of the count.
+ */
 async function full(context: CheckContext, options: ReadGraphCheckOptions): Promise<Verdict> {
   const attempts = options.attempts ?? DEFAULTS.attempts;
   const chunk = options.chunkGraphs ?? DEFAULTS.chunkGraphs;
-  const members = await memberGraphs(context, context.catalog);
+  const missingIn = async (graphs: readonly string[]) => {
+    for (const graph of graphs) {
+      if (await ask(context, readGraphMissingTripleAsk(context.readGraph, graph))) return true;
+    }
+    return false;
+  };
+  const probed = new Set<string>();
+  const members = await memberGraphs(context, context.target);
   for (let at = 0; at < members.length; at += chunk) {
     const graphs = members.slice(at, at + chunk);
-    const found = await withoutWrites(context, attempts, async () => {
-      for (const graph of graphs) {
-        if (await ask(context, readGraphMissingTripleAsk(context.readGraph, graph))) return true;
-      }
-      return false;
-    });
+    const found = await withoutWrites(context, attempts, () => missingIn(graphs));
     if (found === INTERRUPTED) return 'interrupted';
     if (found === 'skipped') return 'skipped';
     if (found) return markUnderLock(context, 'missing', options);
+    for (const graph of graphs) probed.add(graph);
     await yieldLane(options.signal);
   }
   // The size of the read graph must equal the number of distinct member triples.
   const counted = await withoutWrites(context, attempts, async () => {
-    // The store's own graph list: a catalog that lags behind would leave a member's triples uncounted.
+    const graphs = await memberGraphs(context, context.target);
+    if (await missingIn(graphs.filter((graph) => !probed.has(graph)))) return 'missing' as const;
     let distinct = 0;
-    for (const graph of await memberGraphs(context, context.target)) {
+    for (const graph of graphs) {
       distinct += await count(context, readGraphFirstHolderCountQuery(context.read, graph));
       await yieldLane(options.signal);
     }
@@ -189,6 +203,7 @@ async function full(context: CheckContext, options: ReadGraphCheckOptions): Prom
   });
   if (counted === INTERRUPTED) return 'interrupted';
   if (counted === 'skipped') return 'skipped';
+  if (counted === 'missing') return markUnderLock(context, 'missing', options);
   if (counted.size === counted.distinct) return 'consistent';
   return markUnderLock(context, counted.size > counted.distinct ? 'unheld' : 'missing', options);
 }
