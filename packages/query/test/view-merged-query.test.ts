@@ -27,13 +27,19 @@ const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
 const quad = (subject: string, predicate: string, object: string, graph: string): Quad => ({ subject, predicate, object, graph });
 // A product typed in one asset and priced in another; a triple that both assets hold.
+// Paths through two predicates, one in each asset.
+const PATHS = [
+  quad('urn:s1', 'urn:a', 'urn:m1', G1), quad('urn:m1', 'urn:b', 'urn:e1', G1), quad('urn:s2', 'urn:b', 'urn:e2', G2),
+];
 const ASSETS = [
   quad('urn:p1', RDF_TYPE, 'urn:Product', G1), quad('urn:shared', 'urn:in', 'urn:cg', G1),
   quad('urn:p1', 'urn:price', '"5"', G2), quad('urn:shared', 'urn:in', 'urn:cg', G2),
+  ...PATHS,
 ];
 // The read graphs hold the merge of their members.
 const READ_GRAPHS = [
   quad('urn:p1', RDF_TYPE, 'urn:Product', READ), quad('urn:p1', 'urn:price', '"5"', READ), quad('urn:shared', 'urn:in', 'urn:cg', READ),
+  ...PATHS.map(row => ({ ...row, graph: READ })),
   quad('urn:draft', 'urn:note', '"mine"', WM_READ),
 ];
 const ELSEWHERE = [quad('urn:p1', 'urn:price', '"999"', OTHER)];
@@ -61,6 +67,12 @@ const VM: QueryOptions = { contextGraphId: id, view: 'verifiable-memory' };
 const MERGED: QueryOptions = { ...VM, semantics: 'merged' };
 const JOIN = 'SELECT ?p ?x WHERE { ?p a <urn:Product> . ?p <urn:price> ?x }';
 const MIXED = 'SELECT ?g ?x WHERE { ?p a <urn:Product> . GRAPH ?g { ?p <urn:price> ?x } }';
+const REPEATED = 'SELECT ?g ?s ?o WHERE { GRAPH ?g { ?s (<urn:a>|<urn:b>)+ ?o } }';
+const REPEATED_ROWS = [
+  { g: G1, s: 'urn:s1', o: 'urn:m1' }, { g: G1, s: 'urn:m1', o: 'urn:e1' }, { g: G1, s: 'urn:s1', o: 'urn:e1' },
+  { g: G2, s: 'urn:s2', o: 'urn:e2' },
+];
+const sortedRows = (rows: readonly Record<string, string>[]) => rows.map(row => JSON.stringify(row)).sort();
 
 describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}`, () => {
   let store: TripleStore;
@@ -147,6 +159,13 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
     await expect(engine.query(MIXED, VM)).rejects.toThrow(ScopedQueryViolationError);
   });
 
+  it('keeps the graph of each match of a repeated path inside GRAPH, as per asset', async () => {
+    fresh();
+    const merged = await engine.query(REPEATED, MERGED);
+    expect(sortedRows(merged.bindings)).toEqual(sortedRows(REPEATED_ROWS));
+    expect(sortedRows(merged.bindings)).toEqual(sortedRows((await engine.query(REPEATED, VM)).bindings));
+  });
+
   it('never shows the read graph, or another context graph, to a GRAPH portion', async () => {
     fresh();
     const graphs = await engine.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }', MERGED);
@@ -169,6 +188,10 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
     expect((await viaFacade.query(MIXED, MERGED)).bindings).toEqual([{ g: G2, x: '"5"' }]);
     expect((await viaFacade.query('SELECT DISTINCT ?g WHERE { ?s <urn:price> ?x GRAPH ?g { ?s a <urn:Product> } }', MERGED)).bindings)
       .toEqual([{ g: G1 }]);
+    // A repeated compound path gets constant graph targets, as on the per-asset route.
+    const sent = vi.spyOn(store, 'query');
+    expect(sortedRows((await viaFacade.query(REPEATED, MERGED)).bindings)).toEqual(sortedRows(REPEATED_ROWS));
+    expect(sent.mock.calls.at(-1)![0]).toContain(`GRAPH <${G1}> { VALUES ?g { <${G1}> }`);
   });
 
   it('reads working memory from the read graph of the agent that owns the address', async () => {
@@ -195,22 +218,33 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
   it('drops an answer whose read graph changed while it ran, and plans once more', async () => {
     fresh();
     const query = store.query.bind(store);
+    const [oldPrice, newPrice] = [quad('urn:p1', 'urn:price', '"5"', READ), quad('urn:p1', 'urn:price', '"6"', READ)];
     let changes = 1;
     const sent = vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
       const result = await query(sparql, options);
       if (changes > 0) {
         changes -= 1;
+        // A rebuild replaces the read graph's contents and moves its generation while the query runs.
+        await store.delete([oldPrice]);
+        await store.insert([newPrice]);
         readGraphs.set(READ, 'ready', readGraphs.state(READ)!.generation + 1);
       }
       return result;
     });
-    const result = await engine.query(JOIN, MERGED);
-    expect(result).toMatchObject({ bindings: [{ p: 'urn:p1', x: '"5"' }], semantics: 'merged' });
-    expect(sent).toHaveBeenCalledTimes(2);
-    // A read graph that changes again is not ready.
-    changes = 2;
-    await expect(engine.query(JOIN, MERGED)).rejects.toBeInstanceOf(ViewNotReadyError);
-    expect(sent).toHaveBeenCalledTimes(4);
+    try {
+      // Only the answer of the generation that is still current is released.
+      const result = await engine.query(JOIN, MERGED);
+      expect(result).toEqual({ bindings: [{ p: 'urn:p1', x: '"6"' }], semantics: 'merged' });
+      expect(sent).toHaveBeenCalledTimes(2);
+      // A read graph that changes again is not ready.
+      changes = 2;
+      await expect(engine.query(JOIN, MERGED)).rejects.toBeInstanceOf(ViewNotReadyError);
+      expect(sent).toHaveBeenCalledTimes(4);
+    } finally {
+      sent.mockRestore();
+      await store.delete([newPrice]);
+      await store.insert([oldPrice]);
+    }
   });
 
   it('refuses merged where it does not apply, and answers a defaulted request per asset there', async () => {

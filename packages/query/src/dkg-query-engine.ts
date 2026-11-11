@@ -72,6 +72,8 @@ import {
   type PreparedGraphScope,
 } from './sparql-graph-scope.js';
 import { injectMinTrustFilter } from './sparql-min-trust.js';
+import { needsCallerGraphBinding } from './sparql-graph-dataset.js';
+import { bindCallerGraphsBeforeRead } from './sparql-caller-graph-read.js';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
 import {
@@ -524,7 +526,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     assertExplicitGraphIrisAllowed(scope, graphs);
     const constrained = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(scope, graphs,
       { boundByDataset: this.sparqlEngine === 'oxigraph', allowDefaultGraphPatterns: true }));
-    return this.execAndNormalize(withMergedViewDataset(constrained, plan.readGraph, graphs), reads);
+    // As on the per-asset route, some GRAPH portions keep their graph only with constant targets.
+    const bound = needsCallerGraphBinding(constrained, this.sparqlEngine)
+      ? transitionGraphScope(constrained, bindCallerGraphsBeforeRead(constrained, graphs).source) : constrained;
+    return this.execAndNormalize(withMergedViewDataset(bound, plan.readGraph, graphs), reads);
   }
 
   /** The graphs a view reads per asset: its families, sub-graph fan-out and per-cgId graphs, without child context graphs. */

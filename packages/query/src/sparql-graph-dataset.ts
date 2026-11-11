@@ -66,6 +66,16 @@ function needsConstantCallerGraphs(scope: PreparedSparqlQuery): boolean {
   });
 }
 
+/**
+ * Whether a read must bind its caller's GRAPH variables to constant graph targets before
+ * evaluation (`bindCallerGraphsBeforeRead`): on a store other than Oxigraph, for a repeated
+ * compound path, a nested SELECT or a caller assignment of the graph variable.
+ */
+export function needsCallerGraphBinding(scope: PreparedSparqlQuery, engine: SparqlEngineFamily | null): boolean {
+  return engine !== 'oxigraph' && scope.operation !== 'DESCRIBE' && scope.graphVariables.length > 0
+    && hasRepeatedPath(scope) && needsConstantCallerGraphs(scope);
+}
+
 export function planGraphDataset(
   scope: PreparedSparqlQuery,
   engine: SparqlEngineFamily | null,
@@ -91,8 +101,7 @@ export function planGraphDataset(
     datasetClauses: graphlessDescription ? ['FROM']
       : !oxigraph || readsDefaultGraph ? ['FROM', 'FROM NAMED'] : ['FROM NAMED'],
     preservePattern: graphlessDescription || scope.readsOnlyDeclaredNamedSet,
-    bindCallerGraphs: !scopedDescription && graphAccess === 'dataset' && !oxigraph
-      && scope.graphVariables.length > 0 && repeatedPath && needsConstantCallerGraphs(scope),
+    bindCallerGraphs: !scopedDescription && graphAccess === 'dataset' && needsCallerGraphBinding(scope, engine),
     wrapDescriptionPattern: scopedDescription && scope.where !== null,
   };
 }
