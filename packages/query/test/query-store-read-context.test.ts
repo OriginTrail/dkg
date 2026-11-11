@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ChangelogStore, GraphManager, GraphSetIndexStore, SharedMemoryLiteralBlobStore, type TripleStore } from '@origintrail-official/dkg-storage';
-import { createQueryStoreReadContext, QueryMaterializationBudget, requireQueryDataset } from '../src/query-store-read-context.js';
+import { createQueryStoreReadContext, requireQueryDataset } from '../src/query-store-read-context.js';
 import { ScopedQueryViolationError } from '../src/scoped-query-error.js';
 
 describe('query store-read materialization budget', () => {
@@ -122,9 +122,8 @@ describe('decorated inventory materialization', () => {
       const exact = createQueryStoreReadContext(store, { maxMaterializedBytes: emptyBytes + resultBytes });
       await expect(exact.listGraphsByPrefix('did:dkg:context-graph:')).resolves.toEqual([]);
       await expect(exact.query('SELECT * WHERE {}')).resolves.toEqual(result);
-      const budget = new QueryMaterializationBudget(emptyBytes);
-      await expect(new GraphManager(store).listStoredContextGraphOwnerCandidates({}, budget)).resolves.toEqual([]);
-      expect(() => budget.consume(result)).toThrow(expect.objectContaining({ actualBytes: emptyBytes + resultBytes }));
+      // The owner inventory of unscoped admission is node work: it is read, never charged.
+      await expect(new GraphManager(store).listStoredContextGraphOwnerCandidates({})).resolves.toEqual([]);
     });
 });
 

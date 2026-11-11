@@ -5,7 +5,12 @@ export {
 } from './query-result-size-error.js';
 export * from './query-engine.js';
 export * from './query-types.js';
-export { QueryMaterializationBudget } from './query-store-read-context.js';
+export {
+  QueryMaterializationBudget,
+  QUERY_CATALOG_LIMIT_NAME,
+  QUERY_CATALOG_MAX_RESPONSE_BYTES,
+  readWithinCatalogLimit,
+} from './query-store-read-context.js';
 export {
   QUERY_MATERIALIZATION_TOO_LARGE,
   QueryMaterializationTooLargeError,
