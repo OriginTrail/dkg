@@ -11,7 +11,7 @@ import { classifyCoverage } from '../pca/coverage.js';
 import { nodeCoverage, type CoverageAccount, type CoverageProbe, type NodeCoverage } from '../pca/walletCoverage.js';
 import { eqAddress as eq } from '../web3/address.js';
 
-/** Per-(node wallet) registration probe against one account. `null` = couldn't determine. */
+/** Per-(node wallet) probe against one account, with its canonical coverage result. */
 export type PcaWalletProbe = CoverageProbe;
 
 export type PcaClassification = 'owned' | 'approved' | 'unknown';
@@ -95,12 +95,13 @@ async function resolveAccount(accountId: string, wallets: string[]): Promise<Res
         // adapterSupported===false (the adapter couldn't answer) → registered null
         // (couldn't determine), NOT not-registered → probesInconclusive (H2 path),
         // excluded from approvedCount (which counts registered === true, not 'covers').
-        .then((s): PcaWalletProbe => ({ wallet, registered: classifyCoverage(s).registered }))
-        .catch((): PcaWalletProbe => ({ wallet, registered: null })),
+        .then((s): PcaWalletProbe => ({ wallet, coverage: classifyCoverage(s) }))
+        // A failed probe couldn't determine coverage: inconclusive, not a capability gap.
+        .catch((): PcaWalletProbe => ({ wallet, coverage: { outcome: 'inconclusive', registered: null, adapterUnsupported: false } })),
     ),
   );
-  const approvedCount = walletProbes.filter((p) => p.registered === true).length;
-  const probesInconclusive = walletProbes.some((p) => p.registered === null);
+  const approvedCount = walletProbes.filter((p) => p.coverage.registered === true).length;
+  const probesInconclusive = walletProbes.some((p) => p.coverage.outcome === 'inconclusive');
   const owned = wallets.some((w) => eq(w, snapshot.owner));
   const classification: PcaClassification = owned
     ? 'owned'
@@ -268,8 +269,8 @@ export function usePcaOverview(intervalMs = 30_000, extraIds: string[] = []): Pc
   const wallets = entry?.data?.wallets ?? EMPTY_WALLETS;
   const walletsError = entry?.data?.walletsError ?? false;
   const walletsInconclusive = walletsError && wallets.length === 0;
-  // U2 (#1344) — coverage and the best discount come from ONE pure aggregate, which uses the
-  // shared isPcaSpendable, so no surface advertises a discount S5 treats as not-covering.
+  // U2 (#1344) — coverage and the best discount come from ONE aggregate over the probes'
+  // canonical classifyCoverage outcomes, so no surface advertises a discount S5 treats as not-covering.
   const coverage = useMemo(() => nodeCoverage(wallets, accounts, walletsInconclusive), [wallets, accounts, walletsInconclusive]);
   return {
     accounts,

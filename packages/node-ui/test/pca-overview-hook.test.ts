@@ -152,8 +152,9 @@ describe('usePcaOverview', () => {
     };
     mocks.fetchPca.mockImplementation((id: string, wallet?: string) => {
       if (wallet === undefined) return Promise.resolve(snaps[id]);
+      // A probe returns that PCA's own snapshot plus probedKey (as the daemon does).
       // '8' has no approved wallet (0-approved); all others approve W1.
-      return Promise.resolve(snap({ probedKey: { wallet: W1, registered: id !== '8' } }));
+      return Promise.resolve({ ...snaps[id], probedKey: { wallet: W1, registered: id !== '8' } });
     });
     const { unmount } = await render();
     expect(latest!.bestCoveringDiscountBps).toBe(4000);
@@ -167,8 +168,10 @@ describe('usePcaOverview', () => {
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W1], balances: [], chainId: '84532', rpcUrl: null });
     mocks.fetchPca.mockImplementation((id: string, wallet?: string) => {
       // healthy (future expiry, not swept), approved, but ZERO budget (override the snap() default topUpBuffer:'1').
-      if (wallet === undefined) return Promise.resolve(snap({ accountId: '7', topUpBuffer: '0', baseEpochAllowance: '0' }));
-      return Promise.resolve(snap({ probedKey: { wallet: W1, registered: true } }));
+      const account = snap({ accountId: '7', topUpBuffer: '0', baseEpochAllowance: '0' });
+      if (wallet === undefined) return Promise.resolve(account);
+      // The probe returns the same PCA's snapshot plus probedKey.
+      return Promise.resolve({ ...account, probedKey: { wallet: W1, registered: true } });
     });
     const { unmount } = await render();
     expect(latest!.covered).toBe(false);

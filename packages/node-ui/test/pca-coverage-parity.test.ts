@@ -217,7 +217,7 @@ describe('#1344 coverage parity (table-driven) — S5 / S6 / overview agree via 
       // 1. usePcaOverview
       const ov = await renderOverview();
       const a = latestOverview!.accounts.find((x) => x.accountId === ACCOUNT)!;
-      expect(a.walletProbes[0]?.registered).toBe(s.overview.registered);
+      expect(a.walletProbes[0]?.coverage.registered).toBe(s.overview.registered);
       expect(a.approvedCount).toBe(s.overview.approvedCount);
       expect(a.probesInconclusive).toBe(s.overview.inconclusive);
       expect(latestOverview!.covered).toBe(s.overview.covered);

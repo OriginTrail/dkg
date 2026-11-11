@@ -33,44 +33,55 @@ export interface OwnerGuidance {
 
 export function ownerGuidance({ accountId, owner, access, connected, ownerInPool }: OwnerGuidanceInput): OwnerGuidance {
   const short = truncateAddress(owner);
-  const loading = access.ownerUnknownCause === 'wallets-loading';
-  const unreadable = access.ownerUnknownCause === 'wallets-unreadable';
-  const isWallet = access.mode === 'wallet';
+  const probeNote = ' You can still check whether a wallet is approved.';
+  const switchLine = `Your connected wallet isn’t the PCA owner wallet. To top up, approve wallets or renew this PCA, switch to ${short}.`;
+  const connectAnyLine = 'To manage a PCA that a wallet owns, connect that wallet.';
 
-  const reason = loading
-    ? `Confirming ownership of PCA #${accountId}…`
-    : unreadable
-    ? `Couldn’t load this node’s wallets, so we can’t confirm who owns PCA #${accountId}.`
-    : isWallet && access.wrongNetwork
-    ? `The PCA owner wallet is on another network. Switch it to this node’s network to change PCA #${accountId}.`
-    : isWallet
-    ? `Your connected wallet is the PCA owner wallet, so you can change PCA #${accountId}.`
-    : ownerInPool
-    ? `Only the PCA owner wallet (${short}) can change PCA #${accountId}. It’s one of this node’s operational wallets, but the node signs PCA changes only with its primary operational wallet.`
-    : connected
-    ? `You’re connected with a different wallet. Only the PCA owner wallet (${short}) can change PCA #${accountId}.`
-    : `Only the PCA owner wallet (${short}) can change PCA #${accountId}.`;
-
-  const walletLine = connected
-    ? isWallet
-      ? access.wrongNetwork
-        ? 'Your connected wallet is the PCA owner wallet, but it’s on another network. Switch networks to top up, approve wallets or renew this PCA.'
-        : 'Your connected wallet is the PCA owner wallet. It signs top-ups, wallet approvals, removals and renewals.'
+  // Writes on (ownerModeWritesEnabled: this node owns it, or the owner wallet is
+  // connected on the right network): only the wallet line, nothing to explain.
+  if (access.writesEnabled) {
+    const walletLine = !connected
+      ? connectAnyLine
       : access.mode === 'daemon'
         ? 'This node owns this PCA and signs changes itself. You don’t need to connect a wallet.'
-        : `Your connected wallet isn’t the PCA owner wallet. To top up, approve wallets or renew this PCA, switch to ${short}.`
-    : access.mode === 'external'
-      ? 'To top up, approve wallets or renew this PCA, connect the PCA owner wallet.'
-      : 'To manage a PCA that a wallet owns, connect that wallet.';
-
-  let notice: OwnerNotice | null = null;
-  if (!access.writesEnabled) {
-    if (loading) notice = { kind: 'loading', text: reason };
-    // Someone else's PCA with no wallet connected: the wallet line already says to connect the owner wallet.
-    else if (!(access.mode === 'external' && !connected && !ownerInPool)) {
-      notice = { kind: 'warning', text: unreadable ? reason : `${reason} You can still check whether a wallet is approved.`, retry: unreadable };
-    }
+        : 'Your connected wallet is the PCA owner wallet. It signs top-ups, wallet approvals, removals and renewals.';
+    return { walletLine, notice: null, disabledReason: undefined };
   }
 
-  return { walletLine, notice, disabledReason: access.writesEnabled ? undefined : reason };
+  // Writes off from here: the reason is also the tooltip on the disabled owner actions.
+  const disabled = (walletLine: string, reason: string, notice: OwnerNotice | null): OwnerGuidance =>
+    ({ walletLine, notice, disabledReason: reason });
+
+  // Ownership can't be confirmed yet: the node's wallet list is loading (a neutral tip)
+  // or couldn't be read ("can't confirm" with Retry, never a false non-owner).
+  if (access.ownerUnknownCause === 'wallets-loading') {
+    const reason = `Confirming ownership of PCA #${accountId}…`;
+    return disabled(connected ? switchLine : connectAnyLine, reason, { kind: 'loading', text: reason });
+  }
+  if (access.ownerUnknownCause === 'wallets-unreadable') {
+    const reason = `Couldn’t load this node’s wallets, so we can’t confirm who owns PCA #${accountId}.`;
+    return disabled(connected ? switchLine : connectAnyLine, reason, { kind: 'warning', text: reason, retry: true });
+  }
+
+  // The owner wallet is connected, but on another network.
+  if (access.mode === 'wallet') {
+    const reason = `The PCA owner wallet is on another network. Switch it to this node’s network to change PCA #${accountId}.`;
+    const line = connected
+      ? 'Your connected wallet is the PCA owner wallet, but it’s on another network. Switch networks to top up, approve wallets or renew this PCA.'
+      : connectAnyLine;
+    return disabled(line, reason, { kind: 'warning', text: reason + probeNote, retry: false });
+  }
+
+  // Someone other than this node and the connected wallet owns it.
+  const reason = ownerInPool
+    ? `Only the PCA owner wallet (${short}) can change PCA #${accountId}. It’s one of this node’s operational wallets, but the node signs PCA changes only with its primary operational wallet.`
+    : connected
+      ? `You’re connected with a different wallet. Only the PCA owner wallet (${short}) can change PCA #${accountId}.`
+      : `Only the PCA owner wallet (${short}) can change PCA #${accountId}.`;
+  const warning: OwnerNotice = { kind: 'warning', text: reason + probeNote, retry: false };
+  if (access.mode === 'external' && !connected) {
+    // The line already says to connect the owner wallet, so only the node-wallet case adds a notice.
+    return disabled('To top up, approve wallets or renew this PCA, connect the PCA owner wallet.', reason, ownerInPool ? warning : null);
+  }
+  return disabled(connected ? switchLine : connectAnyLine, reason, warning);
 }

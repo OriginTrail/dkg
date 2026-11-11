@@ -1,9 +1,10 @@
 import React from 'react';
 import { RefreshCw } from 'lucide-react';
-import { Button } from '../ds/Button.js';
+import { Button } from './Button.js';
 
 /**
- * The one Retry control on PCA screens. It sits outside the message it belongs to.
+ * The one Retry control (DESIGN.md · Feedback states). It sits outside the message it belongs to,
+ * with the refresh icon.
  * Small by default; `md` where it sits beside a default-size button.
  */
 export function RetryButton({

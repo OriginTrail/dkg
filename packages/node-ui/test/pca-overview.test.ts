@@ -603,3 +603,26 @@ describe('ConvictionOverview — Already have a PCA? hands the ID to Get added',
     await unmount();
   });
 });
+
+describe('ConvictionOverview — ID check with no publishing wallets', () => {
+  it('hands the ID to Get added, reads the PCA, and offers Add without claiming coverage', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockImplementation(async (id: string) => ({ ...snapFixture(id), owner: '0xSOMEONEELSE0000000000000000000000000000' }));
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, 'Already have a PCA?');
+    const input = container.querySelector('[data-testid="pca-check-input"]') as HTMLInputElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, '7');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      (container.querySelector('[data-testid="pca-check-submit"]') as HTMLButtonElement).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await waitForText(document.body, 'PCA #7 exists, but this node reported no publishing wallets to check.');
+    expect(mocks.fetchPca).toHaveBeenCalledWith('7');
+    expect(document.body.textContent).not.toContain('Approved on PCA #7');
+    expect(document.querySelector('[data-testid="pca-sponsor-track"]')?.textContent).toBe('Add PCA #7 to your list');
+    expect(usePcaStore.getState().trackedIds).not.toContain('7');
+    await unmount();
+  });
+});
