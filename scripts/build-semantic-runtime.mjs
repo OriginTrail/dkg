@@ -147,7 +147,6 @@ export function assertPortableBuildEnvironment(env = process.env) {
 
 function buildInto(outputRoot) {
   assertPortableBuildEnvironment();
-  verifyToolchain();
   // Cargo may pass only `rustc` to RUSTC_WRAPPER (notably with Homebrew).
   // The macOS wrapper needs the selected compiler's full path for its dylibs.
   const rustc = run('rustup', ['which', '--toolchain', EXPECTED_RUST_TOOLCHAIN, 'rustc'], { capture: true });
@@ -464,25 +463,6 @@ function verifyArtifactLock(root, manifest) {
   }
 }
 
-/**
- * What a build (not `--verify-only`) does with the Wasm: build it when the pinned toolchain is installed; otherwise skip
- * it, so a node built from source without that toolchain still builds, but can't run the semantic runtime. With
- * `DKG_SEMANTIC_RUNTIME_WASM=required` (CI, release packing) a missing toolchain fails the build instead.
- */
-export function wasmBuildDecision(env, toolchainProblem) {
-  if (!toolchainProblem) return 'build';
-  return env.DKG_SEMANTIC_RUNTIME_WASM === 'required' ? 'fail' : 'skip';
-}
-
-function toolchainProblem() {
-  try {
-    verifyToolchain();
-    return null;
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
-  }
-}
-
 function main() {
   const verifyOnly = process.argv.includes('--verify-only');
   if (verifyOnly) {
@@ -491,14 +471,15 @@ function main() {
     return;
   }
 
-  const problem = toolchainProblem();
-  const decision = wasmBuildDecision(process.env, problem);
-  if (decision === 'fail') throw new Error(problem);
-  if (decision === 'skip') {
+  try {
+    verifyToolchain();
+  } catch (error) {
+    if (process.env.DKG_SEMANTIC_RUNTIME_WASM === 'required') throw error;
     console.warn(
-      `${problem}\nsemantic-runtime: the pinned toolchain is not installed, so the Wasm build is skipped and this build `
-      + "can't run the semantic runtime. See rust/README.md to install it, or set DKG_SEMANTIC_RUNTIME_WASM=required "
-      + 'to fail instead.',
+      `${error instanceof Error ? error.message : String(error)}\n`
+      + 'semantic-runtime: the pinned toolchain is not installed, so the Wasm build is skipped and this build '
+      + "can't run the semantic runtime. To build it, install the toolchain (see rust/README.md) and build with "
+      + 'DKG_SEMANTIC_RUNTIME_WASM=required.',
     );
     return;
   }
