@@ -1,15 +1,8 @@
 // Icons come from one set: Lucide for actions and things, LayerGlyph for
 // memory layers, StatusGlyph for status (see DESIGN.md). Emoji and Unicode
 // symbols render differently per platform and can't carry a size or colour.
-import { readFileSync, readdirSync } from 'node:fs';
-import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
-
-const UI = join(__dirname, '../src/ui');
-const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (
-  e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)]
-));
-const files = walk(UI);
+import { codeFiles, cssFiles, findAll, tsxFiles } from './helpers/source.js';
 
 // Arrows, technical symbols, shapes, dingbats and emoji.
 const GLYPH = /[×←-⇿⌀-⏿■-➿⤀-⥿⬀-⯿\u{1f300}-\u{1faff}]/gu;
@@ -23,41 +16,27 @@ const stripComments = (source: string) => source
 
 describe('icons', () => {
   it('keeps icons to the size scale', () => {
-    const found = files
-      .filter((file) => file.endsWith('.tsx'))
-      .flatMap((file) => [...readFileSync(file, 'utf8').matchAll(/\bsize=\{(10|11|13|15)\}/g)].map((m) => `${relative(UI, file)}: ${m[1]}`));
-    expect(found).toEqual([]);
+    expect(findAll(tsxFiles, /\bsize=\{(10|11|13|15)\}/g, { show: (m) => m[1]! })).toEqual([]);
   });
 
   it('uses no emoji or symbol characters as icons in the UI code', () => {
-    const found = files
-      .filter((file) => /\.tsx?$/.test(file))
-      .flatMap((file) => [...stripComments(readFileSync(file, 'utf8')).matchAll(GLYPH)]
-        .filter(([glyph]) => !ALLOWED.has(glyph))
-        .map(([glyph]) => `${relative(UI, file)}: ${glyph}`));
-    expect(found).toEqual([]);
+    expect(findAll(codeFiles, GLYPH, { prepare: stripComments, keep: ([glyph]) => !ALLOWED.has(glyph) })).toEqual([]);
   });
 
   it('never prints an icon into a string, where it would read [object Object]', () => {
-    const found = files
-      .filter((file) => /\.tsx?$/.test(file))
-      .flatMap((file) => [...readFileSync(file, 'utf8').matchAll(/\$\{[\w.]*[iI]con\}/g)].map(([m]) => `${relative(UI, file)}: ${m}`));
-    expect(found).toEqual([]);
+    expect(findAll(codeFiles, /\$\{[\w.]*[iI]con\}/g, { show: ([m]) => m })).toEqual([]);
   });
 
   it('puts the refresh icon on every text Refresh and Retry button', () => {
-    const found = files
-      .filter((file) => file.endsWith('.tsx'))
-      .flatMap((file) => [...readFileSync(file, 'utf8').matchAll(/(?<!\/)>\s*(Retry|Refresh)[^<{\n]*<\/button>/g)].map(([m]) => `${relative(UI, file)}: ${m}`));
-    expect(found).toEqual([]);
+    expect(findAll(tsxFiles, /(?<!\/)>\s*(Retry|Refresh)[^<{\n]*<\/button>/g, { show: ([m]) => m })).toEqual([]);
   });
 
   it('draws no symbol characters from CSS', () => {
-    const found = files
-      .filter((file) => file.endsWith('.css'))
-      .flatMap((file) => [...stripComments(readFileSync(file, 'utf8')).matchAll(/content:\s*["']([^"']+)["']/g)]
-        .filter(([, value]) => value.match(GLYPH))
-        .map(([, value]) => `${relative(UI, file)}: ${value}`));
+    const found = findAll(cssFiles, /content:\s*["']([^"']+)["']/g, {
+      prepare: stripComments,
+      keep: ([, value]) => !!value!.match(GLYPH),
+      show: ([, value]) => value!,
+    });
     expect(found).toEqual([]);
   });
 });

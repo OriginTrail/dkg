@@ -1,16 +1,10 @@
 // Reads the UI's JSX with the TypeScript parser, so source checks look at the
 // element tree, not at how the source happens to be laid out.
-import { readFileSync, readdirSync } from 'node:fs';
-import { join, relative } from 'node:path';
 import ts from 'typescript';
+import { UI, read, tsxFiles, uiFiles, where } from './source.js';
 
-export const UI = join(__dirname, '../../src/ui');
-
-const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (
-  e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)]
-));
-export const uiFiles = walk(UI);
-export const tsxFiles = uiFiles.filter((f) => f.endsWith('.tsx'));
+// The source inventory is shared with the other rule suites (helpers/source.ts).
+export { UI, tsxFiles, uiFiles };
 
 export type Jsx = ts.JsxElement | ts.JsxSelfClosingElement;
 export const opening = (n: Jsx) => (ts.isJsxElement(n) ? n.openingElement : n);
@@ -34,7 +28,7 @@ export function* jsxElements(tree: ts.SourceFile, file = tree.fileName): Generat
     const isJsx = ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n);
     if (isJsx) {
       const line = tree.getLineAndCharacterOfPosition(n.getStart()).line + 1;
-      out.push({ node: n, ancestors: [...stack].reverse(), where: `${relative(UI, file).replace(/\\/g, '/')}:${line}` });
+      out.push({ node: n, ancestors: [...stack].reverse(), where: `${where(file)}:${line}` });
       stack.push(n);
     }
     ts.forEachChild(n, visit);
@@ -46,5 +40,5 @@ export function* jsxElements(tree: ts.SourceFile, file = tree.fileName): Generat
 
 /** Every JSX element in every UI .tsx file. */
 export function* uiJsxElements() {
-  for (const file of tsxFiles) yield* jsxElements(parseTsx(readFileSync(file, 'utf8'), file), file);
+  for (const file of tsxFiles) yield* jsxElements(parseTsx(read(file), file), file);
 }
