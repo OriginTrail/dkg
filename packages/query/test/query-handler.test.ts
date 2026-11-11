@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, StoreResponseTooLargeError, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
-import { QueryHandler } from '../src/query-handler.js';
+import { QueryHandler, REMOTE_SPARQL_MAX_RESULT_BYTES } from '../src/query-handler.js';
+import { QueryResultTooLargeError } from '../src/query-result-size-error.js';
+import { QueryMaterializationTooLargeError } from '../src/query-materialization-error.js';
 import type { QueryRequest, QueryAccessConfig } from '../src/query-types.js';
 
 const CONTEXT_GRAPH = 'test-contextGraph';
@@ -313,6 +315,44 @@ describe('QueryHandler', () => {
 
       expect(response.status).toBe('GAS_LIMIT_EXCEEDED');
       expect(response.error).toContain('time limit');
+    });
+
+    it('gives a remote SPARQL lookup the result budget of the HTTP query route', async () => {
+      const query = vi.fn(async () => ({ bindings: [{ name: '"Alice"' }] }));
+      const handler = new QueryHandler({ query } as unknown as DKGQueryEngine, { defaultPolicy: 'public' });
+      const sparql = `SELECT ?name WHERE { ?s <${SCHEMA_NAME}> ?name }`;
+      const response = await handler.handle(makeRequest({ lookupType: 'SPARQL_QUERY', sparql }), 'peer-1');
+      expect(response.status).toBe('OK');
+      expect(REMOTE_SPARQL_MAX_RESULT_BYTES).toBe(10 * 1024 * 1024);
+      expect(query).toHaveBeenCalledWith(sparql, {
+        contextGraphId: CONTEXT_GRAPH,
+        maxResponseBytes: REMOTE_SPARQL_MAX_RESULT_BYTES,
+        maxMaterializedBytes: REMOTE_SPARQL_MAX_RESULT_BYTES,
+      });
+    });
+
+    it.each([
+      ['one store response', () => new QueryResultTooLargeError(new StoreResponseTooLargeError(10, 11))],
+      ['the materialized total', () => new QueryMaterializationTooLargeError(10, 11)],
+    ])('answers ERROR when a remote SPARQL result passes the budget in %s', async (_kind, overBudget) => {
+      const engine = { query: async () => { throw overBudget(); } } as unknown as DKGQueryEngine;
+      const handler = new QueryHandler(engine, { defaultPolicy: 'public' });
+      const response = await handler.handle(makeRequest({
+        lookupType: 'SPARQL_QUERY', sparql: `SELECT ?name WHERE { ?s <${SCHEMA_NAME}> ?name }`,
+      }), 'peer-1');
+      expect(response).toMatchObject({
+        status: 'ERROR', error: 'Query result exceeds byte limit (11 > 10)', resultCount: 0, truncated: false,
+      });
+      expect(response.bindings).toBeUndefined();
+    });
+
+    it('answers an unrelated remote SPARQL failure as an internal error, not as a byte limit', async () => {
+      const engine = { query: async () => { throw new Error('store unavailable'); } } as unknown as DKGQueryEngine;
+      const handler = new QueryHandler(engine, { defaultPolicy: 'public' });
+      const response = await handler.handle(makeRequest({
+        lookupType: 'SPARQL_QUERY', sparql: `SELECT ?name WHERE { ?s <${SCHEMA_NAME}> ?name }`,
+      }), 'peer-1');
+      expect(response).toMatchObject({ status: 'ERROR', error: 'Internal error processing query' });
     });
   });
 

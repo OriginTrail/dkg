@@ -1,19 +1,21 @@
 import { readGraphInventoryByPrefix } from './graph-inventory-materialization.js';
+import { readCompleteGraphCatalog } from './graph-catalog-internal-limit.js';
 // SPDX-License-Identifier: Apache-2.0
 import { contextGraphStorageOwnerCandidates } from '@origintrail-official/dkg-core';
 import { readGraphPartitionOwner } from './graph-enumeration-visibility.js';
 import type { QueryOptions, TripleStore } from './triple-store.js';
 const CG_PREFIX = 'did:dkg:context-graph:';
 
-/** Read and meter the context-graph inventory before projecting possible owners. */
-export async function listStoredContextGraphOwnerCandidates(store: TripleStore, options: QueryOptions,
-  materializationMeter?: { consumeBytes(bytes: number): void }): Promise<string[]> {
+/**
+ * Every possible owner of a stored graph, for unscoped query admission. The inventory
+ * read is node work: it runs under the internal catalog ceiling, never a caller's byte
+ * limit, and nothing is charged to the caller.
+ */
+export async function listStoredContextGraphOwnerCandidates(store: TripleStore, options: QueryOptions): Promise<string[]> {
     options.signal?.throwIfAborted();
     const readOptions = { ...options, source: options.source ?? 'storage.contextGraphOwnerCandidates' };
-    const graphUris = await readGraphInventoryByPrefix(store, CG_PREFIX, readOptions);
-    // Charge the inventory this read returns, before deduplicating owners. A
-    // store without a prefix listing reads its complete list as node work.
-    materializationMeter?.consumeBytes(graphUris.materializedBytes);
+    const graphUris = await readCompleteGraphCatalog(readOptions,
+      internal => readGraphInventoryByPrefix(store, CG_PREFIX, internal));
     const candidates = new Set<string>();
     let visited = 0;
     for (const graph of graphUris.graphs) {
