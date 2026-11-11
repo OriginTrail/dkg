@@ -4,6 +4,7 @@ import {
   type ReadGraphWriteOptions,
   type ReadGraphWritePlan,
 } from '../read-graph/adapter-contract.js';
+import type { GraphWriteScope } from '../graph-write-gen.js';
 import type { QueryOptions } from '../triple-store.js';
 
 /**
@@ -56,4 +57,14 @@ export function withReadGraphOperationsAroundCallerUpdate(sparql: string, option
     : sparql.slice(start);
   const spliced = withReadGraphOperations(operations, options);
   return start > 0 ? `${sparql.slice(0, start)}\n${spliced}` : spliced;
+}
+
+/**
+ * The graphs a write may change: the scope of its own update, and the read
+ * graphs its plan maintains, which change in the same request. An unscoped
+ * write stays unscoped.
+ */
+export function withReadGraphs(scope: GraphWriteScope, options: QueryOptions | undefined): GraphWriteScope {
+  const plan = operationsOf(options);
+  return plan && scope.kind === 'graphs' ? { kind: 'graphs', graphs: [...scope.graphs, ...plan.readGraphs] } : scope;
 }

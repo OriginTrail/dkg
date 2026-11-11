@@ -7,7 +7,7 @@ import { refuseWithheldGraphQuery } from '../withheld-graph-query.js';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import { prepareAtomicGraphReplace, prepareAtomicGraphAndSubjectReplace, prepareAtomicSubjectReplace, prepareAtomicSubjectAndInsert } from './atomic-write-plans.js';
 import { SparqlHttpResponseError, isDefinitiveSparqlUpdateRejectionV1 } from './sparql-http-response-error.js';
-import { sparqlHttpReadGraphCapabilities, sparqlHttpUpdateRequest, type ReadGraphCapableAdapter } from './sparql-http-read-graphs.js';
+import { sparqlHttpReadGraphCapabilities, sparqlHttpWriteRequest, type ReadGraphCapableAdapter } from './sparql-http-read-graphs.js';
 /**
  * SparqlHttpStore — TripleStore adapter for any SPARQL 1.1 Protocol endpoint.
  *
@@ -1033,12 +1033,12 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       operation: StoreOperation;
     };
   }): Promise<void> {
-    const update = sparqlHttpUpdateRequest(opts.update, opts.options, opts.operation, this.readGraphCapabilities);
+    const request = sparqlHttpWriteRequest(opts, this.readGraphCapabilities);
     let lifecycle: GraphWriteLifecycle | undefined;
     try {
-      await this.postUpdate(update, opts.options, opts.operation, () => {
+      await this.postUpdate(request.update, opts.options, opts.operation, () => {
         // Begin the semantic write only after all pre-dispatch refusals.
-        lifecycle = this.writeGen.beginWrite(opts.scope);
+        lifecycle = this.writeGen.beginWrite(request.scope);
         this.invalidateListGraphsCache();
         this.logicalMutationScope.markMutationDispatched();
       });

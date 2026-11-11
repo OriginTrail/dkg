@@ -2,8 +2,9 @@ import type {
   ReadGraphAdapterCapabilities,
   ReadGraphPlannedMethod,
 } from '../read-graph/adapter-contract.js';
+import type { GraphWriteScope } from '../graph-write-gen.js';
 import type { QueryOptions } from '../triple-store.js';
-import { refuseReadGraphOperations, withReadGraphOperationsAroundCallerUpdate } from './read-graph-request.js';
+import { refuseReadGraphOperations, withReadGraphOperationsAroundCallerUpdate, withReadGraphs } from './read-graph-request.js';
 
 export type { ReadGraphCapableAdapter } from '../read-graph/adapter-contract.js';
 
@@ -35,21 +36,23 @@ export function sparqlHttpReadGraphCapabilities(atomicUpdates: boolean): ReadGra
 }
 
 /**
- * The update request of one write, run as store operation `operation`: the
- * write's own update text, the caller's for `update`, with the plan's
- * operations around it. A plan with operations on an operation the store has
- * not declared is refused before anything is sent: `insert`, whose quads the
- * layer adds to the same call instead, and every write on a best-effort
- * endpoint.
+ * The update request of one write, run as store operation `operation`, and the
+ * graphs it may change: the write's own update text (the caller's, for
+ * `update`) with the plan's operations around it, and the write's scope with
+ * the read graphs the plan maintains, so their write revisions move with the
+ * request. A plan with operations on an operation the store has not declared
+ * is refused before anything is sent: `insert`, whose quads the layer adds to
+ * the same call instead, and every write on a best-effort endpoint.
  */
-export function sparqlHttpUpdateRequest(
-  update: string,
-  options: QueryOptions | undefined,
-  operation: string,
+export function sparqlHttpWriteRequest(
+  write: Readonly<{ update: string; scope: GraphWriteScope; options?: QueryOptions; operation: string }>,
   capabilities: ReadGraphAdapterCapabilities,
-): string {
-  if (!(capabilities.methods as readonly string[]).includes(operation)) {
-    refuseReadGraphOperations(options, `SparqlHttpStore.${operation}`);
+): { update: string; scope: GraphWriteScope } {
+  if (!(capabilities.methods as readonly string[]).includes(write.operation)) {
+    refuseReadGraphOperations(write.options, `SparqlHttpStore.${write.operation}`);
   }
-  return withReadGraphOperationsAroundCallerUpdate(update, options);
+  return {
+    update: withReadGraphOperationsAroundCallerUpdate(write.update, write.options),
+    scope: withReadGraphs(write.scope, write.options),
+  };
 }

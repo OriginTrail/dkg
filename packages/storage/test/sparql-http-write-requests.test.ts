@@ -137,6 +137,21 @@ describe('SparqlHttpStore write requests with read-graph operations', () => {
     expect(performance.now() - startedAt).toBeLessThan(2_000);
   });
 
+  it('counts the read graphs a planned write maintains among the graphs it writes', async () => {
+    const replaceSubject = SPARQL_HTTP_WRITE_CASES.find((c) => c.name === 'replaceSubject')!;
+    const [readGraph] = PLAN.readGraphs;
+    const { error } = await recordSparqlHttpWrite(async (store) => {
+      const before = store.getWriteRevision(readGraph!);
+      await replaceSubject.run(store);
+      expect(store.getWriteRevision(readGraph!)).toEqual(before);
+      await replaceSubject.run(store, planned(PLAN));
+      const after = store.getWriteRevision(readGraph!);
+      expect(after.generation).not.toEqual(before.generation);
+      expect(after.stable).toBe(true);
+    });
+    expect(error).toBeUndefined();
+  });
+
   it('declares every write it sends with operations on an atomic endpoint, and that updates may run side by side', () => {
     for (const profile of ['atomic-update', 'atomic-readback'] as const) {
       const store = newSparqlHttpTestStore(profile);
