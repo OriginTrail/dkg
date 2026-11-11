@@ -20,6 +20,16 @@ describe('whether the store holds any graph of a context graph', () => {
     await expect(holdsContextGraphGraphs(store([]), '0xab/products')).resolves.toBe(false);
   });
 
+  it('counts its per-context-ID graphs and its working-memory assertion graphs', async () => {
+    await expect(holdsContextGraphGraphs(store([`${ROOT}/context/7`]), '0xab/products')).resolves.toBe(true);
+    await expect(holdsContextGraphGraphs(store([`${ROOT}/context/7/_meta`]), '0xab/products')).resolves.toBe(true);
+    await expect(holdsContextGraphGraphs(store([`${ROOT}/assertion/0xaa/notes`]), '0xab/products')).resolves.toBe(true);
+    const plain = store([`${ROOT}/assertion/0xaa/notes`], { byPrefix: false });
+    await expect(holdsContextGraphGraphs(plain, '0xab/products')).resolves.toBe(true);
+    // A graph whose segment only begins like one of these partitions is not one of them.
+    await expect(holdsContextGraphGraphs(store([`${ROOT}/contexts/7`, `${ROOT}/assertions/x`]), '0xab/products')).resolves.toBe(false);
+  });
+
   it('does not count another context graph whose id extends this one, a child included', async () => {
     const other = store([`${ROOT}-archive/_verifiable_memory/0xaa/1`, `${ROOT}s`, `${ROOT}/child/_verifiable_memory/0xaa/1`, `${ROOT}/child`]);
     await expect(holdsContextGraphGraphs(other, '0xab/products')).resolves.toBe(false);
