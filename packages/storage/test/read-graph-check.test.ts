@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { nonEmptyNamedGraphEnumerationPattern } from '../src/adapters/graph-enumeration-query.js';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
 import { checkReadGraph, memberGraphListingQuery } from '../src/read-graph/check.js';
 import { ReadGraphCheckSchedule, startReadGraphChecks } from '../src/read-graph/check-schedule.js';
+import { withReadGraphBackgroundSlot } from '../src/read-graph/rebuild.js';
 import { readGraphStateCompareAndSet } from '../src/read-graph/state.js';
 import type { QueryOptions, QueryResult } from '../src/triple-store.js';
 import { captureMetrics, readGraphCheckConformance } from './helpers/read-graph-check-conformance.js';
@@ -46,7 +47,7 @@ const isMemberEnumeration = (sparql: string) => sparql.startsWith('SELECT ?g WHE
 describe('read-graph checks under concurrent writes', () => {
   it('lists member graphs in the form the adapter lists its graphs with, so the store narrows the list', () => {
     const root = 'did:dkg:context-graph:listing';
-    const under = `FILTER(STRSTARTS(STR(?g), "${root}"))`;
+    const under = `FILTER(?g = <${root}> || STRSTARTS(STR(?g), "${root}/"))`;
     expect(memberGraphListingQuery(new PlanningOxigraphStore(), root)).toBe(`SELECT ?g WHERE { ${nonEmptyNamedGraphEnumerationPattern('g')} ${under} }`);
     const blazegraph = new BlazegraphStore('http://fixture.invalid/sparql');
     expect(memberGraphListingQuery(blazegraph, root)).toBe(`SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } ${under} }`);
@@ -62,6 +63,33 @@ describe('read-graph checks under concurrent writes', () => {
     // A maintained write: the new member and the read graph change together.
     await store.insert([q('urn:s:late', '"late"', `${fixture.root}/_verifiable_memory/${AGENT}/9`)]);
     expect(await checkReadGraph(store, wholeVm, 'full')).toEqual({ readGraph: wholeVm, mode: 'full', outcome: 'consistent' });
+    await adapter.close();
+  });
+
+  it('leaves a read graph alone when a newer generation is published while a full check runs', async () => {
+    const { adapter, fixture, layer, store } = await hooked();
+    const { wholeVm } = fixture.readGraphs;
+    let probes = 0;
+    adapter.hook = {
+      matches: isMissingProbe,
+      // During the first probe a rebuild publishes generation 3 under the lock, holding a triple no member holds.
+      before: async () => {
+        if (++probes !== 1) return;
+        await layer.runtime.locks.withLocks([wholeVm], async () => {
+          layer.runtime.mirror.set(readyRow(wholeVm, 3));
+          await adapter.insert([q('urn:s:stray', '"stray"', wholeVm)]);
+        });
+      },
+    };
+    const alerts: string[] = [];
+    expect(await checkReadGraph(store, wholeVm, 'full', { alert: (message) => alerts.push(message) }))
+      .toEqual({ readGraph: wholeVm, mode: 'full', outcome: 'skipped' });
+    expect(probes).toBeGreaterThan(0);
+    expect(layer.runtime.mirror.get(wholeVm)).toMatchObject({ state: 'ready', generation: 3 });
+    expect(alerts).toEqual([]);
+    // The check that starts at generation 3 finds the triple.
+    expect(await checkReadGraph(store, wholeVm, 'full', { alert: (message) => alerts.push(message) }))
+      .toEqual({ readGraph: wholeVm, mode: 'full', outcome: 'mismatch', direction: 'unheld' });
     await adapter.close();
   });
 
@@ -218,6 +246,33 @@ describe('the read-graph check schedule', () => {
     await adapter.close();
   });
 
+  it('runs each check in the backend background slot, so no check runs beside a build', async () => {
+    const { adapter, layer, store } = await hooked();
+    const schedule = new ReadGraphCheckSchedule(store, { sampledIntervalMs: 3_600_000, fullIntervalMs: 3_600_000 });
+    let counts = 0;
+    adapter.hook = { matches: isSizeQuery, before: async () => { counts += 1; } };
+    let release: (() => void) | undefined;
+    const { recorded } = await captureMetrics(async () => {
+      // A build holds the slot until it is released.
+      const build = withReadGraphBackgroundSlot(layer.runtime, () => new Promise<void>((resolve) => { release = resolve; }));
+      expect(schedule.requestFullCheck()).toBe(true);
+      let idle = false;
+      const ended = schedule.whenIdle().then(() => { idle = true; });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(counts).toBe(0);
+      expect(idle).toBe(false);
+      release!();
+      await build;
+      await ended;
+    });
+    const checks = recorded.filter((entry) => entry.metric === 'dkg.store.read_graph_checks_total').map((entry) => entry.attributes);
+    expect(counts).toBeGreaterThan(0);
+    expect(checks).toHaveLength(4);
+    expect(checks.every((attributes) => attributes.mode === 'full' && attributes.outcome === 'consistent')).toBe(true);
+    await schedule.close();
+    await adapter.close();
+  });
+
   it('samples a few ready read graphs in turn, and goes on past a check that fails', async () => {
     const { adapter, fixture, store } = await hooked();
     const failing = fixture.readGraphs.wholeSwm;
@@ -246,5 +301,26 @@ describe('the read-graph check schedule', () => {
     expect(schedule!.requestSampledCheck()).toBe(false);
     expect(schedule!.requestFullCheck()).toBe(false);
     await adapter.close();
+  });
+
+  it('runs both passes on its own once started, with no request', async () => {
+    const { adapter, store } = await hooked();
+    const passes = new Set<string>();
+    // A full pass counts each read graph's size; a sampled pass takes subjects from member graphs.
+    adapter.hook = {
+      matches: (sparql) => {
+        if (isSizeQuery(sparql)) passes.add('full');
+        if (sparql.startsWith('SELECT DISTINCT ?s WHERE { GRAPH <')) passes.add('sampled');
+        return false;
+      },
+      before: async () => {},
+    };
+    const schedule = startReadGraphChecks(store, { sampledIntervalMs: 20, fullIntervalMs: 40 });
+    try {
+      await vi.waitFor(() => expect([...passes].sort()).toEqual(['full', 'sampled']), { timeout: 10_000, interval: 20 });
+    } finally {
+      await schedule.close();
+      await adapter.close();
+    }
   });
 });
