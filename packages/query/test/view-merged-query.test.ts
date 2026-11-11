@@ -312,13 +312,15 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
     await sampling.query(unpriced, MERGED);
     // Merged does not apply here, so there is nothing to compare.
     await sampling.query(JOIN, { ...VM, minTrust: TrustLevel.Endorsed });
+    // A query that generates values during evaluation is counted, not compared.
+    await sampling.query('SELECT ?p (STRUUID() AS ?id) WHERE { ?p a <urn:Product> }', VM);
     await sampler.idle();
     expect(locked).toEqual([READ, READ]);
     expect(sampleReads.length).toBeGreaterThanOrEqual(4);
     expect(sampleReads.every(Boolean)).toBe(true);
     const [summary, ...others] = sampling.viewSemanticsDeltaReport([id]);
     expect(others).toEqual([]);
-    expect(summary).toMatchObject({ contextGraphId: id, samples: 2, skipped: 0,
+    expect(summary).toMatchObject({ contextGraphId: id, samples: 2, skipped: 0, uncomparable: 1,
       kinds: { 'none': 0, 'copies-removed': 0, 'rows-added': 1, 'rows-removed-or-changed': 1 } });
     expect(summary!.shapes.map(shape => [shape.view, shape.shape]).sort()).toEqual([
       ['verifiable-memory', 'SELECT ?p ?x WHERE { ?p a <…> . ?p <…> ?x }'],

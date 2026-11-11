@@ -4,7 +4,7 @@ import type { ViewQuerySemantics } from '@origintrail-official/dkg-core';
 import { activeDefaultStoreWorkPriority, withDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
 import type { QueryResult } from '../src/query-engine.js';
 import {
-  ViewSemanticsDeltaSampler, classifyViewSemanticsDelta, viewQueryShape, type ViewSemanticsDeltaSample,
+  ViewSemanticsDeltaSampler, classifyViewSemanticsDelta, generatesValuesInEvaluation, viewQueryShape, type ViewSemanticsDeltaSample,
 } from '../src/view-semantics-delta.js';
 
 const SELECT = 'SELECT ?s ?o WHERE { ?s ?p ?o }';
@@ -41,6 +41,55 @@ describe('classifying the merged answer against the per-asset answer', () => {
       .toBe('copies-removed');
     expect(classifyViewSemanticsDelta(construct, quads(), quads(['urn:a', 'urn:o']))).toBe('rows-added');
     expect(classifyViewSemanticsDelta(construct, quads(['urn:a', 'urn:o']), quads())).toBe('rows-removed-or-changed');
+  });
+
+  it('keeps which rows share a blank node, whatever its label', () => {
+    const construct = 'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }';
+    const graph = (...items: Array<[string, string, string]>): QueryResult => ({ bindings: [],
+      quads: items.map(([subject, predicate, object]) => ({ subject, predicate, object, graph: '' })) });
+    // Two nodes become one.
+    expect(classifyViewSemanticsDelta(construct, graph(['_:a', 'urn:p', 'urn:x'], ['_:b', 'urn:q', 'urn:y']),
+      graph(['_:z', 'urn:p', 'urn:x'], ['_:z', 'urn:q', 'urn:y']))).toBe('rows-removed-or-changed');
+    // One node becomes two.
+    expect(classifyViewSemanticsDelta(construct, graph(['_:a', 'urn:p', 'urn:x'], ['_:a', 'urn:p', 'urn:y']),
+      graph(['_:b', 'urn:p', 'urn:x'], ['_:c', 'urn:p', 'urn:y']))).toBe('rows-removed-or-changed');
+    // The same structure under other labels, with nodes linked to each other.
+    expect(classifyViewSemanticsDelta(construct,
+      graph(['_:a', 'urn:next', '_:b'], ['_:b', 'urn:next', '_:c'], ['_:c', 'urn:value', '"1"']),
+      graph(['_:z', 'urn:value', '"1"'], ['_:x', 'urn:next', '_:y'], ['_:y', 'urn:next', '_:z']))).toBe('none');
+    // A link reversed is another structure.
+    expect(classifyViewSemanticsDelta(construct, graph(['_:a', 'urn:next', '_:b'], ['_:b', 'urn:value', '"1"']),
+      graph(['_:a', 'urn:next', '_:b'], ['_:a', 'urn:value', '"1"']))).toBe('rows-removed-or-changed');
+  });
+
+  it('keeps which bindings share a blank node across variables and rows', () => {
+    const select = 'SELECT ?a ?b WHERE { ?a ?p ?b }';
+    const shared: QueryResult = { bindings: [{ a: '_:n', b: '_:n' }, { a: '_:m', b: 'urn:x' }] };
+    expect(classifyViewSemanticsDelta(select, shared, { bindings: [{ a: '_:k', b: 'urn:x' }, { a: '_:j', b: '_:j' }] })).toBe('none');
+    expect(classifyViewSemanticsDelta(select, shared, { bindings: [{ a: '_:k', b: '_:j' }, { a: '_:m', b: 'urn:x' }] }))
+      .toBe('rows-removed-or-changed');
+  });
+});
+
+describe('queries that generate values during evaluation', () => {
+  it('are found by the functions they call, in any case and spacing', () => {
+    for (const sparql of [
+      'SELECT ?s (NOW() AS ?t) WHERE { ?s ?p ?o }',
+      'SELECT ?s WHERE { ?s ?p ?o FILTER(rand () < 0.5) }',
+      'SELECT (UUID() AS ?id) WHERE { ?s ?p ?o }',
+      'SELECT (STRUUID() AS ?id) WHERE { ?s ?p ?o }',
+      'PREFIX ex: <urn:ex:> CONSTRUCT { ?s ex:at ?t } WHERE { ?s ?p ?o BIND(NOW() AS ?t) }',
+    ]) expect(generatesValuesInEvaluation(sparql), sparql).toBe(true);
+  });
+
+  it('are not found in names, strings, IRIs or language tags', () => {
+    for (const sparql of [
+      'SELECT ?now ?rand WHERE { ?now <urn:uuid> ?rand }',
+      'SELECT ?s WHERE { ?s <urn:p> "NOW()" }',
+      'SELECT ?s WHERE { ?s <urn:NOW> ?o }',
+      'PREFIX ex: <urn:ex:> SELECT ?s WHERE { ?s ex:now ?o }',
+      'SELECT ?s WHERE { ?s ?p "x"@now }',
+    ]) expect(generatesValuesInEvaluation(sparql), sparql).toBe(false);
   });
 });
 
@@ -101,7 +150,7 @@ describe('the semantic-delta sampler', () => {
     expect(first!.aborted).toBe(false);
     expect(onDelta).toHaveBeenCalledWith('rows-added');
     expect(sampler.report()).toEqual([{
-      contextGraphId: 'cg-a', since: '2026-11-11T02:05:00.000Z', samples: 1, skipped: 0,
+      contextGraphId: 'cg-a', since: '2026-11-11T02:05:00.000Z', samples: 1, skipped: 0, uncomparable: 0,
       kinds: { 'none': 0, 'copies-removed': 0, 'rows-added': 1, 'rows-removed-or-changed': 0 },
       shapes: [{ shape: 'SELECT ?s ?o WHERE { ?s ?p ?o }', view: 'verifiable-memory', samples: 1, lastSampledAt: '2026-11-11T02:05:00.000Z',
         kinds: { 'none': 0, 'copies-removed': 0, 'rows-added': 1, 'rows-removed-or-changed': 0 } }],
@@ -131,6 +180,18 @@ describe('the semantic-delta sampler', () => {
     sampler.offer(sample({ perAsset: rows('1'), merged: rows('1') }, { isCurrent: () => { throw new Error('state unavailable'); } }).offered);
     await sampler.idle();
     expect(sampler.report()[0]).toMatchObject({ samples: 0, skipped: 3 });
+  });
+
+  it('counts a sampled query that generates values during evaluation as not compared, and never runs it', async () => {
+    const sampler = new ViewSemanticsDeltaSampler({ sampleRate: 1, maxQueued: 1 });
+    const { offered, run } = sample({ perAsset: rows('1'), merged: rows('1') }, { sparql: 'SELECT ?s (NOW() AS ?t) WHERE { ?s ?p ?o }' });
+    sampler.offer(offered);
+    sampler.offer(offered);
+    // A text that cannot be read is not compared either.
+    sampler.offer({ ...offered, sparql: undefined as unknown as string });
+    await sampler.idle();
+    expect(run).not.toHaveBeenCalled();
+    expect(sampler.report()).toMatchObject([{ contextGraphId: 'cg-a', samples: 0, skipped: 0, uncomparable: 3 }]);
   });
 
   it('keeps a sample when counting it elsewhere fails', async () => {
