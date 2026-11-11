@@ -34,7 +34,7 @@ export const READ_GRAPH_REGISTRY_PREDICATES = Object.freeze({
 } as const);
 
 /** The query that reads one context graph's registry, as `?name` and `?child` rows. */
-export function readGraphRegistryQuery(contextGraphId: string): string {
+function readGraphRegistryQuery(contextGraphId: string): string {
   const p = READ_GRAPH_REGISTRY_PREDICATES;
   const meta = assertSafeIri(contextGraphMetaUri(contextGraphId));
   const prefix = escapeSparqlLiteral(`${assertSafeIri(contextGraphDataUri(contextGraphId))}/`);
@@ -80,7 +80,7 @@ export async function readReadGraphRegistry(
 }
 
 /** A sub-graph name as the view route decodes it: the lexical form, if `validateSubGraphName` accepts it. */
-function registeredSubGraphName(value: string | undefined): string | undefined {
+export function registeredSubGraphName(value: string | undefined): string | undefined {
   const name = (value ?? '').replace(/^"/, '').replace(/"(?:\^\^<[^>]+>|@[a-zA-Z-]+)?$/, '');
   return validateSubGraphName(name).valid ? name : undefined;
 }
