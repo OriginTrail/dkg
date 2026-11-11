@@ -23,6 +23,11 @@ All notable changes to the DKG V10 node are documented here. The format is based
   that node can't run the semantic runtime until the toolchain is installed
   and it builds with `DKG_SEMANTIC_RUNTIME_WASM=required`. CI and release
   packing still require the Wasm.
+- The node UI build has room for the code editor the UI now bundles. Its heap
+  limit rises from 896 MB to 1536 MB, because at 896 MB the build ran out of
+  memory about one time in three, in CI and in git-based updates alike. A
+  node that builds from source needs that much memory free while it builds
+  the UI.
 - A Core node no longer spends a large share of its RPC on context graphs
   that peers announced but nobody registered on chain. A Core node subscribes
   to every graph it hears of over gossip. For one that was never registered,
