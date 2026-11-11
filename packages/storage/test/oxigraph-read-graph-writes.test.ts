@@ -6,7 +6,16 @@ import oxigraph from 'oxigraph';
 import { afterAll, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { OxigraphWorkerStore } from '../src/adapters/oxigraph-worker.js';
-import { q, readGraphWriteSuite, type SentRequests } from './_helpers/read-graph-write-suite.js';
+import { readGraphCopy } from '../src/read-graph/statements.js';
+import {
+  P,
+  planned,
+  q,
+  readGraphWriteSuite,
+  type ReadGraphTestStore,
+  type ReadGraphWriteContext,
+  type SentRequests,
+} from './_helpers/read-graph-write-suite.js';
 
 /**
  * OxigraphStore and OxigraphWorkerStore send a write's read-graph operations
@@ -54,6 +63,30 @@ function sentToWorker(): SentRequests {
   };
 }
 
+/**
+ * The engine deletes a stored blank node by its identity. A planned delete of
+ * one is refused before anything changes, because SPARQL could name it only by
+ * shape; without a plan it deletes exactly that node, as before.
+ */
+function blankNodeDeletes({ store, inScenario, graph }: ReadGraphWriteContext<ReadGraphTestStore>): void {
+  it('refuses a planned delete of a stored blank node, and deletes exactly that node without a plan', () =>
+    inScenario(async (s) => {
+      // Two blank nodes and a named subject with the same predicate and object.
+      await store().insert(['_:a', '_:b', 'urn:rg-int:other'].map((subject) => ({ subject, predicate: P, object: '"one"', graph: s.G3 })));
+      await store().update(readGraphCopy(s.R, s.G3));
+      const stored = await store().query(`SELECT ?s WHERE { GRAPH <${s.G3}> { ?s <${P}> "one" FILTER(isBlank(?s)) } }`);
+      if (stored.type !== 'bindings' || stored.bindings.length !== 2) throw new Error('Expected two stored blank nodes');
+      const quad = { subject: stored.bindings[0]!['s']!, predicate: P, object: '"one"', graph: s.G3 };
+      const before = { data: await graph(s.G3), read: await s.readGraph() };
+      await expect(store().delete([quad], planned(s.reference(s.G3)))).rejects.toThrow(/blank node/);
+      expect(await graph(s.G3)).toEqual(before.data);
+      expect(await s.readGraph()).toEqual(before.read);
+      await store().delete([quad]);
+      expect(await graph(s.G3)).toEqual(before.data.filter((t) => !t.startsWith(`${quad.subject} `)));
+      expect(await graph(s.G3)).toHaveLength(2);
+    }));
+}
+
 const dir = mkdtempSync(join(tmpdir(), 'dkg-read-graph-writes-'));
 const persistPath = join(dir, 'store.nq');
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -63,7 +96,9 @@ readGraphWriteSuite({
   adapter: 'oxigraph',
   open: async () => new OxigraphStore(persistPath),
   requests: sentToEngine(),
-}, ({ store, inScenario }) => {
+}, (context) => {
+  const { store, inScenario } = context;
+  blankNodeDeletes(context);
   it('a store reopened from what it flushed holds the same read graph', () => inScenario(async (s) => {
     await s.maintained(s.reference(s.G1), (o) => store().replaceGraph(s.G1, [q('r', 'reopened', s.G1)], o));
     await store().flush();
@@ -90,4 +125,4 @@ readGraphWriteSuite({
   open: async () => new OxigraphWorkerStore(),
   requests: sentToWorker(),
   replaceAssetGroup: false,
-});
+}, blankNodeDeletes);

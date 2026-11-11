@@ -5,7 +5,8 @@ import type {
   ReadGraphWriteOptions,
 } from '../read-graph/adapter-contract.js';
 import type { Quad, QueryOptions } from '../triple-store.js';
-import { withReadGraphOperations } from './read-graph-request.js';
+import { isBlankNodeTerm } from './blank-node-safe-delete.js';
+import { operationsOf, withReadGraphOperations } from './read-graph-request.js';
 import { sparqlStatements } from './sparql-statements.js';
 
 export type { ReadGraphCapableAdapter } from '../read-graph/adapter-contract.js';
@@ -17,10 +18,15 @@ export type { ReadGraphCapableAdapter } from '../read-graph/adapter-contract.js'
  *
  * Every other write already changes its data with one `update` of the engine,
  * and the plan's operations go around it. `delete` and `deleteByPattern` make
- * one engine call per quad; with a plan they send one update instead, built as
- * the HTTP adapters build theirs, so that the data change and the read graphs
- * commit together. Without a plan they keep their per-quad calls. The engine
- * runs one call at a time, in process and in the worker.
+ * one engine call per quad; with a plan they send one update instead, so that
+ * the data change and the read graphs commit together. Without a plan they
+ * keep their per-quad calls. The engine runs one call at a time, in process
+ * and in the worker.
+ *
+ * A planned `delete` of a quad with a blank node is refused before anything
+ * changes. The engine deletes a stored blank node by its identity, but SPARQL
+ * can name one only by its shape, which may match other blank nodes and named
+ * subjects; one update could not delete exactly what the caller asked for.
  */
 const METHODS: readonly ReadGraphPlannedMethod[] = Object.freeze([
   'delete', 'deleteByPattern', 'deleteByPatternWithoutCount', 'deleteBySubjectPrefix', 'dropGraph', 'replaceAssetGroup',
@@ -36,16 +42,10 @@ export const OXIGRAPH_WORKER_READ_GRAPH_CAPABILITIES: ReadGraphAdapterCapabiliti
 const statements = sparqlStatements('oxigraph');
 type Engine = InstanceType<typeof oxigraph.Store>;
 
-function planOf(options: QueryOptions | undefined): ReadGraphWriteOptions['readGraphPlan'] {
-  const plan = (options as ReadGraphWriteOptions | undefined)?.readGraphPlan;
-  return plan && plan.before.length + plan.after.length > 0 ? plan : undefined;
-}
-
 /**
- * Delete `quads`. With a plan: one update with the plan's operations around
- * it, `DELETE DATA` for the ground quads and, for quads with a blank node, a
- * `DELETE … WHERE` by shape, the only form SPARQL has for them. Without a
- * plan: one engine call per quad, as before.
+ * Delete `quads`. With a plan: one `DELETE DATA` with the plan's operations
+ * around it; a quad with a blank node is refused before anything changes.
+ * Without a plan: one engine call per quad, as before.
  */
 export function deleteQuads(
   writable: () => Engine,
@@ -53,7 +53,11 @@ export function deleteQuads(
   options: QueryOptions | undefined,
   toEngineQuad: (quad: Quad) => oxigraph.Quad | null,
 ): void {
-  const update = planOf(options) ? statements.deleteData(quads)?.update : undefined;
+  if (operationsOf(options) && quads.some((quad) => isBlankNodeTerm(quad.subject) || isBlankNodeTerm(quad.object))) {
+    throw new Error('OxigraphStore.delete cannot send read-graph operations with a quad that has a blank node: '
+      + 'SPARQL names a stored blank node only by its shape, which may match other data');
+  }
+  const update = operationsOf(options) ? statements.deleteData(quads)?.update : undefined;
   if (update !== undefined) {
     writable().update(withReadGraphOperations(update, options));
     return;
@@ -76,7 +80,7 @@ export function deleteMatching(
   matches: readonly oxigraph.Quad[],
   options: QueryOptions | undefined,
 ): boolean {
-  if (planOf(options)) {
+  if (operationsOf(options)) {
     writable().update(withReadGraphOperations(statements.deleteByPattern(pattern).update, options));
     return true;
   }
@@ -90,7 +94,7 @@ export function deleteMatching(
  * plan's operations change the read graphs in the same update.
  */
 export function quadsRemoved(engine: Engine, graph: string, options: QueryOptions | undefined, update: () => void): number {
-  const count = planOf(options)
+  const count = operationsOf(options)
     ? () => Number((engine.query(statements.countQuads(graph).sparql) as Map<string, oxigraph.Term>[])[0]!.get('c')!.value)
     : () => engine.size;
   const before = count();
@@ -103,6 +107,6 @@ export function quadsRemoved(engine: Engine, graph: string, options: QueryOption
  * has operations: without one the worker gets exactly today's message.
  */
 export function readGraphPlanArgs(options: QueryOptions | undefined): [] | [ReadGraphWriteOptions] {
-  const plan = planOf(options);
+  const plan = operationsOf(options);
   return plan ? [{ readGraphPlan: plan }] : [];
 }

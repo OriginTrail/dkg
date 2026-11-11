@@ -13,7 +13,7 @@ import type { QueryOptions } from '../triple-store.js';
  * backend commits both or neither. A write without operations sends exactly
  * the request it sent before.
  */
-function operationsOf(options: QueryOptions | undefined): ReadGraphWritePlan | undefined {
+export function operationsOf(options: QueryOptions | undefined): ReadGraphWritePlan | undefined {
   const plan = (options as ReadGraphWriteOptions | undefined)?.readGraphPlan;
   return plan && plan.before.length + plan.after.length > 0 ? plan : undefined;
 }

@@ -65,7 +65,8 @@ const statements = sparqlStatements('oxigraph');
 
 /** An engine `update` call with the plan's operations around `own`. */
 const carrying = (own: string, plan: ReadGraphWritePlan = PLAN) => `update\n${[...plan.before, own, ...plan.after].join('\n;\n')}`;
-const plannedCases = OXIGRAPH_WRITE_CASES.filter((c) => c.name !== 'insert');
+// insert refuses operations, and so does a delete of a quad with a blank node (below).
+const plannedCases = OXIGRAPH_WRITE_CASES.filter((c) => c.name !== 'insert' && c.name !== 'delete with a blank node');
 const plannedMethods = (cases: readonly OxigraphWriteCase[]) => [...new Set(cases.map((c) => c.name.split(' ')[0]!))].sort();
 
 /**
@@ -75,7 +76,6 @@ const plannedMethods = (cases: readonly OxigraphWriteCase[]) => [...new Set(case
  */
 const ONE_UPDATE: Readonly<Record<string, string>> = {
   'delete': statements.deleteData([q(S, '"one"')])!.update,
-  'delete with a blank node': statements.deleteData([q('_:b1', '"one"')])!.update,
   'deleteByPattern': statements.deleteByPattern({ graph: G, subject: S }).update,
   'deleteByPatternWithoutCount': statements.deleteByPattern({ graph: G, predicate: P }).update,
 };
@@ -97,6 +97,13 @@ describe('OxigraphStore engine calls with read-graph operations', () => {
       writeCase.run(store, planned({ readGraphs: [], before: [], after: [] })));
     expect(error).toBeUndefined();
     expect(requests).toEqual(TODAY.embedded[writeCase.name]);
+  });
+
+  it('a delete of a quad with a blank node refuses operations before it changes anything', async () => {
+    const blankNode = OXIGRAPH_WRITE_CASES.find((c) => c.name === 'delete with a blank node')!;
+    const { requests, error } = await recordOxigraphWrite((store) => blankNode.run(store, planned(PLAN)));
+    expect(String(error)).toMatch(/OxigraphStore\.delete cannot send read-graph operations with a quad that has a blank node/);
+    expect(requests).toEqual([]);
   });
 
   it('insert refuses operations before it changes anything', async () => {
@@ -122,7 +129,7 @@ describe('OxigraphStore engine calls with read-graph operations', () => {
 });
 
 describe('OxigraphWorkerStore worker messages with read-graph operations', () => {
-  const workerPlannedCases = WORKER_CASES.filter((c) => c.name !== 'insert');
+  const workerPlannedCases = WORKER_CASES.filter((c) => c.name !== 'insert' && c.name !== 'delete with a blank node');
 
   it.each(workerPlannedCases)('$name posts the plan with its write, and nothing else changes', async (writeCase) => {
     const { requests, error } = await recordOxigraphWorkerWrite((store) => writeCase.run(store, planned(PLAN)));
@@ -139,6 +146,14 @@ describe('OxigraphWorkerStore worker messages with read-graph operations', () =>
       writeCase.run(store, planned({ readGraphs: [], before: [], after: [] })));
     expect(error).toBeUndefined();
     expect(requests).toEqual(TODAY.worker[writeCase.name]);
+  });
+
+  it('a delete of a quad with a blank node posts its plan, and the worker refuses it before it changes anything', async () => {
+    const blankNode = WORKER_CASES.find((c) => c.name === 'delete with a blank node')!;
+    const { requests, error } = await recordOxigraphWorkerWrite((store) => blankNode.run(store, planned(PLAN)));
+    expect(String(error)).toMatch(/OxigraphStore\.delete cannot send read-graph operations with a quad that has a blank node/);
+    const [message] = TODAY.worker[blankNode.name]!;
+    expect(requests).toEqual([`delete\n${JSON.stringify([...JSON.parse(message!.slice('delete\n'.length)) as unknown[], { readGraphPlan: PLAN }])}`]);
   });
 
   it('insert refuses operations before it posts anything', async () => {
