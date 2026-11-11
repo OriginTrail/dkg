@@ -80,7 +80,7 @@ import {
   type ReadGraphRegistryWrite,
 } from './registry-recognition.js';
 import { readGraphBackendIdentity, readGraphBackendRuntime, type ReadGraphBackendRuntime } from './runtime.js';
-import { nextReadGraphState, readGraphStateCompareAndSet } from './state.js';
+import { nextReadGraphState, readGraphStateCompareAndSet, readGraphStateMarkDirty } from './state.js';
 import type { ReadGraphTarget } from './statements.js';
 import { joinReadGraphWriteChanges, readGraphWriteChange, readGraphWriteGraphs, type ReadGraphWrite } from './write-plan.js';
 
@@ -198,7 +198,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
     if (this.runtime.mirror.size === 0) return this.innerStore.insert(quads, options);
     const write: ReadGraphWrite = { kind: 'insert', quads };
     refuseRewrittenGraphNames('insert', write);
-    return this.withMaintainedReadGraphs(write, options, (maintained) => {
+    return this.withMaintainedReadGraphs('insert', write, options, (maintained) => {
       const added = joinReadGraphWriteChanges(maintained.map(({ target, members }) =>
         readGraphWriteChange(write, target, members, this.renderer('insert')))).insertQuads;
       return this.dispatch('insert', maintained, () => this.innerStore.insert(added.length === 0 ? quads : [...quads, ...added], options));
@@ -297,7 +297,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
   ): Promise<T> {
     if (this.runtime.mirror.size === 0) return send(options);
     refuseRewrittenGraphNames(method, write);
-    return this.withMaintainedReadGraphs(write, options, (maintained) => {
+    return this.withMaintainedReadGraphs(storeOperationOf(method), write, options, (maintained) => {
       const change = joinReadGraphWriteChanges(maintained.map(({ target, members }) =>
         readGraphWriteChange(write, target, members, this.renderer(method))));
       if (change.before.length + change.after.length === 0) return send(options);
@@ -321,6 +321,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
    * lock, and the write tries again.
    */
   private async withMaintainedReadGraphs<T>(
+    operation: StoreOperation,
     write: ReadGraphWrite,
     options: QueryOptions | undefined,
     work: (maintained: readonly MaintainedReadGraph[]) => Promise<T>,
@@ -338,7 +339,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
           .filter((readGraph) => !locked.has(readGraph));
         if (missing.length > 0) return { missing };
         const run = () => work(maintained);
-        return { done: await (owners.length === 0 ? run() : this.withRecognizedRegistry(owners, registry!, options, run)) };
+        return { done: await (owners.length === 0 ? run() : this.withRecognizedRegistry(operation, owners, registry!, options, run)) };
       });
       if ('done' in outcome) return outcome.done;
       for (const readGraph of outcome.missing) locked.add(readGraph);
@@ -371,11 +372,13 @@ export class ReadGraphStore implements TripleStoreDecorator {
   /**
    * Send a write that may change the registry of context graphs with read
    * graphs. Where its arguments show the registry it leaves, the read graphs
-   * whose membership changes are marked dirty before it is sent. Where they do
-   * not, the registry is read again after it, whether it succeeded or not, and
+   * whose membership changes are marked dirty before it is sent, and the
+   * write is refused if the store does not take a mark. Where they do not,
+   * the registry is read again after it, whether it succeeded or not, and
    * they are marked then.
    */
   private async withRecognizedRegistry<T>(
+    operation: StoreOperation,
     owners: readonly string[],
     registry: ReadGraphRegistryWrite,
     options: QueryOptions | undefined,
@@ -386,7 +389,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
       const after = registryFactsAfter(owner, this.runtime.registries.facts(owner) ?? [], registry);
       if (after === undefined) continue;
       predicted.set(owner, after);
-      await this.markMembershipChange(owner, registrySnapshotOfFacts(owner, after));
+      await this.markMembershipChange(owner, registrySnapshotOfFacts(owner, after), operation);
     }
     const settle = async (succeeded: boolean) => {
       for (const owner of owners) {
@@ -419,16 +422,35 @@ export class ReadGraphStore implements TripleStoreDecorator {
     return result;
   }
 
-  /** Mark dirty the read graphs of a context graph whose membership the registry `next` changes. */
-  private async markMembershipChange(contextGraphId: string, next: ReadGraphRegistrySnapshot): Promise<void> {
+  /**
+   * Mark dirty the read graphs of a context graph whose membership the
+   * registry `next` changes. With `unsent`, the operation of a write not yet
+   * sent: each mark goes to the store from whatever row it holds, so one an
+   * earlier attempt could not confirm is sent again, and a mark the store does
+   * not take refuses the write. No stored `ready` row then outlives a change
+   * it misses.
+   */
+  private async markMembershipChange(contextGraphId: string, next: ReadGraphRegistrySnapshot, unsent?: StoreOperation): Promise<void> {
     const current = this.runtime.registries.get(contextGraphId);
     if (!current || sameRegistry(current, next)) return;
     const identity = this.runtime.workingMemoryIdentity;
-    await this.markDirty(this.readGraphsOf(contextGraphId).filter((readGraph) => {
+    const changed = this.readGraphsOf(contextGraphId).filter((readGraph) => {
       const key = parseReadGraphIri(readGraph);
       return key !== undefined
         && JSON.stringify(readGraphMembership(key, current, identity)) !== JSON.stringify(readGraphMembership(key, next, identity));
-    }));
+    });
+    if (unsent === undefined) return this.markDirty(changed);
+    const rows = changed.flatMap((readGraph) => this.runtime.mirror.get(readGraph) ?? []);
+    for (const row of rows) if (row.state !== 'dirty') this.runtime.mirror.set(nextReadGraphState(row, { kind: 'mark-dirty' })!);
+    for (const { readGraph } of rows) {
+      try {
+        if (!this.innerStore.update) throw new Error('its adapter has no update()');
+        await this.innerStore.update(readGraphStateMarkDirty(readGraph), { source: 'storage.readGraphDirtyMark' });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new ReadGraphWriteRefusedError(unsent, `a read graph whose membership it changes could not be marked dirty: ${reason}`);
+      }
+    }
   }
 
   /** The read graphs with a row whose membership holds one of `graphs`, in code-point order. */

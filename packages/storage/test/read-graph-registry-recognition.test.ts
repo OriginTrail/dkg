@@ -110,6 +110,37 @@ describe('registry recognition in the read-graph layer', () => {
     expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
   });
 
+  it('refuses a write that changes membership while the store does not take the dirty mark, and marks again on the next attempt', async () => {
+    const { adapter, fixture, layer, store, meta, states } = await layered();
+    const wholeVm = fixture.readGraphs.wholeVm;
+    await adapter.update(readGraphStateCompareAndSet(undefined, readyRow(wholeVm)));
+    const storedRows = async () => {
+      const result = await adapter.query(readGraphStateRowsQuery());
+      return parseReadGraphStateRows(result.type === 'bindings' ? result.bindings : []).rows;
+    };
+    const update = adapter.update.bind(adapter);
+    let unreachable = true;
+    adapter.update = async (sparql, options) => {
+      if (unreachable && options?.source === 'storage.readGraphDirtyMark') throw new Error('connection reset');
+      return update(sparql, options);
+    };
+    const registration = [fact(meta, `${fixture.root}/docs`, R.type, R.subGraphClass), fact(meta, `${fixture.root}/docs`, R.name, '"docs"')];
+    const refused = await store.insert(registration).catch((error: unknown) => error);
+    expect(refused).toMatchObject({ code: 'READ_GRAPH_WRITE_REFUSED', outcome: 'not_started', storeOperation: 'insert' });
+    // Nothing was sent, and the mirror says dirty for every read graph the change touches.
+    const held = await adapter.query(`ASK { GRAPH <${meta}> { <${fixture.root}/docs> <${R.name}> "docs" } }`);
+    expect(held.type === 'boolean' && held.value).toBe(false);
+    expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'ready@1', agentWm: 'dirty@2' });
+    expect(await storedRows()).toEqual([readyRow(wholeVm)]);
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code']);
+    // The mirror already says dirty, yet the next attempt sends the mark again before the write.
+    unreachable = false;
+    await store.insert(registration);
+    expect(await storedRows()).toEqual([{ ...readyRow(wholeVm, 2), state: 'dirty' }]);
+    expect(states()).toEqual({ wholeVm: 'dirty@2', wholeSwm: 'dirty@2', codeVm: 'ready@1', agentWm: 'dirty@2' });
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
+  });
+
   it('marks the read graphs a sub-graph leaves dirty when its name goes', async () => {
     const { store, meta, fixture, states } = await layered();
     await store.delete([fact(meta, `${fixture.root}/code`, R.name, '"code"')]);
