@@ -4,19 +4,14 @@ import type { MeasuredGraphInventory } from './graph-inventory-materialization.j
  * No vendor-specific methods. Any SPARQL-capable store (Oxigraph, Blazegraph,
  * Neptune, GraphDB, Jena, etc.) can implement this interface.
  */
-import { dirname, join } from 'node:path';
+import { SharedMemoryLiteralBlobStore } from './shared-memory-literal-blob-store.js';
 import {
-  DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES,
-  SharedMemoryLiteralBlobStore,
-} from './shared-memory-literal-blob-store.js';
-import {
-  GraphSetIndexStore,
-  type GraphSetIndexStoreOptions,
-} from './graph-set-index-store.js';
-import {
-  ChangelogStore,
-  type ChangelogStoreOptions,
-} from './changelog-store.js';
+  resolveAdapterOptions,
+  resolveLargeLiteralStorageOptions,
+  wrapChangelog,
+  wrapGraphSetIndex,
+  type TripleStoreConfig,
+} from './triple-store-composition.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 import type { StoreOperation } from './store-operation-outcome.js';
 import type {
@@ -592,7 +587,7 @@ export async function tryRfc64AuthorCommitCasV1(
   }
 }
 
-export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-worker' | 'blazegraph' | 'sparql-http' | string;
+export type { LargeLiteralStorageConfig, TripleStoreBackend, TripleStoreConfig } from './triple-store-composition.js';
 
 // Backends that talk to a remote SPARQL endpoint over HTTP rather than
 // owning local files. The local/external split governs three pieces of
@@ -658,30 +653,6 @@ export function getSparqlEndpoint(storeConfig: TripleStoreConfig): SparqlEndpoin
   return { queryUrl: queryEndpoint, updateUrl: updateEndpoint, headers };
 }
 
-export interface LargeLiteralStorageConfig {
-  /** Enable large SWM literal blob storage. Defaults to true when present. */
-  enabled?: boolean;
-  /** Externalize literal object terms larger than this UTF-8 byte size. */
-  thresholdBytes?: number;
-  /** Content-addressed blob directory. Defaults to `<dirname(options.path)>/literal-blobs` when a persistent path is available. */
-  directory?: string;
-}
-
-export interface TripleStoreConfig {
-  backend: TripleStoreBackend;
-  options?: Record<string, unknown>;
-  largeLiteralStorage?: LargeLiteralStorageConfig;
-  graphSetIndex?: boolean | GraphSetIndexStoreOptions;
-  /**
-   * OT-RFC-59 append-only change log (write-side). **Default OFF** — opt-in per
-   * store, independent of backend (unlike `graphSetIndex`, which is gated to
-   * local Oxigraph): the changelog must work on Blazegraph too, and its cost is
-   * a few marker quads per write. Enable ONLY on a single-writer (daemon) store;
-   * see the {@link ChangelogStore} single-writer caveat.
-   */
-  changelog?: boolean | ChangelogStoreOptions;
-}
-
 type AdapterFactory = (
   options?: Record<string, unknown>,
   constructionAuthority?: object,
@@ -717,84 +688,4 @@ export async function createTripleStore(
   // reuses the graph-set index's fast listGraphs() for reconcile, and hides its
   // own reserved graph from everything above.
   return wrapChangelog(withGraphSetIndex, config);
-}
-
-function wrapChangelog(store: TripleStore, config: TripleStoreConfig): TripleStore {
-  const changelog = config.changelog;
-  if (changelog == null || changelog === false) return store; // default OFF
-  if (typeof changelog === 'object' && changelog.enabled === false) return store;
-  const options = typeof changelog === 'object' ? changelog : undefined;
-  return new ChangelogStore(store, options);
-}
-
-function resolveAdapterOptions(config: TripleStoreConfig): Record<string, unknown> | undefined {
-  if (
-    config.backend !== 'sparql-http' ||
-    config.options?.managedByDkg !== true ||
-    isGraphSetIndexExplicitlyDisabled(config.graphSetIndex) ||
-    !shouldEnableGraphSetIndex(config)
-  ) {
-    return config.options;
-  }
-  // The outer GraphSetIndexStore replaces the adapter-local graph-list cache,
-  // so clear only that cache-ownership flag. A daemon-supervised Oxigraph
-  // process carries separate storage-issued runtime provenance; never derive
-  // that consistency proof from persisted namespace ownership.
-  return Object.freeze({
-    ...config.options,
-    managedByDkg: false,
-  });
-}
-
-function wrapGraphSetIndex(
-  store: TripleStore,
-  config: TripleStoreConfig,
-): TripleStore {
-  const graphSetIndex = config.graphSetIndex;
-  if (isGraphSetIndexExplicitlyDisabled(graphSetIndex)) return store;
-  if (!shouldEnableGraphSetIndex(config)) return store;
-  const options = typeof graphSetIndex === 'object' ? graphSetIndex : undefined;
-  return new GraphSetIndexStore(store, options);
-}
-
-function isGraphSetIndexExplicitlyDisabled(
-  graphSetIndex: TripleStoreConfig['graphSetIndex'],
-): boolean {
-  return graphSetIndex === false ||
-    (typeof graphSetIndex === 'object' && graphSetIndex.enabled === false);
-}
-
-function shouldEnableGraphSetIndex(config: TripleStoreConfig): boolean {
-  if (config.graphSetIndex === true || typeof config.graphSetIndex === 'object') return true;
-  if (isDefaultLocalGraphSetIndexBackend(config.backend)) return true;
-  return config.options?.managedByDkg === true;
-}
-
-function isDefaultLocalGraphSetIndexBackend(backend: TripleStoreBackend): boolean {
-  return backend === 'oxigraph'
-    || backend === 'oxigraph-persistent'
-    || backend === 'oxigraph-worker';
-}
-
-function resolveLargeLiteralStorageOptions(
-  config: TripleStoreConfig,
-): { blobDir: string; thresholdBytes: number } | undefined {
-  const largeLiteralStorage = config.largeLiteralStorage;
-  if (!largeLiteralStorage || largeLiteralStorage.enabled === false) return undefined;
-
-  const thresholdBytes = largeLiteralStorage.thresholdBytes ?? DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES;
-  const directory = largeLiteralStorage.directory ?? inferLiteralBlobDirectory(config.options);
-  if (!directory) {
-    throw new Error(
-      'largeLiteralStorage.directory is required when the triple-store options do not include a persistent path',
-    );
-  }
-
-  return { blobDir: directory, thresholdBytes };
-}
-
-function inferLiteralBlobDirectory(options: Record<string, unknown> | undefined): string | undefined {
-  const persistPath = options?.path;
-  if (typeof persistPath !== 'string' || persistPath.trim().length === 0) return undefined;
-  return join(dirname(persistPath), 'literal-blobs');
 }
