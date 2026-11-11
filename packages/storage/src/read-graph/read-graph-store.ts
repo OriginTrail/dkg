@@ -29,11 +29,13 @@
  * without a graph, and a write whose adapter has not declared that it can send
  * read-graph operations with it.
  *
- * Its state (locks, state mirror, registry snapshots) lives in the backend's
- * {@link ReadGraphBackendRuntime}, which every store object over the same
- * backend shares. Storage-owned work on read graphs (the start-up rule,
- * rebuilds and checks) runs on the store below the layer, which
- * `readGraphPartitionMaintenanceStore` returns, under the same locks.
+ * Its state (locks, state mirror, registry snapshots, the writes in flight)
+ * lives in the backend's {@link ReadGraphBackendRuntime}, which every store
+ * object over the same backend shares. Storage-owned work on read graphs (the
+ * start-up rule, rebuilds and checks) runs on the store below the layer, which
+ * `readGraphPartitionMaintenanceStore` returns, under the same locks. Work that
+ * starts on a read graph first waits for the writes that were in flight before
+ * its row existed (`runtime.writes.settled()`): they were sent unmaintained.
  */
 
 import { compareCodePoint, isSparqlUpdateOperation, parseReadGraphIri, readGraphIri, type ReadGraphKey } from '@origintrail-official/dkg-core';
@@ -188,7 +190,11 @@ export class ReadGraphStore implements TripleStoreDecorator {
     return this.innerStore.getPressureSnapshot?.();
   }
 
-  async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
+  insert(quads: Quad[], options?: QueryOptions): Promise<void> {
+    return this.runtime.writes.track(this.maintainInsert(quads, options));
+  }
+
+  private async maintainInsert(quads: Quad[], options: QueryOptions | undefined): Promise<void> {
     if (this.runtime.mirror.size === 0) return this.innerStore.insert(quads, options);
     const write: ReadGraphWrite = { kind: 'insert', quads };
     refuseRewrittenGraphNames('insert', write);
@@ -209,10 +215,11 @@ export class ReadGraphStore implements TripleStoreDecorator {
   }
 
   query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
-    if (this.runtime.mirror.size > 0 && isSparqlUpdateOperation(sparql)) {
+    if (!isSparqlUpdateOperation(sparql)) return this.innerStore.query(sparql, options);
+    if (this.runtime.mirror.size > 0) {
       return Promise.reject(new ReadGraphWriteRefusedError('query', 'send it through update() and declare the graphs it writes'));
     }
-    return this.innerStore.query(sparql, options);
+    return this.runtime.writes.track(this.innerStore.query(sparql, options));
   }
 
   hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
@@ -251,7 +258,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
     options: QueryOptions | undefined,
     send: (options: QueryOptions | undefined) => Promise<T>,
   ): Promise<T> {
-    if (this.runtime.mirror.size === 0) return send(options);
+    if (this.runtime.mirror.size === 0) return this.runtime.writes.track(send(options));
     if (!pattern.graph) return Promise.reject(new ReadGraphWriteRefusedError('deleteByPattern', 'a pattern delete must name its graph'));
     const { subject, predicate, object } = pattern;
     return this.maintain(method, { kind: 'delete-matching', graph: pattern.graph, pattern: { subject, predicate, object } }, options, send,
@@ -259,7 +266,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
   }
 
   private declaredUpdate(options: UpdateOptions | undefined, send: (options: UpdateOptions | undefined) => Promise<void>): Promise<void> {
-    if (this.runtime.mirror.size === 0) return send(options);
+    if (this.runtime.mirror.size === 0) return this.runtime.writes.track(send(options));
     const written = options?.writtenGraphs;
     if (written === undefined) {
       return Promise.reject(new ReadGraphWriteRefusedError('update', 'it does not declare the graphs it writes (writtenGraphs)'));
@@ -267,8 +274,21 @@ export class ReadGraphStore implements TripleStoreDecorator {
     return this.maintain('update', { kind: 'replace', graphs: written }, options, send, { kind: 'opaque', graphs: written });
   }
 
-  /** Send a planned write with the operations of every read graph it touches. */
-  private async maintain<T, O extends QueryOptions>(
+  /**
+   * Send a planned write with the operations of every read graph it touches.
+   * Every write is tracked from here, before it finds its read graphs, until it settles.
+   */
+  private maintain<T, O extends QueryOptions>(
+    method: ReadGraphPlannedMethod,
+    write: ReadGraphWrite,
+    options: O | undefined,
+    send: (options: O | undefined) => Promise<T>,
+    registry?: ReadGraphRegistryWrite,
+  ): Promise<T> {
+    return this.runtime.writes.track(this.sendMaintained(method, write, options, send, registry));
+  }
+
+  private async sendMaintained<T, O extends QueryOptions>(
     method: ReadGraphPlannedMethod,
     write: ReadGraphWrite,
     options: O | undefined,
