@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { LocalAgentApiError, type LocalAgentIntegration } from '../src/ui/api.js';
-import { formatLocalAgentErrorMessage } from '../src/ui/components/Shell/PanelRight/local-agent-errors.js';
+import { formatLocalAgentErrorMessage } from '../src/ui/conversations/local-agent-errors.js';
 
 const primeAgent = { name: 'Prime Agent' } as LocalAgentIntegration;
 

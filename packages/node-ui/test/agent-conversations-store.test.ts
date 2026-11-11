@@ -24,6 +24,7 @@ vi.mock('../src/ui/api.js', async () => {
 
 const { conversationActions, resetAgentConversations, useAgentConversations } =
   await import('../src/ui/stores/agentConversations.js');
+const { resolveLocalAgentConversation } = await import('../src/ui/conversations/identity.js');
 
 const KEY = 'openclaw:session-1';
 const integration = {
@@ -35,9 +36,9 @@ const integration = {
 } as LocalAgentIntegration;
 
 const conversation = () => useAgentConversations.getState().conversations[KEY];
-// The conversation key is the session id, so this target loads into KEY.
+// The conversation key is the session id, so this target loads, and this request sends, into KEY.
 const target = { integrationId: 'openclaw', sessionId: KEY };
-const request = () => ({ conversationKey: KEY, integration, sessionId: 'session-1', contextEntries: [], contextGraphId: null });
+const request = () => ({ integration, sessionId: KEY, contextEntries: [], contextGraphId: null });
 
 describe('agent conversation store', () => {
   beforeEach(() => {
@@ -59,7 +60,7 @@ describe('agent conversation store', () => {
     const outcome = await pending;
 
     expect(outcome).toEqual({ status: 'sent' });
-    expect(streamLocalAgentChatMock).toHaveBeenCalledWith('openclaw', 'hi', expect.objectContaining({ sessionId: 'session-1' }));
+    expect(streamLocalAgentChatMock).toHaveBeenCalledWith('openclaw', 'hi', expect.objectContaining({ sessionId: KEY }));
     const { messages, input, sending } = conversation();
     expect(input).toBe('');
     expect(sending).toBe(false);
@@ -113,15 +114,26 @@ describe('agent conversation store', () => {
     expect(conversation().attachments).toEqual([]);
   });
 
-  it('carries a conversation over to the session that answered it', async () => {
-    streamLocalAgentChatMock.mockResolvedValue({ text: 'Hello' });
-    conversationActions.setInput(KEY, 'hi');
-    await conversationActions.send(request());
+  it('carries a conversation over when Prime answers from another session', async () => {
+    const prime = { ...integration, id: 'prime-agent', name: 'Prime' } as LocalAgentIntegration;
+    streamLocalAgentChatMock.mockResolvedValue({ text: 'Hello', sessionId: 'prime-live' });
+    conversationActions.setInput('prime-old', 'hi');
 
-    conversationActions.migrateSession(KEY, 'openclaw:session-2');
+    const outcome = await conversationActions.send({ ...request(), integration: prime, sessionId: 'prime-old' });
 
-    const moved = useAgentConversations.getState().conversations['openclaw:session-2'];
+    expect(outcome).toEqual({ status: 'sent', sessionId: 'prime-live' });
+    const moved = useAgentConversations.getState().conversations['prime-live'];
     expect(moved.messages.map((m) => m.content)).toEqual(['hi', 'Hello']);
+  });
+
+  it('sends into the conversation its session resolves to', async () => {
+    streamLocalAgentChatMock.mockResolvedValue({ text: 'Hello' });
+    const key = resolveLocalAgentConversation({ integrationId: 'openclaw', sessionId: null }).stateKey;
+    conversationActions.setInput(key, 'hi');
+
+    await conversationActions.send({ ...request(), sessionId: null });
+
+    expect(useAgentConversations.getState().conversations[key].messages.map((m) => m.content)).toEqual(['hi', 'Hello']);
   });
 
   it('clear empties the conversation and marks it loaded', () => {
@@ -166,9 +178,9 @@ describe('agent conversation store', () => {
 
   it('needs no rendering code: it uses the message model, not the message renderer', () => {
     const source = readFileSync(resolve(__dirname, '../src/ui/stores/agentConversations.ts'), 'utf-8');
-    expect(source).toContain("from '../components/Shell/PanelRight/message-model.js'");
+    expect(source).toContain("from '../conversations/message-model.js'");
     expect(source).not.toContain('PanelRight/messages.js');
-    const model = readFileSync(resolve(__dirname, '../src/ui/components/Shell/PanelRight/message-model.ts'), 'utf-8');
+    const model = readFileSync(resolve(__dirname, '../src/ui/conversations/message-model.ts'), 'utf-8');
     expect(model).not.toMatch(/from 'react'|thinking-orbs|MarkdownMessage/);
   });
 });

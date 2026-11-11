@@ -1,4 +1,4 @@
-import type { LocalAgentHistoryMessage } from '../../../api.js';
+import type { LocalAgentHistoryMessage } from '../api.js';
 import { buildAttachmentSummary } from './attachments.js';
 import { formatLocalTimestamp, toIsoTimestamp } from './format.js';
 import type { LocalAgentMessage } from './types.js';

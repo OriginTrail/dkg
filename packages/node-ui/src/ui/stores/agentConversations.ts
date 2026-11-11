@@ -15,21 +15,21 @@ import {
   buildAttachmentTurnSummary,
   draftToAttachmentRef,
   isSendableAttachmentDraft,
-} from '../components/Shell/PanelRight/attachments.js';
-import { formatLocalTimestamp, toIsoTimestamp } from '../components/Shell/PanelRight/format.js';
-import { formatLocalAgentErrorMessage } from '../components/Shell/PanelRight/local-agent-errors.js';
+} from '../conversations/attachments.js';
+import { formatLocalTimestamp, toIsoTimestamp } from '../conversations/format.js';
+import { formatLocalAgentErrorMessage } from '../conversations/local-agent-errors.js';
 import {
   adoptLocalAgentTurnId,
   buildLiveFailedTurnDisplay,
   mapHistoryMessage,
   mergeLocalAgentMessages,
-} from '../components/Shell/PanelRight/message-model.js';
-import { resolveLocalAgentConversation } from '../components/Shell/PanelRight/selection.js';
+} from '../conversations/message-model.js';
+import { resolveLocalAgentConversation } from '../conversations/identity.js';
 import type {
   LocalAgentAttachmentDraft,
   LocalAgentAttachmentStatus,
   LocalAgentMessage,
-} from '../components/Shell/PanelRight/types.js';
+} from '../conversations/types.js';
 import { useJourneyStore } from './journey.js';
 
 /**
@@ -151,22 +151,34 @@ export interface ConversationTarget {
 
 export type HistoryResult = { ok: true } | { ok: false; error: unknown };
 
+/**
+ * What to send and where. The conversation is named once, by its agent and
+ * session; the store derives its state key the same way loadHistory does.
+ */
 export interface SendRequest {
-  conversationKey: string;
   integration: LocalAgentIntegration;
   sessionId: string | null;
+  defaultSessionId?: string | null;
   contextEntries: LocalAgentChatContextEntry[];
   contextGraphId: string | null;
 }
 
+/** A send with its conversation resolved: the key and the session it talks to. */
+interface ResolvedSend extends SendRequest {
+  conversationKey: string;
+}
+
 export type SendOutcome =
   | { status: 'skipped' }
-  /** `sessionId` is set when Prime answered from a different live session. */
+  /**
+   * `sessionId` is set when Prime answered from a different live session. The
+   * transcript has already moved there; the caller decides whether to follow it.
+   */
   | { status: 'sent'; sessionId?: string }
   /** `inConversation` is false when it failed before the turn was shown. */
   | { status: 'failed'; reason: string; aborted: boolean; inConversation: boolean };
 
-async function runSend(request: SendRequest, text: string, drafts: LocalAgentAttachmentDraft[]): Promise<SendOutcome> {
+async function runSend(request: ResolvedSend, text: string, drafts: LocalAgentAttachmentDraft[]): Promise<SendOutcome> {
   const { conversationKey, integration, sessionId, contextGraphId } = request;
   const integrationId = integration.id;
   let controller: AbortController | null = null;
@@ -267,9 +279,10 @@ async function runSend(request: SendRequest, text: string, drafts: LocalAgentAtt
     if (journey.stage === 0) journey.advance();
 
     const resolvedPrimeSessionId = integrationId === 'prime-agent' ? result.sessionId?.trim() : undefined;
-    return resolvedPrimeSessionId && resolvedPrimeSessionId !== sessionId
-      ? { status: 'sent', sessionId: resolvedPrimeSessionId }
-      : { status: 'sent' };
+    if (!resolvedPrimeSessionId || resolvedPrimeSessionId === sessionId) return { status: 'sent' };
+    // Prime restarted: carry the transcript over to the session that answered.
+    migrateSession(conversationKey, resolveLocalAgentConversation({ integrationId, sessionId: resolvedPrimeSessionId }).stateKey);
+    return { status: 'sent', sessionId: resolvedPrimeSessionId };
   } catch (err: any) {
     const aborted = err?.name === 'AbortError';
     const reason = aborted ? 'Request cancelled.' : formatLocalAgentErrorMessage(integration, err);
@@ -303,9 +316,22 @@ async function runSend(request: SendRequest, text: string, drafts: LocalAgentAtt
   }
 }
 
+/**
+ * Carry a conversation over to the session that answered it (Prime after a
+ * restart). Only an explicit no-session miss is retried, and that runs
+ * nothing, so the merged transcript can't hold a turn twice.
+ */
+function migrateSession(fromKey: string, toKey: string) {
+  const from = read(fromKey);
+  update(toKey, (c) => ({
+    messages: mergeLocalAgentMessages(c.messages, from.messages),
+    historyLoaded: from.historyLoaded,
+  }));
+}
+
 /** Hermes keeps failed turns, so a timed-out session survives a refresh. */
 async function persistHermesFailure(
-  request: SendRequest,
+  request: ResolvedSend,
   turn: {
     correlationId: string;
     userMessage: string;
@@ -397,7 +423,13 @@ export const conversationActions = {
    * or the agent can't take it; otherwise how the turn ended.
    */
   send(request: SendRequest): Promise<SendOutcome> | null {
-    const { conversationKey, integration } = request;
+    const { integration } = request;
+    const target = resolveLocalAgentConversation({
+      integrationId: integration.id,
+      sessionId: request.sessionId,
+      defaultSessionId: request.defaultSessionId,
+    });
+    const conversationKey = target.stateKey;
     const conversation = read(conversationKey);
     const text = conversation.input.trim();
     const drafts = conversation.attachments;
@@ -405,7 +437,7 @@ export const conversationActions = {
     if (!integration.chatSupported || !integration.chatReady || conversation.sending) return null;
     if (!text && !hasSendableDrafts) return null;
     update(conversationKey, () => ({ sending: true }));
-    return runSend(request, text, drafts);
+    return runSend({ ...request, sessionId: target.sessionId, conversationKey }, text, drafts);
   },
 
   /** Abort this conversation's reply in flight; the turn then shows as cancelled. */
@@ -416,19 +448,6 @@ export const conversationActions = {
   /** Empty a conversation after its agent's session was cleared. */
   clear(conversationKey: string) {
     update(conversationKey, () => ({ messages: [], input: '', attachments: [], historyLoaded: true }));
-  },
-
-  /**
-   * Carry a conversation over to the session that answered it (Prime after a
-   * restart). Only an explicit no-session miss is retried, and that runs
-   * nothing, so the merged transcript can't hold a turn twice.
-   */
-  migrateSession(fromKey: string, toKey: string) {
-    const from = read(fromKey);
-    update(toKey, (c) => ({
-      messages: mergeLocalAgentMessages(c.messages, from.messages),
-      historyLoaded: from.historyLoaded,
-    }));
   },
 };
 

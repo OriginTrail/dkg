@@ -1,7 +1,7 @@
 import type {
   LocalAgentChatAttachmentImportResult,
   LocalAgentChatAttachmentRef,
-} from '../../../api.js';
+} from '../api.js';
 import type { LocalAgentAttachmentDraft } from './types.js';
 import { formatAttachmentImportContextValue } from './format.js';
 

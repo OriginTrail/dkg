@@ -23,7 +23,6 @@ import { NetworkTab } from './NetworkTab.js';
 import { SessionsTab } from './SessionsTab.js';
 import {
   compareLocalAgentIntegrations,
-  getLocalAgentConversationStateKey,
   markLocalAgentIntegrationDisconnected,
   resolveLocalAgentConversation,
   resolveLocalAgentSelectionState,
@@ -286,7 +285,6 @@ export function PanelRight() {
     // The store runs the turn, so it finishes even if the panel closes;
     // what's left here is what the panel shows about it.
     const pending = conversationActions.send({
-      conversationKey: conversation.stateKey,
       integration,
       sessionId: conversation.sessionId,
       contextEntries: buildChatContextEntries(availableProjects, activeProjectId, currentAgent),
@@ -307,11 +305,7 @@ export function PanelRight() {
       && selectedIntegrationIdRef.current === integration.id
       && selectedSessionIdRef.current === conversation.sessionId
     ) {
-      // Prime restarted: keep the transcript and follow the live session.
-      conversationActions.migrateSession(
-        conversation.stateKey,
-        getLocalAgentConversationStateKey(integration.id, outcome.sessionId),
-      );
+      // Prime restarted and the store moved the transcript; follow it if this chat is still showing.
       setSelectedIntegration(integration.id, { sessionId: outcome.sessionId });
       setConnectNotice(`${integration.name} restarted; switched chat to the live session.`);
     }

@@ -1,4 +1,4 @@
-import { LocalAgentApiError, type LocalAgentIntegration } from '../../../api.js';
+import { LocalAgentApiError, type LocalAgentIntegration } from '../api.js';
 
 export function formatLocalAgentErrorMessage(
   integration: LocalAgentIntegration,

@@ -12,7 +12,7 @@ import {
   formatFileSize,
   getProjectDisplayName,
 } from './format.js';
-import { isSendableAttachmentDraft } from './attachments.js';
+import { isSendableAttachmentDraft } from '../../../conversations/attachments.js';
 import { renderMessageContent } from './messages.js';
 import {
   compareLocalAgentIntegrations,
