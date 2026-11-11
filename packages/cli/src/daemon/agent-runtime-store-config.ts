@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import {
+  keepsAnyReadGraph,
   withManagedOxigraphRuntimeStoreConfigV1,
   type ChangelogEraGuard,
   type ManagedOxigraphRuntimeStoreConfigV1,
@@ -23,9 +24,10 @@ export function buildAgentRuntimeStoreConfig(
   input: AgentRuntimeStoreConfigInput,
 ): TripleStoreConfig | undefined {
   if (!input.runtimeStore) {
-    // Without a store section the agent builds its default embedded store. Read-graph settings reach it as the
-    // same store, configured explicitly; the agent adds its default large-literal storage as it does by default.
-    return input.readGraphs === undefined || input.dataDir === undefined
+    // Without a store section the agent builds its default embedded store. Settings that keep a read graph reach it
+    // as the same store, configured explicitly; the agent adds its default large-literal storage as it does by
+    // default. Without such settings nothing changes.
+    return input.readGraphs === undefined || input.dataDir === undefined || !keepsAnyReadGraph(input.readGraphs.modes)
       ? undefined
       : { backend: 'oxigraph-worker', options: { path: join(input.dataDir, 'store.nq') }, readGraphs: input.readGraphs };
   }

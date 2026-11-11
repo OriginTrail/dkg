@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { QueryConfigError, resolveQueryConfig } from '../src/read-graphs-config.js';
 import {
   READ_GRAPHS_FIRST_RECOGNIZING_RELEASE,
+  assertQueryConfigFitsNode,
   assertRollbackTargetRecognizesReadGraphs,
   readGraphRollbackTarget,
   resolveQueryConfigOrExit,
@@ -114,6 +115,23 @@ describe('read graphs and the Core rollback target', () => {
     expect(await refusal('core')).toBeUndefined();
     await slot('a', '10.1.2');
     expect(rollbackTargetRecognizesReadGraphs(await readGraphRollbackTarget('core'))).toBe(true);
+  });
+});
+
+describe('read graphs on a node that starts from a public checkpoint', () => {
+  it('refuses settings that keep a read graph, and accepts settings that keep none', async () => {
+    // Nothing to roll back to: only the checkpoint decides.
+    const refused = await assertQueryConfigFitsNode(BUILD, 'edge', true).then(() => undefined, (error: unknown) => error);
+    expect(refused).toBeInstanceOf(QueryConfigError);
+    expect((refused as QueryConfigError).issues).toEqual([{
+      key: 'query.readGraphs',
+      message: 'must be "off" on a node that starts from a public checkpoint, whose store the checkpoint builds',
+    }]);
+    for (const config of [OFF, resolveQueryConfig({})]) await expect(assertQueryConfigFitsNode(config, 'edge', true)).resolves.toBeUndefined();
+    // Without a checkpoint, the same settings pass to the rollback-target check.
+    await expect(assertQueryConfigFitsNode(BUILD, 'edge', false)).resolves.toBeUndefined();
+    await writeFile(join(home, 'previous-version'), '10.1.1\n');
+    await expect(assertQueryConfigFitsNode(BUILD, 'edge', false)).rejects.toBeInstanceOf(QueryConfigError);
   });
 });
 
