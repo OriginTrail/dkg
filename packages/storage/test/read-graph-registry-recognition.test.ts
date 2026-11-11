@@ -308,7 +308,21 @@ describe('registry recognition in the read-graph layer', () => {
   });
 
   it('reads the registry again after a write naming an IRI the grammar refuses, which an adapter may rewrite', async () => {
-    const { adapter, store, meta, fixture, layer, states } = await layered();
+    // An adapter that drops the characters that break an IRI before it deletes, as a renderer without validation does.
+    class Rewriting extends PlanningOxigraphStore {
+      override async deleteByPattern(pattern: Partial<Quad>, options?: Parameters<PlanningOxigraphStore['deleteByPattern']>[1]): Promise<number> {
+        const clean = (term: string | undefined) => (term === undefined || term.startsWith('"') ? term : term.replace(/[{}|^`\\<>"\s]/g, ''));
+        return super.deleteByPattern({ ...pattern, subject: clean(pattern.subject), predicate: clean(pattern.predicate), object: clean(pattern.object) }, options);
+      }
+    }
+    const adapter = new Rewriting();
+    const fixture = layerFixture(`recognition-${sequence += 1}`);
+    const { layer, store } = await layeredStore(adapter, { backend: 'oxigraph' }, fixture);
+    const meta = `${fixture.root}/_meta`;
+    const states = () => Object.fromEntries(Object.entries(fixture.readGraphs).map(([name, readGraph]) => {
+      const row = layer.runtime.mirror.get(readGraph)!;
+      return [name, `${row.state}@${row.generation}`];
+    }));
     const brokenType = `${R.type.slice(0, -2)}{${R.type.slice(-2)}`;
     expect(isExactRegistryWrite(fixture.contextGraphId, { kind: 'match', graph: meta, predicate: brokenType })).toBe(false);
     expect(isExactRegistryWrite(fixture.contextGraphId, { kind: 'quads', added: [fact(meta, `${fixture.root}/a{b`, R.name, '"ab"')], removed: [] })).toBe(false);

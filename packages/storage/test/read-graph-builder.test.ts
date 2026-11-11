@@ -51,7 +51,7 @@ import {
   type ReadGraphStateRow,
 } from '../src/read-graph/state.js';
 import { readGraphBackfillBatch, readGraphFencedDrop, readGraphHoldsTripleAsk } from '../src/read-graph/statements.js';
-import { startReadGraphs } from '../src/read-graph/startup.js';
+import { startReadGraphs, type ReadGraphStartOptions } from '../src/read-graph/startup.js';
 import type { Quad, QueryOptions, TripleStore, UpdateOptions } from '../src/triple-store.js';
 import { AGENT, isLayerMember, layerFixture, P, q, readyRow, type LayerFixture } from './helpers/read-graph-layer-conformance.js';
 import { PlanningOxigraphStore } from './helpers/read-graph-planning-store.js';
@@ -1074,6 +1074,39 @@ describe('read-graph start-up', () => {
     const restarted = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
     expect(await startReadGraphs(restarted, { dataDir: fresh, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
     expect(mayHoldReadGraphPartitions(fresh)).toBe(true);
+  });
+
+  const recordOnly: Array<[string, () => TripleStore, ReadGraphStartOptions]> = [
+    ['with read graphs off', () => new HookedStore(), {}],
+    ['over an adapter that does not declare its read-graph methods', () => undeclared(new OxigraphStore()), { maintains: () => true }],
+    ['maintaining every read graph', () => new HookedStore(), { maintains: () => true }],
+  ];
+  it.each(recordOnly)('notes a fresh store that holds only a registry record as holding read-graph partitions, %s', async (_name, adapterOf, modes) => {
+    const adapter = adapterOf();
+    const fixture = layerFixture(`builder-${sequence += 1}`);
+    await adapter.update!(readGraphRegistryRecordUpdate(fixture.registry));
+    const dataDir = mkdtempSync(join(tmpdir(), 'read-graph-builder-'));
+    dirs.push(dataDir);
+    const store = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
+    expect(await startReadGraphs(store, { dataDir, ...modes })).toEqual({ marked: 0, maintained: 0 });
+    expect(mayHoldReadGraphPartitions(dataDir)).toBe(true);
+    expect(storeMayHoldReadGraphPartitions(adapter)).toBe(true);
+  });
+
+  it('notes a store whose registry records cannot be listed at start, with read graphs off', async () => {
+    const failing = new HookedStore();
+    const query = failing.query.bind(failing);
+    failing.query = async (sparql, options) => {
+      if (sparql.includes('<http://dkg.io/ontology/readGraphRegistry>')) throw new Error('connection reset');
+      return query(sparql, options);
+    };
+    const dataDir = mkdtempSync(join(tmpdir(), 'read-graph-builder-'));
+    dirs.push(dataDir);
+    const logs: string[] = [];
+    await startReadGraphs(guardReadGraphPartition(wrapReadGraphLayer(failing, { backend: 'oxigraph' })), { dataDir, log: (line) => logs.push(line) });
+    expect(mayHoldReadGraphPartitions(dataDir)).toBe(true);
+    expect(storeMayHoldReadGraphPartitions(failing)).toBe(true);
+    expect(logs.some((line) => line.includes('could not be listed'))).toBe(true);
   });
 
   it('replaces damaged rows and rows whose generation cannot grow, and notes nothing without rows', async () => {
