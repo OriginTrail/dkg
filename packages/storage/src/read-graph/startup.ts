@@ -9,7 +9,8 @@
  * plans) keep a `ready` row built under versions this release accepts, whose
  * membership the registry recorded for its context graph still gives
  * (`./registry-record.ts`): the layer maintained every write since it was
- * published, and no registry change went unmarked. Every other row of
+ * published, no registry change went unmarked, and no dirty mark of it
+ * stayed unstored (`./mark-journal.ts`). Every other row of
  * theirs gets a new generation and the state `dirty`, whatever its state, so
  * nothing an earlier process left in flight passes a fence; a damaged row, or
  * one whose generation cannot grow, is replaced by a dirty row at a new random
@@ -37,6 +38,7 @@ import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
 import { workingMemoryIdentityRule } from './membership.js';
+import { clearUnstoredReadGraphMarks, readUnstoredReadGraphMarks, useReadGraphMarkJournal } from './mark-journal.js';
 import { readGraphLayerOf } from './read-graph-store.js';
 import { keepsAnyReadGraph, readGraphModeOf } from './settings.js';
 import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry, type ReadGraphRegistryFact } from './registry-recognition.js';
@@ -110,6 +112,9 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
   if (found.count > 0 || (options.dataDir !== undefined && mayHoldReadGraphPartitions(options.dataDir))) {
     noteStoreMayHoldReadGraphPartitions(target);
   }
+  // The marks a process could not store from here on go to the data directory's journal.
+  const journaled = options.dataDir !== undefined ? readUnstoredReadGraphMarks(options.dataDir) : new Map<string, Set<number>>();
+  if (options.dataDir !== undefined) useReadGraphMarkJournal(layer.runtime, options.dataDir);
   if (found.count === 0) return { marked: 0, maintained: 0 };
 
   const maintained = (readGraph: string) => {
@@ -128,7 +133,8 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
     return read;
   };
   // A maintained row that may stay ready, if its registry did not move.
-  const mayKeep = (row: ReadGraphStateRow) => maintained(row.readGraph) && keepsReady(row, versions, recorded !== undefined);
+  const mayKeep = (row: ReadGraphStateRow) => maintained(row.readGraph) && keepsReady(row, versions, recorded !== undefined)
+    && journaled.get(row.readGraph)?.has(row.generation) !== true;
   for (const row of found.rows) if (mayKeep(row)) await readRegistry(parseReadGraphIri(row.readGraph)!.scope.contextGraphId);
   const records = await registryRecords(target, queryOptions);
   const followsRecord = (row: ReadGraphStateRow) => {
@@ -161,6 +167,8 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
     }
   }
 
+  // Every row the journal named is marked now, or moved on before.
+  if (options.dataDir !== undefined && journaled.size > 0) clearUnstoredReadGraphMarks(options.dataDir);
   const after = await stateRows(target, queryOptions);
   for (const row of after.rows) if (maintained(row.readGraph)) mirror.set(row);
   // Before anything writes: the facts go in with the snapshot, so the layer predicts its first registry write from them.

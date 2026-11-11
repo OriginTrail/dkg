@@ -45,10 +45,17 @@ describe('updates that declare the graphs they write, while read graphs exist', 
   it('keep each read graph equal to its members when a heal copies an asset into a scoped data graph', async () => {
     const { adapter, fixture, layer, store } = await layered();
     const scoped = `${fixture.root}/context/7`;
-    // The shape of a heal of a stranded scoped asset: a server-side copy into the graph it names.
-    const heal = `INSERT { GRAPH <${scoped}> { ?s ?p ?o } } WHERE { GRAPH <${fixture.graphs[1]!}> { ?s ?p ?o } }`;
+    // The shape of a heal of a stranded scoped asset: a server-side copy into the graph it names. The
+    // source is a registered child's graph, outside every read graph here, so only the maintenance of
+    // the declared destination brings its triples into the context graph's VM read graph.
+    const source = fixture.graphs[8]!;
+    const heal = `INSERT { GRAPH <${scoped}> { ?s ?p ?o } } WHERE { GRAPH <${source}> { ?s ?p ?o } }`;
+    const held = async () => (await adapter.query(
+      `ASK { GRAPH <${fixture.readGraphs.wholeVm}> { <urn:s:8> <${P}> "v8" } }`)) as { type: string; value?: boolean };
+    expect(await held()).toEqual({ type: 'boolean', value: false });
     await expect(tryUpdateWithTouchedGraphs(store, heal, [scoped], { writtenGraphs: [scoped] })).resolves.toBe(true);
-    expect(await adapter.countQuads(scoped)).toBeGreaterThan(0);
+    expect(await adapter.countQuads(scoped)).toBe(3);
+    expect(await held()).toEqual({ type: 'boolean', value: true });
     await expectLayerUnions(adapter, layer, fixture, 'a heal copy into a scoped data graph');
   });
 });
