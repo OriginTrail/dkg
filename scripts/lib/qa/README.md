@@ -237,8 +237,16 @@ only valid suite exit zeros remains PASS.
 The EXIT finalizer first turns RUNNING into CANCELLED and PENDING into NOT_RUN.
 `comprehensive-report.mjs` derives JSON, Markdown, console totals and the selection
 exit from that one finalized snapshot and `summarizeComprehensive`; the shell no
-longer maintains a second set of totals. Both reports include all six totals,
+longer maintains a second set of totals. Both reports include all totals,
 individual suite states, overall/selection outcomes, interruption and filters.
+
+A suite registered with `register_skip_aware` follows the "exit 3 = did not
+run" convention of `devnet-test-store-outage.sh`: its exit 3 is recorded as
+SKIPPED (total `skipped`), with the tail of its log in the report. A skipped
+suite is neither a pass nor a failure of the product: FAIL_FAST does not stop
+at it, and a run that has one is INCONCLUSIVE and exits non-zero. Exit 3 of any
+other suite stays FAIL:3 (for the two aggregators it means three failed
+scripts).
 
 Suites run in separate Bash process groups. Cancellation sends SIGTERM to the
 active group, allows recovery/EXIT cleanup and its descendants to finish, then

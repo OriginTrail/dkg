@@ -14,9 +14,21 @@
 #      it is denied (each deny == one prevented flap).
 #   4. It RECOVERS — DCUtR upgrades relayed->direct and the quarantine clears.
 #
-# Reads the node daemon logs (`.devnet/node*/daemon.log`). Requires a running
-# devnet built from post-#1240 code. Self-contained; FAILS loudly if it cannot
-# actually exercise the guard (no false-green).
+# Reads the node daemon logs (`$DEVNET_DIR/node*/daemon.log`) of a fleet built
+# from post-#1240 code. Self-contained and read-only.
+#
+# NOT PART OF THE DEVNET GATE, and it cannot be: the guard acts on relayed
+# connections that flap, and the local devnet does not produce any. Every devnet
+# node is directly dialable on 127.0.0.1, so the few relayed connections there
+# are (Edge to Edge, through node 1) are upgraded to direct ones at once. Two
+# full runs of scripts/devnet-comprehensive.sh (10.0.23 and 10.0.24, October
+# 2026) logged 9 and 10 relayed closes, none of them sub-second, and no denial.
+# Use it on the logs of a fleet whose peers sit behind relays: point DEVNET_DIR
+# at a directory with one node<N>/daemon.log per node.
+#
+# Exit codes: 0 = the guard was exercised and held, 3 = there were no relay
+# flaps to exercise it on (did not run; never a pass), other non-zero = a check
+# failed or the logs are missing.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -50,8 +62,8 @@ done
 FLAPS=$(short_flaps)
 log "  sub-second relayed closes across the fleet: $FLAPS (waited ${waited}s)"
 if [ "$FLAPS" -lt "$THRESHOLD" ]; then
-  bad "only $FLAPS (<$THRESHOLD) sub-second relayed flaps observed in ${WAIT_SECONDS}s — cannot exercise the guard (is circuit relay enabled / is this a post-#1240 build?)"
-  echo; log "PASS=$PASS FAIL=$FAIL SKIP=$SKIP"; exit 1
+  skip "only $FLAPS (<$THRESHOLD) sub-second relayed flaps observed in ${WAIT_SECONDS}s — nothing to exercise the guard on (a fleet without relayed peers, such as the local devnet, never has any)"
+  echo; log "PASS=$PASS FAIL=$FAIL SKIP=$SKIP — the guard was not exercised (exit 3)"; exit 3
 fi
 ok "fleet is producing relayed flaps ($FLAPS) — the guard has something to act on"
 

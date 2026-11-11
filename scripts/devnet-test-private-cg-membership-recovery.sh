@@ -59,6 +59,15 @@
 # `fixed` requires the pre-admission subscription to remain pending/not-ready,
 # then requires metadata, authorization, root SWM, and sub-graph SWM to recover
 # exactly and survive a node-6 restart.
+#
+# Since the subscribe route establishes read authority before it records
+# anything, a node whose agent is not a member REFUSES that pre-admission
+# subscription outright ("not authorized to read this project") instead of
+# keeping it pending. `fixed` accepts that stricter answer as well, on the
+# condition that the refusal left nothing behind: no subscription row and no
+# graph material. The joiner then subscribes once it has been admitted, which
+# is the order a member follows. `broken` still requires the accepted,
+# falsely-ready subscription it was written to witness.
 
 # The JavaScript snippets deliberately use single-quoted shell strings and JS
 # template literals; their `$` expressions belong to JavaScript, not Bash.
@@ -1424,6 +1433,22 @@ sparql_count() {
         if (match) process.stdout.write(match[0]);
       } catch {}
     });
+  '
+}
+
+# The subscribe route's answer to a caller whose agent is not a member of a
+# private graph: an error, no subscription, and the reason. Anything else that
+# is not a subscription (a store error, a timeout, an unavailable authority) is
+# not this refusal and stays a failed step.
+pre_admission_subscribe_refused() {
+  RESPONSE="$1" node -e '
+    try {
+      const answer = JSON.parse(process.env.RESPONSE);
+      const refused = typeof answer.error === "string"
+        && /not authorized to read this project/.test(answer.error)
+        && answer.subscribed === undefined && answer.catchup === undefined;
+      process.exit(refused ? 0 : 1);
+    } catch { process.exit(1); }
   '
 }
 
@@ -3305,12 +3330,37 @@ wait_node_down "$CURATOR_NODE" 45 \
 log "curator is offline; unrelated core peers remain online"
 
 act "Joiner subscribes before admission while curator is offline"
-SUBSCRIBE_RESPONSE="$(api_call "$JOINER_NODE" POST /api/context-graph/subscribe \
-  "$(CG="$CG_ID" node -e 'process.stdout.write(JSON.stringify({contextGraphId:process.env.CG,includeSharedMemory:true}))')")"
-[ "$(json_get "$SUBSCRIBE_RESPONSE" subscribed)" = "$CG_ID" ] \
-  || fail "joiner subscribe failed: $SUBSCRIBE_RESPONSE"
+SUBSCRIBE_BODY="$(CG="$CG_ID" node -e 'process.stdout.write(JSON.stringify({contextGraphId:process.env.CG,includeSharedMemory:true}))')"
+SUBSCRIBE_RESPONSE="$(api_call "$JOINER_NODE" POST /api/context-graph/subscribe "$SUBSCRIBE_BODY")"
 save_artifact "pre-admission-subscribe-response.json" "$SUBSCRIBE_RESPONSE"
+PRE_ADMISSION_SUBSCRIPTION=accepted
+if [ "$(json_get "$SUBSCRIBE_RESPONSE" subscribed)" != "$CG_ID" ]; then
+  [ "$HARNESS_EXPECT" = "fixed" ] && pre_admission_subscribe_refused "$SUBSCRIBE_RESPONSE" \
+    || fail "joiner subscribe failed: $SUBSCRIBE_RESPONSE"
+  PRE_ADMISSION_SUBSCRIPTION=refused
+fi
 
+if [ "$PRE_ADMISSION_SUBSCRIPTION" = "refused" ]; then
+  # The node decided before recording anything. Give a wrongly started
+  # background job a moment to show itself, then require that nothing was kept.
+  sleep 5
+  SUB_ROW="$(db_subscription_row "$JOINER_NODE" 2>/dev/null || printf 'null')"
+  [ -z "$SUB_ROW" ] || [ "$SUB_ROW" = "null" ] || [ "$(json_get "$SUB_ROW" subscribed)" != "1" ] \
+    || fail "the refused pre-admission subscription left an active subscription row: $SUB_ROW"
+  ROOT_BEFORE="$(root_count "$JOINER_NODE")"
+  SUB_BEFORE="$(subgraph_count "$JOINER_NODE")"
+  ROOT_VM_BEFORE="$(root_vm_count "$JOINER_NODE")"
+  SUB_VM_BEFORE="$(subgraph_vm_count "$JOINER_NODE")"
+  META_BEFORE="$(meta_count "$JOINER_NODE")"
+  if ! count_is_absent "$ROOT_BEFORE" || ! count_is_absent "$SUB_BEFORE" \
+    || ! count_is_absent "$ROOT_VM_BEFORE" || ! count_is_absent "$SUB_VM_BEFORE" \
+    || ! count_is_absent "$META_BEFORE"; then
+    fail "pre-admission joiner unexpectedly holds CG material (rootSwm=${ROOT_BEFORE:-unreadable} subSwm=${SUB_BEFORE:-unreadable} rootVm=${ROOT_VM_BEFORE:-unreadable} subVm=${SUB_VM_BEFORE:-unreadable} meta=${META_BEFORE:-unreadable})"
+  fi
+  log "GREEN PRECONDITION: the node refused the subscription before admission and kept no subscription, metadata or data"
+else
+# The subscription was accepted: the oracle this harness was written for. (Left
+# at its indentation so that the change to this block is the two lines around it.)
 CATCHUP_RESPONSE="$(poll_catchup_terminal)" \
   || fail "pre-admission catch-up did not reach a terminal state within ${CATCHUP_TIMEOUT_S}s"
 save_artifact "pre-admission-catchup-terminal.json" "$CATCHUP_RESPONSE"
@@ -3377,6 +3427,7 @@ else
     || fail "fixed oracle violated: pre-admission state claims readiness: $SUB_ROW"
   log "GREEN PRECONDITION: syncCapablePeers=$SYNC_CAPABLE_PEERS emptyResponses=$EMPTY_RESPONSES but subscription remains pending/not-ready"
 fi
+fi  # PRE_ADMISSION_SUBSCRIPTION refused / accepted
 snapshot_phase pre-admission
 
 act "Restart curator and deliver a signed admission request"
@@ -3507,6 +3558,23 @@ else
   [ "$AUTO_MEMBER_COUNT" = "2" ] \
     || fail "automatic approval did not produce the expected curator + joiner membership: $OPEN_POLICY_AFTER_APPROVAL"
   log "curator automatically approved $JOINER_AGENT; no manual approve-join call was made"
+fi
+
+if [ "$PRE_ADMISSION_SUBSCRIPTION" = "refused" ]; then
+  # The subscription the node refused is made now that the agent is a member.
+  # Approval reaches the joiner asynchronously, so the same request is repeated
+  # until the node accepts it.
+  POST_ADMISSION_SUBSCRIBE=""
+  SUBSCRIBE_START="$(date +%s)"
+  while [ $(( $(date +%s) - SUBSCRIBE_START )) -lt "$JOIN_DELIVERY_TIMEOUT_S" ]; do
+    POST_ADMISSION_SUBSCRIBE="$(api_call "$JOINER_NODE" POST /api/context-graph/subscribe "$SUBSCRIBE_BODY" 2>/dev/null || true)"
+    [ "$(json_get "$POST_ADMISSION_SUBSCRIBE" subscribed)" = "$CG_ID" ] && break
+    sleep 3
+  done
+  save_artifact "post-admission-subscribe-response.json" "$POST_ADMISSION_SUBSCRIBE"
+  [ "$(json_get "$POST_ADMISSION_SUBSCRIBE" subscribed)" = "$CG_ID" ] \
+    || fail "the admitted joiner could not subscribe within ${JOIN_DELIVERY_TIMEOUT_S}s: $POST_ADMISSION_SUBSCRIBE"
+  log "the admitted joiner subscribed"
 fi
 
 act "Measure post-approval metadata/data recovery"
