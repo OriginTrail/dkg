@@ -1,11 +1,6 @@
-import { useEffect } from 'react';
-import { useLayoutStore } from '../stores/layout.js';
-import { applyTheme } from '../lib/applyTheme.js';
-
-/** A failed status probe must never present fabricated operational health. */
+/** A failed status probe must never present fabricated operational health.
+ * The document theme is applied by App, which renders this view. */
 export function NodeUnavailableView() {
-  const theme = useLayoutStore((state) => state.theme);
-  useEffect(() => { applyTheme(theme); }, [theme]);
 
   return (
     <main className="v10-app" style={{ alignItems: 'center', justifyContent: 'center', padding: 24 }}>

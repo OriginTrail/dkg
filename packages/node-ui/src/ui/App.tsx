@@ -73,7 +73,7 @@ function AppShell() {
   useNodeStatusPolling();
   useKeyboardShortcuts();
   useShellRouting();
-  const { bottomCollapsed, theme, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
+  const { bottomCollapsed, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
   const { narrow, leftOpen, rightOpen } = useShellPanels();
   const closeNarrowPanel = useLayoutStore((s) => s.closeNarrowPanel);
   const { pathname } = useLocation();
@@ -81,13 +81,6 @@ function AppShell() {
   // The create and join dialogs belong to the shell (ContextGraphDialogs), so closing the panel keeps them.
   useEffect(() => { closeNarrowPanel(); }, [pathname, narrow, closeNarrowPanel]);
   const [, setVpTick] = useState(0);
-
-  useEffect(() => {
-    // BUG-004: see applyTheme for why both <html> AND <body> need the
-    // class. The helper lives in src/ui/lib/applyTheme so a unit test
-    // can pin the contract without mounting AppShell.
-    applyTheme(theme);
-  }, [theme]);
 
   // Re-render on viewport resize so the render-time clamp in PanelBottom
   // and the drag base both recompute against the new maxBottomHeight().
@@ -203,6 +196,11 @@ function ContextGraphPrimerRoute() {
 export function App() {
   const usingMocks = useSyncExternalStore(subscribeMockMode, isUsingMocks, isUsingMocks);
   useEffect(() => { void detectMockMode(); }, []);
+  // The one owner of the document's theme, for every route: the shell, the
+  // standalone pages and the unavailable view. BUG-004: see applyTheme for
+  // why both <html> AND <body> carry the class.
+  const theme = useLayoutStore((s) => s.theme);
+  useEffect(() => { applyTheme(theme); }, [theme]);
   if (usingMocks) return <NodeUnavailableView />;
 
   return (
