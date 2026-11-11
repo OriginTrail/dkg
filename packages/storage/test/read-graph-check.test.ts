@@ -11,13 +11,21 @@ import { PlanningOxigraphStore } from './helpers/read-graph-planning-store.js';
 
 readGraphCheckConformance('oxigraph');
 
-/** An adapter that runs `before` ahead of each query whose text `matches`. */
+/**
+ * An adapter that runs `before` ahead of each query whose text `matches`,
+ * and can answer `listGraphs` from a list it cached earlier.
+ */
 class HookedStore extends PlanningOxigraphStore {
   hook: { matches: (sparql: string) => boolean; before: () => Promise<void> } | undefined;
+  cachedGraphs: string[] | undefined;
 
   override async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
     if (this.hook?.matches(sparql)) await this.hook.before();
     return super.query(sparql, options);
+  }
+
+  override async listGraphs(options?: QueryOptions): Promise<string[]> {
+    return this.cachedGraphs ? [...this.cachedGraphs] : super.listGraphs(options);
   }
 }
 
@@ -31,8 +39,39 @@ async function hooked() {
 
 const isSizeQuery = (sparql: string) => sparql.startsWith('SELECT (COUNT(*) AS ?n) WHERE { GRAPH <');
 const isMissingProbe = (sparql: string) => sparql.startsWith('ASK {') && sparql.includes('FILTER NOT EXISTS { GRAPH <');
+const isMemberEnumeration = (sparql: string) => sparql.startsWith('SELECT ?g WHERE { GRAPH ?g {}');
 
 describe('read-graph checks under concurrent writes', () => {
+  it('lists member graphs from the store itself, past a graph list an adapter cached', async () => {
+    const { adapter, fixture, store } = await hooked();
+    const { wholeVm } = fixture.readGraphs;
+    // The adapter keeps answering listGraphs from before the write, as a cached list would.
+    adapter.cachedGraphs = await adapter.listGraphs();
+    // A maintained write: the new member and the read graph change together.
+    await store.insert([q('urn:s:late', '"late"', `${fixture.root}/_verifiable_memory/${AGENT}/9`)]);
+    expect(await checkReadGraph(store, wholeVm, 'full')).toEqual({ readGraph: wholeVm, mode: 'full', outcome: 'consistent' });
+    await adapter.close();
+  });
+
+  it('probes a member graph that appears between the probes and the count', async () => {
+    const { adapter, fixture, layer, store } = await hooked();
+    const { wholeVm } = fixture.readGraphs;
+    let listings = 0;
+    adapter.hook = {
+      matches: isMemberEnumeration,
+      // Before the count lists the members: equal-sized corruption below every decorator.
+      before: async () => {
+        if (++listings !== 2) return;
+        await adapter.delete([q('urn:s:1', '"v1"', fixture.graphs[1]!)]);
+        await adapter.insert([q('urn:s:new', '"new"', `${fixture.root}/_verifiable_memory/${AGENT}/9`)]);
+      },
+    };
+    expect(await checkReadGraph(store, wholeVm, 'full')).toEqual({ readGraph: wholeVm, mode: 'full', outcome: 'mismatch', direction: 'missing' });
+    expect(listings).toBe(2);
+    expect(layer.runtime.mirror.get(wholeVm)).toMatchObject({ state: 'dirty', generation: 2 });
+    await adapter.close();
+  });
+
   it('finds equal-sized corruption beside a member graph that a warm catalog does not know', async () => {
     const { adapter, fixture, layer, store } = await hooked();
     const { wholeVm } = fixture.readGraphs;

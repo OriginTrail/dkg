@@ -26,7 +26,9 @@
  * Checks read the store below the read-graph layer, on the background lane.
  */
 
-import { assertSafeIri, compareCodePoint, contextGraphDataUri, getMetrics, MemoryLayer, parseReadGraphIri } from '@origintrail-official/dkg-core';
+import { assertSafeIri, compareCodePoint, contextGraphDataUri, escapeSparqlLiteral, getMetrics, MemoryLayer, parseReadGraphIri } from '@origintrail-official/dkg-core';
+import { nonEmptyNamedGraphEnumerationPattern } from '../adapters/graph-enumeration-query.js';
+import { readCompleteGraphCatalog } from '../graph-catalog-internal-limit.js';
 import { readGraphInventoryByPrefix } from '../graph-inventory-materialization.js';
 import { readGraphPartitionMaintenanceStore } from '../read-graph-partition-store.js';
 import { withDefaultStoreWorkPriority } from '../store-priority-scheduler.js';
@@ -180,7 +182,7 @@ async function full(context: CheckContext, options: ReadGraphCheckOptions): Prom
     return false;
   };
   const probed = new Set<string>();
-  const members = await memberGraphs(context, context.target);
+  const members = await storedMemberGraphs(context);
   for (let at = 0; at < members.length; at += chunk) {
     const graphs = members.slice(at, at + chunk);
     const found = await withoutWrites(context, attempts, () => missingIn(graphs));
@@ -192,7 +194,7 @@ async function full(context: CheckContext, options: ReadGraphCheckOptions): Prom
   }
   // The size of the read graph must equal the number of distinct member triples.
   const counted = await withoutWrites(context, attempts, async () => {
-    const graphs = await memberGraphs(context, context.target);
+    const graphs = await storedMemberGraphs(context);
     if (await missingIn(graphs.filter((graph) => !probed.has(graph)))) return 'missing' as const;
     let distinct = 0;
     for (const graph of graphs) {
@@ -259,6 +261,21 @@ function unchanged(context: CheckContext): boolean {
 }
 
 /** The member graphs of the read graph in `store`'s graph list, in code-point order. */
+/**
+ * The member graphs the store holds now, enumerated by one query rather than
+ * read from any graph list an adapter or a decorator may cache. It uses the
+ * adapters' own enumeration of non-empty named graphs, narrowed to the
+ * context graph, under the internal catalog ceiling.
+ */
+async function storedMemberGraphs(context: CheckContext): Promise<string[]> {
+  const query = `SELECT ?g WHERE { ${nonEmptyNamedGraphEnumerationPattern('g')} `
+    + `FILTER(STRSTARTS(STR(?g), "${escapeSparqlLiteral(context.root)}")) }`;
+  const result = await readCompleteGraphCatalog(context.options, (internal) => context.target.query(query, internal));
+  if (result.type !== 'bindings') throw new Error('A read-graph check expected graph bindings');
+  const graphs = result.bindings.map((row) => row['g']).filter((graph): graph is string => typeof graph === 'string');
+  return [...new Set(graphs)].filter((graph) => matchesGraphNameTest(context.read.membership, graph)).sort(compareCodePoint);
+}
+
 async function memberGraphs(context: CheckContext, store: TripleStore): Promise<string[]> {
   const listed = await readGraphInventoryByPrefix(store, `${context.root}/`, context.options);
   return [...new Set([context.root, ...listed.graphs])]
