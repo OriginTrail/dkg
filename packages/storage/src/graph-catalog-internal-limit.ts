@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { getMetrics } from '@origintrail-official/dkg-core';
+import { createOperationContext, getMetrics, Logger } from '@origintrail-official/dkg-core';
 import { assertGraphCatalogWithinResponseLimit } from './graph-catalog-response-limit.js';
 import { isStoreResponseTooLargeError } from './http-response-limit.js';
 import type { QueryOptions } from './triple-store.js';
@@ -80,6 +80,71 @@ export function recordStoreInternalLimit(limitName: string): void {
   }
 }
 
+/** How often a graph catalog warning repeats while its condition holds. */
+export const GRAPH_CATALOG_WARNING_REPEAT_MS = 60 * 60_000;
+
+/**
+ * The start of the graph catalog's warning at one level of its limit. The observability alert
+ * on the 80 % warning matches this text (`graphCatalogLimitWarning` in
+ * tools/observability/lib/queries.mjs).
+ */
+export function graphCatalogLimitWarningStart(percent: number): string {
+  return `The graph catalog has reached ${percent}% of its internal limit ${STORE_GRAPH_CATALOG_LIMIT_NAME}`;
+}
+
+const catalogLog = new Logger('graph-catalog');
+
+/** The node's log sinks, at WARN, from the graph-catalog module. */
+export function logGraphCatalogWarning(message: string): void {
+  catalogLog.warn(createOperationContext('system'), message);
+}
+
+interface GraphCatalogWarningOptions {
+  /** Monotonic milliseconds. */
+  readonly now?: () => number;
+  readonly warn?: (message: string) => void;
+}
+
+/**
+ * The warning for catalog reads the limit refuses: once, then again an hour later while reads
+ * are still refused. It starts as the 80 % warning does, so the alert on that warning stays
+ * raised while the catalog is over its limit, and clears only once reads stop being refused.
+ */
+export function createGraphCatalogOverLimitWarning(
+  options: GraphCatalogWarningOptions = {},
+): (limit: Pick<StoreInternalLimitErrorLike, 'limitBytes' | 'actualBytes'>) => void {
+  const now = options.now ?? (() => performance.now());
+  const warn = options.warn ?? logGraphCatalogWarning;
+  let lastAt: number | undefined;
+  return (limit) => {
+    const at = now();
+    if (lastAt !== undefined && at - lastAt >= 0 && at - lastAt < GRAPH_CATALOG_WARNING_REPEAT_MS) return;
+    lastAt = at;
+    warn(`${graphCatalogLimitWarningStart(80)}, and is over it: at least ${limit.actualBytes} of ${limit.limitBytes} bytes. `
+      + `Catalog reads fail with ${STORE_INTERNAL_LIMIT} until the limit is raised: store.graphCatalog.maxBytes or ${STORE_GRAPH_CATALOG_MAX_BYTES_ENV}.`);
+  };
+}
+
+const warnGraphCatalogOverLimit = createGraphCatalogOverLimitWarning();
+
+/** Count a read a node-side limit refused, and warn when the limit is the graph catalog's. */
+export function recordStoreInternalLimitError(limit: StoreInternalLimitErrorLike): void {
+  recordStoreInternalLimit(limit.limitName);
+  if (limit.limitName !== STORE_GRAPH_CATALOG_LIMIT_NAME) return;
+  try {
+    warnGraphCatalogOverLimit(limit);
+  } catch {
+    // A log sink must never change a read's outcome.
+  }
+}
+
+/** The error for a catalog read the limit refused, counted and warned about. */
+function refusedByGraphCatalogLimit(limitBytes: number, actualBytes: number | bigint): StoreInternalLimitError {
+  const limit = new StoreInternalLimitError(STORE_GRAPH_CATALOG_LIMIT_NAME, limitBytes, actualBytes);
+  recordStoreInternalLimitError(limit);
+  return limit;
+}
+
 function isByteCount(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
@@ -113,8 +178,7 @@ export async function readCompleteGraphCatalog<T>(
     return await read(internalCatalogReadOptions(options));
   } catch (error) {
     if (!isStoreResponseTooLargeError(error)) throw error;
-    recordStoreInternalLimit(STORE_GRAPH_CATALOG_LIMIT_NAME);
-    throw new StoreInternalLimitError(STORE_GRAPH_CATALOG_LIMIT_NAME, error.maxBytes, error.actualBytes);
+    throw refusedByGraphCatalogLimit(error.maxBytes, error.actualBytes);
   }
 }
 
@@ -125,8 +189,7 @@ export function assertGraphCatalogWithinInternalLimit(graphs: readonly string[])
     assertGraphCatalogWithinResponseLimit(graphs, ceiling);
   } catch (error) {
     if (!isStoreResponseTooLargeError(error)) throw error;
-    recordStoreInternalLimit(STORE_GRAPH_CATALOG_LIMIT_NAME);
-    throw new StoreInternalLimitError(STORE_GRAPH_CATALOG_LIMIT_NAME, ceiling, error.actualBytes);
+    throw refusedByGraphCatalogLimit(ceiling, error.actualBytes);
   }
 }
 
@@ -134,6 +197,5 @@ export function assertGraphCatalogWithinInternalLimit(graphs: readonly string[])
 export function assertMeasuredGraphCatalogWithinInternalLimit(bytes: number): void {
   const ceiling = storeGraphCatalogMaxBytes();
   if (bytes <= ceiling) return;
-  recordStoreInternalLimit(STORE_GRAPH_CATALOG_LIMIT_NAME);
-  throw new StoreInternalLimitError(STORE_GRAPH_CATALOG_LIMIT_NAME, ceiling, bytes);
+  throw refusedByGraphCatalogLimit(ceiling, bytes);
 }

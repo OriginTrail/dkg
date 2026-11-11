@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-import { createOperationContext, getMetrics, Logger } from '@origintrail-official/dkg-core';
+import { getMetrics } from '@origintrail-official/dkg-core';
 import {
-  STORE_GRAPH_CATALOG_LIMIT_NAME,
+  GRAPH_CATALOG_WARNING_REPEAT_MS,
   STORE_GRAPH_CATALOG_MAX_BYTES_ENV,
+  graphCatalogLimitWarningStart,
   isStoreInternalLimitError,
+  logGraphCatalogWarning,
   storeGraphCatalogMaxBytes,
 } from './graph-catalog-internal-limit.js';
 import type { GraphSetRefreshSource } from './graph-set-index-types.js';
@@ -52,10 +54,6 @@ function recordRefresh(kind: GraphCatalogRefreshKind, startedAt: number, error?:
 }
 
 const WARNING_PERCENTS = [80, 50] as const;
-const log = new Logger('graph-catalog');
-/** The node's log sinks, at WARN: the observability alert on the 80 % warning matches its text. */
-const logWarning = (message: string): void => log.warn(createOperationContext('system'), message);
-const WARNING_REPEAT_MS = 60 * 60_000;
 
 interface GraphCatalogSizeWarningsOptions {
   /** Monotonic milliseconds. */
@@ -72,7 +70,7 @@ export function createGraphCatalogSizeRecorder(
   options: GraphCatalogSizeWarningsOptions = {},
 ): (size: { readonly graphs: number; readonly bytes: number } | null) => void {
   const now = options.now ?? (() => performance.now());
-  const warn = options.warn ?? logWarning;
+  const warn = options.warn ?? logGraphCatalogWarning;
   let last: { percent: number; at: number } | undefined;
   return (size) => {
     if (size === null) return;
@@ -91,11 +89,10 @@ export function createGraphCatalogSizeRecorder(
       return;
     }
     const at = now();
-    if (last && last.percent >= percent && at - last.at >= 0 && at - last.at < WARNING_REPEAT_MS) return;
+    if (last && last.percent >= percent && at - last.at >= 0 && at - last.at < GRAPH_CATALOG_WARNING_REPEAT_MS) return;
     last = { percent, at };
     // `tools/observability/lib/queries.mjs` (graphCatalogLimitWarning) matches the start of this text.
-    warn(`The graph catalog has reached ${percent}% of its internal limit `
-      + `${STORE_GRAPH_CATALOG_LIMIT_NAME}: ${size.bytes} of ${ceiling} bytes, ${size.graphs} graphs. `
+    warn(`${graphCatalogLimitWarningStart(percent)}: ${size.bytes} of ${ceiling} bytes, ${size.graphs} graphs. `
       + `At the limit, catalog reads fail with STORE_INTERNAL_LIMIT; raise store.graphCatalog.maxBytes or ${STORE_GRAPH_CATALOG_MAX_BYTES_ENV} before then.`);
   };
 }

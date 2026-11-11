@@ -24,9 +24,10 @@ export const severityMatches = (regex) => ` | severity_text=~\`${regex}\``;
  *  callers append the range selector directly: `...${RPC_USAGE_PIPELINE}[1h]`. */
 export const RPC_USAGE_PIPELINE = ' |= `rpc_usage` | logfmt | method != `` | unwrap count ';
 
-/** Line filter for the node's graph catalog size warning at one level (50 or 80):
- *  the start of the message packages/storage/src/graph-catalog-metrics.ts logs
- *  at WARN, pinned by its test. */
+/** Line filter for the node's graph catalog warning at one level (50 or 80): the
+ *  start of the warnings packages/storage/src/graph-catalog-internal-limit.ts
+ *  builds (graphCatalogLimitWarningStart) and logs at WARN, pinned by their test.
+ *  At 80 it also matches the warning for catalog reads the limit refuses. */
 export const graphCatalogLimitWarning = (percent) =>
   ` |= \`The graph catalog has reached ${percent}% of its internal limit\``;
 
