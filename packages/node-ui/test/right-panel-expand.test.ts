@@ -93,8 +93,18 @@ describe('showing the page on navigation', () => {
     expect(expanded()).toBe(true);
   });
 
-  it('opens the panel instead when arriving from /agent-hub', () => {
+  it('opens the panel instead when the /agent-hub redirect replaces its entry', () => {
     act(() => useLayoutStore.setState({ rightCollapsed: true }));
+    mount(['/agent-hub']);
+    // What the redirect does: replace the entry with the open tab's address and { openAgents }.
+    act(() => seen.navigate!('/settings', { replace: true, state: { openAgents: true } }));
+    expect(seen.path).toBe('/settings');
+    expect(useLayoutStore.getState().rightCollapsed).toBe(false);
+    expect(expanded()).toBe(true);
+  });
+
+  it('shows the page when it loads an entry the redirect left (a reload or Back is a POP)', () => {
+    act(() => useLayoutStore.setState({ rightCollapsed: false, rightExpanded: true }));
     const container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -102,9 +112,7 @@ describe('showing the page on navigation', () => {
       root!.render(React.createElement(MemoryRouter, { initialEntries: [{ pathname: '/settings', state: { openAgents: true } }] },
         React.createElement(Routes, null, React.createElement(Route, { path: '*', element: React.createElement(Shell) }))));
     });
-    expect(seen.path).toBe('/settings');
-    expect(useLayoutStore.getState().rightCollapsed).toBe(false);
-    expect(expanded()).toBe(true);
+    expect(expanded()).toBe(false);
   });
 });
 

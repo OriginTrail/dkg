@@ -73,7 +73,7 @@ describe('/agent-hub', () => {
     setNarrow(false);
     await visit('/agent-hub');
     expect(seen.path).toBe('/settings');
-    expect(seen.state).toEqual({ agentsOpened: true });
+    expect(seen.state).toEqual({ openAgents: true });
     const layout = useLayoutStore.getState();
     expect(layout.rightCollapsed).toBe(false);
     expect(layout.rightExpanded).toBe(true);
@@ -112,7 +112,7 @@ describe('/agent-hub', () => {
     expect(useLayoutStore.getState().rightExpanded).toBe(false);
   });
 
-  // The redirect marks its entry, and only its own replace keeps the panel open.
+  // The redirect's own replace opens the panel; Back or Forward to that entry later (a POP) shows the page.
   for (const strict of [false, true]) {
     it(`Back to the redirected entry shows the page${strict ? ' (StrictMode)' : ''}`, async () => {
       setNarrow(false);
@@ -124,7 +124,7 @@ describe('/agent-hub', () => {
       await act(async () => { useLayoutStore.getState().setRightExpanded(true); });
       await act(async () => { seen.navigate!(-1); });
       expect(seen.path).toBe('/settings');
-      expect(seen.state).toEqual({ agentsOpened: true });
+      expect(seen.state).toEqual({ openAgents: true });
       expect(useTabsStore.getState().activeTabId).toBe('settings');
       expect(useLayoutStore.getState().rightExpanded).toBe(false);
     });
