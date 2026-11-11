@@ -1460,6 +1460,27 @@ describe('a store restored to an earlier state', () => {
     expect(await startReadGraphs(restarted, { dataDir, maintains: () => true })).toMatchObject({ marked: 1 });
   });
 
+  it('ends a build whose first row a reported restore overlaps, and leaves the background slot free', async () => {
+    const { adapter, fixture, layer, store, context, dataDir } = await open();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    const { wholeVm } = fixture.readGraphs;
+    const creating = `<${wholeVm}> <${READ_GRAPH_STATE_PREDICATES.state}> "building"`;
+    adapter.onUpdate = (sparql) => {
+      // The restore is reported while the request that creates the row is on its way: the cached registry goes.
+      if (sparql.split('\n').some((line) => line.startsWith('INSERT {') && line.includes(creating))) noteReadGraphStoreRestored(store);
+    };
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'lost' });
+    adapter.onUpdate = undefined;
+    expect(servingReadGraphGeneration(layer.runtime.mirror.get(wholeVm))).toBeUndefined();
+    // Nothing still holds the read graph's lock or the background slot: a builder's pass builds it, and the builder closes.
+    const builder = new ReadGraphBuilder({ store, dataDir, wanted: () => [vm], batching: { pauseRatio: 0 }, intervalMs: 60_000 });
+    builder.start();
+    await builder.whenIdle();
+    expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('ready');
+    await builder.close();
+    await expectUnion(adapter, layer, fixture, vm);
+  });
+
   it('takes every read graph out of service once a supervised backend tells of a restart, before the next query is served', async () => {
     const { adapter, fixture, layer, store, context } = await open();
     let recovery = { generation: 1, ready: true };

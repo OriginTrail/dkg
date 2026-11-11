@@ -188,6 +188,8 @@ async function build(job: ReadGraphJob, key: ReadGraphKey): Promise<ReadGraphJob
       started = dirty?.state === 'dirty' ? await job.transition(dirty, { kind: 'start-rebuild', versions: job.versions }) : dirty;
     }
     if (started?.state !== 'building' && started?.state !== 'rebuilding') return { ended: 'lost', row: started };
+    // An invalidation since the job began cleared the registry, which a refresh would read under the lock held here.
+    if (job.restarted()) return { ended: 'lost', row: started };
     return { started, membership: await job.membership(key) };
   });
   if (begun.ended !== undefined) return job.result(begun.ended, begun.row);
