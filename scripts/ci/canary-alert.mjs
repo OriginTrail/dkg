@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Opens, comments on or closes the `ci-alert` issue of a finished ci.yml run's
-// profile on testnet-canary (scripts/lib/canary-alert.mjs decides which). The
+// profile on testnet-canary, or records a newer pass on its last closed one
+// (scripts/lib/canary-alert.mjs decides which). The
 // canary-alert job in .github/workflows/ci.yml runs it after the CI gate of
 // every push and dispatched run there, the nightly included, with the gate's
 // result in CI_GATE_RESULT and the profile ci.yml resolved in CI_PROFILE.
@@ -29,21 +30,24 @@ export function runProfile({ option, env, live, run }) {
   return profile;
 }
 
-// The newest pass that closed one of this profile's alert issues, read from
-// the closed ones GitHub updated last, in one request: it cannot sort by
-// closing time, but closing updates an issue. A state that cannot be read
-// counts for nothing, and so does a failed lookup: the alert then opens as it
-// would with no recovery on record.
-export async function findLastRecovery(client, repo, profile, log = () => {}) {
+// The profile's last closed alert, as { issue, recovery }: the one recording
+// the newest recovery, or else its most recently updated one (closed by hand,
+// say, with no recovery), from the closed alerts GitHub updated last, in one
+// request: it cannot sort by closing time, but closing or recording a
+// recovery updates an issue. Undefined when the profile has no closed alert,
+// and when the lookup fails: a red run then opens and a pass records nothing,
+// as they would with no recovery on record.
+export async function findLastClosedAlert(client, repo, profile, log = () => {}) {
   try {
     const issues = await client.request('GET', `repos/${repo}/issues`, {
       query: { labels: ALERT_LABEL.name, state: 'closed', sort: 'updated', direction: 'desc', per_page: 100 },
     });
-    return issues
-      .filter((issue) => !issue.pull_request)
-      .map((issue) => readRecovery(issue.body, profile))
-      .filter(Boolean)
-      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+    const own = issues.filter((issue) => !issue.pull_request && String(issue.body ?? '').includes(alertIssue(profile).marker));
+    const recovered = own
+      .map((issue) => ({ issue, recovery: readRecovery(issue.body, profile) }))
+      .filter(({ recovery }) => recovery)
+      .sort((a, b) => Date.parse(b.recovery.createdAt) - Date.parse(a.recovery.createdAt));
+    return recovered[0] ?? (own[0] && { issue: own[0], recovery: undefined });
   } catch (error) {
     log(`Could not read the closed ${profile} alerts (${error.message}); deciding as if none recovered.`);
     return undefined;
@@ -83,6 +87,15 @@ export async function applyAlertPlan(client, repo, plan) {
       // One update records the recovery in the state and closes the issue.
       await client.request('PATCH', `repos/${repo}/issues/${plan.issue.number}`, { body: { body: plan.body, state: 'closed', state_reason: 'completed' } });
       return `closed #${plan.issue.number}`;
+    case 'recover':
+      // Recording a newer recovery only sharpens a later decision: if it
+      // fails, the run's outcome stands and the job does not fail.
+      try {
+        await client.request('PATCH', `repos/${repo}/issues/${plan.issue.number}`, { body: { body: plan.body } });
+        return `recorded the recovery on closed #${plan.issue.number}`;
+      } catch (error) {
+        return `could not record the recovery on closed #${plan.issue.number} (${error.message})`;
+      }
     default:
       return 'left the alert as it is';
   }
@@ -133,11 +146,12 @@ export async function runCanaryAlert({ argv = process.argv.slice(2), env = proce
   // A dry run reads the gate from the past run, never from this shell.
   const gateResult = options['gate-result'] ?? (live ? env.CI_GATE_RESULT : undefined) ?? gate?.conclusion ?? '';
   const issue = await findOpenIssue(github, repo, { label: ALERT_LABEL.name, marker: alertIssue(profile).marker });
-  // Only a red run about to open an alert needs the profile's last recovery.
-  const recovery = !issue && isRed(gateResult) ? await findLastRecovery(github, repo, profile, log) : undefined;
+  // With no open alert, a red run about to open one checks the profile's last
+  // recovery, and a pass moves it forward: both read the last closed alert.
+  const closed = !issue && (gateResult === 'success' || isRed(gateResult)) ? await findLastClosedAlert(github, repo, profile, log) : undefined;
   const plan = planAlert({
     issue,
-    recovery,
+    closed,
     run: runReference(run, {
       attempt,
       profile,

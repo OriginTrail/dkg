@@ -166,24 +166,41 @@ export function renderAlertBody(state, details) {
   ].join('\n');
 }
 
-// What to do with a profile's alert issue for one finished testnet-canary run
+// What to do with a profile's alert issues for one finished testnet-canary run
 // of that profile: `open` (with title, labels and body), `comment` (and
 // rewrite the body), `close` (with a comment, and the body recording the
+// recovery), `recover` (rewrite a closed alert's body to record a newer
 // recovery) or `none`, with the reason.
 // - run: { id, attempt, profile, createdAt, finishedAt, url, sha, commitUrl,
 //   event, actor, triggeringActor, title }
 // - gateResult: the CI gate job's result in this run
 // - jobs: this attempt's jobs, from the jobs API
 // - issue: the open alert issue of run.profile ({ number, body }), or null
-// - recovery: with no open issue, the pass that closed the profile's last
-//   alert (readRecovery), if one can be read
+// - closed: with no open issue, the profile's last closed alert ({ issue,
+//   recovery }, the recovery when its state records one), if one was found
 // Runs are ordered by creation: a re-run keeps its run's commit and creation
 // time, so a failing re-run of an old commit is as old as that commit's run.
-export function planAlert({ issue, run, gateResult, jobs, recovery }) {
+export function planAlert({ issue, run, gateResult, jobs, closed }) {
   const { title } = alertIssue(run.profile);
   const state = issue ? readAlertState(issue.body, run.profile) : undefined;
   if (gateResult === 'success') {
-    if (!issue) return { action: 'none', reason: `CI gate passed and no ${run.profile} alert is open` };
+    // With no alert open, a pass still moves the profile's recovery forward
+    // on its last closed alert, so that a failure of an older run cannot open
+    // one later. With none closed yet there is no recovery to keep.
+    if (!issue) {
+      if (!closed?.issue) return { action: 'none', reason: `CI gate passed; no ${run.profile} alert is open or closed` };
+      if (closed.recovery && time(closed.recovery.createdAt) >= time(run.createdAt)) {
+        return { action: 'none', reason: `CI gate passed; closed #${closed.issue.number} already records a recovery no older (#${closed.recovery.id})` };
+      }
+      const advanced = { ...(parseState(closed.issue.body, run.profile) ?? { version: 1, profile: run.profile }), recovered: recorded(run) };
+      return {
+        action: 'recover',
+        issue: closed.issue,
+        state: advanced,
+        body: withState(closed.issue.body, advanced),
+        reason: `CI gate passed; recording it as the ${run.profile} recovery on closed #${closed.issue.number}`,
+      };
+    }
     // An older commit passing late proves nothing about a newer red one. An
     // issue whose state is unreadable closes on any pass of its profile.
     if (state && time(state.run.createdAt) > time(run.createdAt)) {
@@ -191,12 +208,12 @@ export function planAlert({ issue, run, gateResult, jobs, recovery }) {
     }
     // The closed issue keeps this pass as the profile's latest recovery, so a
     // later failure of an older run cannot reopen the alert.
-    const closed = { ...(state ?? { version: 1, profile: run.profile }), recovered: recorded(run) };
+    const recovered = { ...(state ?? { version: 1, profile: run.profile }), recovered: recorded(run) };
     return {
       action: 'close',
       issue,
-      state: closed,
-      body: withState(issue.body, closed),
+      state: recovered,
+      body: withState(issue.body, recovered),
       comment: `**Green again:** ${runLink(run)} (\`${run.event}\`, ${run.profile} profile) passed at ${commitLink(run)}. Closing.`,
       reason: `CI gate passed; closing #${issue.number}`,
     };
@@ -205,7 +222,7 @@ export function planAlert({ issue, run, gateResult, jobs, recovery }) {
   // The pass this red episode follows: the recovery found for a new alert, or
   // the one an open alert recorded when it opened. A run no newer than that
   // pass, such as a failing re-run of an older commit, proves nothing now.
-  const after = issue ? state?.after : recovery;
+  const after = issue ? state?.after : closed?.recovery;
   if (dated(after) && time(run.createdAt) <= time(after.createdAt)) {
     return {
       action: 'none',

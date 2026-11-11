@@ -1846,6 +1846,8 @@ jobs:
   # (the nightly included) on testnet-canary is red, open the `ci-alert`
   # issue of the run's profile, or comment on it while it stays red; close it
   # once a later run of that profile passes (scripts/ci/canary-alert.mjs).
+  # A pass with no alert open records itself on the profile's last closed
+  # alert, so that a failing re-run of an older run cannot open a new one.
   # The standard profile (pushes, standard dispatches) and the
   # nightly-equivalent one (the nightly) each have their own issue, written
   # only by runs of that profile. Those runs share one concurrency group
@@ -1877,7 +1879,7 @@ jobs:
     permissions:
       contents: read # check out the alert script at this run's commit
       actions: read # read this run and its jobs' failed steps
-      issues: write # create the ci-alert label; open, comment on and close the profile's alert issue
+      issues: write # create the ci-alert label; open, comment on and close the profile's alert, and record passes on its last closed one
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:

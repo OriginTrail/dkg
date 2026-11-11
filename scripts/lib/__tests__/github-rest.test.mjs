@@ -63,6 +63,36 @@ test('server errors, network failures and cut-off bodies are retried with backof
   const missing = client([{ status: 404, body: { message: 'Not Found' } }]);
   await assert.rejects(missing.github.request('GET', 'x'), (error) => error.status === 404);
   assert.deepEqual(missing.sleeps, []);
+
+  // A PATCH sets a whole body or state, so it is repeated like a read.
+  const patch = client([{ status: 502 }, new Error('socket hang up'), { body: { number: 5 } }]);
+  assert.deepEqual(await patch.github.request('PATCH', 'repos/o/r/issues/5', { body: { state: 'closed' } }), { number: 5 });
+  assert.equal(patch.calls.length, 3);
+});
+
+test('a POST goes out once: a write whose answer is lost is reported, never repeated', async () => {
+  // GitHub creates the issue, then the answer is cut off: one issue, and an error.
+  let created = 0;
+  const createThenLose = () => {
+    created += 1;
+    return { status: 201, cutOff: true };
+  };
+  const lost = client([createThenLose, createThenLose]);
+  await assert.rejects(lost.github.request('POST', 'repos/o/r/issues', { body: { title: 't' } }), /failed: terminated \(not repeated: the write may have happened\)/);
+  assert.equal(created, 1);
+  assert.equal(lost.calls.length, 1);
+  assert.deepEqual(lost.sleeps, []);
+  // Nor after a lost connection, a server error or a rate-limit refusal.
+  for (const answer of [new Error('socket hang up'), { status: 502 }, { status: 429, headers: { 'retry-after': '1' } }]) {
+    const once = client([answer, { status: 201, body: { number: 2 } }]);
+    await assert.rejects(once.github.request('POST', 'repos/o/r/issues/1/comments', { body: { body: 'b' } }));
+    assert.equal(once.calls.length, 1, String(answer.status ?? answer.message));
+    assert.deepEqual(once.sleeps, []);
+  }
+  // A read after the same failures is still repeated.
+  const read = client([{ cutOff: true }, { status: 502 }, { status: 429, headers: { 'retry-after': '1' } }, { body: [1] }]);
+  assert.deepEqual(await read.github.request('GET', 'repos/o/r/issues'), [1]);
+  assert.deepEqual(read.sleeps, [1000, 2000, 1000]);
 });
 
 test('rate limits are waited out: Retry-After, an exhausted primary limit, and a bare secondary limit', async () => {

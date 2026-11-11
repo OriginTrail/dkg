@@ -1,13 +1,21 @@
 // A small GitHub REST client for the repository's CI tooling (the canary alert
 // and the weekly CI health report): global fetch, no dependencies. It retries
-// server errors and network failures with backoff, waits out primary and
-// secondary rate limits (up to a bound, then fails with the reason), and pages
-// through list endpoints. `fetch`, `sleep` and `now` are injectable so the
-// tests drive every path without a network.
+// reads and PATCHes after server errors and network failures, with backoff,
+// waits out primary and secondary rate limits (up to a bound, then fails with
+// the reason), and pages through list endpoints. A POST is never repeated.
+// `fetch`, `sleep` and `now` are injectable so the tests drive every path
+// without a network.
 
 const API_ROOT = 'https://api.github.com';
 const API_VERSION = '2022-11-28';
 const SECOND = 1000;
+// The methods a request repeats on its own when its outcome is unknown (a lost
+// connection, a cut-off body, a server error) or it was refused for a rate
+// limit: reads, and PATCH, which here always sets a whole body or state, so
+// sending it twice changes nothing. A POST goes out once: GitHub may have
+// created the issue or comment before its answer was lost, and sending it
+// again would create a second one. Its failure is the caller's to report.
+const REPEATABLE_METHODS = new Set(['GET', 'HEAD', 'PATCH']);
 
 // A non-2xx response that retrying did not fix; `status` lets a caller read a
 // 404 or a 5xx as an answer.
@@ -82,6 +90,7 @@ export function createGitHubClient({
       if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
     }
     const label = `${method} ${url.pathname}`;
+    const repeatable = REPEATABLE_METHODS.has(method);
     let failures = 0;
     let limited = 0;
     for (;;) {
@@ -108,6 +117,7 @@ export function createGitHubClient({
         // part of the attempt.
         if (response.ok) data = response.status === 204 ? null : JSON.parse(await response.text());
       } catch (error) {
+        if (!repeatable) throw new Error(`GitHub API ${label} failed: ${error.message} (not repeated: the write may have happened)`);
         if (failures >= attempts) throw new Error(`GitHub API ${label} failed: ${error.message}`);
         await wait(backoffMs * 2 ** failures, `${label} failed (${error.message})`);
         failures += 1;
@@ -121,13 +131,13 @@ export function createGitHubClient({
       if (response.ok) return data;
       const detail = await errorDetail(response);
       const delay = rateLimitDelay(response, detail, now());
-      if (delay !== undefined && limited < retries) {
+      if (repeatable && delay !== undefined && limited < retries) {
         limited += 1;
         remaining = undefined;
         await wait(delay, `${label} rate limited (${response.status})`);
         continue;
       }
-      if (response.status >= 500 && failures < attempts) {
+      if (repeatable && response.status >= 500 && failures < attempts) {
         await wait(backoffMs * 2 ** failures, `${label} returned ${response.status}`);
         failures += 1;
         continue;
