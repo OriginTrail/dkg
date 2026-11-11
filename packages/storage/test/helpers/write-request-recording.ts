@@ -51,7 +51,8 @@ function recordingFetch(requests: RecordedRequest[], answer: RequestAnswer, fail
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
 const SUFFIX = /\b(subject[PO])[0-9a-f]{32}\b/g;
 
-function normalize(requests: readonly RecordedRequest[]): string[] {
+/** Each request as its content type (or call name) and its body, with random names numbered in order of first appearance. */
+export function normalizeRecordedRequests(requests: readonly RecordedRequest[]): string[] {
   const names = new Map<string, string>();
   const placeholder = (value: string, kind: string): string => {
     const key = `${kind}:${value}`;
@@ -79,9 +80,9 @@ export async function recordWrite<T extends { close(): Promise<void> }>(
   const store = newStore();
   try {
     await run(store);
-    return { requests: normalize(requests) };
+    return { requests: normalizeRecordedRequests(requests) };
   } catch (error) {
-    return { requests: normalize(requests), error };
+    return { requests: normalizeRecordedRequests(requests), error };
   } finally {
     globalThis.fetch = original;
     await store.close();
