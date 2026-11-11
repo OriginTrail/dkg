@@ -112,6 +112,32 @@ describe('read-graph layer on embedded Oxigraph', () => {
       .toEqual({ failed: false, planned: true, mirror: 'ready@1', stored: 'ready@1' });
   });
 
+  it('sends a pattern delete naming a blank node to such an adapter, which deletes what the engine alone would', async () => {
+    // The embedded engine's own pattern delete, beside the same engine without the layer.
+    class ByIdentity extends OxigraphStore {
+      readonly readGraphCapabilities = Object.freeze({ methods: Object.freeze(['deleteByPattern'] as const), serialUpdates: true, plansBlankNodeDeletes: false });
+    }
+    const { adapter, fixture, layer, store } = await layered(new ByIdentity());
+    const reference = new OxigraphStore();
+    const member = fixture.graphs[2]!;
+    const pointers = [q('urn:s:pointer', '_:target', member), q('urn:s:pointer', '_:other', member)];
+    for (const each of [adapter, reference]) await each.insert(pointers);
+    const pointed = async (target: TripleStore) => {
+      const result = await target.query(`SELECT ?o WHERE { GRAPH <${member}> { <urn:s:pointer> <${P}> ?o } }`);
+      return (result.type === 'bindings' ? result.bindings : []).map((row) => row.o!).sort();
+    };
+    // Each store names one of its own stored blank nodes.
+    const [named] = await pointed(adapter);
+    const [referenceNamed] = await pointed(reference);
+    await store.deleteByPattern({ graph: member, subject: 'urn:s:pointer', object: named! });
+    await reference.deleteByPattern({ graph: member, subject: 'urn:s:pointer', object: referenceNamed! });
+    const left = await pointed(adapter);
+    expect(left.length).toBe((await pointed(reference)).length);
+    expect(left.length).toBeLessThan(2);
+    expect(layer.runtime.mirror.get(fixture.readGraphs.wholeVm)?.state).toBe('dirty');
+    await reference.close();
+  });
+
   it('deletes a blank node by its identity on such an adapter, leaving a twin with the same predicate and object', async () => {
     // The embedded engine's own delete, which removes a stored blank node by its identity.
     class ByIdentity extends OxigraphStore {
