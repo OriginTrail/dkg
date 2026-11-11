@@ -1,14 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { metrics as otelMetrics } from '@opentelemetry/api';
 import { rebuildMetrics } from '@origintrail-official/dkg-core';
 import { BlazegraphStore } from '../../src/adapters/blazegraph.js';
 import { BlazegraphNamespaceManager, blazegraphNamespaceApiUrlFromSparqlEndpoint } from '../../src/blazegraph-namespace-manager.js';
+import { STORE_GRAPH_CATALOG_MAX_BYTES_ENV } from '../../src/graph-catalog-internal-limit.js';
 import { checkReadGraph, type ReadGraphCheckResult } from '../../src/read-graph/check.js';
 import { parseReadGraphStateRows, readGraphStateCompareAndSet, readGraphStateRowsQuery } from '../../src/read-graph/state.js';
 import type { TripleStoreConfig } from '../../src/triple-store-composition.js';
 import type { TripleStore } from '../../src/triple-store.js';
-import { layerFixture, layeredStore, q, readyRow, type LayerFixture } from './read-graph-layer-conformance.js';
+import { AGENT, layerFixture, layeredStore, q, readyRow, type LayerFixture } from './read-graph-layer-conformance.js';
 import { PlanningOxigraphStore } from './read-graph-planning-store.js';
 
 export interface Recorded { readonly metric: string; readonly value: number; readonly attributes: Record<string, unknown> }
@@ -102,6 +103,22 @@ export function readGraphCheckConformance(backend: 'oxigraph' | 'blazegraph') {
         expect(checks).toHaveLength(8);
         expect(new Set(checks.map((entry) => entry.attributes.layer))).toEqual(new Set(['vm', 'swm', 'wm']));
         for (const entry of recorded) expect(JSON.stringify(entry.attributes)).not.toContain(opened.fixture.contextGraphId);
+      } finally { await opened.close(); }
+    });
+
+    it('lists a full check\'s member graphs within its context graph, under a catalog ceiling the store\'s graph list exceeds', async () => {
+      const opened = await open();
+      try {
+        const { wholeVm } = opened.fixture.readGraphs;
+        // A context graph whose ID extends this one's, with graph names that alone are over the ceiling set below.
+        const other = `${opened.fixture.root}-bulk`;
+        await opened.adapter.insert(Array.from({ length: 200 }, (_, n) => q(`urn:s:bulk${n}`, '"bulk"', `${other}/_verifiable_memory/${AGENT}/${n}`)));
+        vi.stubEnv(STORE_GRAPH_CATALOG_MAX_BYTES_ENV, String(8 * 1024));
+        try {
+          expect(await opened.check(wholeVm, 'full')).toEqual({ readGraph: wholeVm, mode: 'full', outcome: 'consistent' });
+        } finally {
+          vi.unstubAllEnvs();
+        }
       } finally { await opened.close(); }
     });
 
