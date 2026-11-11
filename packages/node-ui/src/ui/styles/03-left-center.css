@@ -304,7 +304,7 @@
 .v10-cg-mark{display:inline-grid;place-items:center;flex:none;border-radius:var(--radius-xs);font-family:var(--font-sans);font-weight:700;line-height:1;letter-spacing:0;
   color:var(--cg-color);background:color-mix(in srgb,var(--cg-color) 20%,var(--bg-surface));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--cg-color) 55%,transparent)}
 .v10-cg-mark::before{content:attr(data-initial)}
-.v10-cg-mark-sm{width:16px;height:16px;font-size:9.5px}
+.v10-cg-mark-sm{width:16px;height:16px;font-size: var(--fs-micro)}
 .v10-cg-mark-md{width:20px;height:20px;font-size: var(--fs-label);border-radius: var(--radius-xs)}
 .v10-cg-name{display:flex;align-items:center;gap:var(--space-8);min-width:0}
 .v10-select-option{display:flex;align-items:center;gap:var(--space-8)}
