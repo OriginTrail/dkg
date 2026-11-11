@@ -18,21 +18,28 @@
 #             each node's directory before and after;
 #   gate      run READ_GRAPHS_GATE_CMD (default scripts/devnet-comprehensive.sh)
 #             with read graphs on, wait for `ready`, then run the full check
-#             again;
+#             again. Only a complete pass of the comprehensive run counts
+#             (completeSuccess in its REPORT.json); a filtered run is
+#             INCONCLUSIVE;
 #   drills    a restart during a rebuild; a kill of the daemon worker during
 #             writes (every write the node acknowledged must be there after
 #             it); a CLI write with the daemon down (`dkg publisher clear
 #             finalized` on a node that has such jobs, which must stay
 #             cleared); a rollback and forward again (the earlier release is
-#             built first); and the setting to `off` and back. Each must end
+#             built first, and the node's store must show no read-graph
+#             partition after the rollback step, so the drill node needs a
+#             store that stays up with its daemon down: Blazegraph or an
+#             external SPARQL endpoint); and the setting to `off` and back. Each must end
 #             as designed (a new generation, or a dropped partition), and then
 #             be `ready` again with a clean full check. A drill whose workload
 #             did not happen is INCONCLUSIVE, never a pass.
 #
 # It writes report.md and results.tsv to READ_GRAPHS_RUN_RESULTS (default
-# $DEVNET_DIR/read-graphs-build-run/<UTC timestamp>; no spaces). At the end it
-# puts back every node's config.json, restarts the nodes in ascending order
-# and drops their read graphs, unless READ_GRAPHS_RUN_KEEP=1.
+# $DEVNET_DIR/read-graphs-build-run/<UTC timestamp>; no spaces). It saves every
+# node's config.json before any phase runs. At the end, also after a failure or
+# an interruption, it puts back the config.json of each node it changed,
+# restarts those nodes in ascending order, and drops the read graphs that their
+# own settings do not keep, unless READ_GRAPHS_RUN_KEEP=1.
 #
 # It reads read-graph state only through `dkg store read-graphs` (status, check,
 # rebuild and drop, each with --json), which ask the running daemon; the
@@ -78,6 +85,8 @@ ROLLBACK_FROM="${READ_GRAPHS_ROLLBACK_FROM:-prev}"
 # resolver (a test can point either elsewhere).
 ROLLBACK_MODULE="${READ_GRAPHS_ROLLBACK_MODULE:-$REPO_ROOT/packages/cli/dist/update/rollback-read-graphs.js}"
 ENDPOINT_RESOLVER="${READ_GRAPHS_ENDPOINT_RESOLVER:-$REPO_ROOT/scripts/lib/qa/devnet-storage-endpoint.mjs}"
+LISTING_MODULE="$REPO_ROOT/scripts/lib/qa/context-graph-listing.mjs"
+CORE_MODULE="$REPO_ROOT/packages/core/dist/index.js"
 RESTART_NODE="${READ_GRAPHS_DRILL_RESTART_NODE:-5}"
 KILL_NODE="${READ_GRAPHS_DRILL_KILL_NODE:-6}"
 CLI_NODE="${READ_GRAPHS_DRILL_CLI_NODE:-3}"
@@ -97,6 +106,8 @@ command -v curl >/dev/null 2>&1 || early_exit "curl not available"
 [ -x "$DEVNET_SH" ] || early_exit "no devnet.sh at $DEVNET_SH"
 [ -f "$DKG_CLI_ENTRY" ] || early_exit "the CLI is not built ($DKG_CLI_ENTRY)"
 node -e 'JSON.parse(process.argv[1])' "$SETTING" 2>/dev/null || early_exit "READ_GRAPHS_SETTING is not JSON: $SETTING"
+node --input-type=module -e 'const core = await import(process.argv[1]); process.exit(typeof core.isReadGraphEligibleContextGraphId === "function" ? 0 : 1);' "$CORE_MODULE" 2>/dev/null \
+  || early_exit "the core package is not built with isReadGraphEligibleContextGraphId ($CORE_MODULE)"
 # shellcheck source=devnet-lib.sh
 . "$REPO_ROOT/scripts/devnet-lib.sh" || early_exit "cannot source scripts/devnet-lib.sh"
 mkdir -p "$RESULTS/config" "$RESULTS/rows" "$RESULTS/checks" "$RESULTS/measure" || early_exit "cannot create $RESULTS"
@@ -140,7 +151,10 @@ restart_node() {
   env "$@" "$DEVNET_SH" restart-node "$n" >> "$RESULTS/devnet-sh.log" 2>&1 || true
   wait_up "$n" 180
 }
-stop_node() { "$DEVNET_SH" stop-node "$1" >> "$RESULTS/devnet-sh.log" 2>&1; }
+# The nodes whose config or running state this run changed; cleanup puts them back.
+CHANGED=""
+changed() { CHANGED="$CHANGED $1"; }
+stop_node() { changed "$1"; "$DEVNET_SH" stop-node "$1" >> "$RESULTS/devnet-sh.log" 2>&1; }
 start_node() {
   local n="$1"; shift
   env "$@" "$DEVNET_SH" start-node "$n" >> "$RESULTS/devnet-sh.log" 2>&1 || true
@@ -148,6 +162,7 @@ start_node() {
 }
 # set_read_graphs <n> <JSON value | "-">: write query.readGraphs into the node's config.json ("-" removes it).
 set_read_graphs() {
+  changed "$1"
   node -e '
     const fs = require("fs");
     const [file, value] = process.argv.slice(1);
@@ -165,21 +180,20 @@ read_graphs_setting() {
     if (cfg.query?.readGraphs !== undefined) process.stdout.write(JSON.stringify(cfg.query.readGraphs));
   ' "$DEVNET_DIR/node$1/config.json"
 }
-same_json() { node -e 'const [a, b] = process.argv.slice(1); process.exit(JSON.stringify(JSON.parse(a)) === JSON.stringify(JSON.parse(b)) ? 0 : 1)' "$1" "$2" 2>/dev/null; }
-# context_graph_count <n>: the context graphs the node subscribes to that can have read graphs, by the
-# core package's own rule (IDs from before the rule for new IDs get none); "" when the list cannot be read.
+# context_graph_count <n>: the context graphs the node subscribes to that can have read graphs, read with the
+# devnet's listing parser and the core package's rule (IDs from before the rule for new IDs get none);
+# fails when the listing cannot be read.
 context_graph_count() {
-  local resp
-  resp="$(api "$1" GET /api/context-graph/list)"
-  [ "$(code_of "$resp")" = "200" ] || return 1
-  body_of "$resp" | node --input-type=module -e '
-    const core = await import(process.argv[1]).catch(() => ({}));
-    const eligible = core.isReadGraphEligibleContextGraphId ?? (() => true);
-    let d = ""; for await (const chunk of process.stdin) d += chunk;
-    const j = JSON.parse(d);
-    const list = Array.isArray(j) ? j : (j.contextGraphs ?? []);
-    process.stdout.write(String(list.filter((cg) => cg.subscribed !== false && eligible(String(cg.id ?? cg.contextGraphId ?? ""))).length));
-  ' "$REPO_ROOT/packages/core/dist/index.js"
+  # The module paths go in the environment: the listing module runs as a command when argv[1] names it.
+  api "$1" GET /api/context-graph/list | LISTING_MODULE="$LISTING_MODULE" CORE_MODULE="$CORE_MODULE" node --input-type=module -e '
+    const { readListing } = await import(process.env.LISTING_MODULE);
+    const { isReadGraphEligibleContextGraphId: eligible } = await import(process.env.CORE_MODULE);
+    let frame = ""; for await (const chunk of process.stdin) frame += chunk;
+    const newline = frame.indexOf("\n");
+    const listing = readListing(Number(newline === -1 ? frame : frame.slice(0, newline)), newline === -1 ? "" : frame.slice(newline + 1));
+    if (!listing.ok) { console.error(listing.reason); process.exit(1); }
+    process.stdout.write(String(listing.graphs.filter((graph) => graph.subscribed === true && eligible(graph.id)).length));
+  '
 }
 node_commit() { field "$(body_of "$(api "$1" GET /api/status)")" version; printf ' '; field "$(body_of "$(api "$1" GET /api/status)")" commitShort; }
 # store_endpoint <n>: the node's store query URL, from the devnet's own resolver; "" for a store that only
@@ -296,20 +310,21 @@ full_checks() {
 generation_of() { awk -v g="$2" '$3 == g { print $2 }' "$1"; }
 
 # ── cleanup ────────────────────────────────────────────────────────────────
-SETUP_DONE=0
+# Every node's config.json as it was before any phase ran; cleanup puts back each node the run changed.
+for n in $NODES; do cp "$DEVNET_DIR/node$n/config.json" "$RESULTS/config/node$n.json" || early_exit "cannot save node$n's config.json"; done
 cleanup() {
   local status=$?
   trap - EXIT
   trap '' INT TERM
-  if [ "$SETUP_DONE" = 1 ] && [ "$KEEP" != 1 ]; then
-    say "putting back every node's config.json, restarting the nodes and dropping their read graphs"
-    local n
-    for n in $NODES; do
-      [ -f "$RESULTS/config/node$n.json" ] && cp "$RESULTS/config/node$n.json" "$DEVNET_DIR/node$n/config.json"
-    done
-    for n in $NODES; do
+  local n changed original
+  changed="$(printf '%s\n' $CHANGED | sort -nu | tr '\n' ' ')"
+  if [ -n "${changed// /}" ] && [ "$KEEP" != 1 ]; then
+    say "putting back the config.json of nodes ${changed% }, restarting them, and dropping read graphs their settings do not keep"
+    for n in $changed; do cp "$RESULTS/config/node$n.json" "$DEVNET_DIR/node$n/config.json"; done
+    for n in $changed; do
       if ! restart_node "$n"; then note "cleanup: node$n did not come back after the restart"; status=1; continue; fi
-      read_graph_drop "$n" || note "cleanup: dropping node$n's read graphs failed (see cli.log)"
+      original="$(read_graphs_setting "$n")"
+      case "$original" in ''|'"off"') read_graph_drop "$n" || note "cleanup: dropping node$n's read graphs failed (see cli.log)" ;; esac
     done
   fi
   write_report
@@ -359,10 +374,8 @@ phase_setup() {
   started="$(now)"
   : > "$RESULTS/measure/size-before.txt"
   for n in $NODES; do
-    [ -f "$RESULTS/config/node$n.json" ] || cp "$DEVNET_DIR/node$n/config.json" "$RESULTS/config/node$n.json"
     du -sk "$DEVNET_DIR/node$n" | awk -v n="$n" '{ print "node" n " " $1 }' >> "$RESULTS/measure/size-before.txt"
   done
-  SETUP_DONE=1
   for n in $NODES; do set_read_graphs "$n" "$SETTING" || { record setup FAIL "$(( $(now) - started ))" "could not write node$n's config.json"; return; }; done
   : > "$RESULTS/rows/restarted"
   for n in $NODES; do
@@ -422,13 +435,38 @@ phase_measure() {
   else record measure INCONCLUSIVE "$(( $(now) - started ))" "a store report failed (measure/errors.log)"; fi
 }
 
+# gate_verdict <exit code>: PASS, INCONCLUSIVE or FAIL for the gate. The comprehensive run writes REPORT.json
+# into RESULTS_DIR, and only its completeSuccess is a pass: a filtered run exits 0 without being one. A gate
+# command that writes no report is judged by its exit code (0 PASS, 3 INCONCLUSIVE, other FAIL).
+gate_verdict() {
+  local report="$RESULTS/gate/REPORT.json"
+  if [ -f "$report" ]; then
+    node -e '
+      const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      if (r.phase === "complete" && r.completeSuccess === true) console.log("PASS");
+      else if (r.outcome === "FAIL" || r.selectionOutcome === "FAIL") console.log("FAIL");
+      else console.log("INCONCLUSIVE");
+    ' "$report" 2>/dev/null || echo INCONCLUSIVE
+  elif [ "$GATE_CMD" = "$REPO_ROOT/scripts/devnet-comprehensive.sh" ]; then
+    echo INCONCLUSIVE
+  else
+    case "$1" in 0) echo PASS ;; "$SKIP_EXIT") echo INCONCLUSIVE ;; *) echo FAIL ;; esac
+  fi
+}
+
 phase_gate() {
-  local started rc checked n cg lost="" rebuilt=""
+  local started rc verdict checked n cg lost="" rebuilt=""
   started="$(now)"
-  "$GATE_CMD" > "$RESULTS/gate.log" 2>&1; rc=$?
-  for n in $NODES; do same_json "$(read_graphs_setting "$n")" "$SETTING" || lost="$lost node$n"; done
+  mkdir -p "$RESULTS/gate"
+  for n in $NODES; do read_graphs_setting "$n" > "$RESULTS/gate/setting.node$n"; done
+  RESULTS_DIR="$RESULTS/gate" "$GATE_CMD" > "$RESULTS/gate.log" 2>&1; rc=$?
+  verdict="$(gate_verdict "$rc")"
+  # The gate must leave every node's setting as it found it.
+  for n in $NODES; do
+    [ "$(read_graphs_setting "$n")" = "$(cat "$RESULTS/gate/setting.node$n")" ] || lost="$lost node$n"
+  done
   if [ -n "$lost" ]; then
-    record gate FAIL "$(( $(now) - started ))" "the setting is gone from:$lost (a suite rewrote the node's config)"
+    record gate FAIL "$(( $(now) - started ))" "the read-graph setting changed on:$lost (a suite rewrote the node's config)"
     return
   fi
   note "gate: nodes a suite adds for itself run with read graphs off."
@@ -449,16 +487,14 @@ phase_gate() {
   full_checks after-gate; checked=$?
   if [ "$checked" = 1 ]; then
     record gate FAIL "$(( $(now) - started ))" "full check not clean after the gate on:$(cat "$RESULTS/checks/after-gate.failed")"
-  elif [ "$rc" != 0 ] && [ "$rc" != "$SKIP_EXIT" ]; then
-    record gate FAIL "$(( $(now) - started ))" "the gate failed with exit $rc (gate.log)"
+  elif [ "$verdict" = FAIL ]; then
+    record gate FAIL "$(( $(now) - started ))" "the gate failed (exit $rc; gate/REPORT.md, gate.log)"
   elif [ "$checked" = 2 ]; then
     record gate INCONCLUSIVE "$(( $(now) - started ))" "full check incomplete after the gate on:$(cat "$RESULTS/checks/after-gate.failed")"
-  elif [ "$rc" = 0 ]; then
-    record gate PASS "$(( $(now) - started ))" "the gate passed with read graphs on; full check clean"
-  elif [ "$rc" = "$SKIP_EXIT" ]; then
-    record gate INCONCLUSIVE "$(( $(now) - started ))" "the gate was inconclusive (gate.log); full check clean"
+  elif [ "$verdict" = PASS ]; then
+    record gate PASS "$(( $(now) - started ))" "the gate passed in full with read graphs on; full check clean"
   else
-    record gate FAIL "$(( $(now) - started ))" "the gate failed with exit $rc (gate.log)"
+    record gate INCONCLUSIVE "$(( $(now) - started ))" "the gate was not a complete pass, e.g. a filtered or unfinished run (exit $rc; gate/REPORT.json); full check clean"
   fi
 }
 
@@ -600,15 +636,35 @@ drill_cli_write_daemon_down() {
   drill_end drill-cli "$n" "$started" "with node$n's daemon down, \`dkg publisher clear finalized\` cleared $cleared of $before jobs, and they stayed cleared"
 }
 
+# partition_graphs <endpoint> <out>: every graph the store holds in a read-graph partition (read graphs and
+# state graphs), one per line, read from the store itself; fails when the store cannot be read.
+partition_graphs() {
+  node "$REPO_ROOT/scripts/read-graph-store-report.mjs" --endpoint "$1" --partition-graphs 2>> "$RESULTS/drill-rollback.log" \
+    | node -e 'let d = ""; process.stdin.on("data", (c) => d += c); process.stdin.on("end", () => { for (const g of JSON.parse(d).graphs) console.log(g); });' > "$2"
+}
+
 # rollback_steps: the rollback drill's changes, run with the node stopped. On a failed step it sets
 # outcome and detail; the caller always restores the node afterwards.
 rollback_steps() {
+  local before="$RESULTS/rows/rollback.partition-before.node$n" after="$RESULTS/rows/rollback.partition-after.node$n"
+  # The store must show the partition with the daemon down, or an empty listing afterwards would prove nothing.
+  partition_graphs "$endpoint" "$before" \
+    || { outcome=INCONCLUSIVE; detail="node$n's store cannot be read with its daemon down (a managed store stops with it)"; return; }
+  [ -s "$before" ] || { outcome=INCONCLUSIVE; detail="node$n's store showed no read-graph partition before the rollback step"; return; }
+  # The step `dkg rollback` runs before it switches versions.
   dropped="$(DKG_HOME="$DEVNET_DIR/node$n" node --input-type=module -e '
     const { dropReadGraphsForRollback } = await import(process.argv[1]);
     const dropped = await dropReadGraphsForRollback(process.env.DKG_HOME, (line) => console.error(line));
     console.log(dropped ?? 0);
   ' "$ROLLBACK_MODULE" 2>> "$RESULTS/drill-rollback.log")"
   case "$dropped" in ''|*[!0-9]*|0) outcome=FAIL; detail="the rollback step dropped nothing on node$n (drill-rollback.log)"; return ;; esac
+  # Whatever the step reports, the whole partition must be gone before the earlier release starts.
+  partition_graphs "$endpoint" "$after" \
+    || { outcome=FAIL; detail="node$n's store could not be read after the rollback step"; return; }
+  if [ -s "$after" ]; then
+    outcome=FAIL; detail="the rollback step left $(wc -l < "$after" | tr -d ' ') graphs in node$n's read-graph partitions, such as $(head -1 "$after")"
+    return
+  fi
   # The earlier release does not know the setting; it runs without it.
   set_read_graphs "$n" "-"
   start_node "$n" DEVNET_VERSION_LAYOUT="all:current,$n:$ROLLBACK_FROM" \
@@ -618,35 +674,38 @@ rollback_steps() {
 }
 
 drill_rollback_and_forward() {
-  local n="$ROLLBACK_NODE" started dropped="" version="" outcome="" detail=""
+  local n="$ROLLBACK_NODE" started endpoint restore dropped="" version="" outcome="" detail=""
   started="$(now)"
   [ "$ROLLBACK_FROM" != none ] || { record drill-rollback INCONCLUSIVE 0 "not run (READ_GRAPHS_ROLLBACK_FROM=none)"; return; }
+  endpoint="$(store_endpoint "$n")"
+  [ -n "$endpoint" ] || { record drill-rollback INCONCLUSIVE 0 "node$n's store cannot be read from outside its daemon, so the drop cannot be checked: use a node on Blazegraph or an external SPARQL endpoint"; return; }
   read_graph_rows "$n" > "$RESULTS/rows/rollback.before.node$n" && [ -s "$RESULTS/rows/rollback.before.node$n" ] \
     || { record drill-rollback INCONCLUSIVE 0 "node$n has no read graph to drop"; return; }
   # Build the earlier release first, while nothing has changed yet.
   "$DEVNET_SH" prepare-version "$ROLLBACK_FROM" >> "$RESULTS/devnet-sh.log" 2>&1 \
     || { record drill-rollback INCONCLUSIVE "$(( $(now) - started ))" "could not prepare $ROLLBACK_FROM (devnet-sh.log)"; return; }
+  restore="$(read_graphs_setting "$n")"
   stop_node "$n" || { record drill-rollback INCONCLUSIVE 0 "could not stop node$n"; return; }
   rollback_steps
-  # One restoration, whatever happened: the setting back, and the node on the build under test.
+  # One restoration, whatever happened: the node's setting back, and the node on the build under test.
   stop_node "$n" > /dev/null 2>&1 || true
-  set_read_graphs "$n" "$SETTING"
+  set_read_graphs "$n" "${restore:--}"
   start_node "$n" DEVNET_VERSION_LAYOUT="all:current" \
     || { record drill-rollback FAIL "$(( $(now) - started ))" "node$n did not come back on the build under test${detail:+ ($detail)}"; return; }
   [ -z "$outcome" ] || { record drill-rollback "$outcome" "$(( $(now) - started ))" "$detail"; return; }
-  drill_end drill-rollback "$n" "$started" "dropped $dropped read-graph graphs, ran $version, then rebuilt from nothing"
+  drill_end drill-rollback "$n" "$started" "dropped $dropped graphs and left no read-graph partition, ran $version, then rebuilt from nothing"
 }
 
 drill_flag_off_and_back() {
-  local n="$FLAG_NODE" started undirty="" state gen graph gen_after older=""
-  started="$(now)"
+  local n="$FLAG_NODE" started restore undirty="" state gen graph gen_after older=""
+  started="$(now)"; restore="$(read_graphs_setting "$n")"
   read_graph_rows "$n" > "$RESULTS/rows/flag.before.node$n" && all_ready "$RESULTS/rows/flag.before.node$n" \
     || { record drill-flag INCONCLUSIVE 0 "node$n had no ready read graph"; return; }
   set_read_graphs "$n" '"off"'
-  restart_node "$n" || { set_read_graphs "$n" "$SETTING"; record drill-flag FAIL "$(( $(now) - started ))" "node$n did not come back with off"; return; }
+  restart_node "$n" || { set_read_graphs "$n" "${restore:--}"; record drill-flag FAIL "$(( $(now) - started ))" "node$n did not come back with off"; return; }
   read_graph_rows "$n" > "$RESULTS/rows/flag.off.node$n" || true
   while read -r state gen graph; do [ "$state" = dirty ] || undirty="$undirty <$graph>:$state"; done < "$RESULTS/rows/flag.off.node$n"
-  set_read_graphs "$n" "$SETTING"
+  set_read_graphs "$n" "${restore:--}"
   # With off, the node keeps no read graph: status lists none, or lists them dirty.
   [ -s "$RESULTS/rows/flag.off.node$n" ] || note "drill-flag: with off, status listed no read graph on node$n"
   [ -z "$undirty" ] || { restart_node "$n"; record drill-flag FAIL "$(( $(now) - started ))" "with off, not dirty:$undirty"; return; }

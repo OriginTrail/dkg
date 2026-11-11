@@ -18,6 +18,11 @@
 //   A triple that no such graph holds is not counted.
 //
 // Output: one JSON object, { endpoint, sample, readGraphs: [...], skipped: [...] }.
+//
+// With `--partition-graphs` it prints instead every graph the store holds in a
+// context graph's read-graph partition (its read graphs, its state graph and
+// anything else under it), as { endpoint, graphs: [...] }.
+//
 // Exit codes: 0 when the report is complete, 1 when the store could not be read.
 
 const args = process.argv.slice(2);
@@ -28,8 +33,9 @@ function option(name, fallback) {
 const endpoint = option('--endpoint');
 const sample = Number(option('--sample', '10000'));
 const timeoutMs = Number(option('--timeout-ms', '600000'));
+const partitionGraphsOnly = args.includes('--partition-graphs');
 if (!endpoint || !/^https?:\/\//.test(endpoint) || !Number.isSafeInteger(sample) || sample < 1 || !(timeoutMs > 0)) {
-  console.error('usage: read-graph-store-report.mjs --endpoint <SPARQL query URL> [--sample <n>] [--timeout-ms <ms>]');
+  console.error('usage: read-graph-store-report.mjs --endpoint <SPARQL query URL> [--sample <n>] [--timeout-ms <ms>] [--partition-graphs]');
   process.exit(2);
 }
 
@@ -58,7 +64,22 @@ function contextGraphRoot(readGraph) {
   return at === -1 ? undefined : readGraph.slice(0, at);
 }
 
+/** Whether a graph lies in a context graph's read-graph partition: a `_~read` path segment after the ID. */
+function inPartition(iri) {
+  return iri.startsWith(CONTEXT_GRAPH_PREFIX) && iri.slice(CONTEXT_GRAPH_PREFIX.length).split('/').indexOf(PARTITION.slice(1), 1) !== -1;
+}
+
+async function partitionGraphs() {
+  const rows = await select(`SELECT DISTINCT ?g WHERE {
+    # sparql-scan-allow: R2 -- a check an operator or a drill runs by hand, off any request path, with the store idle
+    GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), ${literal(PARTITION)}))
+  }`);
+  const graphs = rows.map((row) => row.g?.value).filter((iri) => typeof iri === 'string' && inPartition(iri)).sort();
+  console.log(JSON.stringify({ endpoint, graphs }, null, 2));
+}
+
 async function main() {
+  if (partitionGraphsOnly) return partitionGraphs();
   const graphs = await select(`SELECT DISTINCT ?g WHERE {
     # sparql-scan-allow: R2 -- a report an operator runs by hand, off any request path; it reads the read-graph names once
     GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), ${literal(`${PARTITION}/`)}))
