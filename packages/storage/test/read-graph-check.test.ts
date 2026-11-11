@@ -180,6 +180,32 @@ describe('the read-graph check schedule', () => {
     await adapter.close();
   });
 
+  it('holds sampled passes back while a full pass runs, so they cannot interrupt it', async () => {
+    const { adapter, fixture, store } = await hooked();
+    const { wholeVm } = fixture.readGraphs;
+    const schedule = new ReadGraphCheckSchedule(store, { sampledIntervalMs: 3_600_000, fullIntervalMs: 3_600_000 });
+    let requests = 0;
+    adapter.hook = {
+      // While the full check counts, a sampled pass is asked for; one that ran would take the read graph's lock.
+      matches: (sparql) => isSizeQuery(sparql) && sparql.includes(wholeVm),
+      before: async () => {
+        if (schedule.requestSampledCheck()) requests += 1;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      },
+    };
+    const { recorded } = await captureMetrics(async () => {
+      expect(schedule.requestFullCheck()).toBe(true);
+      await schedule.whenIdle();
+    });
+    const checks = recorded.filter((entry) => entry.metric === 'dkg.store.read_graph_checks_total').map((entry) => entry.attributes);
+    expect(requests).toBeGreaterThan(0);
+    expect(checks.filter((attributes) => attributes.mode === 'sampled')).toEqual([]);
+    expect(checks).toHaveLength(4);
+    expect(checks.every((attributes) => attributes.outcome === 'consistent')).toBe(true);
+    await schedule.close();
+    await adapter.close();
+  });
+
   it('samples a few ready read graphs in turn, and goes on past a check that fails', async () => {
     const { adapter, fixture, store } = await hooked();
     const failing = fixture.readGraphs.wholeSwm;

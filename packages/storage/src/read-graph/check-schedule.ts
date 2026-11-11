@@ -102,6 +102,11 @@ export class ReadGraphCheckSchedule {
   }
 
   private async pass(mode: ReadGraphCheckMode, signal: AbortSignal): Promise<'rearm'> {
+    // A sampled check holds a read graph's lock, and a full check reruns a chunk
+    // that any lock request overlapped. So sampled passes wait while a full pass
+    // runs, and a full pass starts once a running sampled pass has ended.
+    if (mode === 'sampled' && this.full.running) return 'rearm';
+    if (mode === 'full') await this.sampled.whenIdle();
     const layer = readGraphLayerOf(this.store);
     if (!layer) return 'rearm';
     const rows = layer.runtime.mirror.rows();
