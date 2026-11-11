@@ -62,7 +62,7 @@ function ProjectTreeItem({
         <button
           type="button"
           className="v10-tree-hide-btn ds-btn ds-ghost ds-sm ds-icon"
-          aria-label={`Hide ${cg.name || cg.id.slice(0, 16)} from the sidebar`} title="Hide this Context Graph from the sidebar (reversible)"
+          aria-label={`Hide ${cg.name || cg.id.slice(0, 16)} from the sidebar`} title="Hide this context graph from the sidebar (reversible)"
           onClick={(e) => { e.stopPropagation(); onHide(); }}
         >
           <X size={14} />
@@ -112,7 +112,7 @@ function PublicCatalogueItem({
         <button
           type="button"
           className="v10-tree-hide-btn ds-btn ds-ghost ds-sm ds-icon"
-          aria-label={`Hide ${label} from the sidebar`} title="Hide this Context Graph from the sidebar (reversible)"
+          aria-label={`Hide ${label} from the sidebar`} title="Hide this context graph from the sidebar (reversible)"
           onClick={onHide}
         >
           <X size={14} />
@@ -252,9 +252,9 @@ export function PanelLeft() {
   const showCardActions = showEmptyCard && stage === 1;
 
   const membershipNote = inventoryError
-    ? 'Context Graph membership unavailable.'
+    ? 'Context graph membership unavailable.'
     : inventoryLoading
-      ? 'Loading Context Graphs…'
+      ? 'Loading context graphs…'
       : null;
 
   return (
@@ -306,36 +306,36 @@ export function PanelLeft() {
 
         {inventoryError && (
           <div className="v10-journey-empty-card ds-card" role="alert">
-            <div>{listError ? 'Context Graphs unavailable. ' : ''}{sharedAgent.error ? 'Agent identity unavailable.' : ''}</div>
-            <div>{contextGraphs.length ? 'Showing the last available Context Graphs.' : 'Context Graph membership is unknown.'}</div>
+            <div>{listError ? 'Context graphs unavailable. ' : ''}{sharedAgent.error ? 'Agent identity unavailable.' : ''}</div>
+            <div>{contextGraphs.length ? 'Showing the last available context graphs.' : 'Context graph membership is unknown.'}</div>
             <button type="button" className="ds-btn ds-sm" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}><RefreshCw size={12} />Retry</button>
           </div>
         )}
 
         <SidebarSection
-          label="My Context Graphs"
+          label="My context graphs"
           count={myProjects.length}
           open={leftSectionMyProjectsOpen}
           onToggle={toggleLeftSectionMyProjects}
         >
           {showEmptyCard ? (
             <div className="v10-sidebar-empty v10-sidebar-first-run">
-              <strong>No Context Graphs yet</strong>
+              <strong>No context graphs yet</strong>
               <span>
                 {stage === 0
                   ? 'Connect an agent to get started.'
-                  : 'Create your first Context Graph to give your agent structured memory, or join one by ID.'}
+                  : 'Create your first context graph to give your agent structured memory, or join one by ID.'}
               </span>
               {showCardActions && (
                 <div className="v10-sidebar-inline-actions">
-                  <button type="button" className="ds-btn ds-primary ds-sm" aria-label="New Context Graph" onClick={openCreateModal}>New</button>
-                  <button type="button" className="ds-btn ds-sm" aria-label="Join Context Graph" onClick={() => openJoinModal()}>Join</button>
+                  <button type="button" className="ds-btn ds-primary ds-sm" aria-label="New context graph" onClick={openCreateModal}>New</button>
+                  <button type="button" className="ds-btn ds-sm" aria-label="Join context graph" onClick={() => openJoinModal()}>Join</button>
                 </div>
               )}
             </div>
           ) : myProjects.length === 0 ? (
             <div className="v10-sidebar-empty" role={membershipNote ? 'status' : undefined}>
-              <span>{membershipNote ?? 'No Context Graphs in this section yet.'}</span>
+              <span>{membershipNote ?? 'No context graphs in this section yet.'}</span>
             </div>
           ) : myProjects.map((cg) => (
             <ProjectTreeItem
@@ -358,16 +358,16 @@ export function PanelLeft() {
               type="button"
               className="v10-tree-show-hidden"
               onClick={unhideAll}
-              title="Restore all Context Graphs dismissed from the sidebar"
+              title="Restore all context graphs dismissed from the sidebar"
             >
-              <Eye size={12} /> Show {hiddenCount} hidden Context Graph{hiddenCount !== 1 ? 's' : ''}
+              <Eye size={12} /> Show {hiddenCount} hidden context graph{hiddenCount !== 1 ? 's' : ''}
             </button>
           )}
 
           {!showCardActions && (
             <div className="v10-sidebar-inline-actions">
-              <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="New Context Graph" onClick={openCreateModal}>New</button>
-              <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="Join Context Graph" onClick={() => openJoinModal()}>Join</button>
+              <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="New context graph" onClick={openCreateModal}>New</button>
+              <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="Join context graph" onClick={() => openJoinModal()}>Join</button>
             </div>
           )}
         </SidebarSection>

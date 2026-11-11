@@ -68,7 +68,7 @@ function addGraph(id: string, options: {
 async function render() {
   await act(async () => { root.render(React.createElement(DashboardView)); });
   const card = [...container.querySelectorAll('.stat-card')]
-    .find((element) => element.querySelector('.stat-label')?.textContent === 'Context Graph size')!;
+    .find((element) => element.querySelector('.stat-label')?.textContent === 'Context graph size')!;
   return {
     card,
     values: [...card.querySelectorAll('.v10-cg-size-big')].map((element) => element.textContent),
@@ -95,7 +95,7 @@ describe('real DashboardView size presentation', () => {
   it.each(['cgsError', 'identityError'] as const)('never claims an empty inventory after %s and exposes retry', async failed => {
     probes[failed] = 'endpoint unavailable';
     await render();
-    expect(container.textContent).not.toContain('No Context Graphs yet');
+    expect(container.textContent).not.toContain('No context graphs yet');
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('could not be loaded');
     expect(container.querySelector('.v10-dash-section-badge')?.textContent).toBe('—');
     const retry = [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry')!;
@@ -118,7 +118,7 @@ describe('real DashboardView size presentation', () => {
 
   it('shows a genuine successful empty inventory as empty', async () => {
     await render();
-    expect(container.textContent).toContain('No Context Graphs yet');
+    expect(container.textContent).toContain('No context graphs yet');
     expect(container.querySelector('[role="alert"]')).toBeNull();
   });
 

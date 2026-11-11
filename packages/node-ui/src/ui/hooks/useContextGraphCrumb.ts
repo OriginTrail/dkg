@@ -6,7 +6,7 @@ import { chooseTab as openTab } from '../lib/shellNavigation.js';
 /** The crumb that opens a Context Graph, named as the sidebar names it. */
 export function useContextGraphCrumb(contextGraphId: string): Crumb {
   const name = useProjectsStore((s) => s.contextGraphs.find((cg) => cg.id === contextGraphId)?.name);
-  const label = name || 'Context Graph';
+  const label = name || 'Context graph';
   const onClick = useCallback(() => {
     openTab({ id: `project:${contextGraphId}`, label, closable: true });
   }, [contextGraphId, label, openTab]);

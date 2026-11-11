@@ -25,7 +25,7 @@ describe('layerNoun', () => {
 
 const profile: ProjectProfile = {
   contextGraphId: 'cg-test',
-  displayName: 'Context Graph Test',
+  displayName: 'Context graph Test',
   primaryColor: '#64748b',
   accentColor: '#22c55e',
   subGraphs: [],
@@ -108,7 +108,7 @@ describe('KADetailView navigation label', () => {
     });
 
     const back = query('button.ds-crumb');
-    expect(back.textContent).toBe('Context Graph');
+    expect(back.textContent).toBe('Context graph');
     
     await act(async () => {
       back.dispatchEvent(new MouseEvent('click', { bubbles: true }));

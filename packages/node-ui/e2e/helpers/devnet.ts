@@ -177,7 +177,7 @@ export function requireDevnetPrecondition(test: SkippableTest, unmet: boolean, d
     throw new Error(
       `[devnet-precondition] ${description}. In CI the devnet is bootstrapped and gated ` +
         `by global-setup before any spec runs, so an unmet precondition here is a real ` +
-        `failure (partitioned mesh / missing Context Graph), not a skip.`,
+        `failure (partitioned mesh / missing context graph), not a skip.`,
     );
   }
   test.skip(true, description);

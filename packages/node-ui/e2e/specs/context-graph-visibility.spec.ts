@@ -18,7 +18,7 @@ test.describe('Context Graph visibility', () => {
   test('dashboard My Context Graphs stat reflects the seeded count', async ({ page }) => {
     const card = page
       .locator('.stat-card')
-      .filter({ has: page.locator('.stat-label', { hasText: 'My Context Graphs' }) });
+      .filter({ has: page.locator('.stat-label', { hasText: 'My context graphs' }) });
     await expect(card).toBeVisible();
     // The value slot shows a "loading…" placeholder until the CG set resolves
     // (can be slow under load), so poll the .stat-value until it's a number.
@@ -83,7 +83,7 @@ test.describe('Context Graph hide / restore (sidebar visibility toggle)', () => 
 
     // The reversible restore button shows an accurate hidden count.
     await expect(leftPanel.showHiddenButton).toBeVisible();
-    await expect(leftPanel.showHiddenButton).toContainText(/Show 1 hidden Context Graph\b/);
+    await expect(leftPanel.showHiddenButton).toContainText(/Show 1 hidden context graph\b/);
 
     // Persisted under the SAME key the dashboard + memory-stack read.
     const hidden = await page.evaluate(() =>
@@ -116,7 +116,7 @@ test.describe('Context Graph hide / restore (sidebar visibility toggle)', () => 
     // was extracted to guarantee. A regression to three private copies fails here.
     const statValue = page
       .locator('.stat-card')
-      .filter({ has: page.locator('.stat-label', { hasText: 'My Context Graphs' }) })
+      .filter({ has: page.locator('.stat-label', { hasText: 'My context graphs' }) })
       .locator('.stat-value');
 
     const readCount = async () => {
@@ -158,7 +158,7 @@ test.describe('Context Graph overview navigation', () => {
 
   test('Share action opens Share Context Graph modal', async ({ projectLayer, shareProjectModal }) => {
     await projectLayer.clickShare();
-    await expect(shareProjectModal.title).toHaveText('Share Context Graph');
+    await expect(shareProjectModal.title).toHaveText('Share context graph');
     await shareProjectModal.close();
   });
 

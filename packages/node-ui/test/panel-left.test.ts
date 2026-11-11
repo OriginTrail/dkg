@@ -210,8 +210,8 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     failed.mockRejectedValueOnce(new Error(`${endpoint} unavailable`));
     const { container } = await renderPanel({ graphs: [], stage: 1 });
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('unavailable');
-    expect(container.textContent).not.toContain('No Context Graphs yet');
-    expect(container.textContent).not.toContain('No Context Graphs in this section yet.');
+    expect(container.textContent).not.toContain('No context graphs yet');
+    expect(container.textContent).not.toContain('No context graphs in this section yet.');
     await act(async () => { sectionHeader(container, 'Public graphs').click(); });
     expect(container.textContent).not.toContain('Discovered public graphs will appear here');
     await act(async () => { sectionHeader(container, 'Public graphs').click(); });
@@ -220,7 +220,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     await act(async () => { retry!.click(); });
     await flush();
     expect(container.querySelector('[role="alert"]')).toBeNull();
-    expect(container.textContent).toContain('No Context Graphs yet');
+    expect(container.textContent).toContain('No context graphs yet');
   });
 
   it('keeps the last graph list visible and marks it stale after refresh failure', async () => {
@@ -233,9 +233,9 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
   it('does not show empty onboarding while the list is still loading', async () => {
     apiFetchContextGraphsMock.mockImplementationOnce(() => new Promise(() => {}));
     const { container } = await renderPanel({ graphs: [], stage: 1 });
-    expect(container.textContent).toContain('Loading Context Graphs');
+    expect(container.textContent).toContain('Loading context graphs');
     expect(container.querySelector('[role="alert"]')).toBeNull();
-    expect(container.textContent).not.toContain('No Context Graphs yet');
+    expect(container.textContent).not.toContain('No context graphs yet');
   });
 
   it('does not render the in-panel ◂ collapse button (global header toggle is the sole control)', async () => {
@@ -266,7 +266,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     const headers = container.querySelectorAll('.v10-peer-group-header');
     expect(headers.length).toBe(3);
     const labels = Array.from(container.querySelectorAll('.v10-peer-group-label')).map((el) => el.textContent);
-    expect(labels).toEqual(['My Context Graphs', 'Public graphs', 'Integrations']);
+    expect(labels).toEqual(['My context graphs', 'Public graphs', 'Integrations']);
   });
 
   it('hides Marketplace until the feature flag is set', async () => {
@@ -293,7 +293,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
 
   it('expands "My Context Graphs" by default and keeps secondary groups collapsed', async () => {
     const { container } = await renderPanel();
-    const myCgHeader = sectionHeader(container, 'My Context Graphs');
+    const myCgHeader = sectionHeader(container, 'My context graphs');
     const publicHeader = sectionHeader(container, 'Public graphs');
     const integrationsHeader = sectionHeader(container, 'Integrations');
     expect(myCgHeader.getAttribute('aria-expanded')).toBe('true');
@@ -309,7 +309,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
   it('discloses each section\'s body from its header, mounted only while open, so Integrations polls only then', async () => {
     localStorage.setItem('dkg-marketplace-enabled', '1');
     const { container } = await renderPanel();
-    for (const label of ['Marketplace', 'My Context Graphs', 'Public graphs', 'Integrations']) {
+    for (const label of ['Marketplace', 'My context graphs', 'Public graphs', 'Integrations']) {
       const header = sectionHeader(container, label);
       const wasOpen = header.getAttribute('aria-expanded') === 'true';
       const bodyId = header.getAttribute('aria-controls');
@@ -392,8 +392,8 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     await flush();
 
     const labels = Array.from(container.querySelectorAll('.v10-peer-group-label')).map((el) => el.textContent);
-    expect(labels).toContain('My Context Graphs');
-    expect(container.textContent).toContain('No Context Graphs in this section yet.');
+    expect(labels).toContain('My context graphs');
+    expect(container.textContent).toContain('No context graphs in this section yet.');
     // The catalog-only CG should NOT render as a row in this section.
     expect(container.textContent).not.toContain('Catalog Only CG');
   });
@@ -549,7 +549,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
 
   it('section headers point at their body containers via aria-controls', async () => {
     const { container } = await renderPanel();
-    const myCgHeader = sectionHeader(container, 'My Context Graphs');
+    const myCgHeader = sectionHeader(container, 'My context graphs');
     const publicHeader = sectionHeader(container, 'Public graphs');
     const integrationsHeader = sectionHeader(container, 'Integrations');
     const myCgControls = myCgHeader.getAttribute('aria-controls');

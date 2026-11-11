@@ -10,7 +10,7 @@ Read `packages/node-ui/DESIGN.md` before changing UI code.
 
 - Use the tokens in `src/ui/styles/00-theme.css` and the components in `src/ui/components/ds/`. No hard-coded colours, corner sizes or fractional type sizes.
 - Add anything reusable to `components/ds/`, not to one page, and show it on the reference page.
-- Text is sentence case. Names keep their capitals: Context Graph, Working Memory, Shared Working Memory, Verifiable Memory, Knowledge Asset, Publisher Conviction.
+- Text is sentence case. Names keep their capitals: Working Memory, Shared Working Memory, Verifiable Memory, Knowledge Asset, Publisher Conviction.
 - Update `DESIGN.md` in the same PR when a rule, token or component changes.
 - Layers and status words match nOS, which is their source of truth.
 

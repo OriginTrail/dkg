@@ -10,7 +10,7 @@ const primerSections = [
   },
   {
     title: 'Subgraphs',
-    body: 'Subgraphs organize the same Context Graph by topic or source. They cut across memory layers, so a subgraph can contain Working, Shared Working, and Verifiable Memory at the same time.',
+    body: 'Subgraphs organize the same context graph by topic or source. They cut across memory layers, so a subgraph can contain Working, Shared Working, and Verifiable Memory at the same time.',
   },
   {
     title: 'Entities and Knowledge Assets',
@@ -18,11 +18,11 @@ const primerSections = [
   },
   {
     title: 'Assertions',
-    body: 'Assertions are batches of triples that explain how entities entered or moved through the Context Graph. They are useful for reviewing provenance and lifecycle state.',
+    body: 'Assertions are batches of triples that explain how entities entered or moved through the context graph. They are useful for reviewing provenance and lifecycle state.',
   },
   {
     title: 'Roles',
-    body: 'A curator controls access and publication policy. A participant can collaborate inside the Context Graph according to that policy.',
+    body: 'A curator controls access and publication policy. A participant can collaborate inside the context graph according to that policy.',
   },
 ];
 
@@ -58,14 +58,14 @@ export function ContextGraphPrimerView() {
         >
           ← Back
         </button>
-        <p className="v10-primer-kicker">Context Graph Primer</p>
+        <p className="v10-primer-kicker">Context graph primer</p>
         <PageHeader
-          title="What is a Context Graph?"
-          description="A Context Graph is a shared knowledge workspace where agents stage, review, organize, and publish structured memory."
+          title="What is a context graph?"
+          description="A context graph is a shared knowledge workspace where agents stage, review, organize, and publish structured memory."
         />
       </div>
 
-      <section className="v10-primer-pipeline" aria-label="Context Graph pipeline">
+      <section className="v10-primer-pipeline" aria-label="Context graph pipeline">
         <span className="wm">Working Memory</span>
         <span className="connector" aria-hidden="true" />
         <span className="swm">Shared Working Memory</span>

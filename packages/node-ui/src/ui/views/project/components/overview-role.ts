@@ -37,7 +37,7 @@ export function overviewRoleState(
   if (curator && hasIdentity && agentIds.has(canonicalAgentDid(curator))) {
     return {
       label: 'Curator',
-      title: 'This agent is the curator for this Context Graph.',
+      title: 'This agent is the curator for this context graph.',
       tone: 'curator',
       rank: 'curator',
     };
@@ -46,7 +46,7 @@ export function overviewRoleState(
     if (curator && !hasIdentity && currentAgentStatus === 'loading') {
       return {
         label: 'Role checking',
-        title: 'This agent is involved in this Context Graph; curator status is still loading.',
+        title: 'This agent is involved in this context graph; curator status is still loading.',
         tone: 'unknown',
         rank: 'unknown',
       };
@@ -54,14 +54,14 @@ export function overviewRoleState(
     if (curator && !hasIdentity && currentAgentStatus === 'error') {
       return {
         label: 'Role unknown',
-        title: 'This agent is involved in this Context Graph, but curator status could not be confirmed.',
+        title: 'This agent is involved in this context graph, but curator status could not be confirmed.',
         tone: 'unknown',
         rank: 'unknown',
       };
     }
     return {
       label: 'Joined',
-      title: 'This agent is involved in this Context Graph; curator status is shown only when identity metadata confirms it.',
+      title: 'This agent is involved in this context graph; curator status is shown only when identity metadata confirms it.',
       tone: 'participant',
       rank: 'joined',
     };
@@ -71,15 +71,15 @@ export function overviewRoleState(
       return {
         label: cg.subscribed === true ? 'Public subscriber' : 'Public viewer',
         title: cg.subscribed === true
-          ? 'This node subscribes to this public Context Graph. This agent is not listed as a curator or participant; public access is separate from membership.'
-          : 'This Context Graph is public. This agent can browse it without being listed as a curator or participant; subscribe from Public Context Graphs to follow updates.',
+          ? 'This node subscribes to this public context graph. This agent is not listed as a curator or participant; public access is separate from membership.'
+          : 'This context graph is public. This agent can browse it without being listed as a curator or participant; subscribe from Public graphs to follow updates.',
         tone: 'viewer',
         rank: cg.subscribed === true ? 'subscriber' : 'viewer',
       };
     }
     return {
       label: 'Not joined',
-      title: 'This agent is not listed as curator or participant for this Context Graph.',
+      title: 'This agent is not listed as curator or participant for this context graph.',
       tone: 'viewer',
       rank: 'not-joined',
     };
@@ -91,14 +91,14 @@ export function overviewRoleState(
   if (isListedParticipant) {
     return {
       label: 'Joined',
-      title: 'This agent is listed as a participant for this Context Graph.',
+      title: 'This agent is listed as a participant for this context graph.',
       tone: 'participant',
       rank: 'joined',
     };
   }
   return {
     label: 'Role unknown',
-    title: 'The node did not provide enough role metadata for this Context Graph.',
+    title: 'The node did not provide enough role metadata for this context graph.',
     tone: 'unknown',
     rank: 'unknown',
   };

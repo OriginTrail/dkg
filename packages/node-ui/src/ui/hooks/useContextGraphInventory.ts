@@ -17,7 +17,7 @@ let authKey: string | undefined | null = null;
 let active: InventoryRequest | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let unsubscribeEvents: (() => void) | null = null;
-const credentialsChanged: InventoryResult = { ok: false, error: 'Credentials changed while refreshing Context Graphs' };
+const credentialsChanged: InventoryResult = { ok: false, error: 'Credentials changed while refreshing context graphs' };
 
 /** Every caller follows the current same-credential workflow, including forced supersession. */
 export function refreshContextGraphInventory(force = false): Promise<InventoryResult> {
@@ -41,7 +41,7 @@ export function refreshContextGraphInventory(force = false): Promise<InventoryRe
   const identity = force ? refreshCurrentAgent() : ensureCurrentAgent();
   const list = Promise.resolve().then(() => api.fetchContextGraphs({ fresh: force }))
     .then(({ contextGraphs }): InventoryResult => {
-      if (!Array.isArray(contextGraphs)) throw new Error('Invalid Context Graph list response');
+      if (!Array.isArray(contextGraphs)) throw new Error('Invalid context graph list response');
       return { ok: true, contextGraphs };
     })
     .catch((error): InventoryResult => ({ ok: false, error: error instanceof Error ? error.message : String(error) }));
@@ -74,7 +74,7 @@ export async function refreshContextGraphInventoryAfterMutation(): Promise<Inven
 
 function releaseIdleInventory() {
   if (consumers || mutationOwners) return;
-  active?.settle({ ok: false, error: 'Context Graph inventory has no remaining consumers' });
+  active?.settle({ ok: false, error: 'Context graph inventory has no remaining consumers' });
   active = null;
   useProjectsStore.setState({ loading: false });
 }

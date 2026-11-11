@@ -97,7 +97,7 @@ const ROWS: MatrixRow[] = [
   pickRow('Filter chip', false, filter),
   pickRow('Filter chip · on', true, filter),
   {
-    name: 'Context Graph chip',
+    name: 'Context graph chip',
     note: 'Not a form control: it has no disabled look',
     states: ['Default', 'Hover', 'Focus'],
     render: ({ className }) => <ContextGraphChip id="cg:climate-science" name="Climate science" onOpen={() => undefined} className={className} />,
