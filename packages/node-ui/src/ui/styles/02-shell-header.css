@@ -10,6 +10,9 @@
   height: 100dvh;
   width: 100vw;
   overflow: hidden;
+  /* `clip`, not only `hidden`: a hidden box can still be scrolled by focus
+     or scrollIntoView, which shifted the whole app up on Settings. */
+  overflow: clip;
 }
 
 /* ── API token entry, shown when the node rejects the page's credentials ── */
