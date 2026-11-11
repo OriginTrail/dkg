@@ -1049,6 +1049,39 @@ describe('installing the working-memory identity rule', () => {
     expect((await storedRows(adapter))[readGraphIri(working)]).toMatch(/^ready@/);
   });
 
+  it('publishes no working-memory read graph that a change of identity held while its build ran', async () => {
+    const { adapter, fixture, context, dataDir } = await open();
+    const working = fixture.keys.find((key) => key.layer === MemoryLayer.WorkingMemory)!;
+    const readGraph = readGraphIri(working);
+    const first = { defaultAgentAddress: AGENT, peerId: 'peer-1' };
+    const second = { defaultAgentAddress: `0x${'cd'.repeat(20)}`, peerId: 'peer-1' };
+    expect(await installWorkingMemoryIdentity(context, first)).toEqual({ marked: [], recorded: true });
+    // The build pauses in its registry refresh, at the registry record's write, before its row exists.
+    let reached!: () => void;
+    let release!: () => void;
+    const paused = new Promise<void>((resolve) => { reached = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    adapter.onUpdate = async (sparql) => {
+      if (!sparql.includes('http://dkg.io/ontology/readGraphRegistry')) return;
+      adapter.onUpdate = undefined;
+      reached();
+      await gate;
+    };
+    const building = buildReadGraph(context, working);
+    await paused;
+    // Meanwhile the identity changes, and the record of the one before cannot be removed.
+    const record = join(dataDir, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE);
+    rmSync(record);
+    mkdirSync(record);
+    writeFileSync(join(record, 'entry'), '');
+    expect(await installWorkingMemoryIdentity(context, second)).toEqual({ marked: [], recorded: false });
+    release();
+    // The build ends without publishing: its row is not ready.
+    expect(await building).toMatchObject({ outcome: 'lost' });
+    expect((await storedRows(adapter))[readGraph]).not.toMatch(/^ready@/);
+    rmSync(record, { recursive: true });
+  });
+
   it('reads no identity from a missing or malformed record', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'read-graph-identity-'));
     dirs.push(dataDir);
