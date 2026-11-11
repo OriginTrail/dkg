@@ -248,7 +248,7 @@ export async function repairChainAttestedPublicMetaProjection(
       store,
       buildAuthoritativePublicMetaRepairUpdate(contextGraphId),
       [metaGraph],
-      { source: 'agent.chainAttestedPublicMetaRepair' },
+      { source: 'agent.chainAttestedPublicMetaRepair', writtenGraphs: [metaGraph] },
     );
   } catch (error) {
     return {
