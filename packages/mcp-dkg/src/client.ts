@@ -9,6 +9,9 @@ import type { QueryArgs } from './query-args.js';
  * `/api/context-graph/*`).
  */
 import type { DkgConfig } from './config.js';
+import { missingTokenHttpHint } from './auth-diagnostics.js';
+import { DkgHttpError } from './http-error.js';
+export { DkgHttpError } from './http-error.js';
 import {
   classifySparqlOperation,
   serializeAgentListOptions,
@@ -400,16 +403,6 @@ export interface PeerInfo {
   remoteAddrs: Array<string | null>;
 }
 
-export class DkgHttpError extends Error {
-  readonly status: number;
-  readonly body: unknown;
-  constructor(status: number, body: unknown, message: string) {
-    super(message);
-    this.name = 'DkgHttpError';
-    this.status = status;
-    this.body = body;
-  }
-}
 
 /**
  * A long Knowledge Asset mutation reached the daemon but no response arrived
@@ -494,7 +487,7 @@ export class DkgClient {
         throw new DkgHttpError(
           res.status,
           parsed,
-          `${method} ${route} → ${res.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`,
+          `${method} ${route} → ${res.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}${missingTokenHttpHint(res.status, this.token)}`,
         );
       }
       return parsed as T;

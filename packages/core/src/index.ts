@@ -469,6 +469,7 @@ export {
   readDaemonPid,
   isProcessAlive,
   readDkgApiPort,
+  readDkgApiPortSync,
   loadAuthTokenSync,
   loadAuthToken,
   toEip55Checksum,

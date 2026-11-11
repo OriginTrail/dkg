@@ -48,6 +48,7 @@ import { produceSparseAuthorCatalogSuccessorV1 } from '../src/rfc64/author-catal
 import {
   Rfc64PublicCatalogNativeReceiverV1,
   rfc64CatalogSignatureVariantDigestV1,
+  type Rfc64PublicCatalogNativeAdmissionHandlerV1,
   type Rfc64PublicCatalogNativeAppliedHeadLifecycleV1,
   type Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
   type Rfc64PublicCatalogNativeCommittedHeadTokenV1,
@@ -145,6 +146,27 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       kaBundles: { putKaBundle: async () => undefined },
       store: new OxigraphStore(),
     } as never)).not.toThrow();
+  });
+
+  it('refuses a precommit whose admission half is not a function', () => {
+    expect(() => new Rfc64PublicCatalogNativeReceiverV1({
+      headTransport: { fetchCatalogHead: async () => null },
+      contentTransport: {
+        fetchCatalogObject: async () => null,
+        fetchKaBundle: async () => null,
+      },
+      controlObjects: {
+        stageVerifiedObjects: async () => ({ durable: true, objects: [] }),
+        getVerifiedObjectByDigest: async () => null,
+      },
+      inventory: {
+        readAppliedCatalogHeadV1: () => null,
+        compareAndSwapAppliedCatalogHeadV1: async () => 'applied',
+      },
+      kaBundles: { putKaBundle: async () => undefined },
+      store: new OxigraphStore(),
+      beforeAppliedHeadCommit: Object.assign(async () => undefined, { admit: 'always' }),
+    } as never)).toThrow('receiver dependencies are incomplete');
   });
 
   it('refuses cold bootstrap when an omitted author projection and seal lack durable history', async () => {
@@ -2410,6 +2432,158 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     }
   }, 60_000);
 
+  // Every TripleStore method that writes. A refused head that calls none of
+  // them never showed a concurrent shared-memory reader any of its rows.
+  const STORE_WRITE_METHODS = new Set([
+    'insert', 'delete', 'deleteByPattern', 'deleteByPatternWithoutCount', 'deleteBySubjectPrefix',
+    'createGraph', 'dropGraph', 'replaceGraph', 'replaceAssetGroup', 'replaceGraphAndSubject',
+    'replaceSubject', 'replaceSubjectAndInsert', 'rfc64AuthorCommitCasV1', 'runLogicalMutation',
+    'update',
+  ]);
+  const writeRecordingStore = (store: TripleStore) => {
+    const writes: string[] = [];
+    const recorded = new Proxy(store, {
+      get(target, property) {
+        const value = Reflect.get(target, property, target) as unknown;
+        if (typeof value !== 'function') return value;
+        if (typeof property === 'string' && STORE_WRITE_METHODS.has(property)) {
+          return (...args: unknown[]) => {
+            writes.push(property);
+            return (value as (...callArgs: unknown[]) => unknown).apply(target, args);
+          };
+        }
+        return value.bind(target);
+      },
+    }) as TripleStore;
+    return { store: recorded, writes };
+  };
+  const swmGraphOfFirstRow =
+    `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${KA_NUMBER}`;
+
+  it('refuses a head its precommit does not admit before the boundary lease or any store write', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    const recorded = writeRecordingStore(fixture.receiverStore);
+    const compareAndSwapAppliedCatalogHeadV1 = vi.fn(
+      fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1.bind(
+        fixture.receiverPersistence.inventory,
+      ),
+    );
+    const refusal = new Error('the node has no trusted RPC endpoint for this chain');
+    const admit = vi.fn<Rfc64PublicCatalogNativeAdmissionHandlerV1>(async () => {
+      throw refusal;
+    });
+    const precommit = vi.fn<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1>(
+      async () => appliedHeadLifecycleV1(),
+    );
+    const acquireLegacySwmBoundaryLease = vi.fn(async () => {
+      throw new Error('a refused head must not take the boundary lease');
+    });
+    const receiver = fixture.createReceiver({
+      readAppliedCatalogHeadV1:
+        fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
+          fixture.receiverPersistence.inventory,
+        ),
+      compareAndSwapAppliedCatalogHeadV1,
+    }, undefined, undefined, recorded.store, Object.assign(precommit, { admit }),
+    undefined, undefined, undefined, acquireLegacySwmBoundaryLease);
+
+    await expect(fixture.synchronize(fixture.announcement, receiver)).rejects.toMatchObject({
+      code: 'catalog-native-receiver-activation',
+      message: expect.stringContaining('rejected the head before activation'),
+      cause: refusal,
+    });
+    expect(admit).toHaveBeenCalledOnce();
+    const [plan, signal] = admit.mock.calls[0]!;
+    expect(plan).toEqual({
+      catalogScope: fixture.scope,
+      policyDigest: fixture.announcement.policyDigest,
+      catalogHeadDigest: fixture.successor.head.objectDigest,
+    });
+    expect(Object.isFrozen(plan)).toBe(true);
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(precommit).not.toHaveBeenCalled();
+    expect(acquireLegacySwmBoundaryLease).not.toHaveBeenCalled();
+    expect(recorded.writes).toEqual([]);
+    expect(compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.genesis.head.objectDigest);
+    await expect(fixture.receiverStore.hasGraph(swmGraphOfFirstRow)).resolves.toBe(false);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
+  }, 30_000);
+
+  it('keeps the exact rollback for a precommit that admits a head and then refuses its rows', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    const recorded = writeRecordingStore(fixture.receiverStore);
+    const events: string[] = [];
+    const admit = vi.fn<Rfc64PublicCatalogNativeAdmissionHandlerV1>(async () => {
+      events.push(`admit, ${recorded.writes.length} writes`);
+    });
+    // The final barrier runs between activation and restore: the rows are in
+    // the store when it decides, and a refusal takes them out again.
+    const precommit = vi.fn<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1>(async () => {
+      events.push(`precommit, rows visible: ${
+        await fixture.receiverStore.hasGraph(swmGraphOfFirstRow)}`);
+      throw new Error('a row of this head is refused');
+    });
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      recorded.store,
+      Object.assign(precommit, { admit }),
+    );
+
+    await expect(fixture.synchronize(fixture.announcement, receiver)).rejects.toMatchObject({
+      code: 'catalog-native-receiver-activation',
+      message: expect.stringContaining('rejected the exact activated inventory'),
+    });
+    expect(events).toEqual(['admit, 0 writes', 'precommit, rows visible: true']);
+    expect(recorded.writes.length).toBeGreaterThan(0);
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.genesis.head.objectDigest);
+    await expect(fixture.receiverStore.hasGraph(swmGraphOfFirstRow)).resolves.toBe(false);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
+
+    const applied = await fixture.synchronize(
+      fixture.announcement,
+      fixture.createReceiver(fixture.receiverPersistence.inventory),
+    );
+    expect(applied.appliedHeadStatus).toBe('applied');
+    await expect(fixture.receiverStore.hasGraph(swmGraphOfFirstRow)).resolves.toBe(true);
+  }, 30_000);
+
+  it('passes a cancellation through admission without wrapping it', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    const controller = new AbortController();
+    const reason = new Error('receiver closed during admission');
+    const admit = vi.fn<Rfc64PublicCatalogNativeAdmissionHandlerV1>(async (_plan, signal) => {
+      controller.abort(reason);
+      signal.throwIfAborted();
+    });
+    const precommit = vi.fn<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1>(
+      async () => appliedHeadLifecycleV1(),
+    );
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      fixture.receiverStore,
+      Object.assign(precommit, { admit }),
+    );
+
+    await expect(fixture.synchronize(fixture.announcement, receiver, controller.signal))
+      .rejects.toBe(reason);
+    expect(precommit).not.toHaveBeenCalled();
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
+  }, 30_000);
+
   it('restores SWM and VM together when the applied-head CAS rejects the target', async () => {
     const fixture = await setupLiveReceiver();
     await fixture.bootstrap();
@@ -2883,19 +3057,26 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       getKnowledgeAssetsLifecycleAddress: async () => KAV10,
       store: fixture.receiverStore,
     });
+    const acquireLegacySwmBoundaryLease = vi.fn(async () => {
+      throw new Error('a refused head must not take the boundary lease');
+    });
     const receiver = fixture.createReceiver({
       readAppliedCatalogHeadV1:
         fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
           fixture.receiverPersistence.inventory,
         ),
       compareAndSwapAppliedCatalogHeadV1,
-    }, undefined, undefined, fixture.receiverStore, precommit);
+    }, undefined, undefined, fixture.receiverStore, precommit,
+    undefined, undefined, undefined, acquireLegacySwmBoundaryLease);
 
     await expect(fixture.bootstrapGoverned(receiver)).rejects.toMatchObject({
       code: 'catalog-native-receiver-activation',
-      message: expect.stringContaining('catalog applied-head precommit rejected'),
+      message: expect.stringContaining(
+        'catalog applied-head precommit rejected the head before activation',
+      ),
     });
 
+    expect(acquireLegacySwmBoundaryLease).not.toHaveBeenCalled();
     expect(getOnChainContextGraphId).not.toHaveBeenCalled();
     expect(getEvmChainId).not.toHaveBeenCalled();
     expect(getKnowledgeAssetStorageAddress).not.toHaveBeenCalled();
