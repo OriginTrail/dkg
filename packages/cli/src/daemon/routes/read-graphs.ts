@@ -36,6 +36,38 @@ const DESCRIPTIONS: Readonly<Record<ReadGraphsAction, string>> = {
   drop: 'drop the read graphs of the node',
 };
 
+/**
+ * The read-graph requests a daemon runs. Graceful shutdown ends them at once
+ * ({@link end}), before the HTTP server drains: each stops at its next store
+ * call and answers, and a later check, rebuild or drop is refused.
+ */
+export class ReadGraphRequests {
+  #ending = false;
+  readonly #running = new Set<AbortController>();
+
+  get ending(): boolean {
+    return this.#ending;
+  }
+
+  /** Track a request until the returned function is called. */
+  track(request: AbortController): () => void {
+    this.#running.add(request);
+    return () => {
+      this.#running.delete(request);
+    };
+  }
+
+  end(): void {
+    this.#ending = true;
+    for (const request of this.#running) request.abort(new Error('The node is shutting down'));
+  }
+}
+
+/** The daemon's read-graph requests, which its graceful shutdown ends. */
+export const daemonReadGraphRequests = new ReadGraphRequests();
+
+const SHUTTING_DOWN = { code: 'NODE_SHUTTING_DOWN', error: 'The node is shutting down; try again once it is back.', retryable: true } as const;
+
 interface ReadGraphRow {
   readonly readGraph: string;
   readonly state: string;
@@ -64,9 +96,14 @@ interface ReadGraphRow {
  * taken its read graph out of the mirror but left its dirty row in the store,
  * so it is listed and dropped again. A read graph that fails is reported and
  * the others go on. A caller that goes away ends the work: the running read
- * graph stops at its next store call and no other one starts.
+ * graph stops at its next store call and no other one starts. Graceful
+ * shutdown ends a running request the same way, before the HTTP server
+ * drains, and refuses a later check, rebuild or drop with a retryable 503.
  */
-export async function handleReadGraphRoutes(ctx: RequestContext, options: { dataDir?: string } = {}): Promise<void> {
+export async function handleReadGraphRoutes(
+  ctx: RequestContext,
+  options: { dataDir?: string; requests?: ReadGraphRequests } = {},
+): Promise<void> {
   const { req, res, path } = ctx;
   const action = path === READ_GRAPHS_PATH
     ? 'status'
@@ -76,14 +113,29 @@ export async function handleReadGraphRoutes(ctx: RequestContext, options: { data
   if (req.method !== method) return;
   if (!requireNodeAdmin(actorFromRequestContext(ctx).authentication, res, `${method} ${path}`, DESCRIPTIONS[action])) return;
 
+  const requests = options.requests ?? daemonReadGraphRequests;
+  if (action !== 'status' && requests.ending) return jsonResponse(res, 503, SHUTTING_DOWN, undefined, { 'Retry-After': '30' });
   const gone = new AbortController();
   res.once('close', () => gone.abort());
+  const untrack = requests.track(gone);
+  try {
+    await answer(ctx, action, gone.signal, options.dataDir);
+  } catch (error) {
+    if (!gone.signal.aborted || !requests.ending) throw error;
+    jsonResponse(res, 503, SHUTTING_DOWN, undefined, { 'Retry-After': '30' });
+  } finally {
+    untrack();
+  }
+}
+
+async function answer(ctx: RequestContext, action: ReadGraphsAction, signal: AbortSignal, dataDir: string | undefined): Promise<void> {
+  const { req, res } = ctx;
   const raw = action === 'status' ? Object.fromEntries(ctx.url.searchParams) : jsonOf(await readBody(req, SMALL_BODY_BYTES));
   const parsed = parseReadGraphsRequest(action, raw);
   if ('error' in parsed) return jsonResponse(res, 400, { error: parsed.error });
 
   if (action === 'check') {
-    return jsonResponse(res, 200, await ctx.agent.checkReadGraphsV1({ mode: parsed.request.mode ?? 'full', signal: gone.signal }));
+    return jsonResponse(res, 200, await ctx.agent.checkReadGraphsV1({ mode: parsed.request.mode ?? 'full', signal }));
   }
   if (action === 'rebuild' && ctx.agent.readGraphStatusV1()?.builder === undefined) {
     return jsonResponse(res, 409, {
@@ -93,7 +145,7 @@ export async function handleReadGraphRoutes(ctx: RequestContext, options: { data
   }
   const store = ctx.agent.store;
   const layer = readGraphLayerOf(store);
-  const stored = layer ? await storedRows(layer, gone.signal) : [];
+  const stored = layer ? await storedRows(layer, signal) : [];
   if (action === 'status') {
     const status = ctx.agent.readGraphStatusV1();
     const rows = selected(withStored(status?.readGraphs ?? layer?.runtime.mirror.rows() ?? [], stored), parsed.request);
@@ -106,10 +158,10 @@ export async function handleReadGraphRoutes(ctx: RequestContext, options: { data
     });
   }
 
-  const job: ReadGraphJobContext = { store, dataDir: options.dataDir ?? dkgDir(), signal: gone.signal, source: `api.readGraphs.${action}` };
+  const job: ReadGraphJobContext = { store, dataDir: dataDir ?? dkgDir(), signal, source: `api.readGraphs.${action}` };
   const answers: Record<string, unknown>[] = [];
   for (const { readGraph } of selected(withStored(layer?.runtime.mirror.rows() ?? [], stored), parsed.request)) {
-    if (gone.signal.aborted) break;
+    if (signal.aborted) break;
     try {
       if (action === 'rebuild') {
         const after = await markReadGraphDirty(job, readGraph);

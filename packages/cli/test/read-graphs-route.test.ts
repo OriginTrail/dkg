@@ -24,7 +24,8 @@ import {
 import type { AllowedHttpAuthentication } from '../src/auth.js';
 import { handleRequest, type HandleRequestInput } from '../src/daemon/handle-request.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
-import { handleReadGraphRoutes } from '../src/daemon/routes/read-graphs.js';
+import { ReadGraphRequests, handleReadGraphRoutes } from '../src/daemon/routes/read-graphs.js';
+import { beginGracefulShutdown } from '../src/daemon/teardown.js';
 import { READ_GRAPHS_PATH } from '../src/read-graphs-wire.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
@@ -166,7 +167,9 @@ async function call(
   store: TripleStore,
   method: string,
   target: string,
-  options: { body?: unknown; authentication?: AllowedHttpAuthentication; dataDir?: string; res?: ReturnType<typeof fakeRes>; agent?: object } = {},
+  options: {
+    body?: unknown; authentication?: AllowedHttpAuthentication; dataDir?: string; res?: ReturnType<typeof fakeRes>; agent?: object; requests?: ReadGraphRequests;
+  } = {},
 ) {
   const res = options.res ?? fakeRes();
   const url = new URL(`http://127.0.0.1${target}`);
@@ -179,7 +182,7 @@ async function call(
     authentication: options.authentication ?? OPERATOR,
     agent: options.agent ?? agentOf(store),
   } as unknown as RequestContext;
-  await handleReadGraphRoutes(ctx, { dataDir: options.dataDir ?? '/no-such-dir' });
+  await handleReadGraphRoutes(ctx, { dataDir: options.dataDir ?? '/no-such-dir', requests: options.requests ?? new ReadGraphRequests() });
   return { handled: res.writableEnded, status: res.statusCode, body: res.body ? JSON.parse(res.body) as Record<string, unknown> : undefined };
 }
 
@@ -399,6 +402,76 @@ describe('POST /api/store/read-graphs/drop', () => {
     expect(again.body).toEqual({ removed: [first, second].map((readGraph) => ({ readGraph, outcome: 'done' })) });
     expect(await triplesOf(adapter, first)).toEqual([]);
     expect((await call(store, 'GET', `${READ_GRAPHS_PATH}?contextGraphId=${CG}&layer=vm`)).body!.readGraphs).toEqual([]);
+  });
+});
+
+describe('graceful shutdown', () => {
+  it('ends a running drop at its next store call before HTTP drains, and refuses later read-graph work', async () => {
+    const { adapter, dataDir, store, stateOf } = await node();
+    const requests = new ReadGraphRequests();
+    const [first, second] = [IRI.vm, IRI.codeVm].sort();
+    let reached!: () => void;
+    const atFirstProbe = new Promise<void>((resolve) => { reached = resolve; });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const query = adapter.query.bind(adapter);
+    const spy = vi.spyOn(adapter, 'query').mockImplementation(async (sparql, options) => {
+      // The removal of the first read graph waits here, before its first delete, while the node begins to shut down.
+      if (sparql === `ASK { GRAPH <${first}> { ?s ?p ?o } }`) {
+        reached();
+        await held;
+      }
+      return query(sparql, options);
+    });
+    const drop = call(store, 'POST', `${READ_GRAPHS_PATH}/drop`, { body: { contextGraphId: CG, layer: 'vm' }, dataDir, requests });
+    await atFirstProbe;
+    const logged: string[] = [];
+    await beginGracefulShutdown({
+      state: { catchupAcceptingJobs: true }, removeApiPort: async () => {}, log: (message) => logged.push(message),
+      endReadGraphRequests: () => requests.end(),
+    });
+    release();
+    expect((await drop).body).toEqual({ removed: [{ readGraph: first, outcome: 'error', error: 'The node is shutting down' }] });
+    expect(await triplesOf(adapter, first)).not.toEqual([]);
+    expect(stateOf(second)).toBe('ready');
+    spy.mockRestore();
+    for (const action of ['check', 'rebuild', 'drop']) {
+      expect(await call(store, 'POST', `${READ_GRAPHS_PATH}/${action}`, { body: {}, requests }), action)
+        .toMatchObject({ status: 503, body: { code: 'NODE_SHUTTING_DOWN', retryable: true } });
+    }
+    // A status still answers.
+    expect((await call(store, 'GET', READ_GRAPHS_PATH, { requests })).status).toBe(200);
+  });
+
+  it('answers a check that shutdown ended with a retryable 503', async () => {
+    const { store } = await node();
+    const requests = new ReadGraphRequests();
+    const agent = {
+      ...agentOf(store),
+      checkReadGraphsV1: vi.fn(async (options: { signal?: AbortSignal } = {}) => {
+        requests.end();
+        options.signal?.throwIfAborted();
+        return { mode: 'full', at: 0, results: [] };
+      }),
+    };
+    expect(await call(store, 'POST', `${READ_GRAPHS_PATH}/check`, { body: {}, agent, requests }))
+      .toMatchObject({ status: 503, body: { code: 'NODE_SHUTTING_DOWN', retryable: true } });
+  });
+
+  it('is ended before the first await of the shutdown, and a failure there does not stop it', async () => {
+    const order: string[] = [];
+    const logged: string[] = [];
+    await beginGracefulShutdown({
+      state: { catchupAcceptingJobs: true },
+      removeApiPort: async () => { order.push('removeApiPort'); },
+      log: (message) => logged.push(message),
+      endReadGraphRequests: () => {
+        order.push('endReadGraphRequests');
+        throw new Error('ended twice');
+      },
+    });
+    expect(order).toEqual(['endReadGraphRequests', 'removeApiPort']);
+    expect(logged).toContain('Read-graph request stop error: ended twice');
   });
 });
 
