@@ -348,6 +348,48 @@ export function readGraphStatementsConformance(backend: 'oxigraph' | 'blazegraph
       expect(await triples(R)).toHaveLength(2);
     });
 
+    it('keeps a triple while a member holds it and removes it with the last one, for each delete delta', async () => {
+      const cg = freshContextGraph();
+      const root = `did:dkg:context-graph:${cg}`;
+      const first = `${root}/_verifiable_memory/${AGENT}/1`, last = `${root}/_verifiable_memory/${AGENT}/2`;
+      // A graph of the context graph whose ID extends this one: its name starts with the root, but it is no member.
+      const outside = `${root}y/_verifiable_memory/${AGENT}/1`;
+      const key: ReadGraphKey = { scope: readScope(cg), layer: MemoryLayer.VerifiableMemory };
+      const R = readGraphIri(key);
+      const target: ReadGraphTarget = {
+        readGraph: R, membership: readGraphMembership(key, { contextGraphId: cg, subGraphNames: [], childContextGraphRoots: [] }, identity),
+      };
+      expect(matchesGraphNameTest(target.membership, outside)).toBe(false);
+      const adapterRender = ADAPTER_SPARQL_TERM_POLICY.renderer({ adapter: backend, operation: 'delete' }, () => {});
+      const triple = { subject: 'urn:shared:s', predicate: 'urn:shared:p', object: '"shared"' };
+      // The exact delete's delta runs after the delete; the pattern and prefix deltas run before it.
+      const forms: Record<string, (graph: string) => Promise<unknown>> = {
+        exact: async (graph) => {
+          await store.delete([{ ...triple, graph }]);
+          await update(readGraphDeltaDelete(target, [{ ...triple, graph }], adapterRender)!);
+        },
+        pattern: async (graph) => {
+          await update(readGraphDeltaDeleteMatching(target, graph, { subject: triple.subject }, adapterRender));
+          await store.deleteByPattern({ graph, subject: triple.subject });
+        },
+        prefix: async (graph) => {
+          await update(readGraphDeltaDeleteBySubjectPrefix(target, graph, 'urn:shared:', adapterRender));
+          await store.deleteBySubjectPrefix(graph, 'urn:shared:');
+        },
+      };
+      for (const [form, remove] of Object.entries(forms)) {
+        await store.insert([first, last, outside].map((graph) => ({ ...triple, graph })));
+        await update(`${readGraphCopy(R, first)} ;\n${readGraphCopy(R, last)}`);
+        expect(await triples(R), form).toHaveLength(1);
+        await remove(first);
+        expect(await triples(R), `${form}: another member still holds it`).toHaveLength(1);
+        await remove(last);
+        expect(await triples(R), `${form}: only a graph outside the scope holds it`).toEqual([]);
+        expect(await triples(outside), form).toHaveLength(1);
+        await store.delete([{ ...triple, graph: outside }]);
+      }
+    });
+
     it('lets fenced batches, repairs and drops act only for their own state and generation', async () => {
       const cg = freshContextGraph();
       const root = `did:dkg:context-graph:${cg}`;
