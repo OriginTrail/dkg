@@ -668,10 +668,15 @@ class ReadGraphJob {
     return sent;
   }
 
-  /** Publish `ready`: the compare-and-set, the read-back and the mirror in one lock hold. */
+  /**
+   * Publish `ready`: the compare-and-set, the read-back and the mirror in one
+   * lock hold. A working-memory read graph held since the job began
+   * (`./working-memory-hold.ts`) is not published: the job ends `lost`.
+   */
   async publish(row: ReadGraphStateRow, inService: () => boolean): Promise<ReadGraphJobResult> {
+    const key = parseReadGraphIri(this.readGraph);
     const published = await this.locked(async () => {
-      if (!inService()) return { lost: true as const };
+      if (!inService() || (key !== undefined && isHeldReadGraph(this.runtime, key))) return { lost: true as const };
       return { row: await this.transition(row, { kind: 'publish-ready' }) };
     });
     if ('lost' in published) return this.lost();
