@@ -5,7 +5,8 @@ import { describe, expect, it } from 'vitest';
 
 // A store that holds read graphs refuses a SPARQL UPDATE that does not declare the graphs it
 // writes (`writtenGraphs`). This census reads the production sources that write through a
-// TripleStore and fails on an update call that names no `writtenGraphs`.
+// TripleStore and fails on an update call that names no `writtenGraphs`. It lives in the cli
+// package because the cli lane runs on a change to any of the packages it reads.
 const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const PACKAGES = ['agent', 'publisher', 'cli'];
 

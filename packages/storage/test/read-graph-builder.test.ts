@@ -390,6 +390,29 @@ describe('building a read graph', () => {
     await expectUnion(adapter, layer, fixture, vm);
   });
 
+  it('reads the registry again once earlier writes end, so a registration they removed ends the build before it copies', async () => {
+    const { adapter, fixture, layer, store, context } = await open();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    const { wholeVm } = fixture.readGraphs;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const unregistering = `DELETE DATA { GRAPH <${fixture.root}/_meta> { ${SUB_GRAPH_TYPE(fixture, 'code')} } }`;
+    adapter.onUpdate = (sparql) => (sparql === unregistering ? held : undefined);
+    // With no row yet, the unregistration passes the registry by, and the build reads the registry from before it.
+    const write = store.update!(unregistering, { writtenGraphs: [`${fixture.root}/_meta`] });
+    const job = buildReadGraph(context, vm);
+    await vi.waitFor(() => expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('building'));
+    release();
+    await write;
+    expect(await job).toMatchObject({ outcome: 'lost' });
+    expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('dirty');
+    expect(await triplesOf(adapter, wholeVm)).toEqual([]);
+    // The next build takes the registry the store holds.
+    adapter.onUpdate = undefined;
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    await expectCurrentUnion(adapter, layer, fixture, vm);
+  });
+
   it('keeps the read graph equal to its members across writes during the backfill', async () => {
     const { adapter, fixture, layer, store, context } = await open();
     const [vm] = fixture.keys as [ReadGraphKey];

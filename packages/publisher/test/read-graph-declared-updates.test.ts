@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { MemoryLayer, readGraphIri, readScope } from '@origintrail-official/dkg-core';
 import { CURRENT_READ_GRAPH_VERSIONS, GraphManager, createTripleStore, readGraphLayerOf, type TripleStore } from '@origintrail-official/dkg-storage';
 import { replaceCatalogQuads } from '../src/catalog-persistence.js';
@@ -45,9 +45,20 @@ describe('publisher updates while a read graph exists', () => {
     await replaceCatalogQuads(store, catalog, [{ subject: 'urn:declared:asset', predicate: 'urn:declared:in', object: '"catalog"', graph: catalog }]);
     expect(await holds(store, catalog, 'urn:declared:asset', 'urn:declared:in')).toBe(true);
     const ual = 'urn:declared:ual';
-    await store.insert([{ subject: ual, predicate: 'http://dkg.io/ontology/batchId', object: '"5"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: META }]);
+    const merkleRoot = 'http://dkg.io/ontology/merkleRoot';
+    await store.insert([
+      { subject: ual, predicate: 'http://dkg.io/ontology/batchId', object: '"5"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: META },
+      { subject: ual, predicate: merkleRoot, object: '"0909"', graph: META },
+    ]);
+    const update = vi.spyOn(store, 'update');
+    const insert = vi.spyOn(store, 'insert');
     await updateMetaMerkleRoot(store, new GraphManager(store), CG, 5n, new Uint8Array([1, 2]));
-    expect(await holds(store, META, ual, 'http://dkg.io/ontology/merkleRoot')).toBe(true);
+    // The declared update replaced the root: it succeeded, and the fallback's insert never ran.
+    expect(update).toHaveBeenCalledOnce();
+    await expect(update.mock.results[0]!.value).resolves.toBeUndefined();
+    expect(insert).not.toHaveBeenCalled();
+    const roots = await store.query(`SELECT ?root WHERE { GRAPH <${META}> { <${ual}> <${merkleRoot}> ?root } }`);
+    expect(roots.type === 'bindings' && roots.bindings).toEqual([{ root: '"0102"' }]);
     await expectReadGraphUnchanged(store);
   });
 

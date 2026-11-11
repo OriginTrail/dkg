@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -171,6 +171,19 @@ describe('UpdateHandler graph-scoped updates', () => {
       `ASK { GRAPH <${META}> { <${UAL}> <${DKG}rootEntity> ?root } }`,
     );
     expect(legacyRoots).toMatchObject({ type: 'boolean', value: false });
+  });
+
+  it('declares exactly the graphs its materialization update writes', async () => {
+    await seedPriorMetadata();
+    const update = vi.spyOn(store, 'update');
+    await handler.handle(message([{ subject: 'urn:new:a', predicate: 'urn:p:value', object: '"a"', graph: '' }]), 'forwarding-peer');
+    const call = update.mock.calls.find(([, options]) => options?.source === 'publisher.updateHandler.graphScopedMaterialization');
+    expect(call).toBeDefined();
+    const [sparql, options] = call!;
+    // The update reads no graph it does not write, so every graph it names is one it writes.
+    const named = [...new Set([...sparql.matchAll(/GRAPH\s*<([^>]+)>/g)].map((match) => match[1]))].sort();
+    expect(named).toEqual([vmGraph, META].sort());
+    expect([...(options?.writtenGraphs ?? [])].sort()).toEqual(named);
   });
 
   it('materializes canonical Markdown section entities from a verified update', async () => {
