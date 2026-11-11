@@ -12,6 +12,7 @@ import { readGraphMembership, type GraphNameTest } from '../src/read-graph/membe
 import { wrapReadGraphLayer, type ReadGraphStore } from '../src/read-graph/read-graph-store.js';
 import {
   buildReadGraph,
+  refreshReadGraphRegistry,
   installWorkingMemoryIdentity,
   markReadGraphDirty,
   readGraphEnumerationRoots,
@@ -302,6 +303,31 @@ describe('building a read graph', () => {
     expect(layer.runtime.mirror.get(fixture.readGraphs.wholeVm)).toMatchObject({ state: 'dirty', generation: before.generation + 1 });
     expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done' });
     expect(await triplesOf(adapter, fixture.readGraphs.wholeVm)).toContain(`urn:s:docs ${P} "d"`);
+  });
+
+  it('reads the registry again when a write through the layer changed the cached one while the refresh read it', async () => {
+    const { adapter, fixture, layer, store, context } = await open();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done' });
+    const meta = `${fixture.root}/_meta`;
+    const docs = `${fixture.root}/docs`;
+    const query = adapter.query.bind(adapter);
+    let reads = 0;
+    adapter.query = async (sparql, options) => {
+      const result = await query(sparql, options);
+      // The refresh's first read answers only after a registration through the layer has updated the cached registry.
+      if (options?.source === 'storage.readGraphRegistry' && (reads += 1) === 1) {
+        await store.insert([
+          { subject: docs, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph', graph: meta },
+          { subject: docs, predicate: 'http://schema.org/name', object: '"docs"', graph: meta },
+        ]);
+      }
+      return result;
+    };
+    await refreshReadGraphRegistry(context, fixture.contextGraphId);
+    // The older answer is not installed over the registration: the refresh read again.
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
+    expect(reads).toBeGreaterThan(2);
   });
 
   it('ends without effect when a newer dirty mark overtakes it, and nothing of it lands after a newer ready', async () => {

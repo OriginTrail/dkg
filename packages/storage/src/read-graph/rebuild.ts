@@ -44,9 +44,9 @@ import { noteReadGraphPartitions } from '../read-graph-partition-marker.js';
 import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore } from '../read-graph-partition-store.js';
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
-import { matchesGraphNameTest, readGraphMembership, workingMemoryIdentityRule, type GraphNameTest, type ReadGraphRegistrySnapshot } from './membership.js';
+import { matchesGraphNameTest, readGraphMembership, workingMemoryIdentityRule, type GraphNameTest } from './membership.js';
 import { readGraphLayerOf, readGraphRuntimeOf } from './read-graph-store.js';
-import { readReadGraphRegistry } from './registry.js';
+import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry } from './registry-recognition.js';
 import { ReadGraphLocks, type InMemoryReadGraphStateMirror, type ReadGraphBackendRuntime } from './runtime.js';
 import {
   CURRENT_READ_GRAPH_VERSIONS,
@@ -298,27 +298,39 @@ export function withReadGraphBackgroundSlot<T>(runtime: ReadGraphBackendRuntime,
 }
 
 /**
- * Bring the runtime's registry snapshot of a context graph up to what is
- * stored, holding no lock on entry. When the cache holds another snapshot,
- * every read graph of the context graph with a row is marked dirty under its
- * lock before the cache takes the new one: the layer maintained it under the
- * old membership, and nothing may be built or served from the two mixed.
- * Returns whether the cached snapshot changed.
+ * Bring the runtime's registry of a context graph up to what is stored,
+ * holding no lock on entry. The facts are read without locks, then installed,
+ * snapshot and facts, under the locks of every read graph of the context
+ * graph with a row: the locks the layer takes for every write that may change
+ * the registry. If the cache changed meanwhile, the facts read are older than
+ * that change, and they are read again. When the cache held another snapshot,
+ * every one of those read graphs is marked dirty before the new one is
+ * installed: the layer maintained it under the old membership, and nothing
+ * may be built or served from the two mixed. Returns whether the cached
+ * snapshot changed.
  */
 export async function refreshReadGraphRegistry(context: ReadGraphJobContext, contextGraphId: string): Promise<boolean> {
   const layer = readGraphLayerOf(context.store);
   if (!layer) throw new ReadGraphJobError('This store has no read-graph layer');
   const runtime = layer.runtime;
-  const fresh = await readReadGraphRegistry(readGraphPartitionMaintenanceStore(context.store), contextGraphId, jobOptions(context));
-  const cached = runtime.registries.get(contextGraphId);
-  if (cached !== undefined && sameRegistry(cached, fresh)) return false;
-  const affected = runtime.mirror.rows().map((row) => row.readGraph)
-    .filter((readGraph) => parseReadGraphIri(readGraph)?.scope.contextGraphId === contextGraphId);
-  await runtime.locks.withLocks(affected, async () => {
-    if (cached !== undefined) for (const readGraph of affected) await new ReadGraphJob(context, readGraph, 'mark').markDirtyHeld();
-    runtime.registries.set(fresh);
-  });
-  return cached !== undefined;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const version = runtime.registries.version(contextGraphId);
+    const facts = await readReadGraphRegistryFacts(readGraphPartitionMaintenanceStore(context.store), contextGraphId, jobOptions(context));
+    const fresh = registrySnapshotOfFacts(contextGraphId, facts);
+    const cached = runtime.registries.get(contextGraphId);
+    const changed = cached !== undefined && !sameRegistry(cached, fresh);
+    if (cached !== undefined && !changed && runtime.registries.facts(contextGraphId) !== undefined) return false;
+    const affected = runtime.mirror.rows().map((row) => row.readGraph)
+      .filter((readGraph) => parseReadGraphIri(readGraph)?.scope.contextGraphId === contextGraphId);
+    const installed = await runtime.locks.withLocks(affected, async () => {
+      if (runtime.registries.version(contextGraphId) !== version) return false;
+      if (changed) for (const readGraph of affected) await new ReadGraphJob(context, readGraph, 'mark').markDirtyHeld();
+      runtime.registries.set(fresh, facts);
+      return true;
+    });
+    if (installed) return changed;
+  }
+  throw new ReadGraphJobError(`The registry of ${contextGraphId} kept changing while it was read`);
 }
 
 const INSTALLED_IDENTITIES = new WeakMap<ReadGraphBackendRuntime, string>();
@@ -521,11 +533,8 @@ class ReadGraphJob {
   /** The membership of the read graph under the registry snapshot the layer maintains with, read when there is none. */
   async membership(key: ReadGraphKey): Promise<GraphNameTest> {
     const contextGraphId = key.scope.contextGraphId;
-    let registry = this.runtime.registries.get(contextGraphId);
-    if (!registry) {
-      registry = await readReadGraphRegistry(this.maintenance, contextGraphId, this.options);
-      this.runtime.registries.set(registry);
-    }
+    if (!this.runtime.registries.get(contextGraphId)) await refreshReadGraphRegistry(this.context, contextGraphId);
+    const registry = this.runtime.registries.get(contextGraphId)!;
     return readGraphMembership(key, registry, this.runtime.workingMemoryIdentity);
   }
 
@@ -654,11 +663,6 @@ class ReadGraphJob {
 
 function jobOptions(context: ReadGraphJobContext): QueryOptions {
   return { priority: 'background', source: context.source ?? SOURCE, ...(context.signal ? { signal: context.signal } : {}) };
-}
-
-function sameRegistry(left: ReadGraphRegistrySnapshot, right: ReadGraphRegistrySnapshot): boolean {
-  const same = (a: readonly string[], b: readonly string[]) => a.length === b.length && [...a].sort().every((value, i) => value === [...b].sort()[i]);
-  return same(left.subGraphNames, right.subGraphNames) && same(left.childContextGraphRoots, right.childContextGraphRoots);
 }
 
 function fenceOf(row: ReadGraphStateRow): ReadGraphFence {
