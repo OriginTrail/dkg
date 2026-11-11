@@ -165,7 +165,9 @@ test('profile setup reaches only execution and coverage consumers; checkout iden
   }
   const steps = workflow.jobs.changes.steps;
   assert.ok(steps.findIndex(s => s.id === 'profile') > steps.findIndex(s => s.id === 'plan'));
-  assert.equal(workflow.concurrency['cancel-in-progress'], true);
+  // Pull requests and manual runs are superseded; a protected-branch push runs to completion.
+  const cancels = (event) => Function('github', `return (${/^\$\{\{(.*)\}\}$/.exec(workflow.concurrency['cancel-in-progress'])[1]})`)({ event_name: event });
+  assert.deepEqual(['pull_request', 'workflow_dispatch', 'merge_group', 'push'].map(cancels), [true, true, true, false]);
   // Evaluate the actual workflow's group expression over representative events.
   function group(event, profile = '') {
     const github = { workflow: 'CI', ref: 'refs/heads/candidate', event_name: event, event: { pull_request: {} } };

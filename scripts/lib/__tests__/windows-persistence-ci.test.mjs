@@ -40,7 +40,7 @@ test('Windows groups retain every original test selector exactly once', () => {
     'test/rfc64-durable-file-store-v1.test.ts',
     'test/rfc64-secure-filesystem-policy-v1.test.ts',
   ];
-  assert.equal(job['runs-on'], 'windows-latest');
+  assert.equal(job['runs-on'], 'windows-2025-vs2026');
   assert.equal(job.strategy['fail-fast'], false);
   const selectors = job.strategy.matrix.include.flatMap((group) => group.tests.trim().split(/\s+/));
   assert.deepEqual(selectors.sort(), originalSelectors.sort());
