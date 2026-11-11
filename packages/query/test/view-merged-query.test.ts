@@ -206,6 +206,15 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
     expect((await engine.query(assigned[0]!, MERGED)).bindings).toEqual([{ g: G2, s: 'urn:shared' }]);
     expect((await engine.query(assigned[1]!, MERGED)).bindings).toEqual([{ g: G1, s: 'urn:shared' }]);
     const perAsset: QueryOptions = { ...VM, semantics: 'per-asset' };
+    // On Oxigraph the view's root graph, which the store does not hold, adds no row, also to a block
+    // that assigns its graph variable.
+    if (!endpoint) {
+      const counted = `SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { BIND(IRI("${G1}") AS ?g) } }`;
+      for (const options of [MERGED, perAsset]) {
+        const n = (await engine.query(counted, options)).bindings[0]!.n!;
+        expect(Number.parseInt(n.replace(/^"(\d+)".*$/, '$1'), 10), options.semantics).toBe(1);
+      }
+    }
     for (const sparql of [
       ...assigned,
       'SELECT ?g ?x WHERE { GRAPH ?g { VALUES ?x { <urn:x:1> <urn:x:2> } } }',

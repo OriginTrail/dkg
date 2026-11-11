@@ -6,7 +6,7 @@ import { runStorageACKOperation } from './storage-ack-diagnostics.js';
 import { requireStorageACKContextGraphId } from './internal/storage-ack-context-graph.js';
 import { resolveConfiguredNetworkIdentity } from './configured-network-identity.js';
 import { snapshotCoreChainCacheNetworks } from './core-chain-cache-config.js';
-import { assertionLifecycleAuthorCandidates } from '@origintrail-official/dkg-publisher';
+import { viewQueryEngineOptionsOf } from './read-graph-view-source.js';
 import { durableAssertionShareMethods } from './internal/promote/durable-assertion-share.js';
 import { normalizeAgentPreparedCacheConfig } from './prepared-cache-config.js';
 import { PublicSnapshotMethods, PublicCheckpointMethods } from './dkg-agent-public-snapshot.js';
@@ -166,7 +166,7 @@ import {
   type WorkspaceAgentRecipientResolverInput,
   type WorkspaceSenderKeyEncryptInput, type DurableRootPromotionIdentity,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
-  DEFAULT_REQUIRED_ACKS,
+  DEFAULT_REQUIRED_ACKS, assertionLifecycleAuthorCandidates,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -1615,7 +1615,7 @@ export class DKGAgent extends DKGAgentBase {
       log.warn(createOperationContext('init'), `Failed to migrate SWM attribution to agent DID, continuing without: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    const queryEngine = new DKGQueryEngine(agentStore);
+    const queryEngine = new DKGQueryEngine(agentStore, viewQueryEngineOptionsOf(store));
 
     const agent = new DKGAgent(
       resolvedConfig, wallet, node, agentStore, publishedLifecycleWriter, ledgerTimestampWriter, storageAckCopyCleanupWriter, publisher, queryEngine, eventBus, chain,
