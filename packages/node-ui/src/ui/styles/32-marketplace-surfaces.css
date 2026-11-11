@@ -57,6 +57,9 @@
 .mkt-card h3 { font-size: var(--fs-md); }
 .mkt-flow { display: grid; gap: var(--sp-4); }
 .mkt-wrap { flex-wrap: wrap; }
+/* A Core node line: separate requirements, each with its check; the gaps separate them. */
+.mkt-corenode { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-4); }
+.mkt-corenode-item { display: inline-flex; align-items: center; gap: var(--sp-1); }
 .mkt-linkbtn { background: none; border: 0; padding: 0; color: var(--interactive); cursor: pointer; font-size: inherit; text-decoration: underline; text-underline-offset: 2px; }
 .mkt-chipbtn { border: 1px solid var(--interactive); border-radius: var(--r-full); padding: var(--sp-1) var(--sp-3); font-size: var(--fs-xs); background: transparent; color: var(--interactive); cursor: pointer; }
 button.mkt-chipadd { background: transparent; cursor: pointer; }
