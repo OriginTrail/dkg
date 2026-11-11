@@ -9,7 +9,7 @@ import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import type { QueryOptions } from '../src/query-engine.js';
 import { ScopedQueryViolationError } from '../src/scoped-query-error.js';
 import { SemanticsUnsupportedError, ViewNotReadyError, type ViewReadGraphs } from '../src/view-dataset-plan.js';
-import { ViewSemanticsDeltaSampler } from '../src/view-semantics-delta.js';
+import { VIEW_SEMANTICS_DELTA_SOURCE, ViewSemanticsDeltaSampler } from '../src/view-semantics-delta.js';
 
 // CI's tornado-blazegraph lane runs this file on a live server; elsewhere it runs on Oxigraph.
 const endpoint = process.env.BLAZEGRAPH_TEST_URL;
@@ -284,12 +284,24 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
 
   it('samples view queries that could be answered merged, and runs each both ways once', async () => {
     fresh();
-    // Both reads of a sample run under the read graph's write lock.
+    // Every store read of a sample runs while the read graph's write lock is held.
     const locked: string[] = [];
+    let holding = false;
     readGraphs.withWriteLock = async <T>(readGraph: string, work: () => Promise<T>): Promise<T> => {
       locked.push(readGraph);
-      return work();
+      holding = true;
+      try {
+        return await work();
+      } finally {
+        holding = false;
+      }
     };
+    const query = store.query.bind(store);
+    const sampleReads: boolean[] = [];
+    vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+      if (options?.source === VIEW_SEMANTICS_DELTA_SOURCE) sampleReads.push(holding);
+      return query(sparql, options);
+    });
     const sampler = new ViewSemanticsDeltaSampler({ sampleRate: 1 });
     const sampling = new DKGQueryEngine(store, { readGraphs, viewSemanticsDelta: sampler });
     const unpriced = 'SELECT ?p WHERE { ?p a <urn:Product> FILTER NOT EXISTS { ?p <urn:price> ?x } }';
@@ -302,6 +314,8 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
     await sampling.query(JOIN, { ...VM, minTrust: TrustLevel.Endorsed });
     await sampler.idle();
     expect(locked).toEqual([READ, READ]);
+    expect(sampleReads.length).toBeGreaterThanOrEqual(4);
+    expect(sampleReads.every(Boolean)).toBe(true);
     const [summary, ...others] = sampling.viewSemanticsDeltaReport([id]);
     expect(others).toEqual([]);
     expect(summary).toMatchObject({ contextGraphId: id, samples: 2, skipped: 0,

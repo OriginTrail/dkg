@@ -73,13 +73,27 @@ describe('the semantic-delta sampler', () => {
   it('runs a sample both ways in the background, under the write lock, and keeps the summary', async () => {
     const onDelta = vi.fn();
     const sampler = new ViewSemanticsDeltaSampler({ sampleRate: 1, onDelta, now: at(5) });
-    const lock = vi.fn(async <T>(work: () => Promise<T>) => work());
-    const { offered, run } = sample({ perAsset: rows('1'), merged: rows('1', '2') }, { withWriteLock: lock });
-    sampler.offer(offered);
+    let locked = false;
+    const lock = vi.fn(async <T>(work: () => Promise<T>) => {
+      locked = true;
+      try {
+        return await work();
+      } finally {
+        locked = false;
+      }
+    });
+    // Whether each read, and the check after them, ran while the lock was held.
+    const inside: string[] = [];
+    const { offered, run } = sample({ perAsset: rows('1'), merged: rows('1', '2') }, {
+      withWriteLock: lock,
+      isCurrent: () => { inside.push(`check ${locked}`); return true; },
+    });
+    sampler.offer({ ...offered, run: (semantics, signal) => { inside.push(`${semantics} ${locked}`); return run(semantics, signal); } });
     // The caller's answer does not wait: the sample runs after the current turn.
     expect(run).not.toHaveBeenCalled();
     await sampler.idle();
     expect(lock).toHaveBeenCalledTimes(1);
+    expect(inside).toEqual(['per-asset true', 'merged true', 'check true']);
     expect(run.mock.calls.map(([semantics]) => semantics)).toEqual(['per-asset', 'merged']);
     // Both reads share the sample's deadline, which they finished before.
     const [[, first], [, second]] = run.mock.calls;
