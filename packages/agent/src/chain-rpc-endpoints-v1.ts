@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { resolveRpcUrls } from '@origintrail-official/dkg-chain';
+import { resolveRpcUrls, type ChainAdapter } from '@origintrail-official/dkg-chain';
 
 /**
  * The trusted RPC endpoints of the node's chain, for reads that open their own
@@ -11,14 +11,13 @@ import { resolveRpcUrls } from '@origintrail-official/dkg-chain';
  * means the node has no endpoint, so finalized-chain heads are refused.
  */
 export function resolveChainRpcEndpointsV1(
-  chain: object,
+  chain: Pick<ChainAdapter, 'getRpcUrls'>,
   config: { readonly rpcUrl: string; readonly rpcUrls?: string[] } | undefined,
 ): readonly string[] | null {
-  // `getRpcUrls` is a method of the EVM and mock adapters, not of the
-  // `ChainAdapter` interface, so an adapter without it falls back.
-  const { getRpcUrls } = chain as { readonly getRpcUrls?: unknown };
-  const fromAdapter: unknown = typeof getRpcUrls === 'function'
-    ? getRpcUrls.call(chain)
+  // The capability is optional, and an adapter built outside this repository
+  // may answer anything: a missing, empty, blank or malformed list falls back.
+  const fromAdapter: unknown = typeof chain.getRpcUrls === 'function'
+    ? chain.getRpcUrls()
     : undefined;
   if (
     Array.isArray(fromAdapter)
