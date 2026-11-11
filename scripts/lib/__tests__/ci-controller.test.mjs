@@ -225,12 +225,12 @@ test('every rotation shim is recorded next to the controller pin', () => {
   assert.deepEqual(recorded.sort(), shims.sort());
 });
 
-test('the build job fetches the pinned controller through the canonical pin validator', () => {
+test('the repository checks job fetches the pinned controller through the canonical pin validator', () => {
   // The pinned-parser check below reads the pinned controller from git
-  // history. The build job's shallow checkout fetches it by the ref the pin
-  // validator derives, so workflow layout cannot change which ref it fetches.
-  // A complete clone fetches it without a depth limit, since one would make
-  // the clone shallow.
+  // history. The repository checks job's shallow checkout fetches it by the
+  // ref the pin validator derives, so workflow layout cannot change which ref
+  // it fetches. A complete clone fetches it without a depth limit, since one
+  // would make the clone shallow.
   assert.equal(pinnedControllerRef(), TRUSTED_CI_CONTROLLER_SHA);
   const fetches = (isShallowOutput) => {
     const calls = [];
@@ -243,13 +243,13 @@ test('the build job fetches the pinned controller through the canonical pin vali
   };
   assert.deepEqual(fetches('true\n'), [['git', ['fetch', '--no-tags', '--depth=1', 'origin', TRUSTED_CI_CONTROLLER_SHA], { stdio: 'inherit' }]]);
   assert.deepEqual(fetches('false\n'), [['git', ['fetch', '--no-tags', 'origin', TRUSTED_CI_CONTROLLER_SHA], { stdio: 'inherit' }]]);
-  const { steps } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')).jobs.build;
+  const { steps } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')).jobs['repository-checks'];
   const fetch = steps.findIndex(({ run = '' }) => run.trim() === 'node scripts/ci/fetch-trusted-controller.mjs');
   const scriptTests = steps.findIndex(({ run = '' }) => run.includes('pnpm run test:scripts'));
   assert.ok(fetch !== -1 && fetch < scriptTests, 'the fetch runs before the repository-script tests');
 });
 
-test('the build job fetches protected history back past the pin, deepening only recent tips', () => {
+test('the repository checks job fetches protected history back past the pin, deepening only recent tips', () => {
   // The provenance test below needs each protected branch's history back to
   // the pin. A shallow checkout fetches each tip, then deepens to a day
   // before the pin's commit date only the branches whose tip is that recent:
@@ -309,7 +309,7 @@ test('the build job fetches protected history back past the pin, deepening only 
     tips, dated, ...PROTECTED_HISTORY_DEEPEN_STEPS.flatMap((generations) => ['prune --expire=never', deepen(generations)]),
   ], 'a pin still out of reach after the last step is left for the provenance test to report');
 
-  // A fetch that fails fails the build step instead of leaving the check to
+  // A fetch that fails fails the fetch step instead of leaving the check to
   // run against whatever history is there.
   for (const failing of ['--shallow-since', '--deepen=1']) {
     assert.throws(() => fetchProtectedHistory({
@@ -371,7 +371,7 @@ test('the protected history fetch reaches a pin hidden behind merges of older br
   commit('tip', pinDate + 14_400);
   git(origin, pinDate, 'config', 'uploadpack.allowAnySHA1InWant', 'true');
 
-  // The build job's checkout: shallow, with the pin fetched at depth 1.
+  // The repository checks job's checkout: shallow, with the pin fetched at depth 1.
   const checkout = () => {
     const directory = temporaryDirectory('dkg-pin-checkout-');
     git(directory, pinDate, 'init', '--quiet');
@@ -401,8 +401,8 @@ test('the protected history fetch reaches a pin hidden behind merges of older br
 test('the pinned controller is already on protected branch history', (t) => {
   // The workflows run the planner and aggregate gates from the pin, so it must
   // be reviewed history: an ancestor of protected testnet-canary or main. The
-  // build job fetches both from origin before this suite runs; a branch that
-  // is missing here counts as not containing the pin.
+  // repository checks job fetches both from origin before this suite runs; a
+  // branch that is missing here counts as not containing the pin.
   const branch = protectedBranchContaining(TRUSTED_CI_CONTROLLER_SHA, { cwd: REPO_ROOT });
   assert.ok(
     branch,
@@ -454,8 +454,9 @@ test('workflow controller invocations stay within the current and pinned parsers
     script,
     parserOptions(fs.readFileSync(path.join(REPO_ROOT, `scripts/ci/${script}.mjs`), 'utf8')),
   ]));
-  // The build job fetches the pinned revision before running this suite; a
-  // missing revision fails rather than silently skipping the pinned half.
+  // The repository checks job fetches the pinned revision before running this
+  // suite; a missing revision fails rather than silently skipping the pinned
+  // half.
   let pinned;
   try {
     pinned = Object.fromEntries(scripts.map((script) => [script, parserOptions(execFileSync('git', [
@@ -684,6 +685,43 @@ test('every planner output is wired to a real workflow job and omitted tests sta
     assert.equal(source.includes('--sample-key'), false, `${name} must not request audit sampling`);
   }
   assert.match(evmWorkflow, /^  evm-gate:/m);
+});
+
+test('the repository checks run beside the lanes, and the gate requires them wherever the build succeeded', () => {
+  // No lane consumes what the repository checks produce, so only the gate
+  // waits for them; they run on the shared build's condition and restored
+  // outputs. The trusted controller fails the gate on a job it does not know
+  // only when that job failed or was cancelled, so the gate's own step
+  // requires their success whenever the build succeeded. A plan that skips
+  // the build skips them too.
+  const { jobs } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
+  const checks = jobs['repository-checks'];
+  assert.deepEqual(checks.needs, ['changes', 'build']);
+  assert.equal(checks.if, jobs.build.if);
+  const runs = checks.steps.map(({ run = '' }) => run.trim());
+  const restore = runs.indexOf('tar -xzf /tmp/build-outputs.tgz');
+  assert.ok(restore !== -1 && restore < runs.indexOf('pnpm run test:scripts'), 'the script tests run on the restored build outputs');
+  const scriptRunners = Object.keys(jobs).filter((job) => jobs[job].steps?.some(({ run = '' }) => run.trim() === 'pnpm run test:scripts'));
+  assert.deepEqual(scriptRunners, ['repository-checks']);
+  const waiting = Object.keys(jobs).filter((job) => [jobs[job].needs].flat().includes('repository-checks'));
+  assert.deepEqual(waiting, ['ci-gate'], 'only the gate waits for the repository checks');
+
+  const { steps } = jobs['ci-gate'];
+  const verdict = steps.find((step) => step.name === 'Require the repository checks verdict');
+  assert.equal(verdict.if, 'always()');
+  assert.deepEqual(verdict.env, {
+    BUILD_RESULT: '${{ needs.build.result }}',
+    REPOSITORY_CHECKS_RESULT: '${{ needs.repository-checks.result }}',
+  });
+  assert.ok(steps.indexOf(verdict) < steps.findIndex((step) => step.name === 'Verify selected lanes completed'));
+  for (const build of ['success', 'failure', 'cancelled', 'skipped']) {
+    for (const result of ['success', 'failure', 'cancelled', 'skipped', '']) {
+      const executed = spawnSync('bash', ['-e', '-c', verdict.run], {
+        env: { ...process.env, BUILD_RESULT: build, REPOSITORY_CHECKS_RESULT: result },
+      });
+      assert.equal(executed.status === 0, build !== 'success' || result === 'success', `build ${build}, repository checks ${result || '(none)'}`);
+    }
+  }
 });
 
 test('all shared Hardhat consumers require and restore the matching artifact', () => {
