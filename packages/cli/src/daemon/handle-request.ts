@@ -321,6 +321,7 @@ import { handleStatusRoutes } from './routes/status.js';
 import { handleBackpressureRoutes } from './routes/backpressure.js';
 import { handleViewSemanticsRoutes } from './routes/view-semantics.js';
 import { handleCpuProfileRoutes } from './routes/cpu-profile.js';
+import { handleReadGraphRoutes } from './routes/read-graphs.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
 import { handleOpenclawRoutes } from './routes/openclaw.js';
 import { handleHermesRoutes } from './routes/hermes.js';
@@ -397,6 +398,9 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
   if (res.writableEnded) return;
 
   await handleCpuProfileRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleReadGraphRoutes(ctx);
   if (res.writableEnded) return;
 
   await handleAgentChatRoutes(ctx);

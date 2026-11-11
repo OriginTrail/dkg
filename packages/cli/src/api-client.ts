@@ -40,6 +40,10 @@ import {
 } from './finalized-publish-options.js';
 import { parseRegisterPcaAgentResult, type RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { CPU_PROFILE_PATH, cpuProfileRequestTimeoutMs, type CpuProfileResult } from './cpu-profile-wire.js';
+import type { Dispatcher } from 'undici';
+import { DaemonOutcomeUnknownError } from './daemon-outcome-unknown-error.js';
+import { longRequestDispatcher } from './daemon/local-agent-channel-fetch.js';
+import { READ_GRAPHS_PATH, READ_GRAPHS_REQUEST_TIMEOUT_MS, readGraphsStatusPath, type ReadGraphsAction, type ReadGraphsRequest } from './read-graphs-wire.js';
 import {
   serializeStatusQuery,
   type StatusQueryOptions,
@@ -71,28 +75,7 @@ export type { KnowledgeAssetWritableQuad } from './knowledge-asset-write-contrac
 const VERIFY_DEFAULT_COLLECTION_TIMEOUT_MS = 30 * 60_000;
 const REQUEST_CARRIED_TIMEOUT_MARGIN_MS = 30_000;
 
-/**
- * A long Knowledge Asset mutation (`vm/publish`, `swm/share`, `wm/import-file`,
- * or a create that also shares or publishes) reached the daemon but no response
- * arrived before the client deadline. The daemon keeps working after the client
- * disconnects, so the operation may still complete, and a blind retry can 409.
- */
-export class DaemonOutcomeUnknownError extends Error {
-  readonly code = 'OUTCOME_UNKNOWN';
-  readonly method: string;
-  readonly path: string;
-  readonly timeoutMs: number;
-  constructor(method: string, path: string, timeoutMs: number, historyHint: string) {
-    super(
-      `Outcome unknown: the daemon did not answer ${method} ${path} within ${Math.round(timeoutMs / 1000)}s. ` +
-      `It keeps working after the client disconnects, so the operation may still complete. ${historyHint}`,
-    );
-    this.name = 'DaemonOutcomeUnknownError';
-    this.method = method;
-    this.path = path;
-    this.timeoutMs = timeoutMs;
-  }
-}
+export { DaemonOutcomeUnknownError };
 
 interface RequestDeadline {
   /** Overrides the method's default deadline. */
@@ -102,6 +85,8 @@ interface RequestDeadline {
    * {@link DaemonOutcomeUnknownError} carrying this hint.
    */
   outcomeUnknownHint?: string;
+  /** For a request that may run past undici's 300 s header and body timers: a dispatcher whose timers outlast the deadline. */
+  dispatcher?: Dispatcher;
 }
 
 /**
@@ -2429,6 +2414,16 @@ export class ApiClient {
       { timeoutMs: cpuProfileRequestTimeoutMs(seconds) });
   }
 
+  /**
+   * Node-admin token only: the node's read graphs (`dkg store read-graphs`).
+   * `status` lists them; `check`, `rebuild` and `drop` act on them.
+   */
+  async readGraphs<T>(action: ReadGraphsAction, request: ReadGraphsRequest = {}): Promise<T> {
+    if (action === 'status') return this.get<T>(readGraphsStatusPath(request));
+    const timeoutMs = READ_GRAPHS_REQUEST_TIMEOUT_MS;
+    return this.post<T>(`${READ_GRAPHS_PATH}/${action}`, request, { timeoutMs, dispatcher: longRequestDispatcher(timeoutMs) });
+  }
+
   async shutdown(): Promise<void> {
     try {
       await this.post('/api/shutdown', {});
@@ -2475,7 +2470,7 @@ export class ApiClient {
 
   private async send<T>(path: string, init: RequestInit, deadline: RequestDeadline = {}): Promise<T> {
     return this.withDeadline(init.method ?? 'GET', path, deadline, async (signal) => {
-      const res = await fetch(`${this.baseUrl}${path}`, { ...init, signal });
+      const res = await fetch(`${this.baseUrl}${path}`, { ...init, signal, ...(deadline.dispatcher ? { dispatcher: deadline.dispatcher } : {}) } as RequestInit);
       if (!res.ok) {
         const data = await res.json().catch(() => ({ error: res.statusText }));
         throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);

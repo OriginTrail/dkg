@@ -138,6 +138,9 @@ export default defineConfig({
           'test/cpu-profile-command.test.ts',
           'test/cpu-profile-real.test.ts',
           'test/cpu-profile-live.test.ts',
+          // Node-admin read-graph commands: routes on a real read-graph layer, command and client.
+          'test/read-graphs-route.test.ts',
+          'test/read-graphs-command.test.ts',
           'test/private-access-route.test.ts',
           // R8 — #1085 /register policy-matrix route tests, extracted from
           // daemon-http-behavior-extra so they run here (pure route handler,
