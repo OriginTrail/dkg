@@ -3,7 +3,7 @@ import { createScopedContentGraphRoutePolicy, selectScopedRoutePartitions, selec
 import { normalizeContextGraphPartitionReadOptions, readPartitionStatistics, type NamedGraphStatsBatchGate } from './named-graph-statistics.js';
 import { QueryResultTooLargeError } from './query-result-size-error.js';
 import { type ContentPartition } from './content-partition-policy.js';
-import { classifyScopedContentGraph, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
+import { classifyScopedContentGraph, isKnownChildContextGraphPartition, queryOptionNamingReadGraphPartition } from './scoped-content-partition.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
 import { readScopedContentGraphCatalog, readRegisteredViewSubGraphs, readChildContextGraphAuthority } from './scoped-content-graph-catalog.js';
 import { resolveLegacyRouteScope } from './legacy-route-scope.js';
@@ -11,7 +11,8 @@ import { resolveQueryReadPlan, type QueryReadPlan } from './query-read-plan.js';
 import { storeOptions } from './query-store-options.js';
 import {
   asGraphWriteRevisionSource, asQueryReadAdmissionCapability,
-  isSparqlHttpResponseError, sparqlEngineOf, StoreResponseTooLargeError,
+  isQueryDatasetUnrestrictedError, isSparqlHttpResponseError, preparedSparqlNamesReadGraphPartition, sparqlEngineOf,
+  StoreResponseTooLargeError, storeMayHoldReadGraphPartitions,
 } from '@origintrail-official/dkg-storage';
 import type {
   SparqlEngineFamily,
@@ -78,6 +79,7 @@ import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
 import {
   createQueryStoreReadContext,
+  estimateMaterializedBytes,
   requireQueryDataset,
   type QueryStoreReadContext,
   type StoreReadLane,
@@ -381,6 +383,14 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     if (!guard.safe) {
       throw new Error(`SPARQL rejected: ${guard.reason}`);
     }
+    // Read-graph partitions belong to storage: no caller query may name one, in its text or its options.
+    if (preparedSparqlNamesReadGraphPartition(prepared)) {
+      throw new ScopedQueryViolationError('the query names a graph in a read-graph partition');
+    }
+    const partitionOption = queryOptionNamingReadGraphPartition(options);
+    if (partitionOption !== undefined) {
+      throw new ScopedQueryViolationError(`the query option ${partitionOption} names a read-graph partition`);
+    }
     // Policy checks and rewrites retain the prepared source/logical views.
     // Active UCHAR syntax is materialized once, immediately before the final
     // caller query crosses the store boundary.
@@ -401,12 +411,21 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       case 'scoped': return this.queryScoped(initialGraphScope, options, plan, this.requireReadDatasets(reads));
       case 'view': return this.queryView(initialGraphScope, plan.options, this.requireReadDatasets(reads), reads.catalog);
       case 'unscoped': {
-        // The store answers over its dataset without the withheld graphs.
+        // The store answers over its dataset without the withheld graphs. While
+        // it may hold read-graph partitions, every unscoped query runs over its
+        // visible dataset, or is refused where the store cannot restrict it.
         const withheld = options?.withheldGraphRoots ?? [];
         if (withheld.length) assertWithheldGraphQuery(initialGraphScope);
-        return this.execWithExclusions(initialGraphScope, withheld.length
+        const hidesReadGraphs = withheld.length === 0 && storeMayHoldReadGraphPartitions(this.store);
+        const scopeRequired = () => new ScopedQueryViolationError(
+          'this store cannot answer that query without a context graph now; give the query a context graph');
+        if (hidesReadGraphs && initialGraphScope.hasDatasetClause) throw scopeRequired();
+        return this.execWithExclusions(initialGraphScope, withheld.length > 0 || hidesReadGraphs
           ? reads.withWithheldGraphRoots(withheld) : reads,
-        options?.excludeGraphPrefixes);
+        options?.excludeGraphPrefixes).catch((error: unknown) => {
+          if (hidesReadGraphs && isQueryDatasetUnrestrictedError(error)) throw scopeRequired();
+          throw error;
+        });
       }
     }
   }
@@ -443,8 +462,13 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     switch (plan.discovery.catalog.kind) {
       case 'none': return execute(null);
       case 'shared': return this.resolveScopedContentGraphDiscovery(plan.policy.contextGraphId, reads).then(execute);
-      case 'admission-owned': return plan.discovery.catalog.owner.withQueryReadAdmission(async () =>
-        execute(await this.discoverScopedContentGraphDiscovery(plan.policy.contextGraphId, reads.catalog)), storeOptions(options));
+      case 'admission-owned': return plan.discovery.catalog.owner.withQueryReadAdmission(async () => {
+        // Complete admission needs a store that names its visible graphs, so the discovery reads them
+        // with the registry facts in one query; the caller pays for the graph names it returns.
+        const discovery = await this.discoverScopedContentGraphDiscovery(plan.policy.contextGraphId, reads.catalog);
+        reads.materializationBudget?.consumeBytes(estimateMaterializedBytes(discovery.inventory));
+        return execute(discovery);
+      }, storeOptions(options));
     }
   }
 
@@ -1024,8 +1048,13 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       laneKey: reads.shared.cacheKey,
       graphPrefix,
       signal: reads.signal,
-      load: () => reads.shared.measure(discoveryReads =>
-        this.discoverScopedContentGraphDiscovery(contextGraphId, discoveryReads)),
+      // The caller pays for the graph names the discovery returns, read by a prefix listing or
+      // with the registry facts in one query; the registry and authority answers stay node work.
+      load: async () => {
+        const { snapshot } = await reads.shared.measure(discoveryReads =>
+          this.discoverScopedContentGraphDiscovery(contextGraphId, discoveryReads));
+        return { snapshot, byteCount: estimateMaterializedBytes(snapshot.inventory) };
+      },
     });
     return reads.shared.replay(discovery);
   }

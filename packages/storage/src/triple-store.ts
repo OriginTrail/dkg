@@ -32,9 +32,8 @@ import type {
   Rfc64ExactBindingsReadOperationV1,
   Rfc64SemanticReadCapabilityResultV1,
 } from './rfc64-exact-bindings-read-capability.js';
-import {
-  getManagedOxigraphRuntimeConstructionAuthorityV1,
-} from './managed-oxigraph-runtime-store.js';
+import { getManagedOxigraphRuntimeConstructionAuthorityV1 } from './managed-oxigraph-runtime-store.js';
+import { guardReadGraphPartition } from './read-graph-partition-store.js';
 
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 
@@ -124,9 +123,9 @@ export interface QueryOptions {
   /** Independent bound on hydrated literal bytes; defaults to maxResponseBytes. */
   maxLiteralHydrationBytes?: number;
   /**
-   * Named graphs the query must not read: each IRI and every graph below it. The
-   * query runs over the default graph and every other named graph, replacing any
-   * dataset it names; a store that cannot restrict its dataset refuses it.
+   * Named graphs the query must not read: each IRI and every graph below it. The query
+   * runs over the default graph and every other visible named graph, replacing any
+   * dataset it names. A store that cannot restrict its dataset refuses a non-empty list.
    */
   withheldGraphRoots?: readonly string[];
 }
@@ -326,7 +325,7 @@ export interface TripleStore {
    */
   readonly graphEnumerationVisibility?: (graph: string) => boolean;
   listGraphs(options?: QueryOptions): Promise<string[]>;
-  /** Internal measured enumeration; decorators retain source cost across projections. */
+  /** Measured enumeration: the graphs returned, sized as returned; its full reads run under the internal ceiling. */
   readGraphInventory?(prefix: string | undefined, options?: QueryOptions): Promise<MeasuredGraphInventory>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 
@@ -707,7 +706,7 @@ export async function createTripleStore(
     );
   }
   const constructionAuthority = getManagedOxigraphRuntimeConstructionAuthorityV1(config);
-  const store = await factory(resolveAdapterOptions(config), constructionAuthority);
+  const store = guardReadGraphPartition(await factory(resolveAdapterOptions(config), constructionAuthority));
   const largeLiteralStorage = resolveLargeLiteralStorageOptions(config);
   const withLargeLiteralStorage = largeLiteralStorage
     ? new SharedMemoryLiteralBlobStore(store, largeLiteralStorage)

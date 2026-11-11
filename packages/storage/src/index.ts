@@ -3,6 +3,12 @@ export { sparqlEngineOf, type SparqlEngineFamily } from './sparql-engine-capabil
 export { SparqlTsvResultsShapeError } from './sparql-tsv-query-result.js';
 export { SparqlResultsShapeError } from './sparql-results-shape-error.js';
 export { nonEmptyNamedGraphEnumerationPattern } from './adapters/graph-enumeration-query.js';
+export { preparedSparqlNamesReadGraphPartition } from './read-graph-partition-reference.js';
+export { isReadGraphPartitionGraph } from './graph-enumeration-visibility.js';
+export { dropReadGraphPartitions, noteStoreMayHoldReadGraphPartitions, storeMayHoldReadGraphPartitions } from './read-graph-partition-store.js';
+export { clearReadGraphPartitionsNote, mayHoldReadGraphPartitions } from './read-graph-partition-marker.js';
+export { markReadGraphsDirtyAtStart } from './read-graph-partition-startup.js';
+export { isQueryDatasetUnrestrictedError } from './withheld-graph-query.js';
 export {
   BlazegraphNamespaceManager,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
@@ -202,6 +208,7 @@ export {
   type SortedGraphCatalog,
   type SortedGraphSetSource,
 } from './graph-set-index-store.js';
+export type { GraphSetRevalidation } from './graph-set-refresh.js';
 export {
   CHANGELOG_GRAPH,
   CHANGELOG_SCHEMA_VERSION,
@@ -441,4 +448,14 @@ export {
   type ReadGraphWritePlan,
   type TripleStoreMethodName,
 } from './read-graph/adapter-contract.js';
+export {
+  DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES,
+  STORE_GRAPH_CATALOG_LIMIT_NAME,
+  STORE_GRAPH_CATALOG_MAX_BYTES_ENV,
+  STORE_INTERNAL_LIMIT,
+  StoreInternalLimitError,
+  isStoreInternalLimitError,
+  storeGraphCatalogMaxBytes,
+  type StoreInternalLimitErrorLike,
+} from './graph-catalog-internal-limit.js';
 export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';

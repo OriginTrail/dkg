@@ -357,6 +357,8 @@ export default defineConfig({
       "test/selected-swm-meta-transfer-coordinator.test.ts",
       "test/selected-swm-meta-budget.test.ts",
       "test/legacy-sync-graph-candidate.test.ts",
+      // Read-graph partitions stay out of every enumerating surface.
+      "test/read-graph-partition-comparison.test.ts",
       "test/outbox-shutdown-lifecycle.test.ts",
       // Keyed persist scheduler shared by membership and subscription writes,
       // and the subscription drain / reopen that stop() and start() drive.
