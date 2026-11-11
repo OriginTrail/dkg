@@ -140,6 +140,8 @@ describe('planGraphDataset', () => {
     ['SELECT ?g ?s WHERE { GRAPH ?g { SELECT ?s WHERE { ?s ?p ?o } } }', expected('dataset', named), expected('dataset', both)],
     // A block that assigns its graph variable reads one constant branch per graph on Oxigraph.
     ['SELECT ?g ?s WHERE { GRAPH ?g { BIND(<urn:g:1> AS ?g) ?s ?p ?o } }', expected('named', named, { bindCallerGraphs: true }), expected('values', both)],
+    ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o OPTIONAL { BIND(<urn:g:1> AS ?g) } } }', expected('named', named, { bindCallerGraphs: true }), expected('values', both)],
+    ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o { SELECT (<urn:g:1> AS ?g) WHERE {} } } }', expected('named', named, { bindCallerGraphs: true }), expected('dataset', both)],
     ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o VALUES ?g { <urn:g:1> } } }', expected('named', named), expected('values', both)],
     ['SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o FILTER(?g != <urn:g:2>) } }', expected('named', named), expected('values', both)],
   ] as const)('fully plans %s', (query, oxigraph, other) => {
@@ -622,6 +624,15 @@ describe.each(OXIGRAPH_STORES)('scoped reads on an Oxigraph store (%s)', (_kind,
     }
     const outside = await engine.query(`SELECT ?g ?s WHERE { GRAPH ?g { BIND(<${DATA[1]}> AS ?g) ?s <urn:label> ?l } }`, shared);
     expect(outside.bindings).toEqual([]);
+    // Nested assignments: a group or a subquery binds the graph, or an OPTIONAL may.
+    for (const body of [`?s <urn:label> ?l { BIND(<${SHARED[0]}> AS ?g) }`, `?s <urn:label> ?l { SELECT (<${SHARED[0]}> AS ?g) WHERE {} }`]) {
+      const scoped = await engine.query(`SELECT ?g ?s WHERE { GRAPH ?g { ${body} } }`, shared);
+      expect(rows(scoped.bindings), body).toEqual(rows(labelled));
+    }
+    const plain = await engine.query('SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:label> ?l } }', shared);
+    const optional = await engine.query(`SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:label> ?l OPTIONAL { BIND(<${SHARED[0]}> AS ?g) } } }`, shared);
+    expect(rows(optional.bindings)).toEqual(rows(plain.bindings));
+    expect(plain.bindings.length).toBeGreaterThan(labelled.length);
   });
 
   it('leaves graphs the store does not hold out of patterns that need no triple', async () => {
