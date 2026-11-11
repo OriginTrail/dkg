@@ -11,8 +11,11 @@
  * theirs gets a new generation and the state `dirty`, whatever its state, so
  * nothing an earlier process left in flight passes a fence; a damaged row, or
  * one whose generation cannot grow, is replaced by a dirty row at a new random
- * generation. A working-memory read graph is marked dirty as well, because the
- * identity rule it was built under is not recorded. The rows it does not
+ * generation. A working-memory read graph is kept the same way only when the
+ * node's data directory records the identity it was built under: start-up
+ * installs that rule, and the agent's own installation then marks dirty those
+ * whose agent owns other addresses (`installWorkingMemoryIdentity`). Without
+ * a record it is marked dirty. The rows it does not
  * maintain take the rule of a release that does not maintain read graphs:
  * dirty, unless they already are.
  *
@@ -30,9 +33,11 @@ import { markReadGraphsDirtyAtStart } from '../read-graph-partition-startup.js';
 import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore } from '../read-graph-partition-store.js';
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
+import { workingMemoryIdentityRule } from './membership.js';
 import { readGraphLayerOf } from './read-graph-store.js';
 import { keepsAnyReadGraph, readGraphModeOf } from './settings.js';
 import { readReadGraphRegistryFacts, registrySnapshotOfFacts } from './registry-recognition.js';
+import { noteReadGraphDataDir, recordedWorkingMemoryIdentity } from './working-memory-identity.js';
 import {
   CURRENT_READ_GRAPH_VERSIONS,
   MAX_READ_GRAPH_GENERATION,
@@ -80,6 +85,9 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
   if (!maintains || !layer || missingReadGraphMethods(layer.innerStore, layer.adapterCapabilities).length > 0) {
     return { marked: await markReadGraphsDirtyAtStart(store, options), maintained: 0 };
   }
+  const recorded = options.dataDir === undefined ? undefined : recordedWorkingMemoryIdentity(options.dataDir);
+  if (options.dataDir !== undefined) noteReadGraphDataDir(layer.runtime, options.dataDir);
+  if (recorded !== undefined) layer.runtime.workingMemoryIdentity = workingMemoryIdentityRule(recorded);
   const target = readGraphPartitionMaintenanceStore(store);
   const versions = options.versions ?? CURRENT_READ_GRAPH_VERSIONS;
   const queryOptions: QueryOptions = { priority: 'background', source: 'storage.readGraphStartup', ...(options.signal ? { signal: options.signal } : {}) };
@@ -100,7 +108,7 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
   const marked: string[] = [];
   const replaced = found.damaged.filter((readGraph) => parseReadGraphIri(readGraph) !== undefined);
   for (const row of found.rows) {
-    if (maintained(row.readGraph) ? keepsReady(row, versions) : row.state === 'dirty') continue;
+    if (maintained(row.readGraph) ? keepsReady(row, versions, recorded !== undefined) : row.state === 'dirty') continue;
     (row.generation < MAX_READ_GRAPH_GENERATION ? marked : replaced).push(row.readGraph);
   }
   if (marked.length + replaced.length > 0) {
@@ -133,10 +141,10 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
   return { marked: count, maintained: mirror.size };
 }
 
-/** A maintained row that stays `ready`: built under accepted versions, outside working memory. */
-function keepsReady(row: ReadGraphStateRow, versions: ReadGraphVersions): boolean {
+/** A maintained row that stays `ready`: built under accepted versions, and in working memory only under a recorded identity. */
+function keepsReady(row: ReadGraphStateRow, versions: ReadGraphVersions, identityRecorded: boolean): boolean {
   return row.state === 'ready' && isReadGraphRowAccepted(row, versions)
-    && parseReadGraphIri(row.readGraph)?.layer !== MemoryLayer.WorkingMemory;
+    && (identityRecorded || parseReadGraphIri(row.readGraph)?.layer !== MemoryLayer.WorkingMemory);
 }
 
 async function stateRows(store: TripleStore, options: QueryOptions) {

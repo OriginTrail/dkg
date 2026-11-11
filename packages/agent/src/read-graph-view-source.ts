@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { ViewSemanticsDeltaSampler, type ViewReadGraphs } from '@origintrail-official/dkg-query';
-import { MemoryLayer, parseReadGraphIri, recordViewSemanticsDelta } from '@origintrail-official/dkg-core';
+import { recordViewSemanticsDelta } from '@origintrail-official/dkg-core';
 import {
-  nextReadGraphState, readGraphLayerOf, readGraphModeOf, readGraphStateCompareAndSet, viewSemanticsOf, workingMemoryIdentityRule,
-  type ReadGraphBackendRuntime, type ReadGraphStateRow, type ReadGraphStore, type WorkingMemoryIdentityRule,
+  installWorkingMemoryIdentity, readGraphLayerOf, readGraphModeOf, viewSemanticsOf, type WorkingMemoryNodeIdentity,
 } from '@origintrail-official/dkg-storage';
 
 /**
@@ -53,10 +52,7 @@ export function viewQueryEngineOptionsOf(store: unknown): {
 }
 
 /** The node as its working-memory identity rule sees it. Either value may be absent. */
-export interface ReadGraphNodeIdentity {
-  readonly defaultAgentAddress?: string;
-  readonly peerId?: string;
-}
+export type ReadGraphNodeIdentity = WorkingMemoryNodeIdentity;
 
 /**
  * Give the backend's read-graph runtime the node's working-memory identity
@@ -65,71 +61,17 @@ export interface ReadGraphNodeIdentity {
  * queries and the layer's maintenance both map drafts to agents with it.
  *
  * The agent installs it at start, and again when its default agent changes,
- * right after it changes its own default and before anything is awaited. The
- * new rule is compared with the rule the runtime holds: one configured for the
- * layer, the runtime's own (every address owns its drafts), or the one
- * installed before. Every working-memory read graph whose agent owns other
- * addresses under the new rule is marked dirty in the mirror, and the rule is
- * installed, in that same synchronous step. So no reader sees the new owner
- * with a read graph built for the old one, nor the old rule beside the new
- * default. The marks then reach the store under each read graph's lock; the
- * builder rebuilds those read graphs. A store without a read-graph layer is
- * left as it is.
+ * right after it changes its own default and before anything is awaited.
+ * Storage's `installWorkingMemoryIdentity` compares it with the rule the
+ * runtime holds and, in the same synchronous step, marks dirty in the mirror
+ * every working-memory read graph whose agent owns other addresses under it.
+ * So no reader sees the new owner with a read graph built for the old one,
+ * nor the old rule beside the new default. The marks then reach the store,
+ * and the identity is recorded in the node's data directory. A store without
+ * a read-graph layer is left as it is.
  */
 export async function installReadGraphWorkingMemoryIdentity(store: unknown, node: ReadGraphNodeIdentity): Promise<void> {
   const layer = readGraphLayerOf(store);
   if (layer === null) return;
-  const { runtime } = layer;
-  const rule = workingMemoryIdentityRule(node);
-  // Nothing is awaited from here until both are visible.
-  const marked = markWorkingMemoryReadGraphsDirty(runtime, runtime.workingMemoryIdentity, rule);
-  runtime.workingMemoryIdentity = rule;
-  for (const { readGraph, before } of marked) await storeDirtyMark(layer, readGraph, before);
-}
-
-/** Whether `agent` owns other addresses under `after` than under `before`. */
-function ownsOtherAddresses(before: WorkingMemoryIdentityRule, after: WorkingMemoryIdentityRule, agent: string): boolean {
-  const was = before.addressesOf(agent);
-  const now = after.addressesOf(agent);
-  return was.length !== now.length || was.some((address) => !now.includes(address));
-}
-
-/**
- * Mark dirty, in the mirror, the working-memory read graphs that have a row and
- * whose agent owns other addresses under `after` than under `before`; returns
- * each with its row before.
- */
-function markWorkingMemoryReadGraphsDirty(
-  runtime: ReadGraphBackendRuntime,
-  before: WorkingMemoryIdentityRule,
-  after: WorkingMemoryIdentityRule,
-): Array<{ readonly readGraph: string; readonly before: ReadGraphStateRow }> {
-  const marked: Array<{ readonly readGraph: string; readonly before: ReadGraphStateRow }> = [];
-  for (const row of runtime.mirror.rows()) {
-    const key = parseReadGraphIri(row.readGraph);
-    if (key?.layer !== MemoryLayer.WorkingMemory || row.state === 'dirty' || !ownsOtherAddresses(before, after, key.agentAddress)) continue;
-    const dirty = nextReadGraphState(row, { kind: 'mark-dirty' });
-    if (dirty === undefined) continue;
-    runtime.mirror.set(dirty);
-    marked.push({ readGraph: row.readGraph, before: row });
-  }
-  return marked;
-}
-
-/**
- * Store a dirty mark under the read graph's lock. A row that something
- * published meanwhile is marked dirty again. If the store keeps an older row,
- * a rebuild starts from it, as for the layer's own dirty marks.
- */
-async function storeDirtyMark(layer: ReadGraphStore, readGraph: string, before: ReadGraphStateRow): Promise<void> {
-  const { runtime } = layer;
-  await runtime.locks.withLocks([readGraph], async () => {
-    const current = runtime.mirror.get(readGraph);
-    const from = current !== undefined && current.state !== 'dirty' ? current : before;
-    const dirty = nextReadGraphState(from, { kind: 'mark-dirty' });
-    if (dirty === undefined) return;
-    if (from === current) runtime.mirror.set(dirty);
-    await layer.innerStore.update?.(readGraphStateCompareAndSet(from, dirty), { source: 'agent.readGraphIdentityChange' })
-      .catch(() => undefined);
-  });
+  await installWorkingMemoryIdentity({ store: layer, source: 'agent.readGraphIdentityChange' }, node);
 }

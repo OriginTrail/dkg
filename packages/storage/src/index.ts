@@ -508,7 +508,6 @@ export {
   DEFAULT_READ_GRAPH_BATCHING,
   ReadGraphJobError,
   buildReadGraph,
-  installWorkingMemoryIdentity,
   markReadGraphDirty,
   refreshReadGraphRegistry,
   withReadGraphBackgroundSlot,
@@ -523,6 +522,13 @@ export {
   type ReadGraphRepairInput,
 } from './read-graph/rebuild.js';
 export { startReadGraphs, type ReadGraphStartOptions, type ReadGraphStartResult } from './read-graph/startup.js';
+export {
+  READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE,
+  installWorkingMemoryIdentity,
+  recordedWorkingMemoryIdentity,
+  type WorkingMemoryIdentityInstall,
+  type WorkingMemoryNodeIdentity,
+} from './read-graph/working-memory-identity.js';
 export {
   DEFAULT_READ_GRAPH_BUILD_INTERVAL_MS,
   ReadGraphBuilder,

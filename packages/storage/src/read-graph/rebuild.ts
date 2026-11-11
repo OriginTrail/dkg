@@ -30,7 +30,6 @@
 
 import { setImmediate as nextTurn, setTimeout as sleep } from 'node:timers/promises';
 import {
-  MemoryLayer,
   assertSafeIri,
   compareCodePoint,
   isReadGraphPartitionIri,
@@ -44,8 +43,8 @@ import { noteReadGraphPartitions } from '../read-graph-partition-marker.js';
 import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore } from '../read-graph-partition-store.js';
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
-import { matchesGraphNameTest, readGraphMembership, workingMemoryIdentityRule, type GraphNameTest } from './membership.js';
-import { readGraphLayerOf, readGraphRuntimeOf } from './read-graph-store.js';
+import { matchesGraphNameTest, readGraphMembership, type GraphNameTest } from './membership.js';
+import { readGraphLayerOf } from './read-graph-store.js';
 import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry } from './registry-recognition.js';
 import { ReadGraphLocks, type InMemoryReadGraphStateMirror, type ReadGraphBackendRuntime } from './runtime.js';
 import {
@@ -331,35 +330,6 @@ export async function refreshReadGraphRegistry(context: ReadGraphJobContext, con
     if (installed) return changed;
   }
   throw new ReadGraphJobError(`The registry of ${contextGraphId} kept changing while it was read`);
-}
-
-const INSTALLED_IDENTITIES = new WeakMap<ReadGraphBackendRuntime, string>();
-
-/**
- * Install the node's working-memory identity rule on the store's read-graph
- * runtime. When the identity differs from the one installed before, every
- * working-memory read graph with a row is marked dirty under its lock first,
- * because it was built and maintained under the old rule. The first install
- * in a process marks nothing: start-up has already marked them dirty.
- */
-export async function installWorkingMemoryIdentity(
-  context: ReadGraphJobContext,
-  node: { readonly defaultAgentAddress?: string; readonly peerId?: string },
-): Promise<void> {
-  const runtime = readGraphRuntimeOf(context.store);
-  if (!runtime) return;
-  const identity = JSON.stringify([node.defaultAgentAddress ?? null, node.peerId ?? null]);
-  const installed = INSTALLED_IDENTITIES.get(runtime);
-  if (identity === installed) return;
-  if (installed !== undefined) {
-    const workingMemory = runtime.mirror.rows().map((row) => row.readGraph)
-      .filter((readGraph) => parseReadGraphIri(readGraph)?.layer === MemoryLayer.WorkingMemory);
-    await runtime.locks.withLocks(workingMemory, async () => {
-      for (const readGraph of workingMemory) await new ReadGraphJob(context, readGraph, 'mark').markDirtyHeld();
-    });
-  }
-  runtime.workingMemoryIdentity = workingMemoryIdentityRule(node);
-  INSTALLED_IDENTITIES.set(runtime, identity);
 }
 
 /**
