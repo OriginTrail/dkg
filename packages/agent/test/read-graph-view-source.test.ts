@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { MemoryLayer, readGraphIri, readScope, type ReadGraphKey } from '@origintrail-official/dkg-core';
 import {
@@ -50,7 +50,7 @@ describe('the read-graph source of merged view queries', () => {
     expect(source.identity).toBe(rule);
   });
 
-  it('installs the node\'s working-memory rule, and marks dirty the read graphs whose drafts change owner', async () => {
+  it('installs the node\'s working-memory rule, marking dirty the read graphs whose drafts change owner in the same step', async () => {
     const store = layered({});
     const wm = (agentAddress: string, contextGraphId = 'notes') =>
       readGraphIri({ scope: readScope(contextGraphId), layer: MemoryLayer.WorkingMemory, agentAddress });
@@ -62,12 +62,27 @@ describe('the read-graph source of merged view queries', () => {
     await installReadGraphWorkingMemoryIdentity(store, { defaultAgentAddress: AGENT, peerId: PEER });
     expect(viewReadGraphsOf(store)!.identity.ownerOf(PEER)).toBe(AGENT);
     expect(states()).toEqual(['ready', 'ready', 'ready', 'ready']);
-    // The same owner again changes nothing.
     await installReadGraphWorkingMemoryIdentity(store, { defaultAgentAddress: AGENT, peerId: PEER });
     expect(states()).toEqual(['ready', 'ready', 'ready', 'ready']);
-    // A new default agent takes the peer ID's drafts: both agents' working-memory read graphs go dirty, before the rule changes.
-    await installReadGraphWorkingMemoryIdentity(store, { defaultAgentAddress: OTHER, peerId: PEER });
+
+    // A maintained write holds the old owner's read graph while the node adopts a new default agent.
+    const update = vi.spyOn(store.innerStore, 'update');
+    let release!: () => void;
+    let entered!: () => void;
+    const holding = new Promise<void>((resolve) => { entered = resolve; });
+    const held = store.runtime.locks.withLocks([wm(AGENT)], () => new Promise<void>((resolve) => { release = resolve; entered(); }));
+    await holding;
+    const installing = installReadGraphWorkingMemoryIdentity(store, { defaultAgentAddress: OTHER, peerId: PEER });
+    // In the call's synchronous step: the new owner, and both agents' read graphs no longer served. A query that maps
+    // the peer ID to the new owner finds its read graph dirty, and the old owner's read graph is dirty too.
     expect(store.runtime.workingMemoryIdentity.ownerOf(PEER)).toBe(OTHER);
+    expect(states()).toEqual(['dirty', 'dirty', 'ready', 'ready']);
+    expect(update).not.toHaveBeenCalled();
+    release();
+    await held;
+    await installing;
+    // The marks reach the store under each read graph's lock.
+    expect(update).toHaveBeenCalledTimes(2);
     expect(states()).toEqual(['dirty', 'dirty', 'ready', 'ready']);
     await expect(installReadGraphWorkingMemoryIdentity(new OxigraphStore(), { peerId: PEER })).resolves.toBeUndefined();
   });
