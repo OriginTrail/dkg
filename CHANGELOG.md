@@ -32,6 +32,17 @@ and gives the node UI a new design system.
 - The Marketplace section follows the light and dark themes like the rest
   of the app.
 
+### Changed
+
+- Core nodes send fewer RPC requests for Knowledge Assets that wait to reach
+  Verifiable Memory. The VM reconcile pass and the StorageACK promotion lanes
+  read an asset's latest Merkle root and then its publisher, a request each,
+  and an asset that stays pending is read again on every sweep. The two
+  reads now go out together, so the node's read batching sends them as one
+  request. On the mainnet Core nodes measured, that is up to about 14,000
+  fewer requests a day on Gnosis and 24,000 on Base, depending on how many
+  assets are pending.
+
 ### Fixed
 
 - A seller can serve tool calls on an OpenAI reasoning model that takes
