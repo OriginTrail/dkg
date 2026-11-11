@@ -525,7 +525,7 @@ function buildMetrics(): DkgMetrics {
     queryScopeOverLimitTotal: meter.createCounter('dkg.query.scope_over_limit_total', {
       description: 'Queries whose slice is over a candidate scope limit; none is refused',
     }),
-    storeQueryResultRows:meter.createHistogram('dkg.store.query_result_rows', {
+    storeQueryResultRows: meter.createHistogram('dkg.store.query_result_rows', {
       description: 'Rows retained by bounded expensive store reads',
       advice: { explicitBucketBoundaries: QUAD_COUNT_BUCKETS },
     }),
