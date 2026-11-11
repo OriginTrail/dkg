@@ -110,6 +110,17 @@ function readGraphBlockBindings(scope: PreparedSparqlQuery, opening: number, clo
   return { assignments, others };
 }
 
+/** The closing brace of the innermost OPTIONAL group inside the block that holds the token at `index`, or -1. */
+function enclosingOptionalClosing(scope: PreparedSparqlQuery, opening: number, index: number): number {
+  let closing = -1;
+  for (const range of scope.structure.braces.ranges) {
+    if (range.openingTokenIndex >= index) break;
+    if (range.openingTokenIndex > opening && range.closingTokenIndex > index
+      && isSparqlKeyword(scope.prepared.tokens, range.openingTokenIndex - 1, 'OPTIONAL')) closing = range.closingTokenIndex;
+  }
+  return closing;
+}
+
 /**
  * Oxigraph reads the patterns of a GRAPH ?var block that assigns ?var in the
  * graph it assigns, once for every graph of the dataset, so the block repeats
@@ -118,6 +129,8 @@ function readGraphBlockBindings(scope: PreparedSparqlQuery, opening: number, clo
  * subquery that projects the variables the block binds, and keeps only the
  * rows whose assigned value is the graph it reads or that assign nothing:
  * `{ SELECT ?var … WHERE { GRAPH ?var { P[AS ?var := AS ?a] } FILTER(COALESCE(sameTerm(?a, ?var), true)) } }`.
+ * An OPTIONAL that assigns checks the same inside it, so a value other than
+ * the graph fails only that OPTIONAL and the row stays, as with a graph list.
  * Other reads of ?var in the block keep the graph's binding. (`COALESCE` keeps
  * a row whose assignment failed, which `!BOUND(?a)` would not on Oxigraph
  * 0.5.5.) An assignment inside MINUS, EXISTS or a FILTER binds nothing for the
@@ -140,15 +153,21 @@ export function isolateCallerGraphAssignments(scope: PreparedSparqlQuery): Prepa
     const name = target.variable.logicalName;
     const assigned = allocate(`__dkgAssigned${name}`);
     const projected = new Set<string>([`?${name}`, ...others]);
+    const keep = `FILTER(COALESCE(sameTerm(${assigned}, ?${name}), true))`;
+    const optionals = new Set(assignments.map(index => enclosingOptionalClosing(scope, opening, index)).filter(at => at >= 0));
+    const edits = [
+      ...assignments.map(index => ({ start: tokens[index].start, end: tokens[index].end, text: assigned })),
+      ...[...optionals].map(at => ({ start: tokens[at].start, end: tokens[at].start, text: ` ${keep} ` })),
+    ].sort((left, right) => left.start - right.start);
     let inner = '';
     let from = tokens[opening].end;
-    for (const index of assignments) {
-      inner += `${source.slice(from, tokens[index].start)}${assigned}`;
-      from = tokens[index].end;
+    for (const edit of edits) {
+      inner += `${source.slice(from, edit.start)}${edit.text}`;
+      from = edit.end;
     }
     inner += source.slice(from, tokens[closing].start);
     const graph = `GRAPH ?${name} {${inner}}`;
-    const isolated = `{ SELECT ${[...projected].join(' ')} WHERE { ${graph} FILTER(COALESCE(sameTerm(${assigned}, ?${name}), true)) } }`;
+    const isolated = `{ SELECT ${[...projected].join(' ')} WHERE { ${graph} ${keep} } }`;
     source = `${source.slice(0, tokens[target.keywordTokenIndex].start)}${isolated}${source.slice(tokens[closing].end)}`;
   }
   return transitionGraphScope(scope, source);
