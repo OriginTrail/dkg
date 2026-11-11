@@ -18,7 +18,7 @@ import { startReadGraphs } from '../../src/read-graph/startup.js';
 import { readGraphBackfillBatch, readGraphFencedDrop } from '../../src/read-graph/statements.js';
 import type { TripleStoreConfig } from '../../src/triple-store-composition.js';
 import type { TripleStore } from '../../src/triple-store.js';
-import { IDENTITY, expectEqualToMembers, memberData, readGraphTriples } from './read-graph-builder-qualification.js';
+import { IDENTITY, expectEqualToMembers, expectSourcesKept, memberData, readGraphTriples } from './read-graph-builder-qualification.js';
 import { killWriterOnLine } from './killed-writer-process.js';
 import { layerFixture } from './read-graph-layer-conformance.js';
 
@@ -158,8 +158,9 @@ export function readGraphBuilderRestartSuite(backend: 'oxigraph' | 'blazegraph')
       const config: TripleStoreConfig = path ? { backend: 'oxigraph-persistent', options: { path } } : { backend: 'blazegraph', options: { url } };
       const proxy = point.after === 'receipt' ? await holdCopyBatch(url!, point.batch) : undefined;
       try {
+        const seeded = [...fixture.facts, ...memberData(fixture)];
         const seeding = openAdapter();
-        await seeding.insert([...fixture.facts, ...memberData(fixture)]);
+        await seeding.insert(seeded);
         await seeding.close();
         const killed = await killBuilderAt(path
           ? { DKG_KILL_BACKEND: 'oxigraph', DKG_KILL_PATH: path, DKG_KILL_CG: fixture.contextGraphId }
@@ -175,6 +176,8 @@ export function readGraphBuilderRestartSuite(backend: 'oxigraph' | 'blazegraph')
         const store = guardReadGraphPartition(wrapReadGraphLayer(adapter, { ...config, readGraphs: { workingMemoryIdentity: IDENTITY } }));
         const opened = { adapter, store, fixture };
         try {
+          // The dead builder may leave its own state unfinished, but none of the sources it read.
+          await expectSourcesKept(adapter, fixture, seeded, 'after the restart');
           const [vm] = fixture.keys as [ReadGraphKey];
           const { wholeVm } = fixture.readGraphs;
           const left = (await readStoredReadGraphRow(adapter, wholeVm)).row;
@@ -194,6 +197,7 @@ export function readGraphBuilderRestartSuite(backend: 'oxigraph' | 'blazegraph')
           }
           expect(await buildReadGraph({ store, batching: { pauseRatio: 0 } }, vm)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
           await expectEqualToMembers(opened, vm, fixture.registry, 'after the restart and the rebuild');
+          await expectSourcesKept(adapter, fixture, seeded, 'after the rebuild');
         } finally { await adapter.close(); }
       } finally {
         await proxy?.close();

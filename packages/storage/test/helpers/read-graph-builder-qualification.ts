@@ -46,6 +46,16 @@ async function graphsUnder(adapter: TripleStore, fixture: LayerFixture) {
   return (result.type === 'bindings' ? result.bindings : []).map(b => ({ g: b.g!, t: `${b.s} ${b.p} ${b.o}` }));
 }
 
+/**
+ * Every seeded quad is still stored, in its own graph. This is checked on the adapter, apart from any
+ * read graph, so a store that lost source data cannot pass as one rebuilt from all of it.
+ */
+export async function expectSourcesKept(adapter: TripleStore, fixture: LayerFixture, seeded: readonly Quad[], after: string): Promise<void> {
+  const stored = new Set((await graphsUnder(adapter, fixture)).map(x => `${x.g} ${x.t}`));
+  const missing = seeded.map(quad => `${quad.graph} ${quad.subject} ${quad.predicate} ${quad.object}`).filter(quad => !stored.has(quad));
+  expect(missing, `${after}: seeded quads missing from the store`).toEqual([]);
+}
+
 /** The triples a read graph holds. */
 export async function readGraphTriples(adapter: TripleStore, fixture: LayerFixture, readGraph: string): Promise<string[]> {
   return [...new Set((await graphsUnder(adapter, fixture)).filter(x => x.g === readGraph).map(x => x.t))].sort();
