@@ -31,6 +31,7 @@ Use these routes when you want a node running, an agent connected, memory operat
 | Bootstrap an edge's registry index from network relays or pinned cores | [Authority Index Snapshots](authority-index-snapshots.md) |
 | Choose and configure a store backend | [Storage Backends](storage-sparql-http.md) |
 | Find where a node is slow: store and queue pressure | [Monitor Store and Queue Pressure](backpressure-observability.md) |
+| Act on the graph catalog warning and size its limit | [Graph Catalog Limit](graph-catalog-limit.md) |
 | Manually subscribe a host-mode node | [Host-Mode Manual Subscribe](host-mode-manual-subscribe.md) |
 | Update or roll back | [Updates and Rollback](updates-and-rollback.md) |
 | Migrate a git checkout to npm auto-update | [Migrate to npm](migrate-to-npm.md) |
