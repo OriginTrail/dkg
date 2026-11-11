@@ -70,21 +70,33 @@ describe('useNoPcaCoverage', () => {
   // pending, interval ticks start no check B at all; A's answer is applied, then the next
   // tick's newer answer replaces it.
   it('a slow check is never overtaken: no overlapping checks, and the newest answer wins', async () => {
-    let releaseA!: (v: { accountId: string | null }) => void;
-    apiMocks.pcaAgentAccount.mockImplementationOnce(() => new Promise((r) => { releaseA = r; }));
+    // Every check is held until the test releases it, so the order is the test's, not the timer's.
+    type Answer = { accountId: string | null };
+    const pending: Array<(v: Answer) => void> = [];
+    apiMocks.pcaAgentAccount.mockImplementation(() => new Promise<Answer>((r) => { pending.push(r); }));
+    const until = async (cond: () => boolean) => {
+      for (let i = 0; i < 200 && !cond(); i++) await wait(5);
+      expect(cond()).toBe(true);
+    };
+
     const h = await render(20);
-    await wait(90); // ~4 ticks while A is still pending
-    expect(apiMocks.pcaAgentAccount).toHaveBeenCalledTimes(1);
+    await wait(90); // ~4 ticks while check A is still pending
+    expect(pending).toHaveLength(1); // no overlapping check started
     expect(h.value()).toBe('false');
 
-    apiMocks.pcaAgentAccount.mockResolvedValue({ accountId: '12' }); // the sponsor approves
-    await act(async () => { releaseA({ accountId: null }); });
-    // A (older, uncovered) lands first, as the only check that ran…
-    expect(h.value()).toBe('true');
-    // …and the next tick's newer, covered answer replaces it.
+    // A (older, uncovered) lands as the only check that ran.
+    await act(async () => { pending[0]!({ accountId: null }); });
+    await until(() => h.value() === 'true');
+
+    // The next tick starts B; nothing else starts while it's pending.
+    await until(() => pending.length === 2);
     await wait(60);
-    expect(apiMocks.pcaAgentAccount.mock.calls.length).toBeGreaterThan(1);
-    expect(h.value()).toBe('false');
+    expect(pending).toHaveLength(2);
+    expect(h.value()).toBe('true');
+
+    // B (newer: the sponsor approved) replaces A's answer.
+    await act(async () => { pending[1]!({ accountId: '12' }); });
+    await until(() => h.value() === 'false');
     await h.unmount();
   });
 
