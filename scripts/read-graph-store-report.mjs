@@ -1,0 +1,92 @@
+#!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+//
+// Report the read graphs a store holds, read from the store itself over the
+// SPARQL protocol. It only reads; it changes nothing.
+//
+//   node scripts/read-graph-store-report.mjs --endpoint <SPARQL query URL> [--sample <n>] [--timeout-ms <ms>]
+//
+// The endpoint is the store's query URL: a Blazegraph namespace's `/sparql`, or
+// an Oxigraph server's `/query`. For each read graph (a graph under a context
+// graph's `_~read` partition, other than its state graph) it prints:
+//
+// - `triples`: the triples the read graph holds;
+// - `copies`: for up to `--sample` of those triples (default 10000), how many
+//   graphs of the same context graph outside the read-graph partition hold
+//   each one, as { "<copies>": <triples> }. It counts every such graph, so it
+//   is an upper bound on the copies among the read graph's member graphs.
+//   A triple that no such graph holds is not counted.
+//
+// Output: one JSON object, { endpoint, sample, readGraphs: [...], skipped: [...] }.
+// Exit codes: 0 when the report is complete, 1 when the store could not be read.
+
+const args = process.argv.slice(2);
+function option(name, fallback) {
+  const at = args.indexOf(name);
+  return at === -1 ? fallback : args[at + 1];
+}
+const endpoint = option('--endpoint');
+const sample = Number(option('--sample', '10000'));
+const timeoutMs = Number(option('--timeout-ms', '600000'));
+if (!endpoint || !/^https?:\/\//.test(endpoint) || !Number.isSafeInteger(sample) || sample < 1 || !(timeoutMs > 0)) {
+  console.error('usage: read-graph-store-report.mjs --endpoint <SPARQL query URL> [--sample <n>] [--timeout-ms <ms>]');
+  process.exit(2);
+}
+
+const CONTEXT_GRAPH_PREFIX = 'did:dkg:context-graph:';
+const PARTITION = '/_~read';
+// An IRI this report writes into a query: no character that could end the IRI or the query.
+const SAFE_IRI = /^[^\s<>"{}|\\^`]+$/;
+const literal = (value) => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+
+async function select(query) {
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/sparql-results+json' },
+    body: new URLSearchParams({ query }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) throw new Error(`the store answered ${response.status}: ${(await response.text()).slice(0, 300)}`);
+  const body = await response.json();
+  return body.results.bindings;
+}
+
+/** `did:dkg:context-graph:{cg}` for a read graph's IRI, or undefined when it is not one. */
+function contextGraphRoot(readGraph) {
+  if (!readGraph.startsWith(CONTEXT_GRAPH_PREFIX)) return undefined;
+  const at = readGraph.indexOf(`${PARTITION}/`, CONTEXT_GRAPH_PREFIX.length);
+  return at === -1 ? undefined : readGraph.slice(0, at);
+}
+
+async function main() {
+  const graphs = await select(`SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), ${literal(`${PARTITION}/`)})) }`);
+  const readGraphs = [];
+  const skipped = [];
+  for (const iri of graphs.map((row) => row.g?.value).filter(Boolean).sort()) {
+    const root = contextGraphRoot(iri);
+    if (!root || iri === `${root}${PARTITION}/state`) continue;
+    if (!SAFE_IRI.test(iri)) { skipped.push({ readGraph: iri, reason: 'an IRI this report does not write into a query' }); continue; }
+    const [count] = await select(`SELECT (COUNT(*) AS ?n) WHERE { GRAPH <${iri}> { ?s ?p ?o } }`);
+    const outside = `?g = <${root}> || (STRSTARTS(STR(?g), ${literal(`${root}/`)}) && STR(?g) != ${literal(`${root}${PARTITION}`)}`
+      + ` && !STRSTARTS(STR(?g), ${literal(`${root}${PARTITION}/`)}))`;
+    const histogram = await select(`SELECT ?copies (COUNT(*) AS ?triples) WHERE {
+      { SELECT ?s ?p ?o (COUNT(DISTINCT ?g) AS ?copies) WHERE {
+          { SELECT ?s ?p ?o WHERE { GRAPH <${iri}> { ?s ?p ?o } } LIMIT ${sample} }
+          GRAPH ?g { ?s ?p ?o }
+          FILTER(${outside})
+        } GROUP BY ?s ?p ?o }
+    } GROUP BY ?copies ORDER BY ?copies`);
+    readGraphs.push({
+      readGraph: iri,
+      contextGraphId: root.slice(CONTEXT_GRAPH_PREFIX.length),
+      triples: Number(count?.n?.value ?? 0),
+      copies: Object.fromEntries(histogram.map((row) => [row.copies.value, Number(row.triples.value)])),
+    });
+  }
+  console.log(JSON.stringify({ endpoint, sample, readGraphs, skipped }, null, 2));
+}
+
+main().catch((error) => {
+  console.error(`read-graph-store-report: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+});
