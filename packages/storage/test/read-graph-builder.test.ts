@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -972,6 +972,56 @@ describe('installing the working-memory identity rule', () => {
     adapter.onFlush = undefined;
     expect(await installWorkingMemoryIdentity(context, { peerId: 'peer-1' })).toEqual({ marked: [], recorded: true });
     expect(recordedWorkingMemoryIdentity(dataDir)).toEqual({ peerId: 'peer-1' });
+  });
+
+  it('records only the last of two overlapping installations, once its marks are stored and flushed', async () => {
+    const { adapter, fixture, layer, context, dataDir } = await open();
+    const { agentWm } = fixture.readGraphs;
+    await adapter.update!(readGraphStateCompareAndSet(undefined, readyRow(agentWm, 4)));
+    layer.runtime.mirror.set(readyRow(agentWm, 4));
+    const gates: Array<() => void> = [];
+    adapter.onFlush = () => new Promise<void>((resolve) => { gates.push(resolve); });
+    // AGENT takes the peer ID's drafts, then, while that installation flushes, another default agent takes them.
+    const first = { defaultAgentAddress: AGENT, peerId: 'peer-1' };
+    const second = { defaultAgentAddress: `0x${'cd'.repeat(20)}`, peerId: 'peer-1' };
+    const installingFirst = installWorkingMemoryIdentity(context, first);
+    await vi.waitFor(() => expect(gates).toHaveLength(1));
+    const installingSecond = installWorkingMemoryIdentity(context, second);
+    gates[0]!();
+    // After its flush the first finds a newer identity installed, and records nothing.
+    expect(await installingFirst).toEqual({ marked: [agentWm], recorded: false });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toBeUndefined();
+    // The second stores its own mark (the read graph moved again), flushes, and records only when the flush ends.
+    await vi.waitFor(() => expect(gates).toHaveLength(2));
+    expect(await storedRows(adapter)).toEqual({ [agentWm]: 'dirty@6' });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toBeUndefined();
+    gates[1]!();
+    expect(await installingSecond).toEqual({ marked: [], recorded: true });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual(second);
+  });
+
+  it('holds working-memory read graphs from building while the record of the identity before cannot be removed', async () => {
+    const { adapter, fixture, context, dataDir } = await open();
+    const working = fixture.keys.find((key) => key.layer === MemoryLayer.WorkingMemory)!;
+    const verifiable = fixture.keys.find((key) => key.layer === MemoryLayer.VerifiableMemory && key.scope.kind === 'context-graph')!;
+    const first = { defaultAgentAddress: AGENT, peerId: 'peer-1' };
+    const second = { defaultAgentAddress: `0x${'cd'.repeat(20)}`, peerId: 'peer-1' };
+    expect(await installWorkingMemoryIdentity(context, first)).toEqual({ marked: [], recorded: true });
+    // The record cannot be removed: here its path holds a directory with an entry.
+    const record = join(dataDir, READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE);
+    rmSync(record);
+    mkdirSync(record);
+    writeFileSync(join(record, 'entry'), '');
+    expect(await installWorkingMemoryIdentity(context, second)).toEqual({ marked: [], recorded: false });
+    await expect(buildReadGraph(context, working)).rejects.toThrow(/cannot be removed/);
+    // Other layers still build.
+    expect(await buildReadGraph(context, verifiable)).toMatchObject({ outcome: 'done' });
+    // Once the record can be removed, the next installation removes it, records, and releases the hold.
+    rmSync(record, { recursive: true });
+    expect(await installWorkingMemoryIdentity(context, second)).toEqual({ marked: [], recorded: true });
+    expect(recordedWorkingMemoryIdentity(dataDir)).toEqual(second);
+    expect(await buildReadGraph(context, working)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    expect((await storedRows(adapter))[readGraphIri(working)]).toMatch(/^ready@/);
   });
 
   it('reads no identity from a missing or malformed record', async () => {
