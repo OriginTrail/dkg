@@ -134,13 +134,15 @@ export function buildReadGraphTools(client: ReadGraphsClient): OpenClawTool[] {
       execute: async (_toolCallId, args) => {
         const change = readGraphsChange(args ?? {});
         if ('error' in change) return error(change.error);
+        // The answer names the context graph as the client sends it: without its URI prefix.
+        const sent = { ...change, contextGraphId: normalizeContextGraphId(change.contextGraphId) };
         try {
           const answer = await client.setReadGraphSettings(change);
-          const changed = describeReadGraphChanges(answer);
+          const changed = describeReadGraphChanges(answer, sent);
           const settings = describeReadGraphSettings(answer);
           return result({ summary: changed === undefined ? settings : `${changed}\n\n${settings}`, ...asRecord(answer) });
         } catch (err) {
-          return refusal(err);
+          return refusal(err, sent);
         }
       },
     },
@@ -183,7 +185,7 @@ function error(message: string): OpenClawToolResult {
   return { content: [{ type: 'text', text: JSON.stringify({ error: message }) }], details: { error: message } };
 }
 
-function refusal(err: unknown): OpenClawToolResult {
-  if (err instanceof DkgDaemonHttpError) return error(describeReadGraphSettingsRefusal(err, 'this OpenClaw adapter'));
+function refusal(err: unknown, request?: ReadGraphSettingsChange): OpenClawToolResult {
+  if (err instanceof DkgDaemonHttpError) return error(describeReadGraphSettingsRefusal(err, 'this OpenClaw adapter', request));
   return error(describeReadGraphSettingsRefusal({ message: err instanceof Error ? err.message : String(err) }, 'this OpenClaw adapter'));
 }

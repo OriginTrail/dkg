@@ -193,7 +193,7 @@ describe('describeReadGraphChanges', () => {
         change('wm', 'off', 'serve', { refused: 'Turn Preview on first.' }),
         change('verifiable-memory', 'off', 'serve', { refused: { code: 'X', error: 'No.' } }),
       ],
-    });
+    }, { contextGraphId: 'my-project', layers: { 'shared-working-memory': 'serve' } });
     expect(text?.split('\n')).toEqual([
       "Getting search across assets ready for my-project's published assets. Preview shows how results would change before it is turned on.",
       "Turned search across assets on for my-project's shared memory.",
@@ -214,7 +214,7 @@ describe('describeReadGraphChanges', () => {
         change('wm', 'serve', 'off', 'odd'),
         change('vm', 'off', 'sideways', 'applied'),
       ],
-    })?.split('\n')).toEqual([
+    }, { contextGraphId: '', layers: { elsewhere: 'off' } as never })?.split('\n')).toEqual([
       'Search across assets was already other for elsewhere.',
       'Search across assets was not changed for private drafts: no reason given',
       "Search across assets was not changed for my-project's private drafts: no reason given",
@@ -225,6 +225,39 @@ describe('describeReadGraphChanges', () => {
   it('is undefined when the answer lists no changes', () => {
     expect(describeReadGraphChanges({ contextGraphs: [] })).toBeUndefined();
     expect(describeReadGraphChanges(undefined)).toBeUndefined();
+  });
+
+  // The node reports every memory of each context graph in its settings, not only the ones a change names.
+  const nodeWide = {
+    changes: [
+      change('working-memory', 'off', 'off', 'unchanged', 'team'),
+      change('shared-working-memory', 'off', 'build', 'applied', 'team'),
+      change('verifiable-memory', 'build', 'build', 'unchanged', 'team'),
+      change('working-memory', 'off', 'off', 'unchanged', 'other'),
+      change('verifiable-memory', 'serve', 'serve', 'unchanged', 'other'),
+      change('verifiable-memory', 'off', 'build', 'applied', 'third'),
+    ],
+  };
+
+  it('describes a memory left as it was only when the request set it, and every change', () => {
+    const preview = 'Preview shows how results would change before it is turned on.';
+    expect(describeReadGraphChanges(nodeWide, { contextGraphId: 'team', layers: { 'shared-working-memory': 'build', 'verifiable-memory': 'build' } })
+      ?.split('\n')).toEqual([
+      `Getting search across assets ready for team's shared memory. ${preview}`,
+      "Search across assets was already Preview for team's published assets.",
+      `Getting search across assets ready for third's published assets. ${preview}`,
+    ]);
+    expect(describeReadGraphChanges(nodeWide, { contextGraphId: 'team', layers: { 'shared-working-memory': 'build' } })?.split('\n')).toEqual([
+      `Getting search across assets ready for team's shared memory. ${preview}`,
+      `Getting search across assets ready for third's published assets. ${preview}`,
+    ]);
+    expect(describeReadGraphChanges(nodeWide)?.split('\n')).toHaveLength(2);
+    // A change of the default semantics alone sets no memory: nothing to say about the memories left as they were.
+    const unchanged = { changes: nodeWide.changes.filter((entry) => entry.outcome === 'unchanged') };
+    expect(describeReadGraphChanges(unchanged, { contextGraphId: 'team', viewSemantics: 'merged' })).toBeUndefined();
+    expect(describeReadGraphChanges(unchanged, { contextGraphId: 'other', layers: { vm: 'serve' } as never })).toBeUndefined();
+    expect(describeReadGraphChanges({ changes: [change('vm', 'serve', 'serve', 'unchanged', 'other')] }, { contextGraphId: 'other', layers: { 'verifiable-memory': 'serve' } }))
+      .toBe("Search across assets was already On for other's published assets.");
   });
 });
 
@@ -295,5 +328,23 @@ describe('describeReadGraphSettingsRefusal', () => {
       + "Search across assets was not changed for team's published assets: The store is busy.");
     expect(describeReadGraphSettingsRefusal({ status: 500, body: 'oops', message: 'HTTP 500 oops' }, caller)).toBe('The node refused: HTTP 500 oops');
     expect(describeReadGraphSettingsRefusal({ message: 'fetch failed' }, caller)).toBe('No answer from the node: fetch failed');
+  });
+
+  it('lists, from the node-wide report, what the refused change set and nothing left as it was elsewhere', () => {
+    const body = {
+      code: 'READ_GRAPHS_APPLY_REFUSED',
+      error: 'The node could not apply the change; nothing changed.',
+      changes: [
+        { contextGraphId: 'team', layer: 'working-memory', from: 'off', to: 'serve', outcome: { refused: 'Turn Preview on first.' } },
+        { contextGraphId: 'team', layer: 'verifiable-memory', from: 'build', to: 'serve', outcome: { refused: 'not applied: another change in the same apply was refused' } },
+        { contextGraphId: 'team', layer: 'shared-working-memory', from: 'off', to: 'off', outcome: 'unchanged' },
+        { contextGraphId: 'other', layer: 'verifiable-memory', from: 'serve', to: 'serve', outcome: 'unchanged' },
+      ],
+    };
+    expect(describeReadGraphSettingsRefusal({ status: 409, body, message: 'x' }, caller, {
+      contextGraphId: 'team', layers: { 'working-memory': 'serve', 'verifiable-memory': 'serve' },
+    })).toBe('The node refused: The node could not apply the change; nothing changed. (READ_GRAPHS_APPLY_REFUSED)\n'
+      + "Search across assets was not changed for team's private drafts: Turn Preview on first.\n"
+      + "Search across assets was not changed for team's published assets: not applied: another change in the same apply was refused");
   });
 });

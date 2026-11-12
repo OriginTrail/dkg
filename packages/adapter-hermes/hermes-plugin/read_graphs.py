@@ -37,12 +37,13 @@ _PREVIEW_NOTE = "Preview shows how results would change before it is turned on."
 
 def is_context_graph_id(value: Any) -> bool:
     """A context graph id or URI that names one; the client strips the URI prefix once."""
-    if not isinstance(value, str):
-        return False
-    text = value.strip()
-    if text.startswith(_CONTEXT_GRAPH_URI_PREFIX):
-        text = text[len(_CONTEXT_GRAPH_URI_PREFIX):]
-    return text != ""
+    return isinstance(value, str) and _sent_id(value) != ""
+
+
+def _sent_id(value: Any) -> str:
+    """A context graph id as the client sends it: trimmed, with one URI prefix taken off."""
+    text = value.strip() if isinstance(value, str) else ""
+    return text[len(_CONTEXT_GRAPH_URI_PREFIX):] if text.startswith(_CONTEXT_GRAPH_URI_PREFIX) else text
 
 
 def mode_of(value: str) -> str:
@@ -122,10 +123,22 @@ def describe_settings(answer: Any) -> str:
     return "\n".join(lines)
 
 
-def describe_changes(answer: Any) -> Optional[str]:
-    """What a PUT did to each memory, one sentence each; ``None`` when none are listed."""
-    changes = _records(answer, "changes")
+def describe_changes(answer: Any, request: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """What a PUT did, one sentence per memory; ``None`` when there is nothing to say. The node
+    reports every memory of each context graph in its settings, so a memory left as it was gets
+    a sentence only when ``request`` (the set tool's change) set it; a change or a refusal always does."""
+    changes = [change for change in _records(answer, "changes")
+               if change.get("outcome") != "unchanged" or _set_by(request, change)]
     return "\n".join(_describe_change(change) for change in changes) if changes else None
+
+
+def _set_by(request: Optional[Dict[str, Any]], change: Dict[str, Any]) -> bool:
+    """Whether ``request`` set this memory of this context graph."""
+    layers = request.get("layers") if isinstance(request, dict) else None
+    if not isinstance(layers, dict) or change.get("contextGraphId") != _sent_id(request.get("contextGraphId")):
+        return False
+    layer = change.get("layer")
+    return isinstance(layer, str) and _LAYER_LABELS.get(layer, layer) in layers
 
 
 def describe_create_outcome(context_graph_id: str, requested: Dict[str, Any], outcome: Any) -> str:
@@ -148,8 +161,9 @@ def describe_create_outcome(context_graph_id: str, requested: Dict[str, Any], ou
             "a DKG version from before it. Check with dkg_read_graphs_status.")
 
 
-def describe_refusal(failure: Dict[str, Any], caller: str) -> str:
-    """What a tool says when a settings request fails (the client's ``{"success": False, ...}``)."""
+def describe_refusal(failure: Dict[str, Any], caller: str, request: Optional[Dict[str, Any]] = None) -> str:
+    """What a tool says when a settings request fails (the client's ``{"success": False, ...}``);
+    ``request`` as for ``describe_changes``."""
     status = failure.get("status")
     said = str(failure.get("error") or "no reason given")
     if status is None:
@@ -160,7 +174,7 @@ def describe_refusal(failure: Dict[str, Any], caller: str) -> str:
     code = failure.get("code")
     if status == 404 and code is None:
         return "This node has no search-across-assets settings: it runs a DKG version from before them. Update the node first."
-    changes = describe_changes(failure)
+    changes = describe_changes(failure, request)
     return f"The node refused: {said}" + (f" ({code})" if isinstance(code, str) else "") + ("" if changes is None else f"\n{changes}")
 
 

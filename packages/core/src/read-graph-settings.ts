@@ -123,9 +123,13 @@ export function describeReadGraphSettings(answer: unknown): string {
   return lines.join('\n');
 }
 
-/** What a `PUT` did to each memory, one sentence each, or `undefined` when the answer lists no changes. */
-export function describeReadGraphChanges(answer: unknown): string | undefined {
-  const changes = arrayOf(answer, 'changes');
+/**
+ * What a `PUT` did, one sentence per memory, or `undefined` when there is nothing to say. The node reports every
+ * memory of each context graph in its settings, so a memory left as it was gets a sentence only when `request` set
+ * it; a change or a refusal always does.
+ */
+export function describeReadGraphChanges(answer: unknown, request?: ReadGraphSettingsChange): string | undefined {
+  const changes = arrayOf(answer, 'changes').filter((change) => change.outcome !== 'unchanged' || setBy(request, change));
   return changes.length === 0 ? undefined : changes.map(describeChange).join('\n');
 }
 
@@ -155,9 +159,10 @@ export function describeReadGraphsCreateOutcome(contextGraphId: string, requeste
 /**
  * What a tool says when a settings request fails: only the node admin may use
  * these settings (401, 403); a node from before them (404 without a code);
- * otherwise the node's own sentence and code.
+ * otherwise the node's own sentence and code, then what it did to each memory
+ * (see {@link describeReadGraphChanges} for `request`).
  */
-export function describeReadGraphSettingsRefusal(failure: ReadGraphSettingsFailure, caller: string): string {
+export function describeReadGraphSettingsRefusal(failure: ReadGraphSettingsFailure, caller: string, request?: ReadGraphSettingsChange): string {
   if (failure.status === undefined) return `No answer from the node: ${failure.message}`;
   if (failure.status === 401 || failure.status === 403) {
     return `Only the node admin can see or change search across assets, and the node did not accept ${caller}'s token ` +
@@ -167,8 +172,15 @@ export function describeReadGraphSettingsRefusal(failure: ReadGraphSettingsFailu
   if (failure.status === 404 && body.code === undefined) {
     return 'This node has no search-across-assets settings: it runs a DKG version from before them. Update the node first.';
   }
-  const changes = describeReadGraphChanges(body);
+  const changes = describeReadGraphChanges(body, request);
   return `The node refused: ${sentenceOf(body, failure.message)}${changes === undefined ? '' : `\n${changes}`}`;
+}
+
+/** Whether `request` set this memory of this context graph. */
+function setBy(request: ReadGraphSettingsChange | undefined, change: Record<string, unknown>): boolean {
+  if (request?.layers === undefined || change.contextGraphId !== request.contextGraphId) return false;
+  const layer = layerOf(change.layer) ?? change.layer;
+  return typeof layer === 'string' && Object.hasOwn(request.layers, layer);
 }
 
 function describeChange(change: Record<string, unknown>): string {

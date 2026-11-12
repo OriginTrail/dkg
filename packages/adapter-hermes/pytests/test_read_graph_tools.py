@@ -161,12 +161,12 @@ def test_changes_in_plain_words(wording):
         change("swm", "serve", "serve", "unchanged"),
         change("wm", "off", "serve", {"refused": "Turn Preview on first."}),
         change("verifiable-memory", "off", "serve", {"refused": {"code": "X", "error": "No."}}),
-        change("elsewhere", "odd", "other", "unchanged", ""),
         change("wm", "serve", "off", {"refused": 7}, 3),
         change("wm", "serve", "off", "odd"),
         change("vm", "off", "sideways", "applied"),
     ]}
-    assert wording.describe_changes(answer).split("\n") == [
+    request = {"contextGraphId": "my-project", "layers": {"shared-working-memory": "serve"}}
+    assert wording.describe_changes(answer, request).split("\n") == [
         "Getting search across assets ready for my-project's published assets. Preview shows how results would change before it is turned on.",
         "Turned search across assets on for my-project's shared memory.",
         "Search across assets is back to Preview for my-project's private drafts: queries no longer search across them, and the combined copy stays up to date.",
@@ -174,13 +174,68 @@ def test_changes_in_plain_words(wording):
         "Search across assets was already On for my-project's shared memory.",
         "Search across assets was not changed for my-project's private drafts: Turn Preview on first.",
         "Search across assets was not changed for my-project's published assets: No. (X)",
-        "Search across assets was already other for elsewhere.",
         "Search across assets was not changed for private drafts: no reason given",
         "Search across assets was not changed for my-project's private drafts: no reason given",
         "Search across assets for my-project's published assets: sideways.",
     ]
+    odd = {"changes": [change("elsewhere", "odd", "other", "unchanged", "")]}
+    assert wording.describe_changes(odd, {"contextGraphId": "", "layers": {"elsewhere": "off"}}) == "Search across assets was already other for elsewhere."
     assert wording.describe_changes({"changes": []}) is None
     assert wording.describe_changes(None) is None
+
+
+# The node reports every memory of each context graph in its settings, not only the ones a change names.
+NODE_WIDE = {"changes": [
+    {"contextGraphId": "team", "layer": "working-memory", "from": "off", "to": "off", "outcome": "unchanged"},
+    {"contextGraphId": "team", "layer": "shared-working-memory", "from": "off", "to": "build", "outcome": "applied"},
+    {"contextGraphId": "team", "layer": "verifiable-memory", "from": "build", "to": "build", "outcome": "unchanged"},
+    {"contextGraphId": "other", "layer": "working-memory", "from": "off", "to": "off", "outcome": "unchanged"},
+    {"contextGraphId": "other", "layer": "verifiable-memory", "from": "serve", "to": "serve", "outcome": "unchanged"},
+    {"contextGraphId": "third", "layer": "verifiable-memory", "from": "off", "to": "build", "outcome": "applied"},
+]}
+PREVIEW_NOTE = "Preview shows how results would change before it is turned on."
+
+
+def test_changes_name_a_memory_left_as_it_was_only_when_the_request_set_it(wording):
+    both = {"contextGraphId": "did:dkg:context-graph:team", "layers": {"shared-working-memory": "build", "verifiable-memory": "build"}}
+    assert wording.describe_changes(NODE_WIDE, both).split("\n") == [
+        f"Getting search across assets ready for team's shared memory. {PREVIEW_NOTE}",
+        "Search across assets was already Preview for team's published assets.",
+        f"Getting search across assets ready for third's published assets. {PREVIEW_NOTE}",
+    ]
+    assert len(wording.describe_changes(NODE_WIDE, {"contextGraphId": "team", "layers": {"shared-working-memory": "build"}}).split("\n")) == 2
+    assert len(wording.describe_changes(NODE_WIDE).split("\n")) == 2
+    unchanged = {"changes": [change for change in NODE_WIDE["changes"] if change["outcome"] == "unchanged"]}
+    assert wording.describe_changes(unchanged, {"contextGraphId": "team", "viewSemantics": "merged"}) is None
+    assert wording.describe_changes(unchanged, {"contextGraphId": "other", "layers": {"vm": "serve"}}) is None
+    assert wording.describe_changes({"changes": [{"contextGraphId": "other", "layer": "vm", "to": "serve", "outcome": "unchanged"}]},
+                                    {"contextGraphId": "other", "layers": {"verifiable-memory": "serve"}}) == (
+        "Search across assets was already On for other's published assets.")
+    refused = {"success": False, "status": 409, "code": "READ_GRAPHS_APPLY_REFUSED", "error": "Nothing changed.", "changes": [
+        {"contextGraphId": "team", "layer": "verifiable-memory", "from": "build", "to": "serve", "outcome": {"refused": "Not ready yet."}},
+        {"contextGraphId": "other", "layer": "verifiable-memory", "from": "serve", "to": "serve", "outcome": "unchanged"},
+    ]}
+    assert wording.describe_refusal(refused, "this Hermes provider", {"contextGraphId": "team", "layers": {"verifiable-memory": "serve"}}) == (
+        "The node refused: Nothing changed. (READ_GRAPHS_APPLY_REFUSED)\n"
+        "Search across assets was not changed for team's published assets: Not ready yet.")
+
+
+def test_set_tool_describes_what_it_set_from_a_node_wide_report(provider_factory, send):
+    send.return_value = {**SETTINGS, **NODE_WIDE}
+    out = json.loads(provider_factory().handle_tool_call(
+        "dkg_read_graphs_set", {"context_graph_id": "did:dkg:context-graph:team", "mode": "preview", "layer": "shared-working-memory"}))
+    assert out["summary"].split("\n\n")[0].split("\n") == [
+        f"Getting search across assets ready for team's shared memory. {PREVIEW_NOTE}",
+        f"Getting search across assets ready for third's published assets. {PREVIEW_NOTE}",
+    ]
+    assert out["changes"] == NODE_WIDE["changes"]
+    send.return_value = {"success": False, "status": 409, "code": "READ_GRAPHS_APPLY_REFUSED", "error": "Nothing changed.", "changes": [
+        {"contextGraphId": "team", "layer": "working-memory", "from": "off", "to": "off", "outcome": "unchanged"},
+        {"contextGraphId": "team", "layer": "verifiable-memory", "from": "serve", "to": "off", "outcome": {"refused": "The store is busy."}},
+    ]}
+    refused = json.loads(provider_factory().handle_tool_call("dkg_read_graphs_set", {"context_graph_id": "team", "mode": "off"}))
+    assert refused["error"] == ("The node refused: Nothing changed. (READ_GRAPHS_APPLY_REFUSED)\n"
+                                "Search across assets was not changed for team's published assets: The store is busy.")
 
 
 def test_create_outcome_in_plain_words(wording):

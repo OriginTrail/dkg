@@ -141,6 +141,34 @@ describe('dkg_read_graphs_set', () => {
     expect(result.structuredContent).toEqual(changed);
   });
 
+  it('describes what it set, not every memory the node reports as left alone', async () => {
+    // The node reports every memory of each context graph in its settings.
+    const nodeWide = {
+      ...SETTINGS,
+      changes: [
+        { contextGraphId: 'team', layer: 'working-memory', from: 'off', to: 'off', outcome: 'unchanged' },
+        { contextGraphId: 'team', layer: 'shared-working-memory', from: 'off', to: 'build', outcome: 'applied' },
+        { contextGraphId: 'team', layer: 'verifiable-memory', from: 'build', to: 'build', outcome: 'unchanged' },
+        { contextGraphId: 'other', layer: 'verifiable-memory', from: 'serve', to: 'serve', outcome: 'unchanged' },
+      ],
+    };
+    const { server } = setup(() => json(200, nodeWide));
+    const result = await server.call('dkg_read_graphs_set', { contextGraphId: 'did:dkg:context-graph:team', mode: 'preview', layer: 'shared-working-memory' });
+    expect(text(result).split('\n\n')[0])
+      .toBe("Getting search across assets ready for team's shared memory. Preview shows how results would change before it is turned on.");
+
+    const refused = setup(() => json(409, {
+      code: 'READ_GRAPHS_APPLY_REFUSED',
+      error: 'Nothing changed.',
+      changes: [
+        { contextGraphId: 'team', layer: 'verifiable-memory', from: 'build', to: 'serve', outcome: { refused: 'Not ready yet.' } },
+        { contextGraphId: 'other', layer: 'verifiable-memory', from: 'serve', to: 'serve', outcome: 'unchanged' },
+      ],
+    }));
+    expect(text(await refused.server.call('dkg_read_graphs_set', { contextGraphId: 'team', mode: 'on' })))
+      .toBe("The node refused: Nothing changed. (READ_GRAPHS_APPLY_REFUSED)\nSearch across assets was not changed for team's published assets: Not ready yet.");
+  });
+
   it('sets all three layers, and the default semantics or its removal', async () => {
     const { server, calls } = setup(() => json(200, SETTINGS));
     await server.call('dkg_read_graphs_set', { contextGraphId: 'team', mode: 'on', layer: 'all', defaultSemantics: 'merged' });

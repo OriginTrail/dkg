@@ -1993,8 +1993,8 @@ class DKGMemoryProvider(MemoryProvider):
             return tool_error(error)
         answer = self._client.set_read_graph_settings(change)
         if answer.get("success") is False:
-            return tool_error(describe_refusal(answer, "this Hermes provider"))
-        changed = describe_changes(answer)
+            return tool_error(describe_refusal(answer, "this Hermes provider", change))
+        changed = describe_changes(answer, change)
         settings = describe_settings(answer)
         return json.dumps({"summary": settings if changed is None else f"{changed}\n\n{settings}", **answer})
 

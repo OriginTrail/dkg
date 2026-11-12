@@ -42,13 +42,13 @@ export const READ_GRAPH_LAYER_DESCRIPTION =
   'Which memory: "verifiable-memory" (published assets, the default), "shared-working-memory" ' +
   '(shared memory, shared with your team), "working-memory" (private drafts), or "all".';
 
-/** What a tool says when the node refuses a settings request, or cannot be reached. */
-function readGraphSettingsRefusal(error: unknown): ToolResult {
+/** What a tool says when the node refuses a settings request (`request`, for a change), or cannot be reached. */
+function readGraphSettingsRefusal(error: unknown, request?: ReadGraphSettingsChange): ToolResult {
   if (!(error instanceof DkgHttpError)) {
     return errResult(describeReadGraphSettingsRefusal({ message: error instanceof Error ? error.message : String(error) }, 'this MCP server'));
   }
   const hint = error.message.includes(MISSING_TOKEN_HELP) ? ` ${MISSING_TOKEN_HELP}` : '';
-  return errResult(describeReadGraphSettingsRefusal(error, 'this MCP server') + hint);
+  return errResult(describeReadGraphSettingsRefusal(error, 'this MCP server', request) + hint);
 }
 
 export function registerReadGraphTools(server: McpServer, client: DkgClient, _config: DkgConfig): void {
@@ -114,10 +114,10 @@ export function registerReadGraphTools(server: McpServer, client: DkgClient, _co
       };
       try {
         const answer = await client.setReadGraphSettings(change);
-        const changed = describeReadGraphChanges(answer);
+        const changed = describeReadGraphChanges(answer, change);
         return ok(changed === undefined ? describeReadGraphSettings(answer) : `${changed}\n\n${describeReadGraphSettings(answer)}`, answer);
       } catch (error) {
-        return readGraphSettingsRefusal(error);
+        return readGraphSettingsRefusal(error, change);
       }
     },
   );

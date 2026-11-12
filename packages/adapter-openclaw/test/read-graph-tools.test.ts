@@ -104,6 +104,41 @@ describe('dkg_read_graphs_set', () => {
     expect(parsed(result)).toEqual({ summary: `Turned search across assets on for team's published assets.\n\n${SUMMARY}`, ...answer });
   });
 
+  it('describes what it set, not every memory the node reports as left alone', async () => {
+    // The node reports every memory of each context graph in its settings; the answer names the id without its URI prefix.
+    const answer = {
+      ...SETTINGS,
+      changes: [
+        { contextGraphId: 'team', layer: 'working-memory', from: 'serve', to: 'serve', outcome: 'unchanged' },
+        { contextGraphId: 'team', layer: 'shared-working-memory', from: 'serve', to: 'serve', outcome: 'unchanged' },
+        { contextGraphId: 'team', layer: 'verifiable-memory', from: 'build', to: 'serve', outcome: 'applied' },
+        { contextGraphId: 'other', layer: 'verifiable-memory', from: 'serve', to: 'serve', outcome: 'unchanged' },
+      ],
+    };
+    answering(
+      json(200, answer),
+      json(409, {
+        code: 'READ_GRAPHS_APPLY_REFUSED',
+        error: 'Nothing changed.',
+        changes: [
+          { contextGraphId: 'team', layer: 'shared-working-memory', from: 'serve', to: 'serve', outcome: 'unchanged' },
+          { contextGraphId: 'team', layer: 'verifiable-memory', from: 'serve', to: 'off', outcome: { refused: 'The store is busy.' } },
+          { contextGraphId: 'other', layer: 'verifiable-memory', from: 'serve', to: 'serve', outcome: 'unchanged' },
+        ],
+      }),
+    );
+    const set = tools().get('dkg_read_graphs_set')!;
+    const result = parsed(await set.execute('tc', { context_graph_id: 'did:dkg:context-graph:team', mode: 'on', layer: 'all' }));
+    expect(String(result.summary).split('\n\n')[0].split('\n')).toEqual([
+      "Search across assets was already On for team's private drafts.",
+      "Search across assets was already On for team's shared memory.",
+      "Turned search across assets on for team's published assets.",
+    ]);
+    expect(result.changes).toEqual(answer.changes);
+    expect(parsed(await set.execute('tc', { context_graph_id: 'did:dkg:context-graph:team', mode: 'off' })).error)
+      .toBe("The node refused: Nothing changed. (READ_GRAPHS_APPLY_REFUSED)\nSearch across assets was not changed for team's published assets: The store is busy.");
+  });
+
   it('sets all three layers, and the default semantics or its removal', async () => {
     const fetchMock = answering(json(200, SETTINGS));
     const set = tools().get('dkg_read_graphs_set')!;
