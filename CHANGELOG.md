@@ -32,6 +32,24 @@ and gives the node UI a new design system.
 - The Marketplace section follows the light and dark themes like the rest
   of the app.
 
+### Added
+
+- A developer preview of Graph Computer Programs: S-expression and
+  TypeScript Programs stored in a context graph, which a node runs once its
+  user approves their effects and records with RDF receipts. The node runs
+  them only when `semanticRuntime.enabled` is `true` in its config, and it
+  is off by default. Two new packages carry it:
+  `@origintrail-official/dkg-semantic-runtime`, the runtime, and
+  `@origintrail-official/dkg-graph-computer`, a TypeScript client that
+  uploads, approves and invokes Programs. The node UI adds a TypeScript
+  Program editor to each project.
+- Building the semantic runtime's Wasm takes a pinned Rust toolchain (see
+  `rust/README.md`). A node built from source without it skips the Wasm with
+  a warning and can't run the semantic runtime; set
+  `DKG_SEMANTIC_RUNTIME_WASM=required` to make that build fail instead. CI
+  and release packing require the Wasm, so the published package includes
+  it.
+
 ### Changed
 
 - Core nodes send fewer RPC requests for Knowledge Assets that wait to reach
@@ -42,6 +60,11 @@ and gives the node UI a new design system.
   request. On the mainnet Core nodes measured, that is up to about 14,000
   fewer requests a day on Gnosis and 24,000 on Base, depending on how many
   assets are pending.
+- The node UI build no longer reports its chunks' compressed sizes. With the
+  code editor bundled, gzipping every chunk only to report its size pushed
+  the build past its 896 MB heap ceiling in about one build in three, in CI
+  and in git-based updates. The ceiling stays where it fits a 1.5 GiB node
+  service.
 
 ### Fixed
 
