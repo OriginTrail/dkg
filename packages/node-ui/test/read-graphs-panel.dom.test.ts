@@ -19,6 +19,8 @@ interface Request { method: string; url: string; body?: Json }
 let requests: Request[] = [];
 let getAnswers: Array<[number, unknown]> = [];
 let changesAnswer: [number, unknown] = [200, { contextGraphs: [] }];
+/** When set, the next settings read waits for it: a slow node. */
+let slowGet: Promise<[number, unknown]> | undefined;
 let putAnswer: (body: Json) => Promise<[number, unknown]>;
 let root: Root | null = null;
 
@@ -91,6 +93,7 @@ beforeEach(() => {
   requests = [];
   getAnswers = [];
   changesAnswer = [200, { contextGraphs: [] }];
+  slowGet = undefined;
   putAnswer = async () => [500, { error: 'unexpected PUT' }];
   vi.stubGlobal('fetch', vi.fn(async (input: string, init: RequestInit = {}) => {
     const method = init.method ?? 'GET';
@@ -98,6 +101,11 @@ beforeEach(() => {
     requests.push({ method, url, ...(typeof init.body === 'string' ? { body: JSON.parse(init.body) } : {}) });
     if (method === 'PUT') return answer(...await putAnswer(JSON.parse(String(init.body))));
     if (url.startsWith(CHANGES)) return answer(...changesAnswer);
+    if (slowGet) {
+      const pending = slowGet;
+      slowGet = undefined;
+      return answer(...await pending);
+    }
     const [status, json] = getAnswers.length > 1 ? getAnswers.shift()! : getAnswers[0] ?? [500, { error: 'no answer' }];
     return answer(status, json);
   }));
@@ -408,6 +416,33 @@ describe('ReadGraphsSection', () => {
     await act(async () => { vi.advanceTimersByTime(3 * READ_GRAPHS_POLL_MS); });
     await flush();
     expect(gets()).toHaveLength(2);
+  });
+
+  it('waits for a slow read before polling again, and shows its answer', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    getAnswers = [[200, settings()]];
+    const container = await render();
+    expect(gets()).toHaveLength(1);
+
+    let answerSlowly!: (outcome: [number, unknown]) => void;
+    slowGet = new Promise(resolve => { answerSlowly = resolve; });
+    await act(async () => { vi.advanceTimersByTime(READ_GRAPHS_POLL_MS); });
+    await flush();
+    expect(gets()).toHaveLength(2);
+
+    // Three more polls fall due while that read is still answering: none starts another read.
+    await act(async () => { vi.advanceTimersByTime(3 * READ_GRAPHS_POLL_MS); });
+    await flush();
+    expect(gets()).toHaveLength(2);
+
+    await act(async () => {
+      answerSlowly([200, settings({ readGraphs: [
+        { readGraph: 'urn:rg:swm', layer: 'swm', state: 'ready', generation: 1 },
+        { readGraph: 'urn:rg:vm', layer: 'vm', state: 'ready', generation: 2 },
+      ] })]);
+    });
+    await flush();
+    expect(state(row(container, 'shared-working-memory'))).toBe('Ready to turn on');
   });
 });
 

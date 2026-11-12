@@ -282,7 +282,7 @@ describe('ContextGraphQueryView', () => {
     expect(textarea.value).toContain('schema.org/name');
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('schema.org/name'),
-      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory', semantics: 'per-asset', includeContextGraphPartitions: true },
+      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory', semantics: 'per-asset' },
       { timeoutMs: null, maxResponseBytes: null },
     );
 
@@ -296,7 +296,7 @@ describe('ContextGraphQueryView', () => {
     });
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('schema.org/name'),
-      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory', semantics: 'per-asset', includeContextGraphPartitions: true },
+      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory', semantics: 'per-asset' },
       { timeoutMs: null, maxResponseBytes: null },
     );
 

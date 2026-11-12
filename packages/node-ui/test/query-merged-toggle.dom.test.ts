@@ -218,7 +218,9 @@ describe('ContextGraphQueryView memory picker and Search across assets', () => {
     const first = executeQueryMock.mock.calls[0][0];
     await chooseView(container, 'working-memory');
     await click(button(container, 'Run'));
-    expect(lastRun()).toMatchObject({ view: 'working-memory', semantics: 'per-asset', includeContextGraphPartitions: true });
+    expect(lastRun()).toMatchObject({ view: 'working-memory', semantics: 'per-asset' });
+    // Private drafts are searched each on its own: nothing merges them into one dataset.
+    expect(lastRun()).not.toHaveProperty('includeContextGraphPartitions');
 
     await click(button(container, 'Reset'));
     expect(viewSelect(container).value).toBe('');

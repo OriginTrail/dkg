@@ -120,8 +120,17 @@ export function ReadGraphsSection({ contextGraphId }: { contextGraphId: string }
   const [confirming, setConfirming] = useState<GetView | null>(null);
   const [refusal, setRefusal] = useState<{ contextGraphId: string; view: GetView; message: string } | null>(null);
   const [showChanges, setShowChanges] = useState(false);
+  // Reads in flight: a poll waits for them, so a slow node's answer isn't dropped by the next poll.
+  const reading = useRef(0);
   const { data, error, refresh } = useFetch(
-    () => fetchReadGraphSettings(contextGraphId),
+    async () => {
+      reading.current += 1;
+      try {
+        return await fetchReadGraphSettings(contextGraphId);
+      } finally {
+        reading.current -= 1;
+      }
+    },
     [contextGraphId],
     0,
     { scope: contextGraphId, retention: 'scope' },
@@ -144,7 +153,7 @@ export function ReadGraphsSection({ contextGraphId }: { contextGraphId: string }
   const changing = settings?.layers.some(inTransition) ?? false;
   useEffect(() => {
     if (!changing) return undefined;
-    const timer = setInterval(() => { if (!document.hidden) refresh(); }, READ_GRAPHS_POLL_MS);
+    const timer = setInterval(() => { if (!document.hidden && reading.current === 0) refresh(); }, READ_GRAPHS_POLL_MS);
     return () => clearInterval(timer);
   }, [changing, refresh]);
 
