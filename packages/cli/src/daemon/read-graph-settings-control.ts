@@ -24,11 +24,11 @@ import {
 } from '@origintrail-official/dkg-storage';
 import { nodeReadGraphModes, policyRefusalOf, resolveEffectiveQueryConfig, type ReadGraphsRefusal } from '../read-graphs-config.js';
 import { CHECKPOINT_NODE_REFUSAL, noteReadGraphStoreSupport, type DaemonReadGraphSettings } from '../read-graph-settings-start.js';
-import {
-  openReadGraphSettingsStore,
-  type ReadGraphSettingsChange,
-  type ReadGraphSettingsEntry,
-  type SqliteReadGraphSettingsStore,
+import type {
+  ReadGraphSettingsChange,
+  ReadGraphSettingsEntry,
+  ReadGraphSettingsRows,
+  SqliteReadGraphSettingsStore,
 } from '../read-graph-settings-store.js';
 import {
   MEMORY_IN_SENTENCES,
@@ -39,8 +39,9 @@ import {
   type ReadGraphSettingsRefusal,
   type ReadGraphSettingsRequest,
 } from '../read-graph-settings-wire.js';
-import { readGraphRollbackTarget, rollbackTargetRefusal } from '../update/read-graph-rollback-target.js';
-import { readGraphViewOf } from './routes/read-graphs.js';
+import { readGraphViewOf } from '../read-graphs-wire.js';
+import { settingsTableRollbackRefusal } from '../update/read-graph-rollback-target.js';
+import { daemonReadGraphRequests, type ReadGraphRequests } from './read-graph-requests.js';
 
 const LAYER_OF_VIEW: Readonly<Record<GetView, MemoryLayer>> = {
   'working-memory': MemoryLayer.WorkingMemory,
@@ -63,17 +64,29 @@ export interface ReadGraphSettingsOutcome {
 
 export type { ReadGraphCreateOutcome } from '../read-graph-settings-wire.js';
 
-/** The `readGraphs` field of a context graph's creation, on a node whose control may not run yet. */
+/**
+ * The `readGraphs` field of a context graph's creation, on a node whose control may not run yet. It runs as one of the daemon's read-graph requests,
+ * which graceful shutdown ends.
+ */
 export async function readGraphSettingsOnCreate(
   control: ReadGraphSettingsControl | undefined,
   input: { readonly contextGraphId: string; readonly layers: ReadGraphSettingsRequest['layers']; readonly canAdminister: boolean; readonly actor: string },
+  requests: ReadGraphRequests = daemonReadGraphRequests,
 ): Promise<ReadGraphCreateOutcome> {
   // The token comes first, and its refusal is the same for every context graph.
   if (!input.canAdminister) return NOT_NODE_ADMIN;
   if (control === undefined) {
     return { code: 'READ_GRAPH_SETTINGS_UNAVAILABLE', refused: 'This node\'s search-across-assets settings aren\'t available yet; the context graph was created without them.' };
   }
-  return control.applyOnCreate(input.contextGraphId, input.layers, input.actor);
+  if (requests.ending) return NODE_SHUTTING_DOWN_ON_CREATE;
+  const stop = new AbortController();
+  const untrack = requests.track(stop);
+  try {
+    const outcome = await control.applyOnCreate(input.contextGraphId, input.layers, input.actor, stop.signal);
+    return stop.signal.aborted && requests.ending && !('applied' in outcome) ? NODE_SHUTTING_DOWN_ON_CREATE : outcome;
+  } finally {
+    untrack();
+  }
 }
 
 /** Build the daemon's control once its agent runs, and say so when its store cannot keep the read graphs the table sets. */
@@ -87,8 +100,8 @@ export interface ReadGraphSettingsControlInput {
   readonly agent: ReadGraphSettingsAgent;
   readonly role: 'core' | 'edge';
   readonly checkpoint: boolean;
-  /** Where the settings table is: each answer and each change opens it for its own work and closes it again. */
-  readonly dataDir: string;
+  /** The settings table, over the node's database: the daemon's composition owns the handle. */
+  readonly table: SqliteReadGraphSettingsStore;
   readonly log: (message: string) => void;
 }
 
@@ -97,7 +110,7 @@ export class ReadGraphSettingsControl {
   readonly #agent: ReadGraphSettingsAgent;
   readonly #role: 'core' | 'edge';
   readonly #checkpoint: boolean;
-  readonly #dataDir: string;
+  readonly #table: SqliteReadGraphSettingsStore;
   readonly #log: (message: string) => void;
   #queue: Promise<unknown> = Promise.resolve();
 
@@ -106,7 +119,7 @@ export class ReadGraphSettingsControl {
     this.#agent = input.agent;
     this.#role = input.role;
     this.#checkpoint = input.checkpoint;
-    this.#dataDir = input.dataDir;
+    this.#table = input.table;
     this.#log = input.log;
   }
 
@@ -167,8 +180,13 @@ export class ReadGraphSettingsControl {
   }
 
   /** The `readGraphs` field of a node admin's creation of a context graph, applied after it with the checks of a change. */
-  async applyOnCreate(contextGraphId: string, layers: ReadGraphSettingsRequest['layers'], actor: string): Promise<ReadGraphCreateOutcome> {
-    const result = await this.#serial(() => this.#change({ contextGraphId, ...(layers === undefined ? {} : { layers }) }, actor, undefined));
+  async applyOnCreate(
+    contextGraphId: string,
+    layers: ReadGraphSettingsRequest['layers'],
+    actor: string,
+    signal?: AbortSignal,
+  ): Promise<ReadGraphCreateOutcome> {
+    const result = await this.#serial(() => this.#change({ contextGraphId, ...(layers === undefined ? {} : { layers }) }, actor, signal));
     return result.ok ? { applied: true, changes: result.changes } : { code: result.refusal.code, refused: result.refusal.error };
   }
 
@@ -191,51 +209,59 @@ export class ReadGraphSettingsControl {
       ...(request.layers === undefined ? {} : { layers: request.layers }),
       ...(request.viewSemantics === undefined ? {} : { viewSemantics: request.viewSemantics }),
     };
-    let table: SqliteReadGraphSettingsStore;
+    // The rows commit in one short transaction of the shared database before the node applies the settings they leave; a change the node does not
+    // apply puts the previous rows back. The apply changes nothing when it refuses or throws.
+    const table = this.#table;
+    let previous: ReadGraphSettingsRows;
     try {
-      table = openReadGraphSettingsStore(this.#dataDir);
+      previous = table.rowsOf(contextGraphId);
+      table.set(contextGraphId, change, actor);
     } catch (error) {
       return unavailable(error);
     }
+    let changes: readonly ReadGraphModeChange[];
     try {
-      // The change stays uncommitted while the node applies the settings it leaves, and is rolled back unless they apply.
-      return await table.changeWithin(contextGraphId, change, actor, async (entries) => {
-        const { config } = resolveEffectiveQueryConfig(policy, entries, { refusals });
-        let changes: readonly ReadGraphModeChange[];
-        try {
-          changes = await this.#agent.applyReadGraphModesV1(config.readGraphs, { ...(signal ? { signal } : {}), viewSemantics: config.viewSemantics });
-        } catch (error) {
-          // A store that cannot keep the settings in force refuses them before anything changes.
-          const unsupported = (error as { code?: unknown } | null)?.code === 'READ_GRAPHS_UNSUPPORTED';
-          return { keep: false, result: unsupported
-            ? refused(409, answerOf({ code: 'READ_GRAPHS_UNSUPPORTED', message: messageOf(error) }))
-            : applyRefused(contextGraphId, messageOf(error)) };
-        }
-        const refusedChange = changes.find((entry) => typeof entry.outcome === 'object');
-        if (refusedChange !== undefined) {
-          return { keep: false, result: applyRefused(contextGraphId, (refusedChange.outcome as { refused: string }).refused, changes) };
-        }
-        this.#log(`[read-graphs] ${actor} changed the settings of ${contextGraphId}: ${describe(request, changes)}.`);
-        return { keep: true, result: { ok: true, changes } as ChangeResult };
-      });
+      const { config } = resolveEffectiveQueryConfig(policy, table.list(), { refusals });
+      changes = await this.#agent.applyReadGraphModesV1(config.readGraphs, { ...(signal ? { signal } : {}), viewSemantics: config.viewSemantics });
     } catch (error) {
-      return unavailable(error);
-    } finally {
-      table.close();
+      // A store that cannot keep the settings in force refuses them before anything changes.
+      const unsupported = (error as { code?: unknown } | null)?.code === 'READ_GRAPHS_UNSUPPORTED';
+      return this.#putBack(contextGraphId, previous, unsupported
+        ? refused(409, answerOf({ code: 'READ_GRAPHS_UNSUPPORTED', message: messageOf(error) }))
+        : applyRefused(contextGraphId, messageOf(error)));
+    }
+    const refusedChange = changes.find((entry) => typeof entry.outcome === 'object');
+    if (refusedChange !== undefined) {
+      return this.#putBack(contextGraphId, previous, applyRefused(contextGraphId, (refusedChange.outcome as { refused: string }).refused, changes));
+    }
+    this.#log(`[read-graphs] ${actor} changed the settings of ${contextGraphId}: ${describe(request, changes)}.`);
+    return { ok: true, changes };
+  }
+
+  /**
+   * Put a context graph's previous rows back after a change the node did not apply, and answer why. Rows that cannot be put back are said so: the
+   * running node keeps its settings, and the table holds the change until it is set again.
+   */
+  #putBack(contextGraphId: string, previous: ReadGraphSettingsRows, result: ChangeResult): ChangeResult {
+    try {
+      this.#table.restore(contextGraphId, previous);
+      return result;
+    } catch (error) {
+      this.#log(`[read-graphs] The previous settings of ${contextGraphId} could not be put back after a change the node did not apply: ${messageOf(error)}`);
+      return refused(503, {
+        code: 'READ_GRAPH_SETTINGS_UNAVAILABLE',
+        error: `Search across assets wasn't changed for ${contextGraphId}, but its previous settings couldn't be put back (${messageOf(error)}): set them again.`,
+      });
     }
   }
 
   /** The table's entries for an answer: none on a node that starts from a public checkpoint, or when the table cannot be read. */
   #entries(): ReadonlyArray<ReadGraphSettingsEntry> {
     if (this.#checkpoint) return [];
-    let table: SqliteReadGraphSettingsStore | undefined;
     try {
-      table = openReadGraphSettingsStore(this.#dataDir);
-      return table.list();
+      return this.#table.list();
     } catch {
       return [];
-    } finally {
-      table?.close();
     }
   }
 
@@ -248,12 +274,8 @@ export class ReadGraphSettingsControl {
       refusals.push({ code: 'READ_GRAPHS_UNSUPPORTED', message: `the node's store does not maintain read graphs with ${missing.join(', ')}` });
     }
     if (this.#checkpoint) refusals.push(CHECKPOINT_NODE_REFUSAL);
-    try {
-      const rollback = rollbackTargetRefusal(await readGraphRollbackTarget(this.#role));
-      if (rollback !== undefined) refusals.push(rollback);
-    } catch (error) {
-      refusals.push({ code: 'READ_GRAPHS_ROLLBACK_TARGET_OLDER', message: `the rollback target cannot be read (${messageOf(error)})` });
-    }
+    const rollback = await settingsTableRollbackRefusal(this.#role);
+    if (rollback !== undefined) refusals.push(rollback);
     return refusals;
   }
 
@@ -263,6 +285,11 @@ export class ReadGraphSettingsControl {
     return run;
   }
 }
+
+const NODE_SHUTTING_DOWN_ON_CREATE: ReadGraphCreateOutcome = Object.freeze({
+  code: 'NODE_SHUTTING_DOWN',
+  refused: 'The node is shutting down; the context graph was created without search across assets.',
+});
 
 const NOT_NODE_ADMIN: ReadGraphCreateOutcome = Object.freeze({
   code: 'NODE_ADMIN_REQUIRED',

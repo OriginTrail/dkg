@@ -1,4 +1,4 @@
-import { MemoryLayer, compareCodePoint, parseReadGraphIri } from '@origintrail-official/dkg-core';
+import { compareCodePoint, parseReadGraphIri } from '@origintrail-official/dkg-core';
 import {
   READ_GRAPH_STATES,
   markReadGraphDirty,
@@ -14,20 +14,15 @@ import {
   READ_GRAPHS_ACTIONS,
   READ_GRAPHS_PATH,
   parseReadGraphsRequest,
-  type ReadGraphLayerLabel,
-  type ReadGraphView,
+  READ_GRAPH_LAYER_LABEL_OF,
+  readGraphViewOf,
   type ReadGraphsAction,
   type ReadGraphsRequest,
 } from '../../read-graphs-wire.js';
 import { jsonResponse, readBody, SMALL_BODY_BYTES } from '../http-utils.js';
 import { requireNodeAdmin } from '../node-admin-guard.js';
 import { actorFromRequestContext, type RequestContext } from './context.js';
-
-const LAYER_LABELS: Readonly<Record<MemoryLayer, ReadGraphLayerLabel>> = {
-  [MemoryLayer.WorkingMemory]: 'wm',
-  [MemoryLayer.SharedWorkingMemory]: 'swm',
-  [MemoryLayer.VerifiableMemory]: 'vm',
-};
+import { SHUTTING_DOWN, daemonReadGraphRequests, type ReadGraphRequests } from '../read-graph-requests.js';
 
 const DESCRIPTIONS: Readonly<Record<ReadGraphsAction, string>> = {
   status: 'list the read graphs of the node',
@@ -36,37 +31,7 @@ const DESCRIPTIONS: Readonly<Record<ReadGraphsAction, string>> = {
   drop: 'drop the read graphs of the node',
 };
 
-/**
- * The read-graph requests a daemon runs. Graceful shutdown ends them at once
- * ({@link end}), before the HTTP server drains: each stops at its next store
- * call and answers, and a later check, rebuild or drop is refused.
- */
-export class ReadGraphRequests {
-  #ending = false;
-  readonly #running = new Set<AbortController>();
-
-  get ending(): boolean {
-    return this.#ending;
-  }
-
-  /** Track a request until the returned function is called. */
-  track(request: AbortController): () => void {
-    this.#running.add(request);
-    return () => {
-      this.#running.delete(request);
-    };
-  }
-
-  end(): void {
-    this.#ending = true;
-    for (const request of this.#running) request.abort(new Error('The node is shutting down'));
-  }
-}
-
-/** The daemon's read-graph requests, which its graceful shutdown ends. */
-export const daemonReadGraphRequests = new ReadGraphRequests();
-
-const SHUTTING_DOWN = { code: 'NODE_SHUTTING_DOWN', error: 'The node is shutting down; try again once it is back.', retryable: true } as const;
+export { ReadGraphRequests, daemonReadGraphRequests } from '../read-graph-requests.js';
 
 interface ReadGraphRow {
   readonly readGraph: string;
@@ -206,20 +171,7 @@ function selected<Row extends ReadGraphRow>(rows: readonly Row[], request: ReadG
     const key = parseReadGraphIri(row.readGraph);
     if (!key) return false;
     if (request.contextGraphId !== undefined && key.scope.contextGraphId !== request.contextGraphId) return false;
-    return request.layer === undefined || LAYER_LABELS[key.layer] === request.layer;
+    return request.layer === undefined || READ_GRAPH_LAYER_LABEL_OF[key.layer] === request.layer;
   }).sort((left, right) => compareCodePoint(left.readGraph, right.readGraph));
 }
 
-/** One read graph as the read-graph routes list it. */
-export function readGraphViewOf(row: ReadGraphRow): ReadGraphView {
-  const key = parseReadGraphIri(row.readGraph)!;
-  return {
-    readGraph: row.readGraph,
-    contextGraphId: key.scope.contextGraphId,
-    ...(key.scope.kind === 'sub-graph' ? { subGraphName: key.scope.subGraphName } : {}),
-    layer: LAYER_LABELS[key.layer],
-    ...(key.layer === MemoryLayer.WorkingMemory ? { agentAddress: key.agentAddress } : {}),
-    state: row.state,
-    generation: row.generation,
-  };
-}

@@ -2,11 +2,11 @@
 // the `readGraphs` field of a context graph's creation, over a real settings table and a real read-graph layer.
 import { EventEmitter } from 'node:events';
 import { createServer } from 'node:http';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { Readable } from 'node:stream';
+import { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryLayer, readGraphIri, readScope } from '@origintrail-official/dkg-core';
 import {
@@ -27,9 +27,10 @@ import { ReadGraphSettingsControl, readGraphSettingsOnCreate, type ReadGraphSett
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
 import { handleReadGraphSettingsRoutes } from '../src/daemon/routes/read-graph-settings.js';
-import { prepareDaemonReadGraphSettings } from '../src/read-graph-settings-start.js';
+import { ReadGraphRequests } from '../src/daemon/read-graph-requests.js';
+import { checkDaemonQuerySection, prepareDaemonReadGraphSettings } from '../src/read-graph-settings-start.js';
 import { resolveQuerySection } from '../src/read-graphs-config.js';
-import { openReadGraphSettingsStore, type SqliteReadGraphSettingsStore } from '../src/read-graph-settings-store.js';
+import { SqliteReadGraphSettingsStore } from '../src/read-graph-settings-store.js';
 import { READ_GRAPH_SETTINGS_PATH } from '../src/read-graph-settings-wire.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
@@ -40,17 +41,21 @@ const AGENT = requestAuthentication({ kind: 'agent', agentAddress: `0x${'ab'.rep
 
 let home: string;
 let previousHome: string | undefined;
-const opened: SqliteReadGraphSettingsStore[] = [];
+let dashboard: DashboardDB;
+/** The settings table over the node's database, as the daemon composes it. */
+let table: SqliteReadGraphSettingsStore;
 
 beforeEach(async () => {
   previousHome = process.env.DKG_HOME;
   home = await mkdtemp(join(tmpdir(), 'dkg-read-graph-settings-route-'));
   process.env.DKG_HOME = home;
+  dashboard = new DashboardDB({ dataDir: home });
+  table = new SqliteReadGraphSettingsStore(dashboard);
 });
 
 afterEach(async () => {
   vi.restoreAllMocks();
-  for (const table of opened.splice(0)) table.close();
+  dashboard.close();
   if (previousHome === undefined) delete process.env.DKG_HOME;
   else process.env.DKG_HOME = previousHome;
   await rm(home, { recursive: true, force: true });
@@ -64,18 +69,8 @@ function layeredStore(capable = true): TripleStore {
   return wrapReadGraphLayer(adapter, { backend: 'oxigraph-worker', options: { path: join(home, `store-${Math.random()}`) } });
 }
 
-/** A context graph's rows as stored, with when and by whom each changed, read straight from the file. */
-function rowsOf(contextGraphId: string) {
-  const db = new DatabaseSync(join(home, 'read-graph-settings.db'), { readOnly: true });
-  try {
-    return {
-      modes: db.prepare('SELECT layer, mode, updated_at AS updatedAt, updated_by AS updatedBy FROM read_graph_modes WHERE context_graph_id = ? ORDER BY layer').all(contextGraphId),
-      semantics: db.prepare('SELECT semantics, updated_at AS updatedAt, updated_by AS updatedBy FROM view_semantics_defaults WHERE context_graph_id = ?').all(contextGraphId),
-    };
-  } finally {
-    db.close();
-  }
-}
+/** A context graph's rows as stored, with when and by whom each changed. */
+const rowsOf = (contextGraphId: string) => table.rowsOf(contextGraphId);
 
 function agentOf(store: TripleStore, overrides: Partial<ReadGraphSettingsAgent> = {}): ReadGraphSettingsAgent {
   return {
@@ -87,19 +82,13 @@ function agentOf(store: TripleStore, overrides: Partial<ReadGraphSettingsAgent> 
   } as ReadGraphSettingsAgent;
 }
 
-/**
- * A control over the settings table in `home`, with a handle of the test's own on the same table to look at it. `unavailable` gives the control a
- * data directory whose table cannot be opened.
- */
-function controlOf(options: { query?: unknown; agent?: ReadGraphSettingsAgent; checkpoint?: boolean; unavailable?: boolean; log?: string[] } = {}) {
-  const dataDir = options.unavailable ? join(home, 'unopenable') : home;
-  const table = options.unavailable || options.checkpoint ? undefined : openReadGraphSettingsStore(home);
-  if (table !== undefined) opened.push(table);
+/** A control over the settings table in the node's database. */
+function controlOf(options: { query?: unknown; agent?: ReadGraphSettingsAgent; checkpoint?: boolean; log?: string[] } = {}) {
   const { policy } = resolveQuerySection(options.query);
   const agent = options.agent ?? agentOf(layeredStore());
   const control = new ReadGraphSettingsControl({
     settings: { policy, effective: { readGraphs: {}, viewSemantics: {} }, storeSettings: undefined },
-    agent, role: 'edge', checkpoint: options.checkpoint ?? false, dataDir, log: (line) => { options.log?.push(line); },
+    table, agent, role: 'edge', checkpoint: options.checkpoint ?? false, log: (line) => { options.log?.push(line); },
   });
   return { control, table, agent };
 }
@@ -138,7 +127,7 @@ const put = (control: ReadGraphSettingsControl | undefined, body: unknown, heade
 describe('GET /api/store/read-graphs/settings', () => {
   it('is for the node admin only, and answers the policy, the node\'s own modes and each context graph', async () => {
     const { control, table } = controlOf({ query: { readGraphs: { layers: { 'shared-working-memory': 'build' } }, viewSemantics: 'merged' } });
-    table!.set(CG, { layers: { 'verifiable-memory': 'serve' }, viewSemantics: 'per-asset' }, 'cli');
+    table.set(CG, { layers: { 'verifiable-memory': 'serve' }, viewSemantics: 'per-asset' }, 'cli');
     const refused = await call(control, 'GET', READ_GRAPH_SETTINGS_PATH, { authentication: AGENT });
     expect(refused.status).toBe(403);
     expect(refused.body!.error).toContain('requires a node-level admin token');
@@ -235,7 +224,7 @@ describe('PUT /api/store/read-graphs/settings', () => {
     const semantics = await put(control, { contextGraphId: CG, viewSemantics: null });
     expect(semantics.status).toBe(200);
     expect(viewSemanticsOf(runtime.viewSemantics, CG)).toBe('per-asset');
-    expect(table!.get(CG)).toEqual({ layers: { 'verifiable-memory': 'build' } });
+    expect(table.get(CG)).toEqual({ layers: { 'verifiable-memory': 'build' } });
   });
 
   it('refuses a body or an actor it cannot take, and changes nothing', async () => {
@@ -251,10 +240,10 @@ describe('PUT /api/store/read-graphs/settings', () => {
     // A format character, such as a bidi override, is no part of an actor's name either.
     expect((await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'build' } }, { 'x-dkg-actor': 'agent:mcp\u202e' })).status).toBe(400);
     expect((await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'build' } })).status).toBe(200);
-    expect(table!.list().map((entry) => entry.contextGraphId)).toEqual([CG]);
+    expect(table.list().map((entry) => entry.contextGraphId)).toEqual([CG]);
     const agentCall = await call(control, 'PUT', READ_GRAPH_SETTINGS_PATH, { body: { contextGraphId: OTHER, layers: { 'verifiable-memory': 'build' } }, authentication: AGENT });
     expect(agentCall.status).toBe(403);
-    expect(table!.get(OTHER)).toEqual({ layers: {} });
+    expect(table.get(OTHER)).toEqual({ layers: {} });
   });
 
   it('switches nothing on that the policy does not allow, in plain words, and always lets a layer switch off', async () => {
@@ -262,22 +251,21 @@ describe('PUT /api/store/read-graphs/settings', () => {
     const refused = await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'build', 'working-memory': 'build' } });
     expect(refused).toMatchObject({ status: 409, body: { code: 'READ_GRAPHS_LAYER_NOT_ALLOWED' } });
     expect(refused.body!.error).toBe('Search across assets can\'t be turned on for private drafts on this node: query.readGraphsPolicy.layers in its config.json leaves it out.');
-    expect(table!.get(CG)).toEqual({ layers: {} });
+    expect(table.get(CG)).toEqual({ layers: {} });
     expect((await put(control, { contextGraphId: CG, layers: { 'working-memory': 'off', 'verifiable-memory': 'serve' } })).status).toBe(200);
     const closed = controlOf({ query: { readGraphsPolicy: { enabled: false } } }).control;
     expect((await put(closed, { contextGraphId: OTHER, layers: { 'verifiable-memory': 'build' } })).body).toMatchObject({ code: 'READ_GRAPHS_DISABLED' });
     expect((await put(closed, { contextGraphId: OTHER, layers: { 'verifiable-memory': 'off' } })).status).toBe(200);
-    // A settings file that could not be opened at start takes no change.
-    await mkdir(join(home, 'unopenable', 'read-graph-settings.db'), { recursive: true });
-    const unopened = controlOf({ unavailable: true }).control;
-    expect((await put(unopened, { contextGraphId: CG, layers: { 'verifiable-memory': 'off' } })).body).toMatchObject({ code: 'READ_GRAPH_SETTINGS_UNAVAILABLE' });
+    // A table that cannot be written takes no change, and says so.
+    vi.spyOn(table, 'set').mockImplementationOnce(() => { throw new Error('disk I/O error'); });
+    expect((await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'off' } })).body)
+      .toMatchObject({ code: 'READ_GRAPH_SETTINGS_UNAVAILABLE', error: 'This node\'s search-across-assets settings can\'t be changed now: disk I/O error.' });
   });
 
   it('switches nothing on where the store, a public checkpoint start or the rollback target refuses, and lets the rest through', async () => {
     const unsupported = controlOf({ agent: agentOf(layeredStore(false)) }).control;
     expect((await put(unsupported, { contextGraphId: CG, layers: { 'verifiable-memory': 'build' } })).body).toMatchObject({ code: 'READ_GRAPHS_UNSUPPORTED' });
     expect((await put(unsupported, { contextGraphId: CG, viewSemantics: 'merged' })).status).toBe(200);
-    opened.splice(0).forEach((table) => table.close());
 
     const checkpoint = controlOf({ checkpoint: true }).control;
     expect(await put(checkpoint, { contextGraphId: CG, layers: { 'verifiable-memory': 'off' } }))
@@ -297,23 +285,20 @@ describe('PUT /api/store/read-graphs/settings', () => {
     expect(older.body!.error).toBe('Search across assets can be turned on after this node\'s next update: the release it would roll back to (10.1.1) '
       + 'doesn\'t support it, and 10.1.2 is the first that does.');
     expect((await put(control, { contextGraphId: CG, layers: { 'shared-working-memory': 'off' } })).status).toBe(200);
-    expect(table!.get(CG).layers).toEqual({ 'shared-working-memory': 'off' });
+    expect(table.get(CG).layers).toEqual({ 'shared-working-memory': 'off' });
   });
 
   it('puts the context graph\'s rows back exactly when the apply refuses or fails', async () => {
     const refusedChange: ReadGraphModeChange = { contextGraphId: CG, layer: 'verifiable-memory', from: 'off', to: 'build', outcome: { refused: 'the store refused' } };
     const store = layeredStore();
-    let during: ReturnType<typeof rowsOf> | undefined;
     const apply = vi.fn<ReadGraphSettingsAgent['applyReadGraphModesV1']>()
-      .mockImplementationOnce(async () => { during = rowsOf(CG); return [refusedChange]; })
+      .mockResolvedValueOnce([refusedChange])
       .mockRejectedValueOnce(new Error('stored rows unreadable'));
     const { control, table } = controlOf({ agent: agentOf(store, { applyReadGraphModesV1: apply }) });
-    table!.set(CG, { layers: { 'working-memory': 'build' }, viewSemantics: 'merged' }, 'ui');
+    table.set(CG, { layers: { 'working-memory': 'build' }, viewSemantics: 'merged' }, 'ui');
     const before = rowsOf(CG);
     const refused = await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'build', 'working-memory': 'off' }, viewSemantics: null });
     expect(refused).toMatchObject({ status: 409, body: { code: 'READ_GRAPHS_APPLY_REFUSED', changes: [refusedChange] } });
-    // While the node applied it, the change was not committed: no other reader saw it.
-    expect(during).toEqual(before);
     expect(refused.body!.error).toBe(`Search across assets couldn't be changed for ${CG}, so its previous settings are back: the store refused.`);
     expect(rowsOf(CG)).toEqual(before);
     // The apply got the whole settings in force with the change written.
@@ -330,9 +315,59 @@ describe('PUT /api/store/read-graphs/settings', () => {
     expect(rowsOf(CG)).toEqual(before);
   });
 
+  it('says so when the rows of a change the node did not apply cannot be put back, and the running node keeps its settings', async () => {
+    const lines: string[] = [];
+    const apply = vi.fn<ReadGraphSettingsAgent['applyReadGraphModesV1']>().mockRejectedValueOnce(new Error('apply refused'));
+    const { control, agent } = controlOf({ agent: agentOf(layeredStore(), { applyReadGraphModesV1: apply }), log: lines });
+    vi.spyOn(table, 'restore').mockImplementationOnce(() => { throw new Error('disk I/O error'); });
+    const answer = await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'build' } });
+    expect(answer).toMatchObject({ status: 503, body: { code: 'READ_GRAPH_SETTINGS_UNAVAILABLE' } });
+    expect(answer.body!.error).toBe(`Search across assets wasn't changed for ${CG}, but its previous settings couldn't be put back (disk I/O error): set them again.`);
+    expect(lines).toEqual([`[read-graphs] The previous settings of ${CG} could not be put back after a change the node did not apply: disk I/O error`]);
+    expect(readGraphModeOfLayer(readGraphRuntimeOf(agent.store)!.modes, CG, MemoryLayer.VerifiableMemory)).toBe('off');
+  });
+
+  it('refuses a change once the node shuts down, and ends a running one before it changes anything', async () => {
+    const requests = new ReadGraphRequests();
+    let started!: () => void;
+    const waiting = new Promise<void>((resolve) => { started = resolve; });
+    const apply = vi.fn(async (_next: ReadGraphModes, options?: { signal?: AbortSignal }) => {
+      started();
+      await new Promise((_resolve, reject) => options?.signal?.addEventListener('abort', () => reject(options.signal!.reason), { once: true }));
+      return [];
+    });
+    const { control } = controlOf({ agent: agentOf(layeredStore(), { applyReadGraphModesV1: apply }) });
+    table.set(CG, { layers: { 'working-memory': 'build' } }, 'ui');
+    const before = rowsOf(CG);
+    const res = fakeRes();
+    const url = new URL(`http://127.0.0.1${READ_GRAPH_SETTINGS_PATH}`);
+    const ctx = {
+      req: fakeReq('PUT', READ_GRAPH_SETTINGS_PATH, JSON.stringify({ contextGraphId: CG, layers: { 'verifiable-memory': 'build' } }), {}),
+      res, url, path: url.pathname, authentication: OPERATOR, readGraphSettings: control,
+    } as unknown as RequestContext;
+    const running = handleReadGraphSettingsRoutes(ctx, { requests });
+    await waiting;
+    requests.end();
+    await running;
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body)).toMatchObject({ code: 'NODE_SHUTTING_DOWN' });
+    expect(rowsOf(CG)).toEqual(before);
+    // A change after that is refused at once.
+    const refused = fakeRes();
+    await handleReadGraphSettingsRoutes({ ...ctx, res: refused, req: fakeReq('PUT', READ_GRAPH_SETTINGS_PATH, JSON.stringify({ contextGraphId: CG, viewSemantics: 'merged' }), {}) } as unknown as RequestContext, { requests });
+    expect(refused.statusCode).toBe(503);
+    expect(apply).toHaveBeenCalledTimes(1);
+    // A creation's setting is refused too, and the context graph keeps none.
+    expect(await readGraphSettingsOnCreate(control, { contextGraphId: OTHER, layers: { 'verifiable-memory': 'build' }, canAdminister: true, actor: 'api' }, requests))
+      .toMatchObject({ code: 'NODE_SHUTTING_DOWN' });
+    expect(table.get(OTHER)).toEqual({ layers: {} });
+  });
+
   it('keeps a change to an imported setting through a restart: the next start puts it in force', async () => {
     const query = { readGraphs: { contextGraphs: { [CG]: 'build' } } };
-    const start = () => prepareDaemonReadGraphSettings({ query, role: 'edge', checkpoint: false, dataDir: home, log: () => undefined });
+    const start = async () => prepareDaemonReadGraphSettings({
+      query, section: await checkDaemonQuerySection({ query, role: 'edge', checkpoint: false }), table, role: 'edge', checkpoint: false, log: () => undefined,
+    });
     // The first start imports config.json's rule.
     expect(readGraphModeOfLayer((await start()).effective.readGraphs, CG, MemoryLayer.VerifiableMemory)).toBe('build');
     const { control } = controlOf();
@@ -409,7 +444,7 @@ describe('the readGraphs field of a context graph\'s creation', () => {
     const existing = await post({ id: CG, name: CG, readGraphs: { layers: { 'verifiable-memory': 'build' } } }, OPERATOR);
     expect(existing.status).toBe(409);
     expect(apply).not.toHaveBeenCalled();
-    expect(table!.get(CG)).toEqual({ layers: {} });
+    expect(table.get(CG)).toEqual({ layers: {} });
     const created = await post({ id: CG, name: CG, readGraphs: { layers: { 'verifiable-memory': 'build' } } }, OPERATOR);
     expect(created).toMatchObject({ status: 200, body: { created: CG, readGraphs: { applied: true } } });
     const byAgent = await post({ id: OTHER, name: OTHER, readGraphs: { layers: { 'verifiable-memory': 'build' } } }, AGENT);

@@ -7,6 +7,7 @@ import {
 } from '../../read-graph-settings-wire.js';
 import { jsonResponse, readBody, SMALL_BODY_BYTES } from '../http-utils.js';
 import { requireNodeAdmin } from '../node-admin-guard.js';
+import { SHUTTING_DOWN, daemonReadGraphRequests, type ReadGraphRequests } from '../read-graph-requests.js';
 import { actorFromRequestContext, type RequestContext } from './context.js';
 
 /**
@@ -21,7 +22,10 @@ import { actorFromRequestContext, type RequestContext } from './context.js';
  * Who asks goes into the settings table: the `X-DKG-Actor` header names `cli`, `ui` or `agent:<id>`, and `api` stands
  * for any other caller.
  */
-export async function handleReadGraphSettingsRoutes(ctx: RequestContext): Promise<void> {
+export async function handleReadGraphSettingsRoutes(
+  ctx: RequestContext,
+  options: { requests?: ReadGraphRequests } = {},
+): Promise<void> {
   const { req, res, path } = ctx;
   if (path !== READ_GRAPH_SETTINGS_PATH || (req.method !== 'GET' && req.method !== 'PUT')) return;
   const action = req.method === 'GET' ? 'read the node\'s search-across-assets settings' : 'change the node\'s search-across-assets settings';
@@ -44,10 +48,21 @@ export async function handleReadGraphSettingsRoutes(ctx: RequestContext): Promis
   if (header !== undefined && actor === undefined) {
     return jsonResponse(res, 400, { code: 'READ_GRAPH_SETTINGS_INVALID', error: 'X-DKG-Actor must be cli, ui or agent:<id>.' });
   }
+  // A change runs as one of the daemon's read-graph requests: graceful shutdown refuses new ones and ends a running one before it changes anything.
+  const requests = options.requests ?? daemonReadGraphRequests;
+  if (requests.ending) return jsonResponse(res, 503, SHUTTING_DOWN, undefined, { 'Retry-After': '30' });
   const gone = new AbortController();
   res.once('close', () => gone.abort());
-  const outcome = await control.change(parsed.request, actor ?? 'api', gone.signal);
-  return jsonResponse(res, outcome.status, outcome.body);
+  const untrack = requests.track(gone);
+  try {
+    const outcome = await control.change(parsed.request, actor ?? 'api', gone.signal);
+    if (gone.signal.aborted && requests.ending && outcome.status !== 200) {
+      return jsonResponse(res, 503, SHUTTING_DOWN, undefined, { 'Retry-After': '30' });
+    }
+    return jsonResponse(res, outcome.status, outcome.body);
+  } finally {
+    untrack();
+  }
 }
 
 /** A body that is no JSON at all becomes `undefined`, which the parser refuses as it refuses any non-object. */
