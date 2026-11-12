@@ -16,7 +16,7 @@ test.describe('Where the marketplace is off', () => {
       const root = await market.open(tab, UI.plain);
       await expect(root).toHaveAttribute('data-state', 'off');
       const card = root.getByTestId('mkt-off');
-      await expect(card).toContainText('The marketplace is off on this node');
+      await expect(card).toContainText('The NS Marketplace is off on this node');
       await expect(card).toContainText("It needs marketplace.enabled in the node's config");
     });
   }

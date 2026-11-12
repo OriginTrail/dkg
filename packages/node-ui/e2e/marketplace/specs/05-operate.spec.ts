@@ -40,7 +40,7 @@ test.describe('Operate', () => {
       intervals: [5_000],
     }).toBe(true);
     await market.reload('operate');
-    await expect(ledger).toContainText('proved this epoch ✓');
+    await expect(ledger.locator('.mkt-corenode-item', { hasText: /^Proved this epoch$/ }).locator('[aria-label="yes"]')).toBeVisible();
 
     await ledger.getByTestId('mkt-land-now').click();
     await expect(ledger.getByTestId('mkt-land-result')).toHaveText('Batches landed: 1 · 1 receipts · 0 refused', { timeout: 60_000 });

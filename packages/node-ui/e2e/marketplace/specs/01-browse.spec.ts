@@ -43,8 +43,10 @@ test.describe('Browse', () => {
     const store = page.getByTestId('mkt-storefront');
     await expect(store).toHaveAttribute('data-seller', String(seller.identityId));
     await expect(store.getByRole('heading', { level: 1 })).toContainText(`seller ${seller.identityId}`);
-    // A Core Node: its profile and its place in the sharding table.
-    await expect(store).toContainText('profile ✓ · sharding table ✓');
+    // A Core Node: its profile and its place in the sharding table, each marked as met.
+    for (const requirement of [/^Profile$/, /^In the sharding table$/]) {
+      await expect(store.locator('.mkt-corenode-item', { hasText: requirement }).locator('[aria-label="yes"]')).toBeVisible();
+    }
     for (const s of SERVICES) {
       await expect(store.getByTestId(`mkt-store-offer-${s.serviceId}`)).toContainText(`${microOf(s.pricePerUnit)} µTRAC/tok`);
     }
