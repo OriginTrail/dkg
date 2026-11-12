@@ -23,6 +23,7 @@ import {
 } from '@origintrail-official/dkg-node-store';
 import { DashboardDB, SCHEMA_VERSION } from '@origintrail-official/dkg-node-ui';
 import { createProtocolStores, type ProtocolStores } from '../src/daemon/protocol-persistence.js';
+import { SqliteReadGraphSettingsStore } from '../src/read-graph-settings-store.js';
 
 /**
  * The daemon's protocol-persistence composition: `createProtocolStores` over a
@@ -141,6 +142,11 @@ const STORE_WRITES: readonly StoreWrite[] = [
     tables: ['ka_numbers'],
     write: (s) => s.kaNumberStore.allocate(AUTHOR),
   },
+  {
+    store: 'readGraphSettingsStore',
+    tables: ['read_graph_modes'],
+    write: (s) => s.readGraphSettingsStore.set('settings-cg', { layers: { 'verifiable-memory': 'build' } }, 'api'),
+  },
 ];
 
 describe('protocol persistence composition', () => {
@@ -205,6 +211,7 @@ describe('protocol persistence composition', () => {
       expect(stores.localContextGraphAuthorityIndexStore).toBeInstanceOf(SqliteContextGraphAuthorityIndexStore);
       expect(stores.chainEventLogStore).toBeInstanceOf(SqliteChainEventLogStore);
       expect(stores.kaNumberStore).toBeInstanceOf(SqliteKaNumberStore);
+      expect(stores.readGraphSettingsStore).toBeInstanceOf(SqliteReadGraphSettingsStore);
     });
 
     // A store on a connection of its own would not join this transaction: its
