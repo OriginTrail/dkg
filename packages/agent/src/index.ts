@@ -13,6 +13,7 @@ export {
   isQueryResultTooLargeError,
   type QueryResultTooLargeErrorLike,
 } from './query-result-too-large-error.js';
+export { encryptionKeyEnrollmentPayload, type EncryptionKeyEnrollment } from './encryption-key-enrollment.js';
 export {
   authorityIndexTrustDomain,
   planAuthorityIndexBootstrap,
@@ -685,3 +686,5 @@ export type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryRe
 export type { PreparedSnapshotCheckpoint, SnapshotCheckpointManifest, VerifiedNativeSnapshotCheckpoint, NativeSnapshotCheckpointReport, PublicCheckpointPreparationResult } from './snapshot-checkpoint-contract.js';
 
 export { ListContextGraphsBudgetExceeded, isListContextGraphsBudgetExceeded, type ListContextGraphsBudgetExceededLike } from './context-graph-list-budget-error.js';
+
+export { readableViewSemanticsDeltaReport } from './view-semantics-delta-report.js';

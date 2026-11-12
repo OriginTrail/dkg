@@ -2,6 +2,7 @@
 // seller, the receipts this node holds against those landed and counted,
 // with the batch transactions; final once the epoch has ended), and the
 // gateway's recent calls, by key.
+import { Badge } from '../../components/ds/Badge.js';
 import React, { useState } from 'react';
 import { copy } from '../copy.generated.js';
 import { marketplaceApi, needsNodeAdmin } from '../api/client.js';
@@ -12,12 +13,12 @@ import { ErrorCard, sellerName, useLoad } from '../shared.js';
 export function Reconciliation({ catalog, epoch }: { catalog: CatalogAnswer; epoch: number }): React.ReactElement {
   const [asked, setAsked] = useState(epoch);
   return (
-    <div className="mkt-card" data-testid="mkt-reconciliation" data-epoch={asked}>
+    <div className="ds-card mkt-card" data-testid="mkt-reconciliation" data-epoch={asked}>
       <div className="mkt-mhead">
         <h2 data-copy="recon.title">{copy('recon.title', { n: asked })}</h2>
         <span className="mkt-fchips">
           {[epoch, epoch - 1].map((e) => (
-            <button key={e} type="button" className={asked === e ? 'on' : ''} data-testid={`mkt-recon-${e}`} data-copy={e === epoch ? 'recon.this' : 'recon.last'} onClick={() => setAsked(e)}>
+            <button key={e} type="button" className={asked === e ? 'ds-filter active' : 'ds-filter'} data-testid={`mkt-recon-${e}`} data-copy={e === epoch ? 'recon.this' : 'recon.last'} onClick={() => setAsked(e)}>
               {copy(e === epoch ? 'recon.this' : 'recon.last')}
             </button>
           ))}
@@ -47,6 +48,7 @@ function ReconciledRows({ catalog, epoch }: { catalog: CatalogAnswer; epoch: num
       )}
       {r.data && rows.length === 0 && <div className="mkt-muted mkt-xs" data-copy="recon.none">{copy('recon.none')}</div>}
       {rows.length > 0 && (
+        <div className="ds-table-scroll">
         <table className="mkt-act" data-testid="mkt-recon-rows">
           <tbody>
             {rows.map((x) => (
@@ -60,6 +62,7 @@ function ReconciledRows({ catalog, epoch }: { catalog: CatalogAnswer; epoch: num
             ))}
           </tbody>
         </table>
+        </div>
       )}
     </div>
   );
@@ -72,15 +75,16 @@ export function Activity({ catalog, calls, err }: { catalog: CatalogAnswer; call
   const keys = [...new Set(all.map((c) => c.keyId))];
   const shown = all.filter((c) => !keyFilter || c.keyId === keyFilter);
   return (
-    <div className="mkt-card" data-testid="mkt-activity">
+    <div className="ds-card mkt-card" data-testid="mkt-activity">
       <div className="mkt-mhead">
         <h2 data-copy="activity.title">{copy('activity.title')}</h2>
         <span className="mkt-fchips">
-          <button type="button" className={keyFilter === null ? 'on' : ''} data-copy="activity.filter.all" onClick={() => setKeyFilter(null)}>{copy('activity.filter.all')}</button>
-          {keys.map((k) => <button type="button" key={k} className={keyFilter === k ? 'on' : ''} data-copy="_data" onClick={() => setKeyFilter(k)}>{k}</button>)}
+          <button type="button" className={keyFilter === null ? 'ds-filter active' : 'ds-filter'} data-copy="activity.filter.all" onClick={() => setKeyFilter(null)}>{copy('activity.filter.all')}</button>
+          {keys.map((k) => <button type="button" key={k} className={keyFilter === k ? 'ds-filter active' : 'ds-filter'} data-copy="_data" onClick={() => setKeyFilter(k)}>{k}</button>)}
         </span>
       </div>
       {needsNodeAdmin(err) ? <div className="mkt-muted mkt-xs" data-copy="activity.admin">{copy('activity.admin')}</div> : err ? <ErrorCard err={err} /> : null}
+      <div className="ds-table-scroll">
       <table className="mkt-act">
         <tbody>
           {shown.slice(0, 20).map((c) => (
@@ -89,12 +93,13 @@ export function Activity({ catalog, calls, err }: { catalog: CatalogAnswer; call
               <td data-copy="_data">{label(c.serviceId)}</td>
               <td className="mkt-muted" data-copy="_data">{sellerName(c.seller)}</td>
               <td data-copy="activity.units">{copy('activity.units', { n: c.units.toLocaleString('en-US'), trac: fmtTrac(c.value) })}</td>
-              <td data-copy={`activity.state.${c.state}`}><span className={c.state === 'missed' ? 'mkt-chipblock' : c.state === 'held' ? 'mkt-chipwarn' : 'mkt-chipleft'}>{copy(`activity.state.${c.state}`)}</span></td>
+              <td data-copy={`activity.state.${c.state}`}><Badge tone={c.state === 'missed' ? 'danger' : c.state === 'held' ? 'warning' : 'success'}>{copy(`activity.state.${c.state}`)}</Badge></td>
               <td className="mkt-muted mkt-mono" data-copy="_data">{c.keyId}</td>
             </tr>
           ))}
         </tbody>
       </table>
+      </div>
       {calls && shown.length === 0 && <div className="mkt-muted mkt-xs" data-copy="empty.activity">{copy('empty.activity')}</div>}
       <div className="mkt-muted mkt-xs" data-copy="activity.note">{copy('activity.note')}</div>
     </div>

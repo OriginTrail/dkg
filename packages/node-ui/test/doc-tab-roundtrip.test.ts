@@ -38,7 +38,7 @@ describe('doc tab-id encode → decode round-trip', () => {
     expect(id).toContain('keccak256:');
 
     const decoded = decodeDocTabId(id);
-    expect(decoded).toEqual({ docRef: FILE_REF, contentType: 'text/markdown' });
+    expect(decoded).toEqual({ docRef: FILE_REF, contentType: 'text/markdown', contextGraphId: 'cg-1' });
     // The digest survives with its algorithm prefix — this is the 404 fix.
     expect(decoded.docRef).toBe(FILE_REF);
     expect(decoded.docRef).not.toBe(HEX);
@@ -57,7 +57,7 @@ describe('doc tab-id encode → decode round-trip', () => {
   it('round-trips an empty contentType (no trailing-segment loss)', () => {
     const id = encodeDocTabId('cg-1', FILE_REF, '');
     expect(id).toBe(`${DOC_TAB_PREFIX}cg-1|${FILE_REF}|`);
-    expect(decodeDocTabId(id)).toEqual({ docRef: FILE_REF, contentType: '' });
+    expect(decodeDocTabId(id)).toEqual({ docRef: FILE_REF, contentType: '', contextGraphId: 'cg-1' });
   });
 
   it('passes through the entity uri when no source file is linked', () => {

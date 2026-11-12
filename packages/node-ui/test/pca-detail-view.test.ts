@@ -144,14 +144,14 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [{ address: W0, eth: '1', trac: '5', symbol: 'TRAC' }], chainId: '84532', rpcUrl: null });
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
     await waitForText(container, 'Funding');
-    expect(container.textContent).not.toContain('Owner-only');
+    expect(container.textContent).not.toContain('Only the PCA owner wallet');
     await unmount();
   });
 
   it('disables owner actions for a non-owner', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: ['0xSomeoneElse0000000000000000000000000000'], balances: [], chainId: '84532', rpcUrl: null });
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
-    await waitForText(container, 'Owner-only');
+    await waitForText(container, 'connect the PCA owner wallet');
     expect(btn(container, '[data-testid="pca-topup-btn"]').disabled).toBe(true);
     await unmount();
   });
@@ -162,13 +162,13 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     // LifecycleSection — not silently drop on approve or renew — and must NOT gate the probe.
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: ['0xSomeoneElse0000000000000000000000000000'], balances: [], chainId: '84532', rpcUrl: null });
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
-    await waitForText(container, 'Owner-only');
+    await waitForText(container, 'connect the PCA owner wallet');
     const byText = (t: string) => Array.from(container.querySelectorAll('button')).find((b) => (b.textContent ?? '').includes(t));
     expect(btn(container, '[data-testid="pca-topup-btn"]').disabled).toBe(true);
     expect(btn(container, '[data-testid="pca-renew-btn"]').disabled).toBe(true);
     expect(byText('Approve publishing wallet')?.disabled).toBe(true);
     // The wallet probe is deliberately ungated — available to everyone.
-    expect(byText('Probe')?.disabled).toBe(false);
+    expect(byText('Check')?.disabled).toBe(false);
     await unmount();
   });
 
@@ -179,6 +179,19 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     expect(container.textContent).not.toContain('Settlement');
     expect(container.textContent).not.toContain('Context-graph binding');
     expect(container.querySelector('[data-testid="pca-settle-btn"]')).toBeNull();
+    await unmount();
+  });
+
+  it('explains each tile in its tooltip and links the primer from the title band (R1, R4)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Funding');
+    const tip = (id: string) => container.querySelector(`[data-stat-id="${id}"]`)?.getAttribute('title');
+    expect(tip('buffer')).toBe('TRAC the owner added on top of the commitment. Publishes use it once the current billing period’s share of the committed TRAC runs out.');
+    // Billing periods are creation-anchored, epoch-long windows, not the network's numbered epochs.
+    expect(tip('per-epoch')).toBe('The committed TRAC is split into equal shares, one for each billing period. A billing period is an epoch long, counted from when the PCA was created. This is one period’s share.');
+    expect(tip('wallets')).toBe('Wallets approved to publish with this PCA, out of 100.');
+    expect(container.querySelector('.v10-pca-detail-band [data-testid="pca-primer-link"]')?.textContent).toBe('What is a PCA?');
     await unmount();
   });
 
@@ -197,8 +210,8 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     // Manual probe tool agrees.
     setInputValue(container.querySelector('.v10-pca-address-crux input.v10-form-input') as HTMLInputElement, '0x' + '1'.repeat(40));
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-    await act(async () => { findBtn(container, 'Probe').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    await waitForText(container, 'Couldn’t determine whether');
+    await act(async () => { findBtn(container, 'Check').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'Couldn’t check whether');
     await unmount();
   });
 
@@ -207,7 +220,7 @@ describe('ConvictionDetailView §8A owner-gating', () => {
   it('shows "can’t confirm ownership" + Retry (not a false non-owner) when the wallets fetch errors (L3)', async () => {
     mocks.fetchWalletsBalances.mockRejectedValue(new Error('balances down'));
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
-    await waitForText(container, "can't confirm ownership");
+    await waitForText(container, 'can’t confirm who owns PCA #7');
     expect(container.textContent).not.toContain('isn’t the owner');
     expect(Array.from(container.querySelectorAll('button')).some((b) => b.textContent === 'Retry')).toBe(true);
     await unmount();
@@ -229,7 +242,7 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     // During the balances load: neutral loading affordance, NOT a false error and NOT a definitive
     // non-owner; writes gated. (Renew needs no amount input, so its disabled state is a clean gate.)
     await waitForText(container, 'Confirming ownership');
-    expect(container.textContent).not.toContain('Owner-only');
+    expect(container.textContent).not.toContain('Only the PCA owner wallet');
     expect(container.textContent).not.toContain("Couldn't load this node's wallets"); // no false failure copy
     expect(container.textContent).not.toContain("can't confirm ownership");
     expect(container.textContent).not.toContain('isn’t the owner');
@@ -307,7 +320,7 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     const warn = container.querySelector('[data-testid="pca-action-warning"]')!;
     expect(warn.getAttribute('role')).toBe('alert');
     expect(warn.textContent).toContain('0xabc');
-    expect(warn.textContent).toContain('a second top-up would lock additional TRAC');
+    expect(warn.textContent).toContain('or you could top up twice');
     expect(container.textContent).not.toContain('temporarily unavailable');
     await unmount();
   });
@@ -383,7 +396,7 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     );
 
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
-    await waitForText(container, 'Connected owner wallet will sign');
+    await waitForText(container, 'It signs top-ups, wallet approvals');
     setInputValue(container.querySelector('input[aria-label="Top-up amount in TRAC"]') as HTMLInputElement, '100');
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     await act(async () => { btn(container, '[data-testid="pca-topup-btn"]').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
@@ -404,8 +417,8 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     mocks.fetchPca.mockResolvedValue(snap({ owner: CONNECTED_OWNER }));
 
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
-    await waitForText(container, 'Owner wallet matches; switch network before signing owner actions.');
-    expect(container.textContent).not.toContain('Connected owner wallet will sign');
+    await waitForText(container, 'Your connected wallet is the PCA owner wallet, but it’s on another network.');
+    expect(container.textContent).not.toContain('It signs top-ups, wallet approvals');
     // T4 (#1468) — the wrong-network gate must reach EVERY owner-write control across the
     // Funding / PublishingWallets / Lifecycle sections, not just top-up.
     const byText = (t: string) => Array.from(container.querySelectorAll('button')).find((b) => (b.textContent ?? '').includes(t));
@@ -413,7 +426,7 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     expect(btn(container, '[data-testid="pca-renew-btn"]').disabled).toBe(true);
     expect(byText('Approve publishing wallet')?.disabled).toBe(true);
     // ...but the wallet probe stays available to everyone (deliberately ungated).
-    expect(byText('Probe')?.disabled).toBe(false);
+    expect(byText('Check')?.disabled).toBe(false);
     await unmount();
   });
 

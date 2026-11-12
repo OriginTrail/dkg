@@ -1,154 +1,19 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { api } from '../../../api-wrapper.js';
 import { listJoinRequests, approveJoinRequest, rejectJoinRequest, type PendingJoinRequest } from '../../../api.js';
 import { useMemoryEntities } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfile } from '../../../hooks/useProjectProfile.js';
-import { SubGraphBar } from '../../../components/SubGraphBar.js';
 import { canonicalAgentDid, normalizeAccessPolicy } from '../../../lib/contextGraphSidebar.js';
-import { layerNoun, useLayerTriples, useCanonicalTriples, type LayerView } from '../helpers.js';
+import { layerNoun, useCanonicalTriples, type LayerView } from '../helpers.js';
 import { StatStrip } from '../../../components/ContextGraphPrimitives.js';
 import { useNodeEvents } from '../../../hooks/useNodeEvents.js';
+import { AgentDot } from '../../../components/AgentDot.js';
 import { overviewRoleState, type OverviewAgentIdentity, type OverviewAgentStatus, type OverviewParticipantsStatus } from './overview-role.js';
-
-export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onRefresh }: {
-  active: LayerView;
-  counts: { wm: number; swm: number; vm: number; total: number };
-  onSwitch: (v: LayerView) => void;
-  onShare: () => void;
-  onImport: () => void;
-  onRefresh: () => void;
-}) {
-  const [moreOpen, setMoreOpen] = useState(false);
-  const moreRef = useRef<HTMLDivElement | null>(null);
-  const switchTo = (layer: LayerView) => {
-    setMoreOpen(false);
-    onSwitch(layer);
-  };
-
-  useEffect(() => {
-    if (!moreOpen) return;
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target as Node | null;
-      if (target && moreRef.current?.contains(target)) return;
-      setMoreOpen(false);
-    };
-    document.addEventListener('pointerdown', onPointerDown);
-    return () => document.removeEventListener('pointerdown', onPointerDown);
-  }, [moreOpen]);
-
-  return (
-    <div className="v10-layer-switcher">
-      <button
-        className={`v10-layer-switch-btn ${active === 'overview' ? 'active' : ''}`}
-        data-layer="overview"
-        aria-label="Overview"
-        title="Overview"
-        onClick={() => switchTo('overview')}
-      >
-        <span className="v10-layer-switch-icon">◎</span>
-        <span className="v10-layer-switch-label">Overview</span>
-      </button>
-      <span className="v10-layer-switch-separator" aria-hidden="true" />
-      <button
-        className={`v10-layer-switch-btn ${active === 'wm' ? 'active' : ''}`}
-        data-layer="wm"
-        aria-label="Working Memory"
-        title="Working Memory"
-        onClick={() => switchTo('wm')}
-      >
-        <span className="v10-layer-switch-icon" style={{ color: '#64748b' }}>◇</span>
-        <span className="v10-layer-switch-label v10-layer-switch-label-full">Working Memory</span>
-        <span className="v10-layer-switch-label v10-layer-switch-label-compact">WM</span>
-        {counts.wm > 0 && <span className="v10-layer-switch-count">{counts.wm}</span>}
-      </button>
-      <button
-        className={`v10-layer-switch-btn ${active === 'swm' ? 'active' : ''}`}
-        data-layer="swm"
-        aria-label="Shared Working Memory"
-        title="Shared Working Memory"
-        onClick={() => switchTo('swm')}
-      >
-        <span className="v10-layer-switch-icon" style={{ color: '#f59e0b' }}>◈</span>
-        <span className="v10-layer-switch-label v10-layer-switch-label-full">Shared Working Memory</span>
-        <span className="v10-layer-switch-label v10-layer-switch-label-compact">SWM</span>
-        {counts.swm > 0 && <span className="v10-layer-switch-count">{counts.swm}</span>}
-      </button>
-      <button
-        className={`v10-layer-switch-btn ${active === 'vm' ? 'active' : ''}`}
-        data-layer="vm"
-        aria-label="Verifiable Memory"
-        title="Verifiable Memory"
-        onClick={() => switchTo('vm')}
-      >
-        <span className="v10-layer-switch-icon" style={{ color: '#22c55e' }}>◉</span>
-        <span className="v10-layer-switch-label v10-layer-switch-label-full">Verifiable Memory</span>
-        <span className="v10-layer-switch-label v10-layer-switch-label-compact">VM</span>
-        {counts.vm > 0 && <span className="v10-layer-switch-count">{counts.vm}</span>}
-      </button>
-      <span className="v10-layer-switch-separator" aria-hidden="true" />
-      <button
-        className={`v10-layer-switch-btn ${active === 'graph-overview' ? 'active' : ''}`}
-        data-layer="graph-overview"
-        aria-label="Subgraphs"
-        title="Subgraphs"
-        onClick={() => switchTo('graph-overview')}
-      >
-        <span className="v10-layer-switch-icon">⌬</span>
-        <span className="v10-layer-switch-label">Subgraphs</span>
-      </button>
-      <div
-        ref={moreRef}
-        className="v10-layer-more"
-        onBlur={(event) => {
-          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-            setMoreOpen(false);
-          }
-        }}
-      >
-        <button
-          type="button"
-          className={`v10-layer-switch-btn v10-layer-more-btn ${active === 'query' ? 'active' : ''}`}
-          data-layer="query"
-          aria-haspopup="menu"
-          aria-expanded={moreOpen}
-          aria-label="More Context Graph views"
-          title="More Context Graph views"
-          onClick={() => setMoreOpen(open => !open)}
-        >
-          <span className="v10-layer-switch-icon">⋯</span>
-          <span className="v10-layer-switch-label">More</span>
-        </button>
-        {moreOpen && (
-          <div className="v10-layer-more-menu" role="menu">
-            <button
-              type="button"
-              role="menuitem"
-              className={`v10-layer-more-item ${active === 'query' ? 'active' : ''}`}
-              onClick={() => switchTo('query')}
-            >
-              <span className="v10-layer-switch-icon">⟐</span>
-              Query Catalogue
-            </button>
-          </div>
-        )}
-      </div>
-      <div className="v10-layer-switcher-spacer" />
-      <div className="v10-layer-switcher-actions">
-        <button className="v10-layer-action-btn" onClick={onShare} aria-label="Share Context Graph">
-          <span className="v10-layer-action-icon">⤴</span>
-          <span className="v10-layer-action-label">Share</span>
-        </button>
-        <button className="v10-layer-action-btn" onClick={onImport} aria-label="Import into Context Graph">
-          <span className="v10-layer-action-icon">↑</span>
-          <span className="v10-layer-action-label">Import</span>
-        </button>
-        <button className="v10-layer-action-btn" onClick={onRefresh} aria-label="Refresh Context Graph data">
-          <span className="v10-layer-action-icon">↻</span>
-        </button>
-      </div>
-    </div>
-  );
-}
+import { useContextGraphColor, ContextGraphMark } from '../../../context-graph-colors.js';
+import { Count } from '../../../components/ds/Badge.js';
+import { Check, Diamond, X } from 'lucide-react';
+import { RANK_ICON } from './rank-icon.js';
+import { Loading } from '../../../components/ds/Loading.js';
+import { formatNumber, truncateAddress } from '../../../lib/format.js';
 
 // ─── Project Header Strip ────────────────────────────────────
 // Persistent project chrome that stays visible across every route
@@ -169,26 +34,21 @@ export function ProjectHeaderStrip({
   onClearSubGraph: () => void;
 }) {
   const name = cg.name || profile.displayName || cg.id;
+  const cgColor = useContextGraphColor(cg.id);
   return (
-    <div
-      className="v10-project-strip"
-      style={{
-        '--sg-color': activeSubGraph?.color ?? profile.primaryColor,
-      } as React.CSSProperties}
-    >
-      <span
-        className="v10-project-strip-dot"
-        style={{ background: profile.primaryColor }}
-      />
-      <button
-        type="button"
-        className="v10-project-strip-name"
-        onClick={activeSubGraph ? onClearSubGraph : undefined}
-        disabled={!activeSubGraph}
-        title={activeSubGraph ? 'Back to context graph overview' : cg.id}
-      >
-        {name}
-      </button>
+    <div className="v10-project-strip" style={{ '--sg-color': activeSubGraph ? activeSubGraph.color ?? 'var(--text-tertiary)' : cgColor } as React.CSSProperties}>
+      <ContextGraphMark id={cg.id} name={name} size="md" />
+      <h1 className="v10-project-strip-heading">
+        <button
+          type="button"
+          className="v10-project-strip-name"
+          onClick={activeSubGraph ? onClearSubGraph : undefined}
+          disabled={!activeSubGraph}
+          title={activeSubGraph ? 'Back to context graph overview' : cg.id}
+        >
+          {name}
+        </button>
+      </h1>
       {activeSubGraph ? (
         <>
           <span className="v10-project-strip-sep">›</span>
@@ -220,7 +80,7 @@ export function ProjectHeaderStrip({
 
 // ─── Project Overview Card ───────────────────────────────────
 
-function overviewAccessAgentStat(
+export function overviewAccessAgentStat(
   cg: any,
   participants: string[],
   participantsStatus: OverviewParticipantsStatus,
@@ -231,7 +91,7 @@ function overviewAccessAgentStat(
       id: 'participants',
       value: 'Open',
       label: 'Public access',
-      tooltip: 'Public Context Graphs do not have an authoritative allowlist count.',
+      tooltip: 'Public context graphs have no fixed participant list, so there’s no count.',
     };
   }
   if (participantsStatus === 'loading') {
@@ -262,31 +122,31 @@ function overviewAccessAgentStat(
 
   return {
     id: 'participants',
-    value: agents.size.toLocaleString(),
+    value: formatNumber(agents.size),
     label: 'Agents with access',
-    tooltip: 'Includes the curator plus allowlisted participants reported by the node.',
+    tooltip: 'Includes the curator and the agents approved to access this context graph.',
   };
 }
 
-function overviewAccessState(raw?: string): { label: string; title: string; tone: 'public' | 'curated' | 'unknown' } {
+export function overviewAccessState(raw?: string): { label: string; title: string; tone: 'public' | 'curated' | 'unknown' } {
   const policy = normalizeAccessPolicy(raw);
   if (policy === 'public') {
     return {
       label: 'Public',
-      title: 'Public Context Graph.',
+      title: 'Public context graph.',
       tone: 'public',
     };
   }
   if (policy === 'private') {
     return {
       label: 'Curated',
-      title: 'Curated Context Graph with access controlled by the curator.',
+      title: 'Curated context graph with access controlled by the curator.',
       tone: 'curated',
     };
   }
   return {
     label: 'Access unknown',
-    title: 'The node did not provide an access policy for this Context Graph.',
+    title: 'The node did not provide an access policy for this context graph.',
     tone: 'unknown',
   };
 }
@@ -344,7 +204,7 @@ export function curatorStatusForOverview({
     : 'not-curator';
 }
 
-function overviewIdentitySet(currentAgent: OverviewAgentIdentity | null): Set<string> {
+export function overviewIdentitySet(currentAgent: OverviewAgentIdentity | null): Set<string> {
   return new Set(
     [currentAgent?.agentDid, currentAgent?.agentAddress]
       .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
@@ -395,13 +255,13 @@ export function ProjectOverviewCard({
     !memory.loading && layerStatuses.length === 3 && unavailableLayerCount === 3;
   const hasUnavailableLayer = !memory.loading && unavailableLayerCount > 0;
   const statusHint = memory.loading
-    ? 'Loading memory layers...'
+    ? 'Loading memory layers…'
     : allLayerCountsUnavailable || memory.error
         ? 'Live memory counts are unavailable.'
         : memory.partial || hasUnavailableLayer
           ? 'One or more layer counts are currently a lower bound.'
-          : 'Canonical current-layer entity counts.';
-  const totalEntitiesValue = allLayerCountsUnavailable ? 'Unavailable' : layerSum.toLocaleString();
+          : 'Entities in each memory layer now.';
+  const totalEntitiesValue = allLayerCountsUnavailable ? 'Unavailable' : formatNumber(layerSum);
   // Triples: canonical project-wide total via `useCanonicalTriples`
   // (GH #819 helper — single source of truth for all aggregate
   // triple-count surfaces).
@@ -428,13 +288,13 @@ export function ProjectOverviewCard({
     : memory.loading && triplesCount === 0
       ? '...'
       : triplesIsPartial
-        ? `${triplesCount.toLocaleString()}+`
-        : triplesCount.toLocaleString();
+        ? `${formatNumber(triplesCount)}+`
+        : formatNumber(triplesCount);
   const triplesTooltip = allLayerCountsUnavailable
     ? 'Live triple counts are unavailable.'
     : triplesIsPartial
       ? 'One or more layer triple counts are currently a lower bound.'
-      : 'Canonical triple total across all layers.';
+      : 'Total facts stored across all memory layers.';
   // Codex review bug D — distinguish "still fetching" from
   // "fetch failed" for the Subgraphs cell so we don't show a
   // perpetual ellipsis after a failed `/sub-graph/list` call. A
@@ -442,12 +302,12 @@ export function ProjectOverviewCard({
   // outage cell uses (so the four cells share one failure idiom).
   const subGraphsValue = subGraphCount == null
     ? subGraphFetchFailed ? 'Unavailable' : '...'
-    : subGraphCount.toLocaleString();
+    : formatNumber(subGraphCount);
   const subGraphsTooltip = subGraphCount == null
     ? subGraphFetchFailed
       ? 'Sub-graph list is currently unavailable.'
       : 'Sub-graph count is loading.'
-    : 'Topical partitions inside this Context Graph.';
+    : 'Topical partitions inside this context graph.';
   const pipeline = [
     {
       key: 'wm' as const,
@@ -455,7 +315,6 @@ export function ProjectOverviewCard({
       desc: 'Private staging area',
       count: working,
       status: memory.layerStatus?.wm ?? 'ok',
-      color: '#64748b',
     },
     {
       key: 'swm' as const,
@@ -463,7 +322,6 @@ export function ProjectOverviewCard({
       desc: 'Collaborative review',
       count: shared,
       status: memory.layerStatus?.swm ?? 'ok',
-      color: '#f59e0b',
     },
     {
       key: 'vm' as const,
@@ -471,7 +329,6 @@ export function ProjectOverviewCard({
       desc: 'Published on-chain',
       count: verified,
       status: memory.layerStatus?.vm ?? 'ok',
-      color: '#22c55e',
     },
   ];
   const pipelineHasUnavailableLayer = pipeline.some(item => item.status === 'error');
@@ -480,9 +337,7 @@ export function ProjectOverviewCard({
     <div className="v10-po">
       {/* Identity row (§4.2.1 — locked spec) — label-pill pairs on
           the left, inline primer link on the right. Name + description
-          live in the persistent `ProjectHeaderStrip`; the role glyph
-          (◆) is applied in CSS via `data-role`/`data-tone`, never in
-          the data string itself. */}
+          live in the persistent `ProjectHeaderStrip`. */}
       <div className="v10-po-identity" data-section="identity">
         <div className="v10-po-identity-pairs">
           <div className="v10-po-identity-pair">
@@ -490,13 +345,15 @@ export function ProjectOverviewCard({
             <span
               className="v10-po-badge"
               data-role={role.tone}
+              data-rank={role.rank}
               title={role.title}
             >
+              {RANK_ICON[role.rank]}
               {role.label}
             </span>
           </div>
           <div className="v10-po-identity-pair">
-            <span className="v10-po-identity-label">Context Graph:</span>
+            <span className="v10-po-identity-label">Context graph:</span>
             <span
               className="v10-po-badge"
               data-cg-type={access.tone}
@@ -509,11 +366,11 @@ export function ProjectOverviewCard({
         {onOpenPrimer && (
           <button
             type="button"
-            className="v10-po-identity-primer"
+            className="v10-po-identity-primer ds-btn ds-sm"
             onClick={onOpenPrimer}
-            title="Open the Context Graph primer"
+            title="Open the context graph primer"
           >
-            What is a Context Graph?
+            What is a context graph?
           </button>
         )}
       </div>
@@ -521,7 +378,7 @@ export function ProjectOverviewCard({
           renders as a `title` tooltip on the Entities cell, not as
           an inline `hint:`, to keep the 4-card grid clean. */}
       <div data-section="at-a-glance" className="v10-po-stat-block">
-        <div className="v10-po-section-title">At a glance</div>
+        <h2 className="v10-po-section-title">At a glance</h2>
         <StatStrip
           className="v10-po-stat-strip"
           items={[
@@ -532,10 +389,10 @@ export function ProjectOverviewCard({
           ]}
         />
       </div>
-      <div className="v10-po-pipeline" data-section="pipeline" aria-label="Knowledge Pipeline">
+      <div className="v10-po-pipeline" data-section="pipeline" aria-label="Knowledge pipeline">
         <div className="v10-po-pipeline-head">
           <div>
-            <div className="v10-po-section-title">Knowledge Pipeline</div>
+            <h2 className="v10-po-section-title">Knowledge pipeline</h2>
             <div className="v10-po-section-desc">Entities move from private staging to shared review; published assertion bundles become Knowledge Assets with on-chain provenance.</div>
           </div>
         </div>
@@ -546,8 +403,8 @@ export function ProjectOverviewCard({
               return (
                 <span
                   key={item.key}
-                  className={`v10-po-pipeline-seg ${item.key}`}
-                  style={{ width: `${width}%`, background: item.color }}
+                  className={`v10-po-pipeline-seg v10-layer-tone-fill layer-tone-${item.key}`}
+                  style={{ width: `${width}%` }}
                 />
               );
             })
@@ -558,9 +415,8 @@ export function ProjectOverviewCard({
             <button
               key={item.key}
               type="button"
-              className={`v10-po-pipeline-step ${item.key}`}
+              className={`v10-po-pipeline-step ds-card-nested ${item.key} layer-tone-${item.key}`}
               onClick={() => onSwitchLayer?.(item.key)}
-              style={{ '--po-layer-color': item.color } as React.CSSProperties}
             >
               <span className="v10-po-pipeline-step-index">{index + 1}</span>
               <span className="v10-po-pipeline-step-copy">
@@ -570,7 +426,7 @@ export function ProjectOverviewCard({
               <span className="v10-po-pipeline-step-count">
                 {item.status === 'error'
                   ? 'Unavailable'
-                  : `${item.count.toLocaleString()} ${layerNoun(item.key, item.count)}`}
+                  : `${formatNumber(item.count)} ${layerNoun(item.key, item.count)}`}
               </span>
             </button>
           ))}
@@ -583,7 +439,7 @@ export function ProjectOverviewCard({
           applied in CSS via `.is-self` / `.is-curator` — never in the
           data string. */}
       <div className="v10-po-people" data-section="participants">
-        <div className="v10-po-section-title">Participant agents</div>
+        <h2 className="v10-po-section-title">Participant agents</h2>
         {(() => {
           // Codex review bug A — `/participants` returns `allowedAgents`
           // and does NOT include the curator on a private CG. Render
@@ -639,9 +495,9 @@ export function ProjectOverviewCard({
             // copy. Only curated CGs fall through to the loading /
             // error / "no participants" sequence.
             const emptyCopy = isPublicAccess
-              ? 'This Context Graph is public — anyone can subscribe.'
+              ? 'This context graph is public — anyone can subscribe.'
               : participantsStatus === 'loading'
-                ? 'Loading participant agents...'
+                ? 'Loading participant agents…'
                 : participantsStatus === 'error'
                   ? 'Participant list unavailable.'
                   : 'No participant agents recorded yet.';
@@ -659,7 +515,7 @@ export function ProjectOverviewCard({
                 // `aria-label` preserves a screen-reader-friendly
                 // form, since the visible separators aren't in the
                 // accessible name.
-                const shortAddress = `${display.slice(0, 6)}…${display.slice(-4)}`;
+                const shortAddress = truncateAddress(display);
                 const ariaLabelParts = [shortAddress];
                 if (isSelf) ariaLabelParts.push('you');
                 if (isCurator) ariaLabelParts.push('curator');
@@ -670,6 +526,8 @@ export function ProjectOverviewCard({
                     title={full}
                     aria-label={ariaLabelParts.join(' ')}
                   >
+                    <AgentDot uri={canonical} label={display} size={16} title={full} />
+                    {isCurator && <Diamond className="v10-po-participant-role" size={12} fill="currentColor" />}
                     <span className="v10-po-participant-name">{shortAddress}</span>
                     {isSelf && <span className="v10-po-participant-tag">you</span>}
                     {isCurator && <span className="v10-po-participant-tag">curator</span>}
@@ -776,7 +634,7 @@ export function PendingJoinRequestsSection({
     return (
       <section className="v10-po-join" data-section="join-requests">
         <header className="v10-po-join-head">
-          <span className="v10-po-section-title">Pending join requests</span>
+          <h2 className="v10-po-section-title">Pending join requests</h2>
         </header>
         <div className="v10-po-join-empty">Verifying access…</div>
       </section>
@@ -804,39 +662,37 @@ export function PendingJoinRequestsSection({
   return (
     <section className="v10-po-join" data-section="join-requests">
       <header className="v10-po-join-head">
-        <span className="v10-po-section-title">Pending join requests</span>
-        <span className="v10-po-join-count" data-empty={requests.length === 0 ? 'true' : 'false'}>
-          {requests.length}
-        </span>
+        <h2 className="v10-po-section-title">Pending join requests</h2>
+        <Count value={requests.length} tone={requests.length > 0 ? 'attention' : 'neutral'} />
       </header>
       {status === 'loading'
-        ? <div className="v10-po-join-empty">Loading join requests...</div>
+        ? <Loading label="Loading join requests…" className="v10-po-join-empty" />
         : status === 'error'
           ? <div className="v10-po-join-empty">Join requests are currently unavailable.</div>
           : requests.length === 0
             ? <div className="v10-po-join-empty">No pending join requests.</div>
             : <div className="v10-po-join-list">
                 {requests.map(req => (
-                  <div key={req.agentAddress} className="v10-po-join-item">
+                  <div key={req.agentAddress} className="v10-po-join-item ds-card-nested">
                     <div className="v10-po-join-info">
-                      <span className="v10-po-join-name">{req.name || `${req.agentAddress.slice(0, 6)}…${req.agentAddress.slice(-4)}`}</span>
+                      <span className="v10-po-join-name">{req.name || truncateAddress(req.agentAddress)}</span>
                       <span className="v10-po-join-addr" title={req.agentAddress}>{req.agentAddress.slice(0, 10)}…</span>
                     </div>
                     <div className="v10-po-join-actions">
                       <button
-                        className="v10-po-join-btn approve"
+                        className="v10-po-join-btn ds-btn ds-primary ds-sm"
                         onClick={() => handleApprove(req.agentAddress)}
                         disabled={processing === req.agentAddress}
                       >
-                        {processing === req.agentAddress ? '…' : '✓ Approve'}
+                        {processing === req.agentAddress ? '…' : <><Check size={12} /> Approve</>}
                       </button>
                       <button
-                        className="v10-po-join-btn reject"
+                        className="v10-po-join-btn ds-btn ds-danger ds-sm"
                         onClick={() => handleReject(req.agentAddress)}
                         disabled={processing === req.agentAddress}
                         aria-label="Reject join request"
                       >
-                        ✕
+                        <X size={12} />
                       </button>
                     </div>
                   </div>
@@ -865,7 +721,7 @@ export function OverviewPrimerEntry({ onOpenPrimer }: { onOpenPrimer: () => void
         className="v10-po-primer-footer-link"
         onClick={onOpenPrimer}
       >
-        What is a Context Graph?
+        What is a context graph?
       </button>
       <div className="v10-po-primer-footer-sub">
         A short primer on context graphs, the WM → SWM → VM pipeline, and how participant agents collaborate.
@@ -874,3 +730,4 @@ export function OverviewPrimerEntry({ onOpenPrimer }: { onOpenPrimer: () => void
   );
 }
 
+export { LayerSwitcher } from './layer-switcher.js';

@@ -91,7 +91,7 @@ export class LocalContextGraphRegistrationStatusStore {
         }
       }`,
       [graph],
-      { source: 'agent.contextGraph.registrationStatus.persist' },
+      { source: 'agent.contextGraph.registrationStatus.persist', writtenGraphs: [graph] },
     );
     if (!updatedAtomically) {
       const previousResult = await this.#store.query(

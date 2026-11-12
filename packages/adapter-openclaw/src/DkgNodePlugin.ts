@@ -2886,12 +2886,9 @@ export class DkgNodePlugin {
       const resolvedAgentAddress = await this.resolveQueryAgentAddress(args.agent_address, view);
       if (resolvedAgentAddress.error) return resolvedAgentAddress.error;
       const agentAddress = resolvedAgentAddress.value;
-      const result = await this.client.query(sparql, {
-        contextGraphId,
-        view,
-        agentAddress,
-      });
-      return this.json(result);
+      const { semantics } = args;
+      if (semantics !== undefined && semantics !== 'merged' && semantics !== 'per-asset') return this.error('"semantics" must be one of: merged, per-asset.');
+      return this.json(await this.client.query(sparql, { contextGraphId, view, semantics, agentAddress }));
     } catch (err: any) {
       return this.daemonError(err);
     }

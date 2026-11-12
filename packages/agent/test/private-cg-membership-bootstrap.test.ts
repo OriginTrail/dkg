@@ -1977,6 +1977,7 @@ describe('private CG membership bootstrap recovery', () => {
     });
 
     const member = ethers.Wallet.createRandom();
+    await (agent as any).persistAgentToStore(agentFromPrivateKey(member.privateKey, 'member'));
     await agent.inviteAgentToContextGraph(contextGraphId, member.address, owner);
 
     const delegateePeerId = '12D3KooWPrivateBootstrapFreshPeer';
@@ -2117,6 +2118,7 @@ describe('private CG membership bootstrap recovery', () => {
     });
 
     const member = ethers.Wallet.createRandom();
+    await (agent as any).persistAgentToStore(agentFromPrivateKey(member.privateKey, 'member'));
     await agent.inviteAgentToContextGraph(contextGraphId, member.address, owner);
 
     const oldPeerId = '12D3KooWPrivateBootstrapOlderPeer';

@@ -56,20 +56,15 @@ describe('OxigraphStore query result contract', () => {
     }
   });
 
-  it('bounds an empty native graph catalog before returning it', async () => {
+  it('returns an empty native graph catalog: the complete list is node work, not bounded by a caller limit', async () => {
     const store = new OxigraphStore();
     const native = (store as unknown as {
       store: { query(sparql: string): unknown };
     }).store;
     const query = vi.spyOn(native, 'query').mockReturnValue(false);
     try {
-      await expect(store.listGraphs({ maxResponseBytes: 1 }))
-        .rejects.toMatchObject({
-          code: 'STORE_RESPONSE_TOO_LARGE',
-          maxBytes: 1,
-          actualBytes: 2,
-        });
-      await expect(store.listGraphs({ maxResponseBytes: 2 })).resolves.toEqual([]);
+      await expect(store.listGraphs({ maxResponseBytes: 1 })).resolves.toEqual([]);
+      await expect(store.listGraphs()).resolves.toEqual([]);
     } finally {
       query.mockRestore();
       await store.close();

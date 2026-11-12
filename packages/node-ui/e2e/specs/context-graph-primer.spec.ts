@@ -16,18 +16,20 @@ const PRIMER_SECTIONS = [
   'Memory layers',
   'Subgraphs',
   'Entities and Knowledge Assets',
+  'Triples',
   'Assertions',
+  'Ontology',
   'Roles',
 ];
 
-const PRIMER_TAB = 'What is a Context Graph?';
+const PRIMER_TAB = 'What is a context graph?';
 
 async function expectPrimerRendered(page: Page) {
   const view = page.locator('.v10-primer-view');
   await expect(view).toBeVisible({ timeout: 15_000 });
 
-  await expect(view.locator('.v10-primer-kicker')).toHaveText('Context Graph Primer');
-  await expect(view.getByRole('heading', { level: 1, name: 'What is a Context Graph?' })).toBeVisible();
+  await expect(view.locator('.v10-primer-kicker')).toHaveText('Context graph primer');
+  await expect(view.getByRole('heading', { level: 1, name: 'What is a context graph?' })).toBeVisible();
 
   // The WM → SWM → VM pipeline must render in lifecycle order.
   const pipeline = view.locator('.v10-primer-pipeline');
@@ -35,7 +37,7 @@ async function expectPrimerRendered(page: Page) {
   await expect(pipeline.locator('.swm')).toHaveText('Shared Working Memory');
   await expect(pipeline.locator('.vm')).toHaveText('Verifiable Memory');
 
-  // Exactly the five primer sections, in order — the headings are the structural
+  // Exactly the seven primer sections, in order — the headings are the structural
   // contract worth pinning.
   const headings = view.locator('.v10-primer-section h2');
   await expect(headings).toHaveCount(PRIMER_SECTIONS.length);
@@ -77,7 +79,7 @@ test.describe('Context Graph Primer', () => {
 
     const link = page.locator('.v10-po-identity-primer').first();
     await expect(link).toBeVisible({ timeout: 15_000 });
-    await expect(link).toHaveText('What is a Context Graph?');
+    await expect(link).toHaveText('What is a context graph?');
     await link.click();
 
     await expectPrimerRendered(page);

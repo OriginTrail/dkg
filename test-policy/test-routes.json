@@ -1,5 +1,18 @@
 [
   {
+    "pattern": "packages/chain/node26/**/*.test.ts",
+    "lane": "chain-rpc-node26",
+    "reason": "Actual undici 8 TLS, environment-proxy and cold-start checks run unconditionally in the required Node 26 evidence gate; generic Node 22/24 unit coverage stays separate.",
+    "cadence": "required",
+    "command": "node scripts/ci/run-chain-rpc-node26.mjs",
+    "prerequisites": [
+      "Node 26 with bundled undici 8",
+      "DKG_REQUIRE_UNDICI8_FETCH=1",
+      "pnpm frozen install",
+      "local TLS loopback"
+    ]
+  },
+  {
     "pattern": "scripts/repro/publisher-live-control-restart.test.mts",
     "lane": "native-crash-campaign",
     "reason": "Five serial runtime starts prove persisted publisher pause, resume, startup override and graceful shutdown fencing in the first required CLI shard",
@@ -31,6 +44,19 @@
     "reason": "Standalone scoped-store and WebGL regressions run in the first required browser CI shard",
     "cadence": "required",
     "command": "pnpm --dir packages/node-ui exec playwright test --config playwright.pr3236.config.ts",
+    "layer": "browser regression fixtures",
+    "prerequisites": [
+      "pnpm frozen install",
+      "built workspace dependencies",
+      "Playwright Chromium"
+    ]
+  },
+  {
+    "pattern": "packages/node-ui/browser-regressions/shell/*.spec.ts",
+    "lane": "browser",
+    "reason": "Real app against a mocked node: narrow-screen side panels, badge contrast and Select menu placement from the browser cascade, in the second required browser CI shard",
+    "cadence": "required",
+    "command": "pnpm --dir packages/node-ui exec playwright test --config playwright.shell.config.ts",
     "layer": "browser regression fixtures",
     "prerequisites": [
       "pnpm frozen install",
@@ -88,9 +114,22 @@
     "command": "pnpm --dir packages/adapter-hermes test:py"
   },
   {
+    "pattern": "examples/n8n-capability/*.test.mjs",
+    "lane": "scripts",
+    "reason": "Studio and native workflow regression suites execute directly in the root scripts lane, including preview admission and cross-graph export authorization.",
+    "cadence": "required",
+    "command": "pnpm test:scripts",
+    "layer": "Studio and native workflow regression fixtures",
+    "prerequisites": [
+      "pnpm frozen install",
+      "built workspace dependencies",
+      "Node with built-in SQLite"
+    ]
+  },
+  {
     "pattern": "scripts/lib/__tests__/*.test.mjs",
     "lane": "scripts",
-    "reason": "Repository tooling checks run in build gate",
+    "reason": "Repository tooling checks run in the required repository checks job",
     "cadence": "required",
     "command": "pnpm test:scripts",
     "layer": "repository tooling",
@@ -120,7 +159,7 @@
   {
     "pattern": "devnet/_bootstrap/{suite-manifest,harness-json,harness-query,select-response,query-node}.test.ts",
     "lane": "scripts",
-    "reason": "Pure devnet evidence parsing and manifest checks run in the required build gate, without starting a devnet",
+    "reason": "Pure devnet evidence parsing and manifest checks run in the required repository checks job, without starting a devnet",
     "cadence": "required",
     "command": "pnpm test:devnet:manifest",
     "layer": "repository tooling",
@@ -169,6 +208,62 @@
     "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
   },
   {
+    "pattern": "packages/storage/test-live/read-graph-statements.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Read-graph maintenance statements, fences and checks on a live Blazegraph, run by the existing Blazegraph CI lane's storage config",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
+    "pattern": "packages/storage/test-live/read-graph-layer.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "The read-graph layer keeping read graphs equal to their members through the Blazegraph adapter, run by the existing Blazegraph CI lane's storage config",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
+    "pattern": "packages/storage/test-live/read-graph-builder.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Read-graph builds, start-up, dirty marks and removal through the Blazegraph adapter, run by the existing Blazegraph CI lane's storage config",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
+    "pattern": "packages/storage/test-live/read-graph-check.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "The sampled and full read-graph checks, both directions, on the Blazegraph adapter, run by the existing Blazegraph CI lane's storage config",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
+    "pattern": "packages/storage/test-live/read-graph-qualification.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "The read-graph qualification rows through the Blazegraph adapter (a shared large literal, concurrent removals of the last copies, triples held by many graphs), run by the existing Blazegraph CI lane's storage config",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
+    "pattern": "packages/storage/test-live/read-graph-kill-at-commit.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "A writer process killed while a write that maintains a read graph is in flight leaves the read graph equal to its members on Blazegraph, run by the existing Blazegraph CI lane's storage config",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
+    "pattern": "packages/storage/test-live/read-graph-builder-qualification.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Builder-level read-graph qualification through the Blazegraph adapter (a build that a newer dirty mark overtakes, and its operations arriving late; a sub-graph or a child context graph registered after its data exists), run by the existing Blazegraph CI lane's storage config",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
+    "pattern": "packages/storage/test-live/read-graph-builder-restart.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "A builder process killed in the middle of a build, a new start of the same store, a late copy batch of the dead process, and the rebuild, on Blazegraph, run by the existing Blazegraph CI lane's storage config",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
     "pattern": "packages/publisher/test-live/**/*.blazegraph.test.ts",
     "lane": "tornado-blazegraph",
     "reason": "Live Blazegraph differential of the bounded share conflict lookup (OT-RFC-73 AC4), required in the existing Tornado Blazegraph CI lane: on its service container and again on the blazegraph-image.json image with the U+001F reproduction required",
@@ -190,6 +285,18 @@
     "command": "pnpm --filter @origintrail-official/dkg-agent exec vitest run --config vitest.blazegraph.config.ts"
   },
   {
+    "pattern": "packages/query/test-live/large-catalog.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Scoped queries on a store of about 100,000 graphs across four context graphs, on Blazegraph and on embedded Oxigraph, in their own CI job that runs wherever the Blazegraph lane does",
+    "cadence": "required",
+    "command": "DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run --config vitest.large-catalog.config.ts && DKG_LARGE_CATALOG_ENGINE=oxigraph pnpm --filter @origintrail-official/dkg-query exec vitest run --config vitest.large-catalog.config.ts",
+    "layer": "system",
+    "prerequisites": [
+      "built storage, core and rdf-utils packages",
+      "BLAZEGRAPH_TEST_URL of a Blazegraph server that lets the test create a namespace"
+    ]
+  },
+  {
     "pattern": "tools/observability/w1/*.test.yaml",
     "lane": "prometheus-rules",
     "reason": "Promtool rule regression fixtures; requires Prometheus tools",
@@ -199,6 +306,13 @@
     "prerequisites": [
       "Prometheus promtool"
     ]
+  },
+  {
+    "pattern": "scripts/run-semantic-runtime-live-smoke.sh",
+    "lane": "devnet",
+    "reason": "Semantic runtime smoke uses an isolated devnet and explicitly enabled runtime",
+    "cadence": "manual",
+    "command": "bash {file}"
   },
   {
     "pattern": "scripts/*test*.sh",

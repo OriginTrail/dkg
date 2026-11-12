@@ -40,7 +40,7 @@ export function IdentityWalletKnownList({
                   {(roles?.operational === true || wallet.registered === true) && (
                     <button
                       type="button"
-                      className="v10-identity-wallet-btn compact"
+                      className="v10-identity-wallet-btn compact ds-btn ds-sm"
                       data-testid={`remove-operational-${wallet.address}`}
                       onClick={() => onRemove('operational', wallet.address)}
                       disabled={!writesEnabled || wallet.isPrimary}
@@ -52,7 +52,7 @@ export function IdentityWalletKnownList({
                   {roles?.admin === true && (
                     <button
                       type="button"
-                      className="v10-identity-wallet-btn compact"
+                      className="v10-identity-wallet-btn compact ds-btn ds-sm"
                       data-testid={`remove-admin-${wallet.address}`}
                       onClick={() => onRemove('admin', wallet.address)}
                       disabled={!writesEnabled || (summary?.adminCount ?? 0) <= 1}

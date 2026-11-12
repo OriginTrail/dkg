@@ -1,0 +1,529 @@
+/* ══════════════════════════════════════════
+   Design-system components (components/ds). Loaded last so these win over
+   the legacy per-screen classes they replace. Shapes follow DESIGN.md:
+   a pill is a read-only fact (status, role, type, layer, count).
+   ══════════════════════════════════════════ */
+
+/* ── Badge ── */
+.ds-badge {
+  --badge-fg: var(--text-secondary);
+  --badge-bg: var(--bg-elevated);
+  --badge-ring: var(--border-default);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-shrink: 0;
+  height: var(--h-badge-md);
+  padding: 0 var(--space-8);
+  border-radius: var(--radius-control);
+  background: var(--badge-bg);
+  color: var(--badge-fg);
+  box-shadow: inset 0 0 0 1px var(--badge-ring);
+  font-family: var(--font-sans);
+  font-size: var(--fs-layer);
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.ds-badge.ds-sm { height: var(--h-badge-sm); padding: 0 var(--space-6); gap: var(--space-4); font-size: var(--fs-micro); }
+.ds-badge-icon { display: inline-flex; font-size: 1em; line-height: 1; }
+.ds-badge-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.ds-badge.ds-sm .ds-badge-dot { width: 5px; height: 5px; }
+.ds-badge-kind-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--badge-kind); flex-shrink: 0; }
+
+/* Tones. Neutral is the default. */
+.ds-badge.ds-tone-muted   { --badge-fg: var(--text-tertiary); --badge-bg: transparent; --badge-ring: var(--border-default); }
+.ds-badge.ds-tone-wm  { --badge-fg: var(--layer-working-text);  --badge-bg: var(--layer-working-bg);  --badge-ring: var(--layer-working-border); }
+.ds-badge.ds-tone-swm { --badge-fg: var(--layer-shared-text);   --badge-bg: var(--layer-shared-bg);   --badge-ring: var(--layer-shared-border); }
+.ds-badge.ds-tone-vm  { --badge-fg: var(--layer-verified-text); --badge-bg: var(--layer-verified-bg); --badge-ring: var(--layer-verified-border); }
+/* Layers look the same as in nOS: a full border, 12px text and the same glyphs. */
+.ds-badge.ds-tone-wm, .ds-badge.ds-tone-swm, .ds-badge.ds-tone-vm { gap: var(--space-4); padding: 0 var(--space-8); border-radius: var(--radius-pill); font-weight: 600; font-size: var(--fs-layer); }
+.ds-badge.ds-sm.ds-tone-wm, .ds-badge.ds-sm.ds-tone-swm, .ds-badge.ds-sm.ds-tone-vm { padding: 0 var(--space-8); font-size: var(--fs-micro); }
+.ds-layer-glyph { width: 12px; height: 12px; flex-shrink: 0; }
+.ds-badge.ds-sm .ds-layer-glyph { width: 10px; height: 10px; }
+
+/* A status is an icon and text with no box, so it never reads as a layer.
+   Badge draws the icon (StatusGlyph, or the chip's own); here it only gets its size. */
+.ds-badge.ds-tone-success { --badge-fg: var(--text-success); }
+.ds-badge.ds-tone-warning { --badge-fg: var(--text-warning); }
+.ds-badge.ds-tone-pending { --badge-fg: var(--text-tertiary); }
+.ds-badge.ds-tone-danger  { --badge-fg: var(--text-danger);  }
+.ds-badge.ds-tone-success, .ds-badge.ds-tone-warning, .ds-badge.ds-tone-danger, .ds-badge.ds-tone-pending {
+  --badge-bg: transparent;
+  --badge-ring: transparent;
+  padding: 0;
+  font-size: var(--fs-control);
+  font-weight: 600;
+}
+.ds-badge.ds-sm.ds-tone-success, .ds-badge.ds-sm.ds-tone-warning, .ds-badge.ds-sm.ds-tone-danger, .ds-badge.ds-sm.ds-tone-pending { padding: 0; gap: var(--space-4); font-size: var(--fs-label); }
+.ds-status-glyph { width: 14px; height: 14px; flex-shrink: 0; }
+/* Icons sit on the text line; a flex parent aligns them itself. */
+.lucide, .ds-status-glyph, .ds-layer-glyph { flex-shrink: 0; vertical-align: -2px; }
+.ds-badge.ds-sm .ds-status-glyph { width: 12px; height: 12px; }
+
+.ds-badge.ds-tone-role { --badge-fg: var(--role-text); --badge-bg: var(--role-bg); --badge-ring: var(--role-border); }
+/* Kind: neutral pill with the kind's colour as a dot, so long type names stay readable. */
+.ds-badge.ds-tone-kind { --badge-fg: var(--text-secondary); }
+
+/* ── Count ── */
+.ds-count {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  min-width: var(--h-badge-sm);
+  height: var(--h-badge-sm);
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  font-family: var(--font-sans);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  vertical-align: middle;
+}
+/* Needs your action (pending requests, unread). Amber, never red: red is errors. */
+.ds-count.ds-tone-attention {
+  background: color-mix(in srgb, var(--text-warning) 16%, transparent);
+  color: var(--text-warning);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-warning) 40%, transparent);
+}
+.ds-count.ds-tone-quiet { background: transparent; box-shadow: none; color: var(--text-tertiary); }
+
+/* ══ Button ════════════════════════════════════════════════════════════
+   One button, five variants, three sizes (DESIGN.md):
+     primary   — the one main action in a view (white on black in dark)
+     secondary — default; outlined
+     ghost     — low emphasis, toolbars and icon buttons
+     danger    — destructive (red outline; never a red fill)
+     layer     — actions that move knowledge into a layer wear its colour:
+                 swm (Share to SWM, cyan tint), vm (Publish to VM, purple fill)
+   Sizes 24 / 32 / 40; icon buttons are square. Every target is ≥ 24×24.
+   Elements declare their look with these classes (`ds-btn` plus a variant
+   and size), or use <Button> (components/ds/Button), which renders them.
+   Screen classes on the same element only add layout. */
+
+.ds-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-6);
+  box-sizing: border-box;
+  height: var(--h-control-md);
+  min-width: var(--h-control-sm);
+  flex-shrink: 0;
+  padding: 0 var(--space-16);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-control);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-control);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0;
+  text-transform: none;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
+}
+/* Preview states: each hover and focus rule below also names .dsp-hover or .dsp-focus,
+   so the reference page's state matrix shows the same declarations without a pointer or
+   keyboard. The app never sets those classes. */
+.ds-btn:is(:hover, .dsp-hover):not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-prominent);
+}
+.ds-btn:is(:focus-visible, .dsp-focus) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.ds-btn:disabled {
+  opacity: var(--opacity-disabled);
+  cursor: not-allowed;
+}
+
+/* Sizes */
+.ds-btn.ds-sm {
+  height: var(--h-control-sm);
+  padding: 0 var(--space-12);
+  gap: var(--space-4);
+  font-size: var(--fs-label);
+}
+.ds-btn.ds-lg {
+  height: var(--h-control-lg);
+  padding: 0 var(--space-16);
+  font-size: var(--fs-body);
+}
+
+
+/* Square icon buttons */
+.ds-btn.ds-icon {
+  width: var(--h-control-md);
+  padding: 0;
+}
+.ds-btn.ds-sm.ds-icon {
+  width: var(--h-control-sm);
+  padding: 0;
+  font-size: var(--fs-body);
+}
+.v10-modal-close { font-size: var(--fs-heading); font-weight: 400; }
+
+/* Primary — one per view */
+.ds-btn.ds-primary {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: var(--text-on-primary);
+}
+.ds-btn.ds-primary:is(:hover, .dsp-hover):not(:disabled) {
+  background: color-mix(in srgb, var(--accent-primary) 86%, var(--bg-root));
+  border-color: color-mix(in srgb, var(--accent-primary) 86%, var(--bg-root));
+}
+
+/* Ghost — no chrome until hover */
+.ds-btn.ds-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+.ds-btn.ds-ghost:is(:hover, .dsp-hover):not(:disabled) {
+  background: var(--bg-hover);
+  border-color: transparent;
+  color: var(--text-primary);
+}
+.v10-header-icon-btn.active-toggle,
+.v10-header-icon-btn.active-toggle:hover:not(:disabled) { background: var(--bg-active); color: var(--text-primary); }
+
+/* Danger — red outline, red tint on hover */
+.ds-btn.ds-danger {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--text-danger) 45%, transparent);
+  color: var(--text-danger);
+}
+.ds-btn.ds-danger:is(:hover, .dsp-hover):not(:disabled) {
+  background: color-mix(in srgb, var(--text-danger) 12%, transparent);
+  border-color: color-mix(in srgb, var(--text-danger) 65%, transparent);
+}
+
+/* Layer actions */
+.ds-btn.ds-swm {
+  background: var(--layer-shared-bg);
+  border-color: color-mix(in srgb, var(--layer-shared-border) 70%, transparent);
+  color: var(--layer-shared-text);
+}
+.ds-btn.ds-swm:is(:hover, .dsp-hover):not(:disabled) {
+  background: color-mix(in srgb, var(--layer-shared) 22%, var(--layer-shared-bg));
+  border-color: var(--layer-shared-border);
+}
+.ds-btn.ds-vm {
+  background: var(--accent-vm);
+  border-color: var(--accent-vm);
+  color: var(--text-on-vm);
+}
+.ds-btn.ds-vm:is(:hover, .dsp-hover):not(:disabled) {
+  background: var(--accent-vm-hover);
+  border-color: var(--accent-vm-hover);
+}
+
+/* ══ Tabs ══════════════════════════════════════════════════════════════
+   Underline tabs = where you are (navigation). One look everywhere:
+   12px medium, tertiary text, the active tab in primary text with a 2px
+   underline. Main bars are 36px tall, sub-bars inside a view 32px.
+   Layer tabs keep their layer colour on the underline. */
+.ds-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
+  height: 100%;
+  padding: 0 var(--space-12);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  color: var(--text-tertiary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-control);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--motion-fast), border-color var(--motion-fast);
+}
+.ds-tab:is(:hover, .dsp-hover) {
+  color: var(--text-secondary);
+}
+.ds-tab.active, .ds-tab[aria-selected="true"] {
+  color: var(--text-primary);
+  border-bottom-color: var(--text-primary);
+}
+.ds-tab:is(:focus-visible, .dsp-focus) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* ══ Segmented control ═════════════════════════════════════════════════
+   Switches what a panel or view shows (Agents / Network / Sessions,
+   Context graphs / Context oracle, table / graph). A 6px track with
+   4px segments; the selected one is lifted onto the surface. */
+.ds-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: var(--bg-elevated);
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  overflow: visible;
+}
+.ds-seg-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-6);
+  height: 24px;
+  min-width: 24px;
+  padding: 0 var(--space-12);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-control);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--motion-fast), background-color var(--motion-fast);
+}
+.ds-seg-item:is(:hover, .dsp-hover) { color: var(--text-primary); }
+.ds-seg-item.active, .ds-seg-item[aria-pressed="true"] {
+  background: var(--bg-active);
+  color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+.ds-seg-item:is(:focus-visible, .dsp-focus) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* ══ Filter chip ═══════════════════════════════════════════════════════
+   Something you set: a 6px rectangle (never a pill — pills are read-only).
+   On = lifted with a stronger border; a sub-graph chip uses its own
+   colour for the "on" ring. */
+.ds-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
+  height: 28px;
+  padding: 0 var(--space-12);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-control);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
+}
+.ds-filter.ds-sm { height: var(--h-control-sm); padding: 0 var(--space-8); font-size: var(--fs-label); }
+.ds-filter:is(:hover, .dsp-hover) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+.ds-filter.active, .ds-filter[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--sg-color, var(--text-primary)) 12%, var(--bg-elevated));
+  border-color: var(--sg-color, var(--border-strong));
+  color: var(--text-primary);
+}
+.ds-filter:is(:focus-visible, .dsp-focus) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* ══ Entity chip ═══════════════════════════════════════════════════════
+   A thing you can open: leading mark (context graph tile; agents use
+   AgentChip's circle) + name, in a pill. 24px, like a small button. */
+.ds-entity-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
+  max-width: 100%;
+  height: var(--h-control-sm);
+  padding: 0 var(--space-8) 0 var(--space-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-label);
+  font-weight: 600;
+  line-height: 1;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.ds-entity-chip-name { overflow: hidden; text-overflow: ellipsis; }
+.ds-entity-chip .v10-cg-mark { width: 18px; height: 18px; border-radius: var(--radius-xs); font-size: var(--fs-micro); }
+.ds-entity-chip.interactive { cursor: pointer; transition: background-color var(--motion-fast), border-color var(--motion-fast); }
+.ds-entity-chip.interactive:is(:hover, .dsp-hover) { background: var(--bg-hover); border-color: var(--border-strong); }
+.ds-entity-chip.interactive:is(:focus-visible, .dsp-focus) { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+
+/* Light: the selected segment is the white surface lifted off a grey track. */
+body.light .ds-seg-item.active,
+body.light .ds-seg-item[aria-pressed="true"] {
+  background: var(--bg-surface);
+  box-shadow: 0 0 0 1px var(--border-default), var(--shadow-xs);
+}
+
+/* ══ Cards and surfaces ════════════════════════════════════════════════
+   Three corners (DESIGN.md): 12 overlays and dialogs, 10 cards and panels,
+   8 anything nested inside a card (cells, notes, legends) and menus or
+   popovers. Menu rows use 4. Put the class on the element; the screen's own
+   class keeps only layout. */
+.ds-overlay { border-radius: var(--radius-overlay); }
+.ds-card { border-radius: var(--radius-card); }
+.ds-card-nested { border-radius: var(--radius-nested); }
+
+/* ══ Inputs ════════════════════════════════════════════════════════════
+   Text fields, selects and textareas: 6px corners like buttons, the same
+   heights as the buttons beside them (32 default, 24 compact), 12px text,
+   one focus ring. The chat composer is a card (10px), not an input. */
+.ds-input {
+  border-radius: var(--radius-control);
+  font-size: var(--fs-control);
+}
+.ds-input:not(textarea) {
+  box-sizing: border-box;
+  height: var(--h-control-md);
+  min-height: var(--h-control-md);
+}
+.ds-input.ds-sm {
+  box-sizing: border-box;
+  height: var(--h-control-sm);
+  min-height: var(--h-control-sm);
+  padding-top: 0;
+  padding-bottom: 0;
+  font-size: var(--fs-label);
+}
+/* Text fields get these from 01-base. :where keeps it below any screen's own select rule. */
+:where(select.ds-input) {
+  padding: 0 var(--space-24) 0 var(--space-12);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  cursor: pointer;
+}
+/* A combobox is unfinished until something is picked, not wrong, so it stays neutral. */
+.ds-input[aria-invalid="true"]:not([role="combobox"]) { border-color: var(--accent-red); }
+.ds-input:is(:focus-visible, .dsp-focus),
+:where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea, select):focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 0;
+}
+
+.ds-external-mark { vertical-align: -1px; }
+
+/* Breadcrumbs: the one way back from a deep view. */
+.ds-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-4); min-width: 0; font-size: var(--fs-control); line-height: var(--lh-tight); color: var(--text-tertiary); }
+.ds-crumb { max-width: 280px; padding: var(--space-2) 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); background: none; }
+button.ds-crumb:hover { color: var(--text-primary); text-decoration: underline; }
+.ds-crumbs-bar { margin-bottom: var(--space-12); }
+.ds-crumb-current { color: var(--text-primary); font-weight: 500; }
+
+/* Page: the content panel sets the gutter, so a page adds no padding of its own. */
+.ds-page { max-width: var(--page-max); }
+.ds-page-narrow { max-width: var(--page-max-narrow); }
+.ds-page-header { margin-bottom: var(--page-gutter); }
+.ds-page-titlerow { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-12); }
+.ds-page-title { margin: 0; font-size: var(--fs-heading); font-weight: 600; line-height: var(--lh-tight); color: var(--text-primary); }
+.ds-page-desc { margin: var(--space-4) 0 0; max-width: 760px; font-size: var(--fs-body); line-height: var(--lh-body); color: var(--text-secondary); }
+
+/* A table scrolls inside its card, so no column is cut off. Wide tables pin the first column. */
+.ds-table-scroll { overflow-x: auto; max-width: 100%; }
+.ds-table-pin tr { background: var(--bg-surface); }
+.ds-table-pin th:first-child, .ds-table-pin td:first-child { position: sticky; left: 0; z-index: 1; background: inherit; }
+/* Pinned cells need a solid fill, and the header cell's must match the header row. */
+.ds-table-pin th:first-child { background: var(--bg-panel); }
+/* Numbers sit right and line up; the header matches its column. */
+.ds-num { text-align: right; font-variant-numeric: tabular-nums; }
+/* One header style for every table. A table's own rule sets padding and borders, not type. */
+.data-table th,
+.ds-table-head {
+  font-size: var(--fs-label);
+  font-weight: 500;
+  line-height: var(--lh-tight);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+/* Toggle: track 40x24, on is the primary action colour, off clears 3:1. */
+.ds-toggle {
+  position: relative; flex-shrink: 0; width: 40px; height: var(--h-control-sm); padding: 0;
+  border: 0; border-radius: var(--radius-pill); background: var(--border-control);
+  cursor: pointer; transition: background var(--motion-base);
+}
+.ds-toggle[aria-checked="true"] { background: var(--accent-primary); }
+.ds-toggle[aria-busy="true"] { opacity: .6; cursor: wait; }
+.ds-toggle:is(:focus-visible, .dsp-focus) { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.ds-toggle-knob {
+  position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%;
+  background: var(--bg-surface); transition: left var(--motion-base);
+}
+.ds-toggle[aria-checked="true"] .ds-toggle-knob { left: 19px; }
+
+/* The keyboard target of a clickable row: a bare button on the row's title.
+   The row still handles the click. :where keeps the row's own type styles. */
+:where(.ds-row-open) { font: inherit; color: inherit; }
+.ds-row-open {
+  display: block; width: 100%; min-width: 0; padding: 0;
+  border: 0; background: none; text-align: left; cursor: pointer;
+}
+
+.ds-skip-link {
+  position: fixed; top: 8px; left: 8px; z-index: var(--z-skip);
+  height: var(--h-control-md); padding: 0 var(--space-16);
+  border: 1px solid var(--border-default); border-radius: var(--radius-control);
+  background: var(--bg-surface); color: var(--text-primary); font-size: var(--fs-control);
+  transform: translateY(-200%);
+}
+.ds-skip-link:focus { transform: none; }
+.v10-center-content:focus { outline: none; }
+
+/* Loading: the words say what is coming, the spinner says it's on its way. */
+.ds-loading {
+  display: inline-flex; align-items: center; gap: var(--space-8);
+  font-size: var(--fs-control); color: var(--text-tertiary);
+}
+.ds-loading.ds-block { display: flex; justify-content: center; min-height: 96px; height: 100%; padding: var(--space-16); box-sizing: border-box; }
+/* Plain buttons have no flex gap, so the icon brings its own. */
+button:not(.ds-btn) > .lucide-refresh-cw { margin-right: var(--space-6); }
+.ds-spin { animation: ds-spin 1s linear infinite; }
+@keyframes ds-spin { to { transform: rotate(360deg); } }
+
+/* Action outcome: what a promote or publish came to (lib/actionOutcome.ts).
+   The one place its tones are set; each consumer keeps its own spacing. */
+.action-outcome { font-size: var(--fs-label); color: var(--text-success); }
+.action-outcome[data-tone="warning"] { color: var(--text-warning); }
+.action-outcome[data-tone="danger"] { color: var(--text-danger); }
+
+/* Operation tone: the layer an operation writes to (op-type-colors.ts picks
+   the tone). The one place these colours are set; Observability and the
+   Transactions panel read --op-text, --op-bg and --op-rule. */
+.op-tone-vm { --op-text: var(--layer-verified-text); --op-bg: var(--layer-verified-bg); --op-rule: var(--layer-verified); }
+.op-tone-swm { --op-text: var(--layer-shared-text); --op-bg: var(--layer-shared-bg); --op-rule: var(--layer-shared); }
+.op-tone-neutral { --op-text: var(--text-secondary); --op-bg: var(--bg-elevated); --op-rule: var(--border-strong); }

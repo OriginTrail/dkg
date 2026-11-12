@@ -9,10 +9,12 @@ import {
   Rfc64InventoryRollbackRefusedErrorV1,
 } from '@origintrail-official/dkg-agent/rfc64/inventory-v1/rollback';
 import { compareSemver } from './npm-registry.js';
+import { dropReadGraphsForRollback } from './rollback-read-graphs.js';
 
 // A store that a newer release migrated must be handed back in a form the
 // rollback target opens, or the target stops at start. Each store whose
-// migrated form an older release refuses is readied here.
+// migrated form an older release refuses is readied here, and the triple
+// store's read graphs are dropped.
 
 export interface RollbackStoresIo {
   log(message: string): void;
@@ -147,9 +149,30 @@ export async function prepareRollbackStores(
   stoppedState = `Nothing was changed. The daemon is stopped: run "dkg start" to start ${currentVersion} again.`,
 ): Promise<PreparedRollbackStores | null> {
   const target = targetName(targetVersion);
+  // The daemon is stopped. Where there is an inventory, its lease is held while
+  // the read graphs are dropped, and the drop comes before the inventory
+  // changes, so a drop that fails leaves both stores as they were.
+  let dropped: number | null | undefined;
+  let dropFailure: { readonly error: unknown } | undefined;
+  const dropReadGraphs = async (): Promise<void> => {
+    try {
+      dropped = await dropReadGraphsForRollback(dataDir, (message) => io.log(message));
+    } catch (error) {
+      dropFailure = { error };
+      throw error;
+    }
+  };
+  const stopForDrop = (error: unknown): null => {
+    io.error(`Rollback stopped: the read graphs could not be dropped: ${error instanceof Error ? error.message : String(error)}.`);
+    io.error(`The version was not switched. Run "dkg rollback" again once the triple store can be opened, `
+      + `or "dkg start" to start ${currentVersion} again.`);
+    return null;
+  };
+  let prepared: Awaited<ReturnType<typeof prepareRfc64InventoryForRollbackV1>>;
   try {
-    const prepared = await prepareRfc64InventoryForRollbackV1(dataDir, inventoryUserVersionFor(targetVersion), {
+    prepared = await prepareRfc64InventoryForRollbackV1(dataDir, inventoryUserVersionFor(targetVersion), {
       removeConfirmedCatalogPlacements: readsOnlyLegacyPlacementRepairs(targetVersion),
+      beforeChange: dropReadGraphs,
     });
     if (prepared.removedConfirmedCatalogPlacements.length > 0) {
       io.log(removedPlacementsLine(prepared.removedConfirmedCatalogPlacements, target));
@@ -165,8 +188,8 @@ export async function prepareRollbackStores(
           + `for ${target}; the replaced schema v${prepared.fromVersion} database is kept at ${prepared.keptPath}.`,
       );
     }
-    return prepared;
   } catch (error) {
+    if (dropFailure !== undefined) return stopForDrop(dropFailure.error);
     if (error instanceof Rfc64InventoryRollbackRefusedErrorV1) {
       for (const line of refusalLines(error, targetVersion, currentVersion, stoppedState)) io.error(line);
     } else {
@@ -175,4 +198,17 @@ export async function prepareRollbackStores(
     }
     return null;
   }
+  if (dropped === undefined) {
+    // There was no inventory to lease, and nothing has changed yet.
+    try {
+      await dropReadGraphs();
+    } catch (error) {
+      prepared.release();
+      return stopForDrop(error);
+    }
+  }
+  if (typeof dropped === 'number') {
+    io.log(`Dropped ${dropped} read-graph partition graph(s) for ${target}; read graphs are rebuilt from the stored data.`);
+  }
+  return prepared;
 }

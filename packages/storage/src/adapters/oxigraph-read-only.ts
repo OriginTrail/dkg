@@ -17,6 +17,12 @@ export interface OxigraphStoreOptions {
    * `close()` write nothing, and a file that fails to parse stays in place.
    */
   readOnly?: boolean;
+  /**
+   * How long after a write the store waits before it writes its snapshot to
+   * the persistence file, in milliseconds. Default 50. `flush()` and `close()`
+   * write it at once whatever this says.
+   */
+  flushDelayMs?: number;
 }
 
 export const OXIGRAPH_STORE_READ_ONLY_CODE = 'DKG_STORE_READ_ONLY';

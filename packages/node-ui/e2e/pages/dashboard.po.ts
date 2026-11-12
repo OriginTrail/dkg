@@ -4,9 +4,8 @@ import { sel } from '../helpers/selectors.js';
 /**
  * DashboardPage — page object for the rc11 redesigned dashboard.
  *
- * The legacy dashboard had quick-action buttons, demo project cards
- * (`.v10-dash-project-card`), and a recent-operations feed
- * (`.v10-recent-op`). All three were removed in the rc11 redesign.
+ * The legacy dashboard had quick-action buttons, demo project cards and a
+ * recent-operations feed. All three were removed in the rc11 redesign.
  * The current dashboard ships:
  *   - 3 StatCards (My Context Graphs / Context Graph Size /
  *     Collaborating Agents) in `.v10-dash-stats.v10-dash-stats-3`,
@@ -27,7 +26,6 @@ export class DashboardPage {
   readonly title: Locator;
   readonly subtitle: Locator;
   readonly statsContainer: Locator;
-  readonly quickActions: Locator;
 
   // Newly-named handles for the rc11 dashboard. The CG list IS the
   // project picker now — clicking a `.v10-cg-row` opens that project's
@@ -44,7 +42,6 @@ export class DashboardPage {
     this.title = page.locator(sel.dashboard.title);
     this.subtitle = page.locator(sel.dashboard.subtitle);
     this.statsContainer = page.locator(sel.dashboard.stats);
-    this.quickActions = page.locator(sel.dashboard.quickAction);
     this.cgRows = page.locator('.v10-cg-list .v10-cg-row');
     this.cgEmpty = page.locator('.v10-cg-empty');
     this.walletsSection = page
@@ -90,19 +87,9 @@ export class DashboardPage {
           .click();
       },
     };
-    const direct = this.quickActions.filter({ hasText: label });
-    if ((await direct.count()) > 0) {
-      await direct.first().click();
-      return;
-    }
-    const fallback = entryByLabel[label];
-    if (fallback) {
-      await fallback();
-      return;
-    }
-    // Preserve the original locator-error if neither path resolves so a
-    // future regression doesn't silently no-op.
-    await direct.click();
+    const entry = entryByLabel[label];
+    if (!entry) throw new Error(`No entry point for "${label}"`);
+    await entry();
   }
 
   /**

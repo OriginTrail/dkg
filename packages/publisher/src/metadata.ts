@@ -11,7 +11,7 @@ import { nextEventId } from './assertion-lifecycle-events.js';
 export { generateAssertionWrittenMetadata, type AssertionWrittenMeta } from './assertion-lifecycle-events.js';
 import { ENTITY_SHARE_METADATA_PREDICATES as ENTITY_SHARE } from './entity-share-metadata.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
-import { deleteByPatternWithoutCount, GraphManager, LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from '@origintrail-official/dkg-storage';
+import { deleteByPatternWithoutCount, GraphManager, LOCAL_TRUSTED_KA_CONTROLS_GRAPH, tryUpdateWithTouchedGraphs } from '@origintrail-official/dkg-storage';
 import {
   validateSubGraphName,
   isSafeIri,
@@ -1065,14 +1065,17 @@ export async function updateMetaMerkleRoot(
   // Prefer a single SPARQL DELETE/INSERT to avoid an intermediate
   // state with no dkg:merkleRoot when update succeeds.
   try {
-    await store.query(
+    const updated = await tryUpdateWithTouchedGraphs(
+      store,
       `DELETE { GRAPH <${metaGraph}> { <${ual}> <${DKG}merkleRoot> ?oldRoot } }
        INSERT { GRAPH <${metaGraph}> { <${ual}> <${DKG}merkleRoot> ${rootLiteral} } }
        WHERE  { GRAPH <${metaGraph}> { OPTIONAL { <${ual}> <${DKG}merkleRoot> ?oldRoot } } }`,
+      [metaGraph],
+      { writtenGraphs: [metaGraph] },
     );
-    return;
+    if (updated) return;
   } catch {
-    // Some backends may not support SPARQL updates via query().
+    // Some backends may not support SPARQL updates.
     // Fallback preserves correctness by inserting first, then pruning old roots.
   }
 

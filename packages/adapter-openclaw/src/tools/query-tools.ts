@@ -46,6 +46,12 @@ export function buildQueryTools(ctx: DkgToolHost): OpenClawTool[] {
               'handler-side (not a JSON-schema enum) so strict-schema hosts still surface the ' +
               'tailored migration guidance on invalid values.',
           },
+          semantics: {
+            type: 'string',
+            description:
+              'Optional with `view`: `merged` matches patterns outside GRAPH across the view\'s assets, as one ' +
+              'graph; `per-asset` (the default) matches inside one asset at a time.',
+          },
           agent_address: {
             type: 'string',
             description:

@@ -1,5 +1,6 @@
 import React from 'react';
 import { WalletRow } from '../Wallet/WalletRow.js';
+import { ExternalMark } from '../ds/ExternalMark.js';
 
 const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 
@@ -65,7 +66,7 @@ export function PcaAgentList({
                     </span>
                     <button
                       type="button"
-                      className="v10-pca-card-btn"
+                      className="v10-pca-card-btn ds-btn"
                       data-testid="pca-deregister-btn"
                       aria-label={`Confirm removing ${addr}`}
                       onClick={() => onConfirmRemove(addr)}
@@ -73,7 +74,7 @@ export function PcaAgentList({
                     >
                       {removeBusy ? 'Removing…' : 'Yes, remove'}
                     </button>
-                    <button type="button" className="v10-pca-card-btn" aria-label={`Cancel removing ${addr}`} onClick={onCancelRemove} disabled={removeBusy}>
+                    <button type="button" className="v10-pca-card-btn ds-btn" aria-label={`Cancel removing ${addr}`} onClick={onCancelRemove} disabled={removeBusy}>
                       Cancel
                     </button>
                   </span>
@@ -81,18 +82,18 @@ export function PcaAgentList({
                   <>
                     {explorer && (
                       <a
-                        className="v10-pca-card-explorer"
+                        className="v10-pca-text-link"
                         href={`${explorer}/address/${addr}`}
                         target="_blank"
                         rel="noreferrer"
                         aria-label={`View ${addr} on explorer`}
                       >
-                        ↗
+                        <ExternalMark />
                       </a>
                     )}
                     <button
                       type="button"
-                      className="v10-pca-card-btn"
+                      className="v10-pca-card-btn ds-btn"
                       aria-label={`Remove ${addr}`}
                       onClick={() => onAskRemove(addr)}
                       disabled={!ownerIsPrimary}

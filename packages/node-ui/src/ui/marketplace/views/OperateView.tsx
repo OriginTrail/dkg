@@ -4,12 +4,13 @@
 // landing, with Land now; recent batches with their gas; this epoch's served
 // and weighted value and the pool so far, each ended epoch's gross; and the
 // operational wallets' ETH. Selling switched off is an explicit card.
+import { Badge } from '../../components/ds/Badge.js';
 import React, { useState } from 'react';
 import { copy, type CopyKey } from '../copy.generated.js';
 import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi } from '../api/client.js';
 import type { LandNowAnswer, LandingReport, LandingStop, Listing, ListingProblem, Offering } from '../api/types.js';
 import { fmtAt, fmtHex, fmtMicro, fmtTrac, modelName, weiOfMicro } from '../amounts.js';
-import { ErrorCard, OffCard, relAt, useLoad } from '../shared.js';
+import { CoreNodeChecks, ErrorCard, MarketplacePage, OffCard, coreNodeBasics, relAt, useLoad } from '../shared.js';
 
 /** Why an offer is not listed, in plain words. */
 const LISTING_PROBLEM: Record<ListingProblem, CopyKey> = {
@@ -83,20 +84,20 @@ export function OperateView(): React.ReactElement {
 
   if (isMarketplaceOff(st.err)) {
     return (
-      <div className="mkt-frame" data-testid="mkt-operate" data-state="inactive">
+      <MarketplacePage page="operate" state="inactive">
         <OffCard selling testId="mkt-operate-inactive" />
-      </div>
+      </MarketplacePage>
     );
   }
-  if (isMarketplaceAbsent(st.err)) return <div className="mkt-frame" data-testid="mkt-operate" data-state="absent"><OffCard absent /></div>;
+  if (isMarketplaceAbsent(st.err)) return <MarketplacePage page="operate" state="absent"><OffCard absent /></MarketplacePage>;
   if (st.err && !st.data) {
     return (
-      <div className="mkt-frame" data-testid="mkt-operate" data-state="error">
-        <div className="mkt-card"><div data-copy="operate.error">{copy('operate.error')}</div><ErrorCard err={st.err} onRetry={st.reload} /></div>
-      </div>
+      <MarketplacePage page="operate" state="error">
+        <div className="ds-card mkt-card"><div data-copy="operate.error">{copy('operate.error')}</div><ErrorCard err={st.err} onRetry={st.reload} /></div>
+      </MarketplacePage>
     );
   }
-  if (!st.data) return <div className="mkt-frame" data-testid="mkt-operate" data-state="loading"><div className="mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></div>;
+  if (!st.data) return <MarketplacePage page="operate" state="loading"><div className="ds-card mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></MarketplacePage>;
   const s = st.data;
   const epoch = s.epoch;
   const g = s.gate;
@@ -105,9 +106,9 @@ export function OperateView(): React.ReactElement {
   const line = report ? landedLine(report) : null;
 
   return (
-    <div className="mkt-frame" data-testid="mkt-operate" data-state="active">
+    <MarketplacePage page="operate" state="active">
       {st.err ? <ErrorCard err={st.err} onRetry={st.reload} /> : null}
-      <div className="mkt-card">
+      <div className="ds-card mkt-card">
         <h2 data-copy="operate.price.title">{copy('operate.price.title')}</h2>
         <div className="mkt-muted mkt-xs" data-copy="operate.price.epoch" data-testid="mkt-ask-cycle">
           {copy('operate.price.epoch', { n: epoch, next: epoch + 1, t: relAt(s.endsAt) })}
@@ -123,7 +124,7 @@ export function OperateView(): React.ReactElement {
                 <strong title={o.serviceId} data-copy="_data">{label(o.serviceId)}</strong>{' '}
                 {o.connector === 'up'
                   ? <span className="mkt-yours" data-copy="operate.connector.up">{copy('operate.connector.up')}</span>
-                  : <span className="mkt-chipblock" data-copy="operate.connector.down">{copy('operate.connector.down')}</span>}
+                  : <Badge tone="danger" data-copy="operate.connector.down">{copy('operate.connector.down')}</Badge>}
                 <div className="mkt-muted mkt-xs" data-copy={changed ? 'operate.price.queued' : 'operate.price.none'}>
                   {changed ? copy('operate.price.queued', { price: fmtMicro(o.nextPrice) }) : copy('operate.price.none')}
                 </div>
@@ -133,9 +134,9 @@ export function OperateView(): React.ReactElement {
               <span className="mkt-mono mkt-sec mkt-askedit">
                 <span data-copy="catalog.price.micro">{copy('catalog.price.micro', { micro: fmtMicro(o.price), unit: 'tok' })}</span>
                 {' → '}
-                <input className="mkt-input mkt-input--short" inputMode="decimal" data-testid={`mkt-ask-input-${o.serviceId}`} value={edits[o.serviceId] ?? ''} placeholder={fmtMicro(o.nextPrice)}
+                <input className="ds-input mkt-input mkt-input--short" inputMode="decimal" data-testid={`mkt-ask-input-${o.serviceId}`} value={edits[o.serviceId] ?? ''} placeholder={fmtMicro(o.nextPrice)}
                   aria-label={copy('operate.price.cta')} onChange={(e) => setEdits((x) => ({ ...x, [o.serviceId]: e.target.value }))} />
-                <button type="button" className="mkt-btn" data-testid={`mkt-ask-queue-${o.serviceId}`} data-copy="operate.price.cta" onClick={() => setPrice(o.serviceId)}
+                <button type="button" className="ds-btn" data-testid={`mkt-ask-queue-${o.serviceId}`} data-copy="operate.price.cta" onClick={() => setPrice(o.serviceId)}
                   disabled={!wei || busy === o.serviceId} title={!wei ? copy('operate.price.invalid') : undefined}>{busy === o.serviceId ? copy('state.working') : copy('operate.price.cta')}</button>
               </span>
             </div>
@@ -144,28 +145,28 @@ export function OperateView(): React.ReactElement {
         <p className="mkt-muted mkt-xs" data-copy="operate.price.note">{copy('operate.price.note')}</p>
       </div>
 
-      <div className="mkt-card" data-testid="mkt-ledger">
+      <div className="ds-card mkt-card" data-testid="mkt-ledger">
         <h2 data-copy="operate.epoch.title">{copy('operate.epoch.title')}</h2>
-        <div className="mkt-muted mkt-xs" data-copy="operate.gate">
-          {copy('operate.gate', {
-            profile: g.profile ? '✓' : '✗', table: g.shardingTable ? '✓' : '✗', stake: fmtTrac(g.stake), min: fmtTrac(g.minimumStake),
-            proved: copy(s.scoredThisEpoch ? 'operate.proved' : 'operate.proved.not'),
-          })}
+        <div className="mkt-muted mkt-xs" data-copy="gate.core" data-testid="mkt-operate-gate">
+          {/* Not proved yet is pending while the epoch runs, not a failed check, so it has no mark. */}
+          <CoreNodeChecks items={[...coreNodeBasics(g),
+            s.scoredThisEpoch ? { ok: true, label: copy('operate.proved') } : { label: copy('operate.proved.not') }]} />
         </div>
         <div className="mkt-sec mkt-sm" data-testid="mkt-ledger-counts" data-copy="operate.ledger">{copy('operate.ledger', { served: l.served, sent: l.sent, landed: l.landed, refused: l.refused, missed: l.missed })}</div>
         <div className="mkt-muted mkt-xs" data-copy="operate.ledger.value">{copy('operate.ledger.value', { held: fmtTrac(l.heldValue), landed: fmtTrac(l.landedValue), counted: fmtTrac(l.counted) })}</div>
         <div className="mkt-muted mkt-xs" data-copy="operate.thisepoch">{copy('operate.thisepoch', { served: fmtTrac(s.thisEpoch.servedValue), weighted: fmtTrac(s.thisEpoch.weightedValue), pool: fmtTrac(s.thisEpoch.poolSoFar) })}</div>
         <div className="mkt-mhead">
           <span className="mkt-sec mkt-sm" data-copy="operate.nextlanding">{copy('operate.nextlanding', { t: relAt(s.nextLandingAt) })}</span>
-          <button type="button" className="mkt-btn" data-testid="mkt-land-now" data-copy="operate.land.cta" onClick={landNow} disabled={busy === 'land'}>{busy === 'land' ? copy('state.working') : copy('operate.land.cta')}</button>
+          <button type="button" className="ds-btn" data-testid="mkt-land-now" data-copy="operate.land.cta" onClick={landNow} disabled={busy === 'land'}>{busy === 'land' ? copy('state.working') : copy('operate.land.cta')}</button>
         </div>
         {line && <div className="mkt-muted mkt-xs" data-testid="mkt-land-result" data-copy={line.key}>{copy(line.key, line.vars)}</div>}
         {landErr ? <ErrorCard err={landErr} onRetry={landNow} /> : null}
       </div>
 
-      <div className="mkt-card" data-testid="mkt-batches">
+      <div className="ds-card mkt-card" data-testid="mkt-batches">
         <h2 data-copy="operate.batches">{copy('operate.batches')}</h2>
         {s.batches.length === 0 && <div className="mkt-muted mkt-xs" data-copy="operate.batches.none">{copy('operate.batches.none')}</div>}
+        <div className="ds-table-scroll">
         <table className="mkt-act">
           <tbody>
             {s.batches.slice(0, 10).map((b) => (
@@ -179,8 +180,10 @@ export function OperateView(): React.ReactElement {
             ))}
           </tbody>
         </table>
+        </div>
         <h3 data-copy="operate.ended">{copy('operate.ended')}</h3>
         {s.ended.length === 0 && <div className="mkt-muted mkt-xs" data-copy="operate.ended.none">{copy('operate.ended.none')}</div>}
+        <div className="ds-table-scroll">
         <table className="mkt-act" data-testid="mkt-ended">
           <tbody>
             {s.ended.map((e) => (
@@ -192,9 +195,10 @@ export function OperateView(): React.ReactElement {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
-      <div className="mkt-card">
+      <div className="ds-card mkt-card">
         <h2 data-copy="op.wallets">{copy('op.wallets')}</h2>
         {s.wallets.map((w) => (
           <div key={w.address} className="mkt-wallet" data-testid="mkt-ops-wallet">
@@ -206,6 +210,6 @@ export function OperateView(): React.ReactElement {
         ))}
         <div className="mkt-muted mkt-xs" data-copy="operate.identity">{copy('operate.identity', { id: s.identityId })}</div>
       </div>
-    </div>
+    </MarketplacePage>
   );
 }

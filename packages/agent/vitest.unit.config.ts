@@ -18,6 +18,11 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      "test/encryption-key-enrollment.test.ts",
+      "test/private-recipient-admission.test.ts",
+      "test/join-encryption-key-cache.test.ts",
+      "test/agent-rotate-encryption-key.test.ts",
+      "test/encryption-key-rdf-recovery.test.ts",
       "test/public-snapshot-checkpoint.test.ts",
       "test/public-snapshot-suppliers.test.ts",
       "test/public-checkpoint-active-store.test.ts",
@@ -87,6 +92,7 @@ export default defineConfig({
       "test/manifest-bound-snapshot-walk.test.ts",
       "test/private-swm-recovery-budget.test.ts",
       "test/swm-target-executor.test.ts",
+      "test/swm-target-executor-read-graph-pass.test.ts",
       "test/finalized-swm-twin-memo.test.ts",
       "test/swm-sync-sub-graph-registration.test.ts",
       "test/registered-public-sub-graph-first-write.test.ts",
@@ -156,6 +162,13 @@ export default defineConfig({
       "test/query-refused-aggregate.test.ts",
       "test/query-source-labels.test.ts",
       "test/query-private-authority-pending.test.ts",
+      "test/view-semantics-authority-order.test.ts",
+      "test/read-graph-qualification-views.test.ts",
+      "test/view-semantics-delta-report.test.ts",
+      "test/context-graph-held-graphs.test.ts",
+      "test/read-graph-declared-updates.test.ts",
+      "test/query-unheld-context-graph.test.ts",
+      "test/unheld-context-graph-read.test.ts",
       "test/unscoped-query-admission.test.ts",
       "test/prepare-unscoped-context-graph-read-checks.test.ts",
       "test/unscoped-query-consistency.test.ts",
@@ -354,6 +367,11 @@ export default defineConfig({
       "test/selected-swm-meta-transfer-coordinator.test.ts",
       "test/selected-swm-meta-budget.test.ts",
       "test/legacy-sync-graph-candidate.test.ts",
+      // Read-graph partitions stay out of every enumerating surface.
+      "test/read-graph-partition-comparison.test.ts",
+      "test/read-graph-runtime.test.ts",
+      "test/read-graph-settings-builder.test.ts",
+      "test/read-graph-working-memory.test.ts",
       "test/outbox-shutdown-lifecycle.test.ts",
       // Keyed persist scheduler shared by membership and subscription writes,
       // and the subscription drain / reopen that stop() and start() drive.
@@ -415,11 +433,14 @@ export default defineConfig({
       "test/vm-reconcile-self-prime.test.ts",
       "test/vm-reconcile-self-prime-budget.test.ts",
       "test/vm-reconcile-sweep.test.ts",
+      // The sweep's unbound lane spaces graphs whose name the chain holds no id for.
+      "test/vm-reconcile-absent-target-backoff.test.ts",
       "test/vm-reconcile-lifecycle-timer.test.ts",
       // #2858 — refresh of confirmed VM copies after an on-chain KA update.
       "test/vm-refresh-after-update.test.ts",
-      "test/core-fills-gap.test.ts",
       "test/vm-promotion-gate.test.ts",
+      // A KA's latest root and publisher in one batched request; stub and real adapter, no hardhat.
+      "test/ka-latest-root-and-publisher.test.ts",
       "test/vm-recovery-microbatch-planner.test.ts",
       "test/vm-recovery-phase-timing.test.ts",
       // #3081 — where a confirmed publication waits for its catalog placement (observation only).
@@ -474,7 +495,6 @@ export default defineConfig({
       "test/direct-rootless-publish.test.ts",
       "test/rootless-update-boundary.test.ts",
       "test/rootless-update-error.test.ts",
-      "test/changelog-requester.test.ts",
       "test/encrypt-inline-policy.test.ts",
       // #3044 — a publish repeats its recipient read within the share's bound.
       "test/publish-recipient-authority-repeat.test.ts",
@@ -499,7 +519,6 @@ export default defineConfig({
       "test/context-graph-join-policy.test.ts",
       // #3366 — a busy store is no verdict on a joining agent's key.
       "test/join-admission-store-busy.test.ts",
-      "test/join-encryption-key-cache.test.ts",
       "test/bounded-operation.test.ts",
       "test/store-admission-retry.test.ts",
       "test/private-read-chain-authority.test.ts",
@@ -525,6 +544,8 @@ export default defineConfig({
       "test/swm-public-cg-plaintext.test.ts",
       "test/swm-sender-key-stale-target.test.ts",
       "test/swm-sender-key-pending-by-agent.test.ts",
+      "test/swm-external-api-recipient.test.ts",
+      "test/approved-private-replica.test.ts",
       "test/swm-sender-key-peer-routes.test.ts",
       "test/swm-sender-key-overlapping-shares.test.ts",
       "test/swm-shares-through-relay.test.ts",
@@ -534,7 +555,6 @@ export default defineConfig({
       // #2827 — SWM authority and plaintext decisions for a joined member of a
       // public, unregistered context graph.
       "test/public-unregistered-member-swm.test.ts",
-      "test/approved-private-replica.test.ts",
       "test/approved-private-replica-proof-runs.test.ts",
       "test/swm-snapshot-materializer.test.ts",
       // #3296 — a newer stored head proves an asset held only with its content.

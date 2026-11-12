@@ -6,11 +6,7 @@ import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { configFileSources, parseConfigText } from './config-file-source.js';
-import type {
-  DKGAgentConfig,
-  SyncAdmissionConfig,
-  SyncContextGraphPriorityConfig,
-} from '@origintrail-official/dkg-agent';
+import type { DKGAgentConfig, SyncAdmissionConfig, SyncContextGraphPriorityConfig } from '@origintrail-official/dkg-agent';
 // The config loader must stay off the agent package ROOT at runtime: that entry
 // loads the whole agent runtime (libp2p, sync lanes, the process-wide
 // `sync-global` backpressure registration) into every config-only command, and
@@ -57,6 +53,7 @@ import {
   type RpcRequestGovernorPolicyInput,
 } from '@origintrail-official/dkg-chain';
 import { runtimeAssetRoots } from './runtime-assets.js';
+import type { SemanticRuntimeNodeSettings } from './semantic-runtime-node-settings.js';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -591,23 +588,14 @@ export interface LocalAgentIntegrationConfig {
   updatedAt?: string;
 }
 
-export interface QueryAccessConfig {
-  defaultPolicy: 'deny' | 'public';
-  contextGraphs?: Record<string, {
-    policy: 'deny' | 'public' | 'allowList';
-    allowedPeers?: string[];
-    allowedLookupTypes?: Array<'ENTITY_BY_UAL' | 'ENTITIES_BY_TYPE' | 'ENTITY_TRIPLES' | 'SPARQL_QUERY'>;
-    sparqlEnabled?: boolean;
-    sparqlTimeout?: number;
-    sparqlMaxResults?: number;
-  }>;
-  rateLimitPerMinute?: number;
-}
+export type { QueryAccessConfig } from './read-graphs-config.js';
 
 export interface GraphSetIndexConfig {
   enabled?: boolean;
   /** Revalidate the named-graph index after this many milliseconds. 0 means every read. */
   revalidateMs?: number;
+  /** `background` (the default) answers from a warm index while it revalidates; `blocking` makes the caller that finds it due wait. */
+  revalidate?: 'background' | 'blocking';
 }
 
 /**
@@ -631,7 +619,7 @@ export interface LoggingConfig {
   /** Emit detailed KA publish lifecycle logs. Default: false. */
   kaPublishLifecycleDebug?: boolean;
 }
-export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLimits' | 'preparedContentCache'> {
+export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLimits' | 'preparedContentCache'>, SemanticRuntimeNodeSettings {
   /** Lower RPC usage by using the DKG Core chain cache. Core service defaults on. Edge use is opt-in. */
   DKG_Core_chain_cache?: boolean;
   publicSnapshotBootstrap?: import('./daemon/public-checkpoint-config.js').DaemonPublicCheckpointConfig;
@@ -761,7 +749,8 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
   /** Local daemon logging controls. */
   logging?: LoggingConfig;
   /** Cross-agent query access policy for inbound query-remote requests. */
-  queryAccess?: QueryAccessConfig;
+  queryAccess?: import('./read-graphs-config.js').QueryAccessConfig;
+  query?: import('./read-graphs-config.js').QueryConfigInput; // OT-RFC-74 read graphs (default off) and view matching (default per-asset)
   marketplace?: { enabled?: boolean; seller?: { enabled?: boolean }; [setting: string]: unknown }; // OT-RFC-27; packages/marketplace reads it.
   autoUpdate?: AutoUpdateConfig;
   /**
@@ -774,8 +763,8 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
   entitySearch?: { embedding: import('./entity-search/types.js').EntityEmbeddingConfig };
   /** Block explorer URL for TX links (default: derived from chainId). */
   blockExplorerUrl?: string;
-  /** Triple store backend override (default: oxigraph-worker with file persistence). `controlReservedSlots`: the async queues' store control path (OT-RFC-73 P14), the values of DKG_STORE_CONTROL_RESERVED_SLOTS, which wins when set; absent = the default (on for blazegraph and oxigraph-server on more than 2 CPUs). */
-  store?: { backend: string; options?: Record<string, unknown>; graphSetIndex?: boolean | GraphSetIndexConfig; changelog?: boolean; controlReservedSlots?: string | number };
+  /** Triple store backend override (default: oxigraph-worker with file persistence). `controlReservedSlots`: the async queues' store control path (OT-RFC-73 P14), the values of DKG_STORE_CONTROL_RESERVED_SLOTS, which wins when set; absent = the default (on for blazegraph and oxigraph-server on more than 2 CPUs). `graphCatalog.maxBytes`: the graph catalog's bound, the values of DKG_STORE_GRAPH_CATALOG_MAX_BYTES, which wins when set (graph-catalog-config.ts). */
+  store?: { backend: string; options?: Record<string, unknown>; graphSetIndex?: boolean | GraphSetIndexConfig; changelog?: boolean; controlReservedSlots?: string | number; graphCatalog?: import('./graph-catalog-config.js').GraphCatalogConfig };
   /**
    * Intentional cap on how many persisted context-graph subscriptions a node
    * ACTIVATES on boot (gossip + sync). A large stale backlog otherwise fans out
@@ -888,10 +877,10 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
   localAgentIntegrations?: Record<string, LocalAgentIntegrationConfig>;
   /**
    * API authentication. When enabled, all non-public endpoints require
-   * a Bearer token in the Authorization header. A token is auto-generated
-   * on first start and stored in `<DKG_HOME>/auth.token`.
+   * a verified agent-key signature or a Bearer token. A legacy token is
+   * auto-generated on first start and stored in `<DKG_HOME>/auth.token`.
    */
-  auth?: { enabled?: boolean; tokens?: string[] };
+  auth?: { enabled?: boolean; tokens?: string[]; operatorAgentAddresses?: string[] };
   /**
    * Opt-in telemetry streaming to a central network dashboard.
    * `enabled` is the master gate: when false, NOTHING is forwarded off the

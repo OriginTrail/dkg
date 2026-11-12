@@ -70,6 +70,30 @@ export interface PublishEligibility {
   /** Per-condition AND across all signing wallets (the popover breakdown). */
   conditions: { approved: boolean; gasFunded: boolean; notExpired: boolean; solvent: boolean };
   wallets: WalletDetail[];
+  /**
+   * Nothing is tracked AND the chain confirms none of this node's signing wallets is on any
+   * PCA (every `pcaAgentAccount` lookup returned `accountId: null`). Drives the publish
+   * widget's "pays the full TRAC fee" line. Display only: the verdict stays `unknown` when
+   * nothing is tracked, so this never gates. `false`/absent when any wallet is on a PCA,
+   * when a lookup fails (including the 503 on networks without PCAs), or with no wallets.
+   */
+  noPcaConfirmed?: boolean;
+}
+
+/**
+ * Nothing tracked: confirm from chain truth that no signing wallet is on any PCA. Never
+ * throws; anything unconfirmed is `false`, so the full-fee line fails toward saying nothing.
+ */
+async function confirmNoPcaForAnyWallet(): Promise<boolean> {
+  try {
+    const wb = await fetchWalletsBalances();
+    const wallets = wb?.wallets ?? [];
+    if (wallets.length === 0) return false;
+    const accounts = await Promise.all(wallets.map((w) => pcaAgentAccount(w)));
+    return accounts.every((a) => a != null && a.accountId == null);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -91,7 +115,10 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
   const { data, loading } = useFetch(
     async () => {
       if (trackedIds.length === 0) {
-        return { wallets: [] as WalletDetail[], ownerPublish: false, resolved: false };
+        // Nothing tracked → still a neutral verdict, but resolve whether the full fee is
+        // confirmed (no signing wallet on ANY PCA), on this same poll.
+        const noPcaConfirmed = await confirmNoPcaForAnyWallet();
+        return { wallets: [] as WalletDetail[], ownerPublish: false, resolved: false, noPcaConfirmed };
       }
       const wb = await fetchWalletsBalances().catch(() => null);
       const wallets = wb?.wallets ?? [];
@@ -211,7 +238,7 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
           };
         }),
       );
-      return { wallets: details, ownerPublish, resolved: wallets.length > 0 };
+      return { wallets: details, ownerPublish, resolved: wallets.length > 0, noPcaConfirmed: false };
     },
     [idsKey, contextGraphId],
     intervalMs,
@@ -231,6 +258,9 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
         reasons: [],
         conditions: { approved: false, gasFunded: false, notExpired: false, solvent: false },
         wallets,
+        // Only for a read made with nothing tracked (useFetch keeps the last data while a
+        // newly tracked set refetches, so check both).
+        noPcaConfirmed: trackedIds.length === 0 && data?.noPcaConfirmed === true,
       };
     }
 
@@ -282,7 +312,7 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
       } else {
         verdict = anyCanFund ? 'fallthrough' : 'fallthrough-no-funds';
         reasons.push(`${covered.length} of ${wallets.length} signing wallets approved`);
-        if (wallets.some((w) => w.sawExpired)) reasons.push('a PCA has expired or been fully swept');
+        if (wallets.some((w) => w.sawExpired)) reasons.push('a PCA has expired');
         if (wallets.some((w) => w.sawInsolvent)) reasons.push('a PCA is out of budget');
         if (!conditions.gasFunded) reasons.push('a signing wallet has no gas');
         if (uncovered.some((w) => w.inconclusive)) reasons.push('a wallet’s PCA coverage couldn’t be checked');
@@ -309,6 +339,7 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
       reasons,
       conditions,
       wallets,
+      noPcaConfirmed: false,
     };
   }, [data, loading, trackedIds.length]);
 }

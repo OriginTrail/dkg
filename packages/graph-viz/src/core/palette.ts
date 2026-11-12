@@ -199,3 +199,12 @@ export function injectPaletteCssVars(container: HTMLElement, palette: ColorPalet
     container.style.setProperty(prop, value);
   }
 }
+
+/** `#rrggbb` (or `#rgb`) → `rgba(r, g, b, a)`; other colour strings pass through. */
+export function withAlpha(color: string, alpha: number): string {
+  const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color.trim());
+  if (!m) return color;
+  const hex = m[1]!.length === 3 ? m[1]!.split('').map((c) => c + c).join('') : m[1]!;
+  const n = parseInt(hex, 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}

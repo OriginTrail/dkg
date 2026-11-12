@@ -64,7 +64,7 @@ the writer, but do not encrypt GossipSub payload bytes.
 
 ## Quick Start
 
-**Prerequisites:** Node.js 22.23.4+, 24.22.1+ or 26.12.1+, npm 10+. DKG starts on Node.js 22.13+ (or 23.4+), but older releases miss the [2026-10-21 Node.js security fixes](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases), and `dkg start` and `dkg doctor` warn about them. macOS, Linux, and Windows (PowerShell 5.1+ or WSL2) all supported.
+**Prerequisites:** Node.js 22.23.5+, 24.22.3+ or 26.13.1+, npm 10+. DKG starts on Node.js 22.13+ (or 23.4+), but older releases miss the [2026-11-11 Node.js security fixes](https://nodejs.org/en/blog/vulnerability/november-2026-security-releases), and `dkg start` and `dkg doctor` warn about them. macOS, Linux, and Windows (PowerShell 5.1+ or WSL2) all supported.
 
 ### Hermes adapter
 
@@ -391,6 +391,7 @@ analysis reports are under `bench/results/profiles/`, including
 |---|---|
 | [Quickstart](docs/getting-started/quickstart.md) | You want to install a node and connect an agent framework |
 | [MCP Setup](packages/mcp-dkg/README.md) | You want Cursor / Claude Code / Claude Desktop / Windsurf / VSCode + Copilot / Cline / Codex CLI to use DKG as memory |
+| [Graph Computer SDK](packages/graph-computer/README.md) | You want to upload, approve and invoke Programs from TypeScript using agent signatures |
 | [Publish & Query](docs/use-dkg/publish-and-query.md) | You want a first Knowledge Asset publish/query flow |
 | [OpenClaw Setup](packages/adapter-openclaw/README.md) | You want OpenClaw to use DKG as memory/tools |
 | [Hermes Setup](packages/adapter-hermes/README.md) | You want Hermes Agent to use DKG as memory/tools |
@@ -583,7 +584,7 @@ This is a pnpm + Turborepo monorepo.
 
 ## Development
 
-Clone the repo and use pnpm (v10+) with Node.js 22.23.4+ (22.13+ or 23.4+ still runs, without the 2026-10-21 security fixes) to work across all workspace packages:
+Clone the repo and use pnpm (v10+) with Node.js 22.23.5+ (22.13+ or 23.4+ still runs, without the 2026-11-11 security fixes) to work across all workspace packages:
 
 ```bash
 pnpm install                                     # install all workspace deps

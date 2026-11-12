@@ -639,7 +639,7 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     );
     await waitForText(container, 'slots used');
     await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
-    await waitForText(container, 'expired/swept'); // the R1 dead-sponsor conflict copy
+    await waitForText(container, 'but it’s expired'); // the R1 dead-sponsor conflict copy
     expect(container.querySelector('.v10-pca-approve-results')?.textContent).not.toContain('already discounted');
     expect(mocks.pcaAddAgent).not.toHaveBeenCalled(); // not registered (can't free a sponsor's PCA)
     expect(mocks.pcaRemoveAgent).not.toHaveBeenCalled(); // not deregistered (not the owner)

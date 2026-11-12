@@ -164,6 +164,20 @@ describe('DkgDaemonClient', () => {
     expect(body.sparql).toContain('SELECT');
   });
 
+  it('query should pass the view and semantics options', async () => {
+    fetchResponses.push(
+      new Response(JSON.stringify({ result: { type: 'bindings', bindings: [] }, semantics: 'merged' }), { status: 200 }),
+    );
+
+    const response = await client.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId: 'cg', view: 'verifiable-memory', semantics: 'merged',
+    });
+
+    const body = JSON.parse(fetchCalls[0][1]?.body as string);
+    expect(body).toMatchObject({ contextGraphId: 'cg', view: 'verifiable-memory', semantics: 'merged' });
+    expect(response.semantics).toBe('merged');
+  });
+
   it('query should pass contextGraphId option', async () => {
     fetchResponses.push(
       new Response(JSON.stringify({}), { status: 200 }),

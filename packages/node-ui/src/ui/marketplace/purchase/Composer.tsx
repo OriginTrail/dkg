@@ -77,7 +77,7 @@ function Amounts({ line, fx, onChange }: { line: Line; fx: Fx; onChange: (l: Lin
     <>
       <label className="mkt-xs">
         <span data-copy="composer.budget">{copy('composer.budget')}</span>{' '}
-        <input type="text" inputMode="decimal" value={line.valueTrac} aria-label={copy('composer.budget')} data-testid={`mkt-value-${line.serviceId}`}
+        <input type="text" className="ds-input ds-sm mkt-input" inputMode="decimal" value={line.valueTrac} aria-label={copy('composer.budget')} data-testid={`mkt-value-${line.serviceId}`}
           onChange={(e) => onChange({ ...line, valueTrac: e.target.value })} />
         {' '}<span data-copy="composer.budget.trac">{copy('composer.budget.trac')}</span>
       </label>
@@ -86,7 +86,7 @@ function Amounts({ line, fx, onChange }: { line: Line; fx: Fx; onChange: (l: Lin
       </span>
       <label className="mkt-xs">
         <span data-copy="composer.cap">{copy('composer.cap')}</span>{' '}
-        <input type="text" inputMode="decimal" value={line.capMicro} aria-label={copy('composer.cap')} data-testid={`mkt-cap-${line.serviceId}`}
+        <input type="text" className="ds-input ds-sm mkt-input" inputMode="decimal" value={line.capMicro} aria-label={copy('composer.cap')} data-testid={`mkt-cap-${line.serviceId}`}
           onChange={(e) => onChange({ ...line, capMicro: e.target.value })} />
         {' '}<span data-copy="composer.cap.unit">{copy('composer.cap.unit')}</span>
       </label>
@@ -111,7 +111,7 @@ export function Composer({ catalog, funding, draft, onChange, fundsEpoch, endsAt
   const sourceKey = draft.source.kind === 'wallet' ? 'wallet' : draft.source.accountId;
 
   return (
-    <div className="mkt-card" data-testid="mkt-composer">
+    <div className="ds-card mkt-card" data-testid="mkt-composer">
       <h2 data-copy="composer.title">{copy('composer.title')}</h2>
 
       {fundsEpoch && (
@@ -119,7 +119,7 @@ export function Composer({ catalog, funding, draft, onChange, fundsEpoch, endsAt
           <span data-copy="composer.epoch">{copy('composer.epoch')}</span>
           <span className="mkt-fchips" role="radiogroup" aria-label={copy('composer.epoch')}>
             {(['current', 'next'] as const).map((e) => (
-              <button key={e} type="button" role="radio" aria-checked={draft.epoch === e} className={draft.epoch === e ? 'on' : ''} data-testid={`mkt-epoch-${e}`}
+              <button key={e} type="button" role="radio" aria-checked={draft.epoch === e} className={draft.epoch === e ? 'ds-filter active' : 'ds-filter'} data-testid={`mkt-epoch-${e}`}
                 data-copy={`composer.epoch.${e}`} onClick={() => set({ epoch: e })}>{copy(`composer.epoch.${e}`, { n: e === 'current' ? catalog.epoch : catalog.epoch + 1, t: relAt(endsAt) })}</button>
             ))}
           </span>
@@ -129,12 +129,12 @@ export function Composer({ catalog, funding, draft, onChange, fundsEpoch, endsAt
       <div className="mkt-mhead">
         <span data-copy="composer.source">{copy('composer.source')}</span>
         <span className="mkt-fchips mkt-wrap" role="radiogroup" aria-label={copy('composer.source')}>
-          <button type="button" role="radio" aria-checked={sourceKey === 'wallet'} className={sourceKey === 'wallet' ? 'on' : ''} data-testid="mkt-source-wallet" data-copy="source.wallet.balance"
+          <button type="button" role="radio" aria-checked={sourceKey === 'wallet'} className={sourceKey === 'wallet' ? 'ds-filter active' : 'ds-filter'} data-testid="mkt-source-wallet" data-copy="source.wallet.balance"
             onClick={() => set({ source: { kind: 'wallet' } })}>{copy('source.wallet.balance', { trac: funding ? fmtTrac(funding.buyerWallet.trac) : '—' })}</button>
           {accounts.map((a) => {
             const usable = a.serviceCapable && !!a.grant?.live;
             return (
-              <button key={a.accountId} type="button" role="radio" aria-checked={sourceKey === a.accountId} className={sourceKey === a.accountId ? 'on' : ''} data-testid={`mkt-source-${a.accountId}`}
+              <button key={a.accountId} type="button" role="radio" aria-checked={sourceKey === a.accountId} className={sourceKey === a.accountId ? 'ds-filter active' : 'ds-filter'} data-testid={`mkt-source-${a.accountId}`}
                 disabled={!usable} title={usable ? undefined : copy(a.refusal ? refusalKey(a.refusal) : 'err.grant.none')} data-copy="source.account.discount"
                 onClick={() => set({ source: { kind: 'account', accountId: a.accountId } })}>{copy('source.account.discount', { id: a.accountId, pct: a.discountBps / 100 })}</button>
             );
@@ -164,7 +164,7 @@ export function Composer({ catalog, funding, draft, onChange, fundsEpoch, endsAt
                 <Amounts line={line} fx={fx} onChange={setLine} />
                 <label className="mkt-xs">
                   <span data-copy="composer.pin">{copy('composer.pin')}</span>{' '}
-                  <select value={line.pinned ?? ''} data-testid={`mkt-pin-${s.serviceId}`} aria-label={copy('composer.pin')}
+                  <select className="ds-input ds-sm mkt-input" value={line.pinned ?? ''} data-testid={`mkt-pin-${s.serviceId}`} aria-label={copy('composer.pin')}
                     onChange={(e) => setLine({ ...line, pinned: e.target.value === '' ? null : Number(e.target.value) })}>
                     <option value="">{copy('composer.pin.any')}</option>
                     {[...new Set(s.offers.map((o) => o.seller))].map((id) => <option key={id} value={id}>{sellerName(id)}</option>)}
@@ -198,7 +198,7 @@ export function Composer({ catalog, funding, draft, onChange, fundsEpoch, endsAt
         <input type="checkbox" checked={draft.renew} onChange={(e) => set({ renew: e.target.checked })} />{' '}
         <span data-copy="composer.renew">{copy('composer.renew')}</span>{' '}
         {draft.renew && (
-          <input className="mkt-input mkt-input--short mkt-mono" inputMode="numeric" value={draft.renewUntil} aria-label={copy('composer.renew.until')} data-testid="mkt-renew-until"
+          <input className="ds-input ds-sm mkt-input mkt-input--short mkt-mono" inputMode="numeric" value={draft.renewUntil} aria-label={copy('composer.renew.until')} data-testid="mkt-renew-until"
             onChange={(e) => set({ renewUntil: e.target.value })} />
         )}
       </label>

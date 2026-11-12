@@ -315,6 +315,37 @@ describe('V10 UPDATE StorageACK — peer handler + collector quorum', () => {
     expect(recovered.toLowerCase()).toBe(wallet.address.toLowerCase());
   });
 
+  it.each([
+    ['a trust-level row', makeQuad('urn:entity:1', 'http://dkg.io/ontology/trustLevel', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>')],
+    ['a subject in a reserved namespace', makeQuad('urn:dkg:file:updated', 'urn:p', 'urn:o9')],
+  ])('refuses an inline update carrying %s before signing or writing', async (_label, metadata) => {
+    const quads = [...updatedQuads, metadata];
+    const inline = new TextEncoder().encode(quads
+      .map((q) => `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`)
+      .join('\n'));
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    const signMessage = vi.spyOn(wallet, 'signMessage');
+    const handler = new StorageACKHandler(store as any, makeConfig(wallet, 42n), new TypedEventBus() as any);
+    const intent = encodeUpdateIntent({
+      kaId: kaId.toString(),
+      contextGraphId,
+      preUpdateMerkleRootCount: Number(preUpdateMerkleRootCount),
+      newMerkleRoot: computeFlatKCRoot(quads, []),
+      newByteSize: inline.length,
+      newTokenAmount: newTokenAmount.toString(),
+      mintAmount: Number(mintAmount),
+      burnTokenIds: [],
+      newMerkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+      publisherPeerId: 'publisher-0',
+      stagingQuads: inline,
+    });
+
+    await expect(handler.updateHandler(intent, fakePeerId)).rejects.toThrow(/trustLevel|reserved namespace/);
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(await store.countQuads()).toBe(0);
+  });
+
   it('declines with MERKLE_MISMATCH_IN_SWM when newMerkleRoot does not match the quads', async () => {
     const wallet = ethers.Wallet.createRandom();
     const handler = new StorageACKHandler(
