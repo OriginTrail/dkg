@@ -1,3 +1,4 @@
+import { invalidComponentValue, componentRecord, inspectComponentValue, normalizeComponentEnvelope } from './component-envelope.mjs';
 import { resolveComponentValueSource, validateComponentUrlSource, normalizeComponentInputSource } from './guest-sources/component-v2.mjs';
 /** Public component descriptors. Credentials and operator endpoints never enter this registry. */
 import { resolveComponentValue, validateComponentUrl } from './component-values.mjs';
@@ -110,17 +111,6 @@ export const { componentRegistry, component, componentNeedsExport } = defaultCom
 /** Host authorization metadata is outside the immutable guest input contract. */
 export function componentExecutionDescriptor({ requiresExportAuthorization: _policy, ...descriptor }) { return descriptor; }
 
-const invalidComponentValue = message => { throw new Error(message); };
-const componentRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
-function inspectComponentValue(value, depth = 0) {
-  if (depth > 8) invalidComponentValue('Input is nested too deeply.');
-  if (typeof value === 'number' && !Number.isFinite(value)) invalidComponentValue('Use finite JSON numbers.');
-  if (value && typeof value === 'object') for (const [key, child] of Object.entries(value)) {
-    if (['__proto__', 'constructor', 'prototype'].includes(key) || key.startsWith('__nos')) invalidComponentValue('Reserved input field.');
-    inspectComponentValue(child, depth + 1);
-  }
-}
-
 /** Normalize persisted paramsJson without records, presentation samples or an execution identity. */
 export function normalizeComponentParameters(descriptor, paramsJson) {
   const bad = invalidComponentValue, record = componentRecord;
@@ -155,20 +145,15 @@ export function normalizeComponentParameters(descriptor, paramsJson) {
 /** Host invocation validation. Historical embedded guest bytes remain in guest-sources. */
 export function normalizeComponentInput(descriptor, value) {
   const bad = invalidComponentValue, record = componentRecord;
-  if (!record(value) || Object.keys(value).some(key => !['itemsJson', 'paramsJson', 'executionId'].includes(key))
-    || typeof value.itemsJson !== 'string' || value.itemsJson.length > 8192
-    || typeof value.paramsJson !== 'string' || value.paramsJson.length > 2048) bad('Use bounded component input.');
-  const items = JSON.parse(value.itemsJson);
-  if (!Array.isArray(items) || items.length > 20 || !items.every(record)) bad('Supply up to twenty JSON records and component parameters.');
-  inspectComponentValue(items);
-  const params = normalizeComponentParameters(descriptor, value.paramsJson);
+  const envelope = normalizeComponentEnvelope(value);
+  const items = JSON.parse(envelope.itemsJson);
+  const params = normalizeComponentParameters(descriptor, envelope.paramsJson);
   if (descriptor.input === 'file') {
     if (!items.length || !items.every(item => record(item.file) && typeof item.file.base64 === 'string'
       && item.file.base64.length <= 6000 && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(item.file.base64)
       && typeof item.file.name === 'string' && /^[A-Za-z0-9 _.-]{1,80}$/.test(item.file.name))) bad('Supply a small file as base64 with a simple file name.');
   }
-  const executionId = value.executionId ?? '';
-  if (typeof executionId !== 'string' || executionId && !/^\d{1,20}$/.test(executionId)) bad('Invalid provider execution identity.');
+  const { executionId } = envelope;
   if (descriptor.mode === 'schedule' && !executionId) bad('Activate this schedule from a saved workflow to receive events.');
   if (descriptor.id === 'google-sheets' && items.length) {
     const keys = Object.keys(items[0]);

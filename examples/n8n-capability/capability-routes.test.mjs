@@ -24,7 +24,7 @@ function fixture() {
     config: { n8nNative: { workflows: [] }, programBindings: [{ contextGraphId: graphId, operationIri: kaRef, enabled: true, program: { sourceHash }, n8n: {} }] },
     studioOptions: { state, headerCredential: { id: 'fixture', name: 'Fixture' }, credentials: {} },
   });
-  for (const [service, methods] of [[bridge.studio, ['list', 'save', 'run', 'activate']], [bridge.workflows, ['list', 'save', 'run']]])
+  for (const [service, methods] of [[bridge.studio, ['list', 'save', 'run', 'activate']], [bridge.workflows, ['list', 'save', 'run']], [bridge.reusable, ['save', 'publish']]])
     for (const method of methods) service[method] = async value => { calls.push({ handler: method, value }); return method === 'list' ? [] : { handler: method, value }; };
   bridge.studio.history = async (ref, disclose) => ({ ref, disclosed: disclose(false) });
   bridge.studio.event = async (key, value) => { calls.push({ handler: 'event', key, value }); return value; };
@@ -59,7 +59,7 @@ test('bridge dispatches every capability route and rejects methods and viewer wr
     const inspect = '/inspect?kaRef=' + f.invocation.kaRef + '&sourceHash=' + f.invocation.sourceHash;
     for (const [path, method] of [['', 'GET'], ['/invoke', 'POST'], [inspect, 'GET'], ['/workflows', 'GET'],
       ['/workflows/save', 'POST'], ['/workflows/run', 'POST'], ['/studio', 'GET'], ['/studio/save', 'POST'],
-      ['/studio/run', 'POST'], ['/studio/invoke', 'POST'], ['/studio/activation', 'POST'], ['/studio/history?kaRef=urn:fixture', 'GET']]) {
+      ['/studio/components', 'POST'], ['/studio/run', 'POST'], ['/studio/invoke', 'POST'], ['/studio/activation', 'POST'], ['/studio/history?kaRef=urn:fixture', 'GET']]) {
       const owner = await f.send(prefix + path, method, 'owner', f.invocation);
       assert.equal(owner.status, 200, path);
       assert.equal(owner.reads, method === 'POST' ? 1 : 0, path);

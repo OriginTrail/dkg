@@ -7,7 +7,7 @@ import { n8nWorkflowSha256, n8nResultSha256 } from '../../packages/cli/dist/sema
 
 /** The operator owns provisioning. Neither this API key nor credential data reaches a KA or browser. */
 export function createStudioProvider({ repository, config, graphId, owner, headerCredential, credentials, fetchImpl = fetch, compiler = createStudioCompiler() }) {
-  const { compileStudio } = compiler;
+  const { compileStudio, studioProgramSource } = compiler;
   const error = message => Object.assign(new Error(message), { status: 409, code: 'INVALID_WORKFLOW' });
   async function api(path, method = 'GET', body) {
     const installation = config.n8nNative;
@@ -30,6 +30,9 @@ export function createStudioProvider({ repository, config, graphId, owner, heade
       flows.push({ contextGraphId: graphId, executorAgentAddress: owner, workflowId: grant.workflowId, workflowSha256: grant.workflowSha256, resultSha256 }); }
   };
   async function provision(definition) {
+    // Check the complete serialized source before repository or remote effects.
+    // The provider accepts identifiers of at most 80 ASCII characters.
+    studioProgramSource(compileStudio(definition, { graphId, owner, headerCredential, credentials, providerId: 'W'.repeat(80) }));
     let compiled = compileStudio(definition, { graphId, owner, headerCredential, credentials });
     if (compiled.kind !== 'native-n8n' || !compiled.workflow) throw error('Native provisioning requires an n8n execution plan.');
     repository.ensure(compiled);

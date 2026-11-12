@@ -4,7 +4,7 @@ import { studioExecutionPlan, prepareStudioExecution } from './studio-execution-
 import { createHash } from 'node:crypto';
 import { createStudioEventController, eventHistorySnapshot } from './studio-events.mjs';
 import { isDeepStrictEqual } from 'node:util';
-import { normalizeComponentInput } from './component-registry.mjs';
+import { invocationInput, workflowInvocationInput } from './studio-inputs.mjs';
 import { component as componentV1, normalizeComponentInput as normalizeComponentInputV1 } from './component-registry-v1.mjs';
 import { createStudioCompiler } from './studio-definition.mjs';
 import { workflowUuid } from './workflow-definition.mjs';
@@ -89,7 +89,7 @@ export function createStudioService({ graphId, owner, client, repository, provid
     return execute(value, { authorizeExport: authorize, actor, prepareExecution: events?.prepareExecution });
   }
   async function execute(value, { authorizeExport, beforeDispatch, actor, prepareExecution }) {
-    if (!value || Object.keys(value).some(k => !['kaRef', 'sourceHash', 'itemsJson', 'invocationId'].includes(k))) throw reject('Invalid graph invocation.');
+    if (!value || Object.keys(value).some(k => !['kaRef', 'sourceHash', 'itemsJson', 'invocationId', 'arguments'].includes(k))) throw reject('Invalid graph invocation.');
     const invocationId = workflowUuid(value.invocationId), { compiled, workflow } = await get(value.kaRef, value.sourceHash);
     if (!workflow.approved) throw reject('This graph is not approved.');
     const root = compiled.definition.nodes.find(n => n.id === compiled.definition.entryId);
@@ -98,8 +98,13 @@ export function createStudioService({ graphId, owner, client, repository, provid
     const policy = validateStudioCapabilities(compiled.definition, await listCapabilities());
     const requiresExportAuthorization = workflow.requiresExportAuthorization || policy.requiresExportAuthorization;
     if (requiresExportAuthorization) authorizeExport();
-    let input; try { input = (compiled.legacy ? normalizeComponentInputV1 : normalizeComponentInput)(preparation.descriptor, { itemsJson: value.itemsJson, paramsJson: JSON.stringify(root.params), executionId: '' }); }
-    catch (e) { throw reject(e.message); }
+    let input;
+    try {
+      const raw = { itemsJson: value.itemsJson, paramsJson: JSON.stringify(root.params), executionId: '' };
+      input = compiled.legacy
+        ? invocationInput(compiled.definition, value.arguments, normalizeComponentInputV1(preparation.descriptor, raw), compiler.registry)
+        : workflowInvocationInput(compiled, value.arguments, raw, preparation.descriptor, compiler.registry);
+    } catch (e) { throw reject(e.message); }
     const authorizeDispatch = () => {
       beforeDispatch?.(requiresExportAuthorization);
       preparation.beforeDispatch?.(requiresExportAuthorization);

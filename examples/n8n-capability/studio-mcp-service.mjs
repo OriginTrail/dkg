@@ -93,7 +93,7 @@ export function createStudioMcpService({ repository, provider, installation, acc
     if (workflow.withdrawn) throw fail('STUDIO_WORKFLOW_WITHDRAWN');
     readOnlyDefinition(workflow.definition, compiler);
     const input = runInput(value, workflow, compiler);
-    const requestHash = createHash('sha256').update(canonical({ value, actor })).digest('hex');
+    const requestHash = createHash('sha256').update(canonical({ value: input.argumentsJson === undefined ? value : { ...value, arguments: JSON.parse(input.argumentsJson) }, actor })).digest('hex');
     if (journal.matchingRun(accountId, value.runKey, requestHash)) return readRun({ runKey: value.runKey }, actor);
     const prior = journal.activeAgentRun(accountId);
     if (actor.startedBy && prior) await readRun({ runKey: prior.runKey }, { id: actor.id, accountId, role: 'owner' });

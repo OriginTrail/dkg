@@ -20,7 +20,8 @@ export const nativeExecutionError = (code = 'STUDIO_NATIVE_UNCONFIRMED') => Obje
 
 /** Hash the normalized wire input, without storing arguments or depending on today's profile. */
 export function nativeInputDigest(input) {
-  if (!n8nRecord(input) || Object.keys(input).some(key => !['itemsJson', 'paramsJson', 'executionId'].includes(key))
+  if (!n8nRecord(input) || Object.keys(input).some(key => !['itemsJson', 'paramsJson', 'executionId', 'argumentsJson'].includes(key))
+    || (input.argumentsJson !== undefined && (typeof input.argumentsJson !== 'string' || input.argumentsJson.length > 8192))
     || !['itemsJson', 'paramsJson', 'executionId'].every(key => typeof input[key] === 'string'))
     throw nativeExecutionError();
   return createHash('sha256').update(canonicalizeJson(input, { maxBytes: 16_384, maxDepth: 12 })).digest('hex');

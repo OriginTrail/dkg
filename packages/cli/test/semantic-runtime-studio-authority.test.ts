@@ -9,7 +9,7 @@ import { assertExecutionCapabilityAuthorized } from '../src/semantic-runtime-inv
 
 afterEach(async () => { vi.unstubAllGlobals(); await cleanupRuntimeFixtures(); });
 
-async function studio({ childDepth = 0, withProgram = false } = {}) {
+async function studio({ childDepth = 0, withProgram = false, namedInput = false } = {}) {
   // Real compiler, signed SDK route, TypeScript/Wasm runtime and SQLite journals.
   // Only the n8n HTTP provider and remote DKG transport are fictional.
   const { createStudioExecutionHarness } = await runInThisContext('(url) => import(url)',
@@ -44,9 +44,13 @@ async function studio({ childDepth = 0, withProgram = false } = {}) {
       .map((row: any) => JSON.parse(row.output)) });
   vi.stubGlobal('fetch', h.runtimeFetch);
   h.controls.interrupted = false;
+  if (namedInput) h.definition.inputs = [{ name: 'note', label: 'Note', required: true,
+    spec: { type: 'string', label: 'Note', default: '', maxLength: 80 },
+    targets: [{ nodeId: 'read', parameter: 'note', kind: 'input' }] }];
   const workflow = await h.service.save(h.definition, () => {});
   const approval = await f.manager.programs.getApproval({ graphId: graph, operationIri: workflow.kaRef });
-  const invocation = { kaRef: workflow.kaRef, sourceHash: workflow.sourceHash, itemsJson: '[{}]', invocationId: randomUUID() };
+  const invocation = { kaRef: workflow.kaRef, sourceHash: workflow.sourceHash, itemsJson: '[{}]', invocationId: randomUUID(),
+    ...(namedInput ? { arguments: { note: 'first' } } : {}) };
   const replaceApproval = (revision: number, typescript = approval.binding.typescript) =>
     f.manager.programs.updateApproval({ graphId: graph, operationIri: workflow.kaRef, expectedRevision: revision,
       program: { graphId: graph, programIri: workflow.kaRef, programLayer: 'wm', sourceHash: workflow.sourceHash, authorAgentAddress: owner },
@@ -61,6 +65,25 @@ function noWrite(h: any) {
   expect(h.controls.callbackStatuses).toEqual([200, 403, 403]);
   expect(h.controls.callbackErrors.map((e: any) => e.code)).toEqual(['PROGRAM_AUTHORITY_REVOKED', 'PROGRAM_AUTHORITY_REVOKED']);
 }
+
+it('compiler 9 bound-entry input retains signed invocation identity and pins across replay and reopen', async () => {
+  const { f, h, workflow, invocation } = await studio({ namedInput: true });
+  try {
+    const original = await f.manager.programs.getSource({ graphId: graph, programIri: workflow.kaRef, programLayer: 'wm' });
+    const first = await h.service.run(invocation, () => {}, h.actor);
+    expect(first.output.ok).toBe(true);
+    expect(h.controls.dispatches).toBe(1);
+    await restartNode(f.target); h.reopen();
+    expect(await h.service.run(invocation, () => {}, h.actor)).toEqual(first);
+    await expect(h.service.run({ ...invocation, arguments: { note: 'changed' } }, () => {}, h.actor)).rejects.toBeDefined();
+    expect(h.controls.dispatches).toBe(1);
+    const second = await h.service.run({ ...invocation, invocationId: randomUUID(), arguments: { note: 'second' } }, () => {}, h.actor);
+    expect(second.output.ok).toBe(true);
+    expect(second.workflowSha256).toBe(first.workflowSha256);
+    expect(h.controls.dispatches).toBe(2);
+    expect(await f.manager.programs.getSource({ graphId: graph, programIri: workflow.kaRef, programLayer: 'wm' })).toEqual(original);
+  } finally { h.close(); }
+});
 
 it('rejects the old Studio Write after same-source revoke/reapprove and journal reopen, but admits a new invocation', async () => {
   const { f, h, workflow, approval, invocation, replaceApproval } = await studio();

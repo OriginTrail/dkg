@@ -1,0 +1,136 @@
+{
+  "compiled": {
+    "kind": "native-n8n",
+    "compiler": 7,
+    "definition": {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "name": "Unit native graph",
+      "entryId": "n0",
+      "nodes": [
+        {
+          "id": "n0",
+          "componentId": "switch",
+          "kaRef": "urn:demo:n8n:component:switch:unit",
+          "sourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "params": {
+            "field": "name",
+            "equals": "Ana"
+          },
+          "x": 0,
+          "y": 100
+        }
+      ],
+      "edges": [],
+      "inputs": [
+        {
+          "name": "status",
+          "label": "Status",
+          "required": true,
+          "spec": {
+            "type": "string",
+            "label": "Status",
+            "default": "",
+            "maxLength": 40
+          },
+          "targets": [
+            {
+              "nodeId": "n0",
+              "parameter": "status",
+              "kind": "input"
+            }
+          ]
+        }
+      ]
+    },
+    "grant": {
+      "toolIri": "urn:dkg:tool:n8n",
+      "workflowId": "nos_studio_a1cb60b8385daf3c22718b60ecb28617",
+      "workflowSha256": "0bd523bc3500707a0711b79a034868e9d83a32cfbf141a042b8d4b0355e81b90",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "itemsJson": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "paramsJson": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "executionId": {
+            "type": "string",
+            "maxLength": 20
+          },
+          "argumentsJson": {
+            "type": "string",
+            "maxLength": 8192
+          }
+        },
+        "required": [
+          "itemsJson",
+          "paramsJson",
+          "executionId",
+          "argumentsJson"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "itemsJson": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "portsJson": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "error": {
+            "type": "string",
+            "maxLength": 512
+          },
+          "traceJson": {
+            "type": "string",
+            "maxLength": 8192
+          }
+        },
+        "required": [
+          "ok",
+          "itemsJson",
+          "portsJson",
+          "error",
+          "traceJson"
+        ],
+        "additionalProperties": false
+      },
+      "result": {
+        "nodes": [
+          "Block n0"
+        ],
+        "sinks": [
+          {
+            "node": "Block n0",
+            "port": 0,
+            "name": "n0 match"
+          },
+          {
+            "node": "Block n0",
+            "port": 1,
+            "name": "n0 other"
+          }
+        ],
+        "traceNodes": [
+          "Block n0"
+        ],
+        "allowObservation": false
+      }
+    },
+    "mode": "branch",
+    "kaRef": "urn:demo:nos:studio:00000000-0000-4000-8000-000000000001:1aefffc5d53051927f15",
+    "requiresExportAuthorization": false
+  },
+  "sourceHash": "38e1e6d46e68748663c20d4c408ed525b416b224525d41560807a0867e060b5c"
+}

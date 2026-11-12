@@ -1,5 +1,6 @@
 import { canonicalizeJson } from '../../packages/core/dist/index.js';
 import { normalizeComponentInput } from './component-registry.mjs';
+import { namedMcpInput } from './studio-inputs.mjs';
 import { createStudioCompiler } from './studio-definition.mjs';
 
 export const fail = (code, status = 409) => Object.assign(new Error(code), { code, status });
@@ -48,6 +49,10 @@ export function runInput(value, workflow, compiler = createStudioCompiler()) {
   if (!closed(value, ['kaRef', 'workflowSha256', 'runKey', 'arguments']) || !id(value.runKey)
     || value.kaRef !== workflow.kaRef || value.workflowSha256 !== workflow.grant.workflowSha256 || !record(value.arguments))
     throw fail('STUDIO_INVALID_RUN', 400);
+  if (workflow.definition.inputs !== undefined) {
+    try { return namedMcpInput(value, workflow, compiler.registry); }
+    catch { throw fail('STUDIO_INVALID_ARGUMENTS', 400); }
+  }
   // Named scalar parameters, as in #1247. The gateway checks its declared five
   // parameter types; Studio independently bounds the values and applies the entry schema.
   if (Object.entries(value.arguments).some(([key, v]) => !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key)
