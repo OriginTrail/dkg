@@ -203,7 +203,7 @@ export function ReadGraphsSection({ contextGraphId }: { contextGraphId: string }
                         <span data-testid="search-state">{searchStateText(layer)}</span>
                         {size && <span data-testid="search-size"> · {size}</span>}
                       </span>
-                      <span className="v10-po-join-addr">
+                      <span className="v10-po-rg-source">
                         {[detail, layer.setHere ? 'Set for this context graph' : 'Node default', layer.allowed ? undefined : 'not allowed on this node']
                           .filter(Boolean).join(' · ')}
                       </span>

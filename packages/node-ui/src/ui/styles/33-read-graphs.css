@@ -37,6 +37,7 @@
   flex-wrap: wrap;
 }
 .v10-po-rg-state { font-size: var(--font-size-caption); color: var(--text-secondary); }
+.v10-po-rg-source { font-size: var(--font-size-meta); color: var(--text-tertiary); }
 .v10-po-rg-modes {
   display: inline-flex;
   flex-shrink: 0;

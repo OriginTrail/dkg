@@ -137,8 +137,8 @@ describe('ReadGraphsSection', () => {
     expect([vm, swm, wm].map(layer => layer.querySelector('.v10-po-join-name')?.textContent)).toEqual(['Published assets', 'Shared memory', 'Private drafts']);
     expect([vm, swm, wm].map(state)).toEqual(['In use', 'Getting ready', 'Off']);
     expect([vm, swm, wm].map(pressed)).toEqual([['On'], ['Preview'], ['Off']]);
-    expect(vm.querySelector('.v10-po-join-addr')?.textContent).toBe('Set for this context graph');
-    expect(swm.querySelector('.v10-po-join-addr')?.textContent).toBe('Shared with your team · Node default');
+    expect(vm.querySelector('.v10-po-rg-source')?.textContent).toBe('Set for this context graph');
+    expect(swm.querySelector('.v10-po-rg-source')?.textContent).toBe('Shared with your team · Node default');
     expect(button(swm, 'Preview').title).toBe('Prepares the combined copy and shows how results would change, without changing any results yet.');
     expect(button(swm, 'On').title).toBe('Lets queries that ask for it search across assets.');
     expect(container.querySelectorAll('button:disabled')).toHaveLength(0);
@@ -325,7 +325,7 @@ describe('ReadGraphsSection', () => {
     const second = await render();
     expect(second.querySelector('[role="note"]')).toBeNull();
     const wm = row(second, 'working-memory');
-    expect(wm.querySelector('.v10-po-join-addr')?.textContent).toBe('Node default · not allowed on this node');
+    expect(wm.querySelector('.v10-po-rg-source')?.textContent).toBe('Node default · not allowed on this node');
     expect(button(wm, 'Preview').disabled).toBe(true);
     expect(button(wm, 'Preview').title).toBe('This node\'s config doesn\'t allow it for this memory.');
     expect(button(row(second, 'verifiable-memory'), 'Preview').disabled).toBe(false);
