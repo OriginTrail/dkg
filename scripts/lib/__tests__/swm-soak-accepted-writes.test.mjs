@@ -1,8 +1,9 @@
 // The SWM soak's accepted-write accounting (scripts/swm-soak-test.sh with
-// scripts/lib/swm-soak-accepted-writes.mjs): the share jobs of writes accepted
-// as retryable partials are polled within one deadline, one per-graph count
-// feeds the tombstone, the summary and the self tally, and a receiver waits
-// for a tombstone that a peer publishes late because of those jobs.
+// scripts/lib/swm-soak-accepted-writes.mjs and scripts/lib/swm-soak-tally.py):
+// the share jobs of writes accepted as retryable partials are polled within
+// one deadline, one per-graph count feeds the tombstone, the summary and the
+// self tally, and a receiver waits, within its own deadline, for a tombstone
+// that a peer publishes late because of those jobs.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -13,11 +14,12 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
-  acceptedWriteCounts, getJsonWithin, missingTombstones, pollShareRecoveries, readJsonLines, shareRecoveryJobs,
+  acceptedWriteCounts, getJsonWithin, pollShareRecoveries, readJsonLines, shareRecoveryJobs,
 } from '../swm-soak-accepted-writes.mjs';
 
 const SOAK = fileURLToPath(new URL('../../swm-soak-test.sh', import.meta.url));
 const HELPER = fileURLToPath(new URL('../swm-soak-accepted-writes.mjs', import.meta.url));
+const TALLY = fileURLToPath(new URL('../swm-soak-tally.py', import.meta.url));
 // macOS ships bash 3.2 as /bin/bash, and the soak has to run there.
 const BASH = existsSync('/bin/bash') ? '/bin/bash' : 'bash';
 const TOKEN = 'soak-test-token';
@@ -182,22 +184,41 @@ test('an unanswered status request is cut at the deadline rather than after the 
   ]);
 });
 
-test('missing tombstones are those of the peers the tally reports on', () => {
-  const inboxRow = (cgId, tags) => ({
+test('the soak waits for exactly the tombstones the tally would report as missing', async (t) => {
+  const logDir = tempDir(t, 'swm-soak-logs-');
+  const lines = (file, records) => writeFileSync(path.join(logDir, file),
+    records.map((record) => `${JSON.stringify(record)}\n`).join(''));
+  const final = (cgId, tags) => ({
     label: 'final', cgId,
-    data: { result: { bindings: tags.map((tag, index) => ({ s: `urn:swm-soak:${tag}:0000${index + 1}` })) } },
+    data: { result: { bindings: tags.map((tag) => ({ s: { type: 'uri', value: `urn:swm-soak:${tag}:00001` } })) } },
   });
-  const tombstone = (tag, count) => ({ tag: `"${tag}"`, writesAccepted: `"${count}"` });
-  const summaries = [
-    { cgId: 'cg-a', data: { result: { bindings: [tombstone('SELF', 3), tombstone('PEER-A', 3), tombstone('PEER-B', 'many')] } } },
-    { cgId: 'cg-b', data: { result: { bindings: [tombstone('PEER-A', 2)] } } },
-  ];
-  const inbox = [inboxRow('cg-a', ['SELF', 'PEER-A', 'PEER-B']), inboxRow('cg-b', ['SELF', 'PEER-A'])];
-  const context = { inbox, summaries, contextGraphs: ['cg-a', 'cg-b'], selfTag: 'SELF' };
-  assert.deepEqual(missingTombstones({ ...context, peersExpected: [] }), [['cg-a', 'PEER-B']]);
-  assert.deepEqual(missingTombstones({ ...context, peersExpected: ['PEER-A', 'PEER-C', 'SELF'] }),
-    [['cg-a', 'PEER-C'], ['cg-b', 'PEER-C']]);
-  assert.deepEqual(missingTombstones({ ...context, inbox: [], summaries: [], peersExpected: [] }), []);
+  const tombstone = (tag, count) => ({ tag: { type: 'literal', value: `"${tag}"` }, writesAccepted: `"${count}"` });
+  lines('swm-inbox.jsonl', [final('cg-a', ['SELF', 'PEER-A', 'PEER-B']), final('cg-b', ['SELF', 'PEER-A'])]);
+  lines('writes-accepted-summaries-observed.jsonl', [
+    { cgId: 'cg-a', data: { result: { bindings: [tombstone('SELF', 1), tombstone('PEER-A', 1), tombstone('PEER-B', 'many')] } } },
+    { cgId: 'cg-b', data: { bindings: [tombstone('PEER-A', 1)] } },
+  ]);
+  lines('writes.jsonl', [shared('cg-a', 1), shared('cg-b', 1)]);
+  writeFileSync(path.join(logDir, 'accepted-counts.json'), '{"cg-a":1,"cg-b":1}\n');
+  for (const [peersExpected, expected] of [
+    ['', ['PEER-B in cg-a']],
+    ['PEER-A,PEER-C,SELF', ['PEER-C in cg-a', 'PEER-C in cg-b']],
+    ['PEER-A', []],
+  ]) {
+    const missing = await collect(spawn('python3', [TALLY, 'missing-tombstones', logDir, 'SELF', peersExpected, 'cg-a,cg-b']));
+    const report = await collect(spawn('python3', [TALLY, 'report', logDir, 'SELF', peersExpected, 'cg-a,cg-b', '1']));
+    assert.equal(missing.status, 0, missing.stderr);
+    assert.equal(report.status, expected.length > 0 ? 1 : 0, report.stdout);
+    const reportedMissing = [];
+    let cgId;
+    for (const line of report.stdout.split('\n')) {
+      cgId = /^ {2}cg=(\S+):/.exec(line)?.[1] ?? cgId;
+      const peer = /^ {4}from (\S+): \d+ observed \(no writes-accepted tombstone in cg — INDETERMINATE/.exec(line)?.[1];
+      if (peer) reportedMissing.push(`${peer} in ${cgId}`);
+    }
+    assert.deepEqual(reportedMissing, expected, report.stdout);
+    assert.equal(missing.stdout, expected.length > 0 ? `${expected.join(', ')}\n` : '');
+  }
 });
 
 // A daemon for the soak script. It shares each write at once, except the seqs
@@ -205,12 +226,16 @@ test('missing tombstones are those of the peers the tally reports on', () => {
 // through `jobStates` (one state per status request) and shares the write
 // when the job succeeds. It answers the scoped SWM queries with the writes and
 // tombstones it holds, plus those of `peers`: each peer's writes, and its
-// tombstone with its `late` writes from the `from`-th tombstone query on.
-async function soakDaemon(t, { partials = new Map(), jobStates = {}, peers = [] } = {}) {
+// tombstone with its `late` writes from the `from`-th tombstone query on. With
+// `slowTombstones`, every tombstone query after the first `after` is answered
+// only `delayMs` later. `queries` records when each query arrived.
+async function soakDaemon(t, { partials = new Map(), jobStates = {}, peers = [], slowTombstones } = {}) {
   const graphs = new Map();
   const graph = (cgId) => graphs.get(cgId) ?? graphs.set(cgId, new Map()).get(cgId);
   const jobs = new Map();
-  const daemon = { tombstones: [], polls: new Map(), tombstoneQueries: 0, unexpected: [] };
+  const delayed = new Set();
+  t.after(() => { for (const timer of delayed) clearTimeout(timer); });
+  const daemon = { tombstones: [], polls: new Map(), tombstoneQueries: 0, queries: [], unexpected: [] };
   const peerRows = (summaries) => peers.flatMap((peer) => {
     const arrived = daemon.tombstoneQueries >= peer.from;
     if (summaries) return arrived ? [{ tag: peer.tag, writesAccepted: peer.writes }] : [];
@@ -260,11 +285,20 @@ async function soakDaemon(t, { partials = new Map(), jobStates = {}, peers = [] 
       const { sparql, contextGraphId: cgId } = JSON.parse(input);
       if (sparql.includes('urn:swm-soak:writesAccepted')) {
         daemon.tombstoneQueries += 1;
+        daemon.queries.push({ kind: 'tombstones', cgId, at: Date.now() });
         const rows = [...daemon.tombstones.filter((entry) => entry.cgId === cgId), ...peerRows(true)];
-        return reply(200, { result: { bindings: rows.map(({ tag, writesAccepted }) => ({
+        const answer = () => reply(200, { result: { bindings: rows.map(({ tag, writesAccepted }) => ({
           s: `urn:swm-soak-summary:${tag}:cohort`, tag: `"${tag}"`, writesAccepted: `"${writesAccepted}"`,
         })) } });
+        if (!slowTombstones || daemon.tombstoneQueries <= slowTombstones.after) return answer();
+        const timer = setTimeout(() => {
+          delayed.delete(timer);
+          if (!request.socket.destroyed) answer();
+        }, slowTombstones.delayMs);
+        delayed.add(timer);
+        return undefined;
       }
+      daemon.queries.push({ kind: 'inbox', cgId, at: Date.now() });
       const own = [...graph(cgId)].filter(([, visible]) => visible).map(([s]) => ({ s }));
       return reply(200, { result: { bindings: [...own, ...peerRows(false)] } });
     }
@@ -334,14 +368,39 @@ test('a receiver waits for a tombstone a peer publishes late, then counts the wr
   assert.match(run.stdout, /VERDICT: PASS/);
 });
 
-test('a receiver stops waiting for a tombstone at the deadline and reports that peer as indeterminate', async (t) => {
-  const daemon = await soakDaemon(t, { peers: [{ tag: 'GONE', writes: 1, late: [], from: Infinity }] });
+test('a receiver waits for a missing tombstone only within its budget, even when tombstone queries hang', async (t) => {
+  const budgetMs = 3000;
+  const daemon = await soakDaemon(t, {
+    peers: [{ tag: 'GONE', writes: 1, late: [], from: Infinity }],
+    // The final snapshot asks each graph once; every later tombstone query
+    // would take twice the whole wait to answer.
+    slowTombstones: { after: 2, delayMs: 2 * budgetMs },
+  });
   const run = await runSoak(t, daemon.api, {
-    SENDER_TAG: 'RECV', PEERS_EXPECTED: 'GONE', SOAK_COHORT_ID: 'cohort', SWM_CG_PUBLIC: 'cg-a',
-    SWM_TOTAL_CYCLES: '1', SWM_RECOVERY_WAIT_S: '2',
+    SENDER_TAG: 'RECV', PEERS_EXPECTED: 'GONE', SOAK_COHORT_ID: 'cohort', SWM_CG_PUBLIC: 'cg-a,cg-b',
+    SWM_TOTAL_CYCLES: '1', SWM_RECOVERY_WAIT_S: String(budgetMs / 1000),
   });
   assert.equal(run.status, 1, `${run.stdout}\n${run.stderr}`);
-  assert.match(run.stdout, /still not observed after 2s: GONE in cg-a/);
-  assert.match(run.stdout, /from GONE: 1 observed \(no writes-accepted tombstone in cg — INDETERMINATE/);
+  assert.deepEqual(daemon.unexpected, []);
+  const tombstoneQueries = daemon.queries.filter(({ kind }) => kind === 'tombstones');
+  assert.deepEqual(tombstoneQueries.slice(0, 2).map(({ cgId }) => cgId), ['cg-a', 'cg-b']);
+  const polls = tombstoneQueries.slice(2);
+  assert.ok(polls.length > 0, 'the receiver polled for the missing tombstone');
+  // The wait's deadline is set before its first poll, so it falls within one
+  // budget of that poll: no query may start later.
+  for (const poll of polls) {
+    assert.ok(poll.at - polls[0].at < budgetMs + 500,
+      `the tombstone query for ${poll.cgId} started ${poll.at - polls[0].at} ms into a ${budgetMs} ms wait`);
+  }
+  // Right after the wait, the receiver takes the final inbox snapshot again.
+  const resnapshot = daemon.queries.find(({ kind, at }) => kind === 'inbox' && at > polls[0].at);
+  assert.ok(resnapshot, 'the receiver took the final inbox snapshot again');
+  assert.ok(resnapshot.at - polls[0].at < budgetMs + 2000,
+    `the wait took ${resnapshot.at - polls[0].at} ms for a ${budgetMs} ms budget`);
+  assert.match(run.stdout, /still not observed after 3s: GONE in cg-a, GONE in cg-b/);
+  for (const cgId of ['cg-a', 'cg-b']) {
+    assert.match(run.stdout, new RegExp(`cg=${cgId}:\\n {4}self \\(RECV\\): 1/1 = 100\\.00%.*\\n`
+      + ' {4}from GONE: 1 observed \\(no writes-accepted tombstone in cg — INDETERMINATE'));
+  }
   assert.match(run.stdout, /VERDICT: FAIL/);
 });

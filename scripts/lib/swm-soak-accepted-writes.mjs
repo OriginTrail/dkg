@@ -15,10 +15,6 @@
 //   count <logDir>
 //     writes accepted-counts.json ({cgId: count}), the one accepted-write
 //     count that the tombstone, the summary and the self tally all read.
-//   missing-tombstones <logDir> <selfTag> <peersExpected> <contextGraphs>
-//     prints the peers the final tally reports on whose writes-accepted
-//     tombstone has not been observed yet, as "<tag> in <cgId>, ...", or
-//     nothing when every one is in.
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
@@ -163,55 +159,6 @@ export function acceptedWriteCounts(writes, recoveries) {
   return Object.fromEntries(counts);
 }
 
-// The result rows of a /api/query answer, as the final tally reads them.
-function bindingRows(data) {
-  if (!data || typeof data !== 'object') return [];
-  if (Array.isArray(data.result?.bindings)) return data.result.bindings;
-  return Array.isArray(data.bindings) ? data.bindings : [];
-}
-
-function bindingText(value) {
-  const text = value && typeof value === 'object' ? value.value : value;
-  return typeof text === 'string' ? text : '';
-}
-
-/**
- * The peers the final tally reports on in each configured context graph whose
- * writes-accepted tombstone has not been observed yet, as [cgId, tag] pairs.
- * Like the tally, it reports on PEERS_EXPECTED, or else on every other sender
- * a final inbox snapshot saw, and takes a tombstone with a whole-number count.
- */
-export function missingTombstones({ inbox, summaries, contextGraphs, selfTag, peersExpected }) {
-  const senders = new Map();
-  for (const record of inbox) {
-    if (record?.label !== 'final' || typeof record.cgId !== 'string') continue;
-    const tags = senders.get(record.cgId) ?? new Set();
-    for (const row of bindingRows(record.data)) {
-      const subject = bindingText(row?.s).replace(/^[<>]+|[<>]+$/g, '');
-      const match = /^urn:swm-soak:([^:]+):(\d+)$/.exec(subject);
-      if (match) tags.add(match[1]);
-    }
-    senders.set(record.cgId, tags);
-  }
-  const announced = new Map();
-  for (const record of summaries) {
-    if (typeof record?.cgId !== 'string') continue;
-    const tags = announced.get(record.cgId) ?? new Set();
-    for (const row of bindingRows(record.data)) {
-      const tag = bindingText(row?.tag).replace(/^"+|"+$/g, '');
-      const count = bindingText(row?.writesAccepted).replace(/^"+|"+$/g, '');
-      if (tag && /^\s*[+-]?\d+\s*$/.test(count)) tags.add(tag);
-    }
-    announced.set(record.cgId, tags);
-  }
-  return contextGraphs.flatMap((cgId) => {
-    const reported = peersExpected.length > 0 ? peersExpected : [...(senders.get(cgId) ?? [])].sort();
-    return reported
-      .filter((tag) => tag !== selfTag && !announced.get(cgId)?.has(tag))
-      .map((tag) => [cgId, tag]);
-  });
-}
-
 /** The records of a JSON-lines file, skipping lines that do not parse; none when it is missing. */
 export function readJsonLines(file) {
   let text;
@@ -230,8 +177,6 @@ export function readJsonLines(file) {
     }
   });
 }
-
-const csv = (text) => String(text ?? '').split(',').map((part) => part.trim()).filter(Boolean);
 
 function recoveryRecord(job) {
   const record = {};
@@ -274,23 +219,10 @@ function countCommand(logDir) {
   writeFileSync(join(logDir, 'accepted-counts.json'), `${JSON.stringify(counts)}\n`);
 }
 
-function missingTombstonesCommand(logDir, selfTag, peersExpected, contextGraphs) {
-  if (!logDir || !selfTag) throw new Error('usage: missing-tombstones <logDir> <selfTag> <peersExpected> <contextGraphs>');
-  const missing = missingTombstones({
-    inbox: readJsonLines(join(logDir, 'swm-inbox.jsonl')),
-    summaries: readJsonLines(join(logDir, 'writes-accepted-summaries-observed.jsonl')),
-    contextGraphs: csv(contextGraphs),
-    selfTag,
-    peersExpected: csv(peersExpected),
-  });
-  if (missing.length > 0) console.log(missing.map(([cgId, tag]) => `${tag} in ${cgId}`).join(', '));
-}
-
 async function main([command, ...args]) {
   if (command === 'resolve') return resolveCommand(...args);
   if (command === 'count') return countCommand(...args);
-  if (command === 'missing-tombstones') return missingTombstonesCommand(...args);
-  throw new Error('usage: swm-soak-accepted-writes.mjs resolve|count|missing-tombstones <logDir> ...');
+  throw new Error('usage: swm-soak-accepted-writes.mjs resolve|count <logDir> ...');
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : undefined;

@@ -739,8 +739,9 @@ snapshot_writes_accepted_summaries() {
   # Query the scoped SWM view for writes-accepted summary tombstones
   # from EVERY peer in the cohort (including self). Receivers
   # consume the resulting jsonl to populate the per-peer
-  # denominator in the final tally.
-  local cgId=$1 ts
+  # denominator in the final tally. $2 caps the query in seconds
+  # (default 30).
+  local cgId=$1 max_time=${2:-30} ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   local sparql
   sparql=$(cat <<SPARQL
@@ -753,7 +754,7 @@ SPARQL
 )
   local body resp
   body=$(python3 -c "import json; print(json.dumps({'sparql': '''$sparql''', 'contextGraphId': '$cgId', 'view': 'shared-working-memory', **({'subGraphName': '$SWM_SUBGRAPH_NAME'} if '$SWM_SUBGRAPH_NAME' else {})}))")
-  resp=$(curl -s --max-time 30 -X POST "$API/api/query" \
+  resp=$(curl -s --max-time "$max_time" -X POST "$API/api/query" \
     -H "Authorization: Bearer $AUTH" \
     -H "Content-Type: application/json" \
     -d "$body")
@@ -763,11 +764,11 @@ SPARQL
   validate_query_response "$resp" "writes-accepted summaries cg=$cgId" || return 1
 }
 
-# The peers the tally reports on (PEERS_EXPECTED, or else every other sender a
-# final inbox snapshot saw) whose writes-accepted tombstone has not been
-# observed yet, as "<tag> in <cgId>, ...", or nothing.
+# The peers the tally would report as INDETERMINATE because their
+# writes-accepted tombstone has not been observed yet, as "<tag> in <cgId>,
+# ...", or nothing. The tally itself decides (scripts/lib/swm-soak-tally.py).
 missing_tombstones() {
-  node "$SCRIPT_DIR/lib/swm-soak-accepted-writes.mjs" missing-tombstones \
+  python3 "$SCRIPT_DIR/lib/swm-soak-tally.py" missing-tombstones \
     "$LOG_DIR" "$SENDER_TAG" "$PEERS_EXPECTED" "$ALL_CGS_CSV"
 }
 
@@ -779,20 +780,28 @@ missing_tombstones() {
 # a tombstone the tally needs is missing, this polls for it for up to $1
 # seconds and then takes the final inbox snapshot again, so the writes that
 # peer shared late are counted too (the tally merges every final snapshot).
-# When every tombstone is in, it does nothing.
+# The polling stays inside the budget: no query starts once it is spent, and
+# each query may only take what is left of it. When every tombstone is in,
+# this does nothing.
 await_late_tombstones() {
-  local budget_s=$1 deadline_s now_s missing cg
+  local budget_s=$1 deadline_s now_s pause_s missing cg
   [ "$budget_s" -gt 0 ] || return 0
   missing=$(missing_tombstones)
   [ -n "$missing" ] || return 0
   log "Waiting up to ${budget_s}s for writes-accepted tombstones not observed yet: $missing"
   deadline_s=$(( $(date +%s) + budget_s ))
   while [ -n "$missing" ]; do
-    now_s=$(date +%s)
-    [ "$now_s" -lt "$deadline_s" ] || break
-    sleep $(( deadline_s - now_s < 10 ? deadline_s - now_s : 10 ))
-    # A failed query is simply tried again at the next poll.
-    for cg in "${ALL_CGS[@]}"; do snapshot_writes_accepted_summaries "$cg"; done
+    # Pause until the next poll, but no later than a second before the
+    # deadline, so that the last poll still has time to be answered.
+    pause_s=$(( deadline_s - $(date +%s) - 1 ))
+    [ "$pause_s" -gt 0 ] || break
+    sleep $(( pause_s < 10 ? pause_s : 10 ))
+    for cg in "${ALL_CGS[@]}"; do
+      now_s=$(date +%s)
+      [ "$now_s" -lt "$deadline_s" ] || break
+      # A failed query is simply tried again at the next poll.
+      snapshot_writes_accepted_summaries "$cg" "$(( deadline_s - now_s ))"
+    done
     missing=$(missing_tombstones)
   done
   if [ -n "$missing" ]; then
@@ -915,216 +924,9 @@ log ""
 log "Per-CG final inbox (delivery validation — operators cross-reference):"
 log ""
 ALL_CGS_CSV=$(IFS=','; printf '%s' "${ALL_CGS[*]}")
-# Heredoc delimiter is QUOTED so bash performs no expansion on the body.
-# That is critical because the Python script's comments contain backtick-
-# quoted code references like `m = re.match(...)`; with an unquoted
-# delimiter bash would attempt to execute those as command substitutions
-# (producing a stream of "command not found" / "syntax error" messages
-# that swamped the soak's actual summary output). All bash-side values
-# travel into the Python script through environment variables instead.
-export SWM_SUMMARY_LOG_DIR="$LOG_DIR"
-export SWM_SUMMARY_SENDER_TAG="$SENDER_TAG"
-export SWM_SUMMARY_PEERS_EXPECTED="$PEERS_EXPECTED"
-export SWM_SUMMARY_ALL_CGS_CSV="$ALL_CGS_CSV"
-export SWM_SUMMARY_TOTAL_CYCLES="$SWM_TOTAL_CYCLES"
-python3 <<'PYTHON' | tee -a "$LOG_DIR/main.log"
-import json, os, re, sys
-log_dir = os.environ["SWM_SUMMARY_LOG_DIR"]
-self_tag = os.environ["SWM_SUMMARY_SENDER_TAG"]
-peers_expected = [p.strip() for p in os.environ.get("SWM_SUMMARY_PEERS_EXPECTED", "").split(',') if p.strip()]
-# Codex PR #572 R14 (round 5): seed the report set from the
-# configured CG list so a context graph that observed ZERO final
-# rows (total failure: nothing — even our own writes — landed in
-# its local SWM) is still surfaced in the breakdown as
-# INDETERMINATE rather than being silently omitted because it
-# never appeared in `by_cg_final`.
-all_cgs_configured = [c.strip() for c in os.environ.get("SWM_SUMMARY_ALL_CGS_CSV", "").split(',') if c.strip()]
-cycles = int(os.environ.get("SWM_SUMMARY_TOTAL_CYCLES", "0") or "0")
-
-# Codex PR #572 R12 (round 4): build per-(cg, sender) denominator
-# table from the writes-accepted summary tombstones each peer
-# emits before the settle window. denom_by_cg[cg][tag] = peer's
-# self-reported accepted-write count. Pre-fix the denominator was
-# always `cycles`, so any sender with local rejections (e.g. a
-# crash mid-run or a daemon backpressure event that returned no
-# shareOperationId) would be scored against an unreachable target
-# even with 100% transport delivery, conflating sender-side
-# rejection with network loss. With the tombstone the ship gate
-# now strictly measures transport reliability.
-denom_by_cg = {}
-try:
-  with open(os.path.join(log_dir, 'writes-accepted-summaries-observed.jsonl')) as f:
-    for line in f:
-      # A poll while waiting for a late tombstone may have recorded an
-      # answer that is not JSON; the final snapshot validated its own.
-      try:
-        rec = json.loads(line)
-      except ValueError:
-        continue
-      cg = rec.get('cgId')
-      if not cg: continue
-      data = rec.get('data') or {}
-      rows = []
-      if isinstance(data, dict):
-        inner = data.get('result')
-        if isinstance(inner, dict) and isinstance(inner.get('bindings'), list):
-          rows = inner['bindings']
-        elif isinstance(data.get('bindings'), list):
-          rows = data['bindings']
-      bucket = denom_by_cg.setdefault(cg, {})
-      for r in rows:
-        tag_v = r.get('tag', '')
-        if isinstance(tag_v, dict): tag_v = tag_v.get('value', '')
-        wa_v = r.get('writesAccepted', '')
-        if isinstance(wa_v, dict): wa_v = wa_v.get('value', '')
-        # /api/query normalizes RDF literals as N-Triples strings ("tag",
-        # "10"); direct SPARQL adapters may return the unquoted values.
-        if isinstance(tag_v, str): tag_v = tag_v.strip('"')
-        if isinstance(wa_v, str): wa_v = wa_v.strip('"')
-        if not tag_v: continue
-        try: wa_int = int(wa_v)
-        except (TypeError, ValueError): continue
-        prev = bucket.get(tag_v)
-        if prev is None or wa_int > prev:
-          bucket[tag_v] = wa_int
-except FileNotFoundError:
-  pass
-
-by_cg_final = {}
-try:
-  with open(os.path.join(log_dir, 'swm-inbox.jsonl')) as f:
-    for line in f:
-      rec = json.loads(line)
-      if rec.get('label') != 'final': continue
-      cg = rec['cgId']
-      # Codex PR #572 R1: /api/query wraps results as
-      # {result: {bindings: [...]}}. Pre-fix this parser read the
-      # top-level `data.bindings` (always absent), so the final
-      # summary saw zero rows on every record. Same wrap-unwrap
-      # as snapshot_swm_inbox above.
-      data = rec.get('data') or {}
-      rows = []
-      if isinstance(data, dict):
-        inner = data.get('result')
-        if isinstance(inner, dict) and isinstance(inner.get('bindings'), list):
-          rows = inner['bindings']
-        elif isinstance(data.get('bindings'), list):
-          rows = data['bindings']
-      # Codex PR #572 R2: the regex match + tag/seq assignment +
-      # `by_cg_final[cg] = by_tag` were all misindented out of
-      # their respective loops pre-fix — `m = re.match(...)` ran
-      # once per record (on whatever `s` happened to be at the
-      # end of the per-binding loop), `continue` jumped past the
-      # remaining records of the file (not the remaining
-      # bindings), and `by_cg_final[cg] = by_tag` ran exactly
-      # once after the whole file was read, keeping only the LAST
-      # final record. Net result: multi-row / multi-CG runs
-      # silently undercounted delivery to zero on all but one CG.
-      # Now: per-binding statements stay inside `for r in rows`,
-      # per-record assignment stays inside `for line in f`, and
-      # we ACCUMULATE into `by_cg_final[cg]` (merging share-op
-      # sequence sets per tag) so if the same `final` cgId
-      # appears more than once across the jsonl no rows are lost.
-      bucket = by_cg_final.setdefault(cg, {})
-      for r in rows:
-        s = r.get('s', '')
-        if isinstance(s, dict): s = s.get('value', '')
-        s = s.strip('<>')
-        m = re.match(r'^urn:swm-soak:([^:]+):(\d+)$', s)
-        if not m: continue
-        tag, seq = m.group(1), m.group(2)
-        bucket.setdefault(tag, set()).add(seq)
-except FileNotFoundError:
-  print('  (no swm-inbox.jsonl)')
-
-# Codex PR #572 R13 (round 5): per-CG self denominator. Pre-fix
-# this counted the entire writes.jsonl regardless of cgId, so on
-# multi-CG runs every CG's "self" row showed denom=cycles*cgCount
-# while the numerator only contained that CG's observations,
-# producing per-CG percentages of ~100/cgCount% even under
-# perfect delivery. Same scope rule is now applied to peer
-# tombstones via the writes-accepted-summary subject — each
-# tombstone is published per CG with that CG's accepted count.
-# The count is the one the tombstone and the summary use too, from
-# accepted-counts.json (see `record_accepted_counts`): the writes
-# shared at once plus those whose share job succeeded.
-self_writes_accepted_by_cg = None
-try:
-  with open(os.path.join(log_dir, 'accepted-counts.json')) as f:
-    self_writes_accepted_by_cg = json.load(f)
-except (FileNotFoundError, ValueError):
-  pass
-have_writes_jsonl = (isinstance(self_writes_accepted_by_cg, dict)
-                     and os.path.exists(os.path.join(log_dir, 'writes.jsonl')))
-
-def denominator_for(cg, tag):
-  # Self: use locally-counted accepted writes for this CG
-  # (ground truth, no transport dependence).
-  if tag == self_tag:
-    if not have_writes_jsonl:
-      return ('self', None, False)
-    return ('self', self_writes_accepted_by_cg.get(cg, 0), True)
-  # Peer: use the writes-accepted tombstone if observed.
-  wa = (denom_by_cg.get(cg) or {}).get(tag)
-  if wa is not None:
-    return ('peer-tombstone', wa, True)
-  # No tombstone observed for this peer in this CG: indeterminate.
-  return ('missing', None, False)
-
-# Codex PR #572 R14 (round 5): iterate over CONFIGURED CGs so a
-# total-failure CG (no inbox rows at all) still appears in the
-# report. Union with by_cg_final keys catches unexpected CGs that
-# somehow show up in the inbox without being configured (defense
-# in depth).
-report_cgs = sorted(set(all_cgs_configured) | set(by_cg_final.keys()))
-ship_ok = bool(report_cgs)
-for cg in report_cgs:
-  by_tag = by_cg_final.get(cg, {})
-  if cg not in by_cg_final:
-    print(f'  cg={cg}: [no `final` SWM-inbox rows observed for this CG — INDETERMINATE; total transport failure or final SPARQL errored]')
-    ship_ok = False
-  else:
-    print(f'  cg={cg}:')
-  src, denom, ok = denominator_for(cg, self_tag)
-  got = len(by_tag.get(self_tag, set()))
-  if not ok:
-    print(f'    self ({self_tag}): {got} observed (no local writes.jsonl or accepted-counts.json — INDETERMINATE)')
-    ship_ok = False
-  elif denom == 0:
-    print(f'    self ({self_tag}): {got}/0 — no accepted writes recorded locally for this CG (script wrote nothing here)')
-    ship_ok = False
-  else:
-    pct = (got / denom * 100.0) if denom else 0.0
-    sanity = '' if got == denom else f'  [WARN: observed {got} self-shares but accepted {denom} locally]'
-    print(f'    self ({self_tag}): {got}/{denom} = {pct:.2f}% (denom=local writes.jsonl){sanity}')
-    if got != denom:
-      ship_ok = False
-
-  others_seen = sorted(t for t in by_tag if t != self_tag)
-  reportable = peers_expected if peers_expected else others_seen
-  for peer in reportable:
-    got = len(by_tag.get(peer, set()))
-    src, denom, ok = denominator_for(cg, peer)
-    if not ok:
-      print(f'    from {peer}: {got} observed (no writes-accepted tombstone in cg — INDETERMINATE; review writes-accepted-summaries-observed.jsonl)')
-      ship_ok = False
-      continue
-    if denom == 0:
-      print(f'    from {peer}: {got}/0 — peer reported zero accepted writes for this CG (peer ran but did not write here)')
-      ship_ok = False
-      continue
-    pct = (got / denom * 100.0) if denom else 0.0
-    ship_gate = '' if pct >= 99.9 else '  [BELOW 99.9% — review postmortem]'
-    print(f'    from {peer}: {got}/{denom} = {pct:.2f}% (denom=peer tombstone){ship_gate}')
-    if pct < 99.9:
-      ship_ok = False
-  if peers_expected:
-    unexpected = [t for t in others_seen if t not in peers_expected]
-    if unexpected:
-      print(f'    unexpected senders observed: {unexpected}')
-print(f'  VERDICT: {"PASS" if ship_ok else "FAIL"}')
-sys.exit(0 if ship_ok else 1)
-PYTHON
+python3 "$SCRIPT_DIR/lib/swm-soak-tally.py" report \
+  "$LOG_DIR" "$SENDER_TAG" "$PEERS_EXPECTED" "$ALL_CGS_CSV" "$SWM_TOTAL_CYCLES" \
+  | tee -a "$LOG_DIR/main.log"
 summary_rc=$?
 if [ "$summary_rc" -ne 0 ]; then
   log "SWM delivery gate failed (summary exit=$summary_rc)"
