@@ -17,6 +17,7 @@ import {
   DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS,
   DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS,
 } from '@origintrail-official/dkg-core';
+import { SqliteReadGraphSettingsStore } from '../read-graph-settings-store.js';
 
 export interface ProtocolStoreOptions {
   /**
@@ -78,6 +79,11 @@ export interface ProtocolStores {
    * follow-up.)
    */
   readonly kaNumberStore: SqliteKaNumberStore;
+  /**
+   * OT-RFC-74: the node's read-graph settings for single context graphs. The daemon is their only writer: it reads them at start and changes
+   * them through its node-admin settings API.
+   */
+  readonly readGraphSettingsStore: SqliteReadGraphSettingsStore;
 }
 
 /**
@@ -134,6 +140,7 @@ export function createProtocolStores(
     new SqliteContextGraphAuthorityIndexStore(database);
   const chainEventLogStore = new SqliteChainEventLogStore(database);
   const kaNumberStore = new SqliteKaNumberStore(database);
+  const readGraphSettingsStore = new SqliteReadGraphSettingsStore(database);
 
   return {
     messengerStores: { idempotencyStore, outboxStore },
@@ -147,5 +154,6 @@ export function createProtocolStores(
     localContextGraphAuthorityIndexStore,
     chainEventLogStore,
     kaNumberStore,
+    readGraphSettingsStore,
   };
 }

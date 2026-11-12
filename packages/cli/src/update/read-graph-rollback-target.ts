@@ -81,6 +81,18 @@ export function rollbackTargetRefusal(target: ReadGraphRollbackTarget): ReadGrap
 }
 
 /**
+ * The rollback target's refusal of the settings table's modes, at start and for a change: `undefined` when it recognizes read graphs. A target that
+ * cannot be read refuses too, so no setting is kept on a target nobody could check.
+ */
+export async function settingsTableRollbackRefusal(role: 'core' | 'edge'): Promise<ReadGraphsRefusal | undefined> {
+  try {
+    return rollbackTargetRefusal(await readGraphRollbackTarget(role));
+  } catch (error) {
+    return { code: 'READ_GRAPHS_ROLLBACK_TARGET_OLDER', message: `the rollback target cannot be read (${error instanceof Error ? error.message : String(error)})` };
+  }
+}
+
+/**
  * The start-up check: throws a `QueryConfigError` naming `query.readGraphs` when the node's own modes, with its policy applied, keep a read graph and the
  * rollback target does not recognize read graphs. The settings table's modes never stop a start.
  */
