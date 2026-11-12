@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react';
 import { readFileSync, existsSync } from 'fs';
 import { join, resolve } from 'path';
 import { monacoAssetsPlugin } from './monaco-workers.js';
+import { directBarrelImportsPlugin } from './barrel-imports.js';
 import { homedir } from 'os';
 
 function readTokenFile(path: string): string {
@@ -55,6 +56,7 @@ export default defineConfig({
   plugins: [
     react(),
     monacoAssetsPlugin(),
+    directBarrelImportsPlugin(),
     {
       name: 'inject-dkg-token',
       apply: 'serve',
@@ -69,6 +71,9 @@ export default defineConfig({
   build: {
     outDir: '../../dist-ui',
     emptyOutDir: true,
+    // Gzipping every chunk only to report its size pushed the build past its 896 MB heap
+    // ceiling about one build in three once the editor was bundled.
+    reportCompressedSize: false,
   },
   server: {
     proxy: {
