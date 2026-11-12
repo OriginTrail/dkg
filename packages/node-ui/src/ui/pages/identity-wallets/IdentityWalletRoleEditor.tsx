@@ -6,7 +6,7 @@ const ROLE_EDITOR_META = {
   operational: {
     title: 'Operational keys',
     label: 'Operational wallet address',
-    description: 'These wallets sign publishes. Registering an address does not copy its private key into this node; it must already be present in the node\'s operational wallet pool to participate in rotation.',
+    description: 'These wallets sign publishes. Registering an address doesn\'t add its private key to this node. To be used for signing, the wallet\'s private key must already be in the node\'s operational wallets.',
     addAction: 'add-operational',
     removeAction: 'remove-operational',
     addLabel: 'Register operational',
@@ -52,13 +52,13 @@ export function IdentityWalletRoleEditor({
   const inputId = `identity-${role}-address`;
   const empty = !value.trim();
   return (
-    <div className="v10-identity-wallet-card" data-testid={`${role}-wallet-editor`}>
-      <h4>{meta.title}</h4>
+    <div className="v10-identity-wallet-card ds-card" data-testid={`${role}-wallet-editor`}>
+      <h3>{meta.title}</h3>
       <p>{meta.description}</p>
       <label htmlFor={inputId}>{meta.label}</label>
       <input
         id={inputId}
-        className="v10-form-input mono"
+        className="v10-form-input ds-input mono"
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder="0x…"
@@ -68,7 +68,7 @@ export function IdentityWalletRoleEditor({
       <div className="v10-identity-wallet-actions">
         <button
           type="button"
-          className="v10-identity-wallet-btn primary"
+          className="v10-identity-wallet-btn primary ds-btn ds-primary"
           data-testid={meta.addAction}
           onClick={() => onSubmit(meta.addAction, value)}
           disabled={!writesEnabled || empty}
@@ -77,7 +77,7 @@ export function IdentityWalletRoleEditor({
         </button>
         <button
           type="button"
-          className="v10-identity-wallet-btn"
+          className="v10-identity-wallet-btn ds-btn"
           data-testid={meta.removeAction}
           onClick={() => onRemove(role, value)}
           disabled={!writesEnabled || empty || Boolean(finalAdmin)}

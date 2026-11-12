@@ -9,6 +9,7 @@ import type { OwnerActionSubmitter } from '../../pca/ownerActions.js';
 import type { WalletTxProgress } from '../../pca/useWalletTxProgress.js';
 import type { DetailDeviceAction } from '../../pca/detailWalletTx.js';
 import type { PcaOwnerAccess } from '../../pca/ownerAccess.js';
+import { Loading } from '../../components/ds/Loading.js';
 
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 
@@ -54,16 +55,16 @@ export function PublishingWalletsSection({
       const snap = await fetchPca(accountId, addr);
       const reg = snap.probedKey?.registered;
       // M8: a 200 that omits probedKey (or registered:null) means the adapter
-      // couldn't answer — render "couldn't determine", NOT a false "✗ NOT approved".
+      // couldn't answer — render "couldn't determine", NOT a false "NOT approved".
       setProbeResult(
         reg === true
-          ? `✓ ${addr} is an approved publishing wallet here.`
+          ? `${addr} is an approved publishing wallet here.`
           : reg === false
-            ? `✗ ${addr} is NOT approved here.`
-            : `Couldn’t determine whether ${addr} is approved here — retry.`,
+            ? `${addr} isn’t approved here.`
+            : `Couldn’t check whether ${addr} is approved here. Try again.`,
       );
     } catch (err) {
-      setProbeResult(describePcaError(err, { accountId })?.message ?? 'Probe failed.');
+      setProbeResult(describePcaError(err, { accountId })?.message ?? 'Couldn’t check this wallet.');
     }
   };
   const runRemove = async (addr: string) => {
@@ -96,12 +97,12 @@ export function PublishingWalletsSection({
         <h3 className="v10-pca-detail-section-title">Publishing wallets — {snapshot.agentCount} / 100</h3>
         <div className="v10-pca-detail-form">
           <AddressCrux mode="single" value={probe} onChange={setProbe} label="Check a wallet" cruxNote={null} />
-          <button type="button" className="v10-pca-card-btn" onClick={runProbe}>Probe</button>
+          <button type="button" className="v10-pca-card-btn ds-btn" onClick={runProbe}>Check</button>
         </div>
         {probeResult && <p className="v10-pca-detail-hint" role="status">{probeResult}</p>}
 
         {agentsLoading && !agentsForThis ? (
-          <p className="v10-pca-detail-hint" role="status">Loading approved wallets…</p>
+          <Loading label="Loading approved wallets…" />
         ) : agentsForThis ? (
           // B3 — the FULL approved set (chain enumerator); the count-only caveat is retired.
           <>
@@ -148,19 +149,19 @@ export function PublishingWalletsSection({
               {wallets.length === 0 && <p className="v10-pca-handshake-empty">No operational wallets on this node.</p>}
             </div>
             <p className="v10-pca-overview-caveat">
-              ⓘ The chain exposes how many wallets are approved, not the full list — only this node’s
-              wallets and any you probe are shown here.
+              The chain exposes how many wallets are approved, not the full list — only this node’s
+              wallets and any you check are shown here.
             </p>
           </>
         )}
-        {removeState.error && <p className="v10-modal-error" role="alert">{removeState.error}</p>}
+        {removeState.error && <p className="v10-modal-error ds-card-nested" role="alert">{removeState.error}</p>}
         {/* D2 (#1357) — surface the deregister success (was a dead state). */}
         {removeState.result && (
           <p className="v10-pca-detail-result" role="status" data-testid="pca-remove-result">{removeState.result.message}</p>
         )}
         <button
           type="button"
-          className="v10-pca-card-btn primary"
+          className="v10-pca-card-btn primary ds-btn ds-primary"
           onClick={() => setApproveOpen(true)}
           disabled={!access.writesEnabled}
           title={ownerTitle}
@@ -212,15 +213,15 @@ function WalletProbeRow({
                     name that consequence explicitly (deregistering your own signer degrades
                     your own publishes). */}
                 <span>This is one of this node’s own signing wallets — its publishes will pay the direct cost (and revert if it holds no TRAC). Remove?</span>
-                <button type="button" className="v10-pca-card-btn" data-testid="pca-deregister-btn" aria-label={`Confirm removing ${wallet}`} onClick={onConfirmRemove} disabled={removeBusy}>
+                <button type="button" className="v10-pca-card-btn ds-btn" data-testid="pca-deregister-btn" aria-label={`Confirm removing ${wallet}`} onClick={onConfirmRemove} disabled={removeBusy}>
                   {removeBusy ? 'Removing…' : 'Yes, remove'}
                 </button>
-                <button type="button" className="v10-pca-card-btn" aria-label={`Cancel removing ${wallet}`} onClick={onCancelRemove} disabled={removeBusy}>Cancel</button>
+                <button type="button" className="v10-pca-card-btn ds-btn" aria-label={`Cancel removing ${wallet}`} onClick={onCancelRemove} disabled={removeBusy}>Cancel</button>
               </span>
             ) : (
               <button
                 type="button"
-                className="v10-pca-card-btn"
+                className="v10-pca-card-btn ds-btn"
                 aria-label={`Remove ${wallet}`}
                 onClick={onAskRemove}
                 disabled={!ownerIsPrimary}

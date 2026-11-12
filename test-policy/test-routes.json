@@ -52,6 +52,19 @@
     ]
   },
   {
+    "pattern": "packages/node-ui/browser-regressions/shell/*.spec.ts",
+    "lane": "browser",
+    "reason": "Real app against a mocked node: narrow-screen side panels, badge contrast and Select menu placement from the browser cascade, in the second required browser CI shard",
+    "cadence": "required",
+    "command": "pnpm --dir packages/node-ui exec playwright test --config playwright.shell.config.ts",
+    "layer": "browser regression fixtures",
+    "prerequisites": [
+      "pnpm frozen install",
+      "built workspace dependencies",
+      "Playwright Chromium"
+    ]
+  },
+  {
     "pattern": "packages/node-ui/e2e/specs/devnet-local/**",
     "lane": "browser-local",
     "reason": "Heavy destructive scenarios use isolated devnet in scheduled main CI or explicit local runs",

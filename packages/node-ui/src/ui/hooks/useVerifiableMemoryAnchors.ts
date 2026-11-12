@@ -1,16 +1,16 @@
 /**
- * useVerifiableMemoryAnchors — pulls Verifiable-Memory provenance out of the
- * daemon's `_shared_memory_meta` graphs and projects it as a small set of
- * "decoration" RDF triples that can be merged into the existing VM graph
- * visualisation.
+ * useVerifiableMemoryAnchors — pulls Verifiable-Memory provenance from the
+ * REAL on-chain publish receipts in the context graph's `_meta` (C10; it used
+ * to read WorkspaceOperation share records from `_shared_memory_meta`, which
+ * are not chain receipts) and projects it as a small set of "decoration" RDF
+ * triples merged into the VM graph visualisation.
  *
  * This is the visual realisation of the DKG "secret sauce": every VM entity
  * becomes surrounded by two extra kinds of nodes so the human eye instantly
  * sees *why* it is trusted:
  *
- *   ◉ OnChainAnchor    per WorkspaceOperation (publish batch).
- *                      Represents the on-chain anchor carrying this batch
- *                      of KAs. Labelled with op-id + timestamp.
+ *   ◉ OnChainAnchor    per receipted assertion (publish tx).
+ *                      Labelled with the tx hash + finalize time.
  *
  *   ◈ AgentIdentity    per unique DID / peer-ID that signed a publish.
  *                      Represents the agent that attested to the batch.
@@ -25,14 +25,19 @@
  * in-memory on the client, under a dedicated viz:* namespace that
  * `ProjectView`'s style maps recognise for VM-only rendering.
  *
+ * Receipts come from `useVmReceipts` (shared with the VM header facts), so
+ * this hook only projects typed receipt records into triples.
+ *
  * If the daemon has no publish provenance yet (e.g. VM wasn't seeded), the
  * hook just returns an empty list — the VM graph falls back to the plain
  * committed-sub-graph view.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { authHeaders } from '../api.js';
+import { useMemo } from 'react';
 import type { Triple } from './useMemoryEntities.js';
+import { useVmReceipts, type VmReceipt } from './useVmReceipts.js';
+import { isAtOrUnder } from './useVmReceiptSummary.js';
+import { truncateAddress } from '../lib/format.js';
 
 /** Namespace for synthetic visualisation triples — unique to VM decoration
  *  so downstream code (SubGraphBar bucketing, counts) never mistakes them
@@ -48,20 +53,10 @@ const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const SCHEMA_NAME = 'http://schema.org/name';
 const SCHEMA_DESC = 'http://schema.org/description';
 
-/** Single publish batch as reported by the daemon's workspace-operation
- *  records. */
-export interface PublishAnchor {
-  opId: string;        // raw operation id (tail of urn:dkg:share:<cg>:<opId>)
-  opUri: string;       // urn:dkg:share:<cg>:<opId>
-  agents: string[];    // distinct peer-ids / DIDs that attested
-  roots: string[];     // KA root entities included in this batch
-  publishedAt: string; // ISO timestamp
-  subGraph?: string;   // sub-graph slug (from the graph URI)
-}
-
 export interface VerifiableMemoryAnchorsResult {
-  /** Every anchor we know about. Useful for legends / ledgers. */
-  anchors: PublishAnchor[];
+  /** Every receipt we know about, newest first (undated last). Useful for
+   *  legends / ledgers. */
+  anchors: VmReceipt[];
   /** Synthetic triples to merge into the RdfGraph input, already filtered
    *  to the subset of anchors whose roots are visible in the current layer
    *  (see `visibleEntityUris` argument). */
@@ -70,112 +65,80 @@ export interface VerifiableMemoryAnchorsResult {
   error: string | null;
 }
 
-function bv(v: unknown): string | undefined {
-  if (v == null) return undefined;
-  if (typeof v === 'string') {
-    // Strip wrapping quotes for literals, and the trailing ^^<datatype> tag.
-    return v.startsWith('"')
-      ? v.replace(/^"/, '').replace(/"(\^\^<[^>]*>)?$/, '')
-      : v;
-  }
-  if (typeof v === 'object' && v !== null && 'value' in (v as any)) {
-    return String((v as any).value);
-  }
-  return String(v);
+
+/** Short label for an anchor: `tx mo3e0z…` + finalize time when known. */
+function anchorLabel(r: VmReceipt): string {
+  const short = r.tx ? r.tx.slice(0, 10) : 'confirmed';
+  return r.finalizedAt ? `anchor ${short} · ${r.finalizedAt.slice(11, 16)}UTC` : `anchor ${short}`;
 }
 
-/** Short label for an anchor: `tx mo3e0z…` + relative time if we can derive it. */
-function anchorLabel(a: PublishAnchor): string {
-  const short = a.opId.slice(0, 10);
-  try {
-    const d = new Date(a.publishedAt);
-    const hhmm = d.toISOString().slice(11, 16);
-    return `anchor ${short} · ${hhmm}UTC`;
-  } catch {
-    return `anchor ${short}`;
-  }
+/** Why an anchored KA shows no transaction, if it doesn't. */
+function noTxNote(r: VmReceipt): string {
+  if (r.tx) return '';
+  return r.confirmation === 'finalized-materialization'
+    ? ' · confirmed by finalized materialization (no local transaction hash)'
+    : ' · published more than once; the current transaction is not recorded';
 }
+
+/** One synthetic node per Knowledge Asset: by its tx, else by its UAL or
+ *  assertion when no single transaction is known. */
+function anchorUriFor(r: VmReceipt): string {
+  return `urn:dkg:viz:anchor:${r.tx ?? encodeURIComponent(r.ual ?? r.assertion)}`;
+}
+
 
 /** Short label for an agent peer-id / DID. */
 function agentLabel(agentId: string): string {
   if (agentId.startsWith('did:dkg:agent:')) {
     const tail = agentId.slice('did:dkg:agent:'.length);
-    if (tail.startsWith('0x')) return tail.slice(0, 6) + '…' + tail.slice(-4);
-    return tail.slice(0, 6) + '…' + tail.slice(-6);
+    return tail.startsWith('0x') ? truncateAddress(tail) : truncateAddress(tail, 6, 6);
   }
   // libp2p peer id or raw 0x address — truncate from the middle
-  if (agentId.length > 18) return agentId.slice(0, 8) + '…' + agentId.slice(-6);
-  return agentId;
+  return agentId.length > 18 ? truncateAddress(agentId, 8, 6) : agentId;
 }
 
-/** Build the SPARQL that enumerates every publish-batch WorkspaceOperation
- *  across every sub-graph's `_shared_memory_meta`. */
-function buildAnchorsQuery(): string {
-  // The server resolves registered partitions and excludes child Context Graphs.
-  return `PREFIX dkg: <http://dkg.io/ontology/>
-PREFIX prov: <http://www.w3.org/ns/prov#>
-SELECT ?op ?root ?agent ?publishedAt ?g WHERE {
-  GRAPH ?g {
-    ?op a dkg:WorkspaceOperation ;
-        dkg:rootEntity ?root ;
-        dkg:publishedAt ?publishedAt ;
-        prov:wasAttributedTo ?agent .
-  }
-  FILTER(STRENDS(STR(?g), "/_shared_memory_meta"))
-} ORDER BY ?publishedAt LIMIT 2000`;
+/** Receipts newest first; receipts without a finalize time go last.
+ *  Sorts a copy. Exported for tests. */
+export function newestFirst(receipts: readonly VmReceipt[]): VmReceipt[] {
+  return [...receipts].sort((x, y) => (y.finalizedAt ?? '').localeCompare(x.finalizedAt ?? ''));
 }
 
-function subGraphFromMetaGraphUri(gUri: string, cgId: string): string | undefined {
-  // did:dkg:context-graph:<cg>/<sg>/_shared_memory_meta  →  <sg>
-  // did:dkg:context-graph:<cg>/_shared_memory_meta       →  undefined
-  const prefix = `did:dkg:context-graph:${cgId}/`;
-  if (!gUri.startsWith(prefix)) return undefined;
-  const tail = gUri.slice(prefix.length);
-  const slash = tail.indexOf('/');
-  if (slash < 0) return undefined;
-  const seg = tail.slice(0, slash);
-  if (!seg || seg.startsWith('_')) return undefined;
-  return seg;
-}
-
-function parseAnchorId(opUri: string): string {
-  // urn:dkg:share:<cg>:<opId>  →  <opId>
-  const lastColon = opUri.lastIndexOf(':');
-  return lastColon >= 0 ? opUri.slice(lastColon + 1) : opUri;
-}
-
-function buildDecorationTriples(
-  anchors: PublishAnchor[],
+/** Synthetic anchor / agent triples for the graph. Exported for tests. */
+export function buildDecorationTriples(
+  receipts: readonly VmReceipt[],
   visibleEntityUris: Set<string> | null,
 ): Triple[] {
   const out: Triple[] = [];
   const seenAgents = new Set<string>();
 
-  for (const a of anchors) {
+  for (const r of receipts) {
     // If we know which entities the graph is currently rendering (VM view),
     // restrict the anchor's edges to roots that will actually show up as
     // nodes — otherwise we end up with orphan anchor hubs floating next to
     // the graph, connected to roots that live only in SWM.
+    // Members come from the seal rows and the per-KA graph; entities
+    // namespaced under the assertion URI belong to it too (same rule as the
+    // receipt summary).
     const visibleRoots = visibleEntityUris
-      ? a.roots.filter(r => visibleEntityUris.has(r))
-      : a.roots;
+      ? [...new Set([...r.members.filter(m => visibleEntityUris.has(m)), ...[...visibleEntityUris].filter(u => u !== r.assertion && isAtOrUnder(u, r.assertion))])]
+      : r.members;
     if (visibleRoots.length === 0) continue;
 
-    const anchorUri = `urn:dkg:viz:anchor:${a.opId}`;
+    const anchorUri = anchorUriFor(r);
     // Anchor node typing + label so RdfGraph can render it with our viz colors.
-    out.push({ subject: anchorUri, predicate: RDF_TYPE, object: VIZ_ANCHOR_TYPE, subGraph: a.subGraph });
-    out.push({ subject: anchorUri, predicate: SCHEMA_NAME, object: `"${anchorLabel(a)}"`, subGraph: a.subGraph });
+    out.push({ subject: anchorUri, predicate: RDF_TYPE, object: VIZ_ANCHOR_TYPE, subGraph: r.subGraph });
+    out.push({ subject: anchorUri, predicate: SCHEMA_NAME, object: `"${anchorLabel(r)}"`, subGraph: r.subGraph });
     out.push({
       subject: anchorUri,
       predicate: SCHEMA_DESC,
-      object: `"Published ${a.roots.length} KA${a.roots.length === 1 ? '' : 's'} · ${new Date(a.publishedAt).toISOString()}"`,
-      subGraph: a.subGraph,
+      object: `"Published ${r.members.length} KA${r.members.length === 1 ? '' : 's'}${r.finalizedAt ? ` · finalized ${r.finalizedAt}` : ' · finalize time unknown'}${noTxNote(r)}"`,
+      subGraph: r.subGraph,
     });
 
     // anchor ← anchoredIn ← entity  (we model the edge outward-from-entity
     // so it reads `<decision> anchored-in <anchor>` in graph hover).
     for (const root of visibleRoots) {
-      out.push({ subject: root, predicate: VIZ_PRED_ANCHORED_IN, object: anchorUri, subGraph: a.subGraph });
+      out.push({ subject: root, predicate: VIZ_PRED_ANCHORED_IN, object: anchorUri, subGraph: r.subGraph });
       // A per-entity consensus literal — picked up by the entity card / hover.
       // We only know 1 signer in the current devnet (minimumRequiredSignatures=1)
       // so we render 1-of-1. A production publish with a quorum would list
@@ -183,23 +146,23 @@ function buildDecorationTriples(
       out.push({
         subject: root,
         predicate: VIZ_PRED_CONSENSUS,
-        object: `"${a.agents.length}-of-${a.agents.length}"`,
-        subGraph: a.subGraph,
+        object: `"${r.signers.length}-of-${r.signers.length}"`,
+        subGraph: r.subGraph,
       });
     }
 
     // Agent nodes — dedupe so we don't emit 50 copies of the same DID.
-    for (const agentRaw of a.agents) {
+    for (const agentRaw of r.signers) {
       const agent = agentRaw.startsWith('did:') || agentRaw.startsWith('12D3')
         ? agentRaw
         : `did:dkg:agent:${agentRaw}`;
       const agentUri = `urn:dkg:viz:agent:${encodeURIComponent(agent)}`;
-      out.push({ subject: anchorUri, predicate: VIZ_PRED_SIGNED_BY, object: agentUri, subGraph: a.subGraph });
+      out.push({ subject: anchorUri, predicate: VIZ_PRED_SIGNED_BY, object: agentUri, subGraph: r.subGraph });
       if (!seenAgents.has(agentUri)) {
         seenAgents.add(agentUri);
-        out.push({ subject: agentUri, predicate: RDF_TYPE, object: VIZ_AGENT_TYPE, subGraph: a.subGraph });
-        out.push({ subject: agentUri, predicate: SCHEMA_NAME, object: `"${agentLabel(agent)}"`, subGraph: a.subGraph });
-        out.push({ subject: agentUri, predicate: SCHEMA_DESC, object: `"${agent}"`, subGraph: a.subGraph });
+        out.push({ subject: agentUri, predicate: RDF_TYPE, object: VIZ_AGENT_TYPE, subGraph: r.subGraph });
+        out.push({ subject: agentUri, predicate: SCHEMA_NAME, object: `"${agentLabel(agent)}"`, subGraph: r.subGraph });
+        out.push({ subject: agentUri, predicate: SCHEMA_DESC, object: `"${agent}"`, subGraph: r.subGraph });
       }
     }
   }
@@ -210,75 +173,8 @@ export function useVerifiableMemoryAnchors(
   contextGraphId: string | undefined,
   visibleEntityUris?: Set<string> | Iterable<string>,
 ): VerifiableMemoryAnchorsResult {
-  const [anchors, setAnchors] = useState<PublishAnchor[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const versionRef = useRef(0);
-
-  useEffect(() => {
-    if (!contextGraphId) {
-      setAnchors([]);
-      setLoading(false);
-      return;
-    }
-    const version = ++versionRef.current;
-    setLoading(true);
-    setError(null);
-
-    (async () => {
-      try {
-        const res = await fetch('/api/query', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify({
-            contextGraphId,
-            includeContextGraphPartitions: true,
-            includeSharedMemoryMeta: true,
-            sparql: buildAnchorsQuery(),
-          }),
-        });
-        if (!res.ok) throw new Error(`SPARQL query failed: ${res.status}`);
-        const data = await res.json();
-        const rows: any[] = data?.result?.bindings ?? [];
-
-        // Fold rows into per-op buckets; each row is a single (op, root, agent)
-        // triple. A single op can carry many roots, hence the merge.
-        const byOp = new Map<string, PublishAnchor>();
-        for (const row of rows) {
-          const op = bv(row.op);
-          const root = bv(row.root);
-          const agent = bv(row.agent);
-          const ts = bv(row.publishedAt);
-          const g = bv(row.g);
-          if (!op || !root || !agent || !ts) continue;
-
-          let a = byOp.get(op);
-          if (!a) {
-            a = {
-              opId: parseAnchorId(op),
-              opUri: op,
-              agents: [],
-              roots: [],
-              publishedAt: ts,
-              subGraph: g ? subGraphFromMetaGraphUri(g, contextGraphId) : undefined,
-            };
-            byOp.set(op, a);
-          }
-          if (!a.roots.includes(root)) a.roots.push(root);
-          if (!a.agents.includes(agent)) a.agents.push(agent);
-        }
-
-        if (version !== versionRef.current) return;
-        setAnchors([...byOp.values()].sort((x, y) => y.publishedAt.localeCompare(x.publishedAt)));
-      } catch (err: any) {
-        if (version !== versionRef.current) return;
-        setError(err?.message ?? 'Failed to load anchors');
-        setAnchors([]);
-      } finally {
-        if (version === versionRef.current) setLoading(false);
-      }
-    })();
-  }, [contextGraphId]);
+  const { receipts, loading, error } = useVmReceipts(contextGraphId);
+  const anchors = useMemo(() => (receipts ? newestFirst(receipts) : []), [receipts]);
 
   // Normalise visibleEntityUris into a stable Set whose identity only
   // changes when the membership changes. We serialise to a sorted join

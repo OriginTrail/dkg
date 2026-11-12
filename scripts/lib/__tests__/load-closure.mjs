@@ -22,6 +22,7 @@ export const UNFOLLOWED_LOADS = new Map([
   ["packages/cli/src/daemon/local-llm-service.ts: pathToFileURL(programPath).href", "an operator-configured external Program module whose source hash is pinned; no repository path is configured by default"],
   ["packages/cli/src/semantic-runtime-investigator-adapter.ts: process.env.SEMANTIC_RUNTIME_CODEX_BIN ?? 'codex'", "the installed Codex executable or a test-supplied executable, not repository source"],
   ["packages/cli/src/semantic-runtime-safe-llm-adapter.ts: binary", "the compiled Rust safe-LLM runner or a test fixture; Rust source and build scripts are unknown paths that plan full CI"],
+  ["packages/node-ui/browser-regressions/shell/select-placement.spec.ts: url", "the Select fixture beside the spec, select-fixture.tsx, which the browser page imports through Vite's /@fs path; it is node-ui source in the same browser-regressions directory, not a module the Node process loads"],
   ["packages/node-ui/src/ui/components/Programs/TypeScriptEditor.tsx: scriptUrl", "the external browser editor script selected by the component, not a repository module"],
   ["scripts/build-semantic-runtime.mjs: command", "pinned cargo, wasm-tools, wasm-bindgen and Node build executables; the repository Rust wrapper is an explicit file reference, and build-script changes plan full CI"],
   ["scripts/semantic-runtime-rustc.mjs: compiler", "the Rust compiler selected by cargo, not repository source"],

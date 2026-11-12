@@ -10,7 +10,7 @@ import { copy } from '../copy.generated.js';
 import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi } from '../api/client.js';
 import type { CatalogAnswer, Plan, Subscription } from '../api/types.js';
 import { fmtMicro, fmtTrac, microOfWei, modelName, sumWei } from '../amounts.js';
-import { ErrorCard, OffCard, refusalKey, relAt, sellerName, useLoad } from '../shared.js';
+import { ErrorCard, MarketplacePage, OffCard, refusalKey, relAt, sellerName, useLoad } from '../shared.js';
 import { useMarketplaceDraftStore } from '../draftStore.js';
 import { FundFlow, WaitingConfirmation } from '../purchase/FundFlow.js';
 import { fundings } from '../purchase/fundings.js';
@@ -53,7 +53,7 @@ function PlanUnread({ err, onRetry }: { err: unknown; onRetry: () => void }): Re
   return (
     <ErrorCard err={err}>
       <span className="mkt-xs" data-testid="mkt-plan-unread" data-copy="plan.unread">{copy('plan.unread')}</span>
-      <button type="button" className="mkt-btn" data-testid="mkt-plan-reload" data-copy="ctl.retry" onClick={onRetry}>{copy('ctl.retry')}</button>
+      <button type="button" className="ds-btn" data-testid="mkt-plan-reload" data-copy="ctl.retry" onClick={onRetry}>{copy('ctl.retry')}</button>
     </ErrorCard>
   );
 }
@@ -71,10 +71,10 @@ function NextEpoch({ catalog, next, plan, planUnknown, onChange, onFundNext }: {
   const source = (s: { kind: string; accountId?: string }) => (s.kind === 'account' ? copy('source.account', { id: s.accountId ?? '' }) : copy('source.wallet'));
   const planKey = planUnknown ? 'plan.unknown' : plan?.renew ? 'plan.renews' : plan ? 'plan.once' : 'plan.none';
   return (
-    <div className="mkt-card" data-testid="mkt-next-epoch" data-funded={!!next}>
+    <div className="ds-card mkt-card" data-testid="mkt-next-epoch" data-funded={!!next}>
       <div className="mkt-planhead">
         <h2 data-copy={next ? 'next.funded' : 'next.title'}>{copy(next ? 'next.funded' : 'next.title', { n })}</h2>
-        {onChange && <button type="button" className="mkt-btn" data-testid="mkt-change-plan" data-copy="next.change" onClick={onChange}>{copy('next.change')}</button>}
+        {onChange && <button type="button" className="ds-btn" data-testid="mkt-change-plan" data-copy="next.change" onClick={onChange}>{copy('next.change')}</button>}
       </div>
       {next ? (
         <p className="mkt-sec mkt-sm" data-copy="next.funded.body">{copy('next.funded.body', { value: fmtTrac(next.value), cost: fmtTrac(next.cost), n: next.budgets.length, source: source(next.source), t: relAt(next.startsAt) })}</p>
@@ -86,7 +86,7 @@ function NextEpoch({ catalog, next, plan, planUnknown, onChange, onFundNext }: {
       ) : (
         <div className="mkt-fork">
           <span className="mkt-sec mkt-sm" data-copy="next.none">{copy('next.none', { n })}</span>
-          {onFundNext && <button type="button" className="mkt-btn mkt-btn--primary" data-testid="mkt-fund-next" data-copy="next.fund" onClick={onFundNext}>{copy('next.fund', { n })}</button>}
+          {onFundNext && <button type="button" className="ds-btn ds-primary" data-testid="mkt-fund-next" data-copy="next.fund" onClick={onFundNext}>{copy('next.fund', { n })}</button>}
         </div>
       )}
       <div className="mkt-muted mkt-xs" data-copy={planKey}>
@@ -99,7 +99,7 @@ function NextEpoch({ catalog, next, plan, planUnknown, onChange, onFundNext }: {
 function NotOnPlan({ catalog, current, onAdd }: { catalog: CatalogAnswer; current: Subscription; onAdd: (serviceId: string) => void }): React.ReactElement {
   const missing = catalog.services.filter((s) => !current.budgets.some((b) => b.serviceId === s.serviceId) && s.offers.some((o) => o.available !== false));
   return (
-    <div className="mkt-card" data-testid="mkt-addon-list">
+    <div className="ds-card mkt-card" data-testid="mkt-addon-list">
       <h3 data-copy="plans.addon.section">{copy('plans.addon.section')}</h3>
       <p className="mkt-muted mkt-xs" data-copy="plans.addon.section.note">{copy('plans.addon.section.note', { t: relAt(current.endsAt) })}</p>
       {missing.length === 0 && <div className="mkt-muted mkt-xs" data-copy="plans.addon.none">{copy('plans.addon.none')}</div>}
@@ -110,7 +110,7 @@ function NotOnPlan({ catalog, current, onAdd }: { catalog: CatalogAnswer; curren
             <span className="mkt-muted mkt-xs" data-copy="catalog.via">{copy('catalog.via', { sellers: [...new Set(s.offers.map((o) => o.seller))].map(sellerName).join(' · ') })}</span>{' '}
             <span className="mkt-mono mkt-sec" data-copy="catalog.price.micro">{copy('catalog.price.micro', { micro: fmtMicro(s.priceMin), unit: 'tok' })}</span>
           </span>
-          <button type="button" className="mkt-btn mkt-btn--primary" data-testid={`mkt-addon-${s.serviceId}`} data-copy="catalog.addon" onClick={() => onAdd(s.serviceId)}>{copy('catalog.addon')}</button>
+          <button type="button" className="ds-btn" data-testid={`mkt-addon-${s.serviceId}`} data-copy="catalog.addon" onClick={() => onAdd(s.serviceId)}>{copy('catalog.addon')}</button>
         </div>
       ))}
     </div>
@@ -196,17 +196,17 @@ export function PlansView(): React.ReactElement {
   }, [ask, catalog, subs.data, current, takeAsk, mayEditPlan, planned.loading]);
 
   const loadErr = cat.err ?? subs.err ?? planned.err;
-  if ([cat.err, subs.err, planned.err, funding.err].some(isMarketplaceOff)) return <div className="mkt-frame" data-testid="mkt-plans" data-state="off"><OffCard /></div>;
-  if ([cat.err, subs.err, planned.err, funding.err].some(isMarketplaceAbsent)) return <div className="mkt-frame" data-testid="mkt-plans" data-state="absent"><OffCard absent /></div>;
+  if ([cat.err, subs.err, planned.err, funding.err].some(isMarketplaceOff)) return <MarketplacePage page="plans" state="off"><OffCard /></MarketplacePage>;
+  if ([cat.err, subs.err, planned.err, funding.err].some(isMarketplaceAbsent)) return <MarketplacePage page="plans" state="absent"><OffCard absent /></MarketplacePage>;
   if (loadErr && !(catalog && subs.data)) {
     return (
-      <div className="mkt-frame" data-testid="mkt-plans" data-state="error">
-        <div className="mkt-card"><div data-copy="empty.error">{copy('empty.error')}</div><ErrorCard err={loadErr} onRetry={reloadAll} /></div>
-      </div>
+      <MarketplacePage page="plans" state="error">
+        <div className="ds-card mkt-card"><div data-copy="empty.error">{copy('empty.error')}</div><ErrorCard err={loadErr} onRetry={reloadAll} /></div>
+      </MarketplacePage>
     );
   }
   if (!catalog || !subs.data || planPending) {
-    return <div className="mkt-frame" data-testid="mkt-plans" data-state="loading"><div className="mkt-card mkt-muted" data-copy="plans.loading">{copy('plans.loading')}</div></div>;
+    return <MarketplacePage page="plans" state="loading"><div className="ds-card mkt-card mkt-muted" data-copy="plans.loading">{copy('plans.loading')}</div></MarketplacePage>;
   }
 
   const endsAt = funding.data?.epochEndsAt ?? current?.endsAt ?? null;
@@ -223,9 +223,9 @@ export function PlansView(): React.ReactElement {
     // Whether to onboard or to fund the plan's next epoch turns on the plan: unknown, neither is offered.
     if (!mayEditPlan) {
       return (
-        <div className="mkt-frame" data-testid="mkt-plans" data-state="plan-unread">
-          <div className="mkt-card"><div data-copy="empty.error">{copy('empty.error')}</div>{planErr}</div>
-        </div>
+        <MarketplacePage page="plans" state="plan-unread">
+          <div className="ds-card mkt-card"><div data-copy="empty.error">{copy('empty.error')}</div>{planErr}</div>
+        </MarketplacePage>
       );
     }
     if (!plan) {
@@ -233,33 +233,33 @@ export function PlansView(): React.ReactElement {
       const funded = !!w && BigInt(w.trac) > 0n || (funding.data?.accounts ?? []).some((a) => a.serviceCapable && a.grant?.live);
       const f = shown?.kind === 'fund' ? shown : { kind: 'fund' as const, epoch: 'current' as const };
       return (
-        <div className="mkt-frame" data-testid="mkt-plans" data-state="never-subscribed">
+        <MarketplacePage page="plans" state="never-subscribed">
           {notices}
-          <h1 className="mkt-h1" data-copy="onboard.p5.title">{copy('onboard.p5.title')}</h1>
+          <h2 data-copy="onboard.p5.title">{copy('onboard.p5.title')}</h2>
           {!funded && <ProgressSteps step={1} />}
           {treasury}
           {funded && fundFlow(f, true)}
-        </div>
+        </MarketplacePage>
       );
     }
     return (
-      <div className="mkt-frame" data-testid="mkt-plans" data-state="period-ended">
+      <MarketplacePage page="plans" state="period-ended">
         {notices}
         {shown?.kind === 'fund' ? fundFlow(shown, false) : (
-          <div className="mkt-card">
+          <div className="ds-card mkt-card">
             <h2 data-copy="ended.title">{copy('ended.title', { n: catalog.epoch })}</h2>
             <p className="mkt-muted mkt-xs" data-copy={plan.renew ? 'ended.renewed.until' : 'ended.norenew'}>
               {plan.renew ? copy('ended.renewed.until', { n: plan.renewUntilEpoch ?? '—' }) : copy('ended.norenew')}
             </p>
             <p className="mkt-muted" data-copy="ended.note">{copy('ended.note', { value: fmtTrac(sumWei(plan.services.map((s) => s.value))) })}</p>
             <div className="mkt-fork">
-              <button type="button" className="mkt-btn mkt-btn--primary" data-testid="mkt-new-period" data-copy="ended.fund" onClick={() => setFlow({ kind: 'fund', epoch: 'current' })}>{copy('ended.fund', { n: catalog.epoch })}</button>
+              <button type="button" className="ds-btn ds-primary" data-testid="mkt-new-period" data-copy="ended.fund" onClick={() => setFlow({ kind: 'fund', epoch: 'current' })}>{copy('ended.fund', { n: catalog.epoch })}</button>
             </div>
           </div>
         )}
         <Reconciliation catalog={catalog} epoch={catalog.epoch - 1} />
         {treasury}
-      </div>
+      </MarketplacePage>
     );
   }
 
@@ -278,7 +278,7 @@ export function PlansView(): React.ReactElement {
     .filter((id) => !(shown?.kind === 'top-up' && shown.serviceId === id))
     .map((id) => <WaitingTopUp key={id} catalog={catalog} subscription={current} serviceId={id} onOpen={() => setFlow({ kind: 'top-up', serviceId: id })} />);
   return (
-    <div className="mkt-frame" data-testid="mkt-plans" data-state="active">
+    <MarketplacePage page="plans" state="active">
       {notices}
       {waitingTopUps}
       {flowNode}
@@ -291,6 +291,6 @@ export function PlansView(): React.ReactElement {
       <Reconciliation catalog={catalog} epoch={catalog.epoch} />
       <Activity catalog={catalog} calls={activity.data?.calls ?? null} err={activity.err} />
       {treasury}
-    </div>
+    </MarketplacePage>
   );
 }

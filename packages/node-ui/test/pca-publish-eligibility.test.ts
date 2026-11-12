@@ -702,3 +702,87 @@ describe('VM publish gate — the promote path never probes (OT2LV)', () => {
     await unmount();
   });
 });
+
+// R2 — the publish widget's "pays the full TRAC fee" line is driven from THIS read (one owner
+// for the wallet lookups, polling and inconclusive handling): with nothing tracked, the
+// eligibility read confirms from chain truth that no signing wallet is on any PCA. Display
+// only: the verdict stays neutral, so it never gates.
+describe('usePublishEligibility — noPcaConfirmed (nothing tracked)', () => {
+  let latest: any = null;
+  function Harness({ intervalMs }: { intervalMs: number }) {
+    latest = usePublishEligibility('cg', intervalMs);
+    return null;
+  }
+  const W1 = '0x' + 'b'.repeat(40);
+  const until = async (cond: () => boolean) => {
+    for (let i = 0; i < 200 && !cond(); i++) await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+    expect(cond()).toBe(true);
+  };
+  const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+  async function renderHarness(intervalMs = 0) {
+    latest = null;
+    return render(React.createElement(Harness, { intervalMs }));
+  }
+
+  beforeEach(() => {
+    usePcaStore.setState({ trackedIds: [], createPending: null });
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0, W1], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.pcaAgentAccount.mockResolvedValue({ accountId: null });
+  });
+
+  it('every signing wallet on no PCA → confirmed, and the verdict stays neutral (never gates)', async () => {
+    const h = await renderHarness();
+    await until(() => latest?.noPcaConfirmed === true);
+    expect(mocks.pcaAgentAccount).toHaveBeenCalledWith(W0);
+    expect(mocks.pcaAgentAccount).toHaveBeenCalledWith(W1);
+    expect(latest.verdict).toBe('unknown');
+    // The tracked-PCA probes never run with nothing tracked.
+    expect(mocks.fetchPca).not.toHaveBeenCalled();
+    await h.unmount();
+  });
+
+  it('a wallet on a sponsor’s untracked PCA → not confirmed (no false full-fee claim)', async () => {
+    mocks.pcaAgentAccount.mockImplementation(async (w: string) => ({ accountId: w === W1 ? '12' : null }));
+    const h = await renderHarness();
+    await settle();
+    expect(mocks.pcaAgentAccount).toHaveBeenCalledTimes(2);
+    expect(latest.noPcaConfirmed).toBe(false);
+    await h.unmount();
+  });
+
+  it('a failed lookup, the 503 on networks without PCAs, unreadable wallets or no wallets → not confirmed', async () => {
+    const arrange: Array<() => void> = [
+      () => { mocks.pcaAgentAccount.mockRejectedValue(new Error('rpc down')); },
+      () => { mocks.pcaAgentAccount.mockRejectedValue(Object.assign(new Error('FEATURE_UNAVAILABLE'), { status: 503 })); },
+      () => { mocks.fetchWalletsBalances.mockRejectedValue(new Error('down')); },
+      () => { mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [], balances: [], chainId: null, rpcUrl: null }); },
+    ];
+    for (const a of arrange) {
+      mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
+      mocks.pcaAgentAccount.mockResolvedValue({ accountId: null });
+      a();
+      const h = await renderHarness();
+      await settle();
+      expect(latest.noPcaConfirmed).toBe(false);
+      expect(latest.verdict).toBe('unknown');
+      await h.unmount();
+    }
+  });
+
+  it('a sponsor approving a wallet later clears it on the next poll, without a remount', async () => {
+    const h = await renderHarness(20);
+    await until(() => latest?.noPcaConfirmed === true);
+    mocks.pcaAgentAccount.mockResolvedValue({ accountId: '12' });
+    await until(() => latest?.noPcaConfirmed === false);
+    await h.unmount();
+  });
+
+  it('tracking a PCA turns it off, even before the tracked read lands', async () => {
+    const h = await renderHarness();
+    await until(() => latest?.noPcaConfirmed === true);
+    mocks.fetchPca.mockReturnValue(new Promise(() => {})); // the tracked read never lands
+    await act(async () => { usePcaStore.setState({ trackedIds: ['7'] }); });
+    expect(latest.noPcaConfirmed).toBe(false);
+    await h.unmount();
+  });
+});

@@ -68,9 +68,9 @@ describe('cg-name validation (BUG-016)', () => {
       expect(validateCgName('<b>safe</b>')).toContain('HTML');
     });
 
-    it('flags overlong input but tells the user the trim length', () => {
+    it('flags overlong input and tells the user the limit', () => {
       const long = 'A'.repeat(CG_NAME_MAX_LENGTH + 1);
-      expect(validateCgName(long)).toMatch(/trimmed.*characters/i);
+      expect(validateCgName(long)).toBe(`Shorten the name to ${CG_NAME_MAX_LENGTH} characters or fewer.`);
     });
 
     it('accepts a normal short name', () => {
@@ -111,7 +111,7 @@ describe('cg-name validation (BUG-016)', () => {
       // surface it to the user.
       const msg = validateCgName('Project <b');
       expect(msg).not.toBeNull();
-      expect(msg).toMatch(/angle bracket|<|>|stripped/i);
+      expect(msg).toBe('Remove < and > from the name.');
     });
 
     it('warns when sanitise strips bare `<` / `>` characters that did not form a tag span (codex #752 — was silent)', () => {
@@ -121,11 +121,11 @@ describe('cg-name validation (BUG-016)', () => {
       // input but submitted `not a tag`.
       const msg = validateCgName('< not a tag >');
       expect(msg).not.toBeNull();
-      expect(msg).toMatch(/angle bracket|stripped/i);
+      expect(msg).toBe('Remove < and > from the name.');
 
       const msg2 = validateCgName('Project >>> Beta');
       expect(msg2).not.toBeNull();
-      expect(msg2).toMatch(/angle bracket|stripped/i);
+      expect(msg2).toBe('Remove < and > from the name.');
     });
   });
 });

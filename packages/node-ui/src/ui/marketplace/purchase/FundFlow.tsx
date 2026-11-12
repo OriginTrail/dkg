@@ -33,7 +33,7 @@ export function FundingUnknown({ id, held, onBack, onDone }: {
   const n = held.confirming.request.epoch;
   const found = read.state === 'other' ? read.subscription : null;
   return (
-    <div className="mkt-card mkt-gate" data-testid="mkt-funding-unknown" data-state={read.state}>
+    <div className="ds-card mkt-card mkt-gate" data-testid="mkt-funding-unknown" data-state={read.state}>
       <p className="mkt-sec mkt-sm" data-copy="flow.unknown">{copy('flow.unknown', { n })}</p>
       <div className="mkt-notice" role="status">
         <span data-copy={`flow.unknown.${read.state}`}>
@@ -45,14 +45,14 @@ export function FundingUnknown({ id, held, onBack, onDone }: {
       <div className="mkt-fork mkt-gate-actions">
         {read.state === 'absent' && (
           <>
-            <button type="button" className="mkt-btn" data-copy="gate.cancel" onClick={onBack}>{copy('gate.cancel')}</button>
-            <button type="button" className="mkt-btn mkt-btn--primary" data-testid="mkt-funding-retry" data-copy="ctl.retry" onClick={() => fundings.retryFunding(id)}>{copy('ctl.retry')}</button>
+            <button type="button" className="ds-btn" data-copy="gate.cancel" onClick={onBack}>{copy('gate.cancel')}</button>
+            <button type="button" className="ds-btn ds-primary" data-testid="mkt-funding-retry" data-copy="ctl.retry" onClick={() => fundings.retryFunding(id)}>{copy('ctl.retry')}</button>
           </>
         )}
         {read.state === 'unread' && (
-          <button type="button" className="mkt-btn mkt-btn--primary" data-testid="mkt-funding-check" data-copy="flow.unknown.again" onClick={() => fundings.readAgain(id)}>{copy('flow.unknown.again')}</button>
+          <button type="button" className="ds-btn ds-primary" data-testid="mkt-funding-check" data-copy="flow.unknown.again" onClick={() => fundings.readAgain(id)}>{copy('flow.unknown.again')}</button>
         )}
-        {read.state === 'other' && <button type="button" className="mkt-btn" data-testid="mkt-funding-done" data-copy="ctl.done" onClick={onDone}>{copy('ctl.done')}</button>}
+        {read.state === 'other' && <button type="button" className="ds-btn" data-testid="mkt-funding-done" data-copy="ctl.done" onClick={onDone}>{copy('ctl.done')}</button>}
       </div>
     </div>
   );
@@ -72,13 +72,13 @@ export function WaitingConfirmation({ id, onDone }: { id: number; onDone: () => 
   const subscription = held.funded?.subscription ?? null;
   const unsaved = held.funded ? 'flow.plan.failed' : 'flow.plan.unsaved';
   return (
-    <div className="mkt-card" data-testid="mkt-plan-waiting" data-confirmation={id}>
+    <div className="ds-card mkt-card" data-testid="mkt-plan-waiting" data-confirmation={id}>
       {held.funded && (
         <strong data-copy="flow.funded">{copy('flow.funded', { n: subscription?.epoch ?? preview?.epoch ?? '—', trac: fmtTrac(subscription?.value ?? preview?.value ?? '0') })}</strong>
       )}
       <ErrorCard err={held.err}>
         <span className="mkt-xs" data-testid="mkt-plan-unsaved" data-copy={unsaved}>{copy(unsaved)}</span>
-        <button type="button" className="mkt-btn" data-testid="mkt-plan-retry" data-copy="flow.plan.retry" onClick={() => fundings.retryPlan(id)}>{copy('flow.plan.retry')}</button>
+        <button type="button" className="ds-btn" data-testid="mkt-plan-retry" data-copy="flow.plan.retry" onClick={() => fundings.retryPlan(id)}>{copy('flow.plan.retry')}</button>
       </ErrorCard>
     </div>
   );
@@ -167,11 +167,11 @@ export function FundFlow({ catalog, funding, initial, fundsEpoch, onboarding, on
       {composing && (
         <>
           <Composer catalog={catalog} funding={funding} draft={draft} onChange={setDraft} fundsEpoch={fundsEpoch} endsAt={endsAt} />
-          <div className="mkt-card" data-testid="mkt-compose-actions">
+          <div className="ds-card mkt-card" data-testid="mkt-compose-actions">
             {fundsEpoch && <PreviewLine preview={shown} err={dryRun.err} busy={dryRun.busy} />}
             <div className="mkt-fork">
-              {onCancel && <button type="button" className="mkt-btn" data-copy="gate.cancel" onClick={onCancel}>{copy('gate.cancel')}</button>}
-              <button type="button" className="mkt-btn mkt-btn--primary" data-testid="mkt-compose-continue" data-copy="composer.continue"
+              {onCancel && <button type="button" className="ds-btn" data-copy="gate.cancel" onClick={onCancel}>{copy('gate.cancel')}</button>}
+              <button type="button" className="ds-btn ds-primary" data-testid="mkt-compose-continue" data-copy="composer.continue"
                 disabled={!canContinue} title={continueKey ? copy(continueKey) : fundsEpoch && dryRun.busy ? copy('composer.preview.updating') : undefined}
                 onClick={toConfirm}>{copy('composer.continue')}</button>
               {continueKey && <span className="mkt-muted mkt-xs" data-copy={continueKey}>{copy(continueKey)}</span>}
@@ -195,12 +195,12 @@ export function FundFlow({ catalog, funding, initial, fundsEpoch, onboarding, on
           {funded.save === 'failed' ? (
             <ErrorCard err={funded.err}>
               <span className="mkt-xs" data-testid="mkt-plan-unsaved" data-copy="flow.plan.failed">{copy('flow.plan.failed')}</span>
-              <button type="button" className="mkt-btn" data-testid="mkt-plan-retry" data-copy="flow.plan.retry" onClick={() => fundings.retryPlan(id)}>{copy('flow.plan.retry')}</button>
+              <button type="button" className="ds-btn" data-testid="mkt-plan-retry" data-copy="flow.plan.retry" onClick={() => fundings.retryPlan(id)}>{copy('flow.plan.retry')}</button>
             </ErrorCard>
           ) : null}
           {onboarding
             ? <KeyStep budgetTrac={fmtTrac(funded.funded.subscription?.value ?? preview?.value ?? '0')} onPlans={onDone} />
-            : <div className="mkt-fork"><button type="button" className="mkt-btn" data-copy="ctl.done" onClick={onDone}>{copy('ctl.done')}</button></div>}
+            : <div className="mkt-fork"><button type="button" className="ds-btn" data-copy="ctl.done" onClick={onDone}>{copy('ctl.done')}</button></div>}
         </>
       )}
     </div>

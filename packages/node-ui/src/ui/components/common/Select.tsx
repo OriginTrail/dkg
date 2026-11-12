@@ -6,6 +6,8 @@ export interface SelectOption {
   value: string;
   label: string;
   disabled?: boolean;
+  /** Optional leading mark (e.g. a context graph's monogram tile). */
+  mark?: React.ReactNode;
 }
 
 interface SelectProps {
@@ -176,9 +178,7 @@ export function Select({
   const rootClassName = ['v10-select', className, disabled ? 'disabled' : '', open ? 'open' : ''].filter(Boolean).join(' ');
 
   const menuStyle: React.CSSProperties | undefined = position
-    ? position.placement === 'below'
-      ? { position: 'fixed', left: position.left, top: position.top, width: position.width }
-      : { position: 'fixed', left: position.left, top: position.top, width: position.width, transform: 'translateY(-100%)' }
+    ? { left: position.left, top: position.top, width: position.width }
     : undefined;
 
   return (
@@ -186,7 +186,7 @@ export function Select({
       <button
         ref={triggerRef}
         type="button"
-        className="v10-select-trigger"
+        className="v10-select-trigger ds-input"
         onClick={() => !disabled && setOpen((o) => !o)}
         onKeyDown={onTriggerKeyDown}
         disabled={disabled}
@@ -195,6 +195,7 @@ export function Select({
         aria-label={ariaLabel}
       >
         {prefixIcon && <span className="v10-select-prefix" aria-hidden="true">{prefixIcon}</span>}
+        {selected?.mark && <span className="v10-select-mark">{selected.mark}</span>}
         <span className={`v10-select-value ${selected ? '' : 'placeholder'}`}>{displayLabel}</span>
         <ChevronDown className="v10-select-caret" size={12} aria-hidden="true" />
 
@@ -203,7 +204,7 @@ export function Select({
       {open && position && createPortal(
         <ul
           ref={menuRef}
-          className={`v10-select-menu v10-select-menu-${position.placement}`}
+          className={`v10-select-menu ds-card-nested v10-select-menu-${position.placement}`}
           role="listbox"
           tabIndex={-1}
           onKeyDown={onMenuKeyDown}
@@ -238,6 +239,7 @@ export function Select({
                 close();
               }}
             >
+              {opt.mark}
               {opt.label}
             </li>
           ))}

@@ -14,16 +14,16 @@ test.beforeAll(async () => {
 });
 
 test.describe('Publishing lifecycle (devnet)', () => {
-  test('UI loads real context graphs from devnet daemon', async ({ shell, leftPanel, page }) => {
+  test('UI loads real Context Graphs from devnet daemon', async ({ shell, leftPanel, page }) => {
     await shell.goto();
     await page.waitForTimeout(2000);
     const names = await leftPanel.getProjectNames();
     expect(names.length).toBeGreaterThan(0);
   });
 
-  test('operations view shows publish operations after devnet activity', async ({ shell, header, page }) => {
+  test('operations view shows publish operations after devnet activity', async ({ shell, leftPanel, page }) => {
     await shell.goto();
-    await header.openObservability();
+    await leftPanel.openObservability();
     await expect(page.getByRole('heading', { name: 'Observability' })).toBeVisible();
     // Devnet may or may not have operations — assert the view loads without crash.
     await expect(page.locator('.v10-me-error')).toBeHidden();

@@ -8,16 +8,16 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     await leftPanel.waitForProjectsLoaded();
   });
 
-  test('My Context Graphs is expanded by default, and Public Graphs collapsed', async ({ leftPanel }) => {
-    await expect(leftPanel.sectionHeader('My Context Graphs')).toHaveAttribute('aria-expanded', 'true');
-    await expect(leftPanel.sectionHeader('Public Graphs')).toHaveAttribute('aria-expanded', 'false');
+  test('My Context Graphs is expanded by default, and Public graphs collapsed', async ({ leftPanel }) => {
+    await expect(leftPanel.sectionHeader('My context graphs')).toHaveAttribute('aria-expanded', 'true');
+    await expect(leftPanel.sectionHeader('Public graphs')).toHaveAttribute('aria-expanded', 'false');
   });
 
   test('Dashboard row is visible', async ({ leftPanel }) => {
     await expect(leftPanel.root.locator(sel.leftPanel.dashboard).filter({ hasText: 'Dashboard' })).toBeVisible();
   });
 
-  test('My Context Graphs peer group lists the seeded context graphs', async ({ leftPanel }) => {
+  test('My Context Graphs peer group lists the seeded Context Graphs', async ({ leftPanel }) => {
     // The devnet seeds devnet-test + devnet-isolation on boot; the node may also
     // surface a local "Agent Context" CG. Assert the deterministic anchors are
     // present (tolerant to extra CGs) rather than a brittle exact count.
@@ -27,7 +27,7 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     expect(names.length).toBeGreaterThanOrEqual(2);
   });
 
-  test('clicking a context graph opens its project tab', async ({ leftPanel, centerPanel }) => {
+  test('clicking a Context Graph opens its project tab', async ({ leftPanel, centerPanel }) => {
     await leftPanel.expandProject(PRIMARY_CG);
     const tabs = await centerPanel.getTabNames();
     expect(tabs.some((t) => t.includes(PRIMARY_CG))).toBe(true);
@@ -39,12 +39,12 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     expect(await importFilesModal.isOpen()).toBe(true);
   });
 
-  test('Public Graphs expands and renders the catalogue', async ({ leftPanel }) => {
-    await leftPanel.expandSection('Public Graphs');
-    expect(await leftPanel.isSectionExpanded('Public Graphs')).toBe(true);
+  test('Public graphs expands and renders the catalogue', async ({ leftPanel }) => {
+    await leftPanel.expandSection('Public graphs');
+    expect(await leftPanel.isSectionExpanded('Public graphs')).toBe(true);
     // The catalogue renders EITHER discovered public CGs OR the empty-state
     // hint — both are valid on a real node depending on what's been synced.
-    // Only the Public Graphs section counts: My Context Graphs' rows share
+    // Only the Public graphs section counts: My Context Graphs' rows share
     // the row class.
     const section = leftPanel.publicGraphsSection();
     const body = section.locator(sel.leftPanel.peerGroupBody);
@@ -66,18 +66,18 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     }
   });
 
-  test('expanding Public Graphs leaves My Context Graphs expanded, with both lists on show', async ({ leftPanel }) => {
-    const mine = leftPanel.section('My Context Graphs');
-    const discovered = leftPanel.section('Public Graphs');
-    await expect(leftPanel.sectionHeader('My Context Graphs')).toHaveAttribute('aria-expanded', 'true');
-    await expect(leftPanel.sectionHeader('Public Graphs')).toHaveAttribute('aria-expanded', 'false');
-    await leftPanel.expandSection('Public Graphs');
+  test('expanding Public graphs leaves My Context Graphs expanded, with both lists on show', async ({ leftPanel }) => {
+    const mine = leftPanel.section('My context graphs');
+    const discovered = leftPanel.section('Public graphs');
+    await expect(leftPanel.sectionHeader('My context graphs')).toHaveAttribute('aria-expanded', 'true');
+    await expect(leftPanel.sectionHeader('Public graphs')).toHaveAttribute('aria-expanded', 'false');
+    await leftPanel.expandSection('Public graphs');
     // Nothing is opened again: both sections stay as that one click left them.
-    await expect(leftPanel.sectionHeader('Public Graphs')).toHaveAttribute('aria-expanded', 'true');
-    await expect(leftPanel.sectionHeader('My Context Graphs')).toHaveAttribute('aria-expanded', 'true');
+    await expect(leftPanel.sectionHeader('Public graphs')).toHaveAttribute('aria-expanded', 'true');
+    await expect(leftPanel.sectionHeader('My context graphs')).toHaveAttribute('aria-expanded', 'true');
     const myRows = mine.locator(sel.leftPanel.peerGroupBody).locator(sel.leftPanel.section);
     for (const name of [PRIMARY_CG, SECONDARY_CG]) await expect(myRows.filter({ hasText: name }).first()).toBeVisible();
-    // Public Graphs lists the graphs the node discovered, or says there are none yet.
+    // Public graphs lists the graphs the node discovered, or says there are none yet.
     const discoveredBody = discovered.locator(sel.leftPanel.peerGroupBody);
     await expect(discoveredBody.locator(`${sel.leftPanel.section}, ${sel.leftPanel.emptyCard}`).first()).toBeVisible();
   });

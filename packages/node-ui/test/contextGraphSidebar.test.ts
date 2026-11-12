@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
-  belongsInContextOracleSidebar,
+  belongsInPublicSidebar,
   belongsInMyProjectsSidebar,
   canonicalAgentDid,
-  classifyContextOracleEntry,
+  classifyPublicEntry,
   computeSelectableProjects,
 } from '../src/ui/lib/contextGraphSidebar.js';
 import type { ContextGraph } from '../src/ui/stores/projects.js';
@@ -25,7 +25,7 @@ describe('contextGraphSidebar', () => {
       accessPolicy: 'public',
     } as ContextGraph;
     expect(belongsInMyProjectsSidebar(cg, id)).toBe(true);
-    expect(belongsInContextOracleSidebar(cg, id)).toBe(false);
+    expect(belongsInPublicSidebar(cg, id)).toBe(false);
   });
 
   it('not my: node subscribed only without agent role (public goes to oracle)', () => {
@@ -37,7 +37,7 @@ describe('contextGraphSidebar', () => {
       accessPolicy: 'public',
     } as ContextGraph;
     expect(belongsInMyProjectsSidebar(cg, id)).toBe(false);
-    expect(belongsInContextOracleSidebar(cg, id)).toBe(true);
+    expect(belongsInPublicSidebar(cg, id)).toBe(true);
   });
 
   it('oracle is strict: unknown accessPolicy never enters oracle', () => {
@@ -46,7 +46,7 @@ describe('contextGraphSidebar', () => {
       name: 'n',
       callerInvolved: false,
     } as ContextGraph;
-    expect(belongsInContextOracleSidebar(cg, id)).toBe(false);
+    expect(belongsInPublicSidebar(cg, id)).toBe(false);
   });
 
   it('my: curator wallet matches (legacy daemon without callerInvolved)', () => {
@@ -80,7 +80,7 @@ describe('contextGraphSidebar', () => {
       creator: 'did:dkg:agent:0x1000000000000000000000000000000000000000',
     } as ContextGraph;
     expect(belongsInMyProjectsSidebar(cg, id)).toBe(false);
-    expect(belongsInContextOracleSidebar(cg, id)).toBe(true);
+    expect(belongsInPublicSidebar(cg, id)).toBe(true);
   });
 
   it('oracle: public, not mine, synced (alone is enough)', () => {
@@ -91,7 +91,7 @@ describe('contextGraphSidebar', () => {
       callerInvolved: false,
       accessPolicy: 'public',
     } as ContextGraph;
-    expect(belongsInContextOracleSidebar(cg, id)).toBe(true);
+    expect(belongsInPublicSidebar(cg, id)).toBe(true);
   });
 
   it('oracle: discovered public graph is browseable before subscription or sync', () => {
@@ -102,17 +102,17 @@ describe('contextGraphSidebar', () => {
       accessPolicy: 'public',
       creator: 'did:dkg:agent:0x1000000000000000000000000000000000000000',
     } as ContextGraph;
-    expect(belongsInContextOracleSidebar(cg, id)).toBe(true);
-    expect(classifyContextOracleEntry(cg)).toBe('catalogue');
+    expect(belongsInPublicSidebar(cg, id)).toBe(true);
+    expect(classifyPublicEntry(cg)).toBe('catalogue');
   });
 
   it('classifies an explicitly subscribed or synced Oracle entry as a project', () => {
-    expect(classifyContextOracleEntry({
+    expect(classifyPublicEntry({
       id: 'subscribed',
       name: 'Subscribed',
       subscribed: true,
     })).toBe('project');
-    expect(classifyContextOracleEntry({
+    expect(classifyPublicEntry({
       id: 'synced',
       name: 'Synced',
       synced: true,
@@ -127,7 +127,7 @@ describe('contextGraphSidebar', () => {
       accessPolicy: 'private',
       creator: 'did:dkg:agent:0x2000000000000000000000000000000000000000',
     } as ContextGraph;
-    expect(belongsInContextOracleSidebar(cg, id)).toBe(false);
+    expect(belongsInPublicSidebar(cg, id)).toBe(false);
   });
 });
 

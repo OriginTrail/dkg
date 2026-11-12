@@ -34,7 +34,7 @@ describe('useAgents query boundary', () => {
     return null;
   }
 
-  it('keeps a hostile context graph id inside one literal at the executeQuery sink', async () => {
+  it('keeps a hostile Context Graph id inside one literal at the executeQuery sink', async () => {
     const contextGraphId = ['cg-', '\\', '"', '\n', '") } UNION { ?s ?p ?o } #'].join('');
     const prefix = `did:dkg:context-graph:${contextGraphId}/meta`;
     const expectedFilter = `FILTER(strstarts(str(?g), ${JSON.stringify(prefix)}))`;

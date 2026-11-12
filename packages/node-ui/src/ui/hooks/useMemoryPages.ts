@@ -146,7 +146,7 @@ export function useMemoryPages(contextGraphId: string, includeQueryCatalog: bool
   return {
     triples, layerStatus, hasMore, canRetry, loading: !current || state.loading,
     partial: hasMore || incomplete || failed > 0,
-    error: failed === 3 ? 'Failed to load memory data' : null,
+    error: failed === 3 ? 'Couldn’t load memory data.' : null,
     pageError: sources.map(pageFailureMessage).find(Boolean) ?? null,
     limitMessage: incomplete ? MEMORY_LIMIT_MESSAGE : null,
     refresh, loadMore,
