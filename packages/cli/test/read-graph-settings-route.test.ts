@@ -214,6 +214,9 @@ describe('PUT /api/store/read-graphs/settings', () => {
     expect(viewSemanticsOf(runtime.viewSemantics, CG)).toBe('merged');
     expect(table!.rowsOf(CG).modes).toEqual([{ layer: 'verifiable-memory', mode: 'build', updatedAt: expect.any(Number), updatedBy: 'cli' }]);
     expect(lines).toEqual([`[read-graphs] cli changed the settings of ${CG}: verifiable-memory off -> build, view semantics merged.`]);
+    // The agent tools name themselves, and the table records it.
+    expect((await put(control, { contextGraphId: OTHER, layers: { 'shared-working-memory': 'build' } }, { 'x-dkg-actor': 'agent:mcp' })).status).toBe(200);
+    expect(table!.rowsOf(OTHER).modes).toEqual([{ layer: 'shared-working-memory', mode: 'build', updatedAt: expect.any(Number), updatedBy: 'agent:mcp' }]);
     // Without the header the change is the API's; a view-semantics default alone applies too, and null removes it.
     const semantics = await put(control, { contextGraphId: CG, viewSemantics: null });
     expect(semantics.status).toBe(200);
@@ -231,6 +234,8 @@ describe('PUT /api/store/read-graphs/settings', () => {
     }
     const actor = await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'build' } }, { 'x-dkg-actor': 'someone' });
     expect(actor.status).toBe(400);
+    // A format character, such as a bidi override, is no part of an actor's name either.
+    expect((await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'build' } }, { 'x-dkg-actor': 'agent:mcp\u202e' })).status).toBe(400);
     expect((await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'build' } })).status).toBe(200);
     expect(table!.list().map((entry) => entry.contextGraphId)).toEqual([CG]);
     const agentCall = await call(control, 'PUT', READ_GRAPH_SETTINGS_PATH, { body: { contextGraphId: OTHER, layers: { 'verifiable-memory': 'build' } }, authentication: AGENT });
@@ -358,8 +363,8 @@ describe('the readGraphs field of a context graph\'s creation', () => {
   });
 
   it('is answered by POST /api/context-graph/create, which creates the context graph whatever the setting does', async () => {
-    const { control } = controlOf();
-    const createContextGraph = vi.fn(async () => undefined);
+    const { control, agent: agentOfControl, table } = controlOf();
+    const createContextGraph = vi.fn(async (_options: unknown): Promise<void> => undefined);
     const agent = { createContextGraph, getSubscribedContextGraphs: () => new Map(), getDefaultAgentAddress: () => `0x${'ab'.repeat(20)}` };
     const post = async (body: unknown, authentication: AllowedHttpAuthentication) => {
       const path = '/api/context-graph/create';
@@ -379,6 +384,13 @@ describe('the readGraphs field of a context graph\'s creation', () => {
         return { status: response.status, body: JSON.parse(await response.text()) as Record<string, unknown> };
       } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
     };
+    // A context graph that exists already is refused before any setting is applied.
+    createContextGraph.mockRejectedValueOnce(new Error(`Context graph "${CG}" already exists`));
+    const apply = vi.spyOn(agentOfControl, 'applyReadGraphModesV1');
+    const existing = await post({ id: CG, name: CG, readGraphs: { layers: { 'verifiable-memory': 'build' } } }, OPERATOR);
+    expect(existing.status).toBe(409);
+    expect(apply).not.toHaveBeenCalled();
+    expect(table!.get(CG)).toEqual({ layers: {} });
     const created = await post({ id: CG, name: CG, readGraphs: { layers: { 'verifiable-memory': 'build' } } }, OPERATOR);
     expect(created).toMatchObject({ status: 200, body: { created: CG, readGraphs: { applied: true } } });
     const byAgent = await post({ id: OTHER, name: OTHER, readGraphs: { layers: { 'verifiable-memory': 'build' } } }, AGENT);
@@ -388,7 +400,7 @@ describe('the readGraphs field of a context graph\'s creation', () => {
     expect(unread).toMatchObject({ status: 200, body: { created: 'fifth', readGraphs: { code: 'NODE_ADMIN_REQUIRED' } } });
     const malformed = await post({ id: 'third', name: 'third', readGraphs: { layers: { vm: 'build' } } }, OPERATOR);
     expect(malformed).toMatchObject({ status: 400, body: { code: 'READ_GRAPH_SETTINGS_INVALID' } });
-    expect(createContextGraph).toHaveBeenCalledTimes(3);
+    expect(createContextGraph).toHaveBeenCalledTimes(4);
     // Without the field, the answer is as before.
     expect((await post({ id: 'fourth', name: 'fourth' }, OPERATOR)).body).toEqual({ created: 'fourth', uri: 'did:dkg:context-graph:fourth' });
   });

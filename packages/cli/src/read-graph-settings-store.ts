@@ -40,7 +40,7 @@ CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 /** Who changed a setting: the CLI, the API, the node UI, an agent through its tools, or the one-time import from config.json. */
 export type ReadGraphSettingsActor = 'cli' | 'api' | 'ui' | 'import' | `agent:${string}`;
-const ACTOR = /^(?:cli|api|ui|import|agent:[^\s\p{Cc}]{1,256})$/u;
+const ACTOR = /^(?:cli|api|ui|import|agent:[^\s\p{Cc}\p{Cf}]{1,256})$/u;
 
 /** A context graph's own settings: a mode for each layer that has one, and its view-semantics default when it has one. */
 export interface ReadGraphContextSettings {

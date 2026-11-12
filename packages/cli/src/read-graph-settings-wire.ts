@@ -121,7 +121,7 @@ export function parseCreateReadGraphSettings(raw: unknown): { readonly layers: R
 /** The value of the actor header: `cli`, `ui` or `agent:<id>`; `undefined` for anything else. */
 export function readGraphSettingsActorOf(header: string | string[] | undefined): string | undefined {
   const value = Array.isArray(header) ? header[0] : header;
-  return value !== undefined && /^(?:cli|ui|agent:[^\s\p{Cc}]{1,256})$/u.test(value) ? value : undefined;
+  return value !== undefined && /^(?:cli|ui|agent:[^\s\p{Cc}\p{Cf}]{1,256})$/u.test(value) ? value : undefined;
 }
 
 function parseSettingsFields(raw: unknown, fields: readonly string[]): { readonly fields: Record<string, unknown> } | { readonly error: string } {
