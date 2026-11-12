@@ -28,19 +28,24 @@
 #             each node's directory before and after;
 #   live      switch READ_GRAPHS_LIVE_CG (default devnet-test) live through the
 #             settings API (PUT /api/store/read-graphs/settings), no restart, on
-#             every node: off, where its read graphs go and a merged request is
-#             refused as for a layer the node does not serve; build, where they
-#             are rebuilt from nothing, ready, and the full check is clean; serve
-#             for verifiable memory, where a merged view query is answered
-#             across assets while a per-asset one is not; and a default view
-#             semantics, followed by a request that names none. Then, on
-#             READ_GRAPHS_LIVE_LOAD_NODE, switch its layers between build and
-#             serve while the node's own agent writes drafts into it (every
-#             acknowledged write must be there after it, and the full check
-#             clean), and restart the node: the settings must hold and be served
-#             again without being set again. The context graph stays in serve for
-#             verifiable memory and in build otherwise, so the gate runs with it.
-#             Without the settings API (READ_GRAPHS_SWITCH) it is INCONCLUSIVE;
+#             every node that holds it. Answers are checked with a join across
+#             two working-memory drafts the node's agent writes first (<x> knows
+#             <y> in one, <y> name in the other): off, where its read graphs go
+#             and a merged request is refused as for a layer the node does not
+#             serve; build, where they are rebuilt from nothing, ready, and the
+#             full check is clean; serve for working and verifiable memory, where
+#             the merged join returns the joined row and the per-asset one none;
+#             and a default view semantics, followed by a request that names
+#             none. Then, on READ_GRAPHS_LIVE_LOAD_NODE, switch its layers between
+#             build and serve while the node's own agent writes drafts into it
+#             (writes must be acknowledged between every two switches, or the
+#             phase is INCONCLUSIVE; every acknowledged write must be there after
+#             it, and the full check clean), and restart the node: the settings
+#             must hold and the join be answered across assets again without
+#             being set again. The context graph stays in serve for working and
+#             verifiable memory and in build for shared memory, so the gate runs
+#             with it. Without the settings API (READ_GRAPHS_SWITCH) it is
+#             INCONCLUSIVE;
 #   gate      run READ_GRAPHS_GATE_CMD (default scripts/devnet-comprehensive.sh)
 #             with read graphs on, wait for `ready`, then run the full check
 #             again. Every mismatch a check logs during the workload fails the
@@ -878,12 +883,56 @@ live_query() {
       try { const j = JSON.parse(d); process.stdout.write(String(j.semantics ?? j.result?.semantics ?? j.code ?? "")); } catch { /* not JSON */ }
     });')"
 }
-# live_expect <n> <label> <view> <semantics or ""> <expected "<code> <semantics or code>"> [seconds to retry]: prints
-# what the node answered instead, and fails, unless it answers as expected within the time given.
+# The answers are checked with a join across assets: two working-memory drafts of the node's own agent in the live
+# context graph, one holding <x> knows <y> and the other <y> name "joined ...". Only an answer across assets joins them:
+# a merged query must return the joined row, and a per-asset one must not.
+JOIN_X="urn:read-graphs-live:$RUN_SLUG:x"
+JOIN_Y="urn:read-graphs-live:$RUN_SLUG:y"
+JOIN_NAME="joined $RUN_SLUG"
+JOIN_SPARQL="SELECT ?name WHERE { <$JOIN_X> <http://schema.org/knows> ?y . ?y <http://schema.org/name> ?name }"
+# live_join_fixture <n>: node <n>'s agent writes the two drafts. Prints why, and fails, unless both are acknowledged.
+live_join_fixture() {
+  local n="$1" body resp
+  body="{\"contextGraphId\":\"$LIVE_CG\",\"name\":\"live-join-a-$RUN_SLUG\"}"
+  api "$n" POST /api/knowledge-assets "$body" > /dev/null
+  body="{\"contextGraphId\":\"$LIVE_CG\",\"quads\":[{\"subject\":\"$JOIN_X\",\"predicate\":\"http://schema.org/knows\",\"object\":\"$JOIN_Y\"}]}"
+  resp="$(api "$n" POST "/api/knowledge-assets/live-join-a-$RUN_SLUG/wm/write" "$body")"
+  case "$(code_of "$resp")" in 2??) ;; *) echo "the first draft of the join was not written (HTTP $(code_of "$resp"))"; return 1 ;; esac
+  body="{\"contextGraphId\":\"$LIVE_CG\",\"name\":\"live-join-b-$RUN_SLUG\"}"
+  api "$n" POST /api/knowledge-assets "$body" > /dev/null
+  body="{\"contextGraphId\":\"$LIVE_CG\",\"quads\":[{\"subject\":\"$JOIN_Y\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"$JOIN_NAME\\\"\"}]}"
+  resp="$(api "$n" POST "/api/knowledge-assets/live-join-b-$RUN_SLUG/wm/write" "$body")"
+  case "$(code_of "$resp")" in 2??) ;; *) echo "the second draft of the join was not written (HTTP $(code_of "$resp"))"; return 1 ;; esac
+}
+# live_join_query <n> <semantics or ""> <out>: the join on working memory. Prints "<HTTP code> <the semantics that
+# answered, or the refusal's code>", and with an answer " <rows holding the joined name>".
+live_join_query() {
+  local body resp
+  body="$(node -e '
+    const [contextGraphId, semantics, sparql] = process.argv.slice(1);
+    const body = { contextGraphId, view: "working-memory", sparql };
+    if (semantics) body.semantics = semantics;
+    process.stdout.write(JSON.stringify(body));' "$LIVE_CG" "$2" "$JOIN_SPARQL")"
+  resp="$(api "$1" POST /api/query "$body")"
+  printf '%s\n' "$resp" > "$3"
+  printf '%s %s' "$(code_of "$resp")" "$(body_of "$resp" | NAME="$JOIN_NAME" node -e '
+    let d = ""; process.stdin.on("data", (c) => d += c).on("end", () => {
+      let j; try { j = JSON.parse(d); } catch { return; }
+      const label = String(j.semantics ?? j.result?.semantics ?? j.code ?? "");
+      const bindings = Array.isArray(j.result?.bindings) ? j.result.bindings : null;
+      // A literal however the release renders it: "lexical"^^<datatype>, "lexical"@lang, bare, or as an object.
+      const value = (v) => { const t = String(v && typeof v === "object" ? v.value ?? "" : v ?? ""); const m = /^"((?:[^"\\]|\\.)*)"/.exec(t); return m ? m[1] : t; };
+      process.stdout.write(label + (bindings === null ? "" : ` ${bindings.filter((b) => value(b.name) === process.env.NAME).length}`));
+    });')"
+}
+# live_expect <n> <label> <vm|join> <semantics or ""> <expected> [seconds to retry]: prints what the node answered
+# instead, and fails, unless it answers as expected within the time given. vm: live_query on verifiable memory,
+# "<code> <semantics or code>"; join: live_join_query, "<code> <semantics> <rows>" ("<code> <code>" for a refusal).
 live_expect() {
   local got deadline=$(( $(now) + ${6:-0} ))
   while :; do
-    got="$(live_query "$1" "$3" "$4" "$RESULTS/rows/live.query-$2.node$1")"
+    if [ "$3" = join ]; then got="$(live_join_query "$1" "$4" "$RESULTS/rows/live.join-$2.node$1")"
+    else got="$(live_query "$1" verifiable-memory "$4" "$RESULTS/rows/live.query-$2.node$1")"; fi
     [ "$got" = "$5" ] && return 0
     [ "$(now)" -lt "$deadline" ] || { echo "$got"; return 1; }
     sleep 5
@@ -894,12 +943,14 @@ live_expect() {
 live_node() {
   local n="$1" body why got
   live_get "$n" before > /dev/null || { echo "reading the settings of $LIVE_CG: $(settings_read "$RESULTS/rows/live.before.node$n" refusal)"; return 1; }
+  why="$(live_join_fixture "$n")" || { echo "$why"; return 1; }
   # Off: the context graph's read graphs go, and a merged request is refused as for a layer the node does not serve.
   body="$(live_body off off off)"
   why="$(live_put "$n" off "$body")" || { echo "switching it off was refused: $why"; return 1; }
   [ "$(live_layers "$n" off)" = "wm=off swm=off vm=off" ] || { echo "after off, the effective modes are $(live_layers "$n" off)"; return 1; }
   live_wait_gone "$n" gone || { echo "after off, read graphs of it were still listed after ${READY_TIMEOUT} s: $(awk '{ print "<" $3 "> (" $1 ")" }' "$RESULTS/rows/live.gone.node$n" | head -3 | paste -sd ',' -)"; return 1; }
-  got="$(live_expect "$n" off verifiable-memory merged "400 SEMANTICS_UNSUPPORTED")" || { echo "after off, a merged query answered $got, not 400 SEMANTICS_UNSUPPORTED"; return 1; }
+  got="$(live_expect "$n" off vm merged "400 SEMANTICS_UNSUPPORTED")" || { echo "after off, a merged query answered $got, not 400 SEMANTICS_UNSUPPORTED"; return 1; }
+  got="$(live_expect "$n" off join merged "400 SEMANTICS_UNSUPPORTED")" || { echo "after off, the merged join answered $got, not 400 SEMANTICS_UNSUPPORTED"; return 1; }
   # build: rebuilt from nothing, ready, and the full check clean.
   body="$(live_body build build build)"
   why="$(live_put "$n" build "$body")" || { echo "switching it to build was refused: $why"; return 1; }
@@ -907,29 +958,33 @@ live_node() {
   wait_all_ready "live-build" "$READY_TIMEOUT" "$n" || { echo "after build, not ready after ${READY_TIMEOUT} s$(unsettled "$RESULTS/rows/live-build.node$n")"; return 1; }
   [ -n "$(live_graphs "$RESULTS/rows/live-build.node$n")" ] || { echo "after build, status lists no read graph of it"; return 1; }
   full_checks "live-build" "$n" || { echo "after build, the full check is not clean: $(cat "$RESULTS/checks/live-build.failed")"; return 1; }
-  got="$(live_expect "$n" build verifiable-memory merged "400 SEMANTICS_UNSUPPORTED")" || { echo "in build, a merged query answered $got, not 400 SEMANTICS_UNSUPPORTED"; return 1; }
-  # serve for verifiable memory: a merged query is answered across assets, a per-asset one is not.
-  body="$(live_body - - serve)"
-  why="$(live_put "$n" serve "$body")" || { echo "switching verifiable memory to serve was refused: $why"; return 1; }
-  [ "$(live_layers "$n" serve)" = "wm=build swm=build vm=serve" ] || { echo "after serve, the effective modes are $(live_layers "$n" serve)"; return 1; }
-  got="$(live_expect "$n" serve verifiable-memory merged "200 merged" 60)" || { echo "in serve, a merged query answered $got, not 200 merged"; return 1; }
-  got="$(live_expect "$n" serve-per-asset verifiable-memory per-asset "200 per-asset")" || { echo "in serve, a per-asset query answered $got"; return 1; }
+  got="$(live_expect "$n" build join merged "400 SEMANTICS_UNSUPPORTED")" || { echo "in build, the merged join answered $got, not 400 SEMANTICS_UNSUPPORTED"; return 1; }
+  # serve for working memory and verifiable memory: the merged join returns the joined row, the per-asset one none.
+  body="$(live_body serve - serve)"
+  why="$(live_put "$n" serve "$body")" || { echo "switching working and verifiable memory to serve was refused: $why"; return 1; }
+  [ "$(live_layers "$n" serve)" = "wm=serve swm=build vm=serve" ] || { echo "after serve, the effective modes are $(live_layers "$n" serve)"; return 1; }
+  got="$(live_expect "$n" serve join merged "200 merged 1" 60)" || { echo "in serve, the merged join answered $got, not the joined row (200 merged 1)"; return 1; }
+  got="$(live_expect "$n" serve-per-asset join per-asset "200 per-asset 0")" || { echo "in serve, the per-asset join answered $got, not 200 per-asset 0"; return 1; }
+  got="$(live_expect "$n" serve vm merged "200 merged" 60)" || { echo "in serve, a merged query on verifiable memory answered $got, not 200 merged"; return 1; }
   # The context graph's default view semantics: followed by a request that names none, and removed again.
   body="$(live_body - - - merged)"
   why="$(live_put "$n" default "$body")" || { echo "setting the default semantics was refused: $why"; return 1; }
-  got="$(live_expect "$n" default verifiable-memory "" "200 merged")" || { echo "with the default merged, a query naming no semantics answered $got"; return 1; }
+  got="$(live_expect "$n" default join "" "200 merged 1")" || { echo "with the default merged, the join naming no semantics answered $got, not the joined row"; return 1; }
   body="$(live_body - - - null)"
   why="$(live_put "$n" no-default "$body")" || { echo "removing the default semantics was refused: $why"; return 1; }
-  got="$(live_expect "$n" no-default verifiable-memory "" "200 per-asset")" || { echo "with the default removed, a query naming no semantics answered $got"; return 1; }
+  got="$(live_expect "$n" no-default join "" "200 per-asset 0")" || { echo "with the default removed, the join naming no semantics answered $got, not 200 per-asset 0"; return 1; }
   return 0
 }
 
 # live_under_load: on LOAD_NODE, switch the live context graph's layers between build and serve while the node's own
 # agent writes drafts into it; every acknowledged write must be there after it, its read graphs ready, and the full
-# check clean. Prints the outcome ("<n switches> <m acknowledged writes>") or why, and fails.
+# check clean. The switches count as under load only when writes were acknowledged between every two of them (each
+# write and each switch is timed): otherwise INCONCLUSIVE (exit 3). Prints the outcome ("<n switches> <m acknowledged
+# writes, k of them between the first and last switch>") or why, and fails.
 live_under_load() {
-  local n="$LOAD_NODE" acked="$RESULTS/live-load.acked" writer step switches=0 i body why refused="" missing="" id
-  : > "$acked"
+  local n="$LOAD_NODE" acked="$RESULTS/live-load.acked" switched="$RESULTS/live-load.switched" writer step switches=0
+  local i t body why refused="" missing="" id gaps during
+  : > "$acked"; : > "$switched"
   (
     export DKG_API_MAXTIME=15
     for i in $(seq 1 60); do
@@ -937,36 +992,42 @@ live_under_load() {
       body="{\"contextGraphId\":\"$LIVE_CG\",\"name\":\"$id\"}"
       api "$n" POST /api/knowledge-assets "$body" > /dev/null 2>&1 || true
       body="{\"contextGraphId\":\"$LIVE_CG\",\"quads\":[{\"subject\":\"urn:read-graphs-live:$RUN_SLUG:$i\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"live $i\\\"\"}]}"
-      case "$(code_of "$(api "$n" POST "/api/knowledge-assets/$id/wm/write" "$body")")" in 2??) echo "$i" >> "$acked" ;; esac
+      # Each acknowledged write with the second it was acknowledged in.
+      case "$(code_of "$(api "$n" POST "/api/knowledge-assets/$id/wm/write" "$body")")" in 2??) echo "$i $(date +%s)" >> "$acked" ;; esac
       sleep 0.3
     done
   ) &
   writer=$!
   echo "$writer" > "$RESULTS/live-load.writer"
-  # Each step: wm, swm, vm ("-" keeps a layer as it is).
-  for step in "serve serve -" "build build -" "serve - -" "build - -" "serve serve -" "build build -"; do
+  # Each step: wm, swm, vm ("-" keeps a layer as it is). The last leaves working memory in serve for the restart.
+  for step in "serve serve -" "build build -" "serve - -" "build - -" "serve serve -" "serve build -"; do
     sleep 3
     switches=$((switches + 1))
     # shellcheck disable=SC2086 # the step is three words
     body="$(live_body $step)"
     why="$(live_put "$n" "load-$switches" "$body")" || refused="$refused; switch $switches ($step): $why"
+    echo "$switches $(date +%s)" >> "$switched"
   done
   wait "$writer" 2>/dev/null; rm -f "$RESULTS/live-load.writer"
   [ -z "$refused" ] || { echo "switches under write load were refused${refused}"; return 1; }
-  [ -s "$acked" ] || { echo "no write was acknowledged during the switches, so nothing ran under load"; return 1; }
+  # Writes acknowledged between every two switches, or the switches were not under load.
+  gaps="$(awk 'NR == FNR { at[$1] = $2; last = $1; next } { done_at[++w] = $2 }
+    END { for (k = 1; k < last; k++) { c = 0; for (j = 1; j <= w; j++) if (done_at[j] >= at[k] && done_at[j] <= at[k + 1]) c++; if (c == 0) printf " %d-%d", k, k + 1 } }' "$switched" "$acked")"
+  during="$(awk 'NR == FNR { if (FNR == 1) first = $2; final = $2; next } $2 >= first && $2 <= final { c++ } END { print c + 0 }' "$switched" "$acked")"
+  [ -z "$gaps" ] || { echo "no write was acknowledged between switches$gaps ($(acked_count "$acked") acknowledged in all), so those switches were not under load"; return 3; }
   wait_all_ready "live-load" "$READY_TIMEOUT" "$n" || { echo "after the switches, not ready after ${READY_TIMEOUT} s$(unsettled "$RESULTS/rows/live-load.node$n")"; return 1; }
   full_checks "live-load" "$n" || { echo "after the switches, the full check is not clean: $(cat "$RESULTS/checks/live-load.failed")"; return 1; }
   why="$(query_rows "$RESULTS/rows/live-load.readback" "$n" "$LIVE_CG" working-memory "SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }" s name)" \
     || { echo "the drafts could not be read back: $why"; return 1; }
-  while read -r i; do
+  while read -r i t; do
     grep -qF "\"urn:read-graphs-live:$RUN_SLUG:$i\"" "$RESULTS/rows/live-load.readback" || missing="$missing $i"
   done < "$acked"
   [ -z "$missing" ] || { echo "acknowledged writes missing after the switches:$(echo "$missing" | cut -c1-120)"; return 1; }
-  printf '%s %s' "$switches" "$(acked_count "$acked")"
+  printf '%s %s %s' "$switches" "$(acked_count "$acked")" "$during"
 }
 
-# live_restart: restart LOAD_NODE; its settings for the live context graph must hold, and verifiable memory be served
-# again without being set again.
+# live_restart: restart LOAD_NODE; its settings for the live context graph must hold, and the merged join and
+# verifiable memory be served again without being set again.
 live_restart() {
   local n="$LOAD_NODE" before after got
   live_get "$n" pre-restart > /dev/null || { echo "reading the settings before the restart: $(settings_read "$RESULTS/rows/live.pre-restart.node$n" refusal)"; return 1; }
@@ -976,11 +1037,13 @@ live_restart() {
   after="$(settings_read "$RESULTS/rows/live.post-restart.node$n" rows "$LIVE_CG")"
   [ "$after" = "$before" ] || { echo "the settings changed across the restart: $before before, $after after"; return 1; }
   wait_all_ready "live-restart" "$READY_TIMEOUT" "$n" || { echo "after the restart, not ready after ${READY_TIMEOUT} s$(unsettled "$RESULTS/rows/live-restart.node$n")"; return 1; }
-  got="$(live_expect "$n" restart verifiable-memory merged "200 merged" 60)" || { echo "after the restart, a merged query answered $got, not 200 merged"; return 1; }
+  got="$(live_expect "$n" restart join merged "200 merged 1" 60)" || { echo "after the restart, the merged join answered $got, not the joined row (200 merged 1)"; return 1; }
+  got="$(live_expect "$n" restart-per-asset join per-asset "200 per-asset 0")" || { echo "after the restart, the per-asset join answered $got, not 200 per-asset 0"; return 1; }
+  got="$(live_expect "$n" restart vm merged "200 merged" 60)" || { echo "after the restart, a merged query on verifiable memory answered $got, not 200 merged"; return 1; }
 }
 
 phase_live() {
-  local started n why outcome holders=""
+  local started n why outcome rc holders=""
   started="$(now)"
   [ "$SWITCH" = api ] || { record live INCONCLUSIVE 0 "the daemon offers no settings API, so modes could not be switched live (see Notes)"; return; }
   # The nodes that hold the live context graph; the others have nothing of it to switch.
@@ -993,9 +1056,15 @@ phase_live() {
   for n in $holders; do
     why="$(live_node "$n")" || { record live FAIL "$(( $(now) - started ))" "node$n, $LIVE_CG: $why"; return; }
   done
-  outcome="$(live_under_load)" || { record live FAIL "$(( $(now) - started ))" "node$LOAD_NODE, $LIVE_CG under write load: $outcome"; return; }
+  outcome="$(live_under_load)"; rc=$?
+  case "$rc" in
+    0) ;;
+    3) record live INCONCLUSIVE "$(( $(now) - started ))" "node$LOAD_NODE, $LIVE_CG under write load: $outcome"; return ;;
+    *) record live FAIL "$(( $(now) - started ))" "node$LOAD_NODE, $LIVE_CG under write load: $outcome"; return ;;
+  esac
   why="$(live_restart)" || { record live FAIL "$(( $(now) - started ))" "node$LOAD_NODE, $LIVE_CG across a restart: $why"; return; }
-  record live PASS "$(( $(now) - started ))" "$LIVE_CG through the settings API on nodes $holders: off dropped its read graphs; build rebuilt them with a clean full check; serve answered merged queries for verifiable memory; the default semantics was followed and removed. On node$LOAD_NODE: ${outcome%% *} switches between build and serve under write load, all ${outcome##* } acknowledged drafts there and a clean full check; the settings held across a restart and were served again"
+  set -- $outcome
+  record live PASS "$(( $(now) - started ))" "$LIVE_CG through the settings API on nodes $holders: off dropped its read graphs; build rebuilt them with a clean full check; serve answered a join across two working-memory drafts with the joined row when merged and none per asset, and merged queries on verifiable memory; the default semantics was followed and removed. On node$LOAD_NODE: $1 switches between build and serve with writes acknowledged between every two ($3 of $2 acknowledged drafts between the first and last switch), every draft there afterwards and a clean full check; after a restart the settings held and the join was answered across assets again"
 }
 
 # gate_verdict <exit code>: PASS, INCONCLUSIVE or FAIL for the gate. The comprehensive run writes REPORT.json
