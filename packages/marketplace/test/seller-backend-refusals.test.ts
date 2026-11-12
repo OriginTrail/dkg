@@ -164,7 +164,7 @@ async function setUp(timeoutMs?: number): Promise<void> {
   });
   const keys = new AccessKeys(join(dir, 'buyer'));
   gateway = new Gateway({
-    chain, buyerWallet: NODE.address, store: buyer.store, router, keys, dir: join(dir, 'buyer'),
+    chain, buyerWallet: NODE.address, store: buyer.store, router, keys,
     send: async (_peer, payload) => {
       const answer = await seller.serve(decodeMessage(payload), 'buyer-peer');
       answers.push(answer);

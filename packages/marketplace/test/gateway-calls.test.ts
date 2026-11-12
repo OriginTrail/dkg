@@ -26,6 +26,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 import {
   AccessKeys,
+  BUYER_LEDGER_FILE,
   Buyer,
   BuyerStore,
   DEFAULT_STOP_SERVING_SECONDS,
@@ -76,7 +77,10 @@ let gate: Promise<void> | undefined;
 const backend: Connector = { kind: 'openai', complete: async () => ({ content: 'synthetic answer', promptTokens: 7, completionTokens: 5 }) };
 const body = (a: GatewayAnswer) => a.body as any;
 const call = (chat: unknown = CHAT, signal?: AbortSignal, g: Gateway = gateway) => g.chatCompletion(caller, chat, { signal });
-const nonceLines = async () => (await readFile(join(dir, 'buyer', 'buyer-nonces.jsonl'), 'utf8').catch(() => '')).trim().split('\n').filter(Boolean);
+/** The ledger's records of one kind, oldest first. */
+const ledgerLines = async (type: string) => (await readFile(join(dir, 'buyer', BUYER_LEDGER_FILE), 'utf8').catch(() => '')).trim().split('\n').filter(Boolean)
+  .map((l) => JSON.parse(l)).filter((e) => e.type === type);
+const nonceLines = () => ledgerLines('nonce');
 /** The calls the gateway has taken (reading the chain, waiting or running), and those waiting for their turn. */
 const turnsOf = (g: Gateway) => (g as unknown as { turns: { size: number } }).turns.size;
 const waitingOf = (g: Gateway) => (g as unknown as { turns: { waiting: number } }).turns.waiting;
@@ -126,7 +130,7 @@ async function setUp(options: {
   const router = routerOf();
   keys = new AccessKeys(join(dir, 'buyer'));
   deps = {
-    chain, buyerWallet: NODE.address, store: buyer.store, router, keys, dir: join(dir, 'buyer'),
+    chain, buyerWallet: NODE.address, store: buyer.store, router, keys,
     ...(options.turns ? { turns: options.turns } : {}),
     ...(options.clock ? { clock: options.clock } : {}),
     send: async (_peer, payload) => {
@@ -247,7 +251,7 @@ describe('the end of the epoch', () => {
     const inTime = await call();
     expect(inTime.status).toBe(200);
     // The request it sent lives as long as the gateway waits for its answer, and its receipt was completed in it.
-    const kept = JSON.parse((await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n').at(-1)!);
+    const kept = (await ledgerLines('call')).at(-1)!;
     expect(kept.request.expiry - lastSend).toBe(MIN_REQUEST_SECONDS);
     expect(kept.request.issuedAt).toBe(lastSend - ISSUED_BEFORE_SECONDS);
     expect(kept.receipt.completedAt).toBeLessThanOrEqual(kept.request.expiry);
@@ -313,8 +317,10 @@ describe('refused and unanswered calls', () => {
     await gateway.tick();
     expect(keys.reservedOf(caller.key.keyId)).toBe(0n);
     expect((await keys.list())[0]!.spent).toBe(String(MOST));
-    const receipts = (await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
-    expect(receipts).toEqual([expect.objectContaining({ type: 'final', epoch })]);
+    // Of the epoch, its reconciliation is all that is left.
+    expect(await ledgerLines('final')).toEqual([expect.objectContaining({ type: 'final', epoch })]);
+    expect(await ledgerLines('call')).toEqual([]);
+    expect(await ledgerLines('nonce')).toEqual([]);
   });
 
   it('count a receipt that fails a check at its most value, not at what it claims', async () => {
@@ -379,7 +385,7 @@ describe('calls that hold their bound (re-review)', () => {
     });
     const { now } = await chain.getEpochTimes();
     expect((await call()).status).toBe(200);
-    const kept = JSON.parse((await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n').at(-1)!);
+    const kept = (await ledgerLines('call')).at(-1)!;
     expect(kept.request.issuedAt).toBeGreaterThanOrEqual(now - ISSUED_BEFORE_SECONDS);
     expect(kept.request.issuedAt).toBeLessThan(now - 10);
   });
@@ -427,7 +433,7 @@ describe('calls that hold their bound (re-review)', () => {
     const open = holdSends();
     const pending = call();
     await vi.waitFor(() => expect(sends).toBe(1));
-    const records = async () => (await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+    const records = () => ledgerLines('call');
     expect(await records()).toMatchObject([{ state: 'open', problem: 'sent' }]);
     // The node stops here: a restart counts the call from that record alone.
     const restartedKeys = new AccessKeys(join(dir, 'buyer'));
@@ -489,7 +495,7 @@ describe('an answer that is not one', () => {
     const { epoch } = await chain.getEpochTimes();
     tamper = (a) => (a.ok ? { ...a, receipt: { anything: 1 } } as unknown as ServeResponse : a);
     expect(await call()).toMatchObject({ status: 502, body: { error: { code: 'bad_receipt' }, problem: 'malformed' } });
-    const kept = JSON.parse((await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n').at(-1)!);
+    const kept = (await ledgerLines('call')).at(-1)!;
     expect(kept).toMatchObject({ state: 'refused', problem: 'malformed', receipt: { anything: 1 } });
     // Kept as its seller sent it, it is read back as kept: refused, never a receipt to land.
     await restart();

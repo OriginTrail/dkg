@@ -162,7 +162,7 @@ describe('access keys', () => {
 
   it('have 64-bit ids, and a key whose id is taken is made again', async () => {
     const draws = [Buffer.alloc(24, 1), Buffer.alloc(24, 1), Buffer.alloc(24, 2)];
-    const keys = new AccessKeys(dir, undefined, () => draws.shift()!);
+    const keys = new AccessKeys(dir, () => draws.shift()!);
     const first = await keys.make(SCOPES, 0);
     expect(first.key.keyId).toBe(`dkgmk_${'01'.repeat(8)}`);
     const second = await keys.make(SCOPES, 0);
@@ -170,7 +170,7 @@ describe('access keys', () => {
     expect(await keys.check(first.secret, 1)).toMatchObject({ ok: true, key: { keyId: first.key.keyId } });
     expect(await keys.check(second.secret, 1)).toMatchObject({ ok: true, key: { keyId: second.key.keyId } });
     // A source that never gives another id gives up, and makes nothing.
-    const stuck = new AccessKeys(dir, undefined, () => Buffer.alloc(24, 1));
+    const stuck = new AccessKeys(dir, () => Buffer.alloc(24, 1));
     await expect(stuck.make(SCOPES, 0)).rejects.toThrow(/no key id of its own/);
     expect(await stuck.list()).toHaveLength(2);
   });
@@ -187,6 +187,9 @@ describe('access keys', () => {
     expect((await keys.make(SCOPES, 2)).key.keyId).toMatch(/^dkgmk_[0-9a-f]{16}$/);
     expect(await keys.revoke('dkgmk_abababab', 3)).toMatchObject({ keyId: 'dkgmk_abababab', revoked: true });
     expect(await keys.check(secret, 4)).toMatchObject({ ok: false, code: 'revoked_key' });
+    // Read once into the buyer's ledger: the old journal is left as it was, and a restart reads the revocation from the ledger.
+    expect(await readFile(join(dir, 'access-keys.jsonl'), 'utf8')).toBe(`${JSON.stringify(make)}\n`);
+    expect(await new AccessKeys(dir).check(secret, 5)).toMatchObject({ ok: false, code: 'revoked_key' });
   });
 });
 
@@ -290,7 +293,7 @@ describe('a call with tools through the gateway', () => {
     });
     keys = new AccessKeys(join(dir, 'buyer'));
     gateway = new Gateway({
-      chain, buyerWallet: NODE.address, store: buyer.store, router, keys, dir: join(dir, 'buyer'),
+      chain, buyerWallet: NODE.address, store: buyer.store, router, keys,
       send: async (_peer, payload) => {
         payloads.push(new TextDecoder().decode(payload));
         const answer = await seller.serve(decodeMessage(payload), 'buyer-peer');

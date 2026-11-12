@@ -148,7 +148,6 @@ export async function startMarketplaceGateway(options: MarketplaceGatewayOptions
     send: (peerId, payload, messageId) => agent.sendMarketplaceMessage(peerId, 'serve', payload, {
       timeoutMs: PEER_LIMITS.serveTimeoutMs, maxReadBytes: PEER_LIMITS.serveResponseBytes, messageId,
     }),
-    dir,
     modelOf: async (serviceId, epoch) => (await router.offersOf([epoch])).find((o) => o.serviceId === serviceId)?.model,
     fx,
     ...(options.log ? { log: options.log } : {}),

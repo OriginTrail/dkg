@@ -81,7 +81,7 @@ beforeEach(async () => {
     quote: async (_peer, services) => ({ seller: String(OTHER), epoch, offers: services.map((serviceId) => ({ serviceId, pricePerUnit: '8', available: true, capacity: null })) }),
   });
   gateway = new Gateway({
-    chain, buyerWallet: NODE.address, store: new BuyerStore(dir), router, keys: new AccessKeys(dir), dir,
+    chain, buyerWallet: NODE.address, store: new BuyerStore(dir), router, keys: new AccessKeys(dir),
     send: async () => { throw new Error('not called'); }, fx: FX,
   });
   // The node's subscription funds A this epoch.
