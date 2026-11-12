@@ -322,7 +322,8 @@ describe('PUT /api/store/read-graphs/settings', () => {
     vi.spyOn(table, 'restore').mockImplementationOnce(() => { throw new Error('disk I/O error'); });
     const answer = await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'build' } });
     expect(answer).toMatchObject({ status: 503, body: { code: 'READ_GRAPH_SETTINGS_UNAVAILABLE' } });
-    expect(answer.body!.error).toBe(`Search across assets wasn't changed for ${CG}, but its previous settings couldn't be put back (disk I/O error): set them again.`);
+    expect(answer.body!.error).toBe(`Search across assets wasn't changed for ${CG} now, but the change is still saved (disk I/O error), so the next change or a `
+      + 'restart puts it in force: set the previous settings again to undo it.');
     expect(lines).toEqual([`[read-graphs] The previous settings of ${CG} could not be put back after a change the node did not apply: disk I/O error`]);
     expect(readGraphModeOfLayer(readGraphRuntimeOf(agent.store)!.modes, CG, MemoryLayer.VerifiableMemory)).toBe('off');
   });
@@ -352,6 +353,21 @@ describe('PUT /api/store/read-graphs/settings', () => {
     expect(res.statusCode).toBe(503);
     expect(JSON.parse(res.body)).toMatchObject({ code: 'NODE_SHUTTING_DOWN' });
     expect(rowsOf(CG)).toEqual(before);
+    // A change still saved after a failed put-back keeps its own answer, even during shutdown.
+    const saved = new ReadGraphRequests();
+    const failing = vi.fn(async (_next: ReadGraphModes, options?: { signal?: AbortSignal }) => {
+      queueMicrotask(() => saved.end());
+      await new Promise((_resolve, reject) => options?.signal?.addEventListener('abort', () => reject(options.signal!.reason), { once: true }));
+      return [];
+    });
+    const putBackFails = controlOf({ agent: agentOf(layeredStore(), { applyReadGraphModesV1: failing }) }).control;
+    vi.spyOn(table, 'restore').mockImplementationOnce(() => { throw new Error('disk I/O error'); });
+    const kept = fakeRes();
+    await handleReadGraphSettingsRoutes({ ...ctx, res: kept, readGraphSettings: putBackFails,
+      req: fakeReq('PUT', READ_GRAPH_SETTINGS_PATH, JSON.stringify({ contextGraphId: 'settings-route-third', layers: { 'verifiable-memory': 'build' } }), {}) } as unknown as RequestContext,
+      { requests: saved });
+    expect(kept.statusCode).toBe(503);
+    expect(JSON.parse(kept.body)).toMatchObject({ code: 'READ_GRAPH_SETTINGS_UNAVAILABLE' });
     // A change after that is refused at once.
     const refused = fakeRes();
     await handleReadGraphSettingsRoutes({ ...ctx, res: refused, req: fakeReq('PUT', READ_GRAPH_SETTINGS_PATH, JSON.stringify({ contextGraphId: CG, viewSemantics: 'merged' }), {}) } as unknown as RequestContext, { requests });

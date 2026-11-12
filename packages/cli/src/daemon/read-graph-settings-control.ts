@@ -83,7 +83,9 @@ export async function readGraphSettingsOnCreate(
   const untrack = requests.track(stop);
   try {
     const outcome = await control.applyOnCreate(input.contextGraphId, input.layers, input.actor, stop.signal);
-    return stop.signal.aborted && requests.ending && !('applied' in outcome) ? NODE_SHUTTING_DOWN_ON_CREATE : outcome;
+    // Shutdown ends a change before it changes anything; a change still saved after a failed put-back keeps its own answer.
+    const ended = stop.signal.aborted && requests.ending && !('applied' in outcome) && outcome.code !== 'READ_GRAPH_SETTINGS_UNAVAILABLE';
+    return ended ? NODE_SHUTTING_DOWN_ON_CREATE : outcome;
   } finally {
     untrack();
   }
@@ -240,7 +242,7 @@ export class ReadGraphSettingsControl {
 
   /**
    * Put a context graph's previous rows back after a change the node did not apply, and answer why. Rows that cannot be put back are said so: the
-   * running node keeps its settings, and the table holds the change until it is set again.
+   * running node keeps its settings, and the table keeps the change, which the next change or a restart puts in force.
    */
   #putBack(contextGraphId: string, previous: ReadGraphSettingsRows, result: ChangeResult): ChangeResult {
     try {
@@ -250,7 +252,8 @@ export class ReadGraphSettingsControl {
       this.#log(`[read-graphs] The previous settings of ${contextGraphId} could not be put back after a change the node did not apply: ${messageOf(error)}`);
       return refused(503, {
         code: 'READ_GRAPH_SETTINGS_UNAVAILABLE',
-        error: `Search across assets wasn't changed for ${contextGraphId}, but its previous settings couldn't be put back (${messageOf(error)}): set them again.`,
+        error: `Search across assets wasn't changed for ${contextGraphId} now, but the change is still saved (${messageOf(error)}), so the next change or a `
+          + 'restart puts it in force: set the previous settings again to undo it.',
       });
     }
   }
