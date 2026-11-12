@@ -191,8 +191,37 @@ describe('graph-set deduplication routes', () => {
   });
 
   it.each([
+    // Without caller variables, a property list and its named-blank-node form: three distinct blank matches,
+    // two in one graph and one in the next.
+    ['SELECT (COUNT(*) AS ?n) WHERE { [ <urn:p:link> [ <urn:p:to> "end" ] ] }', 3],
+    ['SELECT (COUNT(*) AS ?n) WHERE { _:s <urn:p:link> _:m . _:m <urn:p:to> "end" }', 3],
+    ['SELECT (COUNT(*) AS ?n) WHERE { <urn:s:hop> <urn:p:link> [ <urn:p:to> "end" ] }', 3],
+    ['SELECT (COUNT(*) AS ?n) WHERE { [ <urn:p:link> [ <urn:p:to> "end" ] ] FILTER(STRLEN("x") = 1) }', 3],
+    ['SELECT (COUNT(*) AS ?n) WHERE { [ <urn:p:value> "blank" ] }', 2],
+    ['SELECT (COUNT(*) AS ?n) WHERE { [ <urn:p:value> "one" ] a <urn:Thing> }', 1],
+  ])('reads the blank nodes of a pattern without caller variables as the materialized RDF union, whatever their syntax: %s', async (query, expected) => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert(data);
+      await store.update(`INSERT { ?s ?p ?o } WHERE { VALUES ?g { ${graphs.map((g) => `<${g}>`).join(' ')} } GRAPH ?g { ?s ?p ?o } }`);
+      const rewritten = rewrite(query);
+      expect(rewritten.source).toContain('MIN(?__dkgDedupMatchGraph)');
+      const [actual, reference] = await Promise.all([
+        store.query(materializePreparedSparql(rewritten.prepared)),
+        store.query(materializePreparedSparql(scope(query).prepared)),
+      ]);
+      expect(bag(actual.bindings)).toEqual(bag(reference.bindings));
+      const rows = query.includes('COUNT') ? Number(/^"?(\d+)/.exec(actual.bindings[0]?.n ?? '')?.[1]) : actual.bindings.length;
+      expect(rows).toBe(expected);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it.each([
     '?s <urn:p:link>/<urn:p:to> ?o',
     '?s <urn:p:link> [ <urn:p:to> ?o ]',
+    '?s <urn:p:link> _:b . _:b <urn:p:to> ?o',
     '[] <urn:p:link> ?m . ?m <urn:p:to> ?o',
     '?s <urn:p:value>|<urn:p:other> ?o',
     '?o ^<urn:p:value> ?s',

@@ -210,18 +210,20 @@ function buildDeduplicatedGraphPattern(
   // the same row semantics, including its modifiers and volatile FILTERs.
   const distinct = uniqueMappings;
   const movedFilters = filters;
-  // Every retained row evaluates each moved FILTER once. Blank-node variables
-  // stay private: they key the graph choice and the replay, and are not projected.
-  const { pattern: inner, blankVariables } = renderDedupPattern(scope, movedFilters, allocate);
+  // Every retained row evaluates each moved FILTER once. Hidden blank-node
+  // variables stay private across graph selection and replay.
   const callerVariables = variablesOutsideHeldGraphGuards(scope).map(variable => variable.source);
+  // A mapping is read from one graph. The caller's variables are the mapping; blank nodes, like paths, then
+  // repeat as often as the chosen graph holds them. Without caller variables the blank nodes are the mapping:
+  // a mirrored match is read once, and distinct blank matches each.
+  const { pattern: inner, blankVariables } = renderDedupPattern(scope, movedFilters, allocate, callerVariables.length === 0);
   // A pattern without caller variables projects one private variable, so its rows are read through this route too
   // and keep their multiplicity. Blazegraph counts no row that binds no variable, so the variable is bound, except
   // where the query projects every variable (`*`): there the rows themselves are the answer, and stay empty.
   const emptyProjection = callerVariables.length ? undefined : allocate('__dkgNoVariable');
   const bindEmpty = emptyProjection && !projectsEveryVariable(scope) ? ` BIND(true AS ${emptyProjection})` : '';
   const variables = callerVariables.length ? callerVariables.join(' ') : emptyProjection!;
-  // A mapping is read from one graph: the caller's variables and the blank nodes choose the graph together.
-  const keys = [...callerVariables, ...blankVariables].join(' ');
+  const keys = (callerVariables.length ? callerVariables : blankVariables).join(' ');
   const filterVariables = movedFilters.map((_filter, index) => allocate(`__dkgDedupFilter${index}`));
   // BIND evaluates on every retained row on the right of the rejoin. A raw
   // FILTER can be pushed onto the grouped left side by either engine, sampling
