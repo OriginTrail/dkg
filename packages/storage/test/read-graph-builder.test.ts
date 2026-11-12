@@ -522,6 +522,23 @@ describe('building a read graph', () => {
     expect(await triplesOf(adapter, fixture.readGraphs.wholeVm)).toContain(`urn:s:docs ${P} "d"`);
   });
 
+  it('measures a full check against the registry the store holds, so a registration made past the layer is not certified', async () => {
+    const { adapter, fixture, layer, store, context } = await open();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    const { wholeVm } = fixture.readGraphs;
+    // A sub-graph registered past the layer, with data of its own, before the next builder pass refreshes the registry.
+    const docs = `${fixture.root}/docs`;
+    await adapter.insert([
+      { subject: docs, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph', graph: `${fixture.root}/_meta` },
+      { subject: docs, predicate: 'http://schema.org/name', object: '"docs"', graph: `${fixture.root}/_meta` },
+      q('urn:s:docs', '"d"', `${docs}/_verifiable_memory/${AGENT}/9`),
+    ]);
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code']);
+    expect(await checkReadGraph(store, wholeVm, 'full', { alert: () => undefined })).toMatchObject({ outcome: 'mismatch', direction: 'missing' });
+    expect(servingReadGraphGeneration(layer.runtime.mirror.get(wholeVm))).toBeUndefined();
+  });
+
   it('takes every read graph a registry change moves out of service before it sends a mark, so one the store refuses leaves none serving', async () => {
     const { adapter, fixture, layer, context } = await open();
     const [vm, swm] = fixture.keys as [ReadGraphKey, ReadGraphKey];
