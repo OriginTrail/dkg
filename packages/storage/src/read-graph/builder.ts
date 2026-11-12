@@ -175,16 +175,16 @@ export class ReadGraphBuilder {
     const due = [...jobs].filter(([readGraph]) => (this.#retries.get(readGraph)?.retryAt ?? 0) <= now())
       .sort(([left], [right]) => compareCodePoint(left, right));
     this.#pending = due.length;
-    const keeps = this.#options.off ? (key: ReadGraphKey) => !off(key) : undefined;
+    // One relevance per job, from the read graph's mode: checked before it runs, and by the job under the read graph's lock.
     for (const [readGraph, key] of due) {
       this.#building = readGraph;
       this.#progress = 0;
       const progress = (copied: number, total: number) => {
         this.#progress = total === 0 ? 1 : copied / total;
       };
+      const relevant = () => !off(key);
       try {
-        const result = await this.#run(readGraph, () => !off(key), signal, 'built',
-          () => buildReadGraph({ ...context, progress, ...(keeps ? { keeps } : {}) }, key));
+        const result = await this.#run(readGraph, relevant, signal, 'built', () => buildReadGraph({ ...context, progress, relevant }, key));
         if (typeof result === 'object' && result.outcome === 'done') await this.#report(result, signal);
       } finally {
         this.#building = undefined;
@@ -197,9 +197,9 @@ export class ReadGraphBuilder {
     this.#removing = removals.length;
     for (const readGraph of removals) {
       const key = parseReadGraphIri(readGraph)!;
+      const relevant = () => off(key);
       try {
-        const result = await this.#run(readGraph, () => off(key), signal, 'removed',
-          () => removeReadGraph({ ...context, ...(keeps ? { keeps } : {}) }, readGraph));
+        const result = await this.#run(readGraph, relevant, signal, 'removed', () => removeReadGraph({ ...context, relevant }, readGraph));
         if (result === 'failed') continue;
         if (result !== 'skipped' && result.outcome !== 'lost') this.#built.delete(readGraph);
         // Removed, with nothing left to remove, or on again: the drop is no longer asked for. One lost while still off is tried again.

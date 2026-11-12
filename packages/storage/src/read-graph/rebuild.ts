@@ -115,12 +115,11 @@ export interface ReadGraphJobContext {
   /** Told how far a build or repair has copied: member graphs copied, of those it copies; 0 before the first. */
   readonly progress?: (copied: number, total: number) => void;
   /**
-   * Whether the node keeps a read graph, as its mode says, checked under the read graph's lock. A build checks it
-   * before it takes the read graph into the mirror and before each batch, and ends `lost` once it is no longer kept.
-   * A removal checks it before it takes the read graph out of service, before each drop batch and before it removes
-   * the row, and ends `lost` once it is kept again. Without it, a build keeps and a removal removes.
+   * Whether the job is still wanted, as a builder judges it from the read graph's mode. A build or a removal checks
+   * it under the read graph's lock before it takes the read graph into or out of service, before each batch, and
+   * before it publishes or removes the row, and ends `lost` once it fails. Without it, the job goes on.
    */
-  readonly keeps?: (key: ReadGraphKey) => boolean;
+  readonly relevant?: () => boolean;
 }
 
 /** A build, a scoped repair, a removal, or a dirty mark, which reports its row and no result. */
@@ -197,7 +196,7 @@ async function build(job: ReadGraphJob, key: ReadGraphKey): Promise<ReadGraphJob
   await job.refreshRegistry(key.scope.contextGraphId);
   const begun = await job.locked(async (): Promise<Begun<{ readonly membership: GraphNameTest }>> => {
     // Switched off while the job waited for the slot or the registry: not taken back into the mirror.
-    if (!job.keeps(key)) return { ended: 'lost', row: (await job.stored()).row };
+    if (!job.relevant()) return { ended: 'lost', row: (await job.stored()).row };
     const stored = await job.reconcile();
     if (stored?.state === 'ready' && isReadGraphRowAccepted(stored, job.versions)) return { ended: 'current', row: stored };
     let started: ReadGraphStateRow | undefined;
@@ -216,7 +215,7 @@ async function build(job: ReadGraphJob, key: ReadGraphKey): Promise<ReadGraphJob
   if (begun.ended !== undefined) return job.result(begun.ended, begun.row);
   const { started, membership } = begun;
   const holds = job.mirrorHolds(started);
-  const inService = () => holds() && job.keeps(key);
+  const inService = () => holds() && job.relevant();
   if (!(await job.settledUnderRegistry(key.scope.contextGraphId, inService))) return job.lost();
   if (!(await job.drop(started, inService))) return job.lost();
   const members = await job.members(membership);
@@ -281,16 +280,14 @@ export async function removeReadGraph(context: ReadGraphJobContext, readGraph: s
 }
 
 async function remove(job: ReadGraphJob): Promise<ReadGraphJobResult> {
-  const key = parseReadGraphIri(job.readGraph)!;
   // Switched on again while the removal waited for the slot: the read graph stays in service.
-  const kept = () => job.keeps(key, false);
-  const begun = await job.locked(async (): Promise<Begun> => (kept() ? { ended: 'lost', row: (await job.stored()).row } : retire(job)));
+  const begun = await job.locked(async (): Promise<Begun> => (job.relevant() ? retire(job) : { ended: 'lost', row: (await job.stored()).row }));
   if (begun.ended !== undefined) return job.result(begun.ended, begun.row);
   const dirty = begun.started;
   await job.settled();
-  if (!(await job.drop(dirty, () => job.runtime.mirror.get(job.readGraph) === undefined && !kept()))) return job.lost();
+  if (!(await job.drop(dirty, () => job.runtime.mirror.get(job.readGraph) === undefined && job.relevant()))) return job.lost();
   // A row that reads back after the removal is in the mirror again, and maintained.
-  const removed = await job.locked(async () => (kept() ? (await job.stored()).row : job.transition(dirty, { kind: 'remove' })));
+  const removed = await job.locked(async () => (job.relevant() ? job.transition(dirty, { kind: 'remove' }) : (await job.stored()).row));
   return job.result(removed === undefined ? 'done' : 'lost', removed);
 }
 
@@ -582,9 +579,9 @@ class ReadGraphJob {
     return readGraphMembership(key, registry, this.runtime.workingMemoryIdentity);
   }
 
-  /** Whether the node keeps the read graph of `key` (`ReadGraphJobContext.keeps`), or `otherwise` when the caller does not say. */
-  keeps(key: ReadGraphKey, otherwise = true): boolean {
-    return this.context.keeps?.(key) ?? otherwise;
+  /** Whether the job is still wanted (`ReadGraphJobContext.relevant`). */
+  relevant(): boolean {
+    return this.context.relevant?.() ?? true;
   }
 
   /** Whether the mirror still holds the row a job started with. */

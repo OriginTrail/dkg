@@ -8,8 +8,8 @@ export const READ_GRAPHS_UNSUPPORTED_CODE = 'READ_GRAPHS_UNSUPPORTED';
 export class ReadGraphsUnsupportedError extends Error {
   readonly code = READ_GRAPHS_UNSUPPORTED_CODE;
 
-  constructor(readonly backend: string, readonly missingMethods: readonly ReadGraphPlannedMethod[]) {
-    super(`Read graphs are on, but the ${backend} adapter does not send read-graph operations with ${missingMethods.join(', ')}`);
+  constructor(readonly backend: string, readonly missingMethods: readonly ReadGraphPlannedMethod[], message?: string) {
+    super(message ?? `Read graphs are on, but the ${backend} adapter does not send read-graph operations with ${missingMethods.join(', ')}`);
     this.name = 'ReadGraphsUnsupportedError';
   }
 }
