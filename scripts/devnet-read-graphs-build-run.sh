@@ -46,8 +46,10 @@
 #             must hold and the join be answered across assets again without
 #             being set again. The context graph stays in serve for working and
 #             verifiable memory and in build for shared memory, so the gate runs
-#             with it. Without the settings API (READ_GRAPHS_SWITCH) it is
-#             INCONCLUSIVE;
+#             with it. The restart counts only when another daemon worker answers
+#             afterwards. Without the settings API the phase does not apply (N/A)
+#             and the rest of the run can still pass; READ_GRAPHS_SWITCH=api, as
+#             the bar for live settings uses it, stops the run instead;
 #   gate      run READ_GRAPHS_GATE_CMD (default scripts/devnet-comprehensive.sh)
 #             with read graphs on, wait for `ready`, then run the full check
 #             again. Every mismatch a check logs during the workload fails the
@@ -114,7 +116,8 @@
 #   READ_GRAPHS_SETTING                        JSON value of query.readGraphs (default "build")
 #   READ_GRAPHS_RUN_PHASES                     default "seed setup backfill measure live gate drills"
 #   READ_GRAPHS_SWITCH                         auto (default: the settings API when the daemon answers it, else
-#                                              config.json only), api (stop unless it answers), or config
+#                                              config.json only and the live phase N/A), api (stop unless it
+#                                              answers: the bar for live settings), or config
 #   READ_GRAPHS_LIVE_CG                        the context graph the live phase switches (default devnet-test)
 #   READ_GRAPHS_LIVE_LOAD_NODE                 the node of the live phase's switches under write load and its
 #                                              restart (default 1)
@@ -528,7 +531,7 @@ if [ "$SWITCH" != config ]; then
   elif [ "$SWITCH" = api ]; then
     early_exit "READ_GRAPHS_SWITCH=api, but node${NODES%% *} answers the settings API with $(settings_read "$RESULTS/rows/settings-probe" refusal)"
   else
-    note "node${NODES%% *} answers the settings API with $(settings_read "$RESULTS/rows/settings-probe" refusal), so modes are switched through config.json only and the live phase cannot run"
+    note "node${NODES%% *} answers the settings API with $(settings_read "$RESULTS/rows/settings-probe" refusal), so modes are switched through config.json only and the live phase does not apply (READ_GRAPHS_SWITCH=api requires the API)"
     SWITCH=config
   fi
 fi
@@ -1035,20 +1038,27 @@ live_under_load() {
   full_checks "live-load" "$n" || { echo "after the switches, the full check is not clean: $(cat "$RESULTS/checks/live-load.failed")"; return 1; }
   why="$(query_rows "$RESULTS/rows/live-load.readback" "$n" "$LIVE_CG" working-memory "SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }" s name)" \
     || { echo "the drafts could not be read back: $why"; return 1; }
+  # Each acknowledged draft as written: its subject with its name, one row of the readback (as query_rows prints it).
   while read -r i t; do
-    grep -qF "\"urn:read-graphs-live:$RUN_SLUG:$i\"" "$RESULTS/rows/live-load.readback" || missing="$missing $i"
+    grep -qxF "[\"urn:read-graphs-live:$RUN_SLUG:$i\",\"live $i\"]" "$RESULTS/rows/live-load.readback" || missing="$missing $i"
   done < "$acked"
-  [ -z "$missing" ] || { echo "acknowledged writes missing after the switches:$(echo "$missing" | cut -c1-120)"; return 1; }
+  [ -z "$missing" ] || { echo "acknowledged writes missing or changed after the switches (subject and name compared):$(echo "$missing" | cut -c1-120)"; return 1; }
   printf '%s %s %s' "$switches" "$(acked_count "$acked")" "$during"
 }
 
 # live_restart: restart LOAD_NODE; its settings for the live context graph must hold, and the merged join and
 # verifiable memory be served again without being set again.
 live_restart() {
-  local n="$LOAD_NODE" before after got
+  local n="$LOAD_NODE" before after got worker_before worker_after
   live_get "$n" pre-restart > /dev/null || { echo "reading the settings before the restart: $(settings_read "$RESULTS/rows/live.pre-restart.node$n" refusal)"; return 1; }
   before="$(settings_read "$RESULTS/rows/live.pre-restart.node$n" rows "$LIVE_CG")"
+  # The restart counts only when another daemon worker answers afterwards (restart_node only waits for the API).
+  worker_before="$(daemon_worker_pid "$n")"
+  [ -n "$worker_before" ] || { echo "node$n's daemon.pid names no running daemon worker, so a restart could not be proven"; return 3; }
   restart_node "$n" || { echo "node$n did not come back after the restart"; return 1; }
+  worker_after="$(daemon_worker_pid "$n")"
+  [ -n "$worker_after" ] && [ "$worker_after" != "$worker_before" ] \
+    || { echo "the daemon was not replaced: its worker was PID $worker_before before the restart and ${worker_after:-none} after"; return 1; }
   live_get "$n" post-restart > /dev/null || { echo "reading the settings after the restart: $(settings_read "$RESULTS/rows/live.post-restart.node$n" refusal)"; return 1; }
   after="$(settings_read "$RESULTS/rows/live.post-restart.node$n" rows "$LIVE_CG")"
   [ "$after" = "$before" ] || { echo "the settings changed across the restart: $before before, $after after"; return 1; }
@@ -1061,7 +1071,9 @@ live_restart() {
 phase_live() {
   local started n why outcome rc holders=""
   started="$(now)"
-  [ "$SWITCH" = api ] || { record live INCONCLUSIVE 0 "the daemon offers no settings API, so modes could not be switched live (see Notes)"; return; }
+  # Without the settings API (READ_GRAPHS_SWITCH=auto on a daemon that has none, or =config) the phase does not apply:
+  # N/A, neither a failure nor a gap. READ_GRAPHS_SWITCH=api, as the bar for live settings uses it, stops the run instead.
+  [ "$SWITCH" = api ] || { record live N/A 0 "not run: no per-context-graph settings API in use (see Notes); READ_GRAPHS_SWITCH=api requires it"; return; }
   # The nodes that hold the live context graph; the others have nothing of it to switch.
   for n in $NODES; do
     if holds_live_cg "$n"; then holders="$holders $n"; else note "live: node$n does not subscribe to $LIVE_CG, so it is not switched there"; fi
@@ -1078,9 +1090,14 @@ phase_live() {
     3) record live INCONCLUSIVE "$(( $(now) - started ))" "node$LOAD_NODE, $LIVE_CG under write load: $outcome"; return ;;
     *) record live FAIL "$(( $(now) - started ))" "node$LOAD_NODE, $LIVE_CG under write load: $outcome"; return ;;
   esac
-  why="$(live_restart)" || { record live FAIL "$(( $(now) - started ))" "node$LOAD_NODE, $LIVE_CG across a restart: $why"; return; }
+  why="$(live_restart)"; rc=$?
+  case "$rc" in
+    0) ;;
+    3) record live INCONCLUSIVE "$(( $(now) - started ))" "node$LOAD_NODE, $LIVE_CG across a restart: $why"; return ;;
+    *) record live FAIL "$(( $(now) - started ))" "node$LOAD_NODE, $LIVE_CG across a restart: $why"; return ;;
+  esac
   set -- $outcome
-  record live PASS "$(( $(now) - started ))" "$LIVE_CG through the settings API on nodes $holders: off dropped its read graphs; build rebuilt them with a clean full check; serve answered a join across two working-memory drafts with the joined row when merged and none per asset, and merged queries on verifiable memory; the default semantics was followed and removed. On node$LOAD_NODE: $1 switches between build and serve, each taking effect while the writes went on (its modes, and the merged join answered or refused accordingly), with writes acknowledged between every two ($3 of $2 acknowledged drafts between the first and last switch), every draft there afterwards and a clean full check; after a restart the settings held and the join was answered across assets again"
+  record live PASS "$(( $(now) - started ))" "$LIVE_CG through the settings API on nodes $holders: off dropped its read graphs; build rebuilt them with a clean full check; serve answered a join across two working-memory drafts with the joined row when merged and none per asset, and merged queries on verifiable memory; the default semantics was followed and removed. On node$LOAD_NODE: $1 switches between build and serve, each taking effect while the writes went on (its modes, and the merged join answered or refused accordingly), with writes acknowledged between every two ($3 of $2 acknowledged drafts between the first and last switch), every draft there afterwards as written and a clean full check; after a restart, with another daemon worker answering, the settings held and the join was answered across assets again"
 }
 
 # gate_verdict <exit code>: PASS, INCONCLUSIVE or FAIL for the gate. The comprehensive run writes REPORT.json
