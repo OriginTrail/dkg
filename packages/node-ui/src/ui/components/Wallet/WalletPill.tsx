@@ -7,6 +7,7 @@ import {
   type WalletChainBootstrap,
 } from '../../web3/switchWalletChain.js';
 import { truncateAddress } from './truncateAddress.js';
+import { Badge } from '../ds/Badge.js';
 
 function providerLabel(name?: string | null): string {
   const trimmed = name?.trim();
@@ -78,19 +79,19 @@ export function WalletPill({
           via {provider}
         </span>
         {wrongNetwork ? (
-          <span className="badge badge-warn v10-wallet-pill-network" role="alert">
-            wrong network
-          </span>
+          <Badge tone="warning" size="sm" className="v10-wallet-pill-network" role="alert">
+            Wrong network
+          </Badge>
         ) : (
-          <span className="badge badge-success">connected</span>
+          <Badge tone="success" size="sm">Connected</Badge>
         )}
         <button
           type="button"
-          className="v10-wallet-pill-btn"
+          className="v10-wallet-pill-btn ds-btn ds-sm"
           onClick={disconnect}
           title="Disconnect this wallet before switching to another wallet"
         >
-          <Power size={13} aria-hidden="true" />
+          <Power size={14} aria-hidden="true" />
           <span>Disconnect</span>
         </button>
       </div>

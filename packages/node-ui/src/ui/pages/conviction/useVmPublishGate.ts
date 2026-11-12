@@ -13,6 +13,11 @@ export interface VmPublishGate {
   reason: string;
   /** Whether the CTA should render the eligibility chip (node tracks ≥1 PCA). */
   chipVisible: boolean;
+  /**
+   * No PCA tracked AND the same eligibility read confirmed no signing wallet is on any PCA,
+   * so the CTA can say this publish pays the full TRAC fee. Display only; never gates.
+   */
+  fullFeeConfirmed: boolean;
   /** The resolved S5 eligibility — passed straight to the chip (no prop re-listing). */
   eligibility: PublishEligibility;
 }
@@ -38,6 +43,7 @@ export function useVmPublishGate(contextGraphId: string): VmPublishGate {
   const blocked = pcaPublishBlocked(eligibility);
   const reason = 'Publish will fail — no signing wallet can fund it (coverage or gas).';
   const chipVisible = trackedIds.length > 0;
+  const fullFeeConfirmed = !chipVisible && eligibility.noPcaConfirmed === true;
 
-  return { blocked, reason, chipVisible, eligibility };
+  return { blocked, reason, chipVisible, fullFeeConfirmed, eligibility };
 }

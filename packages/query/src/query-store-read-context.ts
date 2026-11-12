@@ -1,9 +1,16 @@
-import { readGraphInventoryByPrefix } from '@origintrail-official/dkg-storage';
+import {
+  isStoreResponseTooLargeError,
+  QUERY_CATALOG_LIMIT_NAME,
+  readGraphInventoryByPrefix,
+  recordStoreInternalLimit,
+  StoreInternalLimitError,
+} from '@origintrail-official/dkg-storage';
 import { raceAgainstCallerAbort } from './caller-abort.js';
 import type { TripleStore, QueryResult as StoreQueryResult, QueryOptions as StoreQueryOptions } from '@origintrail-official/dkg-storage';
 import type { QueryOptions } from './query-engine.js';
 import { storeOptions } from './query-store-options.js';
 import { QueryMaterializationTooLargeError } from './query-materialization-error.js';
+import { ScopedQueryViolationError } from './scoped-query-error.js';
 interface MaterializationMeter {
   consumeBytes(bytes: number): void;
 }
@@ -36,6 +43,20 @@ export function estimateMaterializedBytes(value: unknown): number {
 // Separate from the caller result: stop HTTP buffering before decoding a large
 // authority response. Oversized catalogs fail closed; they are never truncated.
 export const QUERY_CATALOG_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+/** The limit a discovery or authority read over that bound names: the node's, not the caller's. */
+export { QUERY_CATALOG_LIMIT_NAME };
+
+/**
+ * A read under the node's catalog bound. Going over it raises `StoreInternalLimitError`
+ * and counts one in `dkg.query.internal_limit_total`, under the bound's name.
+ */
+export async function readWithinCatalogLimit<T>(read: () => Promise<T>): Promise<T> {
+  try { return await read(); } catch (error) {
+    if (!isStoreResponseTooLargeError(error)) throw error;
+    recordStoreInternalLimit(QUERY_CATALOG_LIMIT_NAME);
+    throw new StoreInternalLimitError(QUERY_CATALOG_LIMIT_NAME, error.maxBytes, error.actualBytes);
+  }
+}
 
 function sharedDiscoveryStoreOptions(
   options: StoreQueryOptions | undefined,
@@ -49,7 +70,8 @@ function sharedDiscoveryStoreOptions(
 }
 
 export interface StoreReadLane {
-  query(sparql: string): Promise<StoreQueryResult>;
+  /** `withDataset`: the query sets its own dataset (FROM / FROM NAMED); a scoped lane can require it. */
+  query(sparql: string, withDataset?: boolean): Promise<StoreQueryResult>;
   listGraphsByPrefix(prefix: string): Promise<string[]>;
 }
 
@@ -59,6 +81,15 @@ export interface MeasuredDiscovery<T> {
   readonly byteCount: number;
 }
 
+/**
+ * One request's reads. `listGraphsByPrefix` reads each prefix once per request, and
+ * nothing is kept for another request. `catalog.query` always reads: an authority
+ * check that must see a registration made during discovery reads through it.
+ *
+ * Discovery, registry, authority and metadata reads are node work under the node's
+ * catalog bound. The caller is charged for the graphs a discovery returns and for its
+ * own results, never for registry, authority or metadata answers.
+ */
 export interface QueryStoreReadContext extends StoreReadLane {
   readonly signal: AbortSignal | undefined;
   readonly materializationBudget: QueryMaterializationBudget | undefined;
@@ -89,6 +120,35 @@ export function createStoreReadLane(
   };
 }
 
+/** Discovery and authority reads: the caller pays for the graphs a discovery returns only. */
+function createInternalReadLane(
+  store: TripleStore,
+  options: StoreQueryOptions,
+  sliceMeter?: MaterializationMeter,
+): StoreReadLane {
+  return {
+    query: sparql => readWithinCatalogLimit(() => store.query(sparql, options)),
+    listGraphsByPrefix: async prefix => {
+      const graphs = await readWithinCatalogLimit(() => readGraphInventoryByPrefix(store, prefix, options));
+      sliceMeter?.consumeBytes(graphs.materializedBytes);
+      return [...graphs.graphs];
+    },
+  };
+}
+
+/** The first read of a key in this request; a failed read fails every use of it. */
+function readOnce<T>(reads: Map<string, Promise<T>>, key: string, read: () => Promise<T>): Promise<T> {
+  let pending = reads.get(key);
+  if (!pending) reads.set(key, pending = read());
+  return pending;
+}
+
+/** Reads that must set their own dataset: one without it is refused before it reaches the store. */
+export function requireQueryDataset(reads: QueryStoreReadContext): QueryStoreReadContext {
+  return { ...reads, query: (sparql, withDataset) => withDataset ? reads.query(sparql, withDataset)
+    : Promise.reject(new ScopedQueryViolationError('a scoped read must carry its dataset')) };
+}
+
 export function createQueryStoreReadContext(
   store: TripleStore,
   queryOptions: QueryOptions | undefined,
@@ -101,22 +161,25 @@ export function createQueryStoreReadContext(
   const catalogOptions = { ...sharedOptions, signal: options?.signal };
   const measure = async <T>(load: (reads: StoreReadLane) => Promise<T>): Promise<MeasuredDiscovery<T>> => {
     let byteCount = 0;
-    const measured = createStoreReadLane(store, sharedOptions, {
+    const measured = createInternalReadLane(store, sharedOptions, {
       consumeBytes(bytes) { byteCount += bytes; },
     });
     return { snapshot: await load(measured), byteCount };
   };
+  const catalog = createInternalReadLane(store, catalogOptions, budget);
+  const discoveries = new Map<string, Promise<readonly string[]>>();
   return {
     ...lane,
     // Enumeration may share an upstream refresh, but each caller owns its abort race.
-    listGraphsByPrefix: async prefix => {
-      const discovery = await raceAgainstCallerAbort(measure(reads => reads.listGraphsByPrefix(prefix)), options?.signal);
+    // A prefix read again in this request reuses the first read and is not charged again.
+    listGraphsByPrefix: async prefix => [...await raceAgainstCallerAbort(readOnce(discoveries, prefix, async () => {
+      const discovery = await measure(reads => reads.listGraphsByPrefix(prefix));
       budget?.consumeBytes(discovery.byteCount); return discovery.snapshot;
-    },
+    }), options?.signal)],
     signal: options?.signal,
     materializationBudget: budget,
     withWithheldGraphRoots: roots => createStoreReadLane(store, { ...options, withheldGraphRoots: [...roots] }, budget),
-    catalog: createStoreReadLane(store, catalogOptions, budget),
+    catalog,
     shared: {
       measure,
       replay<T>(discovery: MeasuredDiscovery<T>): T {

@@ -19,7 +19,7 @@ async function nodeRole(nodeNum: number): Promise<string> {
 }
 
 test.describe('CG variants — core nodes', () => {
-  test('node1 and node2 both expose context graphs', async () => {
+  test('node1 and node2 both expose Context Graphs', async () => {
     // The real-node UI suite always boots a 2-node core devnet (node2 is part
     // of the harness, not optional), so assert directly instead of skipping.
     await waitForDevnetStatus(2);
@@ -61,7 +61,7 @@ test.describe('CG variants — core nodes', () => {
 });
 
 test.describe('CG variants — UI visibility across nodes', () => {
-  test('UI pointed at node1 lists devnet context graphs', async ({ shell, leftPanel, page }) => {
+  test('UI pointed at node1 lists devnet Context Graphs', async ({ shell, leftPanel, page }) => {
     await shell.goto();
     await page.waitForTimeout(2000);
     const names = await leftPanel.getProjectNames();

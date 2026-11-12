@@ -54,7 +54,11 @@ vi.mock('@origintrail-official/dkg-graph-viz/react', async () => {
 });
 
 import { SubGraphOverviewGrid } from '../src/ui/views/project/components.js';
-import { TRUST_COLORS } from '../src/ui/views/project/helpers.js';
+import { trustColors } from '../src/ui/views/project/helpers.js';
+import { graphPalette } from '../src/ui/graph-palette.js';
+
+// Tests render in the default (dark) theme.
+const TRUST_COLORS = trustColors(graphPalette('dark'));
 
 const profile: ProjectProfile = {
   contextGraphId: 'cg-test',
@@ -164,7 +168,7 @@ describe('SubGraphOverviewGrid — fetch failure state (S3 Codex sweep 3 Issue G
     const title = empty!.querySelector('.v10-empty-state-title')?.textContent ?? '';
     expect(title).toBe("Couldn't load subgraphs.");
     // Must NOT be the success-empty teaching copy.
-    expect(title).not.toContain('No subgraphs in this Context Graph yet');
+    expect(title).not.toContain('No subgraphs in this context graph yet');
     // Must NOT show the View root CTA (the user has no way of
     // knowing whether root is the right place to look until the
     // sub-graph list actually loads).
@@ -185,7 +189,7 @@ describe('SubGraphOverviewGrid — fetch failure state (S3 Codex sweep 3 Issue G
     const empty = container.querySelector('.v10-empty-state');
     expect(empty).toBeTruthy();
     const title = empty!.querySelector('.v10-empty-state-title')?.textContent ?? '';
-    expect(title).toBe('No subgraphs in this Context Graph yet.');
+    expect(title).toBe('No subgraphs in this context graph yet.');
     // The teaching state offers the View root action.
     const action = empty!.querySelector('.v10-empty-state-action');
     expect(action).toBeTruthy();
@@ -526,7 +530,7 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     ...profile,
     forSubGraph: (slug: string) => {
       if (slug === '__root__') {
-        return { slug: '__root__', displayName: 'Root', description: 'Entities not in any subgraph (Context Graph root)', icon: '⊘', rank: 999 };
+        return { slug: '__root__', displayName: 'Root', description: 'Entities not in any subgraph (context graph root)', icon: '⊘', rank: 999 };
       }
       return { slug, displayName: slug, color: '#38bdf8', icon: '#', rank: 0 };
     },
@@ -796,7 +800,7 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
 
     // Teaching empty state must NOT render — its title is the
     // tell.
-    expect(container.textContent ?? '').not.toContain('No subgraphs in this Context Graph yet.');
+    expect(container.textContent ?? '').not.toContain('No subgraphs in this context graph yet.');
     // PR #818 sweep 2 — subtitle reads `0 named subgraphs` here.
     // Locks the rename: pre-sweep this said `0 subgraphs` while
     // a Root card visibly rendered (the inconsistency Codex
@@ -827,7 +831,7 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     await flush();
 
     // Teaching empty state renders — its title is the tell.
-    expect(container.textContent ?? '').toContain('No subgraphs in this Context Graph yet.');
+    expect(container.textContent ?? '').toContain('No subgraphs in this context graph yet.');
     // No mini-cards.
     expect(container.querySelectorAll('.v10-sgov-card').length).toBe(0);
   });

@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { BlazegraphStore, OxigraphStore, sparqlEngineOf, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { materializePreparedSparql, prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
+import { planGraphDataset } from '../src/sparql-graph-dataset.js';
 import { prepareGraphScope, rewriteGraphSet, wrapWithDeduplicatedGraphValues } from '../src/sparql-graph-scope.js';
 
 // CI's tornado-blazegraph lane runs this file on a live server; elsewhere it runs on Oxigraph, so both stores answer to the same rows.
@@ -146,6 +147,37 @@ describe(`graph-set deduplication on ${endpoint ? 'Blazegraph' : 'Oxigraph'}`, {
   ])('counts zero rows for %s', async (pattern) => {
     const [row] = await select(`SELECT (COUNT(*) AS ?c) WHERE { ${pattern} }`);
     expect(integer(row.c)).toBe(0);
+  });
+
+  describe.each(['values', 'dataset'])('a pattern without caller variables through %s graph access', (mode) => {
+    // Without a store engine the planner reads a repeated path through dataset access, and the others through values.
+    const p = mode === 'dataset' ? '+' : '';
+    const planned = (source: string) => {
+      if (mode === 'dataset') expect(planGraphDataset(scope(source), null).graphAccess, source).toBe('dataset');
+      const result = mode === 'values' ? wrapWithDeduplicatedGraphValues(scope(source), graphs)
+        : rewriteGraphSet(scope(source), graphs, 'deduplicated-values-union', null);
+      if (result.kind !== 'ready') throw new Error(`Unexpected fallback: ${result.reason}`);
+      return materializePreparedSparql(result.value.prepared);
+    };
+    it.each<[string, string, number]>([
+      ['a constant triple both graphs hold', `<urn:s:1> <${A}>${p} "x"`, 1],
+      ['distinct blank subjects', `[] <${BLANK}>${p} "alike"`, 2],
+      ['a blank subject both graphs hold', `[] <${BLANK}>${p} "mirrored"`, 1],
+      ['a property list', `[ <${BLANK}>${p} "alike" ]`, 2],
+      ['a labelled blank node and a FILTER', `_:b <${BLANK}>${p} "alike" FILTER(STRLEN("x") = 1)`, 2],
+      ['a hidden hop', `<urn:s:4> <${LINK}>${p}/<${TO}> "t"`, 2],
+      ['a triple only outside the graph set', `<urn:s:out> <${A}>${p} "x"`, 0],
+    ])('counts %s', async (_name, pattern, expected) => {
+      const result = await store.query(planned(`SELECT (COUNT(*) AS ?c) WHERE { ${pattern} }`));
+      expect(result.type === 'bindings' ? integer(result.bindings[0]?.c) : Number.NaN).toBe(expected);
+    });
+
+    it('returns empty rows under SELECT * and answers ASK', async () => {
+      const rows = await store.query(planned(`SELECT * WHERE { [] <${BLANK}>${p} "alike" }`));
+      expect(rows.type === 'bindings' ? rows.bindings : null).toEqual([{}, {}]);
+      await expect(store.query(planned(`ASK { [] <${BLANK}>${p} "mirrored" }`))).resolves.toMatchObject({ type: 'boolean', value: true });
+      await expect(store.query(planned(`ASK { <urn:s:out> <${A}>${p} "x" }`))).resolves.toMatchObject({ type: 'boolean', value: false });
+    });
   });
 
   it('aggregates over the deduplicated rows', async () => {

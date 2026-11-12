@@ -10,6 +10,10 @@ export const INCOMING_COPY_ALLOWED_USERS = Object.freeze({
     // readback; broker bytes/digests and advertised assertion hashes stay raw.
     'packages/kafka-source/src/asset.mjs',
     'packages/rdf-utils/src/index.ts',
+    // Read-graph registry recognition compares the literals a write names with
+    // the registry facts the store returns, in memory; it hashes nothing and
+    // writes nothing in the rewritten form.
+    'packages/storage/src/read-graph/registry-recognition.ts',
   ]),
   acceptIncomingPublicQuads: Object.freeze([
     'packages/agent/src/gossip-publish-handler.ts',

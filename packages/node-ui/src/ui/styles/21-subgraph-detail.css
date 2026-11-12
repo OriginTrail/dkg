@@ -1,19 +1,19 @@
 /* ── Sub-graph detail view header + filters ── */
 .v10-subgraph-detail {
-  border-top: 3px solid color-mix(in srgb, var(--sg-color, #64748b) 40%, transparent);
+  border-top: 3px solid color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 40%, transparent);
 }
 .v10-subgraph-detail-header {
-  padding: 12px 16px;
+  padding: var(--space-12) var(--space-16);
   border-bottom: 1px solid var(--border-subtle);
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: center; gap: var(--space-12);
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--sg-color, #64748b) 8%, transparent) 0%,
+    color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 8%, transparent) 0%,
     transparent 100%
   );
 }
 .v10-subgraph-detail-icon {
-  font-size: 20px; line-height: 1;
+  font-size: var(--fs-heading); line-height: 1;
 }
 .v10-subgraph-detail-title-wrap {
   flex: 1;
@@ -28,101 +28,81 @@
   justify-content: center;
 }
 .v10-subgraph-detail-title {
-  font-size: var(--font-size-body-lg); font-weight: 600; color: var(--text-primary);
+  font-size: var(--fs-title); font-weight: 600; color: var(--text-primary);
 }
 .v10-subgraph-detail-desc {
-  font-size: var(--font-size-caption); color: var(--text-tertiary); margin-top: 2px;
+  font-size: var(--fs-label); color: var(--text-tertiary); margin-top: var(--space-2);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   max-width: 520px;
 }
 
 /* Saved queries pills row */
 .v10-subgraph-savedqueries {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  padding: 8px 16px;
+  display: flex; align-items: center; gap: var(--space-6); flex-wrap: wrap;
+  padding: var(--space-8) var(--space-16);
   border-bottom: 1px solid var(--border-subtle);
-  background: rgba(255,255,255,0.015);
+  background: var(--tint-faint);
 }
 .v10-subgraph-savedqueries-label {
-  font-size: var(--font-size-meta); font-weight: 700; text-transform: uppercase;
-  letter-spacing: 0.08em; color: var(--text-tertiary);
-  margin-right: 4px;
+  font-size: var(--fs-micro); font-weight: 700; text-transform: uppercase;
+  letter-spacing: var(--ls-caps); color: var(--text-tertiary);
+  margin-right: var(--space-4);
 }
 .v10-subgraph-savedquery {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 4px 10px;
-  background: rgba(255,255,255,0.02);
+  display: inline-flex; align-items: center; gap: var(--space-4);
+  padding: var(--space-4) var(--space-12);
+  background: var(--tint-faint);
   border: 1px solid var(--border-subtle);
-  border-radius: 14px;
-  font-size: var(--font-size-caption); color: var(--text-secondary);
+  border-radius: var(--radius-overlay);
+  font-size: var(--fs-label); color: var(--text-secondary);
   font-family: var(--font-sans);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all var(--motion-base);
 }
 .v10-subgraph-savedquery:hover { border-color: var(--border-strong); color: var(--text-primary); }
 .v10-subgraph-savedquery.active {
-  background: color-mix(in srgb, var(--sg-color, #a855f7) 14%, transparent);
-  border-color: var(--sg-color, #a855f7);
+  background: color-mix(in srgb, var(--sg-color, var(--text-tertiary)) 14%, transparent);
+  border-color: var(--sg-color, var(--text-tertiary));
   color: var(--text-primary);
 }
-.v10-subgraph-savedquery:disabled { opacity: 0.5; cursor: default; }
+.v10-subgraph-savedquery:disabled { opacity: var(--opacity-disabled); cursor: default; }
 .v10-subgraph-savedquery-glyph {
-  font-size: var(--font-size-meta); color: var(--sg-color, #a855f7);
+  font-size: var(--fs-micro); color: var(--sg-color, var(--text-tertiary));
 }
 .v10-subgraph-savedquery-error {
-  color: var(--text-danger); font-size: var(--font-size-caption);
+  color: var(--text-danger); font-size: var(--fs-label);
 }
 .v10-subgraph-savedquery-count {
   margin-left: auto;
-  font-size: var(--font-size-caption); color: var(--text-tertiary); font-variant-numeric: tabular-nums;
+  font-size: var(--fs-label); color: var(--text-tertiary); font-variant-numeric: tabular-nums;
 }
 
 /* Filter chips (profile-driven) */
 .v10-subgraph-filters {
-  display: flex; flex-direction: column; gap: 6px;
-  padding: 8px 16px;
+  display: flex; flex-direction: column; gap: var(--space-6);
+  padding: var(--space-8) var(--space-16);
   border-bottom: 1px solid var(--border-subtle);
-  background: rgba(255,255,255,0.01);
+  background: var(--tint-faint);
 }
 .v10-subgraph-filter-row {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: var(--space-8);
   flex-wrap: wrap;
 }
 .v10-subgraph-filter-label {
-  font-size: var(--font-size-meta); font-weight: 700; text-transform: uppercase;
-  letter-spacing: 0.08em; color: var(--text-tertiary);
+  font-size: var(--fs-micro); font-weight: 700; text-transform: uppercase;
+  letter-spacing: var(--ls-caps); color: var(--text-tertiary);
   min-width: 62px;
 }
-.v10-subgraph-filter-chips { display: flex; gap: 5px; flex-wrap: wrap; }
-.v10-subgraph-filter-chip {
-  padding: 2px 9px;
-  background: none;
-  border: 1px solid var(--border-subtle);
-  border-radius: 10px;
-  font-size: var(--font-size-meta); font-weight: 600; letter-spacing: 0.02em;
-  color: var(--text-tertiary);
-  font-family: var(--font-mono);
-  text-transform: uppercase;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.v10-subgraph-filter-chip:hover {
-  border-color: var(--border-strong); color: var(--text-primary);
-}
-.v10-subgraph-filter-chip.active {
-  background: color-mix(in srgb, var(--sg-color, #a855f7) 22%, transparent);
-  border-color: var(--sg-color, #a855f7);
-  color: var(--text-primary);
-}
+.v10-subgraph-filter-chips { display: flex; gap: var(--space-4); flex-wrap: wrap; }
 .v10-subgraph-filter-reset {
   align-self: flex-start;
-  padding: 2px 8px;
+  padding: var(--space-2) var(--space-8);
   background: none;
   border: 1px solid transparent;
   color: var(--text-tertiary);
-  font-size: var(--font-size-meta); font-family: var(--font-sans);
+  font-size: var(--fs-micro); font-family: var(--font-sans);
   cursor: pointer;
-  border-radius: 10px;
+  border-radius: var(--radius-card);
 }
 .v10-subgraph-filter-reset:hover {
   border-color: var(--border-subtle); color: var(--text-secondary);
@@ -130,57 +110,57 @@
 
 /* Timeline ribbon */
 .v10-subgraph-timeline {
-  padding: 12px 16px;
-  display: flex; flex-direction: column; gap: 16px;
+  padding: var(--space-12) var(--space-16);
+  display: flex; flex-direction: column; gap: var(--space-16);
   overflow: auto;
 }
 .v10-subgraph-timeline-empty {
-  padding: 24px 16px;
-  color: var(--text-tertiary); font-size: var(--font-size-label);
+  padding: var(--space-24) var(--space-16);
+  color: var(--text-tertiary); font-size: var(--fs-control);
   text-align: center;
 }
 .v10-subgraph-timeline-empty code {
-  background: rgba(255,255,255,0.06);
-  padding: 1px 4px; border-radius: 3px;
-  font-family: var(--font-mono); font-size: var(--font-size-caption);
+  background: var(--tint-strong);
+  padding: 1px var(--space-4); border-radius: var(--radius-hair);
+  font-family: var(--font-mono); font-size: var(--fs-label);
 }
-.v10-subgraph-timeline-bucket { display: flex; flex-direction: column; gap: 6px; }
+.v10-subgraph-timeline-bucket { display: flex; flex-direction: column; gap: var(--space-6); }
 .v10-subgraph-timeline-bucket-head {
-  display: flex; align-items: center; gap: 8px;
-  padding-bottom: 4px;
+  display: flex; align-items: center; gap: var(--space-8);
+  padding-bottom: var(--space-4);
   border-bottom: 1px dashed var(--border-subtle);
 }
 .v10-subgraph-timeline-bucket-dot {
   width: 8px; height: 8px; border-radius: 50%;
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sg-color, #64748b) 20%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 20%, transparent);
 }
 .v10-subgraph-timeline-bucket-label {
-  font-size: var(--font-size-label); font-weight: 700; letter-spacing: 0.04em;
+  font-size: var(--fs-control); font-weight: 700; letter-spacing: 0;
   color: var(--text-primary);
 }
 .v10-subgraph-timeline-bucket-count {
   margin-left: auto;
-  font-size: var(--font-size-meta); color: var(--text-tertiary);
+  font-size: var(--fs-micro); color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
 }
 .v10-subgraph-timeline-items {
-  display: flex; flex-direction: column; gap: 3px;
+  display: flex; flex-direction: column; gap: var(--space-4);
 }
 .v10-subgraph-timeline-item {
-  display: flex; align-items: center; gap: 10px;
-  padding: 6px 10px;
-  background: rgba(255,255,255,0.015);
+  display: flex; align-items: center; gap: var(--space-8);
+  padding: var(--space-6) var(--space-12);
+  background: var(--tint-faint);
   border: 1px solid var(--border-subtle);
-  border-left: 2px solid color-mix(in srgb, var(--sg-color, #64748b) 60%, transparent);
-  border-radius: 4px;
-  font-size: var(--font-size-label); color: var(--text-secondary);
+  border-left: 2px solid color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 60%, transparent);
+  border-radius: var(--radius-xs);
+  font-size: var(--fs-control); color: var(--text-secondary);
   font-family: var(--font-sans);
   text-align: left; cursor: pointer;
-  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  transition: border-color var(--motion-base), background var(--motion-base), color var(--motion-base);
 }
 .v10-subgraph-timeline-item:hover {
   border-color: var(--border-strong);
-  background: rgba(255,255,255,0.04);
+  background: var(--tint-subtle);
   color: var(--text-primary);
 }
 .v10-subgraph-timeline-item-icon { width: 14px; text-align: center; }
@@ -188,69 +168,31 @@
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .v10-subgraph-timeline-item-date {
-  font-family: var(--font-mono); font-size: var(--font-size-meta); color: var(--text-tertiary);
+  font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
 }
-
-/* ── SubGraphBar chip badge (ambient "2 proposed" / "2 p0" / "N open") ── */
-.v10-subgraph-chip.has-badge { padding-right: 6px; }
-.v10-subgraph-chip-badge {
-  display: inline-flex; align-items: center; gap: 3px;
-  margin-left: 6px;
-  padding: 1px 5px;
-  border-radius: 8px;
-  font-size: var(--font-size-micro); font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.04em;
-  background: rgba(255,255,255,0.06);
-  font-family: var(--font-sans);
-}
-.v10-subgraph-chip-badge-dot {
-  width: 5px; height: 5px; border-radius: 50%;
-  display: inline-block;
-}
-.v10-subgraph-chip-badge.tone-warn {
-  background: rgba(245,158,11,0.15); color: var(--text-warning);
-}
-.v10-subgraph-chip-badge.tone-warn .v10-subgraph-chip-badge-dot {
-  background: #f59e0b; box-shadow: 0 0 4px rgba(245,158,11,0.6);
-}
-.v10-subgraph-chip-badge.tone-danger {
-  background: rgba(239,68,68,0.15); color: var(--text-danger);
-}
-.v10-subgraph-chip-badge.tone-danger .v10-subgraph-chip-badge-dot {
-  background: #ef4444; box-shadow: 0 0 4px rgba(239,68,68,0.6);
-  animation: v10-pulse-red 2s infinite;
-}
-.v10-subgraph-chip-badge.tone-info {
-  background: rgba(59,130,246,0.15); color: var(--text-info);
-}
-.v10-subgraph-chip-badge.tone-info .v10-subgraph-chip-badge-dot {
-  background: #3b82f6;
-}
-.v10-subgraph-chip-badge.tone-muted {
-  background: rgba(100,116,139,0.15); color: var(--text-tertiary);
-}
-.v10-subgraph-chip-badge.tone-muted .v10-subgraph-chip-badge-dot {
-  background: #64748b;
-}
+.v10-subgraph-chip-badge { margin-left: var(--space-6); }
 @keyframes v10-pulse-red {
-  0%, 100% { box-shadow: 0 0 4px rgba(239,68,68,0.6); }
-  50%      { box-shadow: 0 0 8px rgba(239,68,68,0.9); }
+  0%, 100% { box-shadow: 0 0 4px color-mix(in srgb, var(--accent-red) 60%, transparent); }
+  50%      { box-shadow: 0 0 8px color-mix(in srgb, var(--accent-red) 90%, transparent); }
 }
 
 /* ── Cross-reference sub-graph badge (inside KA detail links) ── */
 .v10-subgraph-badge {
-  display: inline-flex; align-items: center; gap: 3px;
-  margin-left: 6px;
-  padding: 1px 6px;
-  border-radius: 8px;
-  font-size: var(--font-size-micro); font-weight: 600;
-  letter-spacing: 0.04em;
-  background: color-mix(in srgb, var(--sg-color, #64748b) 14%, transparent);
-  border: 1px solid color-mix(in srgb, var(--sg-color, #64748b) 35%, transparent);
+  display: inline-flex; align-items: center; gap: var(--space-4);
+  margin-left: var(--space-6);
+  padding: 1px var(--space-6);
+  border-radius: var(--radius-nested);
+  font-size: var(--fs-micro); font-weight: 600;
+  letter-spacing: 0;
+  background: color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 35%, transparent);
   color: var(--text-secondary);
   font-family: var(--font-sans);
   white-space: nowrap;
 }
-.v10-subgraph-badge-icon { font-size: var(--font-size-meta); line-height: 1; }
+.v10-subgraph-badge-icon { font-size: var(--fs-micro); line-height: 1; }
 .v10-subgraph-badge-label { text-transform: capitalize; }
+
+/* ── Sub-graph detail ── */
+.v10-subgraph-savedqueries-label.v10-subgraph-savedqueries-count { margin-left: var(--space-8); opacity: 0.8; }

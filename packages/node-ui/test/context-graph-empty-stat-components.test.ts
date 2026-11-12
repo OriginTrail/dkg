@@ -645,7 +645,7 @@ describe('Context Graph shared empty/stat patterns', () => {
 
     await waitForText(container, 'query-catalog-deadbeef');
     expect(container.textContent).not.toContain('Publish all to Verifiable Memory');
-    expect(container.querySelector('[data-testid="assertion-row-action"]')?.textContent).toBe('Publish to VM');
+    expect(container.querySelector('[data-testid="assertion-row-action"]')?.textContent).toBe('Publish to Verifiable Memory');
     await unmount();
   });
 
@@ -661,7 +661,7 @@ describe('Context Graph shared empty/stat patterns', () => {
         React.createElement('div', { className: 'v10-layer-expand-body entities-tab' },
           React.createElement(VerifiableMemoryHeroBanner, {
             entities: [],
-            tripleCount: 0,
+            vmTriples: [],
             contextGraphId: 'cg-test',
           }),
         ),

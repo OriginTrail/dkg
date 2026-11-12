@@ -127,7 +127,9 @@ no marketplace contracts yet.
   selling off with one log line. Before, the buyer's job started anyway,
   failed on every tick and posted a "Marketplace renewal failed"
   notification each time. The node asks its chain for the contracts once at
-  start-up, and only when the marketplace is on.
+  start-up, and only when the marketplace is on. A failed RPC call says
+  nothing about the contracts, so the node then starts the marketplace as
+  before.
 - A node with an endpoint in `chain.rpcUrls` that never answers no longer
   piles up RPC requests while its node UI is open. Each
   `GET /api/wallets/balances`, which the UI's Settings page sends every

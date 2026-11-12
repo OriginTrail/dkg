@@ -75,6 +75,7 @@ export default defineConfig({
           // #1828 — daemon-boot intent-index backfill wiring (fail-open contract).
           'test/vm-publish-intent-backfill.test.ts',
           'test/agent-connect-routes.test.ts',
+          'test/agent-chat-update-term-validation.test.ts',
           'test/preferred-relays.test.ts',
           'test/lan-addresses.test.ts',
           'test/reconcile-503-mapping.test.ts',
@@ -120,6 +121,7 @@ export default defineConfig({
       'test/store-reachability.test.ts',
       'test/query-route-lifecycle.test.ts',
       'test/bounded-query.test.ts',
+      'test/query-route-unheld-context-graph.test.ts',
       'test/entity-search.test.ts',
       'test/query-catalog-profile-route.test.ts',
           'test/context-graph-route-read-authority.test.ts',
@@ -166,6 +168,9 @@ export default defineConfig({
           'test/cpu-profile-command.test.ts',
           'test/cpu-profile-real.test.ts',
           'test/cpu-profile-live.test.ts',
+          // Node-admin read-graph commands: routes on a real read-graph layer, command and client.
+          'test/read-graphs-route.test.ts',
+          'test/read-graphs-command.test.ts',
           'test/private-access-route.test.ts',
           // R8 — #1085 /register policy-matrix route tests, extracted from
           // daemon-http-behavior-extra so they run here (pure route handler,
@@ -406,6 +411,8 @@ export default defineConfig({
           'test/daemon-startup-wait.test.ts',
           'test/oxigraph-server.test.ts',
           'test/oxigraph-server-native.test.ts',
+          // A peer's write with a malformed term, on the pinned real server.
+          'test/peer-write-term-validation-oxigraph-server.test.ts',
           'test/oxigraph-server-wal.test.ts',
           'test/oxigraph-managed-start-options.test.ts',
           'test/oxigraph-wal-maintenance.test.ts',

@@ -27,17 +27,20 @@ import type { AssertionLifecycleEvent } from '../hooks/useAssertionLifecycleEven
 import { useAgentsContext } from '../hooks/useAgents.js';
 import { useProjectProfileContext } from '../hooks/useProjectProfile.js';
 import { AgentChip } from './AgentChip.js';
+import { kindColorForType } from '../entity-kind-colors.js';
 
-const LAYER_COLOR: Record<TrustLevel, string> = {
-  working:  '#64748b',
-  shared:   '#f59e0b',
-  verified: '#22c55e',
-};
+import { humanizeStatus, humanizeTypeName } from '../lib/formatLabels.js';
+import { LAYER_VAR } from '../layer-colors.js';
+import { Badge, LayerGlyph } from './ds/Badge.js';
+import { entityStatusTone } from '../lib/entity-status.js';
+import { formatDateTime } from '../lib/format.js';
 
-const LAYER_GLYPH: Record<TrustLevel, string> = {
-  working:  '◇',
-  shared:   '◈',
-  verified: '◉',
+const LAYER_COLOR: Record<TrustLevel, string> = LAYER_VAR;
+
+const LAYER_TONE: Record<TrustLevel, 'wm' | 'swm' | 'vm'> = {
+  working: 'wm',
+  shared: 'swm',
+  verified: 'vm',
 };
 
 export interface ActivityFeedProps {
@@ -266,25 +269,26 @@ function ActivityRow({
       // separate rows. Hidden when missing (legacy WorkspaceOperation
       // fallback rows) or zero.
       return item.entityCount != null && item.entityCount > 0
-        ? `Promoted to SWM · ${item.entityCount} ${item.entityCount === 1 ? 'entity' : 'entities'}`
-        : 'Promoted to SWM';
+        ? `Promoted to Shared Working Memory · ${item.entityCount} ${item.entityCount === 1 ? 'entity' : 'entities'}`
+        : 'Promoted to Shared Working Memory';
     }
-    if (item.event === 'published') return 'Published to VM';
-    return typeBinding?.label ?? (item.kindUri ? item.kindUri.split(/[#/]/).pop() : null) ?? 'Entity';
-  })();
-  const typeIcon = ((): string => {
-    if (item.event === 'added') return '+';
-    if (item.event === 'promoted') return '⇡';
-    if (item.event === 'published') return '◉';
-    return typeBinding?.icon ?? '◆';
+    if (item.event === 'published') return 'Published to Verifiable Memory';
+    // A profile label wins as written; a raw type name ("PullRequest") is
+    // spaced out for reading ("Pull request").
+    if (typeBinding?.label && !typeBinding.isFallback) return typeBinding.label;
+    const raw = typeBinding?.label ?? (item.kindUri ? item.kindUri.split(/[#/]/).pop() : null);
+    return raw ? humanizeTypeName(raw) : 'Entity';
   })();
   const typeColor = ((): string => {
     if (item.event === 'promoted') return LAYER_COLOR.shared;
     if (item.event === 'published') return LAYER_COLOR.verified;
-    if (item.event === 'added') return '#64748b';
-    return typeBinding?.color ?? '#a855f7';
+    if (item.event === 'added') return LAYER_VAR.working;
+    // A colour the context graph's profile sets wins; otherwise a known kind
+    // (decision, task, PR, …) keeps its shared data colour, same as its card
+    // and graph node; anything else is neutral.
+    if (typeBinding?.color && !typeBinding.isFallback) return typeBinding.color;
+    return kindColorForType(item.kindUri ?? undefined) ?? 'var(--text-tertiary)';
   })();
-  const layerColor = LAYER_COLOR[item.layer];
 
   // Surface status when the entity has one — decisions.status / tasks.status /
   // github.state — because "rejected" / "blocked" / "merged" is often the
@@ -310,24 +314,19 @@ function ActivityRow({
   const rowBody = (
     <>
       <span
-        className="v10-activity-feed-layer"
-        style={{ color: layerColor }}
+        className={`v10-activity-feed-layer v10-layer-tone-text layer-tone-${LAYER_TONE[item.layer]}`}
         title={`${item.layer} memory`}
       >
-        {LAYER_GLYPH[item.layer]}
+        <LayerGlyph layer={LAYER_TONE[item.layer]} />
       </span>
-      <span
-        className="v10-activity-feed-type"
-        style={{ '--type-color': typeColor } as React.CSSProperties}
-      >
-        <span className="v10-activity-feed-type-icon">{typeIcon}</span>
+      <Badge tone="kind" size="sm" kindColor={typeColor} className="v10-activity-feed-type">
         <span className="v10-activity-feed-type-label">{typeLabel}</span>
-      </span>
+      </Badge>
       <span className="v10-activity-feed-title-text">{item.entity.label}</span>
       {status && (
-        <span className={`v10-activity-feed-status status-${statusTone(status)}`}>
-          {status}
-        </span>
+        <Badge tone={entityStatusTone(status)} size="sm" className="v10-activity-feed-status">
+          {humanizeStatus(status)}
+        </Badge>
       )}
       {(author || item.authorUri) && (
         <span className="v10-activity-feed-author">
@@ -339,7 +338,7 @@ function ActivityRow({
           />
         </span>
       )}
-      <span className="v10-activity-feed-time" title={item.at ? item.at.toLocaleString() : 'no timestamp'}>
+      <span className="v10-activity-feed-time" title={item.at ? formatDateTime(item.at) : 'no timestamp'}>
         {relativeTime(item.at)}
       </span>
     </>
@@ -382,22 +381,3 @@ function findStatus(e: MemoryEntity): string | null {
   return null;
 }
 
-function statusTone(status: string): 'good' | 'warn' | 'bad' | 'neutral' {
-  switch (status) {
-    case 'accepted':
-    case 'done':
-    case 'merged':
-      return 'good';
-    case 'proposed':
-    case 'in_progress':
-    case 'open':
-      return 'warn';
-    case 'rejected':
-    case 'superseded':
-    case 'blocked':
-    case 'cancelled':
-      return 'bad';
-    default:
-      return 'neutral';
-  }
-}

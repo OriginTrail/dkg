@@ -1,6 +1,6 @@
 import type { GetView } from '@origintrail-official/dkg-core';
 import { classifySparqlOperation } from '@origintrail-official/dkg-core/dist/sparql-operation.js';
-import type { PublicQueryQuad, PublicQueryResponse, PublicQueryResult } from '@origintrail-official/dkg-core/query-result';
+import type { PublicQueryQuad, PublicQueryResponse, PublicQueryResult, ViewQuerySemantics } from '@origintrail-official/dkg-core/query-result';
 import { BASE, authHeaders, HttpError, getWithTimeout } from './http.js';
 import { fetchQueryJson, AUTOMATIC_QUERY_TIMEOUT_MS, AUTOMATIC_QUERY_MAX_BYTES } from './query-transport.js';
 import { CachedRead, UI_READ_MAX_AGE_MS } from './lib/read-cache.js';
@@ -19,19 +19,26 @@ export function normalizeQueryExecutionResponse(
   const envelope = response && typeof response === 'object' && !Array.isArray(response)
     ? response as Record<string, unknown>
     : {};
+  const result = normalizeQueryExecutionResult(envelope, sparql);
+  // How the daemon answered a query with a context graph.
+  const semantics = envelope.semantics === 'merged' || envelope.semantics === 'per-asset' ? envelope.semantics : undefined;
+  return semantics ? { result, semantics } : { result };
+}
+
+function normalizeQueryExecutionResult(envelope: Record<string, unknown>, sparql: string): QueryExecutionResult {
   const candidate = envelope.result ?? envelope.results;
   const raw = candidate && typeof candidate === 'object' && !Array.isArray(candidate)
     ? candidate as Record<string, unknown>
     : {};
 
   if (raw.type === 'boolean' && typeof raw.value === 'boolean') {
-    return { result: { type: 'boolean', value: raw.value } };
+    return { type: 'boolean', value: raw.value };
   }
   if (raw.type === 'quads' && Array.isArray(raw.quads)) {
-    return { result: { type: 'quads', quads: raw.quads as PublicQueryQuad[] } };
+    return { type: 'quads', quads: raw.quads as PublicQueryQuad[] };
   }
   if (raw.type === 'bindings' && Array.isArray(raw.bindings)) {
-    return { result: { type: 'bindings', bindings: raw.bindings as Array<Record<string, unknown>> } };
+    return { type: 'bindings', bindings: raw.bindings as Array<Record<string, unknown>> };
   }
 
   const operation = classifySparqlOperation(sparql);
@@ -43,17 +50,12 @@ export function normalizeQueryExecutionResponse(
     const value = term && typeof term === 'object' && !Array.isArray(term)
       ? (term as { value?: unknown }).value
       : term;
-    return { result: { type: 'boolean', value: String(value).toLowerCase() === 'true' } };
+    return { type: 'boolean', value: String(value).toLowerCase() === 'true' };
   }
   if (operation.kind === 'read' && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE')) {
-    return {
-      result: {
-        type: 'quads',
-        quads: Array.isArray(raw.quads) ? raw.quads as PublicQueryQuad[] : [],
-      },
-    };
+    return { type: 'quads', quads: Array.isArray(raw.quads) ? raw.quads as PublicQueryQuad[] : [] };
   }
-  return { result: { type: 'bindings', bindings } };
+  return { type: 'bindings', bindings };
 }
 
 const graphLists = new CachedRead<{ contextGraphs: any[] }>(2 * 1024 * 1024, 1);
@@ -116,6 +118,8 @@ export interface QueryExecutionOptions {
   includeSharedMemory?: boolean;
   graphSuffix?: '_shared_memory';
   view?: QueryExecutionView;
+  /** How a view query matches its patterns; the node's default when absent. */
+  semantics?: ViewQuerySemantics;
   /** Include assertion partitions for callers whose query constrains them. */
   includeContextGraphPartitions?: boolean;
 }

@@ -13,7 +13,7 @@ describe('PCA fixtures', () => {
     expect(healthForSnapshot(PCA_FIXTURES.healthy, now)).toBe('healthy');
     expect(healthForSnapshot(PCA_FIXTURES.expiring, now)).toBe('expiring');
     expect(healthForSnapshot(PCA_FIXTURES.expired, now)).toBe('expired');
-    expect(healthForSnapshot(PCA_FIXTURES.swept, now)).toBe('swept');
+    expect(healthForSnapshot(PCA_FIXTURES.swept, now)).toBe('expired');
     expect(healthForSnapshot(PCA_FIXTURES.capNear, now)).toBe('cap-near');
     // P0 does NOT derive insolvent (deferred to P2) — a 0-budget account still
     // reads healthy here; this guards that deferral.

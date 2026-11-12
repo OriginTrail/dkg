@@ -1,73 +1,50 @@
-/* Marketplace design tokens. Scoped to the section's roots (.mktx for the
-   component gallery, .mkt-frame for each surface) so they never re-theme the
-   shell. Layer 1 holds primitives, Layer 2 the semantic names every component
-   binds to; no color, spacing or radius literals elsewhere.
+/* Marketplace tokens. Scoped to the section's roots (.mktx for the component
+   gallery, .mkt-frame for each surface). Every value is one of the app's
+   own tokens from 00-theme.css, so the section follows the light and dark
+   themes like the rest of the app. The names below say what each job is in
+   the marketplace; they never hold a colour of their own.
 
-   The type scale and the mono stack are the app's own, from 00-theme.css.
-   The colors stay here: the section keeps its dark palette in both themes,
-   while the shell's surface, text and border tokens switch to light ones. */
+   Text (--text-primary, --text-secondary, --text-tertiary) and borders
+   (--border-subtle, --border-strong) are the app's tokens, used directly. */
 
 .mktx, .mkt-frame {
-  /* ---------- Layer 1 · primitives ---------- */
-  /* Dark surfaces stay near-black over the ambient canvas; the upper text
-     ramp stays near-white. They equal the shell's dark values, but not its
-     light ones, so they are not taken from it. */
-  --gray-0:rgba(3,2,5,.68); --gray-1:rgba(15,12,18,.92);
-  --gray-2:rgba(24,19,29,.94); --gray-3:rgba(32,25,39,.96);
-  --gray-5:#9d96a6; --gray-6:#bdb6c6;
-  --gray-7:#d8d3df; --gray-9:#fbfaff;
-  --ink-border-subtle:rgba(221,214,254,.10);
-  --ink-border-strong:rgba(221,214,254,.26);
-  --accent-500:#4f7cff;
-  --green-500:#2fbf71;
-  --amber-500:#e6a23c;
-  --red-500:#e5534b;
-  --teal-500:#2ec4b6;              /* provenance ⛓ */
+  /* surfaces: sunken (inputs, snippets), card, nested, raised */
+  --surface-0:var(--bg-panel);
+  --surface-1:var(--bg-surface);
+  --surface-2:var(--bg-elevated);
+  --surface-3:var(--bg-hover);
 
-  /* ---------- Layer 2 · semantic ---------- */
-  --surface-0:var(--gray-0);       /* app background */
-  --surface-1:var(--gray-1);       /* cards */
-  --surface-2:var(--gray-2);       /* nested / hover */
-  --surface-3:var(--gray-3);       /* drawers, popovers */
-  --border-subtle:var(--ink-border-subtle);
-  --border-strong:var(--ink-border-strong);
-  --text-primary:var(--gray-9);
-  --text-secondary:var(--gray-7);
-  --text-muted:var(--gray-6);
-  --text-on-accent:#ffffff;
-  --interactive:var(--accent-500);
+  /* actions and selection: neutral, as the app's primary button and
+     filter chips. Purple stays for Verifiable Memory, blue for roles. */
+  --interactive-fill:var(--accent-primary);
+  --interactive-on:var(--text-on-primary);
+  --interactive-line:var(--border-prominent);
+  --interactive-text:var(--text-primary);
 
-  /* states: landed or live, held or waiting, refused or missed */
-  --state-verified:var(--green-500);
-  --state-pending:var(--amber-500);
-  --state-blocked:var(--red-500);
+  /* states: landed or live, held or waiting, refused or missed (signals) */
+  --state-verified:var(--text-success);
+  --state-pending:var(--text-warning);
+  --state-blocked:var(--text-danger);
 
-  /* provenance */
-  --prov-pinned:var(--teal-500);          /* ⛓ weights-pinned */
+  /* provenance: the ⛓ / ☁ glyph carries the meaning */
+  --prov-pinned:var(--text-secondary);
 
-  /* budget bars */
-  --gauge-track:var(--gray-3);
-  --gauge-mid:var(--amber-500);           /* nearing the soft ceiling */
-  --gauge-over:var(--red-500);            /* at the soft ceiling */
+  /* budget bars and sparklines */
+  --gauge-track:var(--bg-active);
+  --gauge-fill:var(--text-secondary);
+  --gauge-spark:var(--text-tertiary);
+  --gauge-mid:var(--accent-amber);        /* nearing the soft ceiling */
+  --gauge-over:var(--accent-red);         /* at the soft ceiling */
 
-  /* type — Geist for product UI; sizes preserve hierarchy with a readable floor.
-     --font-mono (digests, keys, µ values) is the app's, unchanged here. The
-     section's own stack keeps 'Segoe UI' before the generic fallback. */
-  --font-ui:'Geist Variable',-apple-system,'Segoe UI',sans-serif;
-  --fs-xs:var(--font-size-caption); --fs-sm:var(--font-size-label);
-  --fs-md:var(--font-size-body); --fs-lg:var(--font-size-heading-sm);
-  /* headings above the app's scale */
-  --fs-xl:22px; --fs-2xl:26px;
+  /* type: the app's own faces and size scale (00-theme.css) */
+  --font-ui:var(--font-sans);
+  --fs-xs:var(--fs-label); --fs-sm:var(--fs-control);
+  --fs-md:var(--fs-body); --fs-lg:var(--fs-title);
+  --fs-xl:var(--fs-heading); --fs-2xl:var(--fs-display);
   --lh-tight:1.25; --lh-normal:1.55;
   --fw-regular:400; --fw-semibold:600;
 
-  /* spacing — 4px base scale only */
+  /* spacing: 4px base scale only */
   --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px;
   --sp-5:20px; --sp-6:24px; --sp-10:40px;
-
-  /* radii */
-  --r-sm:6px; --r-md:10px; --r-lg:14px; --r-full:999px;
-
-  /* component geometry */
-  --chip-h:22px;
 }

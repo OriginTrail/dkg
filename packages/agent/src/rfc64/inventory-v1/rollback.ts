@@ -88,6 +88,14 @@ export interface Rfc64InventoryRollbackOptionsV1 {
    * catalog placements (version 2) are removed, with their failure diagnostics.
    */
   readonly removeConfirmedCatalogPlacements?: boolean;
+  /**
+   * Work that must finish under the inventory lease before the database
+   * changes, such as readying the triple store for the target. It runs once,
+   * just before the first change. When it throws, the lease is released,
+   * nothing has changed, and its error is rethrown as it is. It does not run
+   * when there is no inventory to lease.
+   */
+  readonly beforeChange?: () => Promise<void>;
 }
 
 /**
@@ -438,6 +446,18 @@ export async function prepareRfc64InventoryForRollbackV1(
 
   let lease: InventoryV1Lease | null = null;
   let userVersion: number | null = null;
+  let beforeChangeRan = false;
+  let beforeChangeFailed = false;
+  const beforeChange = async (): Promise<void> => {
+    if (beforeChangeRan) return;
+    beforeChangeRan = true;
+    try {
+      await options.beforeChange?.();
+    } catch (error) {
+      beforeChangeFailed = true;
+      throw error;
+    }
+  };
   try {
     prepareSecureDirectory(resolvedDataDir, dirname(databasePath));
     const sqlite = await loadOwnedSqliteModuleV1('RFC-64 inventory rollback');
@@ -472,6 +492,7 @@ export async function prepareRfc64InventoryForRollbackV1(
     }
     if (!pathEntryExists(databasePath)) {
       rejectOrphanedSqliteSidecars(databasePath, 'inventory database');
+      await beforeChange();
       return prepared('absent', null);
     }
     rejectOwnedFileSymlinks(databasePath);
@@ -488,10 +509,12 @@ export async function prepareRfc64InventoryForRollbackV1(
       throw new InventoryV1OpenError('database-busy', 'its write-ahead log could not be folded into the database file');
     }
     if (userVersion <= maxUserVersion) {
+      await beforeChange();
       return prepared('compatible', userVersion, changeForTarget(sqlite, databasePath, [], removePlacements) ?? []);
     }
 
     const chain = downgradeChain(userVersion, maxUserVersion);
+    if (chain !== null) await beforeChange();
     const removed = chain === null ? null : changeForTarget(sqlite, databasePath, chain, removePlacements);
     if (chain !== null && removed !== null) {
       return prepared('downgraded', chain[chain.length - 1]!.toVersion, removed);
@@ -499,11 +522,13 @@ export async function prepareRfc64InventoryForRollbackV1(
     const copy = preMigrationCopyCandidates(databasePath, maxUserVersion)
       .find((candidate) => isRestorableCopy(sqlite, candidate));
     if (copy === undefined) throw unrecognizedSchema(databasePath, userVersion, maxUserVersion);
+    await beforeChange();
     const keptPath = restorePreMigrationCopy(databasePath, userVersion, copy);
     const removedFromCopy = changeForTarget(sqlite, databasePath, [], removePlacements) ?? [];
     return prepared('restored', copy.userVersion, removedFromCopy, keptPath);
   } catch (cause) {
     if (lease !== null) releaseInventoryLease(lease);
+    if (beforeChangeFailed) throw cause;
     throw refusalFrom(cause, databasePath, userVersion, maxUserVersion);
   }
 }

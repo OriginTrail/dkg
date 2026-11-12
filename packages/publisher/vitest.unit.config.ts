@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     include: [
       'test/workspace-operation-timestamp.test.ts',
+      'test/read-graph-declared-updates.test.ts',
       'test/access-client-bounds.test.ts',
       'test/assertion-lifecycle-candidates.test.ts',
       'test/wm-lifecycle-integrity.test.ts',
@@ -159,6 +160,8 @@ export default defineConfig({
       'test/assertion-draft-recovery.test.ts',
       'test/ka-graph-update-ack.test.ts',
       'test/ka-graph-update-handler.test.ts',
+      'test/peer-write-term-validation.test.ts',
+      'test/protocol-metadata.test.ts',
       'test/ka-graph-private-only-publish.test.ts',
       'test/ka-graph-private-access.test.ts',
       'test/rootless-access.test.ts',

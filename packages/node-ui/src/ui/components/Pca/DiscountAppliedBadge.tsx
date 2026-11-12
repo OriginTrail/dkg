@@ -1,7 +1,10 @@
 import React from 'react';
+import { Badge } from '../ds/Badge.js';
 // B8 — the CostCovered wire type now lives at the api boundary (api.ts); re-export it
 // here so existing `components/Pca` importers (the barrel + mocks) keep resolving it.
 import type { ConvictionCostCovered } from '../../api.js';
+import { BadgePercent } from 'lucide-react';
+import { bpsToPercent } from '../../lib/format.js';
 export type { ConvictionCostCovered };
 
 /**
@@ -48,20 +51,20 @@ export function DiscountAppliedBadge({
 }) {
   const bps = convictionDiscountBps(convictionCostCovered);
   if (convictionCostCovered == null || bps == null) return null;
-  const pct = (bps / 100).toFixed(bps % 100 === 0 ? 0 : 1);
+  const pct = bpsToPercent(bps);
   const attribution = convictionCostCovered.accountId
     ? `via PCA #${convictionCostCovered.accountId}`
     : 'across multiple PCAs';
   return (
-    <span
-      className={['badge', 'badge-success', 'v10-pca-discount-applied', className]
-        .filter(Boolean)
-        .join(' ')}
+    <Badge
+      tone="success"
+      size="sm"
+      icon={<BadgePercent size={12} />}
+      className={['v10-pca-discount-applied', className].filter(Boolean).join(' ')}
       data-testid="pca-discount-badge"
       role="status"
     >
-      <span aria-hidden="true">◉ </span>
       Discount applied — −{pct}% {attribution}
-    </span>
+    </Badge>
   );
 }

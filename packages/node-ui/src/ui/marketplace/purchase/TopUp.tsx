@@ -127,16 +127,16 @@ export function TopUp({ catalog, subscription, serviceId, onDone, onCancel }: {
     seen = read.state !== 'read' ? read.state : read.now >= BigInt(attempt.before) + BigInt(attempt.service.value) ? 'shows' : 'missing';
   }
   return (
-    <div className="mkt-card mkt-gate" data-testid="mkt-topup" data-phase={held ? (held.kind === 'reserving' ? 'sending' : held.kind) : 'compose'}>
+    <div className="ds-card mkt-card mkt-gate" data-testid="mkt-topup" data-phase={held ? (held.kind === 'reserving' ? 'sending' : held.kind) : 'compose'}>
       <h2 data-copy={budget ? 'topup.title' : 'topup.title.new'}>{copy(budget ? 'topup.title' : 'topup.title.new', { name, n: subscription.epoch })}</h2>
       <p className="mkt-muted mkt-xs" data-copy="topup.body">{copy('topup.body', { source })}</p>
       <div className="mkt-alloc">
         <label className="mkt-xs"><span data-copy="topup.amount">{copy('topup.amount')}</span>{' '}
-          <input type="text" inputMode="decimal" value={shownAmount} onChange={(e) => setAmount(e.target.value)} disabled={!!held} data-testid="mkt-topup-amount" aria-label={copy('topup.amount')} />{' '}
+          <input type="text" className="ds-input ds-sm mkt-input" inputMode="decimal" value={shownAmount} onChange={(e) => setAmount(e.target.value)} disabled={!!held} data-testid="mkt-topup-amount" aria-label={copy('topup.amount')} />{' '}
           <span data-copy="composer.budget.trac">{copy('composer.budget.trac')}</span></label>
         <span className="mkt-muted mkt-xs" data-copy="catalog.fx.reference.short">{shownValue ? usdOf(shownValue, catalog.fx.tracUsd) ?? '' : copy('composer.budget.zero')}</span>
         <label className="mkt-xs"><span data-copy="composer.cap">{copy('composer.cap')}</span>{' '}
-          <input type="text" inputMode="decimal" value={terms ? microOfWei(terms.maxPricePerUnit) : cap} onChange={(e) => setCap(e.target.value)} disabled={!!budget || !!held} data-testid="mkt-topup-cap" aria-label={copy('composer.cap')} />{' '}
+          <input type="text" className="ds-input ds-sm mkt-input" inputMode="decimal" value={terms ? microOfWei(terms.maxPricePerUnit) : cap} onChange={(e) => setCap(e.target.value)} disabled={!!budget || !!held} data-testid="mkt-topup-cap" aria-label={copy('composer.cap')} />{' '}
           <span data-copy="composer.cap.unit">{copy('composer.cap.unit')}</span></label>
       </div>
       {budget && <div className="mkt-muted mkt-xs" data-copy="topup.after">{copy('topup.after', { trac: fmtTrac(BigInt(budget.value) + (shownValue ?? 0n)) })}</div>}
@@ -157,13 +157,13 @@ export function TopUp({ catalog, subscription, serviceId, onDone, onCancel }: {
         </div>
       )}
       <div className="mkt-fork mkt-gate-actions">
-        <button type="button" className="mkt-btn" data-copy="gate.cancel" onClick={onCancel} disabled={sending}>{copy('gate.cancel')}</button>
+        <button type="button" className="ds-btn" data-copy="gate.cancel" onClick={onCancel} disabled={sending}>{copy('gate.cancel')}</button>
         {fixed ? (
-          <button type="button" className="mkt-btn mkt-btn--primary" data-testid="mkt-topup-retry" data-copy="topup.unknown.retry" onClick={() => { void retry(); }} disabled={sending}>
+          <button type="button" className="ds-btn ds-primary" data-testid="mkt-topup-retry" data-copy="topup.unknown.retry" onClick={() => { void retry(); }} disabled={sending}>
             {sending ? copy('state.working') : copy('topup.unknown.retry')}
           </button>
         ) : (
-          <button type="button" className="mkt-btn mkt-btn--primary" data-testid="mkt-topup-confirm" data-copy="topup.cta" onClick={() => { void confirm(); }} disabled={sending || !ready}>
+          <button type="button" className="ds-btn ds-primary" data-testid="mkt-topup-confirm" data-copy="topup.cta" onClick={() => { void confirm(); }} disabled={sending || !ready}>
             {sending ? copy('state.working') : copy('topup.cta')}
           </button>
         )}

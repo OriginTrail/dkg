@@ -12,6 +12,7 @@ def tool(provider, name, args):
     *[({"sparql": "ASK {}", key: "x"}, "not a supported parameter") for key in ("contextGraph_id", "contextGraphId", "context_graph")],
     *[({"sparql": "ASK {}", key: True}, "no longer supported") for key in ("include_shared_memory", "includeSharedMemory")],
     ({"sparql": "ASK {}", "view": "invalid"}, "must be one of"),
+    ({"sparql": "ASK {}", "semantics": "joined"}, "must be merged or per-asset"),
     ({"sparql": "ASK {}", "view": "working-memory"}, "requires"),
     ({"sparql": "ASK {}", "view": "working-memory", "context_graph_id": "team", "sub_graph_name": "sub"}, "cannot be combined"),
     ({"sparql": "ASK {}", "agent_address": 42}, "must be a string"),
@@ -45,6 +46,12 @@ def test_query_forwards_legacy_scope_without_losing_zero_trust(provider_factory)
     provider = provider_factory()
     tool(provider, "dkg_query", {"sparql": "SELECT * {}", "assertion_name": "asset", "sub_graph_name": "sub", "verified_graph": "urn:g", "graph_suffix": "suffix", "min_trust": 0})
     provider_factory.post.assert_called_with("/api/query", {"sparql": "SELECT * {}", "contextGraphId": "agent-context", "assertionName": "asset", "subGraphName": "sub", "verifiedGraph": "urn:g", "graphSuffix": "suffix", "minTrust": 0})
+
+
+def test_query_forwards_semantics_with_a_view(provider_factory):
+    provider = provider_factory()
+    tool(provider, "dkg_query", {"sparql": "ASK {}", "context_graph_id": "team", "view": "verifiable-memory", "semantics": "merged"})
+    provider_factory.post.assert_called_with("/api/query", {"sparql": "ASK {}", "contextGraphId": "team", "view": "verifiable-memory", "semantics": "merged"})
 
 
 def test_memory_search_queries_all_layers_and_ranks_before_limiting(provider_factory):

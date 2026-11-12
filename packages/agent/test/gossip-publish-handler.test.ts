@@ -45,6 +45,26 @@ function makePublishMessage(opts: {
   });
 }
 
+/**
+ * An embedded store that records the name of every store method the handler
+ * calls, so a test can tell a refusal before the store from one by the store.
+ */
+function recordingStore(): { store: OxigraphStore; calls: string[] } {
+  const calls: string[] = [];
+  const inner = new OxigraphStore();
+  const store = new Proxy(inner, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (typeof value !== 'function' || typeof property !== 'string') return value;
+      return (...args: unknown[]) => {
+        calls.push(property);
+        return value.apply(target, args);
+      };
+    },
+  });
+  return { store, calls };
+}
+
 function createHandler(store?: OxigraphStore, callbacks?: Partial<{
   contextGraphExists: (id: string) => Promise<boolean>;
   getContextGraphOwner: (id: string) => Promise<string | null>;
@@ -503,6 +523,66 @@ describe('GossipPublishHandler', () => {
     expect(bindings[0]['s']).toBe('http://example.org/s');
     expect(bindings[0]['p']).toBe('http://example.org/p');
     expect(bindings[0]['o']).toBe('http://example.org/o');
+  });
+
+  describe('a received term the stores cannot write', () => {
+    const WELL_FORMED_LINE = '<http://example.org/s> <http://example.org/p> "kept value"@en-GB .';
+    const ROOT_MESSAGE = (rootEntity: string) => makePublishMessage({
+      ual: 'did:dkg:mock:31337/0x1/1',
+      contextGraphId: CONTEXT_GRAPH,
+      nquads: `<${rootEntity}> <http://example.org/p> "v" .`,
+      kas: [{ tokenId: 1, rootEntity, privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
+    });
+
+    it('a well-formed broadcast reaches the store (control)', async () => {
+      const { store, calls } = recordingStore();
+      const { handler } = createHandler(store);
+      await handler.handlePublishMessage(makePublishMessage({ contextGraphId: CONTEXT_GRAPH, nquads: WELL_FORMED_LINE }), CONTEXT_GRAPH);
+      expect(calls).toContain('insert');
+      expect(await store.countQuads(`did:dkg:context-graph:${CONTEXT_GRAPH}`)).toBe(1);
+    });
+
+    it.each([
+      ['a language tag with a character a tag may not hold', '<http://example.org/s> <http://example.org/p> "refused value"@en_GB .'],
+      ['a blank-node label with a character a label may not hold', '<http://example.org/s> <http://example.org/p> _:node!refused .'],
+      ['a relative object IRI', '<http://example.org/s> <http://example.org/p> <relative-object> .'],
+    ])('refuses a broadcast holding %s before it calls the store', async (_label, nquads) => {
+      const { store, calls } = recordingStore();
+      const { handler } = createHandler(store);
+      await handler.handlePublishMessage(makePublishMessage({ contextGraphId: CONTEXT_GRAPH, nquads }), CONTEXT_GRAPH);
+      expect(calls).toEqual([]);
+      expect(await store.countQuads()).toBe(0);
+    });
+
+    it('accepts a manifest root entity that is an absolute IRI (control)', async () => {
+      const { store, calls } = recordingStore();
+      const { handler } = createHandler(store);
+      await handler.handlePublishMessage(ROOT_MESSAGE('https://example.org/root'), CONTEXT_GRAPH);
+      expect(calls).toContain('insert');
+    });
+
+    // The root passes the handler's character check for root entities, so only
+    // the term check refuses it.
+    it('refuses a manifest root entity that is not an RFC 3987 IRI before it calls the store', async () => {
+      const { store, calls } = recordingStore();
+      const { handler } = createHandler(store);
+      await handler.handlePublishMessage(ROOT_MESSAGE('https://example.org/%zz'), CONTEXT_GRAPH);
+      expect(calls).toEqual([]);
+      expect(await store.countQuads()).toBe(0);
+    });
+  });
+
+  describe('received protocol metadata', () => {
+    it.each([
+      ['a trust-level row', '<http://example.org/s> <http://dkg.io/ontology/trustLevel> "3" .'],
+      ['a subject in a reserved namespace', '<urn:dkg:file:gossip> <http://example.org/p> "v" .'],
+    ])('refuses a broadcast carrying %s before it calls the store', async (_label, nquads) => {
+      const { store, calls } = recordingStore();
+      const { handler } = createHandler(store);
+      await handler.handlePublishMessage(makePublishMessage({ contextGraphId: CONTEXT_GRAPH, nquads }), CONTEXT_GRAPH);
+      expect(calls).toEqual([]);
+      expect(await store.countQuads()).toBe(0);
+    });
   });
 
   it('registers the sub-graph of a publish once and hands the inserted rows to the metadata projection', async () => {

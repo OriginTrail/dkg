@@ -1,5 +1,6 @@
 import { exactRecoveryActionOutcome } from './sync/durable-recovery-action.js';
 import { runGraphOwnedDurableRecovery, type AgentGraphOwnedRecoveryRequest } from './durable-recovery-owned-round.js';
+import { installReadGraphWorkingMemoryIdentity } from './read-graph-view-source.js';
 // SPDX-License-Identifier: Apache-2.0
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 import { isCommittedSubscription, waitForSubscriptionActivation, type OwnedSubscriptionActivation } from './context-graph-subscription-activation-state.js';
@@ -1671,6 +1672,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // reliance on SPARQL result ordering. Then settle the default agent once.
     await this.loadAgentsFromStore();
     await this.reconcileDefaultAgent();
+    // Read graphs map working-memory drafts to agents with the node's own rule.
+    await installReadGraphWorkingMemoryIdentity(this.store, { defaultAgentAddress: this.defaultAgentAddress, peerId: this.peerId });
 
     const network = new LibP2PNetwork(this.node);
     // Local helper: race a lookup against an optional AbortSignal so

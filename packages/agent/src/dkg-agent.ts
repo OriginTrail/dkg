@@ -6,7 +6,7 @@ import { runStorageACKOperation } from './storage-ack-diagnostics.js';
 import { requireStorageACKContextGraphId } from './internal/storage-ack-context-graph.js';
 import { resolveConfiguredNetworkIdentity } from './configured-network-identity.js';
 import { snapshotCoreChainCacheNetworks } from './core-chain-cache-config.js';
-import { assertionLifecycleAuthorCandidates } from '@origintrail-official/dkg-publisher';
+import { viewQueryEngineOptionsOf } from './read-graph-view-source.js';
 import { durableAssertionShareMethods } from './internal/promote/durable-assertion-share.js';
 import { normalizeAgentPreparedCacheConfig } from './prepared-cache-config.js';
 import { PublicSnapshotMethods, PublicCheckpointMethods } from './dkg-agent-public-snapshot.js';
@@ -119,7 +119,7 @@ import {
   isAllocatableKaAuthorV1,
   applyMixins,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, startReadGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
 import {
   normalizeContextGraphDiscoveryScan,
@@ -166,7 +166,7 @@ import {
   type WorkspaceAgentRecipientResolverInput,
   type WorkspaceSenderKeyEncryptInput, type DurableRootPromotionIdentity,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
-  DEFAULT_REQUIRED_ACKS,
+  DEFAULT_REQUIRED_ACKS, assertionLifecycleAuthorCandidates,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -1163,7 +1163,7 @@ export class DKGAgent extends DKGAgentBase {
         close: () => this.closeRfc64PublicCatalogMutationPersistenceV1(),
       },
       publicCatalog: this.rfc64PublicCatalogOwnerV1,
-      workloads: [bootstrapOwner, projectionOwner, this.createRfc64OwedShareInventoryOwnerV1(resolveCatalogPartition)],
+      workloads: [bootstrapOwner, projectionOwner, this.createRfc64OwedShareInventoryOwnerV1(resolveCatalogPartition), this.createReadGraphWorkloadV1()],
     });
   }
 
@@ -1424,6 +1424,7 @@ export class DKGAgent extends DKGAgentBase {
       store = await createTripleStore({ backend: 'oxigraph' });
       log.warn(ctx, `No dataDir — triple store is in-memory (data will be lost on restart)`);
     }
+    await startReadGraphs(store, { dataDir: config.dataDir, log: message => log.info(ctx, message) });
 
     const nodeRole = config.nodeRole ?? 'edge';
     const eventBus = new TypedEventBus();
@@ -1614,7 +1615,7 @@ export class DKGAgent extends DKGAgentBase {
       log.warn(createOperationContext('init'), `Failed to migrate SWM attribution to agent DID, continuing without: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    const queryEngine = new DKGQueryEngine(agentStore);
+    const queryEngine = new DKGQueryEngine(agentStore, viewQueryEngineOptionsOf(store));
 
     const agent = new DKGAgent(
       resolvedConfig, wallet, node, agentStore, publishedLifecycleWriter, ledgerTimestampWriter, storageAckCopyCleanupWriter, publisher, queryEngine, eventBus, chain,

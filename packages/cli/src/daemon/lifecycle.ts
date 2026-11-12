@@ -228,6 +228,7 @@ import { startActivationCatchups } from './context-graph-activation-catchup.js';
 import { cancelContextGraphReadinessRepeats } from './context-graph-readiness-repeat.js';
 import { endContextGraphWriteReadinessWaits } from './context-graph-write-readiness.js';
 import { daemonCpuProfiles } from './cpu-profile.js';
+import { daemonReadGraphRequests } from './routes/read-graphs.js';
 import { startContextGraphCatchupProgress } from './context-graph-catchup-progress-sources.js';
 import { beginAsyncAdmissionTrace } from './async-admission-trace.js';
 import { authenticateHttpRequest, canAdministerNode, loadTokens } from '../auth.js';
@@ -482,6 +483,9 @@ import { configureApiQueryPriority } from './api-query-priority.js';
 import { configureWritePreflightCoalescing } from './write-preflight-coalescing.js';
 import { startRetention, type RetentionHandle } from './retention-sweeps.js';
 import { resolveRetentionConfig } from '../retention-config.js';
+import { readGraphStoreSettings, resolveQueryConfig } from '../read-graphs-config.js';
+import { assertQueryConfigFitsNode } from '../update/read-graph-rollback-target.js';
+import { applyGraphCatalogConfig } from '../graph-catalog-config.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
 import { buildChatMemoryStack } from './memory-tool-context.js';
@@ -1400,6 +1404,11 @@ async function runDaemonInnerWithStartupOwnership(
   }
   // OT-RFC-73 P10b: a bad queue-retention value fails the boot here and the error names the key (the default is off for both queues).
   const retentionSettings = resolveRetentionConfig(config.queueRetention);
+  // OT-RFC-74: a bad `query` value fails the boot here, and so do read graphs that the rollback target would not recognize.
+  const queryConfig = resolveQueryConfig(config.query);
+  await assertQueryConfigFitsNode(queryConfig, role, Boolean(checkpointMode));
+  // A bad `store.graphCatalog` or DKG_STORE_GRAPH_CATALOG_MAX_BYTES fails the boot here; a good value bounds every catalog read of this process.
+  const graphCatalog = applyGraphCatalogConfig(config.store?.graphCatalog);
   const { name: selectedNetworkConfig, network } = await loadResolvedNetworkConfig(
     config,
     loadNetworkConfig,
@@ -1548,7 +1557,8 @@ async function runDaemonInnerWithStartupOwnership(
   // For the directory-backed blob/snapshot stores we use the managed
   // defaults (the rewritten sparql-http backend has no `options.path` to
   // infer a directory from, unlike the local Oxigraph backend).
-  const runtimeStore = managed?.storeConfig ?? config.store;
+  // A store section that holds only settings (no backend) keeps the default store.
+  const runtimeStore = managed?.storeConfig ?? (config.store?.backend ? config.store : undefined);
   const runtimeLargeLiteralStorage =
     managed?.largeLiteralStorage ?? config.largeLiteralStorage;
   const runtimeSnapshotStorage =
@@ -1796,6 +1806,11 @@ async function runDaemonInnerWithStartupOwnership(
     managedStore: managed?.storeConfig,
     changelogEnabled: Boolean(config.store?.changelog),
     changelogEraGuard: protocolStores.changelogEraGuard,
+    // Only a written `query` section is carried, so a node without one builds its stores exactly as before. A node
+    // that starts from a public checkpoint gets its store from the checkpoint.
+    readGraphs: config.query === undefined || checkpointMode ? undefined : readGraphStoreSettings(queryConfig),
+    dataDir: dkgDir(),
+    graphCatalog,
   });
 
   const agentConfig: DKGAgentConfig = {
@@ -3750,6 +3765,7 @@ async function runDaemonInnerWithStartupOwnership(
       endWriteReadinessWaits: endContextGraphWriteReadinessWaits,
       stopCatchupTriggers,
       endCpuProfile: () => daemonCpuProfiles.end(),
+      endReadGraphRequests: () => daemonReadGraphRequests.end(),
     });
     const cleanupStateFiles = async () => {
       await removeOwnedDaemonRuntimeState().catch((err: any) =>

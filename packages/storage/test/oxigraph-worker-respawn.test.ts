@@ -22,7 +22,7 @@ import {
 // Like the resilience suite next door, this needs the compiled worker
 // artifact (`dist/adapters/oxigraph-worker-impl.js`); if it's missing we fail
 // loudly with the remediation hint rather than silently skip.
-function makeStore(persistPath?: string, opts?: { operationTimeoutMs?: number }): OxigraphWorkerStore {
+function makeStore(persistPath?: string, opts?: { operationTimeoutMs?: number; flushDelayMs?: number }): OxigraphWorkerStore {
   try {
     return new OxigraphWorkerStore(persistPath, opts);
   } catch (err) {
@@ -144,6 +144,34 @@ describe('OxigraphWorkerStore respawn after unexpected worker exit', () => {
       // And writes work too: the store is fully live, not read-only.
       await store.insert(quads(5, 'urn:test:g2'));
       expect(await store.countQuads('urn:test:g2')).toBe(5);
+    } finally {
+      await store.close().catch(() => {});
+    }
+  });
+
+  it('loses a write acknowledged after the last snapshot, and moves the recovery generation', async () => {
+    // What the read-graph runtime keys its reconciliation on: a respawned worker reloads the last snapshot, so a
+    // write it acknowledged but had not flushed yet is gone, and the generation has moved past the one the runtime
+    // last saw (with `ready` false until the replacement serves).
+    // The background snapshot waits a minute, so nothing but the explicit flush() reaches the file during the test:
+    // the acknowledged write below is certainly not in the snapshot when the worker dies.
+    const store = makeStore(path, { flushDelayMs: 60_000 });
+    try {
+      await store.insert(quads(10));
+      await store.flush();
+      const readRecovery = asStoreRecoveryGenerationReader(store)!;
+      const before = readRecovery()!;
+      expect(before.ready).toBe(true);
+
+      await store.insert(quads(5, 'urn:test:unflushed'));
+      expect(await store.countQuads('urn:test:unflushed')).toBe(5);
+      await killWorker(store);
+      expect(readRecovery()).toEqual({ generation: before.generation + 1, ready: false });
+
+      // The replacement holds the snapshot: the flushed write is there, the unflushed one is not.
+      expect(await store.countQuads('urn:test:g')).toBe(10);
+      expect(await store.countQuads('urn:test:unflushed')).toBe(0);
+      expect(readRecovery()).toEqual({ generation: before.generation + 1, ready: true });
     } finally {
       await store.close().catch(() => {});
     }

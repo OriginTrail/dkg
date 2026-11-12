@@ -82,7 +82,7 @@ export function ApiTokenPrompt({
         at <strong>{window.location.host}</strong> (kept for this tab only).
       </span>
       <input
-        className="v10-token-prompt-input"
+        className="v10-token-prompt-input ds-input ds-sm"
         type="password"
         autoComplete="off"
         spellCheck={false}

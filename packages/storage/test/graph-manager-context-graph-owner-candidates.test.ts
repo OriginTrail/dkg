@@ -1,11 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { GraphManager, OxigraphStore, type TripleStore } from '../src/index.js';
+import {
+  DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES,
+  GraphManager,
+  OxigraphStore,
+  STORE_GRAPH_CATALOG_LIMIT_NAME,
+  STORE_GRAPH_CATALOG_MAX_BYTES_ENV,
+  type TripleStore,
+} from '../src/index.js';
 import {
   workspaceKnowledgeAssetOperationSnapshotGraph,
   workspaceOperationPublicSnapshotGraph,
 } from '@origintrail-official/dkg-core';
 
 const PREFIX = 'did:dkg:context-graph:';
+const CEILING = {
+  maxResponseBytes: DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES,
+  maxLiteralHydrationBytes: DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES,
+};
 
 const listStoredContextGraphQueryCandidates = (
   store: TripleStore,
@@ -46,8 +57,9 @@ describe('stored context graph candidates for query admission', () => {
     ]));
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids).not.toContain('urn:unrelated:graph');
+    // Admission reads a current catalog.
     expect(listGraphsByPrefix).toHaveBeenCalledWith(PREFIX, {
-      source: 'storage.contextGraphOwnerCandidates',
+      source: 'storage.contextGraphOwnerCandidates', ...CEILING, currentCatalog: true,
     });
     expect(listGraphs).not.toHaveBeenCalled();
     // Admission cannot depend on metadata existence: ordinary read authority
@@ -79,7 +91,9 @@ describe('stored context graph candidates for query admission', () => {
     const result = await listStoredContextGraphQueryCandidates(store);
     expect(result).toEqual(expect.arrayContaining(['private', 'private/_shared_memory']));
     expect(result).not.toContain('urn:unrelated:graph');
-    expect(listGraphs).toHaveBeenCalledWith({ source: 'storage.contextGraphOwnerCandidates' });
+    // The complete list behind the fallback is node work under the internal catalog ceiling.
+    expect(listGraphs).toHaveBeenCalledWith({ source: 'storage.contextGraphOwnerCandidates',
+      maxResponseBytes: DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES, maxLiteralHydrationBytes: DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES });
     expect(query).not.toHaveBeenCalled();
   });
 
@@ -137,7 +151,20 @@ describe('stored context graph candidates for query admission', () => {
     release([]);
     await failure;
     expect(listGraphsByPrefix).toHaveBeenCalledWith(PREFIX, {
-      source: 'storage.contextGraphOwnerCandidates', signal: controller.signal,
+      source: 'storage.contextGraphOwnerCandidates', signal: controller.signal, ...CEILING, currentCatalog: true,
     });
+  });
+
+  it('reads the inventory under the internal ceiling, never a caller limit, and fails as a node-side limit above it', async () => {
+    const { store, listGraphsByPrefix } = indexedStore(Array.from({ length: 100 }, (_, id) => `${PREFIX}public/${id}`));
+    await expect(new GraphManager(store).listStoredContextGraphOwnerCandidates({ maxResponseBytes: 16 }))
+      .resolves.toContain('public');
+    expect(listGraphsByPrefix.mock.calls[0]?.[1]).toMatchObject(CEILING);
+    vi.stubEnv(STORE_GRAPH_CATALOG_MAX_BYTES_ENV, '64');
+    try {
+      await expect(listStoredContextGraphQueryCandidates(store)).rejects.toMatchObject({
+        code: 'STORE_INTERNAL_LIMIT', limitName: STORE_GRAPH_CATALOG_LIMIT_NAME, limitBytes: 64,
+      });
+    } finally { vi.unstubAllEnvs(); }
   });
 });

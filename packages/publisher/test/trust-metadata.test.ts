@@ -68,6 +68,39 @@ async function buildSeal(
 }
 
 describe('publisher trust metadata', () => {
+  it.each([
+    ['bare', TRUST_LEVEL_PREDICATE],
+    ['in angle brackets', `<${TRUST_LEVEL_PREDICATE}>`],
+  ])('rejects a user-authored trustLevel predicate %s on every write entry point, writing nothing', async (_form, predicate) => {
+    const { publisher, store } = await makePublisher();
+    const trustQuad = quad('urn:trust:user', predicate, `"${TrustLevel.ConsensusVerified}"`);
+    const refused = /User-authored dkg:trustLevel metadata is not allowed/;
+    const before = await store.countQuads();
+
+    await expect(publisher.publish({ contextGraphId: 'trust-cg', quads: [trustQuad] })).rejects.toThrow(refused);
+    await expect(publisher.share('trust-cg', [trustQuad], { publisherPeerId: 'peer-a' })).rejects.toThrow(refused);
+    await expect(publisher.conditionalShare('trust-cg', [trustQuad], { publisherPeerId: 'peer-a', conditions: [] }))
+      .rejects.toThrow(refused);
+    await expect(publisher.assertionWrite('trust-cg', 'draft', '0xabc', [trustQuad])).rejects.toThrow(refused);
+    await expect(publisher.assertionWritePrivate('trust-cg', 'draft', '0xabc', [trustQuad])).rejects.toThrow(refused);
+    expect(await store.countQuads()).toBe(before);
+  });
+
+  it.each([
+    ['bare', 'urn:dkg:file:user'],
+    ['in angle brackets', '<urn:dkg:file:user>'],
+  ])('rejects a subject in a reserved namespace %s on every write entry point, writing nothing', async (_form, subject) => {
+    const { publisher, store } = await makePublisher();
+    const reserved = quad(subject);
+    const before = await store.countQuads();
+
+    await expect(publisher.publish({ contextGraphId: 'trust-cg', quads: [reserved] })).rejects.toThrow(/reserved namespace/);
+    await expect(publisher.share('trust-cg', [reserved], { publisherPeerId: 'peer-a' })).rejects.toThrow(/reserved namespace/);
+    await expect(publisher.assertionWrite('trust-cg', 'draft', '0xabc', [reserved])).rejects.toThrow(/reserved namespace/);
+    await expect(publisher.assertionWritePrivate('trust-cg', 'draft', '0xabc', [reserved])).rejects.toThrow(/reserved namespace/);
+    expect(await store.countQuads()).toBe(before);
+  });
+
   it('rejects user-authored trustLevel quads in publish and SWM inputs', async () => {
     const { publisher } = await makePublisher();
     const trustQuad = quad('urn:trust:user', TRUST_LEVEL_PREDICATE, `"${TrustLevel.ConsensusVerified}"`);
