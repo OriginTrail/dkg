@@ -113,4 +113,21 @@ describe('read-graph settings on an adapter that cannot keep read graphs', () =>
     expect(off.runtime.modes).toEqual({ default: 'off' });
     expect(() => wrapReadGraphLayer(capableAdapter(), { ...config, readGraphs: { modes: { default: 'serve' } } })).not.toThrow();
   });
+
+  it('keep no read graph, and leave the adapter open, when the settings ask for none on such an adapter', () => {
+    const config = { backend: 'oxigraph-worker', options: { path: `/tmp/read-graph-settings-${Math.random()}` } };
+    let closed = false;
+    const adapter = { delete: async () => undefined, close: async () => { closed = true; } } as unknown as TripleStore;
+    const modes: ReadGraphModes = { contextGraphs: { notes: { default: 'build' } } };
+    const layer = wrapReadGraphLayer(adapter, { ...config, readGraphs: { modes, viewSemantics: { default: 'merged' }, whenUnsupported: 'off' } });
+    expect(closed).toBe(false);
+    expect(keepsAnyReadGraph(layer.runtime.modes)).toBe(false);
+    expect(readGraphModeOf(layer.runtime.modes, vm('notes'))).toBe('off');
+    expect(viewSemanticsOf(layer.runtime.viewSemantics, 'notes')).toBe('merged');
+    // An adapter that can keep them keeps the same settings.
+    const capable = wrapReadGraphLayer(capableAdapter(), {
+      backend: 'oxigraph-worker', options: { path: `/tmp/read-graph-settings-${Math.random()}` }, readGraphs: { modes, whenUnsupported: 'off' },
+    });
+    expect(capable.runtime.modes).toBe(modes);
+  });
 });

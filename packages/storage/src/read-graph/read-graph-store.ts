@@ -115,6 +115,12 @@ export interface ReadGraphStoreConfig {
   readonly modes?: ReadGraphModes;
   /** What a view query without `semantics` gets (`query.viewSemantics`); `per-asset` when absent. */
   readonly viewSemantics?: ViewSemanticsSettings;
+  /**
+   * What a store whose adapter cannot keep read graphs does with modes that keep one: `refuse` (the default) throws
+   * {@link ReadGraphsUnsupportedError}; `off` keeps no read graph, as if every mode were `off`. The daemon refuses for
+   * the node's own modes in config.json, and uses `off` when only its settings table keeps read graphs.
+   */
+  readonly whenUnsupported?: 'refuse' | 'off';
 }
 
 export const READ_GRAPH_WRITE_REFUSED_CODE = 'READ_GRAPH_WRITE_REFUSED';
@@ -678,24 +684,35 @@ export class ReadGraphStore implements TripleStoreDecorator {
 
 export { READ_GRAPHS_UNSUPPORTED_CODE, ReadGraphsUnsupportedError } from './read-graphs-unsupported.js';
 
+/** The modes of a store that keeps no read graph. */
+const NO_READ_GRAPHS: ReadGraphModes = Object.freeze({ default: 'off' });
+
 /**
  * Put the read-graph layer directly above an adapter. Store objects whose
  * configurations name the same backend share one runtime. Settings that keep
  * read graphs are refused, and the adapter closed, unless the adapter sends
- * read-graph operations with every planned write it implements.
+ * read-graph operations with every planned write it implements, or the
+ * settings ask for no read graph on such a store (`whenUnsupported: 'off'`).
  */
 export function wrapReadGraphLayer(adapter: TripleStore, config: TripleStoreConfig): ReadGraphStore {
-  const { workingMemoryIdentity, modes, viewSemantics } = config.readGraphs ?? {};
-  const missing = keepsAnyReadGraph(modes) ? missingReadGraphMethods(adapter, readGraphCapabilitiesOf(adapter)) : [];
-  if (missing.length > 0) {
-    void adapter.close().catch(() => undefined);
-    throw new ReadGraphsUnsupportedError(config.backend, missing);
-  }
+  const { workingMemoryIdentity, modes, viewSemantics } = keptReadGraphSettings(adapter, config);
   const runtime = readGraphBackendRuntime(readGraphBackendIdentity(config));
   if (workingMemoryIdentity) runtime.workingMemoryIdentity = workingMemoryIdentity;
   if (modes) runtime.modes = modes;
   if (viewSemantics) runtime.viewSemantics = viewSemantics;
   return new ReadGraphStore(adapter, runtime, termSiteOf(config.backend));
+}
+
+/** The settings a store keeps: refused when they keep read graphs that its adapter cannot maintain, unless they ask to keep none then. */
+function keptReadGraphSettings(adapter: TripleStore, config: TripleStoreConfig): ReadGraphStoreConfig {
+  const settings = config.readGraphs ?? {};
+  const missing = keepsAnyReadGraph(settings.modes) ? missingReadGraphMethods(adapter, readGraphCapabilitiesOf(adapter)) : [];
+  if (missing.length === 0) return settings;
+  if (settings.whenUnsupported !== 'off') {
+    void adapter.close().catch(() => undefined);
+    throw new ReadGraphsUnsupportedError(config.backend, missing);
+  }
+  return { ...settings, modes: NO_READ_GRAPHS };
 }
 
 /** The read-graph layer of a store's decorator chain, or `null` when it has none. */
