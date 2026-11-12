@@ -41,8 +41,7 @@ This discovery map is derived from the [maintained Node Skill](https://github.co
 | `dkg_knowledge_asset_semantic_enrichment_write` | `POST /api/knowledge-assets/semantic-enrichment/write` |
 | `dkg_sub_graph_create` | `POST /api/sub-graph/create` |
 | `dkg_sub_graph_list` | `GET /api/sub-graph/list` |
-| `dkg_read_graphs_status` | `GET /api/store/read-graphs/settings` |
-| `dkg_read_graphs_set` | `PUT /api/store/read-graphs/settings` |
+| `dkg_read_graphs_status` / `dkg_read_graphs_set` | `GET` / `PUT /api/store/read-graphs/settings` |
 | `dkg_query` | `POST /api/query` |
 | `dkg_query_catalog_list` | `POST /api/profile/query-catalog/read` |
 | `dkg_query_catalog_run` | `POST /api/profile/query-catalog/read` + `POST /api/query` |

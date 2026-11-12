@@ -93,8 +93,7 @@ discover other agents on the network.
 **create** an assertion, **write** triples to WM, **finalize** (seal) the draft,
 **share** to SWM, then **publish** the sealed assertion to VM — which mints it on
 chain and returns its **UAL** (see §5 VM for the response body). Data must be in SWM
-before VM publishing; the on-chain transaction is a finality signal for data peers
-already received via gossip.
+before VM publishing; the on-chain transaction is a finality signal for data peers already received via gossip.
 
 A full `swm/share` (`entities: "all"`) **seals by default** and is then publish-ready, so
 the explicit `wm/finalize` step is optional on the happy path. There is no unsealed share:
@@ -222,8 +221,7 @@ Drop to HTTP when the operation isn't in the table — participant self-service 
 | `dkg_knowledge_asset_semantic_enrichment_write` | `POST /api/knowledge-assets/semantic-enrichment/write` | Append model-derived semantic triples and provenance to the imported assertion |
 | `dkg_sub_graph_create` | `POST /api/sub-graph/create` | Register a sub-graph inside a CG |
 | `dkg_sub_graph_list` | `GET /api/sub-graph/list` | List sub-graphs in a CG |
-| `dkg_read_graphs_status` | `GET /api/store/read-graphs/settings` | Where queries can search across assets: for each context graph and memory, Off, Preview or On, and how far its combined copy is. Node admin token only |
-| `dkg_read_graphs_set` | `PUT /api/store/read-graphs/settings` | Turn search across assets Off, to Preview or On for one context graph (one memory or all three), and set whether its queries search across assets by default. Node admin token only |
+| `dkg_read_graphs_status` / `dkg_read_graphs_set` | `GET` / `PUT /api/store/read-graphs/settings` | Status: where queries can search across assets, for each context graph and memory: Off, Preview or On, and how far its combined copy is. Set: turn it Off, to Preview or On for one context graph (one memory or all three), and choose whether its queries search across assets by default. Node admin token only |
 | `dkg_query` | `POST /api/query` | Read-only SPARQL across assertions in a CG. Pass `view` (`working-memory` / `shared-working-memory` / `verifiable-memory`) to pick the layer — when `view` is set, `context_graph_id` is required; for WM reads, optional `agent_address` targets another agent's WM (when omitted it defaults to this node's primary agent wallet, falling back to the peer ID on nodes without a configured default agent). Omit `view` for a legacy cross-graph data-path query. |
 | `dkg_query_catalog_list` | `POST /api/profile/query-catalog/read` | List saved SPARQL queries declared in the project profile query catalog |
 | `dkg_query_catalog_run` | `POST /api/profile/query-catalog/read` + `POST /api/query` | Run a saved catalog query by slug or exact display name |
