@@ -1,0 +1,85 @@
+/* Read graphs — the node admin's section under Pending join requests, and
+   the query view's view picker and Merged toggle. */
+.v10-po-rg-desc,
+.v10-po-rg-notice {
+  margin: 0 0 8px;
+  font-size: var(--font-size-caption);
+  color: var(--text-tertiary);
+}
+.v10-po-rg-notice { color: var(--text-warning); }
+.v10-po-rg-list { display: flex; flex-direction: column; gap: 6px; }
+.v10-po-rg-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+}
+.v10-po-rg-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.v10-po-rg-state { font-size: var(--font-size-caption); color: var(--text-secondary); }
+.v10-po-rg-modes {
+  display: inline-flex;
+  flex-shrink: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+}
+.v10-po-rg-mode {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-caption);
+  font-weight: 600;
+  padding: 4px 10px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 0;
+  border-left: 1px solid var(--border-default);
+  cursor: pointer;
+}
+.v10-po-rg-mode:first-child { border-left: 0; }
+.v10-po-rg-mode:hover:not(:disabled) { background: var(--bg-hover); }
+.v10-po-rg-mode[aria-pressed="true"] { background: var(--bg-active); color: var(--text-primary); }
+.v10-po-rg-mode:disabled { opacity: 0.5; cursor: default; }
+.v10-po-read-graphs .v10-po-join-btn:not(.reject) {
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-default);
+}
+.v10-po-rg-status { font-size: var(--font-size-caption); color: var(--text-tertiary); }
+.v10-po-rg-confirm,
+.v10-po-rg-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: var(--font-size-caption);
+  color: var(--text-secondary);
+}
+.v10-po-rg-refusal,
+.v10-po-rg-error { font-size: var(--font-size-caption); color: var(--text-danger); }
+
+.v10-cg-query-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+.v10-cg-query-option {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--font-size-caption);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.v10-cg-query-merged { flex-direction: row; align-items: center; gap: 6px; cursor: pointer; }
+.v10-cg-query-merged:has(input:disabled) { opacity: 0.55; cursor: default; }
+.v10-cg-query-answered { color: var(--text-secondary); }

@@ -23,7 +23,8 @@ function Scene({ dataImages = false }: { dataImages?: boolean }) {
 }
 const view = new URLSearchParams(location.search).get('view');
 const LargeGraph = view === 'large-graph' ? (await import('./large-graph.js')).LargeGraph : null;
-createRoot(document.getElementById('root')!).render(LargeGraph ? <LargeGraph /> : view === 'assertions'
+const ReadGraphViews = view === 'read-graphs' || view === 'merged-query' ? (await import('./read-graphs.js')).ReadGraphViews : null;
+createRoot(document.getElementById('root')!).render(ReadGraphViews ? <ReadGraphViews view={view!} /> : LargeGraph ? <LargeGraph /> : view === 'assertions'
   ? <AssertionsList contextGraphId={cg} layer="wm" onComplete={() => {}} /> : view === 'scene-data'
   ? <Scene dataImages /> : view === 'scene' ? <Scene /> : view === 'agent'
   ? <AgentProfilePage contextGraphId={cg} agentUri="urn:dkg:agent:late-author" /> : <MemoryStackView />);
