@@ -54,7 +54,6 @@ import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
 import { noteReadGraphPartitionsOfRuntime } from './data-directories.js';
 import { forgetReadGraphDropRequest, requestReadGraphDrops } from './drop-requests.js';
-import { useReadGraphMarkJournal } from './mark-journal.js';
 import { readGraphLayerOf, type ReadGraphStore } from './read-graph-store.js';
 import { ReadGraphsUnsupportedError } from './read-graphs-unsupported.js';
 import { markReadGraphDirty, refreshReadGraphRegistry, retireReadGraph, type ReadGraphJobContext } from './rebuild.js';
@@ -71,9 +70,8 @@ import {
   type ViewSemantics,
   type ViewSemanticsSettings,
 } from './settings.js';
-import { noteReadGraphRuntimeLoaded } from './startup.js';
+import { joinReadGraphMaintenance, noteReadGraphMirrorInService } from './startup.js';
 import { readStoredReadGraphStates } from './state.js';
-import { noteWorkingMemoryIdentityDirectory } from './working-memory-identity.js';
 
 /** What an apply did with one context graph's layer. */
 export type ReadGraphModeOutcome = 'applied' | 'unchanged' | { readonly refused: string };
@@ -85,6 +83,22 @@ export interface ReadGraphModeChange {
   readonly from: ReadGraphMode;
   readonly to: ReadGraphMode;
   readonly outcome: ReadGraphModeOutcome;
+}
+
+/**
+ * A step of a switch that failed after the modes changed. The apply still
+ * reports the change applied, and the builder takes the step over from the
+ * modes: it removes a read graph switched off and builds one switched on.
+ * - `retire`: taking a read graph switched off out of service;
+ * - `admit`: taking a read graph switched on into service, or giving it a row;
+ * - `wanted`: listing the read graphs the node keeps under the new modes;
+ * - `registry`: reading and recording a context graph's registry.
+ */
+export interface ReadGraphModeDeferral {
+  readonly step: 'retire' | 'admit' | 'wanted' | 'registry';
+  readonly readGraph?: string;
+  readonly contextGraphId?: string;
+  readonly error: unknown;
 }
 
 export interface ApplyReadGraphModesOptions {
@@ -108,6 +122,8 @@ export interface ApplyReadGraphModesOptions {
   readonly viewSemantics?: ViewSemanticsSettings;
   /** The `source` label of the apply's store requests. */
   readonly source?: string;
+  /** Told of each step that failed after the modes changed ({@link ReadGraphModeDeferral}). A hook that throws changes nothing. */
+  readonly onDeferred?: (deferral: ReadGraphModeDeferral) => void;
 }
 
 const LAYERS: ReadonlyArray<readonly [GetView, MemoryLayer]> = [
@@ -191,9 +207,16 @@ async function apply(
   runtime.modesApplied = true;
   if (semantics) setViewSemantics(runtime, semantics);
   const context: ReadGraphJobContext = { store, ...(options.dataDir !== undefined ? { dataDir: options.dataDir } : {}), source };
-  await switchOff(context, runtime, next, stored);
+  const deferred = (deferral: ReadGraphModeDeferral) => {
+    try {
+      options.onDeferred?.(deferral);
+    } catch {
+      // The modes changed all the same, and the builder takes the step over.
+    }
+  };
+  await switchOff(context, runtime, next, stored, deferred);
   const on = changes.filter((change) => change.from === 'off' && change.to !== 'off');
-  if (on.length > 0) await switchOn(context, runtime, on, stored, options);
+  if (on.length > 0) await switchOn(context, runtime, on, stored, options, deferred);
   return outcomes(changes, () => undefined);
 }
 
@@ -204,7 +227,13 @@ async function apply(
  * asked for first, so the builder's removal also takes out of service one
  * that this could not.
  */
-async function switchOff(context: ReadGraphJobContext, runtime: ReadGraphBackendRuntime, next: ReadGraphModes, stored: readonly string[]): Promise<void> {
+async function switchOff(
+  context: ReadGraphJobContext,
+  runtime: ReadGraphBackendRuntime,
+  next: ReadGraphModes,
+  stored: readonly string[],
+  deferred: (deferral: ReadGraphModeDeferral) => void,
+): Promise<void> {
   const off = (readGraph: string) => {
     const key = parseReadGraphIri(readGraph);
     return key !== undefined && readGraphModeOf(next, key) === 'off';
@@ -215,8 +244,9 @@ async function switchOff(context: ReadGraphJobContext, runtime: ReadGraphBackend
     if (runtime.mirror.get(readGraph) === undefined) continue;
     try {
       await retireReadGraph(context, readGraph);
-    } catch {
+    } catch (error) {
       // The builder's removal takes it out of service.
+      deferred({ step: 'retire', readGraph, error });
     }
   }
 }
@@ -233,10 +263,9 @@ async function switchOff(context: ReadGraphJobContext, runtime: ReadGraphBackend
 function prepareMaintenance(runtime: ReadGraphBackendRuntime, dataDir: string | undefined): void {
   if (dataDir !== undefined) {
     noteReadGraphPartitionsOfRuntime(runtime, dataDir);
-    useReadGraphMarkJournal(runtime, dataDir);
-    noteWorkingMemoryIdentityDirectory(runtime, dataDir);
+    joinReadGraphMaintenance(runtime, dataDir);
   }
-  noteReadGraphRuntimeLoaded(runtime);
+  noteReadGraphMirrorInService(runtime);
 }
 
 /**
@@ -252,28 +281,32 @@ async function switchOn(
   on: readonly Omit<ReadGraphModeChange, 'outcome'>[],
   stored: readonly string[],
   options: ApplyReadGraphModesOptions,
+  deferred: (deferral: ReadGraphModeDeferral) => void,
 ): Promise<void> {
   const switched = (key: ReadGraphKey | undefined) => key !== undefined
     && on.some((change) => change.contextGraphId === key.scope.contextGraphId && layerOfView(change.layer) === key.layer);
   const admitted = new Set(stored.filter((readGraph) => switched(parseReadGraphIri(readGraph))));
   try {
     for (const key of (await options.wanted?.()) ?? []) if (switched(key)) admitted.add(readGraphIri(key));
-  } catch {
+  } catch (error) {
     // The builder asks again, and creates their rows.
+    deferred({ step: 'wanted', error });
   }
   for (const readGraph of [...admitted].sort(compareCodePoint)) {
     forgetReadGraphDropRequest(runtime, readGraph);
     try {
       await markReadGraphDirty(context, readGraph, { create: true });
-    } catch {
+    } catch (error) {
       // The builder builds it where the node keeps it.
+      deferred({ step: 'admit', readGraph, error });
     }
   }
   for (const contextGraphId of new Set(on.map((change) => change.contextGraphId))) {
     try {
       await refreshReadGraphRegistry(context, contextGraphId);
-    } catch {
+    } catch (error) {
       // A build reads it before it copies anything.
+      deferred({ step: 'registry', contextGraphId, error });
     }
   }
 }

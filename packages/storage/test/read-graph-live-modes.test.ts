@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setImmediate as nextTurn } from 'node:timers/promises';
+import { setImmediate as nextTurn, setTimeout as sleep } from 'node:timers/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryLayer, readGraphIri, type ReadGraphKey } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
@@ -10,7 +10,7 @@ import { guardReadGraphPartition } from '../src/read-graph-partition-store.js';
 import { withReadGraphBackgroundSlot } from '../src/read-graph/background-slot.js';
 import { ReadGraphBuilder } from '../src/read-graph/builder.js';
 import { readGraphDropRequests, requestReadGraphDrops } from '../src/read-graph/drop-requests.js';
-import { applyReadGraphModes, applyViewSemantics, type ReadGraphModeChange } from '../src/read-graph/live-modes.js';
+import { applyReadGraphModes, applyViewSemantics, type ReadGraphModeChange, type ReadGraphModeDeferral } from '../src/read-graph/live-modes.js';
 import { ReadGraphWriteRefusedError, wrapReadGraphLayer } from '../src/read-graph/read-graph-store.js';
 import { markReadGraphDirty, removeReadGraph } from '../src/read-graph/rebuild.js';
 import { readGraphModeOf, type ReadGraphModes } from '../src/read-graph/settings.js';
@@ -254,7 +254,7 @@ describe('switching read graphs live', () => {
     await expectUnion(node, wholeSwm);
   });
 
-  it('repeats an apply as a no-op, runs concurrent applies one at a time, and a later one wins', async () => {
+  it('repeats an apply as a no-op', async () => {
     const node = await open();
     const { adapter, fixture, layer, store } = node;
     const on = layerAt(fixture.contextGraphId, VM, 'build');
@@ -266,18 +266,50 @@ describe('switching read graphs live', () => {
     expect(again.map((change) => change.outcome)).toEqual(['unchanged', 'unchanged', 'unchanged']);
     expect(await stored(adapter)).toEqual(rows);
     expect(layer.runtime.mirror.rows()).toEqual(mirrored);
-
-    // Two applies asked together run in order; each one's changes are measured from the one before.
-    const [first, second] = await Promise.all([
-      applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'serve'), { wanted }),
-      applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'off'), { wanted }),
-    ]);
-    expect(first.find((change) => change.layer === 'verifiable-memory')).toMatchObject({ from: 'build', to: 'serve', outcome: 'applied' });
-    expect(second.find((change) => change.layer === 'verifiable-memory')).toMatchObject({ from: 'serve', to: 'off', outcome: 'applied' });
-    expect(readGraphModeOf(layer.runtime.modes, fixture.keys[0]!)).toBe('off');
-    expect(layer.runtime.mirror.size).toBe(0);
+    // Off, twice: the second changes nothing either.
+    expect(outcomeOf(await applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'off'), { wanted }), 'verifiable-memory')).toBe('applied');
     const third = await applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'off'), { wanted });
     expect(third.map((change) => change.outcome)).toEqual(['unchanged', 'unchanged', 'unchanged']);
+  });
+
+  it('runs applies over one backend one at a time: one asked for while another is held waits for it to end', async () => {
+    const node = await open();
+    const { adapter, fixture, layer, store, dataDir } = node;
+    const [wholeVm, , codeVm] = fixture.keys.map((key) => readGraphIri(key)) as [string, string, string];
+    const wanted = () => fixture.keys.filter((key) => readGraphModeOf(layer.runtime.modes, key) !== 'off');
+    // The first apply is held while it gives the first read graph its row.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let held = false;
+    adapter.onUpdate = async (sparql) => {
+      if (!held && sparql.includes(`<${wholeVm}> <${READ_GRAPH_STATE_PREDICATES.state}>`)) {
+        held = true;
+        await gate;
+      }
+    };
+    const first = applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'build'), { dataDir, wanted });
+    await vi.waitFor(() => expect(held).toBe(true));
+    let secondDone = false;
+    const second = applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'off'), { dataDir, wanted }).then((changes) => {
+      secondDone = true;
+      return changes;
+    });
+    // Long enough for the second to read the stored rows and change the modes, had it not waited.
+    await sleep(100);
+    expect(secondDone).toBe(false);
+    expect(readGraphModeOf(layer.runtime.modes, fixture.keys[0]!)).toBe('build');
+    release();
+    const [one, two] = await Promise.all([first, second]);
+    adapter.onUpdate = undefined;
+    expect(outcomeOf(one, 'verifiable-memory')).toBe('applied');
+    // The second ran once the first had ended: it found the first's rows, and took them out of service.
+    expect(two.find((change) => change.layer === 'verifiable-memory')).toMatchObject({ from: 'build', to: 'off', outcome: 'applied' });
+    expect(readGraphModeOf(layer.runtime.modes, fixture.keys[0]!)).toBe('off');
+    expect(layer.runtime.mirror.size).toBe(0);
+    expect(await stored(adapter)).toEqual({ [wholeVm]: 'dirty', [codeVm]: 'dirty' });
+    expect([...readGraphDropRequests(layer.runtime)].sort()).toEqual([codeVm, wholeVm].sort());
   });
 
   it('refuses every change when one is refused, and changes nothing before it would', async () => {
@@ -680,12 +712,15 @@ describe('switching read graphs live', () => {
         throw new Error('the store is unavailable');
       }
     };
+    const deferrals: ReadGraphModeDeferral[] = [];
     const changes = await applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'serve'), {
-      dataDir, wanted: () => fixture.keys.filter((key) => key.layer === VM),
+      dataDir, wanted: () => fixture.keys.filter((key) => key.layer === VM), onDeferred: (deferral) => deferrals.push(deferral),
     });
     adapter.onUpdate = undefined;
     expect(refused).toBe(1);
     expect(outcomeOf(changes, 'verifiable-memory')).toBe('applied');
+    // The step the builder takes over is told, with its read graph and cause.
+    expect(deferrals).toEqual([{ step: 'admit', readGraph: wholeVm, error: expect.objectContaining({ message: 'the store is unavailable' }) }]);
     // Maintained but not served: the mirror holds it dirty, and no stored row says otherwise.
     expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('dirty');
     expect((await stored(adapter))[wholeVm]).toBeUndefined();
@@ -709,10 +744,18 @@ describe('switching read graphs live', () => {
         throw new Error('the store is unavailable');
       }
     };
-    const changes = await applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'off'));
+    const deferrals: ReadGraphModeDeferral[] = [];
+    // A hook that throws changes nothing: the apply goes on.
+    const changes = await applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'off'), {
+      onDeferred: (deferral) => {
+        deferrals.push(deferral);
+        throw new Error('a hook that fails');
+      },
+    });
     adapter.onUpdate = undefined;
     expect(refused).toBe(1);
     expect(outcomeOf(changes, 'verifiable-memory')).toBe('applied');
+    expect(deferrals).toEqual([{ step: 'retire', readGraph: wholeVm, error: expect.objectContaining({ message: 'the store is unavailable' }) }]);
     // Out of service in the mirror, whatever the store still says, and its drop asked for.
     expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('dirty');
     expect((await stored(adapter))[wholeVm]).toBe('ready');

@@ -551,6 +551,7 @@ export {
   applyViewSemantics,
   type ApplyReadGraphModesOptions,
   type ReadGraphModeChange,
+  type ReadGraphModeDeferral,
   type ReadGraphModeOutcome,
 } from './read-graph/live-modes.js';
 export { readGraphDropRequests } from './read-graph/drop-requests.js';

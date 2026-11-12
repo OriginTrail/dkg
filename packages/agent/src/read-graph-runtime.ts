@@ -26,6 +26,7 @@
 
 import {
   MemoryLayer,
+  createOperationContext,
   isReadGraphEligibleContextGraphId,
   readScope,
   type OperationContext,
@@ -52,6 +53,7 @@ import {
   type ReadGraphCheckSchedule,
   type ReadGraphMode,
   type ReadGraphModeChange,
+  type ReadGraphModeDeferral,
   type ReadGraphModes,
   type ReadGraphState,
   type TripleStore,
@@ -274,6 +276,7 @@ export class ReadGraphWorkloadOwnerV1 {
       contextGraphIds: [...this.#agent.getSubscribedContextGraphs().keys()],
       wanted: () => this.wanted(),
       source: 'agent.readGraphModes',
+      onDeferred: (deferral) => this.#options.logger.warn(this.#started ?? createOperationContext('system'), deferredMessage(deferral)),
     });
     // From the settings now in force, not from the changes listed: a node default switched on lists no context graph
     // before the first subscription, and the builder must run for the ones that come.
@@ -341,4 +344,17 @@ export class ReadGraphWorkloadOwnerV1 {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+const DEFERRED_STEPS: Readonly<Record<ReadGraphModeDeferral['step'], string>> = {
+  retire: 'take out of service',
+  admit: 'take into service',
+  wanted: 'list the read graphs it keeps for',
+  registry: 'read the registry of',
+};
+
+/** The warning for a step of a switch that the builder takes over. */
+function deferredMessage(deferral: ReadGraphModeDeferral): string {
+  const what = deferral.readGraph ?? deferral.contextGraphId ?? 'the switched layers';
+  return `A read-graph switch could not ${DEFERRED_STEPS[deferral.step]} ${what} at once, and leaves it to the builder: ${messageOf(deferral.error)}`;
 }

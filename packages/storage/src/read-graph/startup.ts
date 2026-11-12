@@ -111,20 +111,22 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
   const target = readGraphPartitionMaintenanceStore(store);
   const versions = options.versions ?? CURRENT_READ_GRAPH_VERSIONS;
   const queryOptions: QueryOptions = { priority: 'background', source: 'storage.readGraphStartup', ...(options.signal ? { signal: options.signal } : {}) };
-  // Another start-up of this process loads or loaded the backend's mirror, and its store objects maintain their writes
-  // by it: clearing it would let those writes pass unmaintained. This one waits for it, and applies only its own data
-  // directory's journal. Its agent may start alone next time, so from now on the marks the store refuses go there too.
-  // A failed load is tried again by the first start-up that finds it still the latest; the others wait for that one.
+  // A mirror in service, loaded by another start-up of this process or readied by a live switch, maintains the writes of
+  // every store object over the backend: clearing it would let those writes pass unmaintained. This start-up only joins
+  // it, and applies its own data directory's journal. A load in progress is waited for. A failed load is tried again by
+  // the first start-up that finds it still the latest; the others wait for that one.
   const loaded = LOADS.get(layer.runtime);
-  if (loaded !== undefined && await loaded) {
-    if (options.dataDir !== undefined) useReadGraphMarkJournal(layer.runtime, options.dataDir);
-    if (options.dataDir !== undefined) noteWorkingMemoryIdentityDirectory(layer.runtime, options.dataDir);
+  if (IN_SERVICE.has(layer.runtime) || (loaded !== undefined && await loaded)) {
+    if (options.dataDir !== undefined) joinReadGraphMaintenance(layer.runtime, options.dataDir);
     const marked = options.dataDir === undefined ? 0 : await markJournaledRows(target, layer.runtime, options.dataDir, queryOptions);
     return { marked, maintained: layer.runtime.mirror.size };
   }
   if (loaded !== undefined && LOADS.get(layer.runtime) !== loaded) return startReadGraphs(store, options);
   const loading = loadReadGraphs(store, layer, options, maintains, target, versions, queryOptions);
-  LOADS.set(layer.runtime, loading.then(() => true, () => false));
+  LOADS.set(layer.runtime, loading.then(() => {
+    IN_SERVICE.add(layer.runtime);
+    return true;
+  }, () => false));
   return loading;
 }
 
@@ -257,15 +259,29 @@ async function noteRecordOnlyPartitions(store: TripleStore, options: ReadGraphSt
 
 /** Each backend's load by a start-up of this process: whether it succeeded. */
 const LOADS = new WeakMap<ReadGraphBackendRuntime, Promise<boolean>>();
+/** The backends whose mirror is in service: a start-up loaded it, or a live switch readied it. */
+const IN_SERVICE = new WeakSet<ReadGraphBackendRuntime>();
 
 /**
- * Count a backend's mirror as loaded once a live switch (`./live-modes.ts`)
- * has given it the rows of the read graphs it switched on, after a start-up
- * that maintained none. A later start-up of this process then applies only
- * its own journal, and never clears the mirror the layer maintains writes by.
+ * Count a backend's mirror as in service once a live switch
+ * (`./live-modes.ts`) readies it for maintenance, after a start-up that
+ * maintained none: a later start-up of this process joins it, and never
+ * clears the mirror the layer maintains writes by.
  */
-export function noteReadGraphRuntimeLoaded(runtime: ReadGraphBackendRuntime): void {
-  if (!LOADS.has(runtime)) LOADS.set(runtime, Promise.resolve(true));
+export function noteReadGraphMirrorInService(runtime: ReadGraphBackendRuntime): void {
+  IN_SERVICE.add(runtime);
+}
+
+/**
+ * Join a data directory to a backend's maintenance: the marks the store
+ * refuses from now on go to its journal too, and it records the
+ * working-memory identity. A start-up that finds a mirror in service joins
+ * its directory so, and so does a live switch: the agent of that directory
+ * may start alone next time.
+ */
+export function joinReadGraphMaintenance(runtime: ReadGraphBackendRuntime, dataDir: string): void {
+  useReadGraphMarkJournal(runtime, dataDir);
+  noteWorkingMemoryIdentityDirectory(runtime, dataDir);
 }
 
 /**

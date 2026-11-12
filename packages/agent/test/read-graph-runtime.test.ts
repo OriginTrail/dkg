@@ -305,4 +305,29 @@ describe('the agent read-graph workload', () => {
     expect(await readStoredReadGraphRow(below, vm)).toEqual({ row: undefined, damaged: false });
     await owner.close();
   });
+
+  it('logs a step of a switch that the store refuses, which its builder then takes over', async () => {
+    const { view, store } = await agentView({ subscribed: [CG] });
+    const log = logger();
+    const owner = new ReadGraphWorkloadOwnerV1(view, { logger: log, intervalMs: 60_000 });
+    owner.start(ctx);
+    const inner = readGraphLayerOf(store)!.innerStore;
+    const update = inner.update!.bind(inner);
+    let refused = false;
+    vi.spyOn(inner, 'update').mockImplementation(async (sparql, options) => {
+      // The first row the switch gives a read graph is refused.
+      if (!refused && sparql.includes('"dirty"')) {
+        refused = true;
+        throw new Error('the store is unavailable');
+      }
+      return update(sparql, options);
+    });
+    const changes = await owner.applyReadGraphModes({ contextGraphs: { [CG]: { layers: { [MemoryLayer.VerifiableMemory]: 'build' } } } });
+    expect(refused).toBe(true);
+    expect(changes.find((change) => change.layer === 'verifiable-memory')?.outcome).toBe('applied');
+    expect(log.warn).toHaveBeenCalledWith(ctx, expect.stringMatching(/could not take into service .* at once, and leaves it to the builder: the store is unavailable/));
+    await owner.whenIdle();
+    expect(readGraphRuntimeOf(store)!.mirror.get(readGraphIri({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory }))?.state).toBe('ready');
+    await owner.close();
+  });
 });
