@@ -16,7 +16,8 @@
  * a read-graph layer ({@link READ_GRAPHS_OFF}), the builder does not start,
  * and the start-up before the first write (`startReadGraphs`) marks every
  * read graph it finds dirty, as before. The builder removes the read graphs
- * whose mode is `off`.
+ * whose mode is `off`, and starts for them alone when the start-up found
+ * some.
  *
  * The modes can be switched while the node runs ({@link
  * ReadGraphWorkloadOwnerV1.applyReadGraphModes}): the builder starts once a
@@ -274,10 +275,10 @@ export class ReadGraphWorkloadOwnerV1 {
       wanted: () => this.wanted(),
       source: 'agent.readGraphModes',
     });
-    if (changes.some((change) => change.outcome === 'applied') || this.#removalsAsked()) {
-      if (this.#builder) this.#builder.request();
-      else if (this.#started) this.start(this.#started);
-    }
+    // From the settings now in force, not from the changes listed: a node default switched on lists no context graph
+    // before the first subscription, and the builder must run for the ones that come.
+    if (this.#builder) this.#builder.request();
+    else if (this.#started) this.start(this.#started);
     return changes;
   }
 

@@ -2,11 +2,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setImmediate as nextTurn } from 'node:timers/promises';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryLayer, readGraphIri, type ReadGraphKey } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { missingReadGraphMethods } from '../src/read-graph/adapter-contract.js';
 import { guardReadGraphPartition } from '../src/read-graph-partition-store.js';
+import { withReadGraphBackgroundSlot } from '../src/read-graph/background-slot.js';
 import { ReadGraphBuilder } from '../src/read-graph/builder.js';
 import { readGraphDropRequests, requestReadGraphDrops } from '../src/read-graph/drop-requests.js';
 import { applyReadGraphModes, applyViewSemantics, type ReadGraphModeChange } from '../src/read-graph/live-modes.js';
@@ -506,5 +507,63 @@ describe('switching read graphs live', () => {
     await pass(builder);
     await builder.close();
     await expectUnion(node, wholeVm);
+  });
+
+  it('ends a build that waited for the background slot once its layer is switched off, without taking it back into the mirror', async () => {
+    const node = await open({ modes: layerAt(`live-${sequence + 1}`, VM, 'build') });
+    const { adapter, fixture, layer, store, dataDir } = node;
+    const [wholeVm, , codeVm] = fixture.keys.map((key) => readGraphIri(key)) as [string, string, string];
+    const builder = builderOf(node);
+    await pass(builder);
+    await markReadGraphDirty({ store, dataDir }, wholeVm);
+    // Another job holds the backend's background slot, so the build of the dirty read graph waits for it.
+    let release!: () => void;
+    const holding = withReadGraphBackgroundSlot(layer.runtime, () => new Promise<void>((resolve) => {
+      release = resolve;
+    }));
+    builder.request();
+    await vi.waitFor(() => expect(builder.status().building).toBe(wholeVm));
+    await applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'off'));
+    expect(layer.runtime.mirror.get(wholeVm)).toBeUndefined();
+    // From the switch on, nothing takes the read graph back into the mirror, so no write maintains it again.
+    const held: boolean[] = [];
+    adapter.onUpdate = () => {
+      held.push(layer.runtime.mirror.get(wholeVm) !== undefined);
+    };
+    release();
+    await holding;
+    await builder.whenIdle();
+    adapter.onUpdate = undefined;
+    await builder.close();
+    expect(held.length).toBeGreaterThan(0);
+    expect(held).not.toContain(true);
+    // The pass that ended the build removed both read graphs of the layer.
+    expect(await stored(adapter)).toEqual({});
+    expect(await triplesOf(adapter, wholeVm)).toEqual([]);
+    expect(await triplesOf(adapter, codeVm)).toEqual([]);
+  });
+
+  it('asks at a start with every mode off for the drop of each row it finds, so a drop that a restart cut short ends', async () => {
+    const node = await open({ modes: layerAt(`live-${sequence + 1}`, VM, 'build') });
+    const { adapter, fixture, dataDir } = node;
+    const [wholeVm, , codeVm] = fixture.keys.map((key) => readGraphIri(key)) as [string, string, string];
+    const builder = builderOf(node);
+    await pass(builder);
+    await builder.close();
+    // The node's only layer is switched off, and the process ends before its builder drops anything.
+    await applyReadGraphModes(node.store, layerAt(fixture.contextGraphId, VM, 'off'));
+    expect(await stored(adapter)).toEqual({ [wholeVm]: 'dirty', [codeVm]: 'dirty' });
+    expect((await triplesOf(adapter, wholeVm)).length).toBeGreaterThan(0);
+
+    // The next process starts with every mode off: nothing is maintained, and the rows found are to drop.
+    const restarted = await open({ adapter, dataDir, fixture });
+    expect(restarted.layer.runtime.mirror.size).toBe(0);
+    expect([...readGraphDropRequests(restarted.layer.runtime)].sort()).toEqual([codeVm, wholeVm].sort());
+    const after = builderOf(restarted);
+    await pass(after);
+    await after.close();
+    expect(await stored(adapter)).toEqual({});
+    expect(await triplesOf(adapter, wholeVm)).toEqual([]);
+    expect(await triplesOf(adapter, codeVm)).toEqual([]);
   });
 });

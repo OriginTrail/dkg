@@ -4,6 +4,8 @@ import {
   CURRENT_READ_GRAPH_VERSIONS,
   OxigraphStore,
   readGraphDropRequests,
+  readStoredReadGraphRow,
+  startReadGraphs,
   READ_GRAPH_PLANNED_METHODS,
   ReadGraphBuilder,
   readGraphRuntimeOf,
@@ -262,5 +264,49 @@ describe('the agent read-graph workload', () => {
     const plain = await apply.call({ store: bare.store, config: {} } as never, next);
     expect(plain.find((change) => change.layer === 'verifiable-memory')?.outcome).toBe('applied');
     expect(readGraphRuntimeOf(bare.store)!.modes).toEqual(next);
+  });
+
+  it('starts its builder on a switch that lists no context graph, so a node default switched on before any subscription is built later', async () => {
+    const subscribed: string[] = [];
+    const { view, store } = await agentView({ subscribed });
+    const owner = new ReadGraphWorkloadOwnerV1(view, { logger: logger(), intervalMs: 60_000 });
+    owner.start(ctx);
+    expect(owner.status()).toBeUndefined();
+    expect(await owner.applyReadGraphModes({ layers: { [MemoryLayer.VerifiableMemory]: 'serve' } })).toEqual([]);
+    expect(owner.status()).toBeDefined();
+    await owner.whenIdle();
+    // The first subscription comes later; the builder's next pass builds it.
+    subscribed.push(CG);
+    owner.request();
+    await owner.whenIdle();
+    expect(readGraphRuntimeOf(store)!.mirror.get(readGraphIri({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory }))?.state).toBe('ready');
+    await owner.close();
+  });
+
+  it('starts its builder for the removals alone after a start with every mode off, and removes what a switch to off left', async () => {
+    const adapter = new InsertOnlyOxigraph();
+    const vm = readGraphIri({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory });
+    // What an earlier process left when it ended during a drop: the read graph's dirty row and part of its contents.
+    const below = readGraphLayerOf(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }))!.innerStore;
+    await below.update!(readGraphStateCompareAndSet(undefined, { readGraph: vm, state: 'dirty', generation: 3, ...CURRENT_READ_GRAPH_VERSIONS }));
+    await adapter.insert([{ subject: 'urn:s:left', predicate: 'urn:p', object: '"x"', graph: vm }]);
+    // The next process: every mode off, and no subscription.
+    const store = wrapReadGraphLayer(adapter, { backend: 'oxigraph' });
+    await startReadGraphs(store);
+    const view = {
+      store,
+      peerId: '12D3KooWReadGraphRuntimeTestPeer',
+      getDefaultAgentAddress: () => AGENT,
+      getSubscribedContextGraphs: () => new Map<string, unknown>(),
+      listLocalAgents: () => [{ agentAddress: AGENT }],
+    };
+    const owner = new ReadGraphWorkloadOwnerV1(view, { logger: logger(), intervalMs: 60_000 });
+    owner.start(ctx);
+    expect(owner.status()).toBeDefined();
+    await owner.whenIdle();
+    expect(readGraphDropRequests(readGraphRuntimeOf(store)!)).toEqual([]);
+    expect(await below.query(`ASK { GRAPH <${vm}> { ?s ?p ?o } }`)).toMatchObject({ type: 'boolean', value: false });
+    expect(await readStoredReadGraphRow(below, vm)).toEqual({ row: undefined, damaged: false });
+    await owner.close();
   });
 });

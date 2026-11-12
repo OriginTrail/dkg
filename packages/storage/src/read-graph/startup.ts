@@ -30,7 +30,7 @@
  * Without anything to
  * maintain it is the start-up of a release that does not maintain read graphs
  * (`markReadGraphsDirtyAtStart`), after a look for registry records that
- * outlived their state rows.
+ * outlived their state rows; the rows it finds are dropped too.
  */
 
 import { MemoryLayer, parseReadGraphIri, type ReadGraphKey } from '@origintrail-official/dkg-core';
@@ -106,7 +106,9 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
     ?? (modes && keepsAnyReadGraph(modes) ? (key: ReadGraphKey) => readGraphModeOf(modes, key) !== 'off' : undefined);
   if (!maintains || !layer || missingReadGraphMethods(layer.innerStore, layer.adapterCapabilities).length > 0) {
     await noteRecordOnlyPartitions(store, options);
-    return { marked: await markReadGraphsDirtyAtStart(store, options), maintained: 0 };
+    // Nothing is maintained: the builder drops what it finds, while its mode stays `off`.
+    const found = layer ? { found: (readGraphs: readonly string[]) => requestReadGraphDrops(layer.runtime, readGraphs) } : {};
+    return { marked: await markReadGraphsDirtyAtStart(store, { ...options, ...found }), maintained: 0 };
   }
   const target = readGraphPartitionMaintenanceStore(store);
   const versions = options.versions ?? CURRENT_READ_GRAPH_VERSIONS;

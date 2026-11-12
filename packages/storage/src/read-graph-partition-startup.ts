@@ -33,12 +33,18 @@ type StateBinding = Readonly<Record<string, string | undefined>>;
  * to dirty with the next generation, one operation per thousand rows that
  * names each row's state graph and read graph. A damaged row of a read graph
  * is removed from the state graphs that hold it and created again, dirty. Rows found, or a note left by an interrupted drop, also mark the
- * store for this process as one that may hold partitions. Returns how many
- * read graphs were marked, and reports a non-zero count through `log`.
+ * store for this process as one that may hold partitions. `found` is told
+ * every read graph with a row. Returns how many read graphs were marked, and
+ * reports a non-zero count through `log`.
  */
 export async function markReadGraphsDirtyAtStart(
   store: TripleStore,
-  options: { readonly dataDir?: string; readonly signal?: AbortSignal; readonly log?: (message: string) => void } = {},
+  options: {
+    readonly dataDir?: string;
+    readonly signal?: AbortSignal;
+    readonly log?: (message: string) => void;
+    readonly found?: (readGraphs: readonly string[]) => void;
+  } = {},
 ): Promise<number> {
   const target = readGraphPartitionMaintenanceStore(store);
   const storeOptions: UpdateOptions = { signal: options.signal, priority: 'background', source: 'storage.readGraphStartup' };
@@ -52,6 +58,7 @@ export async function markReadGraphsDirtyAtStart(
   }
   if (!found) return 0;
   const { rows, damaged } = parseReadGraphStateRows(bindings);
+  options.found?.([...rows.map(row => row.readGraph), ...damaged].filter(readGraph => parseReadGraphIri(readGraph) !== undefined));
   const notDirty = rows.filter(row => row.state !== 'dirty');
   const advancing = notDirty.filter(row => row.generation < MAX_READ_GRAPH_GENERATION);
   // A damaged row, or one whose generation cannot grow, is created again.

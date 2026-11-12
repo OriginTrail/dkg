@@ -25,7 +25,7 @@ import { withDefaultStoreWorkPriority } from '../store-priority-scheduler.js';
 import type { TripleStore } from '../triple-store.js';
 import { forgetReadGraphDropRequest, readGraphDropRequests } from './drop-requests.js';
 import { readGraphRuntimeOf } from './read-graph-store.js';
-import { buildReadGraph, refreshReadGraphRegistry, removeReadGraph, type ReadGraphBatching, type ReadGraphJobContext, type ReadGraphJobResult } from './rebuild.js';
+import { buildReadGraph, refreshReadGraphRegistry, removeReadGraph, type ReadGraphBatching, type ReadGraphJobResult } from './rebuild.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
 import { CURRENT_READ_GRAPH_VERSIONS, servingReadGraphGeneration, type ReadGraphVersions } from './state.js';
 import { readGraphSizeQuery } from './statements.js';
@@ -175,26 +175,17 @@ export class ReadGraphBuilder {
     const due = [...jobs].filter(([readGraph]) => (this.#retries.get(readGraph)?.retryAt ?? 0) <= now())
       .sort(([left], [right]) => compareCodePoint(left, right));
     this.#pending = due.length;
+    const keeps = this.#options.off ? (key: ReadGraphKey) => !off(key) : undefined;
     for (const [readGraph, key] of due) {
-      signal.throwIfAborted();
       this.#building = readGraph;
+      this.#progress = 0;
+      const progress = (copied: number, total: number) => {
+        this.#progress = total === 0 ? 1 : copied / total;
+      };
       try {
-        // Switched off since the pass began: the removal below takes it.
-        if (off(key)) continue;
-        this.#progress = 0;
-        const progress = (copied: number, total: number) => {
-          this.#progress = total === 0 ? 1 : copied / total;
-        };
-        const result = await withDefaultStoreWorkPriority('background', () => buildReadGraph({ ...context, progress }, key));
-        this.#lastJob = result;
-        // A build that a switch to off overtook is not tried again: the removal takes the read graph.
-        if (result.outcome === 'lost' && !off(key)) this.#retry(readGraph);
-        else this.#retries.delete(readGraph);
-        if (result.outcome === 'done') await this.#report(result, signal);
-      } catch (error) {
-        if (signal.aborted) throw error;
-        this.#retry(readGraph, error);
-        this.#options.warn?.(`Read graph ${readGraph} could not be built: ${messageOf(error)}`);
+        const result = await this.#run(readGraph, () => !off(key), signal, 'built',
+          () => buildReadGraph({ ...context, progress, ...(keeps ? { keeps } : {}) }, key));
+        if (typeof result === 'object' && result.outcome === 'done') await this.#report(result, signal);
       } finally {
         this.#building = undefined;
         this.#progress = undefined;
@@ -203,7 +194,19 @@ export class ReadGraphBuilder {
     }
     // After the builds, so a read graph switched off meanwhile is removed in this pass.
     const removals = this.#removals(runtime, off).filter((readGraph) => (this.#retries.get(readGraph)?.retryAt ?? 0) <= now());
-    await this.#remove(context, runtime, removals, signal);
+    this.#removing = removals.length;
+    for (const readGraph of removals) {
+      const key = parseReadGraphIri(readGraph)!;
+      try {
+        const result = await this.#run(readGraph, () => off(key), signal, 'removed', () => removeReadGraph(context, readGraph));
+        if (result === 'failed') continue;
+        if (result !== 'skipped' && result.outcome !== 'lost') this.#built.delete(readGraph);
+        // Removed, with nothing left to remove, or on again: the drop is no longer asked for. One lost while still off is tried again.
+        if (result === 'skipped' || result.outcome !== 'lost' || !off(key)) forgetReadGraphDropRequest(runtime, readGraph);
+      } finally {
+        this.#removing -= 1;
+      }
+    }
     return 'rearm';
   }
 
@@ -224,31 +227,35 @@ export class ReadGraphBuilder {
     }).sort(compareCodePoint);
   }
 
-  /** Remove read graphs whose mode is `off`, contents and row, one job at a time. One whose mode is on again is left alone. */
-  async #remove(context: ReadGraphJobContext, runtime: ReadGraphBackendRuntime, readGraphs: readonly string[], signal: AbortSignal): Promise<void> {
-    this.#removing = readGraphs.length;
-    for (const readGraph of readGraphs) {
-      signal.throwIfAborted();
-      const key = parseReadGraphIri(readGraph);
-      try {
-        if (key === undefined || !this.#options.off?.(key)) continue;
-        const result = await withDefaultStoreWorkPriority('background', () => removeReadGraph(context, readGraph));
-        this.#lastJob = result;
-        // A removal that a switch back on overtook is forgotten, and not tried again: the build takes the read graph.
-        if (result.outcome === 'lost' && this.#options.off?.(key)) {
-          this.#retry(readGraph);
-        } else {
-          this.#retries.delete(readGraph);
-          forgetReadGraphDropRequest(runtime, readGraph);
-          if (result.outcome !== 'lost') this.#built.delete(readGraph);
-        }
-      } catch (error) {
-        if (signal.aborted) throw error;
-        this.#retry(readGraph, error);
-        this.#options.warn?.(`Read graph ${readGraph} could not be removed: ${messageOf(error)}`);
-      } finally {
-        this.#removing -= 1;
-      }
+  /**
+   * Run one job, a build or a removal, on the store's background lane while it
+   * stays relevant: one that no longer is, is skipped. One that a newer change
+   * of its row overtook is tried again at a later pass only while it is still
+   * relevant; one that fails, after the retry delay.
+   */
+  async #run(
+    readGraph: string,
+    relevant: () => boolean,
+    signal: AbortSignal,
+    failure: string,
+    job: () => Promise<ReadGraphJobResult>,
+  ): Promise<ReadGraphJobResult | 'skipped' | 'failed'> {
+    signal.throwIfAborted();
+    if (!relevant()) {
+      this.#retries.delete(readGraph);
+      return 'skipped';
+    }
+    try {
+      const result = await withDefaultStoreWorkPriority('background', job);
+      this.#lastJob = result;
+      if (result.outcome === 'lost' && relevant()) this.#retry(readGraph);
+      else this.#retries.delete(readGraph);
+      return result;
+    } catch (error) {
+      if (signal.aborted) throw error;
+      this.#retry(readGraph, error);
+      this.#options.warn?.(`Read graph ${readGraph} could not be ${failure}: ${messageOf(error)}`);
+      return 'failed';
     }
   }
 

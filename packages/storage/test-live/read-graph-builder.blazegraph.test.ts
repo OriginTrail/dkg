@@ -7,7 +7,10 @@ import { MemoryLayer, readGraphIri, type ReadGraphKey } from '@origintrail-offic
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { BlazegraphNamespaceManager, blazegraphNamespaceApiUrlFromSparqlEndpoint } from '../src/blazegraph-namespace-manager.js';
 import { guardReadGraphPartition } from '../src/read-graph-partition-store.js';
+import { ReadGraphBuilder } from '../src/read-graph/builder.js';
+import { applyReadGraphModes } from '../src/read-graph/live-modes.js';
 import { wrapReadGraphLayer, type ReadGraphStore } from '../src/read-graph/read-graph-store.js';
+import { readGraphModeOf } from '../src/read-graph/settings.js';
 import { buildReadGraph, markReadGraphDirty, readStoredReadGraphRow, removeReadGraph } from '../src/read-graph/rebuild.js';
 import { startReadGraphs } from '../src/read-graph/startup.js';
 import { readGraphBackfillBatch } from '../src/read-graph/statements.js';
@@ -34,15 +37,15 @@ describe('read-graph builds on a live Blazegraph', () => {
     if (manager && handles) await manager.disposeAll(handles);
   }, 60_000);
 
-  const triplesOf = async (graph: string) => {
-    const result = await adapter.query(`SELECT ?s ?p ?o WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
+  const triplesOf = async (graph: string, on: TripleStore = adapter) => {
+    const result = await on.query(`SELECT ?s ?p ?o WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
     return (result.type === 'bindings' ? result.bindings : []).map((b) => `${b.s} ${b.p} ${b.o}`).sort();
   };
-  const expectUnion = async (layer: ReadGraphStore, fixture: LayerFixture, key: ReadGraphKey) => {
-    const result = await adapter.query(`SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${fixture.root}")) }`);
+  const expectUnion = async (layer: ReadGraphStore, fixture: LayerFixture, key: ReadGraphKey, on: TripleStore = adapter) => {
+    const result = await on.query(`SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${fixture.root}")) }`);
     const quads = result.type === 'bindings' ? result.bindings : [];
     const expected = [...new Set(quads.filter((b) => isLayerMember(layer, fixture, key, b.g!)).map((b) => `${b.s} ${b.p} ${b.o}`))].sort();
-    expect(await triplesOf(readGraphIri(key)), readGraphIri(key)).toEqual(expected);
+    expect(await triplesOf(readGraphIri(key), on), readGraphIri(key)).toEqual(expected);
   };
 
   it('builds read graphs to their members, keeps them across a start, rebuilds after a dirty mark and removes one', async () => {
@@ -88,4 +91,68 @@ describe('read-graph builds on a live Blazegraph', () => {
     expect(layer.runtime.mirror.get(readGraphIri(code))).toBeUndefined();
     expect(layer.runtime.mirror.get(readGraphIri({ ...vm, layer: MemoryLayer.VerifiableMemory }))?.state).toBe('ready');
   }, 120_000);
+
+  it('switches a layer on under write load, backfills it, and drops it once switched off', async () => {
+    // A namespace of its own: its runtime is new, as a node's is at start.
+    const [handle] = await manager!.acquireMany([`read-graph-live-modes-${randomUUID()}`]);
+    const live = new BlazegraphStore(handle!.sparqlUrl, { timeout: 60_000 });
+    const dataDir = mkdtempSync(join(tmpdir(), 'read-graph-live-modes-'));
+    try {
+      const fixture = layerFixture(`modes-live-${randomUUID().slice(0, 8)}`);
+      const layer = wrapReadGraphLayer(live, { backend: 'blazegraph', options: { url: handle!.sparqlUrl } });
+      const store = guardReadGraphPartition(layer);
+      await live.insert([
+        ...fixture.facts,
+        ...fixture.graphs.flatMap((graph, i) => [q('urn:s:shared', '"both"', graph), q(`urn:s:${i}`, `"v${i}"`, graph)]),
+      ]);
+      await startReadGraphs(store, { dataDir });
+      const [wholeVm, , codeVm] = fixture.keys as [ReadGraphKey, ReadGraphKey, ReadGraphKey];
+      const vmKeys = () => fixture.keys.filter((key) => readGraphModeOf(layer.runtime.modes, key) !== 'off');
+      const builder = new ReadGraphBuilder({
+        store, dataDir, intervalMs: 3_600_000, batching: { pauseRatio: 0, graphsPerBatch: 1, triplesPerDrop: 3 },
+        wanted: vmKeys, off: (key) => readGraphModeOf(layer.runtime.modes, key) === 'off',
+      });
+      let stopped = false;
+      let writes = 0;
+      const load = (async () => {
+        const graphs = [fixture.graphs[1]!, fixture.graphs[4]!, fixture.graphs[6]!];
+        while (!stopped) {
+          await store.insert([q(`urn:load:${writes}`, `"w${writes}"`, graphs[writes % graphs.length]!)]);
+          if (writes % 3 === 2) await store.delete([q(`urn:load:${writes - 1}`, `"w${writes - 1}"`, graphs[(writes - 1) % graphs.length]!)]);
+          writes += 1;
+        }
+      })();
+      const on = await applyReadGraphModes(store, { contextGraphs: { [fixture.contextGraphId]: { layers: { [MemoryLayer.VerifiableMemory]: 'serve' } } } }, {
+        dataDir, wanted: vmKeys,
+      });
+      expect(on.find((change) => change.layer === 'verifiable-memory')?.outcome).toBe('applied');
+      expect((await readStoredReadGraphRow(live, readGraphIri(wholeVm))).row?.state).toBe('dirty');
+      builder.request();
+      await builder.whenIdle();
+      stopped = true;
+      await load;
+      expect(writes).toBeGreaterThan(0);
+      builder.request();
+      await builder.whenIdle();
+      for (const key of [wholeVm, codeVm]) {
+        expect(layer.runtime.mirror.get(readGraphIri(key))?.state, readGraphIri(key)).toBe('ready');
+        await expectUnion(layer, fixture, key, live);
+      }
+
+      const off = await applyReadGraphModes(store, { contextGraphs: { [fixture.contextGraphId]: { layers: { [MemoryLayer.VerifiableMemory]: 'off' } } } });
+      expect(off.find((change) => change.layer === 'verifiable-memory')).toMatchObject({ from: 'serve', to: 'off', outcome: 'applied' });
+      expect(layer.runtime.mirror.size).toBe(0);
+      builder.request();
+      await builder.whenIdle();
+      await builder.close();
+      for (const key of [wholeVm, codeVm]) {
+        expect(await triplesOf(readGraphIri(key), live)).toEqual([]);
+        expect(await readStoredReadGraphRow(live, readGraphIri(key))).toEqual({ row: undefined, damaged: false });
+      }
+    } finally {
+      await live.close();
+      await manager!.disposeAll([handle!]);
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  }, 180_000);
 });
