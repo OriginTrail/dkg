@@ -7,15 +7,16 @@
 // helpers keep the failure summary on one line and give the last lines of each
 // captured stream as separate log lines.
 
+import { stripVTControlCharacters } from 'node:util';
+
 /** Lines kept from the end of each captured stream. */
 export const BUILD_OUTPUT_TAIL_LINES = 30;
 /** Characters kept from each output line. */
 export const BUILD_OUTPUT_LINE_CHARS = 300;
 // Only the end of a stream is split into lines; exec buffers up to 1 MiB.
 const TAIL_WINDOW_CHARS = 64 * 1024;
-// eslint-disable-next-line no-control-regex -- matches the ESC that starts a terminal color or cursor sequence.
-const TERMINAL_ESCAPE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
-// Every C0 control character except tab, and DEL. Line breaks are split first.
+// Every C0 control character except tab, and DEL, left once terminal sequences are
+// stripped. Line breaks are split first.
 // eslint-disable-next-line no-control-regex -- removes control characters from build output before it is logged.
 const CONTROL_CHARACTER = /[\x00-\x08\x0a-\x1f\x7f]/g;
 
@@ -28,9 +29,7 @@ export function buildStepFailureSummary(err: unknown): string {
 /** The last non-blank lines of a captured stream, without terminal escapes or control characters. */
 export function outputTail(output: unknown, maxLines = BUILD_OUTPUT_TAIL_LINES): string[] {
   if (output === undefined || output === null) return [];
-  const lines = String(output)
-    .slice(-TAIL_WINDOW_CHARS)
-    .replace(TERMINAL_ESCAPE, '')
+  const lines = stripVTControlCharacters(String(output).slice(-TAIL_WINDOW_CHARS))
     .split(/\r\n|\n|\r/)
     .map((line) => line.replace(CONTROL_CHARACTER, '').trimEnd())
     .filter((line) => line.trim() !== '');

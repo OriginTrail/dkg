@@ -69,10 +69,12 @@ describe('updater build step output', () => {
 
   it('removes terminal escapes and control characters, caps long lines and reads only the end of a large stream', () => {
     const long = 'x'.repeat(BUILD_OUTPUT_LINE_CHARS + 50);
-    expect(outputTail(`\x1b[31merror\x1b[39m TS2307\r\nstep 1\rstep 2\u0007\n${long}\n`)).toEqual([
+    const link = '\x1b]8;;https://pnpm.io/errors\x07pnpm docs\x1b]8;;\x07';
+    expect(outputTail(`\x1b[31merror\x1b[39m TS2307\r\nstep 1\rstep 2\u0007\nsee ${link}\n${long}\n`)).toEqual([
       'error TS2307',
       'step 1',
       'step 2',
+      'see pnpm docs',
       `${'x'.repeat(BUILD_OUTPUT_LINE_CHARS)}…`,
     ]);
     const tail = outputTail(`${'early\n'.repeat(200_000)}late 1\nlate 2\n`, 3);
