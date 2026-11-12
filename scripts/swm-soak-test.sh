@@ -54,6 +54,13 @@
 # as INDETERMINATE so the operator can investigate rather than
 # silently bake a "missing" peer into the pass/fail metric.
 #
+# A write the daemon accepts as a retryable partial counts as
+# accepted once its share job succeeds, so a peer with such writes
+# waits up to SWM_RECOVERY_WAIT_S for those jobs before it publishes
+# its tombstone. Its tombstone can therefore arrive after another
+# peer's settle window, and a receiver whose final snapshot lacks a
+# tombstone waits up to SWM_RECOVERY_WAIT_S for it before the tally.
+#
 # Expected setup (SETUP STEPS)
 # ----------------------------
 # 1. One operator creates each CG and shares the cgId out-of-band:
@@ -106,6 +113,12 @@
 #   SWM_TOTAL_CYCLES number of write cycles          (default: 1440)
 #   SWM_SETTLE_S     time for late inbound delivery after writes
 #                    (default: 300 seconds)
+#   SWM_RECOVERY_WAIT_S
+#                    how long to wait for the share jobs of writes the
+#                    daemon accepted as retryable partials before the
+#                    tombstone, and for a tombstone still missing after
+#                    the settle window (default: 300 seconds). Use the
+#                    same value on every peer; 0 waits for neither.
 #   PEERS_EXPECTED   comma-separated peer tags (other ops) for
 #                    per-peer delivery breakdown in summary. When
 #                    set, the script requires an explicit
@@ -163,6 +176,7 @@ for kv in "$@"; do
   esac
 done
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SWM_CG_CURATED="${SWM_CG_CURATED:-}"
 SWM_CG_PUBLIC="${SWM_CG_PUBLIC:-}"
 SWM_SUBGRAPH_NAME="${SWM_SUBGRAPH_NAME:-}"
@@ -171,6 +185,11 @@ SWM_TOTAL_CYCLES="${SWM_TOTAL_CYCLES:-1440}"
 SWM_SETTLE_S="${SWM_SETTLE_S:-300}"
 if ! grep -Eq '^[0-9]+$' <<<"$SWM_SETTLE_S"; then
   echo "ERROR: SWM_SETTLE_S must be a non-negative integer" >&2
+  exit 64
+fi
+SWM_RECOVERY_WAIT_S="${SWM_RECOVERY_WAIT_S:-300}"
+if ! grep -Eq '^[0-9]+$' <<<"$SWM_RECOVERY_WAIT_S"; then
+  echo "ERROR: SWM_RECOVERY_WAIT_S must be a non-negative integer" >&2
   exit 64
 fi
 # Codex PR #572 R7 (round 3): SENDER_TAG previously defaulted to
@@ -416,61 +435,36 @@ except: print('fail')
 # the background. Such a write counts as accepted once its job has succeeded:
 # counting it as rejected while the share still lands made the self tally read
 # 10/9 and fail. This polls each such job until it settles (succeeded or
-# failed) or $1 seconds pass, and records the states in share-recoveries.jsonl,
-# which every accepted-write count below reads.
+# failed) or $1 seconds pass, with every status request inside that budget,
+# and records the jobs in share-recoveries.jsonl (see
+# scripts/lib/swm-soak-accepted-writes.mjs).
 resolve_share_recoveries() {
   local line
-  # A plain pipeline: macOS bash 3.2 cannot run a heredoc inside a process
-  # substitution (it stops with "bad substitution").
-  SWM_RECOVERY_WAIT_S="$1" SWM_RECOVERY_API="$API" SWM_RECOVERY_AUTH="$AUTH" SWM_RECOVERY_LOG_DIR="$LOG_DIR" \
-    python3 <<'PYTHON' | while IFS= read -r line; do log "  $line"; done
-import json, os, time, urllib.request
-log_dir = os.environ['SWM_RECOVERY_LOG_DIR']
-api = os.environ['SWM_RECOVERY_API'].rstrip('/')
-auth = os.environ.get('SWM_RECOVERY_AUTH', '')
-deadline = time.time() + int(os.environ.get('SWM_RECOVERY_WAIT_S') or 0)
-settled = ('succeeded', 'failed')
-jobs = []
+  SWM_RECOVERY_API="$API" SWM_RECOVERY_AUTH="$AUTH" \
+    node "$SCRIPT_DIR/lib/swm-soak-accepted-writes.mjs" resolve "$LOG_DIR" "$1" \
+    | while IFS= read -r line; do log "  $line"; done
+}
+
+# The accepted-write count per CG, computed once into accepted-counts.json
+# ({cgId: count}): the writes shared at once plus those whose share job
+# succeeded. The tombstone, the summary and the self tally all read this
+# file, so they count the same writes.
+record_accepted_counts() {
+  node "$SCRIPT_DIR/lib/swm-soak-accepted-writes.mjs" count "$LOG_DIR"
+}
+
+# One CG's count from accepted-counts.json, or the total over every CG when
+# no CG is given.
+accepted_writes() {
+  python3 -c '
+import json, sys
 try:
-  with open(os.path.join(log_dir, 'writes.jsonl')) as f:
-    for line in f:
-      try:
-        rec = json.loads(line)
-      except Exception:
-        continue
-      resp = rec.get('resp')
-      if not isinstance(resp, dict) or resp.get('swmShared') or resp.get('status') in ('swm-shared', 'vm-confirmed'):
-        continue
-      url = resp.get('recoveryStatusUrl')
-      if isinstance(url, str) and url.startswith('/api/'):
-        jobs.append({'cgId': rec.get('cgId'), 'seq': rec.get('seq'), 'jobId': resp.get('recoveryJobId'), 'url': url, 'state': 'unknown'})
-except FileNotFoundError:
-  pass
-if jobs:
-  print(f'waiting up to {int(max(0, deadline - time.time()))}s for {len(jobs)} share job(s) of accepted writes to settle')
-pending = list(jobs)
-while pending:
-  for job in pending:
-    request = urllib.request.Request(api + job['url'], headers={'Authorization': f'Bearer {auth}'})
-    try:
-      with urllib.request.urlopen(request, timeout=10) as response:
-        view = json.load(response)
-      job['state'] = str(view.get('state') or 'unknown')
-      job['attempts'] = view.get('attempts')
-      job['finishedAt'] = view.get('finishedAt')
-    except Exception as error:
-      job['pollError'] = type(error).__name__
-  pending = [job for job in pending if job['state'] not in settled]
-  if not pending or time.time() >= deadline:
-    break
-  time.sleep(5)
-with open(os.path.join(log_dir, 'share-recoveries.jsonl'), 'w') as f:
-  for job in jobs:
-    f.write(json.dumps({k: job.get(k) for k in ('cgId', 'seq', 'jobId', 'state', 'attempts', 'finishedAt', 'pollError')}) + '\n')
-for job in jobs:
-  print(f"share job {job['jobId']} for write cg={job['cgId']} seq={job['seq']}: {job['state']}"
-        + (f" after {job.get('attempts')} attempt(s)" if job.get('attempts') else ''))
-PYTHON
+  with open(sys.argv[1]) as f:
+    counts = json.load(f)
+except (OSError, ValueError):
+  counts = {}
+print(counts.get(sys.argv[2], 0) if len(sys.argv) > 2 else sum(counts.values()))
+' "$LOG_DIR/accepted-counts.json" "$@"
 }
 
 validate_query_response() {
@@ -682,41 +676,12 @@ emit_writes_accepted_summary() {
   # writesAccepted=count value into every CG's tombstone. The
   # receiver then divided per-CG observations by the aggregate
   # cross-CG count, producing per-CG percentages of ~100/N% even
-  # under perfect delivery.
+  # under perfect delivery. The per-CG count comes from
+  # accepted-counts.json (see `record_accepted_counts`).
   local cgId=$1 ts subject writes_accepted body resp ok
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   subject="urn:swm-soak-summary:${SENDER_TAG}:${SOAK_COHORT_ID}"
-  writes_accepted=$(python3 -c "
-import json, sys
-n = 0
-recovered = set()
-try:
-  with open('$LOG_DIR/share-recoveries.jsonl') as f:
-    for line in f:
-      try:
-        j = json.loads(line)
-      except Exception:
-        continue
-      if j.get('state') == 'succeeded': recovered.add((j.get('cgId'), j.get('seq')))
-except FileNotFoundError:
-  pass
-try:
-  with open('$LOG_DIR/writes.jsonl') as f:
-    for line in f:
-      try:
-        r = json.loads(line)
-      except Exception:
-        continue
-      if r.get('cgId') != '$cgId': continue
-      resp = r.get('resp')
-      if isinstance(resp, dict) and (resp.get('swmShared') or resp.get('status') in ('swm-shared', 'vm-confirmed')):
-        n += 1
-      elif (r.get('cgId'), r.get('seq')) in recovered:
-        n += 1
-except FileNotFoundError:
-  pass
-print(n)
-" 2>/dev/null)
+  writes_accepted=$(accepted_writes "$cgId")
   body=$(python3 -c "
 import json
 print(json.dumps({
@@ -798,6 +763,46 @@ SPARQL
   validate_query_response "$resp" "writes-accepted summaries cg=$cgId" || return 1
 }
 
+# The peers the tally reports on (PEERS_EXPECTED, or else every other sender a
+# final inbox snapshot saw) whose writes-accepted tombstone has not been
+# observed yet, as "<tag> in <cgId>, ...", or nothing.
+missing_tombstones() {
+  node "$SCRIPT_DIR/lib/swm-soak-accepted-writes.mjs" missing-tombstones \
+    "$LOG_DIR" "$SENDER_TAG" "$PEERS_EXPECTED" "$ALL_CGS_CSV"
+}
+
+# A peer with writes accepted as retryable partials publishes its tombstone
+# only once their share jobs settle, up to SWM_RECOVERY_WAIT_S after its last
+# cycle, but every peer takes its final snapshot one settle window after its
+# own tombstone. So this peer can reach its final snapshot before such a
+# peer's tombstone arrives, and would report that peer as INDETERMINATE. When
+# a tombstone the tally needs is missing, this polls for it for up to $1
+# seconds and then takes the final inbox snapshot again, so the writes that
+# peer shared late are counted too (the tally merges every final snapshot).
+# When every tombstone is in, it does nothing.
+await_late_tombstones() {
+  local budget_s=$1 deadline_s now_s missing cg
+  [ "$budget_s" -gt 0 ] || return 0
+  missing=$(missing_tombstones)
+  [ -n "$missing" ] || return 0
+  log "Waiting up to ${budget_s}s for writes-accepted tombstones not observed yet: $missing"
+  deadline_s=$(( $(date +%s) + budget_s ))
+  while [ -n "$missing" ]; do
+    now_s=$(date +%s)
+    [ "$now_s" -lt "$deadline_s" ] || break
+    sleep $(( deadline_s - now_s < 10 ? deadline_s - now_s : 10 ))
+    # A failed query is simply tried again at the next poll.
+    for cg in "${ALL_CGS[@]}"; do snapshot_writes_accepted_summaries "$cg"; done
+    missing=$(missing_tombstones)
+  done
+  if [ -n "$missing" ]; then
+    log "  still not observed after ${budget_s}s: $missing"
+  else
+    log "  every writes-accepted tombstone observed; taking the final inbox snapshot again"
+  fi
+  for cg in "${ALL_CGS[@]}"; do snapshot_swm_inbox "final" "$cg" || return 1; done
+}
+
 split_cgs() {
   local raw=$1
   if [ -z "$raw" ]; then return; fi
@@ -877,10 +882,13 @@ for seq in $(seq 1 "$SWM_TOTAL_CYCLES"); do
 done
 
 log ""
-# Settle the share jobs of writes accepted as retryable partials before
-# the tombstone, so the tombstone, the summary and the self tally all
-# count the same writes (see `resolve_share_recoveries`).
-resolve_share_recoveries "${SWM_RECOVERY_WAIT_S:-300}"
+# Settle the share jobs of writes accepted as retryable partials, then
+# count the accepted writes once for the tombstone, the summary and the
+# self tally (see `resolve_share_recoveries` and `record_accepted_counts`).
+resolve_share_recoveries "$SWM_RECOVERY_WAIT_S" \
+  || log "WARN: could not settle the share jobs; writes accepted as retryable partials count as rejected"
+record_accepted_counts \
+  || log "WARN: could not write $LOG_DIR/accepted-counts.json; the tombstone and the summary report 0 accepted writes and the self tally is INDETERMINATE"
 # Codex PR #572 R12 (round 4): emit per-CG writes-accepted
 # tombstone BEFORE settle so receivers have time to observe it
 # and use it as the per-peer denominator in the final tally.
@@ -892,6 +900,7 @@ log "All cycles done. Waiting ${SWM_SETTLE_S}s for any late inbound to settle (g
 sleep "$SWM_SETTLE_S"
 for cg in "${ALL_CGS[@]}"; do snapshot_swm_inbox "final" "$cg" || exit 1; done
 for cg in "${ALL_CGS[@]}"; do snapshot_writes_accepted_summaries "$cg" || exit 1; done
+await_late_tombstones "$SWM_RECOVERY_WAIT_S" || exit 1
 snapshot_slo "final"
 
 log ""
@@ -900,31 +909,7 @@ log ""
 log "Summary:"
 writes_total=$(wc -l < "$LOG_DIR/writes.jsonl" | tr -d ' ')
 log "  total writes attempted: $writes_total"
-writes_ok=$(node -e '
-const fs = require("fs");
-let count = 0;
-const recovered = new Set();
-try {
-  for (const line of fs.readFileSync(process.argv[2], "utf8").split(/\n/)) {
-    try {
-      const job = JSON.parse(line);
-      if (job.state === "succeeded") recovered.add(`${job.cgId}\n${job.seq}`);
-    } catch {}
-  }
-} catch {}
-try {
-  for (const line of fs.readFileSync(process.argv[1], "utf8").split(/\n/)) {
-    if (!line.trim()) continue;
-    try {
-      const rec = JSON.parse(line);
-      const resp = rec.resp;
-      if (resp && (resp.swmShared || resp.status === "swm-shared" || resp.status === "vm-confirmed")) count += 1;
-      else if (recovered.has(`${rec.cgId}\n${rec.seq}`)) count += 1;
-    } catch {}
-  }
-} catch {}
-console.log(count);
-' "$LOG_DIR/writes.jsonl" "$LOG_DIR/share-recoveries.jsonl")
+writes_ok=$(accepted_writes)
 log "  writes accepted by local daemon: $writes_ok"
 log ""
 log "Per-CG final inbox (delivery validation — operators cross-reference):"
@@ -970,7 +955,12 @@ denom_by_cg = {}
 try:
   with open(os.path.join(log_dir, 'writes-accepted-summaries-observed.jsonl')) as f:
     for line in f:
-      rec = json.loads(line)
+      # A poll while waiting for a late tombstone may have recorded an
+      # answer that is not JSON; the final snapshot validated its own.
+      try:
+        rec = json.loads(line)
+      except ValueError:
+        continue
       cg = rec.get('cgId')
       if not cg: continue
       data = rec.get('data') or {}
@@ -1055,37 +1045,17 @@ except FileNotFoundError:
 # perfect delivery. Same scope rule is now applied to peer
 # tombstones via the writes-accepted-summary subject — each
 # tombstone is published per CG with that CG's accepted count.
-self_writes_accepted_by_cg = {}
-# Writes accepted as retryable partials whose share job succeeded
-# (see `resolve_share_recoveries`) count as accepted too.
-recovered_writes = set()
+# The count is the one the tombstone and the summary use too, from
+# accepted-counts.json (see `record_accepted_counts`): the writes
+# shared at once plus those whose share job succeeded.
+self_writes_accepted_by_cg = None
 try:
-  with open(os.path.join(log_dir, 'share-recoveries.jsonl')) as f:
-    for line in f:
-      try:
-        job = json.loads(line)
-      except Exception:
-        continue
-      if job.get('state') == 'succeeded':
-        recovered_writes.add((job.get('cgId'), job.get('seq')))
-except FileNotFoundError:
+  with open(os.path.join(log_dir, 'accepted-counts.json')) as f:
+    self_writes_accepted_by_cg = json.load(f)
+except (FileNotFoundError, ValueError):
   pass
-try:
-  with open(os.path.join(log_dir, 'writes.jsonl')) as f:
-    for line in f:
-      try:
-        rec = json.loads(line)
-      except Exception:
-        continue
-      cg = rec.get('cgId')
-      resp = rec.get('resp')
-      if not cg or not isinstance(resp, dict): continue
-      if (resp.get('swmShared') or resp.get('status') in ('swm-shared', 'vm-confirmed')
-          or (cg, rec.get('seq')) in recovered_writes):
-        self_writes_accepted_by_cg[cg] = self_writes_accepted_by_cg.get(cg, 0) + 1
-except FileNotFoundError:
-  pass
-have_writes_jsonl = bool(self_writes_accepted_by_cg) or os.path.exists(os.path.join(log_dir, 'writes.jsonl'))
+have_writes_jsonl = (isinstance(self_writes_accepted_by_cg, dict)
+                     and os.path.exists(os.path.join(log_dir, 'writes.jsonl')))
 
 def denominator_for(cg, tag):
   # Self: use locally-counted accepted writes for this CG
@@ -1118,7 +1088,7 @@ for cg in report_cgs:
   src, denom, ok = denominator_for(cg, self_tag)
   got = len(by_tag.get(self_tag, set()))
   if not ok:
-    print(f'    self ({self_tag}): {got} observed (no local writes.jsonl — INDETERMINATE)')
+    print(f'    self ({self_tag}): {got} observed (no local writes.jsonl or accepted-counts.json — INDETERMINATE)')
     ship_ok = False
   elif denom == 0:
     print(f'    self ({self_tag}): {got}/0 — no accepted writes recorded locally for this CG (script wrote nothing here)')
@@ -1164,6 +1134,7 @@ log ""
 log "Detailed logs:"
 log "  writes:                          $LOG_DIR/writes.jsonl"
 log "  share-recoveries:                $LOG_DIR/share-recoveries.jsonl  (share jobs of writes accepted as retryable partials)"
+log "  accepted-counts:                 $LOG_DIR/accepted-counts.json    (accepted writes per CG: tombstone, summary and self tally)"
 log "  swm-inbox:                       $LOG_DIR/swm-inbox.jsonl  (per-cycle SPARQL snapshots of each CG's local SWM)"
 log "  slo:                             $LOG_DIR/slo.jsonl        (per-cycle /api/slo: protocols + gossip + swm sections)"
 log "  writes-accepted-emitted:         $LOG_DIR/writes-accepted-summaries.jsonl          (this peer's published accepted-write tombstones)"
