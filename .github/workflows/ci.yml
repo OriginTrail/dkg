@@ -1223,8 +1223,15 @@ jobs:
   #
   # Channel is pinned to bundled chromium in playwright.config.ts under CI
   # (see `ciChromium`) since we only `playwright install chromium`.
+  #
+  # Beside the seven shards, one more entry runs the NeuroSymbolic
+  # Marketplace lane (OT-RFC-27, playwright.marketplace.config.ts) on its own
+  # runner: its own four-node devnet with a seller, a buyer and the registered
+  # Marketplace Context Graph, its specs in order against that one chain. It
+  # runs in parallel with the shards, so it adds a runner, not wall-clock
+  # time, and its devnet never meets theirs.
   kosava-node-ui-e2e:
-    name: "Kosava: node-ui e2e [${{ matrix.shard }}/7] (Playwright real-node devnet)"
+    name: "Kosava: node-ui e2e [${{ matrix.shard == 'marketplace' && 'marketplace' || format('{0}/7', matrix.shard) }}] (Playwright real-node devnet)"
     needs: [changes, build, evm-devnet-test-artifacts]
     if: needs.changes.outputs.kosava_node_ui_e2e == 'true'
     # Playwright 1.59.1 supports Ubuntu 24.04; ubuntu-latest can move ahead of it.
@@ -1237,6 +1244,8 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7]
+        include:
+          - shard: marketplace
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -1300,7 +1309,11 @@ jobs:
         if: matrix.shard == 2
         run: pnpm --dir packages/node-ui exec playwright test --config playwright.shell.config.ts
       - name: "node-ui real-node Playwright e2e (shard ${{ matrix.shard }}/7)"
+        if: matrix.shard != 'marketplace'
         run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright test --shard=${{ matrix.shard }}/7
+      - name: "node-ui NeuroSymbolic Marketplace Playwright e2e (OT-RFC-27)"
+        if: matrix.shard == 'marketplace'
+        run: pnpm --dir packages/node-ui exec playwright test --config playwright.marketplace.config.ts
       - name: Clean up only Playwright-owned devnet processes
         if: always()
         run: pnpm --dir packages/node-ui exec tsx -e "import('./e2e/global-teardown.ts').then(m => m.default())"

@@ -93,6 +93,20 @@
     "command": "pnpm test:e2e:ui"
   },
   {
+    "pattern": "packages/node-ui/e2e/marketplace/specs/*.spec.ts",
+    "lane": "browser",
+    "reason": "NeuroSymbolic Marketplace lane (OT-RFC-27): its own four-node devnet with a seller, a buyer and a stub model, its specs in order, as one more entry of the required browser CI job",
+    "cadence": "required",
+    "command": "pnpm --dir packages/node-ui exec playwright test --config playwright.marketplace.config.ts",
+    "layer": "browser",
+    "prerequisites": [
+      "pnpm frozen install",
+      "built workspace dependencies",
+      "isolated local devnet",
+      "Playwright Chromium"
+    ]
+  },
+  {
     "pattern": "packages/adapter-hermes/pytests/test_*.py",
     "lane": "python",
     "reason": "Hermes runtime Python tests required in supporting job",
