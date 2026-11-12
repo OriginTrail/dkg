@@ -17,8 +17,6 @@
 //     count that the tombstone, the summary and the self tally all read.
 
 import { readFileSync, writeFileSync } from 'node:fs';
-import http from 'node:http';
-import https from 'node:https';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -47,48 +45,32 @@ const delay = (ms) => new Promise((done) => { setTimeout(done, ms); });
 
 /**
  * GETs a JSON document and fails once `timeoutMs` has passed, however far the
- * answer has come. Each request uses its own connection, so nothing is left
- * open when polling ends.
+ * answer has come: the timer aborts the request and the reading of its body
+ * alike. Any status outside 2xx fails, a redirect included, which is not
+ * followed. Each request closes its connection when it ends, so nothing is
+ * left open when polling ends.
  */
-export function getJsonWithin(url, { headers = {}, timeoutMs }) {
-  return new Promise((resolveAnswer, reject) => {
-    let request;
-    let timer;
-    let done = false;
-    const finish = (settle, value) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      settle(value);
-    };
-    try {
-      const target = new URL(url);
-      request = (target.protocol === 'https:' ? https : http).get(target, { headers, agent: false }, (response) => {
-        const chunks = [];
-        response.on('data', (chunk) => chunks.push(chunk));
-        response.on('error', (error) => finish(reject, error));
-        response.on('end', () => {
-          if (response.statusCode < 200 || response.statusCode > 299) {
-            finish(reject, new Error(`HTTP ${response.statusCode}`));
-            return;
-          }
-          try {
-            finish(resolveAnswer, JSON.parse(Buffer.concat(chunks).toString('utf8')));
-          } catch (error) {
-            finish(reject, error);
-          }
-        });
-      });
-    } catch (error) {
-      finish(reject, error);
-      return;
+export async function getJsonWithin(url, { headers = {}, timeoutMs }) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error(`no answer within ${timeoutMs} ms`)), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      headers: { ...headers, connection: 'close' },
+      redirect: 'manual',
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`HTTP ${response.status}`);
     }
-    request.on('error', (error) => finish(reject, error));
-    timer = setTimeout(() => {
-      finish(reject, new Error(`no answer within ${timeoutMs} ms`));
-      request.destroy();
-    }, timeoutMs);
-  });
+    return await response.json();
+  } catch (error) {
+    if (controller.signal.aborted) throw controller.signal.reason;
+    // fetch reports a refused connection or a bad URL as its cause.
+    throw error?.cause instanceof Error ? error.cause : error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

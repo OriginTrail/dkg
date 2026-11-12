@@ -12,6 +12,7 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import {
   acceptedWriteCounts, getJsonWithin, pollShareRecoveries, readJsonLines, shareRecoveryJobs,
@@ -80,8 +81,11 @@ function recordedRequests() {
   return { sent, getJson };
 }
 
+// A helper that never exits is killed after 20 s, so the test fails instead of hanging.
 function runNode(args, env = {}) {
-  const child = spawn(process.execPath, args, { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, args, {
+    env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 20_000,
+  });
   return collect(child);
 }
 
@@ -182,6 +186,85 @@ test('an unanswered status request is cut at the deadline rather than after the 
     { jobId: 'job-1', state: 'unknown', settled: false },
     { jobId: 'job-2', state: 'unknown', settled: false },
   ]);
+});
+
+// When the server saw each path's connection close.
+async function closedWithin(closedAt, route, since, limitMs) {
+  while (!closedAt.has(route) && Date.now() - since < 1000) await delay(10);
+  return closedAt.get(route) - since < limitMs;
+}
+
+test('a status request returns the JSON answer and fails on any other status, without following a redirect', { timeout: 10_000 }, async (t) => {
+  const seen = [];
+  const closedAt = new Map();
+  const api = await listen(t, createServer((request, response) => {
+    seen.push({ url: request.url, authorization: request.headers.authorization });
+    request.socket.once('close', () => closedAt.set(request.url, Date.now()));
+    if (request.url === '/ok') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ state: 'succeeded', attempts: 2 }));
+    } else if (request.url === '/moved') {
+      response.writeHead(302, { location: '/ok' });
+      response.end();
+    } else {
+      response.writeHead(404, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: 'Promote job not found' }));
+    }
+  }));
+  const options = { headers: { Authorization: `Bearer ${TOKEN}` }, timeoutMs: 2000 };
+  assert.deepEqual(await getJsonWithin(`${api}/ok`, options), { state: 'succeeded', attempts: 2 });
+  assert.ok(await closedWithin(closedAt, '/ok', Date.now(), 200), 'the connection stayed open after the answer');
+  await assert.rejects(getJsonWithin(`${api}/missing`, options), { message: 'HTTP 404' });
+  await assert.rejects(getJsonWithin(`${api}/moved`, options), { message: 'HTTP 302' });
+  assert.deepEqual(seen, ['/ok', '/missing', '/moved'].map((url) => ({ url, authorization: `Bearer ${TOKEN}` })));
+  // A refused connection is reported as itself rather than as "fetch failed".
+  const stopped = createServer();
+  stopped.listen(0, '127.0.0.1');
+  await once(stopped, 'listening');
+  const { port } = stopped.address();
+  await new Promise((done) => { stopped.close(done); });
+  await assert.rejects(getJsonWithin(`http://127.0.0.1:${port}/x`, options), { message: /ECONNREFUSED/ });
+});
+
+test('a body that stalls after its headers, like a request never answered, fails at the deadline and closes its connection', { timeout: 10_000 }, async (t) => {
+  const closedAt = new Map();
+  const api = await listen(t, createServer((request, response) => {
+    request.socket.once('close', () => closedAt.set(request.url, Date.now()));
+    if (request.url === '/stalled') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.write('{"state":"runn');
+    }
+  }));
+  for (const route of ['/stalled', '/silent']) {
+    const started = Date.now();
+    await assert.rejects(getJsonWithin(`${api}${route}`, { timeoutMs: 300 }), { message: 'no answer within 300 ms' });
+    const failedAt = Date.now();
+    assert.ok(failedAt - started >= 280 && failedAt - started < 300 + 300, `${route} failed after ${failedAt - started} ms`);
+    assert.ok(await closedWithin(closedAt, route, failedAt, 200), `${route}: the connection stayed open after the request failed`);
+  }
+});
+
+test('the resolve CLI exits as soon as its polling ends, after an answer or after a stalled body', { timeout: 30_000 }, async (t) => {
+  const api = await listen(t, createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    if (request.url.endsWith('/job-done')) response.end(JSON.stringify({ jobId: 'job-done', state: 'succeeded', attempts: 1 }));
+    else response.write('{"jobId":"job-stalled","state":"runn');
+  }));
+  for (const { jobId, waitSeconds, state, withinMs } of [
+    { jobId: 'job-done', waitSeconds: '5', state: 'succeeded', withinMs: 1500 },
+    { jobId: 'job-stalled', waitSeconds: '1', state: 'unknown', withinMs: 2500 },
+  ]) {
+    const logDir = tempDir(t, 'swm-soak-logs-');
+    writeFileSync(path.join(logDir, 'writes.jsonl'), `${JSON.stringify(partial('cg-a', 1, jobId))}\n`);
+    const started = Date.now();
+    const resolved = await runNode([HELPER, 'resolve', logDir, waitSeconds], { SWM_RECOVERY_API: api, SWM_RECOVERY_AUTH: TOKEN });
+    const elapsed = Date.now() - started;
+    assert.equal(resolved.status, 0, resolved.stderr);
+    assert.ok(elapsed < withinMs, `the CLI took ${elapsed} ms to exit after polling ${jobId}`);
+    const [record] = readJsonLines(path.join(logDir, 'share-recoveries.jsonl'));
+    assert.equal(record.state, state);
+    if (state === 'unknown') assert.match(record.pollError, /^no answer within \d+ ms$/);
+  }
 });
 
 test('the soak waits for exactly the tombstones the tally would report as missing', async (t) => {
