@@ -402,10 +402,75 @@ print(json.dumps({
 import json, sys
 try:
   d = json.loads(sys.stdin.read())
-  print('ok' if d.get('swmShared') or d.get('status') in ('swm-shared','vm-confirmed') else 'fail')
+  if d.get('swmShared') or d.get('status') in ('swm-shared','vm-confirmed'): print('ok')
+  elif d.get('recoveryStatusUrl'): print('share job ' + str(d.get('recoveryJobId')) + ' pending')
+  else: print('fail')
 except: print('fail')
 " 2>/dev/null)
   log "  write cg=$cgId seq=$seq → $ok"
+}
+
+# A write the daemon accepts but cannot share at once (a promote prerequisite
+# is briefly unavailable) comes back as a retryable partial with a share job
+# (`recoveryJobId`, `recoveryStatusUrl`), and the daemon finishes the share in
+# the background. Such a write counts as accepted once its job has succeeded:
+# counting it as rejected while the share still lands made the self tally read
+# 10/9 and fail. This polls each such job until it settles (succeeded or
+# failed) or $1 seconds pass, and records the states in share-recoveries.jsonl,
+# which every accepted-write count below reads.
+resolve_share_recoveries() {
+  local line
+  # A plain pipeline: macOS bash 3.2 cannot run a heredoc inside a process
+  # substitution (it stops with "bad substitution").
+  SWM_RECOVERY_WAIT_S="$1" SWM_RECOVERY_API="$API" SWM_RECOVERY_AUTH="$AUTH" SWM_RECOVERY_LOG_DIR="$LOG_DIR" \
+    python3 <<'PYTHON' | while IFS= read -r line; do log "  $line"; done
+import json, os, time, urllib.request
+log_dir = os.environ['SWM_RECOVERY_LOG_DIR']
+api = os.environ['SWM_RECOVERY_API'].rstrip('/')
+auth = os.environ.get('SWM_RECOVERY_AUTH', '')
+deadline = time.time() + int(os.environ.get('SWM_RECOVERY_WAIT_S') or 0)
+settled = ('succeeded', 'failed')
+jobs = []
+try:
+  with open(os.path.join(log_dir, 'writes.jsonl')) as f:
+    for line in f:
+      try:
+        rec = json.loads(line)
+      except Exception:
+        continue
+      resp = rec.get('resp')
+      if not isinstance(resp, dict) or resp.get('swmShared') or resp.get('status') in ('swm-shared', 'vm-confirmed'):
+        continue
+      url = resp.get('recoveryStatusUrl')
+      if isinstance(url, str) and url.startswith('/api/'):
+        jobs.append({'cgId': rec.get('cgId'), 'seq': rec.get('seq'), 'jobId': resp.get('recoveryJobId'), 'url': url, 'state': 'unknown'})
+except FileNotFoundError:
+  pass
+if jobs:
+  print(f'waiting up to {int(max(0, deadline - time.time()))}s for {len(jobs)} share job(s) of accepted writes to settle')
+pending = list(jobs)
+while pending:
+  for job in pending:
+    request = urllib.request.Request(api + job['url'], headers={'Authorization': f'Bearer {auth}'})
+    try:
+      with urllib.request.urlopen(request, timeout=10) as response:
+        view = json.load(response)
+      job['state'] = str(view.get('state') or 'unknown')
+      job['attempts'] = view.get('attempts')
+      job['finishedAt'] = view.get('finishedAt')
+    except Exception as error:
+      job['pollError'] = type(error).__name__
+  pending = [job for job in pending if job['state'] not in settled]
+  if not pending or time.time() >= deadline:
+    break
+  time.sleep(5)
+with open(os.path.join(log_dir, 'share-recoveries.jsonl'), 'w') as f:
+  for job in jobs:
+    f.write(json.dumps({k: job.get(k) for k in ('cgId', 'seq', 'jobId', 'state', 'attempts', 'finishedAt', 'pollError')}) + '\n')
+for job in jobs:
+  print(f"share job {job['jobId']} for write cg={job['cgId']} seq={job['seq']}: {job['state']}"
+        + (f" after {job.get('attempts')} attempt(s)" if job.get('attempts') else ''))
+PYTHON
 }
 
 validate_query_response() {
@@ -624,6 +689,17 @@ emit_writes_accepted_summary() {
   writes_accepted=$(python3 -c "
 import json, sys
 n = 0
+recovered = set()
+try:
+  with open('$LOG_DIR/share-recoveries.jsonl') as f:
+    for line in f:
+      try:
+        j = json.loads(line)
+      except Exception:
+        continue
+      if j.get('state') == 'succeeded': recovered.add((j.get('cgId'), j.get('seq')))
+except FileNotFoundError:
+  pass
 try:
   with open('$LOG_DIR/writes.jsonl') as f:
     for line in f:
@@ -634,6 +710,8 @@ try:
       if r.get('cgId') != '$cgId': continue
       resp = r.get('resp')
       if isinstance(resp, dict) and (resp.get('swmShared') or resp.get('status') in ('swm-shared', 'vm-confirmed')):
+        n += 1
+      elif (r.get('cgId'), r.get('seq')) in recovered:
         n += 1
 except FileNotFoundError:
   pass
@@ -799,6 +877,10 @@ for seq in $(seq 1 "$SWM_TOTAL_CYCLES"); do
 done
 
 log ""
+# Settle the share jobs of writes accepted as retryable partials before
+# the tombstone, so the tombstone, the summary and the self tally all
+# count the same writes (see `resolve_share_recoveries`).
+resolve_share_recoveries "${SWM_RECOVERY_WAIT_S:-300}"
 # Codex PR #572 R12 (round 4): emit per-CG writes-accepted
 # tombstone BEFORE settle so receivers have time to observe it
 # and use it as the per-peer denominator in the final tally.
@@ -821,17 +903,28 @@ log "  total writes attempted: $writes_total"
 writes_ok=$(node -e '
 const fs = require("fs");
 let count = 0;
+const recovered = new Set();
+try {
+  for (const line of fs.readFileSync(process.argv[2], "utf8").split(/\n/)) {
+    try {
+      const job = JSON.parse(line);
+      if (job.state === "succeeded") recovered.add(`${job.cgId}\n${job.seq}`);
+    } catch {}
+  }
+} catch {}
 try {
   for (const line of fs.readFileSync(process.argv[1], "utf8").split(/\n/)) {
     if (!line.trim()) continue;
     try {
-      const resp = JSON.parse(line).resp;
+      const rec = JSON.parse(line);
+      const resp = rec.resp;
       if (resp && (resp.swmShared || resp.status === "swm-shared" || resp.status === "vm-confirmed")) count += 1;
+      else if (recovered.has(`${rec.cgId}\n${rec.seq}`)) count += 1;
     } catch {}
   }
 } catch {}
 console.log(count);
-' "$LOG_DIR/writes.jsonl")
+' "$LOG_DIR/writes.jsonl" "$LOG_DIR/share-recoveries.jsonl")
 log "  writes accepted by local daemon: $writes_ok"
 log ""
 log "Per-CG final inbox (delivery validation — operators cross-reference):"
@@ -963,6 +1056,20 @@ except FileNotFoundError:
 # tombstones via the writes-accepted-summary subject — each
 # tombstone is published per CG with that CG's accepted count.
 self_writes_accepted_by_cg = {}
+# Writes accepted as retryable partials whose share job succeeded
+# (see `resolve_share_recoveries`) count as accepted too.
+recovered_writes = set()
+try:
+  with open(os.path.join(log_dir, 'share-recoveries.jsonl')) as f:
+    for line in f:
+      try:
+        job = json.loads(line)
+      except Exception:
+        continue
+      if job.get('state') == 'succeeded':
+        recovered_writes.add((job.get('cgId'), job.get('seq')))
+except FileNotFoundError:
+  pass
 try:
   with open(os.path.join(log_dir, 'writes.jsonl')) as f:
     for line in f:
@@ -973,7 +1080,8 @@ try:
       cg = rec.get('cgId')
       resp = rec.get('resp')
       if not cg or not isinstance(resp, dict): continue
-      if resp.get('swmShared') or resp.get('status') in ('swm-shared', 'vm-confirmed'):
+      if (resp.get('swmShared') or resp.get('status') in ('swm-shared', 'vm-confirmed')
+          or (cg, rec.get('seq')) in recovered_writes):
         self_writes_accepted_by_cg[cg] = self_writes_accepted_by_cg.get(cg, 0) + 1
 except FileNotFoundError:
   pass
@@ -1055,6 +1163,7 @@ fi
 log ""
 log "Detailed logs:"
 log "  writes:                          $LOG_DIR/writes.jsonl"
+log "  share-recoveries:                $LOG_DIR/share-recoveries.jsonl  (share jobs of writes accepted as retryable partials)"
 log "  swm-inbox:                       $LOG_DIR/swm-inbox.jsonl  (per-cycle SPARQL snapshots of each CG's local SWM)"
 log "  slo:                             $LOG_DIR/slo.jsonl        (per-cycle /api/slo: protocols + gossip + swm sections)"
 log "  writes-accepted-emitted:         $LOG_DIR/writes-accepted-summaries.jsonl          (this peer's published accepted-write tombstones)"
