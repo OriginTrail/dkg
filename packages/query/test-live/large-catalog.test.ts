@@ -242,7 +242,7 @@ describe(`a graph catalog larger than any caller limit, on ${engine}`, () => {
       // The index's clock decides when the catalog is due; the store counts each full catalog read.
       let now = 0;
       const { store: counted, counter } = countingCatalogReads(inner);
-      const reader = new DKGQueryEngine(new GraphSetIndexStore(counted, { revalidateMs: 30_000, now: () => now }));
+      const reader = new DKGQueryEngine(new GraphSetIndexStore(counted, { revalidateMs: 30_000, revalidate: 'background', now: () => now }));
       const read = () => reader.query(FIXTURE_QUERIES.SELECT, requestOptions(vm));
       expect(answer('SELECT', await read())).toEqual(expected('SELECT', vm));
       expect(counter.reads).toBe(1);
@@ -326,7 +326,8 @@ describe(`a small context graph beside a catalog that grows from 10,000 to 100,0
       },
     });
     // The managed stack with its default revalidation, on a clock the test moves. Every write goes through it.
-    index = new GraphSetIndexStore(held, { now: () => clock.now });
+    // The warm catalog is opt-in: this asserts that no caller waits for its revalidation.
+    index = new GraphSetIndexStore(held, { revalidate: 'background', now: () => clock.now });
     reader = new DKGQueryEngine(index);
     fixture = await loadLargeCatalog(index, { unrelatedGraphs: 10_000 });
   }, 600_000);
