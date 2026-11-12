@@ -53,7 +53,9 @@ export function openDevnet({ repoRoot, dir, apiPortBase, libp2pPortBase, adminTo
       try { json = JSON.parse(text); } catch { /* not JSON */ }
       return { status: response.status, json, text };
     } catch (error) {
-      return { status: 0, json: null, text: String(error?.message ?? error) };
+      // fetch hides why in `cause`: a node that was gone (ECONNREFUSED) or one that left mid-request (UND_ERR_SOCKET).
+      const cause = error?.cause?.code ?? error?.cause?.message;
+      return { status: 0, json: null, text: `${error?.message ?? error}${cause ? ` (${cause})` : ''}` };
     }
   }
 

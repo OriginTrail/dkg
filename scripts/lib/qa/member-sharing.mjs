@@ -217,6 +217,24 @@ export function topologyProblems({ observations, links, members, known }) {
   return problems;
 }
 
+/**
+ * What a node's answer to an asynchronous share says about its job, by the
+ * client rule of docs/build/async-jobs.md. `job`: poll `jobId`, which is stored
+ * or, with a 409 that names it, the same share still running. `indeterminate`:
+ * a job may exist under `jobId`, so read it and do not resend. `not-admitted`:
+ * no job was written, so send the same request again after Retry-After.
+ * `refused`: anything else, which no client rule says to wait out.
+ */
+export function shareAdmission(status, json) {
+  if (status === 200 && json?.jobId) return { kind: 'job', jobId: json.jobId };
+  if (status === 409 && json?.existingJobId) return { kind: 'job', jobId: json.existingJobId };
+  if (status === 503 && json?.code === 'PROMOTE_ADMISSION_UNAVAILABLE') {
+    if (json.admissionOutcome === 'indeterminate' && json.jobId) return { kind: 'indeterminate', jobId: json.jobId, phase: json.phase };
+    if (json.admissionOutcome === 'not_admitted') return { kind: 'not-admitted', phase: json.phase };
+  }
+  return { kind: 'refused' };
+}
+
 /** Where a write went, and the write as the report names it. */
 export const where = record => `${record.graph.key}${record.sub ? `/${record.sub}` : ' root'}`;
 export const describe = record => `"${record.value}" by ${record.author.label} in ${where(record)}`;
@@ -258,4 +276,41 @@ function readDetail(read) {
   if (read.different) return ` (holds another value: ${read.different})`;
   if (read.error) return ` (${read.error})`;
   return '';
+}
+
+// A worker logs the first when it starts, and the second the moment it is asked to stop.
+const WORKER_START = /^\[([^\]]+)\] Starting DKG \S+ node "/;
+const WORKER_STOP = /^\[[^\]]+\] Shutting down\.\.\.$/;
+
+/**
+ * The workers that left without stopping, from a daemon's log, read once the
+ * node is stopped. A start with no `Shutting down...` since the start before it
+ * follows a worker that left some other way, and only its supervisor can have
+ * started the next: { restartedAt }. A last start with no such line after it is
+ * a worker that left and was not started again: { restartedAt: null }.
+ */
+export function workersThatLeft(log) {
+  const left = [];
+  let running = false;
+  for (const line of log.split('\n')) {
+    const started = WORKER_START.exec(line);
+    if (started) {
+      if (running) left.push({ restartedAt: started[1] });
+      running = true;
+    } else if (WORKER_STOP.test(line)) running = false;
+  }
+  if (running) left.push({ restartedAt: null });
+  return left;
+}
+
+/** Each worker that ended other than cleanly as its supervisor saw it, from worker-exits.jsonl (worker-exit-trace.cjs). */
+export function workerEnds(trace) {
+  const ends = [];
+  for (const line of trace.split('\n')) {
+    let entry = null;
+    try { entry = JSON.parse(line); } catch { /* not a whole line: a process died writing it */ }
+    if (entry?.event !== 'worker-exit' || entry.code === 0) continue;
+    ends.push(`worker ${entry.worker} end at ${entry.at} with ${entry.signal ? `signal ${entry.signal}` : `exit code ${entry.code}`}`);
+  }
+  return ends;
 }
