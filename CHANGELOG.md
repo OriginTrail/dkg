@@ -4,6 +4,10 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Added
+
+- `localAgentIntegrations.hermes.responseTimeoutMs` overrides the Hermes channel response deadline in milliseconds (default 900000, maximum 86400000). It applies to both the streaming and non-streaming Hermes forwards.
+
 ## [10.1.1] - Unreleased
 
 10.1.1 is the first 10.1 release for mainnet: nodes moving from 10.0.27

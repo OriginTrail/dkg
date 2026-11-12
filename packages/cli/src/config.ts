@@ -53,6 +53,7 @@ import {
   type RpcRequestGovernorPolicyInput,
 } from '@origintrail-official/dkg-chain';
 import { runtimeAssetRoots } from './runtime-assets.js';
+import { assertHermesChannelResponseTimeoutConfig } from './daemon/hermes-response-timeout.js';
 import type { SemanticRuntimeNodeSettings } from './semantic-runtime-node-settings.js';
 
 /**
@@ -578,6 +579,8 @@ export interface LocalAgentIntegrationConfig {
   name?: string;
   description?: string;
   enabled?: boolean;
+  /** Absolute Hermes channel forward deadline in milliseconds. Default 900000; maximum 86400000. */
+  responseTimeoutMs?: number;
   transport?: LocalAgentIntegrationTransport;
   capabilities?: LocalAgentIntegrationCapabilities;
   manifest?: LocalAgentIntegrationManifest;
@@ -2483,6 +2486,7 @@ function mergePersistedConfig(raw: unknown): DkgConfig {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ...DEFAULT_CONFIG };
   const config = { ...DEFAULT_CONFIG, ...(raw as Partial<DkgConfig>) };
   assertAuthorityIndexConfigPlacement(config);
+  assertHermesChannelResponseTimeoutConfig(config);
   return config;
 }
 
