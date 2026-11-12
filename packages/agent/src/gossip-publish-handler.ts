@@ -29,7 +29,7 @@ import {
   shouldApplyMaterialization,
   withMaterializationLock,
   writeMaterializedVersion,
-  validatePublishRequest, parseSimpleNQuads, ensureSubGraphRegistration,
+  validatePublishRequest, parseSimpleNQuads, ensureSubGraphRegistration, assertWritableQuadTerms, assertNoReceivedProtocolMetadata,
   type KAMetadata,
 } from '@origintrail-official/dkg-publisher';
 import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
@@ -283,7 +283,8 @@ export class GossipPublishHandler {
       }
 
       const nquadsStr = new TextDecoder().decode(request.nquads);
-      const quads = parseSimpleNQuads(nquadsStr);
+      const quads = assertWritableQuadTerms(parseSimpleNQuads(nquadsStr), request.kas?.map((ka) => ka.rootEntity));
+      assertNoReceivedProtocolMetadata(quads);
       const graphPublish = resolveGraphScopedPublishRequest(request);
 
       if (quads.length === 0 && !request.ual) {

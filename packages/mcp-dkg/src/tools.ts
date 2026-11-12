@@ -202,6 +202,8 @@ export function registerReadTools(
           .enum(['working-memory', 'shared-working-memory', 'verifiable-memory'])
           .optional()
           .describe('Memory tier: working-memory (default, private), shared-working-memory (team), verifiable-memory (on-chain).'),
+        semantics: z.enum(['merged', 'per-asset']).optional()
+          .describe('With a view: "merged" matches patterns outside GRAPH across the view\'s assets; "per-asset" (the default) inside one asset at a time.'),
         includeSharedMemory: z
           .boolean()
           .optional()
@@ -211,7 +213,7 @@ export function registerReadTools(
         limit: z.number().optional().describe('Row cap when rendering to markdown; does NOT modify the query'),
       },
     },
-    async ({ sparql, projectId, subGraphName, view, includeSharedMemory, includeContextGraphPartitions, includeSharedMemoryMeta, limit }): Promise<ToolResult> => {
+    async ({ sparql, projectId, subGraphName, view, semantics, includeSharedMemory, includeContextGraphPartitions, includeSharedMemoryMeta, limit }): Promise<ToolResult> => {
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
       const fullSparql = sparql.startsWith('PREFIX') ? sparql : `${PREFIXES}\n${sparql}`;
@@ -224,6 +226,7 @@ export function registerReadTools(
           contextGraphId: pid,
           subGraphName,
           view,
+          semantics,
           includeSharedMemory,
           includeContextGraphPartitions,
           includeSharedMemoryMeta,

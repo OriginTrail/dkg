@@ -35,7 +35,8 @@ describe('agent construction wires the queued lifecycle writer', () => {
       if (fail) await expect(operation).rejects.toBe(failure);
       else await operation;
       expect(update).toHaveBeenCalledOnce();
-      expect(update.mock.calls[0]![1]).toEqual({ touchedGraphs: [contextGraphMetaUri(request.contextGraphId)], source: 'agent.publish.namedKaVmLifecycle' });
+      const meta = contextGraphMetaUri(request.contextGraphId);
+      expect(update.mock.calls[0]![1]).toEqual({ touchedGraphs: [meta], writtenGraphs: [meta], source: 'agent.publish.namedKaVmLifecycle' });
       expect(remove).not.toHaveBeenCalled(); expect(insert).not.toHaveBeenCalled();
       if (!fail) {
         const lifecycle = assertionLifecycleUri(request.contextGraphId, author, request.name, request.subGraphName);

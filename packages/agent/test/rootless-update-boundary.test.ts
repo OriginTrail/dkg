@@ -11,6 +11,7 @@ import {
   createGraphKnowledgeAssetScope,
   generateEd25519Keypair,
   knowledgeAssetLayerGraphUri,
+  TRUST_LEVEL_PREDICATE,
 } from '@origintrail-official/dkg-core';
 import {
   GraphManager,
@@ -525,6 +526,36 @@ describe('DKGAgent rootless update boundary', () => {
       { precomputedUpdateAttestation: attestation },
     )).rejects.toMatchObject({ code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED' });
     expect(publisherCalls).toBe(0);
+  });
+
+  it.each([
+    ['a trust-level row', 'public', q('urn:update:meta', TRUST_LEVEL_PREDICATE, '"3"'), /trustLevel/],
+    ['a bracketed trust-level row', 'public', q('urn:update:meta', `<${TRUST_LEVEL_PREDICATE}>`, '"3"'), /trustLevel/],
+    ['a bracketed trust-level row', 'private', q('urn:update:meta', `<${TRUST_LEVEL_PREDICATE}>`, '"3"'), /trustLevel/],
+    ['a subject in a reserved namespace', 'public', q('urn:dkg:file:update', 'urn:value', '"v"'), /reserved namespace/],
+    ['a bracketed subject in a reserved namespace', 'private', q('<urn:dkg:file:update>', 'urn:value', '"v"'), /reserved namespace/],
+  ] as const)('rejects %s in %s quads before staging or publisher side effects', async (_label, partition, refused, message) => {
+    const store = new OxigraphStore();
+    await seedConfirmedRootlessHead(store);
+    const plain = [q('urn:update:named', 'urn:value', '"kept"')];
+    const { attestation } = await updateAttestation(plain);
+    let publisherCalls = 0;
+    const agent = await makeAgentLike(store, async () => {
+      publisherCalls += 1;
+      throw new Error('publisher must not be called');
+    });
+    const before = await store.countQuads();
+
+    await expect((PublishMethods.prototype as any).update.call(
+      agent,
+      KA_ID,
+      CG,
+      partition === 'public' ? [...plain, refused] : plain,
+      partition === 'private' ? [refused] : [],
+      { precomputedUpdateAttestation: attestation },
+    )).rejects.toThrow(message);
+    expect(publisherCalls).toBe(0);
+    expect(await store.countQuads()).toBe(before);
   });
 
   it('serializes same-KA updates so each publisher call reads its own staged graph', async () => {

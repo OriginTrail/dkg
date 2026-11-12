@@ -7,7 +7,8 @@
     "  1. For each entry in contactPoints: POST /api/v1/provisioning/contact-points  (fill url from your password manager first)",
     "  2. GET /api/v1/provisioning/policies, APPEND policyRoutes to .routes, PUT the tree back (a PUT replaces the WHOLE tree - never PUT without GET+append)",
     "  3. For each entry in rules: POST /api/v1/provisioning/alert-rules",
-    "Verified: this exact payload (rendered with the production UIDs) was imported into the production Grafana 11.4.0 on 2026-07-02; all 10 rules evaluate health=ok on the scheduler and route to the three Slack channels."
+    "Verified: this exact payload (rendered with the production UIDs) was imported into the production Grafana 11.4.0 on 2026-07-02; all 10 rules of that import evaluate health=ok on the scheduler and route to the three Slack channels.",
+    "Added since, not yet imported: \"Graph catalog at 80% of its limit on a node\" (2026-11-11). Import it with step 3."
   ],
   "contactPoints": [
     {
@@ -842,6 +843,79 @@
       },
       "annotations": {
         "summary": "DKG operations are producing errored trace spans at {{ $values.B }}/s. (Silent until traces + Tempo metrics-generator are enabled.)"
+      }
+    },
+    {
+      "orgID": 1,
+      "folderUID": "dkg-observability",
+      "ruleGroup": "dkg-node-telemetry",
+      "title": "Graph catalog at 80% of its limit on a node",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "relativeTimeRange": {
+            "from": 600,
+            "to": 0
+          },
+          "datasourceUid": "loki",
+          "model": {
+            "refId": "A",
+            "expr": "sum by (service_instance_id, deployment_environment) (count_over_time({service_name=\"dkg-node\"} | severity_text=`WARN` |= `The graph catalog has reached 80% of its internal limit` [70m]))",
+            "queryType": "range",
+            "intervalMs": 60000,
+            "maxDataPoints": 50,
+            "datasource": {
+              "type": "loki",
+              "uid": "loki"
+            }
+          }
+        },
+        {
+          "refId": "B",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "reduce",
+            "expression": "A",
+            "reducer": "last",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        },
+        {
+          "refId": "C",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "C",
+            "type": "math",
+            "expression": "$B > 0",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "5m",
+      "labels": {
+        "team": "dkg",
+        "signal": "logs"
+      },
+      "annotations": {
+        "summary": "Node {{ $labels.service_instance_id }} ({{ $labels.deployment_environment }}) reports its graph catalog at 80% or more of DKG_STORE_GRAPH_CATALOG_MAX_BYTES. At the limit its catalog reads fail with STORE_INTERNAL_LIMIT. Raise the limit and restart the node: docs/use-dkg/graph-catalog-limit.md. The node repeats the warning hourly, and keeps logging it while the limit refuses catalog reads, so the rule clears about 80 minutes after the catalog is back under 80%."
       }
     }
   ]

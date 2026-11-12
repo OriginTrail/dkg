@@ -28,6 +28,11 @@ import {
   type Histogram,
   type UpDownCounter,
 } from '@opentelemetry/api';
+import {
+  ADMISSION_LATENCY_BUCKETS, BYTE_BUCKETS, CATCHUP_DURATION_BUCKETS, GRAPH_COUNT_BUCKETS,
+  OP_DURATION_BUCKETS, PAGE_COUNT_BUCKETS, PICKUP_BUCKETS, QUAD_COUNT_BUCKETS, QUEUE_WAIT_BUCKETS,
+  READ_GRAPH_CHECK_DURATION_BUCKETS, RPC_DURATION_BUCKETS, SYNC_OPERATION_DURATION_BUCKETS,
+} from './telemetry-buckets.js';
 
 const TRACER_NAME = '@origintrail-official/dkg';
 const METER_NAME = '@origintrail-official/dkg';
@@ -116,54 +121,6 @@ export function activeSpanContext(): SpanContext | undefined {
 // Attributes are supplied at record time; keep them to the bounded keys
 // documented per metric (never peer_id / cg_id / tx_hash / op_id as labels).
 
-/** Duration buckets (ms) for operation-level histograms. */
-const OP_DURATION_BUCKETS = [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000];
-/** Duration buckets (ms) for chain RPC histograms (faster floor). */
-const RPC_DURATION_BUCKETS = [25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 120000];
-/** Retained/process bytes from 1 MiB through 4 GiB. */
-const BYTE_BUCKETS = [
-  1024 * 1024,
-  4 * 1024 * 1024,
-  16 * 1024 * 1024,
-  32 * 1024 * 1024,
-  64 * 1024 * 1024,
-  128 * 1024 * 1024,
-  256 * 1024 * 1024,
-  512 * 1024 * 1024,
-  1024 * 1024 * 1024,
-  2 * 1024 * 1024 * 1024,
-  4 * 1024 * 1024 * 1024,
-];
-const QUAD_COUNT_BUCKETS = [100, 500, 1_000, 5_000, 10_000, 50_000, 100_000, 250_000, 500_000, 1_000_000];
-const PAGE_COUNT_BUCKETS = [1, 2, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000];
-/**
- * Duration buckets (ms) for a whole context-graph catch-up job, out to ~30 min.
- *
- * `OP_DURATION_BUCKETS` stops at 120 s, but observed foreground catch-up jobs ran
- * 305 s and 382 s — both would land in the `+Inf` overflow and become unresolvable.
- * Every measured job must fall in a *finite* bucket.
- */
-const CATCHUP_DURATION_BUCKETS = [
-  1_000, 5_000, 15_000, 30_000, 60_000, 120_000, 240_000,
-  300_000, 420_000, 600_000, 900_000, 1_800_000,
-];
-/**
- * Duration buckets (ms) for a single logical sync operation's *active* occupancy
- * (peer wait + decode + verification + store commit). Floor is finer than
- * `OP_DURATION_BUCKETS` because cheap cache-warm operations cluster below 50 ms.
- */
-const SYNC_OPERATION_DURATION_BUCKETS = [
-  10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000,
-  10_000, 30_000, 60_000, 120_000, 300_000,
-];
-
-/** ms; async admission: 5 ms to 60 s (the share route waits up to 20 s for write readiness). */
-const ADMISSION_LATENCY_BUCKETS = [5, 25, 100, 250, 500, 1000, 2500, 5000, 10000, 20000, 60000];
-/** ms; heartbeat and `claimNext` waits behind the share mutex: 1 ms to 2 min. */
-const QUEUE_WAIT_BUCKETS = [1, 5, 25, 100, 500, 1000, 2500, 5000, 15000, 60000, 120000];
-/** ms; publisher pick-up and claim-to-finish: 100 ms to 1 h. */
-const PICKUP_BUCKETS = [100, 500, 1000, 5000, 15000, 60000, 300000, 900000, 1800000, 3600000];
-
 export interface DkgMetrics {
   /** bytes; boundary and phase are bounded sync lifecycle enums */
   processHeapUsedBytes: Gauge;
@@ -243,6 +200,37 @@ export interface DkgMetrics {
   backpressureQueueWaitMs: Histogram;
   /** admitted-work duration by bounded scheduler, lane, and outcome */
   backpressureActiveDurationMs: Histogram;
+  /** graphs in the node's graph catalog at its last refresh; no labels */
+  storeGraphCatalogGraphs: Gauge;
+  /** bytes; measured size of the node's graph catalog at its last refresh; no labels */
+  storeGraphCatalogBytes: Gauge;
+  /** ms; one full graph catalog scan. kind={seed|revalidate|rebuild}, outcome={ok|error} */
+  storeGraphCatalogRefreshMs: Histogram;
+  /** failed graph catalog scans. kind={seed|revalidate|rebuild},
+   *  reason={internal_limit|timeout|busy|aborted|error} */
+  storeGraphCatalogRefreshFailuresTotal: Counter;
+  /** named graphs in the store, as the graph catalog last counted them; no labels */
+  storeGraphsTotal: Gauge;
+  /** store reads refused by a node-side limit. limit=<limit name, a fixed set, else `other`> */
+  queryInternalLimitTotal: Counter;
+  /** queries by route={view|legacy|unscoped}, view={wm|swm|vm|none|other},
+   *  graph={none|variable|explicit}, min_trust={true|false}, private={true|false} */
+  queryScopeRequestsTotal: Counter;
+  /** graphs one query routes per asset (its slice). route={view|legacy}, graph */
+  queryScopeSliceGraphs: Histogram;
+  /** ms; store time of a query's routed reads. route, graph, slice={le_100|le_1000|…|le_20000|gt_20000} */
+  queryScopeStoreMs: Histogram;
+  /** queries whose slice is over a candidate scope limit. route, graph, limit=<candidate> */
+  queryScopeOverLimitTotal: Counter;
+  /** read-graph checks. mode={sampled|full}, outcome={consistent|mismatch|skipped|interrupted|error}, layer={wm|swm|vm|other} */
+  storeReadGraphChecksTotal: Counter;
+  /** ms; one read-graph check. mode, outcome */
+  storeReadGraphCheckMs: Histogram;
+  /** read graphs a check found unequal to their member graphs' union, each marked dirty.
+   *  mode, direction={missing|unheld}, layer */
+  storeReadGraphMismatchesTotal: Counter;
+  /** read graphs in the state mirror by state={building|ready|dirty|repairing|rebuilding}, at each check pass */
+  storeReadGraphs: Gauge;
   /** bounded materialized result rows by static source */
   storeQueryResultRows: Histogram;
   /** conservative bounded materialized bytes by static source */
@@ -513,6 +501,51 @@ function buildMetrics(): DkgMetrics {
       unit: 'ms',
       description: 'Scheduler admitted-work duration by bounded scheduler, lane, and outcome',
       advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    storeGraphCatalogGraphs: meter.createGauge('dkg.store.graph_catalog_graphs', {
+      description: 'Graphs in the node graph catalog at its last refresh',
+    }),
+    storeGraphCatalogBytes: meter.createGauge('dkg.store.graph_catalog_bytes', {
+      unit: 'By', description: 'Measured size of the node graph catalog at its last refresh',
+    }),
+    storeGraphCatalogRefreshMs: meter.createHistogram('dkg.store.graph_catalog_refresh_ms', {
+      unit: 'ms', description: 'Duration of one full graph catalog scan',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    storeGraphCatalogRefreshFailuresTotal: meter.createCounter('dkg.store.graph_catalog_refresh_failures_total', {
+      description: 'Failed graph catalog scans by kind and bounded reason',
+    }),
+    storeGraphsTotal: meter.createGauge('dkg.store.graphs_total', {
+      description: 'Named graphs in the store, as the graph catalog last counted them',
+    }),
+    queryInternalLimitTotal: meter.createCounter('dkg.query.internal_limit_total', {
+      description: 'Store reads refused by a node-side limit, by limit name',
+    }),
+    queryScopeRequestsTotal: meter.createCounter('dkg.query.scope_requests_total', {
+      description: 'Queries by route and class',
+    }),
+    queryScopeSliceGraphs: meter.createHistogram('dkg.query.scope_slice_graphs', {
+      description: 'Graphs one query routes per asset', advice: { explicitBucketBoundaries: GRAPH_COUNT_BUCKETS },
+    }),
+    queryScopeStoreMs: meter.createHistogram('dkg.query.scope_store_ms', {
+      unit: 'ms', description: 'Store time of the reads a query routes per asset, by slice size',
+      advice: { explicitBucketBoundaries: SYNC_OPERATION_DURATION_BUCKETS },
+    }),
+    queryScopeOverLimitTotal: meter.createCounter('dkg.query.scope_over_limit_total', {
+      description: 'Queries whose slice is over a candidate scope limit; none is refused',
+    }),
+    storeReadGraphChecksTotal: meter.createCounter('dkg.store.read_graph_checks_total', {
+      description: 'Read-graph checks by mode, outcome and layer',
+    }),
+    storeReadGraphCheckMs: meter.createHistogram('dkg.store.read_graph_check_ms', {
+      unit: 'ms', description: 'Duration of one read-graph check',
+      advice: { explicitBucketBoundaries: READ_GRAPH_CHECK_DURATION_BUCKETS },
+    }),
+    storeReadGraphMismatchesTotal: meter.createCounter('dkg.store.read_graph_mismatches_total', {
+      description: 'Read graphs found unequal to the union of their member graphs, each marked dirty',
+    }),
+    storeReadGraphs: meter.createGauge('dkg.store.read_graphs', {
+      description: 'Read graphs in the state mirror by state, at each check pass',
     }),
     storeQueryResultRows: meter.createHistogram('dkg.store.query_result_rows', {
       description: 'Rows retained by bounded expensive store reads',

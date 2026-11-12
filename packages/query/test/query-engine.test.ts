@@ -323,7 +323,7 @@ describe('DKGQueryEngine', () => {
     expect(secondController.signal.aborted).toBe(false);
   });
 
-  it('coalesces bounded discovery while accounting independently per request', async () => {
+  it('coalesces bounded discovery and charges no request for its registry answer', async () => {
     let releaseDiscovery!: () => void;
     const discoveryGate = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
     let discoveryStarted!: () => void;
@@ -361,7 +361,7 @@ describe('DKGQueryEngine', () => {
 
     const first = boundedEngine.query(sparql, {
       ...commonOptions,
-      maxMaterializedBytes: 100,
+      maxMaterializedBytes: 10 * 1024 * 1024,
     });
     await started;
     const second = boundedEngine.query(sparql, {
@@ -369,10 +369,7 @@ describe('DKGQueryEngine', () => {
       maxMaterializedBytes: 10 * 1024 * 1024,
     });
     releaseDiscovery();
-    await expect(first).rejects.toMatchObject({
-      code: 'QUERY_MATERIALIZATION_TOO_LARGE',
-      maxBytes: 100,
-    });
+    await expect(first).resolves.toMatchObject({ bindings: expect.any(Array) });
     await expect(second).resolves.toMatchObject({ bindings: expect.any(Array) });
     expect(boundedStore.sharedOptions).toHaveLength(1);
     for (const seen of boundedStore.sharedOptions) {
@@ -387,13 +384,15 @@ describe('DKGQueryEngine', () => {
     await boundedEngine.query(sparql, {
       ...commonOptions, materializationBudget: new RecordingBudget(10 * 1024 * 1024),
     });
-    const cachedBytes = Buffer.byteLength(JSON.stringify({ type: 'bindings', bindings: Array.from({ length: 64 }, () => ({})) }));
-    expect(charges).toContain(cachedBytes);
-    const totalBytes = charges.reduce((sum, bytes) => sum + bytes, 0);
-    const ceiling = totalBytes - 1;
-    expect(totalBytes - cachedBytes).toBeLessThan(ceiling); // Fresh reads alone fit.
-    await expect(boundedEngine.query(sparql, { ...commonOptions, maxMaterializedBytes: ceiling }))
-      .rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE', maxBytes: ceiling });
+    // The shared registry answer is node work: no request is charged for it, cached or fresh. Each
+    // request pays for its result and for the graph names its discovery returns.
+    const registryBytes = Buffer.byteLength(JSON.stringify({ type: 'bindings', bindings: Array.from({ length: 64 }, () => ({})) }));
+    expect(charges).not.toContain(registryBytes);
+    const chargedBytes = charges.reduce((sum, bytes) => sum + bytes, 0);
+    await expect(boundedEngine.query(sparql, { ...commonOptions, maxMaterializedBytes: chargedBytes }))
+      .resolves.toMatchObject({ bindings: expect.any(Array) });
+    await expect(boundedEngine.query(sparql, { ...commonOptions, maxMaterializedBytes: chargedBytes - 1 }))
+      .rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE', maxBytes: chargedBytes - 1 });
     expect(boundedStore.sharedOptions).toHaveLength(1);
   });
 
@@ -1067,8 +1066,8 @@ describe('DKGQueryEngine', () => {
       const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
       store.query = async (...args) => {
         const result = await originalQuery(...args);
+        // Registry and authority answers are node work: only the slices and the content are charged.
         if (args[0].includes('http://ex.org/p1')) content.push(size(result));
-        else discoveryBytes += size(result);
         return result;
       };
       store.listGraphsByPrefix = async (...args) => {
@@ -1138,7 +1137,7 @@ describe('DKGQueryEngine', () => {
   // ("fetch failed"). The read must now be a SINGLE `VALUES ?g { … } GRAPH ?g
   // { … }` query, with the injected graph variable hidden behind a sub-SELECT
   // so `SELECT *` and cross-graph DISTINCT keep their UNION-form semantics.
-  describe('#1596 multi-graph SWM view uses one VALUES block, not per-graph UNION', () => {
+  describe('#1596 multi-graph SWM view uses one graph-variable read, not per-graph UNION', () => {
     const SWM_CG = 'swm-1596';
     const swmGraph = (addr: string, n: number) =>
       `did:dkg:context-graph:${SWM_CG}/_shared_memory/${addr}/${n}`;
@@ -1163,8 +1162,10 @@ describe('DKGQueryEngine', () => {
     const swmQuery = (sparql: string) =>
       recEngine.query(sparql, { contextGraphId: SWM_CG, view: 'shared-working-memory' });
 
+    // On Oxigraph the query's dataset (FROM NAMED) selects the read's graphs, so no graph list is written.
     const multiGraphQuery = () =>
-      recStore.queries.find((s) => s.includes('VALUES ?__dkgViewGraph'));
+      recStore.queries.find((s) => s.includes('GRAPH ?__dkgViewGraph'));
+    const multiGraphReads = () => recStore.queries.filter(s => s.includes('GRAPH ?__dkgViewGraph'));
     // Authority discovery may UNION independent metadata branches. This guard
     // concerns per-content-graph reads of the SWM view, not catalog queries.
     const hasPerGraphSwmRead = () => recStore.queries.some(
@@ -1184,12 +1185,13 @@ describe('DKGQueryEngine', () => {
       const result = await swmQuery('SELECT ?s ?p ?o WHERE { ?s ?p ?o }');
       expect(result.bindings).toHaveLength(12); // all rows, across all 6 graphs
 
-      // The multi-graph read is ONE VALUES-scoped query, never a per-graph UNION.
+      // The multi-graph read is ONE graph-variable query over its dataset, never a per-graph UNION.
       const multi = multiGraphQuery();
       expect(multi).toBeDefined();
       expect(multi).toContain('GRAPH ?__dkgViewGraph {');
-      expect(multi).toContain(swmGraph('0xowner', 0));
-      expect(recStore.queries.filter(s => s.includes('VALUES ?__dkgViewGraph'))).toHaveLength(1);
+      expect(multi).toContain(`FROM NAMED <${swmGraph('0xowner', 0)}>`);
+      expect(multi).not.toContain('VALUES ?__dkgViewGraph');
+      expect(multiGraphReads()).toHaveLength(1);
       expect(hasPerGraphSwmRead()).toBe(false);
     });
 
@@ -1203,7 +1205,7 @@ describe('DKGQueryEngine', () => {
       const result = await swmQuery('SELECT (COUNT(*) AS ?count) WHERE { ?s ?p ?o }');
       const count = Number(String(result.bindings[0]['count']).match(/^"?(\d+)"?/)?.[1]);
       expect(count).toBe(5);
-      expect(multiGraphQuery()).toBeDefined(); // still the VALUES form
+      expect(multiGraphQuery()).toBeDefined(); // still the single graph-variable read
     });
 
     it('cross-graph DISTINCT dedupes an identical triple present in two graphs', async () => {
@@ -1247,8 +1249,8 @@ describe('DKGQueryEngine', () => {
       for (const b of star.bindings) {
         expect(Object.keys(b)).not.toContain('__dkgViewGraph');
       }
-      // The var-less body must NOT have been emitted as the bare VALUES form
-      // that would project the sentinel.
+      // The var-less body must NOT have been emitted as the bare graph-variable
+      // form that would project the sentinel.
       expect(multiGraphQuery()).toBeUndefined();
     });
 
@@ -1257,7 +1259,7 @@ describe('DKGQueryEngine', () => {
     // CONSTRUCT and ASK are part of the engine contract and have had shape
     // regressions before (#789), so pin them through the new VALUES path too —
     // without an inner UNION (which would divert to the per-graph fallback).
-    it('CONSTRUCT over the SWM view uses the VALUES path and keeps the quad shape', async () => {
+    it('CONSTRUCT over the SWM view uses the single read and keeps the quad shape', async () => {
       const quads: Quad[] = [];
       for (let i = 0; i < 4; i++) {
         quads.push(q(`urn:cq:s${i}`, 'http://ex.org/p', `"v${i}"`, swmGraph('0xcq', i)));
@@ -1271,13 +1273,13 @@ describe('DKGQueryEngine', () => {
       expect((result.quads ?? []).map((qd) => qd.subject).sort())
         .toEqual(['urn:cq:s0', 'urn:cq:s1', 'urn:cq:s2', 'urn:cq:s3']);
       expect((result.quads ?? []).every((qd) => qd.predicate === 'urn:out')).toBe(true);
-      // ...and it went through the ONE VALUES query, never a per-graph UNION.
+      // ...and it went through the ONE graph-variable query, never a per-graph UNION.
       expect(multiGraphQuery()).toBeDefined();
-      expect(recStore.queries.filter(s => s.includes('VALUES ?__dkgViewGraph'))).toHaveLength(1);
+      expect(multiGraphReads()).toHaveLength(1);
       expect(hasPerGraphSwmRead()).toBe(false);
     });
 
-    it('ASK over the SWM view uses the VALUES path and returns the boolean', async () => {
+    it('ASK over the SWM view uses the single read and returns the boolean', async () => {
       await recStore.insert([
         q('urn:aq:s', 'http://ex.org/p', '"present"', swmGraph('0xaq', 2)),
       ]);
@@ -1960,8 +1962,9 @@ describe('DKGQueryEngine', () => {
     ]);
     const executed = recordingStore.queries.at(-1) ?? '';
     expect(executed.match(/VALUES\s+\?sourceGraph/gi)).toHaveLength(1);
-    expect(executed).toBe(sparql);
-    expect(executed).not.toContain(vmGraphs[5]);
+    // On Oxigraph the read's dataset is its only addition: the caller's list is not widened.
+    expect(executed).toContain(`FROM NAMED <${vmGraphs[5]}>`);
+    expect(executed.replace(/ FROM NAMED <[^>]+>/g, '')).toBe(sparql);
   });
 
   it('retains the allow-list intersection when caller VALUES contains an out-of-scope graph', async () => {
@@ -1992,8 +1995,11 @@ describe('DKGQueryEngine', () => {
     );
 
     expect(result.bindings).toEqual([{ sourceGraph: vm, name: '"allowed"' }]);
+    // On Oxigraph the read's dataset is the intersection: the caller's VALUES stays as written.
     const executed = recordingStore.queries.at(-1) ?? '';
-    expect(executed.match(/VALUES\s+\?sourceGraph/gi)).toHaveLength(2);
+    expect(executed.match(/VALUES\s+\?sourceGraph/gi)).toHaveLength(1);
+    expect(executed).toContain(`FROM NAMED <${vm}>`);
+    expect(executed).not.toContain(`FROM NAMED <${foreign}>`);
   });
 
   it('rejects a default-graph pattern even when authorized VALUES makes graph injection redundant', async () => {

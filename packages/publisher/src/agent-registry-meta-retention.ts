@@ -335,6 +335,6 @@ WHERE { GRAPH <${metaGraph}> {
     store,
     sparql,
     [metaGraph],
-    { source: 'agent-registry-meta.prune' },
+    { source: 'agent-registry-meta.prune', writtenGraphs: [metaGraph] },
   );
 }

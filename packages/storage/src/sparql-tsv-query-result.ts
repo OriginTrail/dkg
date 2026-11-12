@@ -30,6 +30,21 @@ export class SparqlTsvResultsShapeError extends SparqlResultsShapeError {
 
 export interface SparqlTsvResponseOptions {
   maxResponseBytes?: number;
+  /**
+   * Let the rest of the process run after each chunk of the body, so that a
+   * long answer, such as a store's complete graph list, is decoded in bounded
+   * steps instead of in one run. Off by default.
+   */
+  yieldBetweenChunks?: boolean;
+}
+
+/**
+ * One full turn of the event loop. A single `setImmediate` taken in an I/O
+ * callback continues in the same loop iteration, before any due timer; the
+ * second one lets timers run.
+ */
+function nextEventLoopTurn(): Promise<void> {
+  return new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
 }
 
 /**
@@ -48,9 +63,13 @@ export async function decodeSparqlTsvSelectResponse(
     parser.consumeLine(line);
   });
   const decoder = new TextDecoder('utf-8', { fatal: true });
-  await consumeStoreResponseBodyChunks(response, options.maxResponseBytes, chunk => {
-    lines.feed(decodeTsvUtf8(decoder, chunk));
-  });
+  const feed = (chunk: Uint8Array) => lines.feed(decodeTsvUtf8(decoder, chunk));
+  await consumeStoreResponseBodyChunks(response, options.maxResponseBytes, options.yieldBetweenChunks
+    ? async (chunk) => {
+      feed(chunk);
+      await nextEventLoopTurn();
+    }
+    : feed);
   lines.feed(decodeTsvUtf8(decoder));
   lines.finish();
   return parser.finish();

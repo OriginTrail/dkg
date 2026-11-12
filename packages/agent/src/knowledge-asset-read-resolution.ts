@@ -6,6 +6,7 @@ import {
   type ContextGraphCallerReadAdmission,
   unavailableContextGraphReadAuthorityDecision,
 } from './context-graph-read-authority.js';
+import { denyUnheldContextGraphRead } from './unheld-context-graph-read.js';
 
 const AGENT_NUMBER_RE = /^0x[0-9a-fA-F]{40}:[0-9]+$/;
 
@@ -79,7 +80,9 @@ export async function resolveKnowledgeAssetRead(
   const { callerAgentAddress: caller, signal } = options;
   const { cg, name } = input;
   signal?.throwIfAborted();
-  let decision = await agent.resolveContextGraphReadAuthority(cg, { callerAgentAddress: caller, signal });
+  // A context graph this node holds nothing of is refused as a private one the caller may not read.
+  let decision = await denyUnheldContextGraphRead(agent, cg,
+    await agent.resolveContextGraphReadAuthority(cg, { callerAgentAddress: caller, signal }), { accessDenied: 'error', signal });
   signal?.throwIfAborted();
   const { identifier, readLiteral, resolveTarget } = createKnowledgeAssetTargetLookup(agent, input, signal);
   const { agentAddress } = input;

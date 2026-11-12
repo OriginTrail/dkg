@@ -40,8 +40,10 @@ export async function decodeSparqlHttpQueryResponse(
   // keeps the established fallback; generic endpoints never request TSV.
   const contentType = response.headers?.get?.('content-type')?.toLowerCase() ?? '';
   if (options.mode === 'select-tsv' && !contentType.includes('json')) {
+    // A complete graph list is decoded in bounded steps, letting other work run between chunks.
     return decodeSparqlTsvSelectResponse(response, {
       maxResponseBytes: options.maxResponseBytes,
+      yieldBetweenChunks: options.operation === 'listGraphs',
     }, options.managedOxigraph
       ? line => assertManagedOxigraphSparqlResponseComplete(line, options.operation)
       : undefined);

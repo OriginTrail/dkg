@@ -50,18 +50,30 @@ export interface QueryNonBusyResponse extends QueryResponseBase {
   reason?: never;
 }
 
-export interface QueryBusyResponse extends QueryResponseBase {
+interface QueryBusyResponseBase extends QueryResponseBase {
   status: 'BUSY';
   error: string;
-  code: 'STORE_BUSY';
   retryable: true;
   retryAfterMs: number;
-  reason: StoreSchedulerBusyReason;
   ntriples?: never;
   bindings?: never;
   entityUris?: never;
   gasConsumed?: never;
 }
+
+/** The store scheduler shed the work before it started. */
+interface QueryStoreBusyResponse extends QueryBusyResponseBase {
+  code: 'STORE_BUSY';
+  reason: StoreSchedulerBusyReason;
+}
+
+/** The node's own state passed one of its internal store limits; not the request's size. */
+interface QueryStoreInternalLimitResponse extends QueryBusyResponseBase {
+  code: 'STORE_INTERNAL_LIMIT';
+  reason?: never;
+}
+
+export type QueryBusyResponse = QueryStoreBusyResponse | QueryStoreInternalLimitResponse;
 
 export type QueryResponse = QueryNonBusyResponse | QueryBusyResponse;
 

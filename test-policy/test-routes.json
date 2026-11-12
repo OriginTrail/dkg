@@ -181,6 +181,62 @@
     "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
   },
   {
+    "pattern": "packages/storage/test-live/read-graph-statements.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Read-graph maintenance statements, fences and checks on a live Blazegraph, run by the existing Blazegraph CI lane's storage config",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
+    "pattern": "packages/storage/test-live/read-graph-layer.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "The read-graph layer keeping read graphs equal to their members through the Blazegraph adapter, run by the existing Blazegraph CI lane's storage config",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
+    "pattern": "packages/storage/test-live/read-graph-builder.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Read-graph builds, start-up, dirty marks and removal through the Blazegraph adapter, run by the existing Blazegraph CI lane's storage config",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
+    "pattern": "packages/storage/test-live/read-graph-check.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "The sampled and full read-graph checks, both directions, on the Blazegraph adapter, run by the existing Blazegraph CI lane's storage config",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
+    "pattern": "packages/storage/test-live/read-graph-qualification.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "The read-graph qualification rows through the Blazegraph adapter (a shared large literal, concurrent removals of the last copies, triples held by many graphs), run by the existing Blazegraph CI lane's storage config",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
+    "pattern": "packages/storage/test-live/read-graph-kill-at-commit.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "A writer process killed while a write that maintains a read graph is in flight leaves the read graph equal to its members on Blazegraph, run by the existing Blazegraph CI lane's storage config",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
+    "pattern": "packages/storage/test-live/read-graph-builder-qualification.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Builder-level read-graph qualification through the Blazegraph adapter (a build that a newer dirty mark overtakes, and its operations arriving late; a sub-graph or a child context graph registered after its data exists), run by the existing Blazegraph CI lane's storage config",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
+    "pattern": "packages/storage/test-live/read-graph-builder-restart.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "A builder process killed in the middle of a build, a new start of the same store, a late copy batch of the dead process, and the rebuild, on Blazegraph, run by the existing Blazegraph CI lane's storage config",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
     "pattern": "packages/publisher/test-live/**/*.blazegraph.test.ts",
     "lane": "tornado-blazegraph",
     "reason": "Live Blazegraph differential of the bounded share conflict lookup (OT-RFC-73 AC4), required in the existing Tornado Blazegraph CI lane: on its service container and again on the blazegraph-image.json image with the U+001F reproduction required",
@@ -200,6 +256,18 @@
     "reason": "Live Blazegraph regressions required in the existing Tornado Blazegraph CI lane",
     "cadence": "required",
     "command": "pnpm --filter @origintrail-official/dkg-agent exec vitest run --config vitest.blazegraph.config.ts"
+  },
+  {
+    "pattern": "packages/query/test-live/large-catalog.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Scoped queries on a store of about 100,000 graphs across four context graphs, on Blazegraph and on embedded Oxigraph, in their own CI job that runs wherever the Blazegraph lane does",
+    "cadence": "required",
+    "command": "DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run --config vitest.large-catalog.config.ts && DKG_LARGE_CATALOG_ENGINE=oxigraph pnpm --filter @origintrail-official/dkg-query exec vitest run --config vitest.large-catalog.config.ts",
+    "layer": "system",
+    "prerequisites": [
+      "built storage, core and rdf-utils packages",
+      "BLAZEGRAPH_TEST_URL of a Blazegraph server that lets the test create a namespace"
+    ]
   },
   {
     "pattern": "tools/observability/w1/*.test.yaml",

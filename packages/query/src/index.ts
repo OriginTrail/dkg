@@ -5,7 +5,12 @@ export {
 } from './query-result-size-error.js';
 export * from './query-engine.js';
 export * from './query-types.js';
-export { QueryMaterializationBudget } from './query-store-read-context.js';
+export {
+  QueryMaterializationBudget,
+  QUERY_CATALOG_LIMIT_NAME,
+  QUERY_CATALOG_MAX_RESPONSE_BYTES,
+  readWithinCatalogLimit,
+} from './query-store-read-context.js';
 export {
   QUERY_MATERIALIZATION_TOO_LARGE,
   QueryMaterializationTooLargeError,
@@ -13,6 +18,14 @@ export {
   type QueryMaterializationTooLargeErrorLike,
 } from './query-materialization-error.js';
 export { DKGQueryEngine, resolveViewGraphs, type ViewResolution } from './dkg-query-engine.js';
+export {
+  SemanticsUnsupportedError, VIEW_NOT_READY_RETRY_AFTER_SECONDS, ViewNotReadyError,
+  type ViewReadGraphs,
+} from './view-dataset-plan.js';
+export {
+  VIEW_SEMANTICS_DELTA_KINDS, ViewSemanticsDeltaSampler,
+  type ViewSemanticsDeltaKind, type ViewSemanticsDeltaSamplerOptions, type ViewSemanticsDeltaShape, type ViewSemanticsDeltaSummary,
+} from './view-semantics-delta.js';
 export {
   CALLER_SPARQL_REJECTED_CODE,
   CallerSparqlRejectedError,

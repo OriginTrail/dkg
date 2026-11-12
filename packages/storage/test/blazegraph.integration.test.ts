@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { singleAssetTransactionTests } from './_helpers/blazegraph-single-asset-integration.js';
+import { blazegraphReadGraphWriteTests } from './_helpers/blazegraph-read-graph-integration.js';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../src/atomic-asset-group.js';
 import { buildBulkAssetGroupPlan } from '../src/adapters/bulk-asset-group.js';
 import { parseNQuadsTextTolerant } from '../src/nquads-text.js';
@@ -28,6 +29,16 @@ import { quadsToNQuads } from '../src/bounded-rdf.js';
  *   http://127.0.0.1:9999/bigdata/namespace/kb/sparql
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { MemoryLayer, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
+import { markReadGraphsDirtyAtStart } from '../src/read-graph-partition-startup.js';
+import {
+  CURRENT_READ_GRAPH_VERSIONS,
+  parseReadGraphStateRows,
+  READ_GRAPH_STATE_PREDICATES,
+  readGraphStateCompareAndSet,
+  readGraphStateRowsQuery,
+  type ReadGraphState,
+} from '../src/read-graph/state.js';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { compileRfc64SemanticAuthorCommitV1 } from '../src/rfc64-semantic-author-commit-v1.js';
 import { normalizeRfc64AuthorCommitCasV1 } from '../src/rfc64-author-commit-cas.js';
@@ -80,6 +91,7 @@ function makeQuads(n: number): Quad[] {
 
 describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', () => {
   singleAssetTransactionTests(BLAZEGRAPH_URL!);
+  blazegraphReadGraphWriteTests(BLAZEGRAPH_URL!);
   let store: BlazegraphStore;
 
   beforeAll(async () => {
@@ -90,6 +102,55 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
 
   afterAll(async () => {
     if (store) await store.dropGraph(GRAPH).catch(() => {});
+  });
+
+  it('lists graphs whose names need escapes, from its streamed one-graph-per-line answer', async () => {
+    const root = `urn:graph-list:${randomUUID()}`;
+    const graphs = [`${root}:café`, `${root}:smile-😀`, `${root}:a%20b`, `${root}:plain`];
+    try {
+      await store.insert(graphs.map((graph, i) => ({ subject: `${root}:s${i}`, predicate: 'urn:p', object: '"x"', graph })));
+      expect((await store.listGraphs()).filter((graph) => graph.startsWith(root)).sort()).toEqual([...graphs].sort());
+    } finally {
+      for (const graph of graphs) await store.dropGraph(graph);
+    }
+  });
+
+  it('marks read graphs dirty at start with a new generation, and recreates a damaged row dirty', async () => {
+    const contextGraphId = `bg-int-${RUN}-start`;
+    const state = readGraphStateGraphIri(contextGraphId);
+    const vm = readGraphIri({ scope: readScope(contextGraphId), layer: MemoryLayer.VerifiableMemory });
+    const swm = readGraphIri({ scope: readScope(contextGraphId), layer: MemoryLayer.SharedWorkingMemory });
+    const code = readGraphIri({ scope: readScope(contextGraphId, 'code'), layer: MemoryLayer.VerifiableMemory });
+    const row = (readGraph: string, rowState: ReadGraphState, generation: number) => ({
+      readGraph, state: rowState, generation, ...CURRENT_READ_GRAPH_VERSIONS,
+    });
+    const ours = async () => {
+      const result = await store.query(readGraphStateRowsQuery());
+      const parsed = parseReadGraphStateRows(result.type === 'bindings' ? result.bindings : []);
+      const mine = (readGraph: string) => readGraph === vm || readGraph === swm || readGraph === code;
+      return {
+        damaged: parsed.damaged.filter(mine).sort(),
+        rows: Object.fromEntries(parsed.rows.filter((each) => mine(each.readGraph)).map((each) => [each.readGraph, `${each.state}@${each.generation}`])),
+      };
+    };
+    try {
+      for (const seeded of [row(vm, 'ready', 5), row(swm, 'ready', 2), row(code, 'dirty', 9)]) {
+        await store.update(readGraphStateCompareAndSet(undefined, seeded));
+      }
+      // A second state makes the shared-memory row damaged.
+      await store.insert([{ graph: state, subject: swm, predicate: READ_GRAPH_STATE_PREDICATES.state, object: '"building"' }]);
+      expect((await ours()).damaged).toEqual([swm]);
+      expect(await markReadGraphsDirtyAtStart(store)).toBeGreaterThanOrEqual(2);
+      const after = await ours();
+      expect(after.damaged).toEqual([]);
+      expect(after.rows[vm]).toBe('dirty@6');
+      expect(after.rows[swm]).toMatch(/^dirty@/);
+      expect(after.rows[code]).toBe('dirty@9');
+      const ready = await store.query(`ASK { GRAPH <${state}> { ?readGraph <${READ_GRAPH_STATE_PREDICATES.state}> "ready" } }`);
+      expect(ready.type === 'boolean' && ready.value).toBe(false);
+    } finally {
+      await store.update(`DROP SILENT GRAPH <${state}>`);
+    }
   });
 
   it('replaces values and preserves exact content on replay', async () => {

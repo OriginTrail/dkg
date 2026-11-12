@@ -424,7 +424,7 @@ export class VmPromotionMethods extends DKGAgentBase {
           since = lastSeen;
         }
         if (since !== null) {
-          await this.store.update(storageAckGrandfatherUpdate(now.toISOString(), since), options);
+          await this.store.update(storageAckGrandfatherUpdate(now.toISOString(), since), { ...options, writtenGraphs: [STORAGE_ACK_LEDGER_GRAPH] });
           await requireStorageAckLedgerTimestamp(this.storageAckLedgerTimestampWriter, STORAGE_ACK_LEDGER_GRAPH, LEDGER.grandfatheredThrough, now, options);
         }
         if (instant(row?.['epoch']) === undefined) {
@@ -613,6 +613,7 @@ export class VmPromotionMethods extends DKGAgentBase {
         source: 'agent.storageAckLedger.orphans',
         priority: 'background',
         touchedGraphs: STORAGE_ACK_LEDGER_TOUCHED_GRAPHS,
+        writtenGraphs: [STORAGE_ACK_LEDGER_GRAPH],
       });
       return 0;
     }

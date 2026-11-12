@@ -106,6 +106,8 @@ function buildCtx(opts: {
       };
     },
     listLocalAgents: () => [{ agentAddress: '0xnode-default-agent' }],
+    // The node holds every context graph these cases name.
+    keepsContextGraphLocally: () => true,
     // Retained so a regression back to the raw-store path is still observed
     // as "retrieval ran" by the deny assertions below.
     store: {

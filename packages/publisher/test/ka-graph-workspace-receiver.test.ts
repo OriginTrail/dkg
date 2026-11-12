@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
+  SPARQL_TERM_VALIDATION_ERROR_CODE,
   TypedEventBus,
   createGraphKnowledgeAssetScope,
   encodeWorkspacePublishRequest,
@@ -564,6 +565,69 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
     expect(afterRetry.type).toBe('bindings');
     if (afterRetry.type !== 'bindings') throw new Error('expected bindings');
     expect(afterRetry.bindings).toEqual([{ s: 'urn:entity:2', o: '"two"' }]);
+  });
+
+  it.each([
+    ['a language tag with a character a tag may not hold', '"refused value"@en_GB'],
+    ['a relative object IRI', '<relative-object>'],
+    ['a literal with a relative datatype', '"42"^^<integer>'],
+  ])('permanently rejects %s and writes nothing to SWM', async (_label, object) => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    const outcome = await handler.handle(v2Request({
+      nquads: new TextEncoder().encode(`<urn:entity:1> <urn:predicate:value> ${object} <${DATA_GRAPH}> .`),
+      shareOperationId: 'rootless-op-malformed-term',
+    }), PEER_ID);
+    expect(outcome).toMatchObject({ applied: false, retryable: false });
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(UAL, 1),
+    );
+    expect(await graphCount(store, swmGraph)).toBe(0);
+    expect(await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: UAL,
+    })).toBeUndefined();
+  });
+
+  it.each([
+    ['a subject in a reserved namespace', `<urn:dkg:file:shared> <urn:predicate:value> "v" <${DATA_GRAPH}> .`],
+    ['a trust-level row', `<urn:entity:1> <http://dkg.io/ontology/trustLevel> "3" <${DATA_GRAPH}> .`],
+  ])('permanently rejects %s and writes nothing to SWM', async (_label, line) => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    const outcome = await handler.handle(v2Request({
+      nquads: new TextEncoder().encode(line),
+      shareOperationId: 'rootless-op-protocol-metadata',
+    }), PEER_ID);
+    expect(outcome).toMatchObject({ applied: false, retryable: false });
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(UAL, 1),
+    );
+    expect(await graphCount(store, swmGraph)).toBe(0);
+  });
+
+  it('permanently rejects a write the store refuses for a malformed term, unlike a store failure', async () => {
+    const store = new OxigraphStore();
+    const refusedTerm = async (): Promise<never> => {
+      // As the store worker passes a refused term back: name, message and code.
+      throw Object.assign(new Error('oxigraph.replaceGraph: invalid literal in SPARQL object position'), {
+        name: 'SparqlTermValidationError',
+        code: SPARQL_TERM_VALIDATION_ERROR_CODE,
+      });
+    };
+    store.replaceGraph = refusedTerm;
+    store.replaceGraphAndSubject = refusedTerm;
+    store.insert = refusedTerm;
+    const outcome = await new SharedMemoryHandler(store, new TypedEventBus()).handle(v2Request(), PEER_ID);
+    expect(outcome).toMatchObject({ applied: false, retryable: false });
+    if (outcome.applied) throw new Error('unreachable');
+    expect(outcome.reason).toContain('invalid literal');
   });
 
   it('accepts a fully private KA with an empty public graph', async () => {
