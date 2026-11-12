@@ -41,7 +41,7 @@ Search across assets is off by default, for every context graph. You switch it p
 
   On any other store the node refuses the setting with `READ_GRAPHS_UNSUPPORTED`.
 - **One node per store backend.** The combined copies assume that the node is its store's only writer, as the node's graph catalog does. Two nodes that share one store backend are not supported with search across assets in 10.1.2.
-- **Not on a checkpoint node.** A node that starts from a public checkpoint refuses Preview and On with `READ_GRAPHS_CHECKPOINT_NODE`.
+- **Not on a checkpoint node.** A node that starts from a public checkpoint keeps no settings, and refuses every change with `READ_GRAPHS_CHECKPOINT_NODE`.
 - **The rollback target must recognize it.** The rollback target is the release `dkg rollback` would activate: the other slot on a Core, or the version in `previous-version` on an Edge. A release that doesn't recognize read graphs would treat them as ordinary graphs, so the node refuses Preview and On while the rollback target is such a release. The refusal is `READ_GRAPHS_ROLLBACK_TARGET_OLDER`, with the target's version and the first release that recognizes read graphs. Once a node that runs such a release updates again, its rollback target recognizes read graphs too.
 - **Plan for the space.** A combined copy holds one copy of each distinct triple of its layer, so the store grows by up to the size of that layer.
 
@@ -195,11 +195,14 @@ The settings calls need the node-admin token.
 
   - **`layers`:** maps layers to `off`, `build` or `serve`. Layers you leave out keep their setting.
   - **`viewSemantics`:** `"merged"` or `"per-asset"` sets the default; `null` removes it.
-  - **The checks, in order:** the node-admin token, the body's shape, the node's policy (below), store support, that the node is not a checkpoint node, and the rollback target.
-  - **Off is always allowed:** switching a layer Off, or changing the default semantics, skips the policy, checkpoint and rollback-target checks.
+  - **The checks, in order:** the node-admin token, the body's shape, the node's policy (below), store support, that the node is not a checkpoint node, the rollback target, and then that the node can write its settings.
+  - **Off is always allowed:** switching a layer Off, or changing the default semantics, skips the policy, store and rollback-target checks. Only a checkpoint node refuses it, as it keeps no settings.
   - **A refusal:** the answer is `{ "code": …, "error": … }`, where `error` is one sentence for the operator, and the settings stay as they were. The codes are listed under [What you'll see](#what-youll-see).
   - **Concurrent changes:** they apply one at a time, and the last one wins.
-- **`POST /api/context-graph/create`:** takes an optional `"readGraphs": { "layers": { "verifiable-memory": "build" } }`. The setting goes through the same checks after the creation, the node-admin token included. The response's `readGraphs` says whether it was applied or refused, and a refused setting doesn't fail the creation.
+- **`POST /api/context-graph/create`:** takes an optional `"readGraphs": { "layers": { "verifiable-memory": "build" } }`.
+  - **A malformed setting:** the request is refused with `400 READ_GRAPH_SETTINGS_INVALID`, and nothing is created.
+  - **Otherwise:** the setting goes through the same checks after the creation, the node-admin token included. The response's `readGraphs` says whether it was applied, or why it was refused, with a code: those of a change, or `NODE_ADMIN_REQUIRED` without the node-admin token.
+  - **A refused setting** doesn't fail the creation.
 
 ### Agents
 
@@ -284,7 +287,7 @@ Node-wide policy stays in `~/.dkg/config.json`. The daemon reads it at start, so
 | `409 READ_GRAPHS_DISABLED` | `query.readGraphsPolicy.enabled` is `false` on the node. |
 | `409 READ_GRAPHS_LAYER_NOT_ALLOWED` | The layer isn't in `query.readGraphsPolicy.layers`. |
 | `409 READ_GRAPHS_UNSUPPORTED` | The node's store can't keep combined copies. |
-| `409 READ_GRAPHS_CHECKPOINT_NODE` | The node starts from a public checkpoint. |
+| `409 READ_GRAPHS_CHECKPOINT_NODE` | The node starts from a public checkpoint, and keeps no settings. |
 | `409 READ_GRAPHS_ROLLBACK_TARGET_OLDER` | The rollback target doesn't recognize read graphs. The answer names the target's version and the first release that recognizes read graphs. |
 | `409 READ_GRAPHS_APPLY_REFUSED` | The node couldn't apply the change. The settings were put back, and the answer lists the changes it tried. |
 | `503 READ_GRAPH_SETTINGS_UNAVAILABLE` | The node can't open its settings. |
