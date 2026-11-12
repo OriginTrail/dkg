@@ -420,6 +420,7 @@ export {
   READ_GRAPH_MEMBERSHIP_RULE_VERSION,
   isReadGraphMember,
   matchesGraphNameTest,
+  readGraphEnumerationRoots,
   readGraphMembership,
   readGraphsOfMemberGraph,
   registeredSubGraphNames,
@@ -519,6 +520,7 @@ export {
   VIEW_SEMANTICS,
   keepsAnyReadGraph,
   readGraphModeOf,
+  readGraphModeOfLayer,
   viewSemanticsOf,
   type ReadGraphMode,
   type ReadGraphModeRule,
@@ -532,11 +534,9 @@ export {
   buildReadGraph,
   markReadGraphDirty,
   refreshReadGraphRegistry,
-  withReadGraphBackgroundSlot,
-  readGraphEnumerationRoots,
-  readStoredReadGraphRow,
   removeReadGraph,
   repairReadGraph,
+  retireReadGraph,
   type ReadGraphBatching,
   type ReadGraphJobContext,
   type ReadGraphJobKind,
@@ -544,6 +544,17 @@ export {
   type ReadGraphRepairInput,
 } from './read-graph/rebuild.js';
 export { startReadGraphs, type ReadGraphStartOptions, type ReadGraphStartResult } from './read-graph/startup.js';
+export { withReadGraphBackgroundSlot } from './read-graph/background-slot.js';
+export { readStoredReadGraphRow } from './read-graph/stored-states.js';
+export {
+  applyReadGraphModes,
+  applyViewSemantics,
+  type ApplyReadGraphModesOptions,
+  type ReadGraphModeChange,
+  type ReadGraphModeDeferral,
+  type ReadGraphModeOutcome,
+} from './read-graph/live-modes.js';
+export { readGraphWork, type ReadGraphWorkKind } from './read-graph/pending-work.js';
 export {
   READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE,
   installWorkingMemoryIdentity,
@@ -554,6 +565,7 @@ export {
 export {
   DEFAULT_READ_GRAPH_BUILD_INTERVAL_MS,
   ReadGraphBuilder,
+  type ReadGraphBuiltSize,
   type ReadGraphBuilderOptions,
   type ReadGraphBuilderStatus,
 } from './read-graph/builder.js';

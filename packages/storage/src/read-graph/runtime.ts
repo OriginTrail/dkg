@@ -252,10 +252,22 @@ export interface ReadGraphBackendRuntime {
    * written under its own address.
    */
   workingMemoryIdentity: WorkingMemoryIdentityRule;
-  /** Where the node keeps read graphs; all `off` until a store configuration sets them. */
+  /**
+   * Where the node keeps read graphs; all `off` until a store configuration
+   * sets them. Once `applyReadGraphModes` has set them, store configurations
+   * no longer do ({@link modesApplied}).
+   */
   modes: ReadGraphModes;
-  /** What a view query without `semantics` gets; `per-asset` until a store configuration sets it. */
+  /** Whether `applyReadGraphModes` set {@link modes}: a store configuration made earlier must not set them back. */
+  modesApplied?: boolean;
+  /**
+   * What a view query without `semantics` gets; `per-asset` until a store
+   * configuration sets it. Once `applyViewSemantics` has set it, store
+   * configurations no longer do ({@link viewSemanticsApplied}).
+   */
   viewSemantics: ViewSemanticsSettings;
+  /** Whether `applyViewSemantics` set {@link viewSemantics}: a store configuration made earlier must not set it back. */
+  viewSemanticsApplied?: boolean;
   /**
    * Whether the backend may hold read-graph partitions, as recorded by
    * `noteStoreMayHoldReadGraphPartitions` through any store object over it.

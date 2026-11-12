@@ -8,7 +8,8 @@ import { guardReadGraphPartition } from '../../src/read-graph-partition-store.js
 import { checkReadGraph } from '../../src/read-graph/check.js';
 import { matchesGraphNameTest, readGraphMembership, workingMemoryIdentityRule, type ReadGraphRegistrySnapshot } from '../../src/read-graph/membership.js';
 import { wrapReadGraphLayer } from '../../src/read-graph/read-graph-store.js';
-import { buildReadGraph, markReadGraphDirty, readStoredReadGraphRow, type ReadGraphJobContext } from '../../src/read-graph/rebuild.js';
+import { buildReadGraph, markReadGraphDirty, type ReadGraphJobContext } from '../../src/read-graph/rebuild.js';
+import { readStoredReadGraphRow } from '../../src/read-graph/stored-states.js';
 import { readGraphStateCompareAndSet } from '../../src/read-graph/state.js';
 import { readGraphBackfillBatch, readGraphFencedDrop } from '../../src/read-graph/statements.js';
 import type { TripleStoreConfig } from '../../src/triple-store-composition.js';

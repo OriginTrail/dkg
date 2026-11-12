@@ -5,7 +5,7 @@ import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
 import { checkReadGraph, memberGraphListingQuery } from '../src/read-graph/check.js';
 import { ReadGraphCheckSchedule, startReadGraphChecks } from '../src/read-graph/check-schedule.js';
-import { withReadGraphBackgroundSlot } from '../src/read-graph/rebuild.js';
+import { withReadGraphBackgroundSlot } from '../src/read-graph/background-slot.js';
 import { readGraphStateCompareAndSet } from '../src/read-graph/state.js';
 import type { QueryOptions, QueryResult } from '../src/triple-store.js';
 import { captureMetrics, readGraphCheckConformance } from './helpers/read-graph-check-conformance.js';

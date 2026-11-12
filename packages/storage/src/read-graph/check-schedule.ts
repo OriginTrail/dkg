@@ -3,7 +3,7 @@ import { CoalescingRecurringTask, compareCodePoint, getMetrics } from '@origintr
 import type { TripleStore } from '../triple-store.js';
 import { checkReadGraph, type ReadGraphCheckMode, type ReadGraphCheckOptions } from './check.js';
 import { readGraphLayerOf } from './read-graph-store.js';
-import { withReadGraphBackgroundSlot } from './rebuild.js';
+import { withReadGraphBackgroundSlot } from './background-slot.js';
 import { READ_GRAPH_STATES } from './state.js';
 
 export interface ReadGraphCheckScheduleOptions extends Omit<ReadGraphCheckOptions, 'signal'> {

@@ -3,6 +3,12 @@ import { sharedMemoryAdmissionError, sharedMemoryAdmissionFailsClosed } from '..
 import { resolveCallerDraftAccess } from '../working-memory-identity.js';
 // SPDX-License-Identifier: Apache-2.0
 
+import {
+  applyReadGraphModes,
+  type ReadGraphModeChange,
+  type ReadGraphModes,
+  type ViewSemanticsSettings,
+} from '@origintrail-official/dkg-storage';
 import type { DKGAgent } from '../dkg-agent.js';
 import { DKGAgentBase } from '../dkg-agent-base.js';
 import { admitContextGraphReadCaller, ContextGraphReadAuthorityUnavailableError } from '../context-graph-read-authority.js';
@@ -39,6 +45,22 @@ export class ContextGraphPartitionQueryMethods extends DKGAgentBase {
   readGraphStatusV1(this: DKGAgent): ReadGraphStatusV1 | undefined {
     return readGraphWorkloadOf(this)?.readGraphStatus();
   }
+
+  /**
+   * Switch the node's read graphs to `next`, the whole settings, while it runs, and with them the view-semantics
+   * defaults when given: for the node-admin settings API. Storage's `applyReadGraphModes` says what each switch does;
+   * the agent's builder backfills and removes.
+   */
+  async applyReadGraphModesV1(
+    this: DKGAgent,
+    next: ReadGraphModes,
+    options: { signal?: AbortSignal; viewSemantics?: ViewSemanticsSettings; beforeCommit?: () => void } = {},
+  ): Promise<readonly ReadGraphModeChange[]> {
+    const owner = readGraphWorkloadOf(this);
+    if (owner) return owner.applyReadGraphModes(next, options);
+    return applyReadGraphModes(this.store, next, { ...options, ...(this.config.dataDir !== undefined ? { dataDir: this.config.dataDir } : {}) });
+  }
+
 
   /** Enumerate the authorized partitions with their required admission. */
   async listContextGraphQueryPartitionReads(this: DKGAgent, contextGraphId: string,

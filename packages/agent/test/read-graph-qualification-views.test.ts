@@ -103,6 +103,32 @@ describe('merged view queries on a private context graph, over built read graphs
     expect(await ask(node, PRIVATE_CG, 'shared-working-memory', 'merged', OWNER)).toEqual({ bindings: [{ price: '"7"' }], semantics: 'merged' });
   });
 
+  it('follows live switches of the mode and of the default semantics in the engine the agent already runs', async () => {
+    const { agent: node } = await privateGraph('build');
+    const switchTo = (mode: ReadGraphMode, semantics?: 'merged' | 'per-asset') => node.applyReadGraphModesV1(
+      { contextGraphs: { [PRIVATE_CG]: { default: mode } } },
+      { viewSemantics: semantics === undefined ? {} : { contextGraphs: { [PRIVATE_CG]: semantics } } },
+    );
+    const merged = () => outcome(ask(node, PRIVATE_CG, 'verifiable-memory', 'merged', OWNER));
+    const byDefault = () => ask(node, PRIVATE_CG, 'verifiable-memory', undefined, OWNER);
+    // Built, not served.
+    expect(await merged()).toMatchObject({ error: { code: 'SEMANTICS_UNSUPPORTED' } });
+    // Served while the read graph is dirty: not ready.
+    await markReadGraphDirty({ store: node.store }, readGraphIri(VM));
+    expect((await switchTo('serve')).find((change) => change.layer === 'verifiable-memory')).toMatchObject({ from: 'build', to: 'serve', outcome: 'applied' });
+    expect(await merged()).toMatchObject({ error: { code: 'VIEW_NOT_READY' } });
+    // Served once ready; a query without semantics is per asset until the default switches to merged.
+    expect(await buildReadGraph({ store: node.store }, VM)).toMatchObject({ outcome: 'done' });
+    expect(await merged()).toEqual({ answer: { bindings: [{ price: '"5"' }], semantics: 'merged' } });
+    expect(await byDefault()).toEqual({ bindings: [] });
+    await switchTo('serve', 'merged');
+    expect(await byDefault()).toEqual({ bindings: [{ price: '"5"' }], semantics: 'merged' });
+    // Built again: no longer served, and a query without semantics is answered per asset again.
+    expect((await switchTo('build', 'merged')).find((change) => change.layer === 'verifiable-memory')).toMatchObject({ from: 'serve', to: 'build', outcome: 'applied' });
+    expect(await merged()).toMatchObject({ error: { code: 'SEMANTICS_UNSUPPORTED' } });
+    expect(await byDefault()).toEqual({ bindings: [] });
+  });
+
   describe.each([
     ['served and ready', 'serve', false, { answer: { bindings: [{ price: '"5"' }], semantics: 'merged' } }],
     ['served but not ready', 'serve', true, { error: { code: 'VIEW_NOT_READY' } }],
