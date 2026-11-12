@@ -95,6 +95,25 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+/** Assert a durable-meta page read exact subjects and no sorted or skipped scan of the graph. */
+function watchSubjectLookupPage(store: OxigraphStore, graph: string, expectedRows: number) {
+  const originalQuery = store.query.bind(store);
+  let lookups = 0;
+  store.query = (async (sparql: string, options?: unknown) => {
+    const normalized = sparql.replace(/\s+/g, ' ').trim();
+    const result = await originalQuery(sparql, options as never);
+    if (normalized.includes(`<${graph}>`)) {
+      expect(normalized).not.toMatch(/\bORDER BY\b|\bOFFSET\b/);
+      if (normalized.includes('VALUES ?s {')) {
+        lookups += 1;
+        expect(result.type === 'bindings' ? result.bindings.length : -1).toBe(expectedRows);
+      }
+    }
+    return result;
+  }) as OxigraphStore['query'];
+  return { assertObserved: () => expect(lookups).toBe(1) };
+}
+
 function watchBoundedPageQuery(
   store: OxigraphStore,
   graph: string,
@@ -916,12 +935,11 @@ describe('sync responder pagination interleaving', () => {
     });
     await store.insert(rows);
 
-    // The durable-meta read is store-bounded (subject-membership filter pushed
-    // into the store via EXISTS), so a deep page is a paged store query. Durable
-    // meta reads `limit + 1` rows to detect a subject straddling the page
-    // boundary (#1788) and serves at most `limit` when the boundary is clean, so
-    // the store query's LIMIT is 6 here while the served page stays 5.
-    const probe = watchBoundedPageQuery(store, metaGraph, 90, 6);
+    // The durable-meta read is store-bounded: a deep page looks up exactly the
+    // subjects it covers (whole subjects, #1788) from the plan of admitted
+    // subjects, so the store returns the five served rows and is never asked to
+    // sort or skip the metadata graph.
+    const probe = watchSubjectLookupPage(store, metaGraph, 5);
     const cap = registerTestSyncHandler(store, { syncPageSize: 5 });
     const out = await cap.invoke({
       contextGraphId: cgId,
