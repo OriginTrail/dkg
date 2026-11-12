@@ -2112,7 +2112,7 @@ async function runDaemonInnerWithStartupOwnership(
       config.apiPort, config.apiHost, writeApiPort);
   }
   const agent = checkpointAgent ?? await DKGAgent.create(agentConfig);
-  const readGraphSettingsControl = startReadGraphSettingsControl({ settings: readGraphSettings, agent, role, checkpoint: Boolean(checkpointMode), log });
+  const readGraphSettingsControl = startReadGraphSettingsControl({ settings: readGraphSettings, agent, role, checkpoint: Boolean(checkpointMode), dataDir: dkgDir(), log });
   agent.configurePromoteQueue(promoteQueuePolicy);
   const publicSnapshotStore = agent.publicSnapshotStore;
 

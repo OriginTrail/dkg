@@ -2,7 +2,7 @@
 // the `readGraphs` field of a context graph's creation, over a real settings table and a real read-graph layer.
 import { EventEmitter } from 'node:events';
 import { createServer } from 'node:http';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -72,14 +72,19 @@ function agentOf(store: TripleStore, overrides: Partial<ReadGraphSettingsAgent> 
   } as ReadGraphSettingsAgent;
 }
 
-function controlOf(options: { query?: unknown; agent?: ReadGraphSettingsAgent; checkpoint?: boolean; table?: SqliteReadGraphSettingsStore | null; log?: string[] } = {}) {
-  const table = options.table === null ? undefined : options.table ?? openReadGraphSettingsStore(home);
+/**
+ * A control over the settings table in `home`, with a handle of the test's own on the same table to look at it. `unavailable` gives the control a
+ * data directory whose table cannot be opened.
+ */
+function controlOf(options: { query?: unknown; agent?: ReadGraphSettingsAgent; checkpoint?: boolean; unavailable?: boolean; log?: string[] } = {}) {
+  const dataDir = options.unavailable ? join(home, 'unopenable') : home;
+  const table = options.unavailable || options.checkpoint ? undefined : openReadGraphSettingsStore(home);
   if (table !== undefined) opened.push(table);
   const { policy } = resolveQuerySection(options.query);
   const agent = options.agent ?? agentOf(layeredStore());
   const control = new ReadGraphSettingsControl({
-    settings: { table, policy, effective: { readGraphs: {}, viewSemantics: {} }, storeSettings: undefined },
-    agent, role: 'edge', checkpoint: options.checkpoint ?? false, log: (line) => { options.log?.push(line); },
+    settings: { policy, effective: { readGraphs: {}, viewSemantics: {} }, storeSettings: undefined },
+    agent, role: 'edge', checkpoint: options.checkpoint ?? false, dataDir, log: (line) => { options.log?.push(line); },
   });
   return { control, table, agent };
 }
@@ -243,7 +248,8 @@ describe('PUT /api/store/read-graphs/settings', () => {
     expect((await put(closed, { contextGraphId: OTHER, layers: { 'verifiable-memory': 'build' } })).body).toMatchObject({ code: 'READ_GRAPHS_DISABLED' });
     expect((await put(closed, { contextGraphId: OTHER, layers: { 'verifiable-memory': 'off' } })).status).toBe(200);
     // A settings file that could not be opened at start takes no change.
-    const unopened = controlOf({ table: null }).control;
+    await mkdir(join(home, 'unopenable', 'read-graph-settings.db'), { recursive: true });
+    const unopened = controlOf({ unavailable: true }).control;
     expect((await put(unopened, { contextGraphId: CG, layers: { 'verifiable-memory': 'off' } })).body).toMatchObject({ code: 'READ_GRAPH_SETTINGS_UNAVAILABLE' });
   });
 
@@ -253,7 +259,7 @@ describe('PUT /api/store/read-graphs/settings', () => {
     expect((await put(unsupported, { contextGraphId: CG, viewSemantics: 'merged' })).status).toBe(200);
     opened.splice(0).forEach((table) => table.close());
 
-    const checkpoint = controlOf({ checkpoint: true, table: null }).control;
+    const checkpoint = controlOf({ checkpoint: true }).control;
     expect(await put(checkpoint, { contextGraphId: CG, layers: { 'verifiable-memory': 'off' } }))
       .toMatchObject({ status: 409, body: { code: 'READ_GRAPHS_CHECKPOINT_NODE' } });
 
@@ -291,6 +297,12 @@ describe('PUT /api/store/read-graphs/settings', () => {
     expect(failed).toMatchObject({ status: 409, body: { code: 'READ_GRAPHS_APPLY_REFUSED' } });
     expect(failed.body!.error).toContain('stored rows unreadable');
     expect(table!.rowsOf(CG)).toEqual(before);
+    // A store that cannot keep the settings refuses them as the store's own refusal.
+    apply.mockRejectedValueOnce(Object.assign(new Error('the adapter cannot maintain read graphs'), { code: 'READ_GRAPHS_UNSUPPORTED' }));
+    const unsupported = await put(control, { contextGraphId: CG, viewSemantics: 'per-asset' });
+    expect(unsupported).toMatchObject({ status: 409, body: { code: 'READ_GRAPHS_UNSUPPORTED' } });
+    expect(unsupported.body!.error).toBe('This node\'s store can\'t search across assets (the adapter cannot maintain read graphs).');
+    expect(table!.rowsOf(CG)).toEqual(before);
   });
 
   it('runs changes one at a time, each applying the settings with every earlier change in them', async () => {
@@ -327,7 +339,7 @@ describe('the readGraphs field of a context graph\'s creation', () => {
       .toMatchObject({ code: 'READ_GRAPH_SETTINGS_UNAVAILABLE' });
     expect(await readGraphSettingsOnCreate(undefined, { contextGraphId: OTHER, layers: undefined, canAdminister: false, actor: 'api' }))
       .toMatchObject({ code: 'NODE_ADMIN_REQUIRED' });
-    const vmOnly = controlOf({ query: { readGraphsPolicy: { layers: ['verifiable-memory'] } }, table: openReadGraphSettingsStore(join(home)) }).control;
+    const vmOnly = controlOf({ query: { readGraphsPolicy: { layers: ['verifiable-memory'] } } }).control;
     expect(await readGraphSettingsOnCreate(vmOnly, { contextGraphId: OTHER, layers: { 'working-memory': 'build' }, canAdminister: true, actor: 'api' }))
       .toMatchObject({ code: 'READ_GRAPHS_LAYER_NOT_ALLOWED' });
   });

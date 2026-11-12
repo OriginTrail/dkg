@@ -24,7 +24,13 @@ import {
 } from '@origintrail-official/dkg-storage';
 import { nodeReadGraphModes, policyRefusalOf, resolveEffectiveQueryConfig, type ReadGraphsRefusal } from '../read-graphs-config.js';
 import { CHECKPOINT_NODE_REFUSAL, noteReadGraphStoreSupport, type DaemonReadGraphSettings } from '../read-graph-settings-start.js';
-import type { ReadGraphSettingsChange } from '../read-graph-settings-store.js';
+import {
+  openReadGraphSettingsStore,
+  type ReadGraphSettingsChange,
+  type ReadGraphSettingsEntry,
+  type ReadGraphSettingsRows,
+  type SqliteReadGraphSettingsStore,
+} from '../read-graph-settings-store.js';
 import {
   MEMORY_IN_SENTENCES,
   type ReadGraphContextGraphSettings,
@@ -74,15 +80,19 @@ export async function readGraphSettingsOnCreate(
 }
 
 /** Build the daemon's control once its agent runs, and say so when its store cannot keep the read graphs the table sets. */
-export function startReadGraphSettingsControl(input: {
+export function startReadGraphSettingsControl(input: ReadGraphSettingsControlInput): ReadGraphSettingsControl {
+  noteReadGraphStoreSupport(input.settings, input.agent.store, input.log);
+  return new ReadGraphSettingsControl(input);
+}
+
+export interface ReadGraphSettingsControlInput {
   readonly settings: DaemonReadGraphSettings;
   readonly agent: ReadGraphSettingsAgent;
   readonly role: 'core' | 'edge';
   readonly checkpoint: boolean;
+  /** Where the settings table is: each answer and each change opens it for its own work and closes it again. */
+  readonly dataDir: string;
   readonly log: (message: string) => void;
-}): ReadGraphSettingsControl {
-  noteReadGraphStoreSupport(input.settings, input.agent.store, input.log);
-  return new ReadGraphSettingsControl(input);
 }
 
 export class ReadGraphSettingsControl {
@@ -90,28 +100,24 @@ export class ReadGraphSettingsControl {
   readonly #agent: ReadGraphSettingsAgent;
   readonly #role: 'core' | 'edge';
   readonly #checkpoint: boolean;
+  readonly #dataDir: string;
   readonly #log: (message: string) => void;
   #queue: Promise<unknown> = Promise.resolve();
 
-  constructor(input: {
-    readonly settings: DaemonReadGraphSettings;
-    readonly agent: ReadGraphSettingsAgent;
-    readonly role: 'core' | 'edge';
-    readonly checkpoint: boolean;
-    readonly log: (message: string) => void;
-  }) {
+  constructor(input: ReadGraphSettingsControlInput) {
     this.#settings = input.settings;
     this.#agent = input.agent;
     this.#role = input.role;
     this.#checkpoint = input.checkpoint;
+    this.#dataDir = input.dataDir;
     this.#log = input.log;
   }
 
   /** The settings of one context graph, or of every context graph with settings of its own or read graphs. */
   async answer(contextGraphId?: string): Promise<ReadGraphSettingsAnswer> {
-    const { policy, table } = this.#settings;
+    const { policy } = this.#settings;
     const refusals = await this.#nodeRefusals();
-    const entries = new Map((table === undefined ? [] : safeList(table)).map((entry) => [entry.contextGraphId, entry]));
+    const entries = new Map(this.#entries().map((entry) => [entry.contextGraphId, entry]));
     const runtime = readGraphRuntimeOf(this.#agent.store);
     const status = this.#agent.readGraphStatusV1();
     const rows = status?.readGraphs ?? runtime?.mirror.rows() ?? [];
@@ -168,7 +174,7 @@ export class ReadGraphSettingsControl {
   }
 
   async #change(request: ReadGraphSettingsRequest, actor: string, signal: AbortSignal | undefined): Promise<ReadGraphSettingsOutcome> {
-    const { policy, table } = this.#settings;
+    const { policy } = this.#settings;
     const { contextGraphId } = request;
     if (!isReadGraphEligibleContextGraphId(contextGraphId)) {
       return { status: 400, body: { code: 'READ_GRAPH_SETTINGS_INVALID', error: `${contextGraphId} is not a context graph that can search across assets.` } };
@@ -182,35 +188,62 @@ export class ReadGraphSettingsControl {
     if (switchesOn.length > 0 && refusals.length > 0) return refusedWith(409, refusals[0]!, switchesOn[0]);
     // A node that starts from a public checkpoint keeps no settings table, so it takes no change at all.
     if (this.#checkpoint) return refusedWith(409, CHECKPOINT_NODE_REFUSAL);
-    if (table === undefined) {
-      return { status: 503, body: { code: 'READ_GRAPH_SETTINGS_UNAVAILABLE', error: 'This node\'s search-across-assets settings can\'t be changed: its settings file could not be opened at start.' } };
-    }
     const change: ReadGraphSettingsChange = {
       ...(request.layers === undefined ? {} : { layers: request.layers }),
       ...(request.viewSemantics === undefined ? {} : { viewSemantics: request.viewSemantics }),
     };
-    let previous: ReturnType<typeof table.rowsOf>;
-    try {
-      previous = table.rowsOf(contextGraphId);
-      table.set(contextGraphId, change, actor);
-    } catch (error) {
-      return { status: 503, body: { code: 'READ_GRAPH_SETTINGS_UNAVAILABLE', error: `This node's search-across-assets settings can't be changed: ${messageOf(error)}.` } };
-    }
+    let table: SqliteReadGraphSettingsStore;
+    let previous: ReadGraphSettingsRows;
+    let entries: ReadonlyArray<ReadGraphSettingsEntry>;
     let changes: readonly ReadGraphModeChange[];
     try {
-      const { config } = resolveEffectiveQueryConfig(policy, table, { refusals });
-      changes = await this.#agent.applyReadGraphModesV1(config.readGraphs, { ...(signal ? { signal } : {}), viewSemantics: config.viewSemantics });
+      table = openReadGraphSettingsStore(this.#dataDir);
     } catch (error) {
-      table.restore(contextGraphId, previous);
-      return applyRefused(contextGraphId, messageOf(error));
+      return unavailable(error);
     }
-    const refused = changes.find((entry) => typeof entry.outcome === 'object');
-    if (refused !== undefined) {
-      table.restore(contextGraphId, previous);
-      return applyRefused(contextGraphId, (refused.outcome as { refused: string }).refused, changes);
+    try {
+      try {
+        previous = table.rowsOf(contextGraphId);
+        table.set(contextGraphId, change, actor);
+        entries = table.list();
+      } catch (error) {
+        return unavailable(error);
+      }
+      try {
+        const { config } = resolveEffectiveQueryConfig(policy, entries, { refusals });
+        changes = await this.#agent.applyReadGraphModesV1(config.readGraphs, { ...(signal ? { signal } : {}), viewSemantics: config.viewSemantics });
+      } catch (error) {
+        table.restore(contextGraphId, previous);
+        // A store that cannot keep the settings in force refuses them before anything changes.
+        if ((error as { code?: unknown } | null)?.code === 'READ_GRAPHS_UNSUPPORTED') {
+          return refusedWith(409, { code: 'READ_GRAPHS_UNSUPPORTED', message: messageOf(error) });
+        }
+        return applyRefused(contextGraphId, messageOf(error));
+      }
+      const refused = changes.find((entry) => typeof entry.outcome === 'object');
+      if (refused !== undefined) {
+        table.restore(contextGraphId, previous);
+        return applyRefused(contextGraphId, (refused.outcome as { refused: string }).refused, changes);
+      }
+      this.#log(`[read-graphs] ${actor} changed the settings of ${contextGraphId}: ${describe(request, changes)}.`);
+    } finally {
+      table.close();
     }
-    this.#log(`[read-graphs] ${actor} changed the settings of ${contextGraphId}: ${describe(request, changes)}.`);
     return { status: 200, body: { ...await this.answer(contextGraphId), changes } };
+  }
+
+  /** The table's entries for an answer: none on a node that starts from a public checkpoint, or when the table cannot be read. */
+  #entries(): ReadonlyArray<ReadGraphSettingsEntry> {
+    if (this.#checkpoint) return [];
+    let table: SqliteReadGraphSettingsStore | undefined;
+    try {
+      table = openReadGraphSettingsStore(this.#dataDir);
+      return table.list();
+    } catch {
+      return [];
+    } finally {
+      table?.close();
+    }
   }
 
   /** The refusals that hold for every context graph now, in the order of the checks: the store, a public checkpoint, the rollback target. */
@@ -306,10 +339,6 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function safeList(table: NonNullable<DaemonReadGraphSettings['table']>) {
-  try {
-    return table.list();
-  } catch {
-    return [];
-  }
+function unavailable(error: unknown): ReadGraphSettingsOutcome {
+  return { status: 503, body: { code: 'READ_GRAPH_SETTINGS_UNAVAILABLE', error: `This node's search-across-assets settings can't be changed now: ${messageOf(error)}.` } };
 }
