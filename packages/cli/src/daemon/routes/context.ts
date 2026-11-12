@@ -176,8 +176,8 @@ export interface RequestContext {
   marketplaceGateway?: Gateway;
   /** The marketplace seller, whose job the daemon runs; absent while selling is off. */
   marketplaceSeller?: Seller;
-  /** The node-admin settings of read graphs per context graph; absent until the daemon's agent runs. */
-  readGraphSettings?: ReadGraphSettingsControl;
+  /** The node-admin settings of read graphs per context graph, which the daemon builds before it serves a request. */
+  readGraphSettings: ReadGraphSettingsControl;
   // Derived per-request. The correlated authentication decision is carried unchanged; identity
   // and capabilities are pure projections from it rather than separately mutable context fields.
   url: URL;

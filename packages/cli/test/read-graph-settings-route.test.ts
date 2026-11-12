@@ -112,7 +112,7 @@ function fakeRes() {
   });
 }
 
-async function call(control: ReadGraphSettingsControl | undefined, method: string, target: string, options: {
+async function call(control: ReadGraphSettingsControl, method: string, target: string, options: {
   body?: unknown; authentication?: AllowedHttpAuthentication; headers?: Record<string, string>;
 } = {}) {
   const res = fakeRes();
@@ -126,7 +126,7 @@ async function call(control: ReadGraphSettingsControl | undefined, method: strin
   return { handled: res.writableEnded, status: res.statusCode, body: res.body ? JSON.parse(res.body) as Record<string, any> : undefined };
 }
 
-const put = (control: ReadGraphSettingsControl | undefined, body: unknown, headers?: Record<string, string>) =>
+const put = (control: ReadGraphSettingsControl, body: unknown, headers?: Record<string, string>) =>
   call(control, 'PUT', READ_GRAPH_SETTINGS_PATH, { body, ...(headers ? { headers } : {}) });
 
 describe('GET /api/store/read-graphs/settings', () => {
@@ -141,7 +141,6 @@ describe('GET /api/store/read-graphs/settings', () => {
       expect(await call(control, 'GET', target, { authentication: AGENT })).toEqual(refused);
     }
     expect((await call(control, 'PUT', READ_GRAPH_SETTINGS_PATH, { body: '{', authentication: AGENT })).status).toBe(403);
-    expect((await call(undefined, 'GET', READ_GRAPH_SETTINGS_PATH, { authentication: AGENT })).status).toBe(403);
     const answer = await call(control, 'GET', READ_GRAPH_SETTINGS_PATH);
     expect(answer.status).toBe(200);
     expect(answer.body).toEqual({
@@ -200,7 +199,6 @@ describe('GET /api/store/read-graphs/settings', () => {
     expect((await call(none, 'GET', READ_GRAPH_SETTINGS_PATH)).body!.refused).toMatchObject({ code: 'READ_GRAPHS_LAYER_NOT_ALLOWED' });
     const unsupported = controlOf({ agent: agentOf(layeredStore(false)) }).control;
     expect((await call(unsupported, 'GET', READ_GRAPH_SETTINGS_PATH)).body!.refused).toMatchObject({ code: 'READ_GRAPHS_UNSUPPORTED' });
-    expect((await call(undefined, 'GET', READ_GRAPH_SETTINGS_PATH)).status).toBe(503);
   });
 });
 
@@ -446,16 +444,14 @@ describe('PUT /api/store/read-graphs/settings', () => {
 });
 
 describe('the readGraphs field of a context graph\'s creation', () => {
-  it('applies with the checks of a change, and is refused without the node admin or a running control', async () => {
+  it('applies with the checks of a change, and is refused without the node admin', async () => {
     const { control } = controlOf();
     expect(await readGraphSettingsOnCreate(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'build' }, canAdminister: true, actor: 'agent:0xabc' }))
       .toMatchObject({ applied: true, changes: expect.arrayContaining([expect.objectContaining({ contextGraphId: CG, to: 'build', outcome: 'applied' })]) });
     expect(rowsOf(CG).modes[0]).toMatchObject({ mode: 'build', updatedBy: 'agent:0xabc' });
     expect(await readGraphSettingsOnCreate(control, { contextGraphId: OTHER, layers: { 'verifiable-memory': 'build' }, canAdminister: false, actor: 'api' }))
       .toEqual({ code: 'NODE_ADMIN_REQUIRED', refused: 'Only the node admin can turn on search across assets; the context graph was created without it.' });
-    expect(await readGraphSettingsOnCreate(undefined, { contextGraphId: OTHER, layers: { 'verifiable-memory': 'build' }, canAdminister: true, actor: 'api' }))
-      .toMatchObject({ code: 'READ_GRAPH_SETTINGS_UNAVAILABLE' });
-    expect(await readGraphSettingsOnCreate(undefined, { contextGraphId: OTHER, layers: undefined, canAdminister: false, actor: 'api' }))
+    expect(await readGraphSettingsOnCreate(control, { contextGraphId: OTHER, layers: undefined, canAdminister: false, actor: 'api' }))
       .toMatchObject({ code: 'NODE_ADMIN_REQUIRED' });
     const vmOnly = controlOf({ query: { readGraphsPolicy: { layers: ['verifiable-memory'] } } }).control;
     expect(await readGraphSettingsOnCreate(vmOnly, { contextGraphId: OTHER, layers: { 'working-memory': 'build' }, canAdminister: true, actor: 'api' }))

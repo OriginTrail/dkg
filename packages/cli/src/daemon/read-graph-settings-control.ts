@@ -24,7 +24,12 @@ import {
 } from '@origintrail-official/dkg-storage';
 import { nodeReadGraphModes, policyRefusalOf, resolveEffectiveQueryConfig, type ReadGraphsRefusal } from '../read-graphs-config.js';
 import { CHECKPOINT_NODE_REFUSAL, noteReadGraphStoreSupport, type DaemonReadGraphSettings } from '../read-graph-settings-start.js';
-import type { ReadGraphSettingsChange, ReadGraphSettingsEntry, SqliteReadGraphSettingsStore } from '../read-graph-settings-store.js';
+import {
+  withSettingsChange,
+  type ReadGraphSettingsChange,
+  type ReadGraphSettingsEntry,
+  type SqliteReadGraphSettingsStore,
+} from '../read-graph-settings-store.js';
 import {
   MEMORY_IN_SENTENCES,
   type ReadGraphCreateOutcome,
@@ -65,20 +70,14 @@ export interface ReadGraphSettingsOutcome {
 
 export type { ReadGraphCreateOutcome } from '../read-graph-settings-wire.js';
 
-/**
- * The `readGraphs` field of a context graph's creation, on a node whose control may not run yet. It runs as one of the daemon's read-graph requests,
- * which graceful shutdown ends.
- */
+/** The `readGraphs` field of a context graph's creation. It runs as one of the daemon's read-graph requests, which graceful shutdown ends. */
 export async function readGraphSettingsOnCreate(
-  control: ReadGraphSettingsControl | undefined,
+  control: ReadGraphSettingsControl,
   input: { readonly contextGraphId: string; readonly layers: ReadGraphSettingsRequest['layers']; readonly canAdminister: boolean; readonly actor: string },
   requests: ReadGraphRequests = daemonReadGraphRequests,
 ): Promise<ReadGraphCreateOutcome> {
   // The token comes first, and its refusal is the same for every context graph.
   if (!input.canAdminister) return NOT_NODE_ADMIN;
-  if (control === undefined) {
-    return { code: 'READ_GRAPH_SETTINGS_UNAVAILABLE', refused: 'This node\'s search-across-assets settings aren\'t available yet; the context graph was created without them.' };
-  }
   if (requests.ending) return NODE_SHUTTING_DOWN_ON_CREATE;
   const stop = new AbortController();
   const untrack = requests.track(stop);
@@ -217,7 +216,7 @@ export class ReadGraphSettingsControl {
     const table = this.#table;
     let entries: ReadonlyArray<ReadGraphSettingsEntry>;
     try {
-      entries = withChange(table.list(), contextGraphId, change);
+      entries = withSettingsChange(table.list(), contextGraphId, change);
     } catch (error) {
       return unavailable(error);
     }
@@ -330,22 +329,6 @@ function refused(status: number, refusal: ReadGraphSettingsRefusal & { readonly 
   return { ok: false, status, refusal };
 }
 
-/** The settings a change leaves, from the table's entries and the change, as the table will hold them. */
-function withChange(
-  entries: ReadonlyArray<ReadGraphSettingsEntry>,
-  contextGraphId: string,
-  change: ReadGraphSettingsChange,
-): ReadonlyArray<ReadGraphSettingsEntry> {
-  const held = entries.find((entry) => entry.contextGraphId === contextGraphId);
-  const layers = { ...held?.layers };
-  for (const view of GET_VIEWS) {
-    const mode = change.layers?.[view];
-    if (mode !== undefined) layers[view] = mode;
-  }
-  const viewSemantics = change.viewSemantics === undefined ? held?.viewSemantics : change.viewSemantics ?? undefined;
-  const changed: ReadGraphSettingsEntry = { contextGraphId, layers, ...(viewSemantics === undefined ? {} : { viewSemantics }) };
-  return [...entries.filter((entry) => entry.contextGraphId !== contextGraphId), changed];
-}
 
 function applyRefused(contextGraphId: string, reason: string, changes?: readonly ReadGraphModeChange[]): ChangeResult {
   return refused(409, {

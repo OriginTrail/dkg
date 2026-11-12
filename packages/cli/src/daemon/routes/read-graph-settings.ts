@@ -31,9 +31,6 @@ export async function handleReadGraphSettingsRoutes(
   const action = req.method === 'GET' ? 'read the node\'s search-across-assets settings' : 'change the node\'s search-across-assets settings';
   if (!requireNodeAdmin(actorFromRequestContext(ctx).authentication, res, `${req.method} ${path}`, action)) return;
   const control = ctx.readGraphSettings;
-  if (control === undefined) {
-    return jsonResponse(res, 503, { code: 'READ_GRAPH_SETTINGS_UNAVAILABLE', error: 'This node\'s search-across-assets settings aren\'t available yet; try again once it has started.' });
-  }
   if (req.method === 'GET') {
     const contextGraphId = ctx.url.searchParams.get('contextGraphId') ?? undefined;
     if (contextGraphId !== undefined && !isReadGraphEligibleContextGraphId(contextGraphId)) {
