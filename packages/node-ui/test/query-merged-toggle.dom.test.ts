@@ -213,6 +213,21 @@ describe('ContextGraphQueryView memory picker and Search across assets', () => {
     expect(lastRun()).toMatchObject({ sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 6', view: undefined, semantics: undefined });
   });
 
+  it('starts another context graph in all graphs with the toggle off, as the run it starts', async () => {
+    const container = await render();
+    await chooseView(container, 'verifiable-memory');
+    await click(mergedBox(container));
+    expect(mergedBox(container).checked).toBe(true);
+
+    await act(async () => { root!.render(React.createElement(ContextGraphQueryView, { contextGraphId: `${CG}-other` })); });
+    await flush();
+    expect(lastRun()).toMatchObject({ contextGraphId: `${CG}-other`, view: undefined, semantics: undefined });
+    expect(viewSelect(container).value).toBe('');
+    expect(mergedBox(container)).toBeNull();
+    await chooseView(container, 'verifiable-memory');
+    expect(mergedBox(container).checked).toBe(false);
+  });
+
   it('resets to the context graph query in all graphs', async () => {
     const container = await render();
     const first = executeQueryMock.mock.calls[0][0];

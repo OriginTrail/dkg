@@ -316,6 +316,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
   useEffect(() => {
     setSession({ kind: 'ad-hoc', draft: defaultQuery });
     setActiveExecution({ sparql: defaultQuery });
+    setOptions({ merged: false });
     setLocalSavedCatalogs([]);
     setSaveOpen(false);
     setSaveName('');
