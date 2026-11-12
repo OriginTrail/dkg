@@ -59,6 +59,11 @@ All notable changes to the DKG V10 node are documented here. The format is based
   the budget within a day and stopped its proofs. The route now uses the
   configured chain's network, so it asks no endpoint for it, and closes its
   connections once it answers.
+- A git-based update whose build fails now logs the cause: the last 30 lines
+  of the failed step's output, from stdout and stderr, each as its own
+  `Auto-update:` log line. The log used to show only the command, such as
+  `Command failed: pnpm build:runtime:packages`, because pnpm prints a
+  failing package's error on stdout.
 
 ## [10.1.1] - Unreleased
 

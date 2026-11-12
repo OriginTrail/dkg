@@ -238,6 +238,7 @@ export default defineConfig({
           'test/auto-update-polling.test.ts',
           'test/auto-update-runner.test.ts',
           'test/auto-update-workspace-clean.test.ts',
+          'test/auto-update-build-output.test.ts',
           'test/maintenance-update-gate.test.ts',
           'test/node-runtime-preflight.test.ts',
           'test/outbound-brotli-refusal.test.ts',
