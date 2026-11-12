@@ -162,6 +162,8 @@ export function wrapWithGraphUnion(
 interface ProjectedGraphPattern {
   readonly pattern: string;
   readonly distinct?: boolean;
+  /** What the subselect projects when the caller's pattern has no variables: a private variable, never bound. */
+  readonly emptyProjection?: string;
 }
 
 function wrapWithProjectedGraphSubselect(
@@ -185,11 +187,11 @@ function wrapWithProjectedGraphSubselect(
   if (hasUnion) return unsupported('nested-union');
   const built = buildPattern(inner, graphs);
   if (!built) return unsupported('strategy-rejected');
-  const { pattern, distinct } = built;
+  const { pattern, distinct, emptyProjection } = built;
 
   const innerVariables = variablesOutsideHeldGraphGuards(scope);
-  if (innerVariables.length === 0) return unsupported('no-projected-variables');
-  const variables = innerVariables.map(variable => variable.source).join(' ');
+  const variables = innerVariables.length ? innerVariables.map(variable => variable.source).join(' ') : emptyProjection;
+  if (!variables) return unsupported('no-projected-variables');
   const replacement = `{ SELECT ${distinct ? 'DISTINCT ' : ''}${variables} WHERE { ${pattern} }${graphSubselectLimit(scope)} }`;
   return ready(transitionGraphScope(
     scope,
@@ -208,10 +210,18 @@ function buildDeduplicatedGraphPattern(
   // the same row semantics, including its modifiers and volatile FILTERs.
   const distinct = uniqueMappings;
   const movedFilters = filters;
-  // Every retained row evaluates each moved FILTER once. Hidden blank-node
-  // variables stay private across graph selection and replay.
-  const inner = renderDedupPattern(scope, movedFilters, allocate);
-  const variables = variablesOutsideHeldGraphGuards(scope).map(variable => variable.source).join(' ');
+  // Every retained row evaluates each moved FILTER once. Blank-node variables
+  // stay private: they key the graph choice and the replay, and are not projected.
+  const { pattern: inner, blankVariables } = renderDedupPattern(scope, movedFilters, allocate);
+  const callerVariables = variablesOutsideHeldGraphGuards(scope).map(variable => variable.source);
+  // A pattern without caller variables projects one private variable, so its rows are read through this route too
+  // and keep their multiplicity. Blazegraph counts no row that binds no variable, so the variable is bound, except
+  // where the query projects every variable (`*`): there the rows themselves are the answer, and stay empty.
+  const emptyProjection = callerVariables.length ? undefined : allocate('__dkgNoVariable');
+  const bindEmpty = emptyProjection && !projectsEveryVariable(scope) ? ` BIND(true AS ${emptyProjection})` : '';
+  const variables = callerVariables.length ? callerVariables.join(' ') : emptyProjection!;
+  // A mapping is read from one graph: the caller's variables and the blank nodes choose the graph together.
+  const keys = [...callerVariables, ...blankVariables].join(' ');
   const filterVariables = movedFilters.map((_filter, index) => allocate(`__dkgDedupFilter${index}`));
   // BIND evaluates on every retained row on the right of the rejoin. A raw
   // FILTER can be pushed onto the grouped left side by either engine, sampling
@@ -225,17 +235,35 @@ function buildDeduplicatedGraphPattern(
   const matchGraph = distinct ? graph : allocate('__dkgDedupMatchGraph');
   const candidate = access.candidate(inner, matchGraph);
   if (distinct) {
-    if (!movedFilters.length) return { pattern: candidate, distinct };
+    if (!movedFilters.length) return { pattern: `${candidate}${bindEmpty}`, distinct, emptyProjection };
     const trailing = filterVariables.map(variable => `FILTER(${variable})`).join(' ');
-    return { pattern: `{ SELECT DISTINCT ${variables} WHERE { ${candidate} } } ${filterBindings} ${trailing}` };
+    return { pattern: `{ SELECT DISTINCT ${variables} WHERE { ${candidate}${bindEmpty} } } ${filterBindings} ${trailing}`, emptyProjection };
   }
   // Choose one graph deterministically and replay its hidden-path multiplicity.
   // The access implementation owns the barriers required by its backend plan.
-  const replay = access.replay(inner, graph, variables, bindings);
+  const replay = access.replay(inner, graph, keys, bindings);
   const trailing = filterVariables.map(variable => `FILTER(${variable})`).join(' ');
-  return {
-    pattern: `{ SELECT ${variables} (MIN(${matchGraph}) AS ${graph}) WHERE { ${candidate} } GROUP BY ${variables} } ${replay} ${trailing}`,
-  };
+  // Without keys all matches form one group, and no match still leaves its row with an unbound graph, which
+  // the replay must never read: that row is dropped before the replay joins.
+  const chosen = keys
+    ? `{ SELECT ${keys} (MIN(${matchGraph}) AS ${graph}) WHERE { ${candidate} } GROUP BY ${keys} }`
+    : `{ { SELECT (MIN(${matchGraph}) AS ${graph}) WHERE { ${candidate} } } FILTER(BOUND(${graph})) }`;
+  return { pattern: `${chosen} ${replay} ${trailing}${bindEmpty}`, emptyProjection };
+}
+
+/** Whether the query projects every in-scope variable: `SELECT *` or `DESCRIBE *`, not the `*` of `COUNT(*)`. */
+function projectsEveryVariable(scope: PreparedGraphScope): boolean {
+  if ((scope.operation !== 'SELECT' && scope.operation !== 'DESCRIBE') || !scope.where) return false;
+  const { tokens } = scope.prepared;
+  let depth = 0;
+  for (let index = scope.prepared.prologue.endTokenIndex + 1; index < scope.where.openingTokenIndex; index++) {
+    const token = tokens[index];
+    if (token.kind !== 'symbol') continue;
+    if (token.logicalValue === '(') depth += 1;
+    else if (token.logicalValue === ')') depth -= 1;
+    else if (token.logicalValue === '*' && depth === 0) return true;
+  }
+  return false;
 }
 
 /** Scope a graph set, reading each mapping from one graph even when several hold it. */

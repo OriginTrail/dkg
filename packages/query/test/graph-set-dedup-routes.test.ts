@@ -7,6 +7,7 @@ import {
 import {
   prepareGraphScope,
   wrapWithDeduplicatedGraphValues,
+  wrapWithGraphValues,
 } from '../src/sparql-graph-scope.js';
 
 const graphs = ['urn:graph:one', 'urn:graph:two', 'urn:graph:three'];
@@ -396,6 +397,80 @@ describe('graph-set deduplication routes', () => {
     } finally {
       await store.close();
     }
+  });
+
+  it.each([
+    // Blank nodes key the graph choice: distinct blank matches each, a mirrored one once.
+    ['SELECT (COUNT(*) AS ?n) WHERE { [] <urn:p:value> "one" }', 2],
+    ['SELECT (COUNT(*) AS ?n) WHERE { [ ] <urn:p:value> "three" }', 1],
+    ['SELECT (COUNT(*) AS ?n) WHERE { [] <urn:p:value> "blank" }', 2],
+    ['SELECT (COUNT(*) AS ?n) WHERE { _:b <urn:p:value> "one" . _:b a <urn:Thing> }', 1],
+    ['SELECT (COUNT(*) AS ?n) WHERE { [] <urn:p:value> "one" FILTER(STRLEN("x") = 1) }', 2],
+    // Constant patterns: once, with or without a moved FILTER.
+    ['SELECT (COUNT(*) AS ?n) WHERE { <urn:s:1> <urn:p:value> "one" }', 1],
+    ['SELECT (COUNT(*) AS ?n) WHERE { <urn:s:1> <urn:p:value> "one" FILTER(STRLEN("x") = 1) }', 1],
+    ['SELECT (COUNT(*) AS ?n) WHERE { <urn:s:1> <urn:p:value> "one" FILTER(STRLEN("x") = 2) }', 0],
+  ])('reads a pattern without caller variables as the materialized RDF union: %s', async (query, expected) => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert(data);
+      // The selected graphs' RDF union in the default graph, copied inside the store so blank nodes keep their identity.
+      await store.update(`INSERT { ?s ?p ?o } WHERE { VALUES ?g { ${graphs.map((g) => `<${g}>`).join(' ')} } GRAPH ?g { ?s ?p ?o } }`);
+      const rewritten = rewrite(query);
+      const [actual, reference] = await Promise.all([
+        store.query(materializePreparedSparql(rewritten.prepared)),
+        store.query(materializePreparedSparql(scope(query).prepared)),
+      ]);
+      const count = (result: typeof actual) => Number(/^"?(\d+)/.exec(result.bindings[0]?.n ?? '')?.[1]);
+      expect(count(reference)).toBe(expected);
+      expect(count(actual)).toBe(expected);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('keeps the rows of a pattern without caller variables and no helper value in them', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert(data);
+      const rewritten = rewrite('SELECT * WHERE { [] <urn:p:value> "one" }');
+      // Under `*` the private variable is projected but never bound; elsewhere it is bound, so every engine counts the rows.
+      expect(rewritten.source).toContain('?__dkgNoVariable');
+      expect(rewritten.source).not.toContain('AS ?__dkgNoVariable');
+      expect((await store.query(materializePreparedSparql(rewritten.prepared))).bindings).toEqual([{}, {}]);
+      const constant = rewrite('SELECT DISTINCT * WHERE { <urn:s:1> <urn:p:value> "one" }');
+      expect((await store.query(materializePreparedSparql(constant.prepared))).bindings).toEqual([{}]);
+      for (const query of ['SELECT (COUNT(*) AS ?n) WHERE { [] <urn:p:value> "one" }', 'ASK { <urn:s:1> <urn:p:value> "one" }',
+        'DESCRIBE <urn:s:1> WHERE { <urn:s:1> <urn:p:value> "one" }']) {
+        expect(rewrite(query).source, query).toContain('BIND(true AS ?__dkgNoVariable)');
+      }
+      // Without caller variables or blank nodes, a mapping that can repeat is read from one graph, as with variables.
+      const path = rewrite('SELECT (COUNT(*) AS ?n) WHERE { <urn:s:hop> <urn:p:link>/<urn:p:to> "end" }');
+      expect((await store.query(materializePreparedSparql(path.prepared))).bindings).toEqual([{ n: `"2"^^<${integer}>` }]);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it.each([
+    ['SELECT (COUNT(*) AS ?n) WHERE { <urn:forbidden> <urn:p:value>? "hidden" }', [{ n: `"0"^^<${integer}>` }]],
+    ['SELECT * WHERE { <urn:forbidden> <urn:p:value>? "hidden" }', []],
+  ])('answers nothing when no selected graph matches a pattern without keys: %s', async (query, expected) => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert(data);
+      // No selected graph holds the triple: no graph is chosen, so there is nothing to replay.
+      expect((await store.query(materializePreparedSparql(rewrite(query).prepared))).bindings).toEqual(expected);
+      await expect(store.query(materializePreparedSparql(rewrite(`ASK { ${query.slice(query.indexOf('{') + 1, query.lastIndexOf('}'))} }`).prepared)))
+        .resolves.toMatchObject({ type: 'boolean', value: false });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('leaves a pattern without caller variables to the next strategy when it does not deduplicate', () => {
+    expect(wrapWithGraphValues(scope('ASK { <urn:s:1> <urn:p:value> "one" }'), graphs))
+      .toMatchObject({ kind: 'unsupported', reason: 'no-projected-variables' });
   });
 
   it.each([

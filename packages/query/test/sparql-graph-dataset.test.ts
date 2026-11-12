@@ -840,19 +840,66 @@ describe.each(OXIGRAPH_STORES)('scoped reads on an Oxigraph store (%s)', (_kind,
     }
   });
 
-  it('counts the matches of a pattern without variables in every graph of the view', async () => {
+  it('counts a pattern without caller variables as the RDF union of the view\'s graphs: a mirrored triple once, distinct subjects each', async () => {
     const counted = 'dataset-stores-count';
     const members = [`did:dkg:context-graph:${counted}/_verifiable_memory/0xa/1`, `did:dkg:context-graph:${counted}/_verifiable_memory/0xb/2`];
+    const union = 'urn:count:union';
+    const both = (subject: string, predicate: string, object: string): Quad[] => members.map(graph => ({ subject, predicate, object, graph }));
     await opened.store.insert([
+      // Distinct subjects, one in each graph, for one target and for a two-step path.
       { subject: 'urn:count:a', predicate: 'urn:p', object: 'urn:count:target', graph: members[0] },
       { subject: 'urn:count:b', predicate: 'urn:p', object: 'urn:count:target', graph: members[1] },
+      { subject: 'urn:count:a', predicate: 'urn:p', object: 'urn:count:step-a', graph: members[0] },
+      { subject: 'urn:count:step-a', predicate: 'urn:q', object: 'urn:count:end', graph: members[0] },
+      { subject: 'urn:count:b', predicate: 'urn:p', object: 'urn:count:step-b', graph: members[1] },
+      { subject: 'urn:count:step-b', predicate: 'urn:q', object: 'urn:count:end', graph: members[1] },
+      // The same triple, and the same two-step path, in both graphs.
+      ...both('urn:count:m', 'urn:p', 'urn:count:mirror'),
+      ...both('urn:count:m', 'urn:p', 'urn:count:mid'),
+      ...both('urn:count:mid', 'urn:q', 'urn:count:mirror-end'),
     ]);
-    const query = 'SELECT (COUNT(*) AS ?n) WHERE { [] <urn:p>/<urn:q>* <urn:count:target> }';
-    const scoped = await new DKGQueryEngine(opened.store).query(query, { contextGraphId: counted, view: 'verifiable-memory' });
-    // As the same query over a default graph made of the view's graphs alone.
-    const reference = await opened.store.query(query.replace(' WHERE', ` ${members.map(graph => `FROM <${graph}>`).join(' ')} WHERE`));
-    expect(scoped.bindings).toEqual(reference.type === 'bindings' ? reference.bindings : []);
-    expect(scoped.bindings[0]?.n).toMatch(/^"?2"?/);
+    // The RDF union of the view's graphs, materialized apart from the engine: each triple once. Copied inside the
+    // store, so a blank node keeps its identity.
+    await opened.store.update(`INSERT { GRAPH <${union}> { ?s ?p ?o } } WHERE { VALUES ?g { ${members.map(graph => `<${graph}>`).join(' ')} } GRAPH ?g { ?s ?p ?o } }`);
+    const engine = new DKGQueryEngine(opened.store);
+    const count = (bindings: readonly Record<string, string>[]) => Number(/^"?(\d+)/.exec(bindings[0]?.n ?? '')?.[1]);
+    for (const [pattern, expected] of [
+      // Distinct subjects keep their multiplicity.
+      ['[] <urn:p> <urn:count:target>', 2],
+      ['_:x <urn:p> <urn:count:target>', 2],
+      ['[] <urn:p>/<urn:q>* <urn:count:target>', 2],
+      ['[] <urn:p>/<urn:q> <urn:count:end>', 2],
+      // A mirrored triple or path counts once.
+      ['[] <urn:p> <urn:count:mirror>', 1],
+      ['[] <urn:p>/<urn:q>* <urn:count:mirror>', 1],
+      ['[] <urn:p>/<urn:q> <urn:count:mirror-end>', 1],
+      ['<urn:count:m> <urn:p>/<urn:q> <urn:count:mirror-end>', 1],
+      ['<urn:count:m> <urn:p> <urn:count:mirror>', 1],
+      ['<urn:count:m> <urn:p> <urn:count:mirror> FILTER(STRLEN("x") = 1)', 1],
+      ['_:x <urn:p> <urn:count:mirror> . _:x <urn:p> <urn:count:mid>', 1],
+      // With a caller variable, the same counts.
+      ['?s <urn:p> <urn:count:target>', 2],
+      ['?s <urn:p> <urn:count:mirror>', 1],
+    ] as const) {
+      const query = `SELECT (COUNT(*) AS ?n) WHERE { ${pattern} }`;
+      const reference = await opened.store.query(`SELECT (COUNT(*) AS ?n) FROM <${union}> WHERE { ${pattern} }`);
+      expect(count(reference.type === 'bindings' ? reference.bindings : []), `reference: ${pattern}`).toBe(expected);
+      const scoped = await engine.query(query, { contextGraphId: counted, view: 'verifiable-memory' });
+      expect(count(scoped.bindings), pattern).toBe(expected);
+    }
+    for (const [pattern, expected] of [
+      ['[] <urn:p> <urn:count:mirror>', 'true'],
+      ['<urn:count:m> <urn:p> <urn:count:mirror>', 'true'],
+      ['[] <urn:p> <urn:count:absent>', 'false'],
+    ] as const) {
+      expect((await engine.query(`ASK { ${pattern} }`, { contextGraphId: counted, view: 'verifiable-memory' })).bindings, pattern)
+        .toEqual([{ result: expected }]);
+    }
+    // Rows without caller variables, once per match of the union, with no helper variable.
+    const rows = await engine.query('SELECT * WHERE { [] <urn:p> <urn:count:target> }', { contextGraphId: counted, view: 'verifiable-memory' });
+    expect(rows.bindings).toEqual([{}, {}]);
+    const mirrored = await engine.query('SELECT * WHERE { <urn:count:m> <urn:p> <urn:count:mirror> }', { contextGraphId: counted, view: 'verifiable-memory' });
+    expect(mirrored.bindings).toEqual([{}]);
   });
 
   it('answers a constant graph assignment on a view with more graphs than the branches allow', async () => {
