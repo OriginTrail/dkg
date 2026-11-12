@@ -9,8 +9,7 @@
  */
 import {
   keepsAnyReadGraph,
-  missingReadGraphMethods,
-  readGraphLayerOf,
+  readGraphRuntimeOf,
   type ReadGraphStoreConfig,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
@@ -82,14 +81,14 @@ export async function prepareDaemonReadGraphSettings(input: {
   };
 }
 
-/** After the agent's store opens: say so when the store cannot keep read graphs that the table sets, which it then keeps none of. */
+/**
+ * After the agent's store opens: say so when the store keeps none of the read graphs that the table sets. The store decides (`whenUnsupported`), and its
+ * runtime holds the modes it applied, so they are what this reads.
+ */
 export function noteReadGraphStoreSupport(settings: DaemonReadGraphSettings, store: TripleStore, log: (message: string) => void): void {
   if (settings.storeSettings?.whenUnsupported !== 'off' || !keepsAnyReadGraph(settings.effective.readGraphs)) return;
-  const layer = readGraphLayerOf(store);
-  const missing = layer === null ? [] : missingReadGraphMethods(layer.innerStore, layer.adapterCapabilities);
-  if (missing.length === 0) return;
-  log(`[read-graphs] The read graphs set in the node's read-graph settings are off: the node's store does not support read graphs `
-    + `(its adapter does not send read-graph operations with ${missing.join(', ')}).`);
+  if (keepsAnyReadGraph(readGraphRuntimeOf(store)?.modes)) return;
+  log('[read-graphs] The read graphs set in the node\'s read-graph settings are off: the node\'s store does not support read graphs.');
 }
 
 /**

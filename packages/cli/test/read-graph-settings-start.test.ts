@@ -147,8 +147,7 @@ describe('the daemon\'s read-graph settings at start', () => {
     const unsupported = wrapReadGraphLayer({ delete: async () => undefined, close: async () => undefined } as unknown as TripleStore, backend);
     noteReadGraphStoreSupport(settings, unsupported, log);
     expect(lines).toEqual([
-      '[read-graphs] The read graphs set in the node\'s read-graph settings are off: the node\'s store does not support read graphs '
-        + '(its adapter does not send read-graph operations with delete).',
+      '[read-graphs] The read graphs set in the node\'s read-graph settings are off: the node\'s store does not support read graphs.',
     ]);
     lines = [];
     const capable = Object.assign(new OxigraphStore(), { readGraphCapabilities: { methods: READ_GRAPH_PLANNED_METHODS, serialUpdates: true } });
