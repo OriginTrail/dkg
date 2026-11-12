@@ -37,7 +37,6 @@ import {
   readGraphIri,
   type ReadGraphKey,
 } from '@origintrail-official/dkg-core';
-import { isReadGraphStateGraph } from '../graph-enumeration-visibility.js';
 import { readGraphInventoryByPrefix } from '../graph-inventory-materialization.js';
 import { assertGraphCatalogWithinInternalLimit, readCompleteGraphCatalog } from '../graph-catalog-internal-limit.js';
 import { noteReadGraphPartitionsOfRuntime } from './data-directories.js';
@@ -54,16 +53,15 @@ import { invalidateReadGraphRuntime, readGraphRecoveryGeneration, syncReadGraphR
 import { recordReadGraphRegistry } from './registry-record.js';
 import { withReadGraphBackgroundSlot } from './background-slot.js';
 import { fenceOf, foregroundQueued, isSafeName, nextBatchSize, sameRow, setMirror } from './job-support.js';
+import { readStoredReadGraphRow } from './stored-states.js';
 import type { InMemoryReadGraphStateMirror, ReadGraphBackendRuntime } from './runtime.js';
 import {
   CURRENT_READ_GRAPH_VERSIONS,
   isReadGraphRowAccepted,
   newReadGraphGeneration,
   nextReadGraphState,
-  parseReadGraphStateRows,
   readGraphStateCompareAndSet,
   readGraphStateReset,
-  readGraphStateRowQuery,
   type ReadGraphStateRow,
   type ReadGraphTransition,
   type ReadGraphVersions,
@@ -405,23 +403,6 @@ function sameFacts(left: readonly ReadGraphRegistryFact[], right: readonly ReadG
   const keys = (facts: readonly ReadGraphRegistryFact[]) => new Set(facts.map((fact) => JSON.stringify([fact.graph, fact.subject, fact.predicate, fact.object])));
   const [a, b] = [keys(left), keys(right)];
   return a.size === b.size && [...b].every((key) => a.has(key));
-}
-
-/**
- * The stored row of one read graph, read below the layer. `damaged` when its
- * row is damaged or misplaced.
- */
-export async function readStoredReadGraphRow(
-  store: TripleStore,
-  readGraph: string,
-  options: QueryOptions = {},
-): Promise<{ readonly row: ReadGraphStateRow | undefined; readonly damaged: boolean }> {
-  const result = await store.query(readGraphStateRowQuery(readGraph), options);
-  if (result.type !== 'bindings') throw new Error('A read-graph state read expected bindings');
-  const bindings = result.bindings.filter((binding) => binding.readGraph === readGraph
-    && binding.stateGraph !== undefined && isReadGraphStateGraph(binding.stateGraph));
-  const { rows, damaged } = parseReadGraphStateRows(bindings);
-  return { row: rows[0], damaged: damaged.length > 0 };
 }
 
 /** One job on one read graph. */

@@ -11,7 +11,8 @@ import { ReadGraphBuilder } from '../src/read-graph/builder.js';
 import { applyReadGraphModes } from '../src/read-graph/live-modes.js';
 import { wrapReadGraphLayer, type ReadGraphStore } from '../src/read-graph/read-graph-store.js';
 import { readGraphModeOf } from '../src/read-graph/settings.js';
-import { buildReadGraph, markReadGraphDirty, readStoredReadGraphRow, removeReadGraph } from '../src/read-graph/rebuild.js';
+import { buildReadGraph, markReadGraphDirty, removeReadGraph } from '../src/read-graph/rebuild.js';
+import { readStoredReadGraphRow } from '../src/read-graph/stored-states.js';
 import { startReadGraphs } from '../src/read-graph/startup.js';
 import { readGraphBackfillBatch } from '../src/read-graph/statements.js';
 import type { TripleStoreConfig } from '../src/triple-store-composition.js';
@@ -97,6 +98,10 @@ describe('read-graph builds on a live Blazegraph', () => {
     const [handle] = await manager!.acquireMany([`read-graph-live-modes-${randomUUID()}`]);
     const live = new BlazegraphStore(handle!.sparqlUrl, { timeout: 60_000 });
     const dataDir = mkdtempSync(join(tmpdir(), 'read-graph-live-modes-'));
+    // Ended in `finally` whatever the assertions do, before the store closes and the namespace goes.
+    let builder: ReadGraphBuilder | undefined;
+    let stopped = false;
+    let load: Promise<void> | undefined;
     try {
       const fixture = layerFixture(`modes-live-${randomUUID().slice(0, 8)}`);
       const layer = wrapReadGraphLayer(live, { backend: 'blazegraph', options: { url: handle!.sparqlUrl } });
@@ -108,13 +113,12 @@ describe('read-graph builds on a live Blazegraph', () => {
       await startReadGraphs(store, { dataDir });
       const [wholeVm, , codeVm] = fixture.keys as [ReadGraphKey, ReadGraphKey, ReadGraphKey];
       const vmKeys = () => fixture.keys.filter((key) => readGraphModeOf(layer.runtime.modes, key) !== 'off');
-      const builder = new ReadGraphBuilder({
+      builder = new ReadGraphBuilder({
         store, dataDir, intervalMs: 3_600_000, batching: { pauseRatio: 0, graphsPerBatch: 1, triplesPerDrop: 3 },
         wanted: vmKeys, off: (key) => readGraphModeOf(layer.runtime.modes, key) === 'off',
       });
-      let stopped = false;
       let writes = 0;
-      const load = (async () => {
+      load = (async () => {
         const graphs = [fixture.graphs[1]!, fixture.graphs[4]!, fixture.graphs[6]!];
         while (!stopped) {
           await store.insert([q(`urn:load:${writes}`, `"w${writes}"`, graphs[writes % graphs.length]!)]);
@@ -150,6 +154,9 @@ describe('read-graph builds on a live Blazegraph', () => {
         expect(await readStoredReadGraphRow(live, readGraphIri(key))).toEqual({ row: undefined, damaged: false });
       }
     } finally {
+      stopped = true;
+      await load?.catch(() => undefined);
+      await builder?.close();
       await live.close();
       await manager!.disposeAll([handle!]);
       rmSync(dataDir, { recursive: true, force: true });

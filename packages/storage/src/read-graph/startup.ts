@@ -22,7 +22,7 @@
  * a record it is marked dirty. The rows it does not
  * maintain take the rule of a release that does not maintain read graphs:
  * dirty, unless they already are; the builder then drops them while their
- * mode stays `off` (`./drop-requests.ts`).
+ * mode stays `off` (`./pending-work.ts`).
  *
  * It then reads the rows back, makes the backend's mirror hold exactly the
  * maintained ones, reads the registry of each context graph that has one, so
@@ -34,19 +34,18 @@
  */
 
 import { MemoryLayer, parseReadGraphIri, type ReadGraphKey } from '@origintrail-official/dkg-core';
-import { isReadGraphStateGraph } from '../graph-enumeration-visibility.js';
 import { mayHoldReadGraphPartitions, noteReadGraphPartitions } from '../read-graph-partition-marker.js';
 import { markReadGraphsDirtyAtStart } from '../read-graph-partition-startup.js';
 import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore } from '../read-graph-partition-store.js';
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
 import { noteReadGraphPartitionsOfRuntime } from './data-directories.js';
-import { requestReadGraphDrops } from './drop-requests.js';
+import { requestReadGraphWork } from './pending-work.js';
 import { clearUnstoredReadGraphMarks, readGraphMarksAtStart, unstoredReadGraphMarksText, useReadGraphMarkJournal } from './mark-journal.js';
 import { syncReadGraphRuntimeWithRecovery } from './recovery.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
 import { readGraphLayerOf, type ReadGraphStore } from './read-graph-store.js';
-import { readStoredReadGraphRow } from './rebuild.js';
+import { readStoredReadGraphRow, readStoredReadGraphStates } from './stored-states.js';
 import { keepsAnyReadGraph, readGraphModeOf } from './settings.js';
 import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry, type ReadGraphRegistryFact } from './registry-recognition.js';
 import {
@@ -63,12 +62,10 @@ import {
   MAX_READ_GRAPH_GENERATION,
   isReadGraphRowAccepted,
   newReadGraphGeneration,
-  parseReadGraphStateRows,
   nextReadGraphState,
   readGraphStateMarkDirty,
   readGraphStateMarkDirtyAtStart,
   readGraphStateReset,
-  readGraphStateRowsQuery,
   type ReadGraphStateRow,
   type ReadGraphVersions,
 } from './state.js';
@@ -107,26 +104,28 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
   if (!maintains || !layer || missingReadGraphMethods(layer.innerStore, layer.adapterCapabilities).length > 0) {
     await noteRecordOnlyPartitions(store, options);
     // Nothing is maintained: the builder drops what it finds, while its mode stays `off`.
-    const found = layer ? { found: (readGraphs: readonly string[]) => requestReadGraphDrops(layer.runtime, readGraphs) } : {};
+    const found = layer ? { found: (readGraphs: readonly string[]) => requestReadGraphWork(layer.runtime, 'drop', readGraphs) } : {};
     return { marked: await markReadGraphsDirtyAtStart(store, { ...options, ...found }), maintained: 0 };
   }
   const target = readGraphPartitionMaintenanceStore(store);
   const versions = options.versions ?? CURRENT_READ_GRAPH_VERSIONS;
   const queryOptions: QueryOptions = { priority: 'background', source: 'storage.readGraphStartup', ...(options.signal ? { signal: options.signal } : {}) };
-  // Another start-up of this process loads or loaded the backend's mirror, and its store objects maintain their writes
-  // by it: clearing it would let those writes pass unmaintained. This one waits for it, and applies only its own data
-  // directory's journal. Its agent may start alone next time, so from now on the marks the store refuses go there too.
-  // A failed load is tried again by the first start-up that finds it still the latest; the others wait for that one.
+  // A mirror in service, loaded by another start-up of this process or readied by a live switch, maintains the writes of
+  // every store object over the backend: clearing it would let those writes pass unmaintained. This start-up only joins
+  // it, and applies its own data directory's journal. A load in progress is waited for. A failed load is tried again by
+  // the first start-up that finds it still the latest; the others wait for that one.
   const loaded = LOADS.get(layer.runtime);
-  if (loaded !== undefined && await loaded) {
-    if (options.dataDir !== undefined) useReadGraphMarkJournal(layer.runtime, options.dataDir);
-    if (options.dataDir !== undefined) noteWorkingMemoryIdentityDirectory(layer.runtime, options.dataDir);
+  if (IN_SERVICE.has(layer.runtime) || (loaded !== undefined && await loaded)) {
+    if (options.dataDir !== undefined) joinReadGraphMaintenance(layer.runtime, options.dataDir);
     const marked = options.dataDir === undefined ? 0 : await markJournaledRows(target, layer.runtime, options.dataDir, queryOptions);
     return { marked, maintained: layer.runtime.mirror.size };
   }
   if (loaded !== undefined && LOADS.get(layer.runtime) !== loaded) return startReadGraphs(store, options);
   const loading = loadReadGraphs(store, layer, options, maintains, target, versions, queryOptions);
-  LOADS.set(layer.runtime, loading.then(() => true, () => false));
+  LOADS.set(layer.runtime, loading.then(() => {
+    IN_SERVICE.add(layer.runtime);
+    return true;
+  }, () => false));
   return loading;
 }
 
@@ -215,7 +214,7 @@ async function loadReadGraphs(
   if (options.dataDir !== undefined && journaled.size > 0) clearUnstoredReadGraphMarks(options.dataDir);
   const after = await stateRows(target, queryOptions);
   for (const row of after.rows) if (maintained(row.readGraph)) mirror.set(row);
-  requestReadGraphDrops(layer.runtime, after.rows.map((row) => row.readGraph)
+  requestReadGraphWork(layer.runtime, 'drop', after.rows.map((row) => row.readGraph)
     .filter((readGraph) => !maintained(readGraph) && parseReadGraphIri(readGraph) !== undefined));
   // Before anything writes: the facts go in with the snapshot, so the layer predicts its first registry write from them.
   // Every row that does not follow this registry is dirty now, so it is the one to record.
@@ -259,15 +258,29 @@ async function noteRecordOnlyPartitions(store: TripleStore, options: ReadGraphSt
 
 /** Each backend's load by a start-up of this process: whether it succeeded. */
 const LOADS = new WeakMap<ReadGraphBackendRuntime, Promise<boolean>>();
+/** The backends whose mirror is in service: a start-up loaded it, or a live switch readied it. */
+const IN_SERVICE = new WeakSet<ReadGraphBackendRuntime>();
 
 /**
- * Count a backend's mirror as loaded once a live switch (`./live-modes.ts`)
- * has given it the rows of the read graphs it switched on, after a start-up
- * that maintained none. A later start-up of this process then applies only
- * its own journal, and never clears the mirror the layer maintains writes by.
+ * Count a backend's mirror as in service once a live switch
+ * (`./live-modes.ts`) readies it for maintenance, after a start-up that
+ * maintained none: a later start-up of this process joins it, and never
+ * clears the mirror the layer maintains writes by.
  */
-export function noteReadGraphRuntimeLoaded(runtime: ReadGraphBackendRuntime): void {
-  if (!LOADS.has(runtime)) LOADS.set(runtime, Promise.resolve(true));
+export function noteReadGraphMirrorInService(runtime: ReadGraphBackendRuntime): void {
+  IN_SERVICE.add(runtime);
+}
+
+/**
+ * Join a data directory to a backend's maintenance: the marks the store
+ * refuses from now on go to its journal too, and it records the
+ * working-memory identity. A start-up that finds a mirror in service joins
+ * its directory so, and so does a live switch: the agent of that directory
+ * may start alone next time.
+ */
+export function joinReadGraphMaintenance(runtime: ReadGraphBackendRuntime, dataDir: string): void {
+  useReadGraphMarkJournal(runtime, dataDir);
+  noteWorkingMemoryIdentityDirectory(runtime, dataDir);
 }
 
 /**
@@ -307,8 +320,6 @@ async function registryRecords(store: TripleStore, options: QueryOptions) {
 }
 
 async function stateRows(store: TripleStore, options: QueryOptions) {
-  const result = await store.query(readGraphStateRowsQuery(), options);
-  if (result.type !== 'bindings') throw new Error('Read-graph start-up expected state-row bindings');
-  const bindings = result.bindings.filter((binding) => binding.stateGraph !== undefined && isReadGraphStateGraph(binding.stateGraph));
-  return { count: bindings.length, ...parseReadGraphStateRows(bindings) };
+  const { bindings, rows, damaged } = await readStoredReadGraphStates(store, options);
+  return { count: bindings.length, rows, damaged };
 }

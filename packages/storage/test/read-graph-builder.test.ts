@@ -24,13 +24,13 @@ import {
   buildReadGraph,
   refreshReadGraphRegistry,
   markReadGraphDirty,
-  readStoredReadGraphRow,
   removeReadGraph,
   repairReadGraph,
   ReadGraphJobError,
   type ReadGraphJobContext,
 } from '../src/read-graph/rebuild.js';
 import { withReadGraphBackgroundSlot } from '../src/read-graph/background-slot.js';
+import { readStoredReadGraphRow } from '../src/read-graph/stored-states.js';
 import { readReadGraphRegistry } from '../src/read-graph/registry.js';
 import { fenceReadGraphs, liftReadGraphFences } from '../src/read-graph/registry-fences.js';
 import {

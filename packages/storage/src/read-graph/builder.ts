@@ -11,7 +11,7 @@
  * Each pass first refreshes the registry of every context graph with rows, so
  * a changed membership marks its read graphs dirty. After the builds it
  * removes, contents and row, every read graph whose mode is `off` that the
- * mirror still holds or whose drop was asked for (`./drop-requests.ts`).
+ * mirror still holds or whose drop was asked for (`./pending-work.ts`).
  * Jobs run one at a time per backend (`withReadGraphBackgroundSlot`), on the
  * store's background lane. A job that fails is tried again after a delay that
  * doubles up to ten minutes; one that a newer change of its row overtook is
@@ -23,7 +23,7 @@ import { AsyncResource } from 'node:async_hooks';
 import { CoalescingRecurringTask, compareCodePoint, parseReadGraphIri, readGraphIri, type ReadGraphKey } from '@origintrail-official/dkg-core';
 import { withDefaultStoreWorkPriority } from '../store-priority-scheduler.js';
 import type { TripleStore } from '../triple-store.js';
-import { forgetReadGraphDropRequest, readGraphDropRequests } from './drop-requests.js';
+import { forgetReadGraphWork, readGraphWork, type ReadGraphWorkKind } from './pending-work.js';
 import { readGraphRuntimeOf } from './read-graph-store.js';
 import { buildReadGraph, refreshReadGraphRegistry, removeReadGraph, type ReadGraphBatching, type ReadGraphJobResult } from './rebuild.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
@@ -167,7 +167,18 @@ export class ReadGraphBuilder {
       const key = parseReadGraphIri(row.readGraph);
       if (key && servingReadGraphGeneration(row, versions) === undefined) jobs.set(row.readGraph, key);
     }
-    for (const [readGraph, key] of jobs) if (off(key)) jobs.delete(readGraph);
+    // Read graphs a switch on could not take into service, which the node may not list among those it wants.
+    for (const readGraph of readGraphWork(runtime, 'build')) {
+      const key = parseReadGraphIri(readGraph);
+      if (key !== undefined && servingReadGraphGeneration(runtime.mirror.get(readGraph), versions) === undefined) jobs.set(readGraph, key);
+      else forgetReadGraphWork(runtime, readGraph, 'build');
+    }
+    // Work that no longer applies is dropped here; the work a job ends is the executor's to forget.
+    for (const [readGraph, key] of jobs) {
+      if (!off(key)) continue;
+      jobs.delete(readGraph);
+      forgetReadGraphWork(runtime, readGraph, 'build');
+    }
     // A retry is kept only for a read graph that is still to build or to remove.
     const removable = new Set(this.#removals(runtime, off));
     for (const readGraph of this.#retries.keys()) if (!jobs.has(readGraph) && !removable.has(readGraph)) this.#retries.delete(readGraph);
@@ -184,7 +195,7 @@ export class ReadGraphBuilder {
       };
       const relevant = () => !off(key);
       try {
-        const result = await this.#run(readGraph, relevant, signal, 'built', () => buildReadGraph({ ...context, progress, relevant }, key));
+        const result = await this.#run(runtime, 'build', readGraph, relevant, signal, () => buildReadGraph({ ...context, progress, relevant }, key));
         if (typeof result === 'object' && result.outcome === 'done') await this.#report(result, signal);
       } finally {
         this.#building = undefined;
@@ -199,11 +210,8 @@ export class ReadGraphBuilder {
       const key = parseReadGraphIri(readGraph)!;
       const relevant = () => off(key);
       try {
-        const result = await this.#run(readGraph, relevant, signal, 'removed', () => removeReadGraph({ ...context, relevant }, readGraph));
-        if (result === 'failed') continue;
-        if (result !== 'skipped' && result.outcome !== 'lost') this.#built.delete(readGraph);
-        // Removed, with nothing left to remove, or on again: the drop is no longer asked for. One lost while still off is tried again.
-        if (result === 'skipped' || result.outcome !== 'lost' || !off(key)) forgetReadGraphDropRequest(runtime, readGraph);
+        const result = await this.#run(runtime, 'drop', readGraph, relevant, signal, () => removeReadGraph({ ...context, relevant }, readGraph));
+        if (typeof result === 'object' && result.outcome !== 'lost') this.#built.delete(readGraph);
       } finally {
         this.#removing -= 1;
       }
@@ -219,43 +227,50 @@ export class ReadGraphBuilder {
   #removals(runtime: ReadGraphBackendRuntime, off: (key: ReadGraphKey) => boolean): string[] {
     if (!this.#options.off) return [];
     const removals = new Set(runtime.mirror.rows().map((row) => row.readGraph));
-    for (const readGraph of readGraphDropRequests(runtime)) removals.add(readGraph);
+    for (const readGraph of readGraphWork(runtime, 'drop')) removals.add(readGraph);
     return [...removals].filter((readGraph) => {
       const key = parseReadGraphIri(readGraph);
       if (key !== undefined && off(key)) return true;
-      forgetReadGraphDropRequest(runtime, readGraph);
+      forgetReadGraphWork(runtime, readGraph, 'drop');
       return false;
     }).sort(compareCodePoint);
   }
 
   /**
    * Run one job, a build or a removal, on the store's background lane while it
-   * stays relevant: one that no longer is, is skipped. One that a newer change
-   * of its row overtook is tried again at a later pass only while it is still
-   * relevant; one that fails, after the retry delay.
+   * stays relevant. One that no longer is, is skipped. One that a newer change
+   * of its row overtook is tried again at a later pass while it is still
+   * relevant; one that fails, after the retry delay. Otherwise the job has
+   * ended, and so has the work of its kind asked for on its read graph
+   * (`./pending-work.ts`).
    */
   async #run(
+    runtime: ReadGraphBackendRuntime,
+    kind: ReadGraphWorkKind,
     readGraph: string,
     relevant: () => boolean,
     signal: AbortSignal,
-    failure: string,
     job: () => Promise<ReadGraphJobResult>,
   ): Promise<ReadGraphJobResult | 'skipped' | 'failed'> {
     signal.throwIfAborted();
-    if (!relevant()) {
+    const ended = () => {
       this.#retries.delete(readGraph);
+      forgetReadGraphWork(runtime, readGraph, kind);
+    };
+    if (!relevant()) {
+      ended();
       return 'skipped';
     }
     try {
       const result = await withDefaultStoreWorkPriority('background', job);
       this.#lastJob = result;
       if (result.outcome === 'lost' && relevant()) this.#retry(readGraph);
-      else this.#retries.delete(readGraph);
+      else ended();
       return result;
     } catch (error) {
       if (signal.aborted) throw error;
       this.#retry(readGraph, error);
-      this.#options.warn?.(`Read graph ${readGraph} could not be ${failure}: ${messageOf(error)}`);
+      this.#options.warn?.(`Read graph ${readGraph} could not be ${kind === 'build' ? 'built' : 'removed'}: ${messageOf(error)}`);
       return 'failed';
     }
   }
