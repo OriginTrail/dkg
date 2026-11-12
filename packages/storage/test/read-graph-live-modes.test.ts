@@ -14,7 +14,8 @@ import { applyReadGraphModes, applyViewSemantics, type ReadGraphModeChange } fro
 import { ReadGraphWriteRefusedError, wrapReadGraphLayer } from '../src/read-graph/read-graph-store.js';
 import { markReadGraphDirty, removeReadGraph } from '../src/read-graph/rebuild.js';
 import { readGraphModeOf, type ReadGraphModes } from '../src/read-graph/settings.js';
-import { parseReadGraphStateRows, readGraphStateRowsQuery } from '../src/read-graph/state.js';
+import { READ_GRAPH_STATE_PREDICATES, parseReadGraphStateRows, readGraphStateRowsQuery } from '../src/read-graph/state.js';
+import { readGraphDataDirectories } from '../src/read-graph/data-directories.js';
 import { startReadGraphs } from '../src/read-graph/startup.js';
 import { noteReadGraphStoreRestored } from '../src/read-graph/store-restored.js';
 import type { Quad, QueryOptions, TripleStore, UpdateOptions } from '../src/triple-store.js';
@@ -565,5 +566,123 @@ describe('switching read graphs live', () => {
     expect(await stored(adapter)).toEqual({});
     expect(await triplesOf(adapter, wholeVm)).toEqual([]);
     expect(await triplesOf(adapter, codeVm)).toEqual([]);
+  });
+
+  it('ends a removal that waited for the background slot once its layer is switched back on, and keeps the read graph', async () => {
+    const node = await open({ modes: layerAt(`live-${sequence + 1}`, VM, 'build') });
+    const { adapter, fixture, layer, store, dataDir } = node;
+    const [wholeVm, , codeVm] = fixture.keys.map((key) => readGraphIri(key)) as [string, string, string];
+    const builder = builderOf(node);
+    await pass(builder);
+    await applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'off'));
+    // Another job holds the backend's background slot, so the removals wait for it.
+    let release!: () => void;
+    const holding = withReadGraphBackgroundSlot(layer.runtime, () => new Promise<void>((resolve) => {
+      release = resolve;
+    }));
+    builder.request();
+    await vi.waitFor(() => expect(builder.status().removing).toBe(2));
+    // Switched back on: the stored rows are taken back into the mirror.
+    await applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'serve'), { dataDir, wanted: () => fixture.keys.filter((key) => key.layer === VM) });
+    expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('dirty');
+    release();
+    await holding;
+    await builder.whenIdle();
+    // Neither removal took them out of service, and the drops are no longer asked for.
+    expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('dirty');
+    expect(layer.runtime.mirror.get(codeVm)?.state).toBe('dirty');
+    expect(await stored(adapter)).toEqual({ [wholeVm]: 'dirty', [codeVm]: 'dirty' });
+    expect(readGraphDropRequests(layer.runtime)).toEqual([]);
+    await pass(builder);
+    await builder.close();
+    expect(await stored(adapter)).toEqual({ [wholeVm]: 'ready', [codeVm]: 'ready' });
+    await expectUnion(node, fixture.keys[0]!);
+    await expectUnion(node, fixture.keys[2]!);
+  });
+
+  it('readies the runtime when a node default is switched on with no context graph to list, so a later start-up shares the mirror', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'read-graph-live-default-'));
+    const other = mkdtempSync(join(tmpdir(), 'read-graph-live-default-other-'));
+    dirs.push(dataDir, other);
+    const fixture = layerFixture(`live-${sequence += 1}`);
+    const adapter = new HookedStore();
+    const config = { backend: 'oxigraph-persistent' as const, options: { path: join(dataDir, 'store') } };
+    const first = wrapReadGraphLayer(adapter, config);
+    const store = guardReadGraphPartition(first);
+    await adapter.insert([...fixture.facts, ...fixture.graphs.flatMap((graph, i) => [q('urn:s:shared', '"both"', graph), q(`urn:s:${i}`, `"v${i}"`, graph)])]);
+    await startReadGraphs(store, { dataDir });
+    expect(await applyReadGraphModes(store, { layers: { [VM]: 'serve' } }, { dataDir })).toEqual([]);
+    // The marks the store refuses from now on are journaled in the data directory.
+    expect(readGraphDataDirectories(first.runtime)).toContain(dataDir);
+    // The first subscription comes, and its read graph is built.
+    const builder = new ReadGraphBuilder({
+      store, dataDir, intervalMs: 3_600_000, batching: { pauseRatio: 0 }, wanted: () => [fixture.keys[0]!],
+      off: (key) => readGraphModeOf(first.runtime.modes, key) === 'off',
+    });
+    await pass(builder);
+    await builder.close();
+    const ready = first.runtime.mirror.get(readGraphIri(fixture.keys[0]!));
+    expect(ready?.state).toBe('ready');
+    // Another store object over the same backend starts: it shares the mirror the layer maintains writes by.
+    const cleared = vi.spyOn(first.runtime.mirror, 'remove');
+    const second = guardReadGraphPartition(wrapReadGraphLayer(adapter, config));
+    expect(await startReadGraphs(second, { dataDir: other })).toEqual({ marked: 0, maintained: 1 });
+    expect(cleared).not.toHaveBeenCalled();
+    expect(first.runtime.mirror.get(readGraphIri(fixture.keys[0]!))).toEqual(ready);
+  });
+
+  it('applies a switch on whose admission the store refuses, and the builder builds the read graph once the store answers', async () => {
+    const node = await open();
+    const { adapter, fixture, layer, store, dataDir } = node;
+    const wholeVm = readGraphIri(fixture.keys[0]!);
+    let refused = 0;
+    adapter.onUpdate = (sparql) => {
+      if (refused === 0 && sparql.includes(`<${wholeVm}> <${READ_GRAPH_STATE_PREDICATES.state}>`)) {
+        refused += 1;
+        throw new Error('the store is unavailable');
+      }
+    };
+    const changes = await applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'serve'), {
+      dataDir, wanted: () => fixture.keys.filter((key) => key.layer === VM),
+    });
+    adapter.onUpdate = undefined;
+    expect(refused).toBe(1);
+    expect(outcomeOf(changes, 'verifiable-memory')).toBe('applied');
+    // Maintained but not served: the mirror holds it dirty, and no stored row says otherwise.
+    expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('dirty');
+    expect((await stored(adapter))[wholeVm]).toBeUndefined();
+    const builder = builderOf(node);
+    await pass(builder);
+    await builder.close();
+    expect((await stored(adapter))[wholeVm]).toBe('ready');
+    await expectUnion(node, fixture.keys[0]!);
+  });
+
+  it('applies a switch off whose dirty mark the store refuses, and the builder removes the read graph once the store answers', async () => {
+    const node = await open({ modes: layerAt(`live-${sequence + 1}`, VM, 'build') });
+    const { adapter, fixture, layer, store } = node;
+    const wholeVm = readGraphIri(fixture.keys[0]!);
+    const builder = builderOf(node);
+    await pass(builder);
+    let refused = 0;
+    adapter.onUpdate = (sparql) => {
+      if (refused === 0 && sparql.includes(`<${wholeVm}> <${READ_GRAPH_STATE_PREDICATES.state}> "dirty"`)) {
+        refused += 1;
+        throw new Error('the store is unavailable');
+      }
+    };
+    const changes = await applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'off'));
+    adapter.onUpdate = undefined;
+    expect(refused).toBe(1);
+    expect(outcomeOf(changes, 'verifiable-memory')).toBe('applied');
+    // Out of service in the mirror, whatever the store still says, and its drop asked for.
+    expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('dirty');
+    expect((await stored(adapter))[wholeVm]).toBe('ready');
+    expect(readGraphDropRequests(layer.runtime)).toContain(wholeVm);
+    await pass(builder);
+    await builder.close();
+    expect(await stored(adapter)).toEqual({});
+    expect(await triplesOf(adapter, wholeVm)).toEqual([]);
+    expect(layer.runtime.mirror.size).toBe(0);
   });
 });

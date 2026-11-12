@@ -198,7 +198,8 @@ export class ReadGraphBuilder {
     for (const readGraph of removals) {
       const key = parseReadGraphIri(readGraph)!;
       try {
-        const result = await this.#run(readGraph, () => off(key), signal, 'removed', () => removeReadGraph(context, readGraph));
+        const result = await this.#run(readGraph, () => off(key), signal, 'removed',
+          () => removeReadGraph({ ...context, ...(keeps ? { keeps } : {}) }, readGraph));
         if (result === 'failed') continue;
         if (result !== 'skipped' && result.outcome !== 'lost') this.#built.delete(readGraph);
         // Removed, with nothing left to remove, or on again: the drop is no longer asked for. One lost while still off is tried again.

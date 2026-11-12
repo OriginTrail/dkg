@@ -55,6 +55,7 @@ import type { ReadGraphBackendRuntime } from './runtime.js';
 import {
   READ_GRAPH_MODES,
   VIEW_SEMANTICS,
+  keepsAnyReadGraph,
   readGraphModeOf,
   readGraphModeOfLayer,
   type ReadGraphMode,
@@ -178,6 +179,9 @@ async function apply(
   runtime.modes = next;
   runtime.modesApplied = true;
   if (semantics) setViewSemantics(runtime, semantics);
+  // From the settings, not from the changes listed: a node default switched on lists no context graph before the first
+  // subscription, and the builder then builds there all the same.
+  if (keepsAnyReadGraph(next)) prepareMaintenance(runtime, options.dataDir);
   const context: ReadGraphJobContext = { store, ...(options.dataDir !== undefined ? { dataDir: options.dataDir } : {}), source };
   await switchOff(context, runtime, next, stored);
   const on = changes.filter((change) => change.from === 'off' && change.to !== 'off');
@@ -210,11 +214,24 @@ async function switchOff(context: ReadGraphJobContext, runtime: ReadGraphBackend
 }
 
 /**
+ * Ready a runtime for maintenance, as a start-up that keeps read graphs does:
+ * the marks the store refuses from now on go to the data directory's journal,
+ * which also records the working-memory identity, and a later start-up of
+ * this process shares the mirror rather than load it again.
+ */
+function prepareMaintenance(runtime: ReadGraphBackendRuntime, dataDir: string | undefined): void {
+  if (dataDir !== undefined) {
+    useReadGraphMarkJournal(runtime, dataDir);
+    noteWorkingMemoryIdentityDirectory(runtime, dataDir);
+  }
+  noteReadGraphRuntimeLoaded(runtime);
+}
+
+/**
  * The start-up path for the layers switched on: every stored row of theirs is
  * marked dirty at a new generation, and every read graph the node keeps there
  * without a row gets a dirty row, each under its lock, so the mirror holds
- * them and the layer maintains them. The marks the store refuses from now on
- * go to the data directory's journal. Then each context graph's registry is
+ * them and the layer maintains them. Then each context graph's registry is
  * read, installed and recorded.
  */
 async function switchOn(
@@ -224,11 +241,6 @@ async function switchOn(
   stored: readonly string[],
   options: ApplyReadGraphModesOptions,
 ): Promise<void> {
-  if (options.dataDir !== undefined) {
-    useReadGraphMarkJournal(runtime, options.dataDir);
-    noteWorkingMemoryIdentityDirectory(runtime, options.dataDir);
-  }
-  noteReadGraphRuntimeLoaded(runtime);
   const switched = (key: ReadGraphKey | undefined) => key !== undefined
     && on.some((change) => change.contextGraphId === key.scope.contextGraphId && layerOfView(change.layer) === key.layer);
   const admitted = new Set(stored.filter((readGraph) => switched(parseReadGraphIri(readGraph))));
