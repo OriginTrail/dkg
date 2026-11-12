@@ -11,6 +11,7 @@ import {
   ReadGraphSettingsUnavailableError,
   SqliteReadGraphSettingsStore,
   readReadGraphSettings,
+  withSettingsChange,
 } from '../src/read-graph-settings-store.js';
 
 const CURATED = `0x${'cd'.repeat(20)}/my-project`;
@@ -196,6 +197,25 @@ describe('the read-graph settings in the node\'s database', () => {
     older.exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL); PRAGMA user_version = 38;');
     older.close();
     expect(readReadGraphSettings(dir)).toBeUndefined();
+  });
+
+  it('previews a change as the table holds it after the change: the one rule for every preview', () => {
+    const { store } = open();
+    store.set(CURATED, { layers: { 'working-memory': 'build', 'verifiable-memory': 'serve' }, viewSemantics: 'merged' }, 'api');
+    store.set('notes', { layers: { 'verifiable-memory': 'build' } }, 'api');
+    const changes = [
+      [CURATED, { layers: { 'working-memory': 'off' } }],
+      [CURATED, { viewSemantics: null }],
+      ['alpha', { layers: { 'shared-working-memory': 'serve' }, viewSemantics: 'per-asset' }],
+      ['notes', { viewSemantics: 'merged', layers: { 'verifiable-memory': 'build' } }],
+    ] as const;
+    for (const [contextGraphId, change] of changes) {
+      const preview = withSettingsChange(store.list(), contextGraphId, change);
+      store.set(contextGraphId, change, 'api');
+      expect(preview, `${contextGraphId} ${JSON.stringify(change)}`).toEqual(store.list());
+    }
+    expect(store.list().map((entry) => entry.contextGraphId)).toEqual([CURATED, 'alpha', 'notes']);
+    expect(store.get(CURATED)).toEqual({ layers: { 'working-memory': 'off', 'verifiable-memory': 'serve' } });
   });
 
   it('answers nothing once closed', () => {

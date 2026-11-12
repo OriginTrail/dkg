@@ -25,6 +25,7 @@ import {
 } from './read-graphs-config.js';
 import {
   readReadGraphSettings,
+  withSettingsChange,
   type ReadGraphSettingsEntry,
   type SqliteReadGraphSettingsStore,
 } from './read-graph-settings-store.js';
@@ -177,18 +178,7 @@ async function rollbackRefusals(entries: ReadonlyArray<ReadGraphSettingsEntry>, 
 
 /** The table's entries with config.json's rules written over them, as the import writes them. */
 function overlaid(table: ReadonlyArray<ReadGraphSettingsEntry>, rules: ReadonlyArray<ReadGraphSettingsEntry>): ReadonlyArray<ReadGraphSettingsEntry> {
-  if (rules.length === 0) return table;
-  const byGraph = new Map(table.map((entry) => [entry.contextGraphId, entry]));
-  for (const rule of rules) {
-    const held = byGraph.get(rule.contextGraphId);
-    const viewSemantics = rule.viewSemantics ?? held?.viewSemantics;
-    byGraph.set(rule.contextGraphId, {
-      contextGraphId: rule.contextGraphId,
-      layers: { ...held?.layers, ...rule.layers },
-      ...(viewSemantics === undefined ? {} : { viewSemantics }),
-    });
-  }
-  return [...byGraph.keys()].sort().map((contextGraphId) => byGraph.get(contextGraphId)!);
+  return rules.reduce((entries, rule) => withSettingsChange(entries, rule.contextGraphId, rule), table);
 }
 
 const capitalized = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);

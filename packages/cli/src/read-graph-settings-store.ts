@@ -53,6 +53,28 @@ export interface ReadGraphSettingsStore {
   close(): void;
 }
 
+/**
+ * The entries a change to one context graph leaves, as the table holds them after it: each mode the change sets replaces that layer's, a layer it does
+ * not name keeps its own, an omitted view-semantics default stays, and `null` removes it. Entries stay in ID order. The one rule for every preview of
+ * the table: a change before it is written, and config.json's rules before they are imported.
+ */
+export function withSettingsChange(
+  entries: ReadonlyArray<ReadGraphSettingsEntry>,
+  contextGraphId: string,
+  change: ReadGraphSettingsChange,
+): ReadonlyArray<ReadGraphSettingsEntry> {
+  const held = entries.find((entry) => entry.contextGraphId === contextGraphId);
+  const layers: Partial<Record<GetView, ReadGraphMode>> = { ...held?.layers };
+  for (const view of GET_VIEWS) {
+    const mode = change.layers?.[view];
+    if (mode !== undefined) layers[view] = mode;
+  }
+  const viewSemantics = change.viewSemantics === undefined ? held?.viewSemantics : change.viewSemantics ?? undefined;
+  const changed = entryOf(contextGraphId, { layers, ...(viewSemantics === undefined ? {} : { viewSemantics }) });
+  return Object.freeze([...entries.filter((entry) => entry.contextGraphId !== contextGraphId), changed]
+    .sort((left, right) => (left.contextGraphId < right.contextGraphId ? -1 : left.contextGraphId > right.contextGraphId ? 1 : 0)));
+}
+
 /** A change the table refuses: a context graph ID that can't have read graphs, an unknown layer or value, or an unknown actor. */
 export class ReadGraphSettingsError extends Error {
   readonly code = 'READ_GRAPH_SETTINGS_INVALID';
