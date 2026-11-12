@@ -7,6 +7,7 @@ import { shareJobsPath, shareReconciliationPath, type ShareJobsListOptions, type
 import { publisherJobsPath, type PublisherJobsPageOptions, type PublisherJobsResult } from './publisher-job-client-paths.js';
 import { createEntityClient } from './entity-search/client.js';
 import { createViewSemanticsClient } from './view-semantics-client.js';
+import { CLI_ACTOR_HEADERS, createReadGraphSettingsClient, type ReadGraphCreateOutcome, type ReadGraphsCreateSetting } from './read-graph-settings-client.js';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import type {
@@ -1977,6 +1978,7 @@ export class ApiClient {
      * {@link registerContextGraph} instead.
      */
     pcaAccountId?: string | number | bigint;
+    readGraphs?: ReadGraphsCreateSetting; // search across assets, applied after the creation; a refused setting doesn't fail it
   }, allowedPeers?: string[]): Promise<{
     created: string;
     uri: string;
@@ -1985,6 +1987,7 @@ export class ApiClient {
     onChainId?: string;
     /** Present when `register: true` was requested but the register leg failed. */
     registerError?: string;
+    readGraphs?: ReadGraphCreateOutcome;
     hint?: string;
   }> {
     return this.post('/api/context-graph/create', {
@@ -1999,7 +2002,8 @@ export class ApiClient {
       ...(options?.register === true ? { register: true } : {}),
       ...(options?.publishPolicy != null ? { publishPolicy: options.publishPolicy } : {}),
       ...(options?.pcaAccountId != null ? { pcaAccountId: options.pcaAccountId.toString() } : {}),
-    });
+      ...(options?.readGraphs ? { readGraphs: options.readGraphs } : {}),
+    }, {}, options?.readGraphs ? CLI_ACTOR_HEADERS : {});
   }
 
   async createSubGraph(contextGraphId: string, subGraphName: string): Promise<{
@@ -2443,19 +2447,20 @@ export class ApiClient {
 
   readonly entities = createEntityClient((path, body, deadline) => this.post(path, body, deadline));
   readonly viewSemantics = createViewSemanticsClient(<T>(path: string) => this.get<T>(path));
+  readonly readGraphSettings = createReadGraphSettingsClient(<T>(path: string) => this.get<T>(path), <T>(path: string, body: unknown, headers: Readonly<Record<string, string>>) => this.put<T>(path, body, headers));
 
-  private async post<T>(path: string, body: unknown, deadline: RequestDeadline = {}): Promise<T> {
+  private async post<T>(path: string, body: unknown, deadline: RequestDeadline = {}, headers: Readonly<Record<string, string>> = {}): Promise<T> {
     return this.send<T>(path, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
+      headers: { 'Content-Type': 'application/json', ...this.authHeaders(), ...headers },
       body: JSON.stringify(body),
     }, deadline);
   }
 
-  private async put<T>(path: string, body: unknown): Promise<T> {
+  private async put<T>(path: string, body: unknown, headers: Readonly<Record<string, string>> = {}): Promise<T> {
     return this.send<T>(path, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
+      headers: { 'Content-Type': 'application/json', ...this.authHeaders(), ...headers },
       body: JSON.stringify(body),
     });
   }

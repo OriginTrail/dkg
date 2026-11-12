@@ -30,6 +30,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
+import { parseQueryViewOptions } from '../read-graph-settings-words.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
@@ -179,8 +180,13 @@ program
   .option('-q, --sparql <query>', 'SPARQL query string')
   .option('-f, --file <path>', 'File containing SPARQL query')
   .option('--include-shared-memory', 'Include shared (unpublished) memory in the query - use for data promoted through the KA lifecycle before on-chain registration')
+  .option('--view <memory>', 'Query one memory: verifiable-memory (published assets), shared-working-memory (shared memory) or working-memory (private drafts)')
+  .option('--semantics <semantics>', 'merged searches across assets, so one query can link facts from different assets; '
+    + 'per-asset searches each asset on its own. Reads published assets unless --view names another memory')
   .action(async (contextGraph: string | undefined, opts: ActionOpts) => {
     try {
+      const scope = parseQueryViewOptions(opts.view, opts.semantics);
+      if ('error' in scope) throw new Error(scope.error);
       const client = await ApiClient.connect();
 
       let sparql = opts.sparql;
@@ -193,14 +199,16 @@ program
         process.exit(1);
       }
 
-      const { result } = await client.query(sparql, contextGraph, {
+      const { result, semantics } = await client.query(sparql, contextGraph, {
         includeSharedMemory: Boolean(opts.includeSharedMemory),
+        ...scope,
       });
+      const across = semantics === 'merged' ? ', searched across assets' : '';
 
       if (result?.type === 'bindings' && result.bindings) {
         const { bindings } = result;
         if (bindings.length === 0) {
-          console.log('No results.');
+          console.log(`No results${across}.`);
           return;
         }
         const keys = Object.keys(bindings[0]);
@@ -215,7 +223,7 @@ program
           const line = keys.map((k, i) => stripQuotes(String(row[k] ?? '')).padEnd(widths[i])).join('  ');
           console.log(line);
         }
-        console.log(`\n${bindings.length} row(s)`);
+        console.log(`\n${bindings.length} row(s)${across}`);
       } else {
         console.log(JSON.stringify(result, null, 2));
       }
