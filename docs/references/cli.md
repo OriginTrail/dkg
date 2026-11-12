@@ -21,6 +21,10 @@ dkg logs                                 # tail the daemon log
 dkg debug cpu-profile [--seconds <n>]    # record a CPU profile of the node (node-admin token; 10 s default, 60 s max)
 dkg store read-graphs status|rebuild|drop [-c <id>] [--layer wm|swm|vm] [--json]   # list, rebuild or drop the node's read graphs (node-admin token; drop needs --yes)
 dkg store read-graphs check [--full|--sampled] [--json]   # check every ready read graph against its member graphs (node-admin token)
+dkg store read-graphs enable -c <id> [--layer verifiable-memory|shared-working-memory|working-memory|all] [--mode preview|on]   # search across assets for a context graph: Preview (default) or On, published assets by default (node-admin token)
+dkg store read-graphs disable -c <id> [--layer …]   # turn it off for a context graph (node-admin token)
+dkg store read-graphs settings [--json]   # the settings, and each context graph's effective setting per layer (node-admin token)
+dkg store read-graphs default-semantics -c <id> merged|per-asset|none   # a context graph's default semantics for view queries (node-admin token)
 dkg peers                                # list discovered agents on the network
 dkg peer info <peer-id>                  # inspect a peer's identity and addresses
 
@@ -30,6 +34,7 @@ dkg chat <name>                          # interactive chat with a peer
 
 # Context graphs (projects)
 dkg context-graph create <id>            # create a local context graph
+dkg context-graph create <id> --read-graphs preview|on [--read-graph-layer …]   # create it with search across assets switched on (node-admin token for the setting)
 dkg context-graph register <id>          # register an existing CG on-chain (unlocks VM)
 dkg context-graph add-agent <id> --agent <addr>   # add an agent to a curated CG allowlist (replaces deprecated 'invite')
 dkg context-graph list                   # list known context graphs and subscription state
@@ -70,6 +75,7 @@ dkg endorse <ual> --context-graph <cg> [--agent <addr>]  # endorse a published K
 
 # Querying
 dkg query [cg] -q "<sparql>"             # SPARQL against a local context graph
+dkg query [cg] -q "<sparql>" --semantics merged|per-asset   # search across assets, where it is On, or per asset
 dkg query-remote <peer> -q "<sparql>"    # query a remote peer over P2P
 dkg sync catchup-status <cg>             # show background catch-up status for a context graph
 dkg subscribe <cg>                       # subscribe to a CG's gossip topics
