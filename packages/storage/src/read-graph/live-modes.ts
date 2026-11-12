@@ -53,7 +53,7 @@ import { readGraphPartitionMaintenanceStore } from '../read-graph-partition-stor
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
 import { noteReadGraphPartitionsOfRuntime } from './data-directories.js';
-import { forgetReadGraphDropRequest, requestReadGraphDrops } from './drop-requests.js';
+import { forgetReadGraphBuildRequest, forgetReadGraphDropRequest, requestReadGraphBuilds, requestReadGraphDrops } from './drop-requests.js';
 import { readGraphLayerOf, type ReadGraphStore } from './read-graph-store.js';
 import { ReadGraphsUnsupportedError } from './read-graphs-unsupported.js';
 import { markReadGraphDirty, refreshReadGraphRegistry, retireReadGraph, type ReadGraphJobContext } from './rebuild.js';
@@ -71,7 +71,7 @@ import {
   type ViewSemanticsSettings,
 } from './settings.js';
 import { joinReadGraphMaintenance, noteReadGraphMirrorInService } from './startup.js';
-import { readStoredReadGraphStates } from './state.js';
+import { readStoredReadGraphStates } from './stored-states.js';
 
 /** What an apply did with one context graph's layer. */
 export type ReadGraphModeOutcome = 'applied' | 'unchanged' | { readonly refused: string };
@@ -296,8 +296,10 @@ async function switchOn(
     forgetReadGraphDropRequest(runtime, readGraph);
     try {
       await markReadGraphDirty(context, readGraph, { create: true });
+      forgetReadGraphBuildRequest(runtime, readGraph);
     } catch (error) {
-      // The builder builds it where the node keeps it.
+      // The node may not list it among the read graphs it wants: the builder is asked for it, and builds it into service.
+      requestReadGraphBuilds(runtime, [readGraph]);
       deferred({ step: 'admit', readGraph, error });
     }
   }

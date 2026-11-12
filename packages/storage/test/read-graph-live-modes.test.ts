@@ -9,23 +9,24 @@ import { missingReadGraphMethods } from '../src/read-graph/adapter-contract.js';
 import { guardReadGraphPartition } from '../src/read-graph-partition-store.js';
 import { withReadGraphBackgroundSlot } from '../src/read-graph/background-slot.js';
 import { ReadGraphBuilder } from '../src/read-graph/builder.js';
-import { readGraphDropRequests, requestReadGraphDrops } from '../src/read-graph/drop-requests.js';
+import { readGraphBuildRequests, readGraphDropRequests, requestReadGraphDrops } from '../src/read-graph/drop-requests.js';
 import { applyReadGraphModes, applyViewSemantics, type ReadGraphModeChange, type ReadGraphModeDeferral } from '../src/read-graph/live-modes.js';
 import { ReadGraphWriteRefusedError, wrapReadGraphLayer } from '../src/read-graph/read-graph-store.js';
 import { markReadGraphDirty, removeReadGraph } from '../src/read-graph/rebuild.js';
 import { readGraphModeOf, type ReadGraphModes } from '../src/read-graph/settings.js';
-import { READ_GRAPH_STATE_PREDICATES, parseReadGraphStateRows, readGraphStateRowsQuery } from '../src/read-graph/state.js';
+import { READ_GRAPH_STATE_PREDICATES, parseReadGraphStateRows, readGraphStateCompareAndSet, readGraphStateRowsQuery } from '../src/read-graph/state.js';
 import { readGraphDataDirectories } from '../src/read-graph/data-directories.js';
 import { startReadGraphs } from '../src/read-graph/startup.js';
 import { noteReadGraphStoreRestored } from '../src/read-graph/store-restored.js';
-import type { Quad, QueryOptions, TripleStore, UpdateOptions } from '../src/triple-store.js';
+import type { Quad, QueryOptions, QueryResult, TripleStore, UpdateOptions } from '../src/triple-store.js';
 import { matchesGraphNameTest, readGraphEnumerationRoots, readGraphMembership } from '../src/read-graph/membership.js';
-import { isLayerMember, layerFixture, q, type LayerFixture } from './helpers/read-graph-layer-conformance.js';
+import { isLayerMember, layerFixture, q, readyRow, type LayerFixture } from './helpers/read-graph-layer-conformance.js';
 import { PlanningOxigraphStore } from './helpers/read-graph-planning-store.js';
 
 /** An adapter that offers only the methods it plans, and lets a test act on each update before it is sent. */
 class HookedStore extends PlanningOxigraphStore {
   onUpdate: ((sparql: string, options: UpdateOptions | undefined) => Promise<void> | void) | undefined;
+  onQuery: ((sparql: string) => Promise<void> | void) | undefined;
   constructor() {
     super();
     for (const method of missingReadGraphMethods(this, this.readGraphCapabilities)) {
@@ -39,6 +40,10 @@ class HookedStore extends PlanningOxigraphStore {
   override async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
     return super.insert(quads, options);
   }
+  override async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+    await this.onQuery?.(sparql);
+    return super.query(sparql, options);
+  }
 }
 
 const VM = MemoryLayer.VerifiableMemory;
@@ -46,9 +51,18 @@ const SWM = MemoryLayer.SharedWorkingMemory;
 
 let sequence = 0;
 const dirs: string[] = [];
-afterEach(() => {
+/** What a test started that must end with it, whatever its assertions do: write loads and builders. */
+const running: Array<() => Promise<unknown>> = [];
+afterEach(async () => {
+  for (const stop of running.splice(0).reverse()) await stop().catch(() => undefined);
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
+
+/** A builder the test fixture closes when the test ends. */
+function owned(builder: ReadGraphBuilder): ReadGraphBuilder {
+  running.push(() => builder.close());
+  return builder;
+}
 
 /** The settings that put one context graph's layer at a mode, over a node with everything else off. */
 const layerAt = (contextGraphId: string, layer: MemoryLayer, mode: 'off' | 'build' | 'serve'): ReadGraphModes =>
@@ -76,14 +90,14 @@ type Node = Awaited<ReturnType<typeof open>>;
 
 /** The node's builder, as the agent runs it: it wants the fixture's read graphs whose mode is not off, and removes the others. */
 function builderOf({ store, dataDir, layer, fixture }: Node): ReadGraphBuilder {
-  return new ReadGraphBuilder({
+  return owned(new ReadGraphBuilder({
     store,
     dataDir,
     intervalMs: 3_600_000,
     batching: { pauseRatio: 0, graphsPerBatch: 2, triplesPerDrop: 2 },
     wanted: () => fixture.keys.filter((key) => readGraphModeOf(layer.runtime.modes, key) !== 'off'),
     off: (key) => readGraphModeOf(layer.runtime.modes, key) === 'off',
-  });
+  }));
 }
 
 async function pass(builder: ReadGraphBuilder): Promise<void> {
@@ -97,7 +111,7 @@ function writeLoad({ store, fixture }: Node) {
   let stopped = false;
   let writes = 0;
   let failure: unknown;
-  const running = (async () => {
+  const loop = (async () => {
     while (!stopped) {
       const graph = graphs[writes % graphs.length]!;
       const quad = q(`urn:load:${writes}`, `"w${writes}"`, graph);
@@ -112,13 +126,17 @@ function writeLoad({ store, fixture }: Node) {
       await nextTurn();
     }
   })();
+  running.push(async () => {
+    stopped = true;
+    await loop;
+  });
   return {
     get writes() {
       return writes;
     },
     async end(): Promise<number> {
       stopped = true;
-      await running;
+      await loop;
       if (failure !== undefined) throw failure;
       return writes;
     },
@@ -430,10 +448,10 @@ describe('switching read graphs live', () => {
     const node = await open({ modes: layerAt(`live-${sequence + 1}`, VM, 'build') });
     const { adapter, fixture, store, dataDir, layer } = node;
     const wholeVm = readGraphIri(fixture.keys[0]!);
-    const builder = new ReadGraphBuilder({
+    const builder = owned(new ReadGraphBuilder({
       store, dataDir, intervalMs: 3_600_000, batching: { pauseRatio: 0, graphsPerBatch: 1, maxGraphsPerBatch: 1 },
       wanted: () => fixture.keys.filter((key) => readGraphModeOf(layer.runtime.modes, key) !== 'off'),
-    });
+    }));
     const seen: Array<number | undefined> = [];
     adapter.onUpdate = (sparql) => {
       if (sparql.startsWith('INSERT') && sparql.includes(`GRAPH <${wholeVm}>`)) seen.push(builder.status().progress);
@@ -463,11 +481,11 @@ describe('switching read graphs live', () => {
     const modes: ReadGraphModes = { contextGraphs: { [fixture.contextGraphId]: { layers: { [VM]: 'build' } }, [kept.contextGraphId]: { layers: { [VM]: 'build' } } } };
     const node = await open({ modes, fixture });
     await node.adapter.insert(kept.graphs.map((graph, i) => q(`urn:k:${i}`, '"k"', graph)));
-    const builder = new ReadGraphBuilder({
+    const builder = owned(new ReadGraphBuilder({
       store: node.store, dataDir: node.dataDir, intervalMs: 3_600_000, batching: { pauseRatio: 0, triplesPerDrop: 1 },
       wanted: () => [fixture.keys[0]!, kept.keys[0]!].filter((key) => readGraphModeOf(node.layer.runtime.modes, key) !== 'off'),
       off: (key) => readGraphModeOf(node.layer.runtime.modes, key) === 'off',
-    });
+    }));
     await pass(builder);
     const switchedOff = readGraphIri(fixture.keys[0]!);
     const next: ReadGraphModes = { contextGraphs: { [fixture.contextGraphId]: { layers: { [VM]: 'off' } }, [kept.contextGraphId]: { layers: { [VM]: 'build' } } } };
@@ -490,11 +508,11 @@ describe('switching read graphs live', () => {
     // The next process starts with the settings the switch left, and its builder ends the drop.
     const restarted = await open({ modes: next, adapter: node.adapter, dataDir: node.dataDir, fixture });
     expect(readGraphDropRequests(restarted.layer.runtime)).toEqual([switchedOff]);
-    const after = new ReadGraphBuilder({
+    const after = owned(new ReadGraphBuilder({
       store: restarted.store, dataDir: restarted.dataDir, intervalMs: 3_600_000, batching: { pauseRatio: 0 },
       wanted: () => [kept.keys[0]!],
       off: (key) => readGraphModeOf(restarted.layer.runtime.modes, key) === 'off',
-    });
+    }));
     await pass(after);
     await after.close();
     expect(await stored(node.adapter)).toEqual({ [readGraphIri(kept.keys[0]!)]: 'ready' });
@@ -513,9 +531,9 @@ describe('switching read graphs live', () => {
     adapter.onUpdate = (sparql) => {
       if (sparql.includes(`GRAPH <${readGraphIri(wholeVm)}>`) && sparql.startsWith('INSERT') && (copies += 1) === 1) noteReadGraphStoreRestored(store);
     };
-    const builder = new ReadGraphBuilder({
+    const builder = owned(new ReadGraphBuilder({
       store, dataDir, intervalMs: 3_600_000, batching: { pauseRatio: 0, graphsPerBatch: 1 }, wanted: () => [wholeVm], off: () => false,
-    });
+    }));
     await pass(builder);
     expect(builder.status().lastJob).toMatchObject({ readGraph: readGraphIri(wholeVm), outcome: 'lost' });
     adapter.onUpdate = undefined;
@@ -525,9 +543,9 @@ describe('switching read graphs live', () => {
     expect((await stored(adapter))[readGraphIri(wholeVm)]).not.toBe('ready');
     const restarted = await open({ modes: next, adapter, dataDir, fixture });
     expect(restarted.layer.runtime.mirror.get(readGraphIri(wholeVm))?.state).toBe('dirty');
-    const after = new ReadGraphBuilder({
+    const after = owned(new ReadGraphBuilder({
       store: restarted.store, dataDir, intervalMs: 3_600_000, batching: { pauseRatio: 0 }, wanted: () => [wholeVm], off: () => false,
-    });
+    }));
     await pass(after);
     await after.close();
     expect((await stored(adapter))[readGraphIri(wholeVm)]).toBe('ready');
@@ -538,7 +556,7 @@ describe('switching read graphs live', () => {
     const node = await open({ modes: layerAt(`live-${sequence + 1}`, VM, 'build') });
     const { adapter, fixture, layer, store, dataDir } = node;
     const [wholeVm] = fixture.keys as [ReadGraphKey];
-    const plain = new ReadGraphBuilder({ store, dataDir, intervalMs: 3_600_000, batching: { pauseRatio: 0 }, wanted: () => [wholeVm] });
+    const plain = owned(new ReadGraphBuilder({ store, dataDir, intervalMs: 3_600_000, batching: { pauseRatio: 0 }, wanted: () => [wholeVm] }));
     await pass(plain);
     requestReadGraphDrops(layer.runtime, [readGraphIri(wholeVm)]);
     await pass(plain);
@@ -685,10 +703,10 @@ describe('switching read graphs live', () => {
     // The marks the store refuses from now on are journaled in the data directory.
     expect(readGraphDataDirectories(first.runtime)).toContain(dataDir);
     // The first subscription comes, and its read graph is built.
-    const builder = new ReadGraphBuilder({
+    const builder = owned(new ReadGraphBuilder({
       store, dataDir, intervalMs: 3_600_000, batching: { pauseRatio: 0 }, wanted: () => [fixture.keys[0]!],
       off: (key) => readGraphModeOf(first.runtime.modes, key) === 'off',
-    });
+    }));
     await pass(builder);
     await builder.close();
     const ready = first.runtime.mirror.get(readGraphIri(fixture.keys[0]!));
@@ -784,5 +802,40 @@ describe('switching read graphs live', () => {
     expect(layer.runtime.mirror.size).toBe(0);
     expect(readGraphDataDirectories(layer.runtime)).not.toContain(unusable);
     expect(await stored(node.adapter)).toEqual({});
+  });
+
+  it('builds a read graph switched on whose admission failed, though the node does not list it among those it wants', async () => {
+    const node = await open();
+    const { adapter, fixture, layer, store, dataDir } = node;
+    const wholeVm = readGraphIri(fixture.keys[0]!);
+    // A row left from earlier: dirty, outside the mirror, of a context graph the node lists nowhere (no subscription).
+    await adapter.update(readGraphStateCompareAndSet(undefined, { ...readyRow(wholeVm, 4), state: 'dirty' }));
+    let refused = 0;
+    adapter.onQuery = (sparql) => {
+      // The admission's read of the row fails, once.
+      if (refused === 0 && sparql.includes(`<${wholeVm}>`)) {
+        refused += 1;
+        throw new Error('the store is unavailable');
+      }
+    };
+    const deferrals: ReadGraphModeDeferral[] = [];
+    const changes = await applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'serve'), {
+      dataDir, onDeferred: (deferral) => deferrals.push(deferral),
+    });
+    adapter.onQuery = undefined;
+    expect(refused).toBe(1);
+    expect(outcomeOf(changes, 'verifiable-memory')).toBe('applied');
+    expect(deferrals).toMatchObject([{ step: 'admit', readGraph: wholeVm }]);
+    expect(layer.runtime.mirror.get(wholeVm)).toBeUndefined();
+    expect(readGraphBuildRequests(layer.runtime)).toEqual([wholeVm]);
+    // A builder that wants nothing of this context graph builds it all the same, from the build the admission asked for.
+    const builder = owned(new ReadGraphBuilder({
+      store, dataDir, intervalMs: 3_600_000, batching: { pauseRatio: 0 }, wanted: () => [],
+      off: (key) => readGraphModeOf(layer.runtime.modes, key) === 'off',
+    }));
+    await pass(builder);
+    expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('ready');
+    expect(readGraphBuildRequests(layer.runtime)).toEqual([]);
+    await expectUnion(node, fixture.keys[0]!);
   });
 });

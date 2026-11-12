@@ -534,7 +534,6 @@ export {
   buildReadGraph,
   markReadGraphDirty,
   refreshReadGraphRegistry,
-  readStoredReadGraphRow,
   removeReadGraph,
   repairReadGraph,
   retireReadGraph,
@@ -546,6 +545,7 @@ export {
 } from './read-graph/rebuild.js';
 export { startReadGraphs, type ReadGraphStartOptions, type ReadGraphStartResult } from './read-graph/startup.js';
 export { withReadGraphBackgroundSlot } from './read-graph/background-slot.js';
+export { readStoredReadGraphRow } from './read-graph/stored-states.js';
 export {
   applyReadGraphModes,
   applyViewSemantics,

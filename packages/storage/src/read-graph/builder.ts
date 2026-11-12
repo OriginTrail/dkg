@@ -23,7 +23,7 @@ import { AsyncResource } from 'node:async_hooks';
 import { CoalescingRecurringTask, compareCodePoint, parseReadGraphIri, readGraphIri, type ReadGraphKey } from '@origintrail-official/dkg-core';
 import { withDefaultStoreWorkPriority } from '../store-priority-scheduler.js';
 import type { TripleStore } from '../triple-store.js';
-import { forgetReadGraphDropRequest, readGraphDropRequests } from './drop-requests.js';
+import { forgetReadGraphBuildRequest, forgetReadGraphDropRequest, readGraphBuildRequests, readGraphDropRequests } from './drop-requests.js';
 import { readGraphRuntimeOf } from './read-graph-store.js';
 import { buildReadGraph, refreshReadGraphRegistry, removeReadGraph, type ReadGraphBatching, type ReadGraphJobResult } from './rebuild.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
@@ -167,6 +167,15 @@ export class ReadGraphBuilder {
       const key = parseReadGraphIri(row.readGraph);
       if (key && servingReadGraphGeneration(row, versions) === undefined) jobs.set(row.readGraph, key);
     }
+    // Read graphs a switch on could not take into service, which the node may not list among those it wants.
+    for (const readGraph of readGraphBuildRequests(runtime)) {
+      const key = parseReadGraphIri(readGraph);
+      if (key === undefined || off(key) || servingReadGraphGeneration(runtime.mirror.get(readGraph), versions) !== undefined) {
+        forgetReadGraphBuildRequest(runtime, readGraph);
+      } else {
+        jobs.set(readGraph, key);
+      }
+    }
     for (const [readGraph, key] of jobs) if (off(key)) jobs.delete(readGraph);
     // A retry is kept only for a read graph that is still to build or to remove.
     const removable = new Set(this.#removals(runtime, off));
@@ -185,6 +194,10 @@ export class ReadGraphBuilder {
       const relevant = () => !off(key);
       try {
         const result = await this.#run(readGraph, relevant, signal, 'built', () => buildReadGraph({ ...context, progress, relevant }, key));
+        // Built, current, or switched off: a build asked for is no longer. One lost or failed while still on is tried again.
+        if (result === 'skipped' || (typeof result === 'object' && (result.outcome !== 'lost' || !relevant()))) {
+          forgetReadGraphBuildRequest(runtime, readGraph);
+        }
         if (typeof result === 'object' && result.outcome === 'done') await this.#report(result, signal);
       } finally {
         this.#building = undefined;

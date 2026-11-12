@@ -45,7 +45,7 @@ import { clearUnstoredReadGraphMarks, readGraphMarksAtStart, unstoredReadGraphMa
 import { syncReadGraphRuntimeWithRecovery } from './recovery.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
 import { readGraphLayerOf, type ReadGraphStore } from './read-graph-store.js';
-import { readStoredReadGraphRow } from './rebuild.js';
+import { readStoredReadGraphRow, readStoredReadGraphStates } from './stored-states.js';
 import { keepsAnyReadGraph, readGraphModeOf } from './settings.js';
 import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry, type ReadGraphRegistryFact } from './registry-recognition.js';
 import {
@@ -66,7 +66,6 @@ import {
   readGraphStateMarkDirty,
   readGraphStateMarkDirtyAtStart,
   readGraphStateReset,
-  readStoredReadGraphStates,
   type ReadGraphStateRow,
   type ReadGraphVersions,
 } from './state.js';

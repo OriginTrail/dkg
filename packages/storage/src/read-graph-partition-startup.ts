@@ -8,9 +8,9 @@ import {
   READ_GRAPH_STATE_PREDICATES,
   newReadGraphGeneration,
   readGraphStateCompareAndSet,
-  readStoredReadGraphStates,
   type ReadGraphStateRow,
 } from './read-graph/state.js';
+import { readStoredReadGraphStates } from './read-graph/stored-states.js';
 import type { UpdateOptions, TripleStore } from './triple-store.js';
 
 /** Rows per mark operation: on Blazegraph one operation costs about as much for one row as for a thousand. */
