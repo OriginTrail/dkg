@@ -698,13 +698,13 @@ export class DkgLocalLlmRuntime {
         const finishFromEvidence = await contextRecovery.recover(
           error, messages, currentSystemContext, sessionEvidence.length > 0, routedTools.length > 0,
         );
+        // Without history and before any tool result, the model may ask for an identifier it lacks.
+        requireTool = requireTool && !finishFromEvidence && sessionEvidence.length > 0;
         if (finishFromEvidence) {
           finalOnly = true;
-          requireTool = false;
           pinnedToolName = undefined;
         }
-        // At most two explicit pre-inference rejections can reach here. They
-        // do not spend an orchestration round or repeat any completed MCP call.
+        // At most two explicit pre-inference rejections reach here; they spend no round and repeat no MCP call.
         round--;
         continue;
       }

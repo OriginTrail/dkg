@@ -101,7 +101,20 @@ export function legacyContextGraphQueryCatalogGraphUri(contextGraphId: string): 
   return `did:dkg:context-graph:${contextGraphId}/meta/query-catalog`;
 }
 
-export function buildContextGraphQueryCatalogSelect(graph: string = '?g', catalogIri?: string): string {
+/**
+ * The catalog IRIs a slug filter matches. A writer passes a slug as it is and
+ * the IRI percent-encodes it, while a read returns the slug as the IRI stores
+ * it, already encoded. Both forms select the catalog. The given text is used
+ * as it is only when it is a valid IRI segment, so it cannot change the query.
+ */
+export function queryCatalogFilterIris(contextGraphId: string, catalogSlug: string): string[] {
+  const encoded = queryCatalogProfileUri(contextGraphId, 'catalog', catalogSlug);
+  if (!/^(?:[A-Za-z0-9._~!$&'()*+,;=:@-]|%[0-9A-Fa-f]{2})+$/.test(catalogSlug)) return [encoded];
+  const asStored = `${queryCatalogProfileUri(contextGraphId, 'catalog', '')}${catalogSlug}`;
+  return asStored === encoded ? [encoded] : [encoded, asStored];
+}
+
+export function buildContextGraphQueryCatalogSelect(graph: string = '?g', catalogIris?: readonly string[]): string {
   return `PREFIX prof: <${PROFILE_NS}>
 PREFIX schema: <http://schema.org/>
 SELECT ?q ?scopeGraph ?subGraph ?catalog ?name ?description ?sparql ?resultColumn ?queryParameters ?executionView ?view ?rank ?catalogScopeGraph ?catalogSubGraph ?catalogName ?catalogDescription ?catalogRank
@@ -112,7 +125,7 @@ WHERE {
     OPTIONAL { ?q prof:scopeGraph ?scopeGraph }
     OPTIONAL { ?q prof:forSubGraph ?subGraph }
     FILTER(BOUND(?scopeGraph) || BOUND(?subGraph))
-    ${catalogIri ? `VALUES ?catalog { <${catalogIri}> }\n    ?q prof:inCatalog ?catalog .` : 'OPTIONAL { ?q prof:inCatalog ?catalog }'}
+    ${catalogIris?.length ? `VALUES ?catalog { ${catalogIris.map((iri) => `<${iri}>`).join(' ')} }\n    ?q prof:inCatalog ?catalog .` : 'OPTIONAL { ?q prof:inCatalog ?catalog }'}
     OPTIONAL { ?q prof:displayName ?name }
     OPTIONAL { ?q schema:description ?description }
     OPTIONAL { ?q prof:resultColumn ?resultColumn }
@@ -155,8 +168,8 @@ export async function readContextGraphQueryCatalogBindings(
   contextGraphId: string,
   options: QueryCatalogReadOptions = {},
 ): Promise<Array<Record<string, unknown>>> {
-  const catalogIri = options.catalogSlug === undefined ? undefined : queryCatalogProfileUri(contextGraphId, 'catalog', options.catalogSlug);
-  const query = buildContextGraphQueryCatalogSelect('?g', catalogIri);
+  const catalogIris = options.catalogSlug === undefined ? undefined : queryCatalogFilterIris(contextGraphId, options.catalogSlug);
+  const query = buildContextGraphQueryCatalogSelect('?g', catalogIris);
   const baseOptions = {
     contextGraphId,
     subGraphName: QUERY_CATALOG_META_SUBGRAPH,
@@ -181,7 +194,7 @@ export async function readContextGraphQueryCatalogBindings(
   const legacyRead = options.includeLegacyDirectGraph === false
     ? Promise.resolve([] as Array<Record<string, unknown>>)
     : agent.store.query(
-      buildContextGraphQueryCatalogSelect(`<${legacyContextGraphQueryCatalogGraphUri(contextGraphId)}>`, catalogIri),
+      buildContextGraphQueryCatalogSelect(`<${legacyContextGraphQueryCatalogGraphUri(contextGraphId)}>`, catalogIris),
       {
         signal: options.signal,
         priority: options.priority,
