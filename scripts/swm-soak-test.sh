@@ -54,6 +54,13 @@
 # as INDETERMINATE so the operator can investigate rather than
 # silently bake a "missing" peer into the pass/fail metric.
 #
+# A write the daemon accepts as a retryable partial counts as
+# accepted once its share job succeeds, so a peer with such writes
+# waits up to SWM_RECOVERY_WAIT_S for those jobs before it publishes
+# its tombstone. Its tombstone can therefore arrive after another
+# peer's settle window, and a receiver whose final snapshot lacks a
+# tombstone waits up to SWM_RECOVERY_WAIT_S for it before the tally.
+#
 # Expected setup (SETUP STEPS)
 # ----------------------------
 # 1. One operator creates each CG and shares the cgId out-of-band:
@@ -106,6 +113,12 @@
 #   SWM_TOTAL_CYCLES number of write cycles          (default: 1440)
 #   SWM_SETTLE_S     time for late inbound delivery after writes
 #                    (default: 300 seconds)
+#   SWM_RECOVERY_WAIT_S
+#                    how long to wait for the share jobs of writes the
+#                    daemon accepted as retryable partials before the
+#                    tombstone, and for a tombstone still missing after
+#                    the settle window (default: 300 seconds). Use the
+#                    same value on every peer; 0 waits for neither.
 #   PEERS_EXPECTED   comma-separated peer tags (other ops) for
 #                    per-peer delivery breakdown in summary. When
 #                    set, the script requires an explicit
@@ -163,6 +176,7 @@ for kv in "$@"; do
   esac
 done
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SWM_CG_CURATED="${SWM_CG_CURATED:-}"
 SWM_CG_PUBLIC="${SWM_CG_PUBLIC:-}"
 SWM_SUBGRAPH_NAME="${SWM_SUBGRAPH_NAME:-}"
@@ -171,6 +185,11 @@ SWM_TOTAL_CYCLES="${SWM_TOTAL_CYCLES:-1440}"
 SWM_SETTLE_S="${SWM_SETTLE_S:-300}"
 if ! grep -Eq '^[0-9]+$' <<<"$SWM_SETTLE_S"; then
   echo "ERROR: SWM_SETTLE_S must be a non-negative integer" >&2
+  exit 64
+fi
+SWM_RECOVERY_WAIT_S="${SWM_RECOVERY_WAIT_S:-300}"
+if ! grep -Eq '^[0-9]+$' <<<"$SWM_RECOVERY_WAIT_S"; then
+  echo "ERROR: SWM_RECOVERY_WAIT_S must be a non-negative integer" >&2
   exit 64
 fi
 # Codex PR #572 R7 (round 3): SENDER_TAG previously defaulted to
@@ -402,10 +421,50 @@ print(json.dumps({
 import json, sys
 try:
   d = json.loads(sys.stdin.read())
-  print('ok' if d.get('swmShared') or d.get('status') in ('swm-shared','vm-confirmed') else 'fail')
+  if d.get('swmShared') or d.get('status') in ('swm-shared','vm-confirmed'): print('ok')
+  elif d.get('recoveryStatusUrl'): print('share job ' + str(d.get('recoveryJobId')) + ' pending')
+  else: print('fail')
 except: print('fail')
 " 2>/dev/null)
   log "  write cg=$cgId seq=$seq → $ok"
+}
+
+# A write the daemon accepts but cannot share at once (a promote prerequisite
+# is briefly unavailable) comes back as a retryable partial with a share job
+# (`recoveryJobId`, `recoveryStatusUrl`), and the daemon finishes the share in
+# the background. Such a write counts as accepted once its job has succeeded:
+# counting it as rejected while the share still lands made the self tally read
+# 10/9 and fail. This polls each such job until it settles (succeeded or
+# failed) or $1 seconds pass, with every status request inside that budget,
+# and records the jobs in share-recoveries.jsonl (see
+# scripts/lib/swm-soak-accepted-writes.mjs).
+resolve_share_recoveries() {
+  local line
+  SWM_RECOVERY_API="$API" SWM_RECOVERY_AUTH="$AUTH" \
+    node "$SCRIPT_DIR/lib/swm-soak-accepted-writes.mjs" resolve "$LOG_DIR" "$1" \
+    | while IFS= read -r line; do log "  $line"; done
+}
+
+# The accepted-write count per CG, computed once into accepted-counts.json
+# ({cgId: count}): the writes shared at once plus those whose share job
+# succeeded. The tombstone, the summary and the self tally all read this
+# file, so they count the same writes.
+record_accepted_counts() {
+  node "$SCRIPT_DIR/lib/swm-soak-accepted-writes.mjs" count "$LOG_DIR"
+}
+
+# One CG's count from accepted-counts.json, or the total over every CG when
+# no CG is given.
+accepted_writes() {
+  python3 -c '
+import json, sys
+try:
+  with open(sys.argv[1]) as f:
+    counts = json.load(f)
+except (OSError, ValueError):
+  counts = {}
+print(counts.get(sys.argv[2], 0) if len(sys.argv) > 2 else sum(counts.values()))
+' "$LOG_DIR/accepted-counts.json" "$@"
 }
 
 validate_query_response() {
@@ -617,28 +676,12 @@ emit_writes_accepted_summary() {
   # writesAccepted=count value into every CG's tombstone. The
   # receiver then divided per-CG observations by the aggregate
   # cross-CG count, producing per-CG percentages of ~100/N% even
-  # under perfect delivery.
+  # under perfect delivery. The per-CG count comes from
+  # accepted-counts.json (see `record_accepted_counts`).
   local cgId=$1 ts subject writes_accepted body resp ok
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   subject="urn:swm-soak-summary:${SENDER_TAG}:${SOAK_COHORT_ID}"
-  writes_accepted=$(python3 -c "
-import json, sys
-n = 0
-try:
-  with open('$LOG_DIR/writes.jsonl') as f:
-    for line in f:
-      try:
-        r = json.loads(line)
-      except Exception:
-        continue
-      if r.get('cgId') != '$cgId': continue
-      resp = r.get('resp')
-      if isinstance(resp, dict) and (resp.get('swmShared') or resp.get('status') in ('swm-shared', 'vm-confirmed')):
-        n += 1
-except FileNotFoundError:
-  pass
-print(n)
-" 2>/dev/null)
+  writes_accepted=$(accepted_writes "$cgId")
   body=$(python3 -c "
 import json
 print(json.dumps({
@@ -696,8 +739,9 @@ snapshot_writes_accepted_summaries() {
   # Query the scoped SWM view for writes-accepted summary tombstones
   # from EVERY peer in the cohort (including self). Receivers
   # consume the resulting jsonl to populate the per-peer
-  # denominator in the final tally.
-  local cgId=$1 ts
+  # denominator in the final tally. $2 caps the query in seconds
+  # (default 30).
+  local cgId=$1 max_time=${2:-30} ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   local sparql
   sparql=$(cat <<SPARQL
@@ -710,7 +754,7 @@ SPARQL
 )
   local body resp
   body=$(python3 -c "import json; print(json.dumps({'sparql': '''$sparql''', 'contextGraphId': '$cgId', 'view': 'shared-working-memory', **({'subGraphName': '$SWM_SUBGRAPH_NAME'} if '$SWM_SUBGRAPH_NAME' else {})}))")
-  resp=$(curl -s --max-time 30 -X POST "$API/api/query" \
+  resp=$(curl -s --max-time "$max_time" -X POST "$API/api/query" \
     -H "Authorization: Bearer $AUTH" \
     -H "Content-Type: application/json" \
     -d "$body")
@@ -718,6 +762,63 @@ SPARQL
     "$cgId" "$ts" "${resp:-{\"error\":\"empty response\"\}}" \
     >> "$LOG_DIR/writes-accepted-summaries-observed.jsonl"
   validate_query_response "$resp" "writes-accepted summaries cg=$cgId" || return 1
+}
+
+# The peers the tally would report as INDETERMINATE because their
+# writes-accepted tombstone has not been observed yet, as "<tag> in <cgId>,
+# ...", or nothing. The tally itself decides (scripts/lib/swm-soak-tally.py).
+missing_tombstones() {
+  python3 "$SCRIPT_DIR/lib/swm-soak-tally.py" missing-tombstones \
+    "$LOG_DIR" "$SENDER_TAG" "$PEERS_EXPECTED" "$ALL_CGS_CSV"
+}
+
+# A peer with writes accepted as retryable partials publishes its tombstone
+# only once their share jobs settle, up to SWM_RECOVERY_WAIT_S after its last
+# cycle, but every peer takes its final snapshot one settle window after its
+# own tombstone. So this peer can reach its final snapshot before such a
+# peer's tombstone arrives, and would report that peer as INDETERMINATE. When
+# a tombstone the tally needs is missing, this polls for it for up to $1
+# seconds and then takes the final inbox snapshot again, so the writes that
+# peer shared late are counted too (the tally merges every final snapshot).
+# It polls while any of the budget is left: no query starts once it is spent,
+# and each query may only take what is left of it. When every tombstone is
+# in, this does nothing.
+await_late_tombstones() {
+  local budget_s=$1 deadline_s now_s pause_s missing cg
+  [ "$budget_s" -gt 0 ] || return 0
+  missing=$(missing_tombstones)
+  [ -n "$missing" ] || return 0
+  log "Waiting up to ${budget_s}s for writes-accepted tombstones not observed yet: $missing"
+  # The shell clock counts whole seconds. The first round checks the same
+  # reading the deadline comes from, so even a 1 s budget makes a query.
+  now_s=$(date +%s)
+  deadline_s=$(( now_s + budget_s ))
+  while :; do
+    for cg in "${ALL_CGS[@]}"; do
+      [ "$now_s" -lt "$deadline_s" ] || break
+      # A failed query is simply tried again at the next round.
+      snapshot_writes_accepted_summaries "$cg" "$(( deadline_s - now_s ))"
+      now_s=$(date +%s)
+    done
+    missing=$(missing_tombstones)
+    now_s=$(date +%s)
+    [ -n "$missing" ] || break
+    [ "$now_s" -lt "$deadline_s" ] || break
+    # Pause before the next round for up to 10 s, but never into the
+    # budget's last second: there the rounds follow each other until the
+    # deadline, so a tombstone that arrives then is still seen.
+    pause_s=$(( deadline_s - now_s - 1 ))
+    if [ "$pause_s" -gt 0 ]; then
+      sleep $(( pause_s < 10 ? pause_s : 10 ))
+      now_s=$(date +%s)
+    fi
+  done
+  if [ -n "$missing" ]; then
+    log "  still not observed after ${budget_s}s: $missing"
+  else
+    log "  every writes-accepted tombstone observed; taking the final inbox snapshot again"
+  fi
+  for cg in "${ALL_CGS[@]}"; do snapshot_swm_inbox "final" "$cg" || return 1; done
 }
 
 split_cgs() {
@@ -799,6 +900,13 @@ for seq in $(seq 1 "$SWM_TOTAL_CYCLES"); do
 done
 
 log ""
+# Settle the share jobs of writes accepted as retryable partials, then
+# count the accepted writes once for the tombstone, the summary and the
+# self tally (see `resolve_share_recoveries` and `record_accepted_counts`).
+resolve_share_recoveries "$SWM_RECOVERY_WAIT_S" \
+  || log "WARN: could not settle the share jobs; writes accepted as retryable partials count as rejected"
+record_accepted_counts \
+  || log "WARN: could not write $LOG_DIR/accepted-counts.json; the tombstone and the summary report 0 accepted writes and the self tally is INDETERMINATE"
 # Codex PR #572 R12 (round 4): emit per-CG writes-accepted
 # tombstone BEFORE settle so receivers have time to observe it
 # and use it as the per-peer denominator in the final tally.
@@ -810,6 +918,7 @@ log "All cycles done. Waiting ${SWM_SETTLE_S}s for any late inbound to settle (g
 sleep "$SWM_SETTLE_S"
 for cg in "${ALL_CGS[@]}"; do snapshot_swm_inbox "final" "$cg" || exit 1; done
 for cg in "${ALL_CGS[@]}"; do snapshot_writes_accepted_summaries "$cg" || exit 1; done
+await_late_tombstones "$SWM_RECOVERY_WAIT_S" || exit 1
 snapshot_slo "final"
 
 log ""
@@ -818,235 +927,15 @@ log ""
 log "Summary:"
 writes_total=$(wc -l < "$LOG_DIR/writes.jsonl" | tr -d ' ')
 log "  total writes attempted: $writes_total"
-writes_ok=$(node -e '
-const fs = require("fs");
-let count = 0;
-try {
-  for (const line of fs.readFileSync(process.argv[1], "utf8").split(/\n/)) {
-    if (!line.trim()) continue;
-    try {
-      const resp = JSON.parse(line).resp;
-      if (resp && (resp.swmShared || resp.status === "swm-shared" || resp.status === "vm-confirmed")) count += 1;
-    } catch {}
-  }
-} catch {}
-console.log(count);
-' "$LOG_DIR/writes.jsonl")
+writes_ok=$(accepted_writes)
 log "  writes accepted by local daemon: $writes_ok"
 log ""
 log "Per-CG final inbox (delivery validation — operators cross-reference):"
 log ""
 ALL_CGS_CSV=$(IFS=','; printf '%s' "${ALL_CGS[*]}")
-# Heredoc delimiter is QUOTED so bash performs no expansion on the body.
-# That is critical because the Python script's comments contain backtick-
-# quoted code references like `m = re.match(...)`; with an unquoted
-# delimiter bash would attempt to execute those as command substitutions
-# (producing a stream of "command not found" / "syntax error" messages
-# that swamped the soak's actual summary output). All bash-side values
-# travel into the Python script through environment variables instead.
-export SWM_SUMMARY_LOG_DIR="$LOG_DIR"
-export SWM_SUMMARY_SENDER_TAG="$SENDER_TAG"
-export SWM_SUMMARY_PEERS_EXPECTED="$PEERS_EXPECTED"
-export SWM_SUMMARY_ALL_CGS_CSV="$ALL_CGS_CSV"
-export SWM_SUMMARY_TOTAL_CYCLES="$SWM_TOTAL_CYCLES"
-python3 <<'PYTHON' | tee -a "$LOG_DIR/main.log"
-import json, os, re, sys
-log_dir = os.environ["SWM_SUMMARY_LOG_DIR"]
-self_tag = os.environ["SWM_SUMMARY_SENDER_TAG"]
-peers_expected = [p.strip() for p in os.environ.get("SWM_SUMMARY_PEERS_EXPECTED", "").split(',') if p.strip()]
-# Codex PR #572 R14 (round 5): seed the report set from the
-# configured CG list so a context graph that observed ZERO final
-# rows (total failure: nothing — even our own writes — landed in
-# its local SWM) is still surfaced in the breakdown as
-# INDETERMINATE rather than being silently omitted because it
-# never appeared in `by_cg_final`.
-all_cgs_configured = [c.strip() for c in os.environ.get("SWM_SUMMARY_ALL_CGS_CSV", "").split(',') if c.strip()]
-cycles = int(os.environ.get("SWM_SUMMARY_TOTAL_CYCLES", "0") or "0")
-
-# Codex PR #572 R12 (round 4): build per-(cg, sender) denominator
-# table from the writes-accepted summary tombstones each peer
-# emits before the settle window. denom_by_cg[cg][tag] = peer's
-# self-reported accepted-write count. Pre-fix the denominator was
-# always `cycles`, so any sender with local rejections (e.g. a
-# crash mid-run or a daemon backpressure event that returned no
-# shareOperationId) would be scored against an unreachable target
-# even with 100% transport delivery, conflating sender-side
-# rejection with network loss. With the tombstone the ship gate
-# now strictly measures transport reliability.
-denom_by_cg = {}
-try:
-  with open(os.path.join(log_dir, 'writes-accepted-summaries-observed.jsonl')) as f:
-    for line in f:
-      rec = json.loads(line)
-      cg = rec.get('cgId')
-      if not cg: continue
-      data = rec.get('data') or {}
-      rows = []
-      if isinstance(data, dict):
-        inner = data.get('result')
-        if isinstance(inner, dict) and isinstance(inner.get('bindings'), list):
-          rows = inner['bindings']
-        elif isinstance(data.get('bindings'), list):
-          rows = data['bindings']
-      bucket = denom_by_cg.setdefault(cg, {})
-      for r in rows:
-        tag_v = r.get('tag', '')
-        if isinstance(tag_v, dict): tag_v = tag_v.get('value', '')
-        wa_v = r.get('writesAccepted', '')
-        if isinstance(wa_v, dict): wa_v = wa_v.get('value', '')
-        # /api/query normalizes RDF literals as N-Triples strings ("tag",
-        # "10"); direct SPARQL adapters may return the unquoted values.
-        if isinstance(tag_v, str): tag_v = tag_v.strip('"')
-        if isinstance(wa_v, str): wa_v = wa_v.strip('"')
-        if not tag_v: continue
-        try: wa_int = int(wa_v)
-        except (TypeError, ValueError): continue
-        prev = bucket.get(tag_v)
-        if prev is None or wa_int > prev:
-          bucket[tag_v] = wa_int
-except FileNotFoundError:
-  pass
-
-by_cg_final = {}
-try:
-  with open(os.path.join(log_dir, 'swm-inbox.jsonl')) as f:
-    for line in f:
-      rec = json.loads(line)
-      if rec.get('label') != 'final': continue
-      cg = rec['cgId']
-      # Codex PR #572 R1: /api/query wraps results as
-      # {result: {bindings: [...]}}. Pre-fix this parser read the
-      # top-level `data.bindings` (always absent), so the final
-      # summary saw zero rows on every record. Same wrap-unwrap
-      # as snapshot_swm_inbox above.
-      data = rec.get('data') or {}
-      rows = []
-      if isinstance(data, dict):
-        inner = data.get('result')
-        if isinstance(inner, dict) and isinstance(inner.get('bindings'), list):
-          rows = inner['bindings']
-        elif isinstance(data.get('bindings'), list):
-          rows = data['bindings']
-      # Codex PR #572 R2: the regex match + tag/seq assignment +
-      # `by_cg_final[cg] = by_tag` were all misindented out of
-      # their respective loops pre-fix — `m = re.match(...)` ran
-      # once per record (on whatever `s` happened to be at the
-      # end of the per-binding loop), `continue` jumped past the
-      # remaining records of the file (not the remaining
-      # bindings), and `by_cg_final[cg] = by_tag` ran exactly
-      # once after the whole file was read, keeping only the LAST
-      # final record. Net result: multi-row / multi-CG runs
-      # silently undercounted delivery to zero on all but one CG.
-      # Now: per-binding statements stay inside `for r in rows`,
-      # per-record assignment stays inside `for line in f`, and
-      # we ACCUMULATE into `by_cg_final[cg]` (merging share-op
-      # sequence sets per tag) so if the same `final` cgId
-      # appears more than once across the jsonl no rows are lost.
-      bucket = by_cg_final.setdefault(cg, {})
-      for r in rows:
-        s = r.get('s', '')
-        if isinstance(s, dict): s = s.get('value', '')
-        s = s.strip('<>')
-        m = re.match(r'^urn:swm-soak:([^:]+):(\d+)$', s)
-        if not m: continue
-        tag, seq = m.group(1), m.group(2)
-        bucket.setdefault(tag, set()).add(seq)
-except FileNotFoundError:
-  print('  (no swm-inbox.jsonl)')
-
-# Codex PR #572 R13 (round 5): per-CG self denominator. Pre-fix
-# this counted the entire writes.jsonl regardless of cgId, so on
-# multi-CG runs every CG's "self" row showed denom=cycles*cgCount
-# while the numerator only contained that CG's observations,
-# producing per-CG percentages of ~100/cgCount% even under
-# perfect delivery. Same scope rule is now applied to peer
-# tombstones via the writes-accepted-summary subject — each
-# tombstone is published per CG with that CG's accepted count.
-self_writes_accepted_by_cg = {}
-try:
-  with open(os.path.join(log_dir, 'writes.jsonl')) as f:
-    for line in f:
-      try:
-        rec = json.loads(line)
-      except Exception:
-        continue
-      cg = rec.get('cgId')
-      resp = rec.get('resp')
-      if not cg or not isinstance(resp, dict): continue
-      if resp.get('swmShared') or resp.get('status') in ('swm-shared', 'vm-confirmed'):
-        self_writes_accepted_by_cg[cg] = self_writes_accepted_by_cg.get(cg, 0) + 1
-except FileNotFoundError:
-  pass
-have_writes_jsonl = bool(self_writes_accepted_by_cg) or os.path.exists(os.path.join(log_dir, 'writes.jsonl'))
-
-def denominator_for(cg, tag):
-  # Self: use locally-counted accepted writes for this CG
-  # (ground truth, no transport dependence).
-  if tag == self_tag:
-    if not have_writes_jsonl:
-      return ('self', None, False)
-    return ('self', self_writes_accepted_by_cg.get(cg, 0), True)
-  # Peer: use the writes-accepted tombstone if observed.
-  wa = (denom_by_cg.get(cg) or {}).get(tag)
-  if wa is not None:
-    return ('peer-tombstone', wa, True)
-  # No tombstone observed for this peer in this CG: indeterminate.
-  return ('missing', None, False)
-
-# Codex PR #572 R14 (round 5): iterate over CONFIGURED CGs so a
-# total-failure CG (no inbox rows at all) still appears in the
-# report. Union with by_cg_final keys catches unexpected CGs that
-# somehow show up in the inbox without being configured (defense
-# in depth).
-report_cgs = sorted(set(all_cgs_configured) | set(by_cg_final.keys()))
-ship_ok = bool(report_cgs)
-for cg in report_cgs:
-  by_tag = by_cg_final.get(cg, {})
-  if cg not in by_cg_final:
-    print(f'  cg={cg}: [no `final` SWM-inbox rows observed for this CG — INDETERMINATE; total transport failure or final SPARQL errored]')
-    ship_ok = False
-  else:
-    print(f'  cg={cg}:')
-  src, denom, ok = denominator_for(cg, self_tag)
-  got = len(by_tag.get(self_tag, set()))
-  if not ok:
-    print(f'    self ({self_tag}): {got} observed (no local writes.jsonl — INDETERMINATE)')
-    ship_ok = False
-  elif denom == 0:
-    print(f'    self ({self_tag}): {got}/0 — no accepted writes recorded locally for this CG (script wrote nothing here)')
-    ship_ok = False
-  else:
-    pct = (got / denom * 100.0) if denom else 0.0
-    sanity = '' if got == denom else f'  [WARN: observed {got} self-shares but accepted {denom} locally]'
-    print(f'    self ({self_tag}): {got}/{denom} = {pct:.2f}% (denom=local writes.jsonl){sanity}')
-    if got != denom:
-      ship_ok = False
-
-  others_seen = sorted(t for t in by_tag if t != self_tag)
-  reportable = peers_expected if peers_expected else others_seen
-  for peer in reportable:
-    got = len(by_tag.get(peer, set()))
-    src, denom, ok = denominator_for(cg, peer)
-    if not ok:
-      print(f'    from {peer}: {got} observed (no writes-accepted tombstone in cg — INDETERMINATE; review writes-accepted-summaries-observed.jsonl)')
-      ship_ok = False
-      continue
-    if denom == 0:
-      print(f'    from {peer}: {got}/0 — peer reported zero accepted writes for this CG (peer ran but did not write here)')
-      ship_ok = False
-      continue
-    pct = (got / denom * 100.0) if denom else 0.0
-    ship_gate = '' if pct >= 99.9 else '  [BELOW 99.9% — review postmortem]'
-    print(f'    from {peer}: {got}/{denom} = {pct:.2f}% (denom=peer tombstone){ship_gate}')
-    if pct < 99.9:
-      ship_ok = False
-  if peers_expected:
-    unexpected = [t for t in others_seen if t not in peers_expected]
-    if unexpected:
-      print(f'    unexpected senders observed: {unexpected}')
-print(f'  VERDICT: {"PASS" if ship_ok else "FAIL"}')
-sys.exit(0 if ship_ok else 1)
-PYTHON
+python3 "$SCRIPT_DIR/lib/swm-soak-tally.py" report \
+  "$LOG_DIR" "$SENDER_TAG" "$PEERS_EXPECTED" "$ALL_CGS_CSV" "$SWM_TOTAL_CYCLES" \
+  | tee -a "$LOG_DIR/main.log"
 summary_rc=$?
 if [ "$summary_rc" -ne 0 ]; then
   log "SWM delivery gate failed (summary exit=$summary_rc)"
@@ -1055,6 +944,8 @@ fi
 log ""
 log "Detailed logs:"
 log "  writes:                          $LOG_DIR/writes.jsonl"
+log "  share-recoveries:                $LOG_DIR/share-recoveries.jsonl  (share jobs of writes accepted as retryable partials)"
+log "  accepted-counts:                 $LOG_DIR/accepted-counts.json    (accepted writes per CG: tombstone, summary and self tally)"
 log "  swm-inbox:                       $LOG_DIR/swm-inbox.jsonl  (per-cycle SPARQL snapshots of each CG's local SWM)"
 log "  slo:                             $LOG_DIR/slo.jsonl        (per-cycle /api/slo: protocols + gossip + swm sections)"
 log "  writes-accepted-emitted:         $LOG_DIR/writes-accepted-summaries.jsonl          (this peer's published accepted-write tombstones)"
