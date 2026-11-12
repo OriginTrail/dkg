@@ -89,12 +89,17 @@
 #
 # It writes report.md and results.tsv to READ_GRAPHS_RUN_RESULTS (default
 # $DEVNET_DIR/read-graphs-build-run/<UTC timestamp>; no spaces). It saves every
-# node's config.json before any phase runs. At the end, also after a failure or
-# an interruption, it switches the live context graph off through the settings
-# API on each node it switched (the API keeps a row per layer, so an `off` row
-# stays), puts back the config.json of each node it changed, restarts those
-# nodes in ascending order, and drops the read graphs that their own settings do
-# not keep, unless READ_GRAPHS_RUN_KEEP=1.
+# node's config.json, and with the settings API every node's settings, before
+# any phase runs. At the end, also after a failure or an interruption, unless
+# READ_GRAPHS_RUN_KEEP=1, it:
+#   - switches the live context graph off through the settings API on each node
+#     it switched;
+#   - puts back the config.json of each node it changed, restarts those nodes in
+#     ascending order, and drops the read graphs their own settings do not keep;
+#   - puts back the live context graph's own settings on each node it switched:
+#     its own modes and its own view-semantics default, or none. The API can't
+#     remove a layer's own setting, so a layer that had none gets the node's mode
+#     from before the run as its own, and the report's Notes name those layers.
 #
 # The node-wide setting (READ_GRAPHS_SETTING) is always written to config.json,
 # as node-wide policy stays there. Per-context-graph settings are switched
@@ -115,9 +120,10 @@
 #   DEVNET_DIR, API_PORT_BASE                  as for every devnet script
 #   READ_GRAPHS_SETTING                        JSON value of query.readGraphs (default "build")
 #   READ_GRAPHS_RUN_PHASES                     default "seed setup backfill measure live gate drills"
-#   READ_GRAPHS_SWITCH                         auto (default: the settings API when the daemon answers it, else
-#                                              config.json only and the live phase N/A), api (stop unless it
-#                                              answers: the bar for live settings), or config
+#   READ_GRAPHS_SWITCH                         auto (default: the settings API when the daemon answers it; on a
+#                                              build without it, a plain 404, config.json only and the live phase
+#                                              N/A; any other answer stops the run), api (stop unless it answers:
+#                                              the bar for live settings), or config
 #   READ_GRAPHS_LIVE_CG                        the context graph the live phase switches (default devnet-test)
 #   READ_GRAPHS_LIVE_LOAD_NODE                 the node of the live phase's switches under write load and its
 #                                              restart (default 1)
@@ -475,11 +481,16 @@ urlencode() { node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))
 #   rows <cg>               the context graph's stored modes as JSON with sorted keys, {} when it has none
 #   default <cg>            its effective view semantics
 #   refusal                 "HTTP <code> <code field>: <error>"
+#   error-code              the body's code field, "" when it has none
 #   effective-map           {"<cg>": {"WM": mode, "SWM": mode, "VM": mode}} for every context graph the answer lists,
 #                           with "__policyDisabled": true when the node's policy switches read graphs off
+#   restore-body <cg>       the PUT that sets the context graph's own settings as the answer lists them: each layer's own
+#                           mode, else the node's (the API can't remove a layer's own setting); its own default, else null
+#   inherited <cg>          the layers without an own mode, as "<layer>=<the node's mode>" separated by spaces
 settings_read() {
   node -e '
     const fs = require("fs");
+    const VIEWS = ["working-memory", "shared-working-memory", "verifiable-memory"];
     const [file, what, cg, layer] = process.argv.slice(1);
     const frame = fs.readFileSync(file, "utf8"); const at = frame.indexOf("\n");
     const code = (at === -1 ? frame : frame.slice(0, at)).trim();
@@ -494,6 +505,19 @@ settings_read() {
       case "rows": out(JSON.stringify(sorted(one(cg)?.layers))); break;
       case "default": out(one(cg)?.effective?.viewSemantics); break;
       case "refusal": out(`HTTP ${code}${body?.code ? ` ${body.code}` : ""}: ${body?.error ?? "no error text"}`); break;
+      case "error-code": out(body?.code); break;
+      case "restore-body": case "inherited": {
+        // A layer without an own mode has the node mode, which the answer gives as node.layers (and in effective).
+        const own = one(cg);
+        const nodeMode = (view) => body?.node?.layers?.[view] ?? own?.effective?.layers?.[view] ?? "off";
+        if (what === "inherited") {
+          out(VIEWS.filter((view) => own?.layers?.[view] === undefined).map((view) => `${view}=${nodeMode(view)}`).join(" "));
+          break;
+        }
+        const layers = Object.fromEntries(VIEWS.map((view) => [view, own?.layers?.[view] ?? nodeMode(view)]));
+        out(JSON.stringify({ contextGraphId: cg, layers, viewSemantics: own?.viewSemantics ?? null }));
+        break;
+      }
       case "effective-map": {
         const map = {};
         if (body?.policy?.enabled === false) map.__policyDisabled = true;
@@ -526,14 +550,27 @@ dkg_cli "${NODES%% *}" store read-graphs --help > /dev/null 2>&1 \
 case "$SWITCH" in auto|api|config) ;; *) early_exit "READ_GRAPHS_SWITCH must be auto, api or config: $SWITCH" ;; esac
 if [ "$SWITCH" != config ]; then
   api "${NODES%% *}" GET "$SETTINGS_PATH" > "$RESULTS/rows/settings-probe"
-  if [ "$(settings_read "$RESULTS/rows/settings-probe" code)" = 200 ]; then
+  settings_probe="$(settings_read "$RESULTS/rows/settings-probe" code)"
+  if [ "$settings_probe" = 200 ]; then
     SWITCH=api
   elif [ "$SWITCH" = api ]; then
     early_exit "READ_GRAPHS_SWITCH=api, but node${NODES%% *} answers the settings API with $(settings_read "$RESULTS/rows/settings-probe" refusal)"
-  else
-    note "node${NODES%% *} answers the settings API with $(settings_read "$RESULTS/rows/settings-probe" refusal), so modes are switched through config.json only and the live phase does not apply (READ_GRAPHS_SWITCH=api requires the API)"
+  elif [ "$settings_probe" = 404 ] && [ -z "$(settings_read "$RESULTS/rows/settings-probe" error-code)" ]; then
+    # Only the daemon's plain 404 for a route it doesn't have (no code field) means a build without the settings API.
+    note "node${NODES%% *} has no settings API (HTTP 404 for $SETTINGS_PATH), so modes are switched through config.json only and the live phase does not apply (READ_GRAPHS_SWITCH=api requires the API)"
     SWITCH=config
+  else
+    # A refusal, a server error or no answer is a settings API that doesn't work: the run stops, never a pass.
+    early_exit "node${NODES%% *}'s settings API answered neither its settings nor a plain 404 (a build without it), so the live settings can't be checked (READ_GRAPHS_SWITCH=config runs without them): $(settings_read "$RESULTS/rows/settings-probe" refusal)"
   fi
+fi
+# With the settings API, every node's settings before any phase runs: cleanup puts back the live context graph's own.
+if [ "$SWITCH" = api ]; then
+  for n in $NODES; do
+    api "$n" GET "$SETTINGS_PATH" > "$RESULTS/rows/settings-original.node$n"
+    [ "$(settings_read "$RESULTS/rows/settings-original.node$n" code)" = 200 ] \
+      || early_exit "node$n's settings could not be saved to be put back after the run: its settings API answered $(settings_read "$RESULTS/rows/settings-original.node$n" refusal)"
+  done
 fi
 # The build under test, as the first node reports it: "<version> <commit>".
 UNDER_TEST="$(node_commit "${NODES%% *}")"
@@ -634,16 +671,16 @@ cleanup() {
   local status=$?
   trap - EXIT
   trap '' INT TERM
-  local n changed w
+  local n changed w body inherited
   for w in $(cat "$RESULTS/gate/watchers" 2>/dev/null); do kill "$w" 2>/dev/null; done
   # A kill drill or a live phase interrupted mid-run leaves its writer: stop it and its requests before any node is restored.
   w="$(cat "$RESULTS/drill-kill.writer" 2>/dev/null)"
   [ -n "$w" ] && stop_writer "$w"
   w="$(cat "$RESULTS/live-load.writer" 2>/dev/null)"
   [ -n "$w" ] && { kill_tree "$w"; wait "$w" 2>/dev/null; rm -f "$RESULTS/live-load.writer"; }
-  # The live context graph off again, through the settings API, on each node the run switched it on.
+  # The live context graph off first, through the settings API, on each node the run switched it on, so the restarts
+  # below and the drop of what a node does not keep find none of its read graphs in use (its settings come back last).
   if [ -s "$RESULTS/rows/live-changed" ] && [ "$KEEP" != 1 ]; then
-    local body
     body="$(live_body off off off null)"
     for n in $(sort -nu "$RESULTS/rows/live-changed"); do
       node_up "$n" || { note "cleanup: node$n was down, so $LIVE_CG was not switched off there"; continue; }
@@ -659,6 +696,23 @@ cleanup() {
     for n in $changed; do
       if ! restart_node "$n"; then note "cleanup: node$n did not come back after the restart"; status=1; continue; fi
       drop_unkept "$n" || note "cleanup: dropping the read graphs node$n's setting does not keep failed (see cli.log)"
+    done
+  fi
+  # Then the live context graph's own settings as they were before the run, on each node the run switched it on.
+  if [ -s "$RESULTS/rows/live-changed" ] && [ "$KEEP" != 1 ]; then
+    for n in $(sort -nu "$RESULTS/rows/live-changed"); do
+      [ -s "$RESULTS/rows/settings-original.node$n" ] \
+        || { note "cleanup: node$n's settings from before the run were not saved, so $LIVE_CG stays Off there"; continue; }
+      node_up "$n" || { note "cleanup: node$n was down, so $LIVE_CG's settings were not put back there"; continue; }
+      body="$(settings_read "$RESULTS/rows/settings-original.node$n" restore-body "$LIVE_CG")"
+      api "$n" PUT "$SETTINGS_PATH" "$body" > "$RESULTS/rows/live.restore.node$n"
+      if [ "$(settings_read "$RESULTS/rows/live.restore.node$n" code)" != 200 ]; then
+        note "cleanup: putting back $LIVE_CG's settings on node$n was refused ($(settings_read "$RESULTS/rows/live.restore.node$n" refusal)), so it stays Off there"
+        continue
+      fi
+      inherited="$(settings_read "$RESULTS/rows/settings-original.node$n" inherited "$LIVE_CG")"
+      [ -z "$inherited" ] \
+        || note "cleanup: $LIVE_CG's settings on node$n are back as before the run; the API can't remove a layer's own setting, so the layers that had none hold the node's mode from before the run as their own: $inherited"
     done
   fi
   write_report
@@ -805,7 +859,7 @@ phase_measure() {
 
 # ── live: one context graph switched through the settings API ──────────────
 # rows/live-changed names the nodes whose settings for the live context graph the run changed (a file, as the calls
-# run in command substitutions); cleanup switches the context graph off on them again.
+# run in command substitutions); cleanup puts back the context graph's own settings there (rows/settings-original.*).
 RUN_SLUG="$(echo "$RUN_ID" | tr 'A-Z' 'a-z')"
 # live_body <wm> <swm> <vm> [view semantics]: a PUT body for the live context graph, with the layers' modes ("-" leaves
 # a layer out) and the view semantics ("merged", "per-asset", "null" to remove it, or "" to leave it out).
