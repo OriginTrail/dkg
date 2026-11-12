@@ -311,8 +311,9 @@ test('the soak waits for exactly the tombstones the tally would report as missin
 // tombstones it holds, plus those of `peers`: each peer's writes, and its
 // tombstone with its `late` writes from the `from`-th tombstone query on. With
 // `slowTombstones`, every tombstone query after the first `after` is answered
-// only `delayMs` later. `queries` records when each query arrived.
-async function soakDaemon(t, { partials = new Map(), jobStates = {}, peers = [], slowTombstones } = {}) {
+// only `delayMs` later. `queries` records when each query arrived, and
+// `onTombstoneQuery` hears the count of each tombstone query as it arrives.
+async function soakDaemon(t, { partials = new Map(), jobStates = {}, peers = [], slowTombstones, onTombstoneQuery } = {}) {
   const graphs = new Map();
   const graph = (cgId) => graphs.get(cgId) ?? graphs.set(cgId, new Map()).get(cgId);
   const jobs = new Map();
@@ -368,6 +369,7 @@ async function soakDaemon(t, { partials = new Map(), jobStates = {}, peers = [],
       const { sparql, contextGraphId: cgId } = JSON.parse(input);
       if (sparql.includes('urn:swm-soak:writesAccepted')) {
         daemon.tombstoneQueries += 1;
+        onTombstoneQuery?.(daemon.tombstoneQueries);
         daemon.queries.push({ kind: 'tombstones', cgId, at: Date.now() });
         const rows = [...daemon.tombstones.filter((entry) => entry.cgId === cgId), ...peerRows(true)];
         const answer = () => reply(200, { result: { bindings: rows.map(({ tag, writesAccepted }) => ({
@@ -394,11 +396,20 @@ async function soakDaemon(t, { partials = new Map(), jobStates = {}, peers = [],
 
 // Runs the soak script against `api` with a `sleep` that returns at once: the
 // daemon answers straight away, so the soak's pacing would only cost time.
+// With SOAK_TEST_CLOCK set, the soak's whole-second clock (`date +%s`) reads
+// that file instead, and every other `date` call is the real one. A soak that
+// never ends is stopped after a minute, so the test fails instead of hanging.
 async function runSoak(t, api, settings) {
   const home = tempDir(t, 'swm-soak-home-');
   const bin = path.join(home, 'bin');
   mkdirSync(bin);
   writeFileSync(path.join(bin, 'sleep'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  if (settings.SOAK_TEST_CLOCK) {
+    const date = ['/bin/date', '/usr/bin/date'].find((file) => existsSync(file));
+    writeFileSync(path.join(bin, 'date'),
+      `#!/bin/sh\nif [ "$#" -eq 1 ] && [ "$1" = "+%s" ]; then cat "$SOAK_TEST_CLOCK"; else exec ${date} "$@"; fi\n`,
+      { mode: 0o755 });
+  }
   const inherited = Object.fromEntries(Object.entries(process.env)
     .filter(([name]) => !/^(?:SWM_|SOAK_|DKG_|PEERS_EXPECTED$|SENDER_TAG$|AUTH$|API$)/.test(name)));
   const child = spawn(BASH, [SOAK], {
@@ -409,6 +420,7 @@ async function runSoak(t, api, settings) {
       ...settings,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 60_000,
   });
   const result = await collect(child);
   const logs = readdirSync(home).find((name) => name.startsWith('swm-soak-test-'));
@@ -448,6 +460,60 @@ test('a receiver waits for a tombstone a peer publishes late, then counts the wr
   assert.match(run.stdout, /Waiting up to 60s for writes-accepted tombstones not observed yet: LATE in cg-a/);
   assert.match(run.stdout, /from LATE: 2\/2 = 100\.00%/);
   assert.match(run.stdout, /self \(RECV\): 1\/1 = 100\.00%/);
+  assert.match(run.stdout, /VERDICT: PASS/);
+});
+
+test('a 1 s wait still polls for a missing tombstone, and the tally uses the count that tombstone carries', async (t) => {
+  // The peer's tombstone, and the write it shared late, are there from the
+  // first tombstone query after the final snapshot on.
+  const daemon = await soakDaemon(t, { peers: [{ tag: 'LATE', writes: 2, late: [2], from: 2 }] });
+  const run = await runSoak(t, daemon.api, {
+    SENDER_TAG: 'RECV', PEERS_EXPECTED: 'LATE', SOAK_COHORT_ID: 'cohort', SWM_CG_PUBLIC: 'cg-a',
+    SWM_TOTAL_CYCLES: '1', SWM_RECOVERY_WAIT_S: '1',
+  });
+  assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+  assert.deepEqual(daemon.unexpected, []);
+  assert.equal(daemon.tombstoneQueries, 2, 'the receiver queried the tombstones once while it waited');
+  assert.match(run.stdout, /Waiting up to 1s for writes-accepted tombstones not observed yet: LATE in cg-a\n/);
+  assert.match(run.stdout, /every writes-accepted tombstone observed/);
+  assert.match(run.stdout, /from LATE: 2\/2 = 100\.00% \(denom=peer tombstone\)\n/);
+  assert.match(run.stdout, /VERDICT: PASS/);
+});
+
+test('with no wait configured, a missing tombstone is not polled for and the peer stays indeterminate', async (t) => {
+  // The tombstone would be there for the next query, but none is made.
+  const daemon = await soakDaemon(t, { peers: [{ tag: 'LATE', writes: 2, late: [2], from: 2 }] });
+  const run = await runSoak(t, daemon.api, {
+    SENDER_TAG: 'RECV', PEERS_EXPECTED: 'LATE', SOAK_COHORT_ID: 'cohort', SWM_CG_PUBLIC: 'cg-a',
+    SWM_TOTAL_CYCLES: '1', SWM_RECOVERY_WAIT_S: '0',
+  });
+  assert.equal(run.status, 1, `${run.stdout}\n${run.stderr}`);
+  assert.equal(daemon.tombstoneQueries, 1, 'only the final snapshot asked for tombstones');
+  assert.doesNotMatch(run.stdout, /Waiting up to/);
+  assert.match(run.stdout, /from LATE: 1 observed \(no writes-accepted tombstone in cg — INDETERMINATE/);
+});
+
+test('the last second of a wait is polled until the deadline, so a tombstone seen on a later query still counts', async (t) => {
+  // The soak's clock stays in the budget's only second: the first poll after
+  // the final snapshot misses the tombstone, the next one sees it. Should the
+  // receiver keep polling anyway, the clock reaches the deadline after a few
+  // more queries.
+  const clock = path.join(tempDir(t, 'swm-soak-clock-'), 'now');
+  const second = Math.floor(Date.now() / 1000);
+  writeFileSync(clock, `${second}\n`);
+  const daemon = await soakDaemon(t, {
+    peers: [{ tag: 'LATE', writes: 2, late: [2], from: 3 }],
+    onTombstoneQuery: (count) => { if (count >= 6) writeFileSync(clock, `${second + 1}\n`); },
+  });
+  const run = await runSoak(t, daemon.api, {
+    SENDER_TAG: 'RECV', PEERS_EXPECTED: 'LATE', SOAK_COHORT_ID: 'cohort', SWM_CG_PUBLIC: 'cg-a',
+    SWM_TOTAL_CYCLES: '1', SWM_RECOVERY_WAIT_S: '1', SOAK_TEST_CLOCK: clock,
+  });
+  assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+  assert.deepEqual(daemon.unexpected, []);
+  assert.equal(daemon.tombstoneQueries, 3, 'the receiver polled twice within the last second');
+  assert.match(run.stdout, /every writes-accepted tombstone observed/);
+  assert.match(run.stdout, /from LATE: 2\/2 = 100\.00% \(denom=peer tombstone\)\n/);
   assert.match(run.stdout, /VERDICT: PASS/);
 });
 

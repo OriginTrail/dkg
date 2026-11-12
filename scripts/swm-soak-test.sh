@@ -780,29 +780,38 @@ missing_tombstones() {
 # a tombstone the tally needs is missing, this polls for it for up to $1
 # seconds and then takes the final inbox snapshot again, so the writes that
 # peer shared late are counted too (the tally merges every final snapshot).
-# The polling stays inside the budget: no query starts once it is spent, and
-# each query may only take what is left of it. When every tombstone is in,
-# this does nothing.
+# It polls while any of the budget is left: no query starts once it is spent,
+# and each query may only take what is left of it. When every tombstone is
+# in, this does nothing.
 await_late_tombstones() {
   local budget_s=$1 deadline_s now_s pause_s missing cg
   [ "$budget_s" -gt 0 ] || return 0
   missing=$(missing_tombstones)
   [ -n "$missing" ] || return 0
   log "Waiting up to ${budget_s}s for writes-accepted tombstones not observed yet: $missing"
-  deadline_s=$(( $(date +%s) + budget_s ))
-  while [ -n "$missing" ]; do
-    # Pause until the next poll, but no later than a second before the
-    # deadline, so that the last poll still has time to be answered.
-    pause_s=$(( deadline_s - $(date +%s) - 1 ))
-    [ "$pause_s" -gt 0 ] || break
-    sleep $(( pause_s < 10 ? pause_s : 10 ))
+  # The shell clock counts whole seconds. The first round checks the same
+  # reading the deadline comes from, so even a 1 s budget makes a query.
+  now_s=$(date +%s)
+  deadline_s=$(( now_s + budget_s ))
+  while :; do
     for cg in "${ALL_CGS[@]}"; do
-      now_s=$(date +%s)
       [ "$now_s" -lt "$deadline_s" ] || break
-      # A failed query is simply tried again at the next poll.
+      # A failed query is simply tried again at the next round.
       snapshot_writes_accepted_summaries "$cg" "$(( deadline_s - now_s ))"
+      now_s=$(date +%s)
     done
     missing=$(missing_tombstones)
+    now_s=$(date +%s)
+    [ -n "$missing" ] || break
+    [ "$now_s" -lt "$deadline_s" ] || break
+    # Pause before the next round for up to 10 s, but never into the
+    # budget's last second: there the rounds follow each other until the
+    # deadline, so a tombstone that arrives then is still seen.
+    pause_s=$(( deadline_s - now_s - 1 ))
+    if [ "$pause_s" -gt 0 ]; then
+      sleep $(( pause_s < 10 ? pause_s : 10 ))
+      now_s=$(date +%s)
+    fi
   done
   if [ -n "$missing" ]; then
     log "  still not observed after ${budget_s}s: $missing"
