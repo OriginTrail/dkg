@@ -1,10 +1,12 @@
 // Search across assets in the CLI's words: its option values, and the words it
 // shows for the engine's values.
 import { describe, expect, it } from 'vitest';
+import type { ReadGraphModeChange } from '@origintrail-official/dkg-storage';
 import type { ReadGraphContextGraphSettings, ReadGraphSettingsReadGraph } from '../src/read-graph-settings-wire.js';
 import {
   MEMORIES,
   changeLine,
+  changesToName,
   createReadGraphsLines,
   layerLine,
   parseCreateReadGraphsOptions,
@@ -119,6 +121,29 @@ describe('the words for a memory\'s state', () => {
   });
 });
 
+describe('what a change names, from the node\'s report on every memory of each context graph in its settings', () => {
+  const entry = (contextGraphId: string, layer: ReadGraphModeChange['layer'], from: ReadGraphModeChange['from'], to: ReadGraphModeChange['to'],
+    outcome: ReadGraphModeChange['outcome'] = 'applied'): ReadGraphModeChange => ({ contextGraphId, layer, from, to, outcome });
+  const report = [
+    entry('team', 'working-memory', 'off', 'off', 'unchanged'),
+    entry('team', 'shared-working-memory', 'off', 'build'),
+    entry('team', 'verifiable-memory', 'build', 'build', 'unchanged'),
+    entry('other', 'verifiable-memory', 'serve', 'serve', 'unchanged'),
+    entry('third', 'verifiable-memory', 'off', 'build'),
+    entry('fourth', 'working-memory', 'off', 'serve', { refused: 'not applied: another change in the same apply was refused' }),
+  ];
+  const [, teamShared, teamPublished, otherPublished, third, fourth] = report;
+
+  it('a memory left as it was only when the request set it, and every change and refusal', () => {
+    expect(changesToName(report, { contextGraphId: 'team', layers: { 'shared-working-memory': 'build', 'verifiable-memory': 'build' } }))
+      .toEqual([teamShared, teamPublished, third, fourth]);
+    expect(changesToName(report, { contextGraphId: 'team', layers: { 'shared-working-memory': 'build' } })).toEqual([teamShared, third, fourth]);
+    // A change of the default semantics alone sets no memory.
+    expect(changesToName(report, { contextGraphId: 'team' })).toEqual([teamShared, third, fourth]);
+    expect(changesToName(report, { contextGraphId: 'other', layers: { 'verifiable-memory': 'serve' } })).toEqual([teamShared, otherPublished, third, fourth]);
+  });
+});
+
 describe('what a creation says about its setting', () => {
   const vm = { layers: { 'verifiable-memory': 'build' } } as const;
   const all = { layers: { 'verifiable-memory': 'serve', 'shared-working-memory': 'serve', 'working-memory': 'serve' } } as const;
@@ -137,6 +162,19 @@ describe('what a creation says about its setting', () => {
     });
     expect(createReadGraphsLines('0xab/research', vm, { applied: true, changes: [{ ...changes[0], outcome: { refused: 'Not allowed.' } }] })).toEqual({
       lines: ['Published assets of 0xab/research: stays off. Not allowed.'], ok: false,
+    });
+  });
+
+  it('from the node\'s report on every context graph, what the creation set and what changed elsewhere', () => {
+    const report = [
+      { contextGraphId: '0xab/research', layer: 'verifiable-memory', from: 'off', to: 'build', outcome: 'applied' },
+      { contextGraphId: '0xab/research', layer: 'working-memory', from: 'off', to: 'off', outcome: 'unchanged' },
+      { contextGraphId: 'other', layer: 'verifiable-memory', from: 'serve', to: 'serve', outcome: 'unchanged' },
+      { contextGraphId: 'third', layer: 'shared-working-memory', from: 'off', to: 'build', outcome: 'applied' },
+    ] as const;
+    expect(createReadGraphsLines('0xab/research', vm, { applied: true, changes: report })).toEqual({
+      lines: ['Published assets of 0xab/research: off → preview. Getting ready in the background.', 'Shared memory of third: off → preview. Getting ready in the background.'],
+      ok: true,
     });
   });
 

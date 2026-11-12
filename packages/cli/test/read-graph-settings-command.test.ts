@@ -101,6 +101,25 @@ describe('dkg store read-graphs enable', () => {
     expect(process.exitCode).toBe(1);
   });
 
+  it('names, from the node\'s report on every context graph, what it set and what changed, not what was left as it was', async () => {
+    const other = (layer: ReadGraphModeChange['layer'], from: ReadGraphModeChange['from'], to: ReadGraphModeChange['to'], outcome?: ReadGraphModeChange['outcome']) =>
+      ({ ...applied(layer, from, to, outcome), contextGraphId: 'other' });
+    const n = node({ set: answer(RESEARCH, [
+      applied('verifiable-memory', 'serve', 'serve', 'unchanged'),
+      applied('shared-working-memory', 'off', 'off', 'unchanged'),
+      applied('working-memory', 'build', 'build', 'unchanged'),
+      other('working-memory', 'off', 'off', 'unchanged'),
+      other('verifiable-memory', 'off', 'serve'),
+    ]) });
+    await n.run('enable', '-c', 'research', '--layer', 'working-memory');
+    expect(printed()).toEqual([
+      'Private drafts of research: already preview.',
+      // Another context graph's change, without the state of research's published assets, which are in use.
+      'Published assets of other: off → on. Getting ready in the background; until then, queries that ask to search across assets are told it is not ready.',
+    ]);
+    expect(process.exitCode).toBeUndefined();
+  });
+
   it('prints the node\'s answer with --json, engine values and all', async () => {
     const reply = answer(RESEARCH, [applied('verifiable-memory', 'off', 'build')]);
     const n = node({ set: reply });
@@ -125,7 +144,12 @@ describe('dkg store read-graphs enable', () => {
   it('says what each memory did when the node refuses the whole change, then why', async () => {
     const refusal = httpError(409, {
       code: 'READ_GRAPHS_APPLY_REFUSED', error: 'The node could not switch it; nothing changed.',
-      changes: [applied('verifiable-memory', 'off', 'build', { refused: 'The store is restarting.' })],
+      changes: [
+        applied('verifiable-memory', 'off', 'build', { refused: 'The store is restarting.' }),
+        // The report holds every memory of each context graph in the settings; those left as they were go unnamed.
+        applied('working-memory', 'build', 'build', 'unchanged'),
+        { ...applied('verifiable-memory', 'serve', 'serve', 'unchanged'), contextGraphId: 'other' },
+      ],
     });
     const n = node({ set: refusal });
     await n.run('enable', '-c', 'research');
@@ -163,7 +187,8 @@ describe('dkg store read-graphs disable', () => {
 
 describe('dkg store read-graphs default-semantics', () => {
   it('sets merged or per-asset, and none goes back to the node\'s default', async () => {
-    const n = node({ set: answer(RESEARCH) });
+    // A change of the default alone sets no memory: the memories the node reports left as they were go unnamed.
+    const n = node({ set: answer(RESEARCH, [applied('verifiable-memory', 'serve', 'serve', 'unchanged'), applied('working-memory', 'build', 'build', 'unchanged')]) });
     await n.run('default-semantics', '-c', 'research', 'merged');
     expect(n.set).toHaveBeenLastCalledWith({ contextGraphId: 'research', viewSemantics: 'merged' });
     n.set.mockResolvedValueOnce(answer({ ...RESEARCH, viewSemantics: undefined, effective: { ...RESEARCH.effective!, viewSemantics: 'per-asset' } }));

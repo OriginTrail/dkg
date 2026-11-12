@@ -11,6 +11,7 @@ import {
   type ReadGraphContextGraphSettings,
   type ReadGraphSettingsAnswer,
   type ReadGraphSettingsReadGraph,
+  type ReadGraphSettingsRequest,
 } from './read-graph-settings-wire.js';
 
 export const FEATURE_NAME = 'Search across assets';
@@ -136,6 +137,16 @@ export function changeLine(change: ReadGraphModeChange, state?: string): string 
   return `${subject}: ${modeWord(change.from)} → ${modeWord(change.to)}. ${afterChange(change.to, state)}`;
 }
 
+/**
+ * What to name from the node's report, which holds every memory of each context graph in its settings: a memory left
+ * as it was only when the request set it, and every change and refusal.
+ */
+export function changesToName(changes: readonly ReadGraphModeChange[], request: Pick<ReadGraphSettingsRequest, 'contextGraphId' | 'layers'>):
+  readonly ReadGraphModeChange[] {
+  return changes.filter((change) => change.outcome !== 'unchanged'
+    || (change.contextGraphId === request.contextGraphId && request.layers !== undefined && Object.hasOwn(request.layers, change.layer)));
+}
+
 function afterChange(to: ReadGraphMode, state: string | undefined): string {
   if (to === 'off') return 'The combined copy is removed in the background.';
   if (state === 'In use' || state === 'Ready to turn on') return `${state}.`;
@@ -162,7 +173,10 @@ export function createReadGraphsLines(contextGraphId: string, setting: ReadGraph
   if (outcome.changes.length === 0) {
     return { lines: asked.map(([layer, mode]) => `${memoryOf(layer, contextGraphId)}: ${modeWord(mode)}. Getting ready in the background.`), ok: true };
   }
-  return { lines: outcome.changes.map((change) => changeLine(change)), ok: !outcome.changes.some((change) => typeof change.outcome === 'object') };
+  return {
+    lines: changesToName(outcome.changes, { contextGraphId, layers: setting.layers }).map((change) => changeLine(change)),
+    ok: !outcome.changes.some((change) => typeof change.outcome === 'object'),
+  };
 }
 
 /** The node's policy, as the first line of `settings`. */

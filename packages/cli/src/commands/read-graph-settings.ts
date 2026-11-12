@@ -14,6 +14,7 @@ import {
   MEMORIES,
   MODE_OPTION_HELP,
   changeLine,
+  changesToName,
   layerLine,
   memoryOf,
   modeWord,
@@ -113,7 +114,7 @@ async function change(options: Options, build: () => Body | { readonly error: st
     } catch (error) {
       // A refused apply puts the settings back, and its answer says what each layer did.
       const changes = (error as { responseBody?: { changes?: readonly ReadGraphModeChange[] } }).responseBody?.changes;
-      if (!options.json) for (const refused of changes ?? []) console.log(changeLine(refused));
+      if (!options.json) for (const refused of changesToName(changes ?? [], parsed.request)) console.log(changeLine(refused));
       throw error;
     }
     if (answer.changes?.some((applied) => typeof applied.outcome === 'object')) process.exitCode = 1;
@@ -124,16 +125,20 @@ async function change(options: Options, build: () => Body | { readonly error: st
 
 /** What a change did, from the node's answer for that context graph. */
 function changeLines(answer: ReadGraphSettingsAnswer, change: ReadGraphSettingsRequest): string[] {
-  const settings = answer.contextGraphs.find((candidate) => candidate.contextGraphId === change.contextGraphId);
-  const state = (layer: GetView, mode: ReadGraphMode) =>
-    (settings === undefined ? undefined : stateWords(mode, readGraphsOf(settings, layer)));
+  const settingsOf = (contextGraphId: string) => answer.contextGraphs.find((candidate) => candidate.contextGraphId === contextGraphId);
+  const settings = settingsOf(change.contextGraphId);
+  // A memory's state comes from its own context graph's settings, which the answer holds only for the one changed.
+  const state = (contextGraphId: string, layer: GetView, mode: ReadGraphMode) => {
+    const of = settingsOf(contextGraphId);
+    return of === undefined ? undefined : stateWords(mode, readGraphsOf(of, layer));
+  };
   const lines = answer.changes !== undefined
-    ? answer.changes.map((applied) => changeLine(applied, state(applied.layer, applied.to)))
+    ? changesToName(answer.changes, change).map((applied) => changeLine(applied, state(applied.contextGraphId, applied.layer, applied.to)))
     // A node that does not list the changes still answers with the modes in force.
     : Object.entries(change.layers ?? {}).map(([layer, asked]) => {
       const memory = layer as GetView;
       const mode = settings?.effective?.layers[memory] ?? asked;
-      return `${memoryOf(memory, change.contextGraphId)}: ${modeWord(mode)}.${mode === 'off' ? '' : ` ${state(memory, mode) ?? 'Getting ready'}.`}`;
+      return `${memoryOf(memory, change.contextGraphId)}: ${modeWord(mode)}.${mode === 'off' ? '' : ` ${state(change.contextGraphId, memory, mode) ?? 'Getting ready'}.`}`;
     });
   if (change.viewSemantics !== undefined) {
     const inForce = settings?.effective?.viewSemantics ?? change.viewSemantics ?? 'per-asset';
