@@ -5,7 +5,6 @@ import {
   OxigraphStore, READ_GRAPH_PLANNED_METHODS, buildReadGraph, checkReadGraph, markReadGraphDirty, wrapReadGraphLayer,
   type ReadGraphMode,
 } from '@origintrail-official/dkg-storage';
-import type { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { DKGAgent } from '../src/index.js';
 import { installReadGraphWorkingMemoryIdentity } from '../src/read-graph-view-source.js';
 
@@ -91,8 +90,7 @@ describe('merged view queries on a private context graph, over built read graphs
       expect(await buildReadGraph({ store: created.store }, key)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
       expect(await checkReadGraph(created.store, readGraphIri(key), 'full')).toMatchObject({ outcome: 'consistent' });
     }
-    const engine = (created as unknown as { queryEngine: DKGQueryEngine }).queryEngine;
-    return { agent: created, store, engine };
+    return { agent: created, store, engine: created.queryEngine };
   }
 
   const ask = (node: DKGAgent, contextGraphId: string, view: (typeof VIEWS)[number], semantics: (typeof SEMANTICS)[number], callerAgentAddress: string) =>
@@ -189,7 +187,7 @@ describe('merged working-memory queries through the agent, over built read graph
       expect(await buildReadGraph({ store: created.store }, key)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
       expect(await checkReadGraph(created.store, readGraphIri(key), 'full')).toMatchObject({ outcome: 'consistent' });
     }
-    return { agent: created, engine: (created as unknown as { queryEngine: DKGQueryEngine }).queryEngine };
+    return { agent: created, engine: created.queryEngine };
   }
 
   const drafts = (node: DKGAgent, sparql: string, options: { agentAddress?: string; callerAgentAddress?: string; semantics?: 'merged' | 'per-asset' }) =>
