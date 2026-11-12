@@ -70,12 +70,6 @@ export interface ReadGraphSettingsStore {
   close(): void;
 }
 
-/** One context graph's rows as stored, for putting them back after a change the node refuses. */
-export interface ReadGraphSettingsRows {
-  readonly modes: ReadonlyArray<{ readonly layer: string; readonly mode: string; readonly updatedAt: number; readonly updatedBy: string }>;
-  readonly semantics?: { readonly semantics: string; readonly updatedAt: number; readonly updatedBy: string };
-}
-
 /** A change the table refuses: a context graph ID that can't have read graphs, an unknown layer or value, or an unknown actor. */
 export class ReadGraphSettingsError extends Error {
   readonly code = 'READ_GRAPH_SETTINGS_INVALID';
@@ -203,30 +197,31 @@ export class SqliteReadGraphSettingsStore implements ReadGraphSettingsStore {
     });
   }
 
-  /** One context graph's rows as stored, with when and by whom each changed: what {@link restore} puts back. */
-  rowsOf(contextGraphId: string): ReadGraphSettingsRows {
+  /**
+   * Change one context graph's settings in a transaction that stays open while `decide` looks at the entries the change leaves: committed when it
+   * keeps the change, rolled back when it does not or throws, so a change the node refuses leaves every row as it was, times and actors included.
+   * Other connections see the change only once it is committed. The daemon runs its changes one at a time.
+   */
+  async changeWithin<T>(
+    contextGraphId: string,
+    change: ReadGraphSettingsChange,
+    actor: string,
+    decide: (entries: ReadonlyArray<ReadGraphSettingsEntry>) => Promise<{ readonly keep: boolean; readonly result: T }>,
+  ): Promise<T> {
+    const issues = [...contextGraphIssues(contextGraphId), ...changeIssues(change), ...actorIssues(actor)];
+    if (issues.length > 0) throw new ReadGraphSettingsError(issues);
+    if (this.#readOnly) throw new ReadGraphSettingsUnavailableError('the read-graph settings table is open read-only');
     const db = this.#open();
-    const modes = db.prepare('SELECT layer, mode, updated_at, updated_by FROM read_graph_modes WHERE context_graph_id = ?').all(contextGraphId)
-      .map((row) => ({ layer: String(row['layer']), mode: String(row['mode']), updatedAt: Number(row['updated_at']), updatedBy: String(row['updated_by']) }));
-    const row = db.prepare('SELECT semantics, updated_at, updated_by FROM view_semantics_defaults WHERE context_graph_id = ?').get(contextGraphId);
-    const semantics = row === undefined
-      ? undefined
-      : { semantics: String(row['semantics']), updatedAt: Number(row['updated_at']), updatedBy: String(row['updated_by']) };
-    return Object.freeze({ modes: Object.freeze(modes), ...(semantics === undefined ? {} : { semantics }) });
-  }
-
-  /** Put a context graph's rows back exactly as {@link rowsOf} read them, in one transaction. */
-  restore(contextGraphId: string, rows: ReadGraphSettingsRows): void {
-    this.#transaction(() => {
-      this.#db.prepare('DELETE FROM read_graph_modes WHERE context_graph_id = ?').run(contextGraphId);
-      this.#db.prepare('DELETE FROM view_semantics_defaults WHERE context_graph_id = ?').run(contextGraphId);
-      const insert = this.#db.prepare('INSERT INTO read_graph_modes (context_graph_id, layer, mode, updated_at, updated_by) VALUES (?, ?, ?, ?, ?)');
-      for (const mode of rows.modes) insert.run(contextGraphId, mode.layer, mode.mode, mode.updatedAt, mode.updatedBy);
-      if (rows.semantics !== undefined) {
-        this.#db.prepare('INSERT INTO view_semantics_defaults (context_graph_id, semantics, updated_at, updated_by) VALUES (?, ?, ?, ?)')
-          .run(contextGraphId, rows.semantics.semantics, rows.semantics.updatedAt, rows.semantics.updatedBy);
-      }
-    });
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      this.#write(contextGraphId, change, actor, Date.now());
+      const decision = await decide(this.list());
+      db.exec(decision.keep ? 'COMMIT' : 'ROLLBACK');
+      return decision.result;
+    } catch (error) {
+      try { db.exec('ROLLBACK'); } catch { /* SQLite already ended the transaction; the first error is the one to report */ }
+      throw error;
+    }
   }
 
   /** When config.json's rules for single context graphs were imported (unix milliseconds), or `undefined` before they are. */

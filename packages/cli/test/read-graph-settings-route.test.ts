@@ -5,6 +5,7 @@ import { createServer } from 'node:http';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryLayer, readGraphIri, readScope } from '@origintrail-official/dkg-core';
@@ -61,6 +62,19 @@ function layeredStore(capable = true): TripleStore {
     ? Object.assign(new OxigraphStore(), { readGraphCapabilities: { methods: READ_GRAPH_PLANNED_METHODS, serialUpdates: true } })
     : Object.assign(new OxigraphStore(), { readGraphCapabilities: { methods: [], serialUpdates: true } });
   return wrapReadGraphLayer(adapter, { backend: 'oxigraph-worker', options: { path: join(home, `store-${Math.random()}`) } });
+}
+
+/** A context graph's rows as stored, with when and by whom each changed, read straight from the file. */
+function rowsOf(contextGraphId: string) {
+  const db = new DatabaseSync(join(home, 'read-graph-settings.db'), { readOnly: true });
+  try {
+    return {
+      modes: db.prepare('SELECT layer, mode, updated_at AS updatedAt, updated_by AS updatedBy FROM read_graph_modes WHERE context_graph_id = ? ORDER BY layer').all(contextGraphId),
+      semantics: db.prepare('SELECT semantics, updated_at AS updatedAt, updated_by AS updatedBy FROM view_semantics_defaults WHERE context_graph_id = ?').all(contextGraphId),
+    };
+  } finally {
+    db.close();
+  }
 }
 
 function agentOf(store: TripleStore, overrides: Partial<ReadGraphSettingsAgent> = {}): ReadGraphSettingsAgent {
@@ -212,11 +226,11 @@ describe('PUT /api/store/read-graphs/settings', () => {
     const runtime = readGraphRuntimeOf(agent.store)!;
     expect(readGraphModeOfLayer(runtime.modes, CG, MemoryLayer.VerifiableMemory)).toBe('build');
     expect(viewSemanticsOf(runtime.viewSemantics, CG)).toBe('merged');
-    expect(table!.rowsOf(CG).modes).toEqual([{ layer: 'verifiable-memory', mode: 'build', updatedAt: expect.any(Number), updatedBy: 'cli' }]);
+    expect(rowsOf(CG).modes).toEqual([{ layer: 'verifiable-memory', mode: 'build', updatedAt: expect.any(Number), updatedBy: 'cli' }]);
     expect(lines).toEqual([`[read-graphs] cli changed the settings of ${CG}: verifiable-memory off -> build, view semantics merged.`]);
     // The agent tools name themselves, and the table records it.
     expect((await put(control, { contextGraphId: OTHER, layers: { 'shared-working-memory': 'build' } }, { 'x-dkg-actor': 'agent:mcp' })).status).toBe(200);
-    expect(table!.rowsOf(OTHER).modes).toEqual([{ layer: 'shared-working-memory', mode: 'build', updatedAt: expect.any(Number), updatedBy: 'agent:mcp' }]);
+    expect(rowsOf(OTHER).modes).toEqual([{ layer: 'shared-working-memory', mode: 'build', updatedAt: expect.any(Number), updatedBy: 'agent:mcp' }]);
     // Without the header the change is the API's; a view-semantics default alone applies too, and null removes it.
     const semantics = await put(control, { contextGraphId: CG, viewSemantics: null });
     expect(semantics.status).toBe(200);
@@ -289,26 +303,31 @@ describe('PUT /api/store/read-graphs/settings', () => {
   it('puts the context graph\'s rows back exactly when the apply refuses or fails', async () => {
     const refusedChange: ReadGraphModeChange = { contextGraphId: CG, layer: 'verifiable-memory', from: 'off', to: 'build', outcome: { refused: 'the store refused' } };
     const store = layeredStore();
-    const apply = vi.fn<ReadGraphSettingsAgent['applyReadGraphModesV1']>().mockResolvedValueOnce([refusedChange]).mockRejectedValueOnce(new Error('stored rows unreadable'));
+    let during: ReturnType<typeof rowsOf> | undefined;
+    const apply = vi.fn<ReadGraphSettingsAgent['applyReadGraphModesV1']>()
+      .mockImplementationOnce(async () => { during = rowsOf(CG); return [refusedChange]; })
+      .mockRejectedValueOnce(new Error('stored rows unreadable'));
     const { control, table } = controlOf({ agent: agentOf(store, { applyReadGraphModesV1: apply }) });
     table!.set(CG, { layers: { 'working-memory': 'build' }, viewSemantics: 'merged' }, 'ui');
-    const before = table!.rowsOf(CG);
+    const before = rowsOf(CG);
     const refused = await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'build', 'working-memory': 'off' }, viewSemantics: null });
     expect(refused).toMatchObject({ status: 409, body: { code: 'READ_GRAPHS_APPLY_REFUSED', changes: [refusedChange] } });
+    // While the node applied it, the change was not committed: no other reader saw it.
+    expect(during).toEqual(before);
     expect(refused.body!.error).toBe(`Search across assets couldn't be changed for ${CG}, so its previous settings are back: the store refused.`);
-    expect(table!.rowsOf(CG)).toEqual(before);
+    expect(rowsOf(CG)).toEqual(before);
     // The apply got the whole settings in force with the change written.
     expect(readGraphModeOfLayer(apply.mock.calls[0]![0], CG, MemoryLayer.VerifiableMemory)).toBe('build');
     const failed = await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'serve' } });
     expect(failed).toMatchObject({ status: 409, body: { code: 'READ_GRAPHS_APPLY_REFUSED' } });
     expect(failed.body!.error).toContain('stored rows unreadable');
-    expect(table!.rowsOf(CG)).toEqual(before);
+    expect(rowsOf(CG)).toEqual(before);
     // A store that cannot keep the settings refuses them as the store's own refusal.
     apply.mockRejectedValueOnce(Object.assign(new Error('the adapter cannot maintain read graphs'), { code: 'READ_GRAPHS_UNSUPPORTED' }));
     const unsupported = await put(control, { contextGraphId: CG, viewSemantics: 'per-asset' });
     expect(unsupported).toMatchObject({ status: 409, body: { code: 'READ_GRAPHS_UNSUPPORTED' } });
     expect(unsupported.body!.error).toBe('This node\'s store can\'t search across assets (the adapter cannot maintain read graphs).');
-    expect(table!.rowsOf(CG)).toEqual(before);
+    expect(rowsOf(CG)).toEqual(before);
   });
 
   it('keeps a change to an imported setting through a restart: the next start puts it in force', async () => {
@@ -347,10 +366,10 @@ describe('PUT /api/store/read-graphs/settings', () => {
 
 describe('the readGraphs field of a context graph\'s creation', () => {
   it('applies with the checks of a change, and is refused without the node admin or a running control', async () => {
-    const { control, table } = controlOf();
+    const { control } = controlOf();
     expect(await readGraphSettingsOnCreate(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'build' }, canAdminister: true, actor: 'agent:0xabc' }))
       .toMatchObject({ applied: true, changes: expect.arrayContaining([expect.objectContaining({ contextGraphId: CG, to: 'build', outcome: 'applied' })]) });
-    expect(table!.rowsOf(CG).modes[0]).toMatchObject({ mode: 'build', updatedBy: 'agent:0xabc' });
+    expect(rowsOf(CG).modes[0]).toMatchObject({ mode: 'build', updatedBy: 'agent:0xabc' });
     expect(await readGraphSettingsOnCreate(control, { contextGraphId: OTHER, layers: { 'verifiable-memory': 'build' }, canAdminister: false, actor: 'api' }))
       .toEqual({ code: 'NODE_ADMIN_REQUIRED', refused: 'Only the node admin can turn on search across assets; the context graph was created without it.' });
     expect(await readGraphSettingsOnCreate(undefined, { contextGraphId: OTHER, layers: { 'verifiable-memory': 'build' }, canAdminister: true, actor: 'api' }))

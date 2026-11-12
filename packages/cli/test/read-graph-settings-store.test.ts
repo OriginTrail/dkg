@@ -175,6 +175,33 @@ describe('the read-graph settings table', () => {
     expect(store.importedFromConfigAt()).toBeUndefined();
   });
 
+  it('keeps a change made within a decision only when the decision keeps it, and shows it to no other reader before', async () => {
+    vi.useFakeTimers({ now: 1_000, toFake: ['Date'] });
+    const store = open();
+    store.set(CURATED, { layers: { 'verifiable-memory': 'build' }, viewSemantics: 'merged' }, 'ui');
+    const before = rows('SELECT * FROM read_graph_modes');
+    vi.setSystemTime(2_000);
+    const seen: unknown[] = [];
+    const kept = await store.changeWithin(CURATED, { layers: { 'verifiable-memory': 'serve' }, viewSemantics: null }, 'api', async (entries) => {
+      seen.push(entries, rows('SELECT * FROM read_graph_modes'));
+      return { keep: true, result: 'kept' };
+    });
+    expect(kept).toBe('kept');
+    // The decision sees the change; another reader does not until it is kept.
+    expect(seen).toEqual([[{ contextGraphId: CURATED, layers: { 'verifiable-memory': 'serve' } }], before]);
+    expect(store.get(CURATED)).toEqual({ layers: { 'verifiable-memory': 'serve' } });
+    const after = rows('SELECT * FROM read_graph_modes');
+    expect(after).toEqual([{ context_graph_id: CURATED, layer: 'verifiable-memory', mode: 'serve', updated_at: 2_000, updated_by: 'api' }]);
+    // A decision that drops the change, or throws, leaves every row as it was, times and actors included.
+    expect(await store.changeWithin(CURATED, { layers: { 'working-memory': 'build' } }, 'cli', async () => ({ keep: false, result: 'dropped' }))).toBe('dropped');
+    await expect(store.changeWithin(CURATED, { viewSemantics: 'merged' }, 'cli', async () => { throw new Error('apply failed'); })).rejects.toThrow('apply failed');
+    expect(rows('SELECT * FROM read_graph_modes')).toEqual(after);
+    expect(store.get(CURATED)).toEqual({ layers: { 'verifiable-memory': 'serve' } });
+    // A change it cannot hold is refused before any transaction.
+    await expect(store.changeWithin('_private', { layers: { 'verifiable-memory': 'build' } }, 'api', async () => ({ keep: true, result: 0 })))
+      .rejects.toBeInstanceOf(ReadGraphSettingsError);
+  });
+
   it('keeps its settings across a reopen, and is read by another process without writing', () => {
     const store = open();
     store.set(CURATED, { layers: { 'verifiable-memory': 'serve' } }, 'cli');

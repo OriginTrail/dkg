@@ -28,7 +28,6 @@ import {
   openReadGraphSettingsStore,
   type ReadGraphSettingsChange,
   type ReadGraphSettingsEntry,
-  type ReadGraphSettingsRows,
   type SqliteReadGraphSettingsStore,
 } from '../read-graph-settings-store.js';
 import {
@@ -158,76 +157,72 @@ export class ReadGraphSettingsControl {
     };
   }
 
-  /** Change one context graph's own settings: see the module documentation. */
+  /** Change one context graph's own settings, and answer what is in force afterwards: see the module documentation. */
   change(request: ReadGraphSettingsRequest, actor: string, signal?: AbortSignal): Promise<ReadGraphSettingsOutcome> {
-    return this.#serial(() => this.#change(request, actor, signal));
+    return this.#serial(async () => {
+      const result = await this.#change(request, actor, signal);
+      if (!result.ok) return { status: result.status, body: result.refusal };
+      return { status: 200, body: { ...await this.answer(request.contextGraphId), changes: result.changes } };
+    });
   }
 
   /** The `readGraphs` field of a node admin's creation of a context graph, applied after it with the checks of a change. */
   async applyOnCreate(contextGraphId: string, layers: ReadGraphSettingsRequest['layers'], actor: string): Promise<ReadGraphCreateOutcome> {
-    const outcome = await this.change({ contextGraphId, ...(layers === undefined ? {} : { layers }) }, actor);
-    if (outcome.status === 200 && 'contextGraphs' in outcome.body) return { applied: true, changes: outcome.body.changes ?? [] };
-    const body = outcome.body as ReadGraphSettingsRefusal;
-    return { code: body.code, refused: body.error };
+    const result = await this.#serial(() => this.#change({ contextGraphId, ...(layers === undefined ? {} : { layers }) }, actor, undefined));
+    return result.ok ? { applied: true, changes: result.changes } : { code: result.refusal.code, refused: result.refusal.error };
   }
 
-  async #change(request: ReadGraphSettingsRequest, actor: string, signal: AbortSignal | undefined): Promise<ReadGraphSettingsOutcome> {
+  async #change(request: ReadGraphSettingsRequest, actor: string, signal: AbortSignal | undefined): Promise<ChangeResult> {
     const { policy } = this.#settings;
     const { contextGraphId } = request;
     if (!isReadGraphEligibleContextGraphId(contextGraphId)) {
-      return { status: 400, body: { code: 'READ_GRAPH_SETTINGS_INVALID', error: `${contextGraphId} is not a context graph that can search across assets.` } };
+      return refused(400, { code: 'READ_GRAPH_SETTINGS_INVALID', error: `${contextGraphId} is not a context graph that can search across assets.` });
     }
     const switchesOn = GET_VIEWS.filter((view) => request.layers?.[view] !== undefined && request.layers[view] !== 'off');
     for (const view of switchesOn) {
       const refusal = policyRefusalOf(policy.readGraphsPolicy, view);
-      if (refusal !== undefined) return refusedWith(409, refusal, view);
+      if (refusal !== undefined) return refused(409, answerOf(refusal, view));
     }
     const refusals = await this.#nodeRefusals();
-    if (switchesOn.length > 0 && refusals.length > 0) return refusedWith(409, refusals[0]!, switchesOn[0]);
+    if (switchesOn.length > 0 && refusals.length > 0) return refused(409, answerOf(refusals[0]!, switchesOn[0]));
     // A node that starts from a public checkpoint keeps no settings table, so it takes no change at all.
-    if (this.#checkpoint) return refusedWith(409, CHECKPOINT_NODE_REFUSAL);
+    if (this.#checkpoint) return refused(409, answerOf(CHECKPOINT_NODE_REFUSAL));
     const change: ReadGraphSettingsChange = {
       ...(request.layers === undefined ? {} : { layers: request.layers }),
       ...(request.viewSemantics === undefined ? {} : { viewSemantics: request.viewSemantics }),
     };
     let table: SqliteReadGraphSettingsStore;
-    let previous: ReadGraphSettingsRows;
-    let entries: ReadonlyArray<ReadGraphSettingsEntry>;
-    let changes: readonly ReadGraphModeChange[];
     try {
       table = openReadGraphSettingsStore(this.#dataDir);
     } catch (error) {
       return unavailable(error);
     }
     try {
-      try {
-        previous = table.rowsOf(contextGraphId);
-        table.set(contextGraphId, change, actor);
-        entries = table.list();
-      } catch (error) {
-        return unavailable(error);
-      }
-      try {
+      // The change stays uncommitted while the node applies the settings it leaves, and is rolled back unless they apply.
+      return await table.changeWithin(contextGraphId, change, actor, async (entries) => {
         const { config } = resolveEffectiveQueryConfig(policy, entries, { refusals });
-        changes = await this.#agent.applyReadGraphModesV1(config.readGraphs, { ...(signal ? { signal } : {}), viewSemantics: config.viewSemantics });
-      } catch (error) {
-        table.restore(contextGraphId, previous);
-        // A store that cannot keep the settings in force refuses them before anything changes.
-        if ((error as { code?: unknown } | null)?.code === 'READ_GRAPHS_UNSUPPORTED') {
-          return refusedWith(409, { code: 'READ_GRAPHS_UNSUPPORTED', message: messageOf(error) });
+        let changes: readonly ReadGraphModeChange[];
+        try {
+          changes = await this.#agent.applyReadGraphModesV1(config.readGraphs, { ...(signal ? { signal } : {}), viewSemantics: config.viewSemantics });
+        } catch (error) {
+          // A store that cannot keep the settings in force refuses them before anything changes.
+          const unsupported = (error as { code?: unknown } | null)?.code === 'READ_GRAPHS_UNSUPPORTED';
+          return { keep: false, result: unsupported
+            ? refused(409, answerOf({ code: 'READ_GRAPHS_UNSUPPORTED', message: messageOf(error) }))
+            : applyRefused(contextGraphId, messageOf(error)) };
         }
-        return applyRefused(contextGraphId, messageOf(error));
-      }
-      const refused = changes.find((entry) => typeof entry.outcome === 'object');
-      if (refused !== undefined) {
-        table.restore(contextGraphId, previous);
-        return applyRefused(contextGraphId, (refused.outcome as { refused: string }).refused, changes);
-      }
-      this.#log(`[read-graphs] ${actor} changed the settings of ${contextGraphId}: ${describe(request, changes)}.`);
+        const refusedChange = changes.find((entry) => typeof entry.outcome === 'object');
+        if (refusedChange !== undefined) {
+          return { keep: false, result: applyRefused(contextGraphId, (refusedChange.outcome as { refused: string }).refused, changes) };
+        }
+        this.#log(`[read-graphs] ${actor} changed the settings of ${contextGraphId}: ${describe(request, changes)}.`);
+        return { keep: true, result: { ok: true, changes } as ChangeResult };
+      });
+    } catch (error) {
+      return unavailable(error);
     } finally {
       table.close();
     }
-    return { status: 200, body: { ...await this.answer(contextGraphId), changes } };
   }
 
   /** The table's entries for an answer: none on a node that starts from a public checkpoint, or when the table cannot be read. */
@@ -305,19 +300,21 @@ function sentenceOf(refusal: ReadGraphsRefusal, view: GetView | undefined): stri
   }
 }
 
-function refusedWith(status: number, refusal: ReadGraphsRefusal, view?: GetView): ReadGraphSettingsOutcome {
-  return { status, body: answerOf(refusal, view) };
+/** What a change did: applied with what it changed, or refused with an HTTP status and why. */
+type ChangeResult =
+  | { readonly ok: true; readonly changes: readonly ReadGraphModeChange[] }
+  | { readonly ok: false; readonly status: number; readonly refusal: ReadGraphSettingsRefusal & { readonly changes?: readonly ReadGraphModeChange[] } };
+
+function refused(status: number, refusal: ReadGraphSettingsRefusal & { readonly changes?: readonly ReadGraphModeChange[] }): ChangeResult {
+  return { ok: false, status, refusal };
 }
 
-function applyRefused(contextGraphId: string, reason: string, changes?: readonly ReadGraphModeChange[]): ReadGraphSettingsOutcome {
-  return {
-    status: 409,
-    body: {
-      code: 'READ_GRAPHS_APPLY_REFUSED',
-      error: `Search across assets couldn't be changed for ${contextGraphId}, so its previous settings are back: ${reason}.`,
-      ...(changes === undefined ? {} : { changes }),
-    },
-  };
+function applyRefused(contextGraphId: string, reason: string, changes?: readonly ReadGraphModeChange[]): ChangeResult {
+  return refused(409, {
+    code: 'READ_GRAPHS_APPLY_REFUSED',
+    error: `Search across assets couldn't be changed for ${contextGraphId}, so its previous settings are back: ${reason}.`,
+    ...(changes === undefined ? {} : { changes }),
+  });
 }
 
 /** A context graph's mode in each layer. */
@@ -337,6 +334,6 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function unavailable(error: unknown): ReadGraphSettingsOutcome {
-  return { status: 503, body: { code: 'READ_GRAPH_SETTINGS_UNAVAILABLE', error: `This node's search-across-assets settings can't be changed now: ${messageOf(error)}.` } };
+function unavailable(error: unknown): ChangeResult {
+  return refused(503, { code: 'READ_GRAPH_SETTINGS_UNAVAILABLE', error: `This node's search-across-assets settings can't be changed now: ${messageOf(error)}.` });
 }

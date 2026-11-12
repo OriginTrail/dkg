@@ -232,7 +232,8 @@ import { daemonReadGraphRequests } from './routes/read-graphs.js';
 import { startContextGraphCatchupProgress } from './context-graph-catchup-progress-sources.js';
 import { beginAsyncAdmissionTrace } from './async-admission-trace.js';
 import { authenticateHttpRequest, canAdministerNode, loadTokens } from '../auth.js';
-import { AGENT_HTTP_HEADERS, normalizeOperatorAgentAddresses } from '../agent-http-auth.js';
+import { normalizeOperatorAgentAddresses } from '../agent-http-auth.js';
+import { corsPreflightHeaders } from './cors-preflight.js';
 import { SqliteAgentHttpNonceStore } from '../agent-http-nonce-store.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
@@ -3501,13 +3502,7 @@ async function runDaemonInnerWithStartupOwnership(
           res.writeHead(403).end();
           return;
         }
-        res.writeHead(204, {
-          ...(reqCorsOrigin
-            ? { "Access-Control-Allow-Origin": reqCorsOrigin }
-            : {}),
-          "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": AGENT_HTTP_HEADERS,
-        });
+        res.writeHead(204, corsPreflightHeaders(reqCorsOrigin));
         res.end();
         return;
       }
