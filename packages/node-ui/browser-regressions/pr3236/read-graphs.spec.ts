@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 
-// The read-graphs section and the query view's Merged toggle in a real
+// The "Search across assets" section and the query view's toggle in a real
 // browser, against a node stubbed with page.route. Globs end in `**` so a
 // query string still matches.
 const cg = '0x1111111111111111111111111111111111111111/browser-preview';
@@ -29,7 +29,7 @@ async function stubPage(page: Page): Promise<void> {
   await page.route('**/api/**', route => route.fulfill({ json: {} }));
 }
 
-test('the node admin switches a layer\'s read graphs, and Off asks first', async ({ page }) => {
+test('the node admin switches a memory between Off, Preview and On, and Off asks first', async ({ page }) => {
   await stubPage(page);
   let rows: Record<string, string> = { 'verifiable-memory': 'serve' };
   const puts: unknown[] = [];
@@ -47,14 +47,15 @@ test('the node admin switches a layer\'s read graphs, and Off asks first', async
 
   const swm = page.locator('[data-layer="shared-working-memory"]');
   await expect(swm.getByRole('button', { name: 'Off', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  await swm.getByRole('button', { name: 'Build', exact: true }).click();
-  await expect(swm.getByRole('button', { name: 'Build', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  await expect(swm.getByTestId('read-graph-state')).toHaveText('Ready');
+  await swm.getByRole('button', { name: 'Preview', exact: true }).click();
+  await expect(swm.getByRole('button', { name: 'Preview', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(swm.getByTestId('search-state')).toHaveText('Ready to turn on');
   expect(puts).toEqual([{ contextGraphId: cg, layers: { 'shared-working-memory': 'build' } }]);
 
   const vm = page.locator('[data-layer="verifiable-memory"]');
   await vm.getByRole('button', { name: 'Off', exact: true }).click();
-  await expect(vm.getByRole('group', { name: 'Turn off Verifiable memory read graphs' })).toBeVisible();
+  await expect(vm.getByTestId('search-state')).toHaveText('In use');
+  await expect(vm.getByRole('group', { name: 'Turn off Published assets' })).toBeVisible();
   expect(puts).toHaveLength(1);
   await vm.getByRole('button', { name: 'Turn off', exact: true }).click();
   await expect(vm.getByRole('button', { name: 'Off', exact: true })).toHaveAttribute('aria-pressed', 'true');
@@ -64,7 +65,7 @@ test('the node admin switches a layer\'s read graphs, and Off asks first', async
   ]);
 });
 
-test('the Merged toggle asks for merged answers in a view, and a merged view that is not ready is explained', async ({ page }) => {
+test('Search across assets asks for merged answers in a memory, and one that is not ready yet is explained', async ({ page }) => {
   await stubPage(page);
   const bodies: Array<Record<string, unknown>> = [];
   await page.route('**/api/query**', async route => {
@@ -79,16 +80,16 @@ test('the Merged toggle asks for merged answers in a view, and a merged view tha
   });
   await page.goto('/?view=merged-query');
 
-  const merged = page.getByRole('checkbox', { name: 'Merged' });
+  const merged = page.getByRole('checkbox', { name: 'Search across assets' });
   await expect(page.locator('.v10-mlv-result-count')).toHaveText('1 result');
   await expect(merged).toBeDisabled();
-  await page.getByRole('combobox', { name: 'View' }).selectOption('verifiable-memory');
+  await page.getByRole('combobox', { name: 'Search in' }).selectOption('verifiable-memory');
   await merged.check();
   await page.getByRole('button', { name: 'Run', exact: true }).click();
-  await expect(page.locator('.v10-mlv-result-count')).toHaveText('1 result · matched merged');
+  await expect(page.locator('.v10-mlv-result-count')).toHaveText('1 result · searched across assets');
   expect(bodies.at(-1)).toMatchObject({ contextGraphId: cg, view: 'verifiable-memory', semantics: 'merged' });
 
-  await page.getByRole('combobox', { name: 'View' }).selectOption('shared-working-memory');
+  await page.getByRole('combobox', { name: 'Search in' }).selectOption('shared-working-memory');
   await page.getByRole('button', { name: 'Run', exact: true }).click();
-  await expect(page.getByText('The merged view is not ready: its read graph is still being built or repaired.', { exact: false })).toBeVisible();
+  await expect(page.getByText('Search across assets is still getting ready for this memory.', { exact: false })).toBeVisible();
 });

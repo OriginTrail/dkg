@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
 
-// The query view's view picker and Merged toggle: what each run asks the node
-// for, how the answer says it was matched, and what a refused merged query
-// tells the user.
+// The query view's memory picker and "Search across assets" toggle: what
+// each run asks the node for, how the answer says it searched, and what a
+// refused search across assets tells the user.
 
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -105,13 +105,20 @@ afterEach(async () => {
   root = null;
 });
 
-describe('ContextGraphQueryView view and Merged toggle', () => {
-  it('asks for merged answers only in a view, and says how the node matched a view query', async () => {
+describe('ContextGraphQueryView memory picker and Search across assets', () => {
+  it('searches across assets only in a memory, and says how the node searched it', async () => {
     const container = await render();
     expect(lastRun()).toMatchObject({ contextGraphId: CG, view: undefined, semantics: undefined });
     expect(viewSelect(container).value).toBe('');
     expect(mergedBox(container).disabled).toBe(true);
     expect(resultCount(container)).toBe('1 result');
+    const options = container.querySelector<HTMLElement>('.v10-cg-query-options')!;
+    expect(options.querySelector('label span')?.textContent).toBe('Search in');
+    expect(Array.from(viewSelect(container).options).map(option => option.textContent)).toEqual(['All graphs', 'Published assets', 'Shared memory', 'Private drafts']);
+    expect(options.querySelector('.v10-cg-query-merged span')?.textContent).toBe('Search across assets');
+    const hint = document.getElementById(mergedBox(container).getAttribute('aria-describedby')!);
+    expect(hint?.textContent).toBe('On: one query can link facts from different assets. Off: each asset is searched on its own.');
+    expect(options.querySelector('.v10-cg-query-merged')?.getAttribute('title')).toBe('Choose a memory to search across its assets.');
 
     await chooseView(container, 'verifiable-memory');
     expect(mergedBox(container).disabled).toBe(false);
@@ -120,13 +127,13 @@ describe('ContextGraphQueryView view and Merged toggle', () => {
     executeQueryMock.mockResolvedValue(bindings('merged'));
     await click(button(container, 'Run'));
     expect(lastRun()).toMatchObject({ contextGraphId: CG, view: 'verifiable-memory', semantics: 'merged' });
-    expect(resultCount(container)).toBe('1 result · matched merged');
+    expect(resultCount(container)).toBe('1 result · searched across assets');
 
     await click(mergedBox(container));
     executeQueryMock.mockResolvedValue(bindings('per-asset'));
     await click(button(container, 'Run'));
     expect(lastRun()).toMatchObject({ view: 'verifiable-memory', semantics: undefined });
-    expect(resultCount(container)).toBe('1 result · matched per asset');
+    expect(resultCount(container)).toBe('1 result · each asset searched on its own');
 
     await click(mergedBox(container));
     await chooseView(container, '');
@@ -136,26 +143,26 @@ describe('ContextGraphQueryView view and Merged toggle', () => {
     expect(lastRun()).toMatchObject({ view: undefined, semantics: undefined });
   });
 
-  it('says why a merged query was refused, and passes other errors through', async () => {
+  it('says why a search across assets was refused, and passes other errors through', async () => {
     const container = await render();
     await chooseView(container, 'shared-working-memory');
     await click(mergedBox(container));
 
     executeQueryMock.mockRejectedValue(new HttpError(503, 'The view is not ready for a merged query', { code: 'VIEW_NOT_READY', retryable: true }));
     await click(button(container, 'Run'));
-    expect(container.textContent).toContain('The merged view is not ready: its read graph is still being built or repaired. Try again shortly, or turn Merged off.');
+    expect(container.textContent).toContain('Search across assets is still getting ready for this memory. Try again shortly, or turn it off.');
 
     executeQueryMock.mockRejectedValue(new HttpError(400, 'semantics "merged" does not apply to a working-memory read by assertion name', { code: 'SEMANTICS_UNSUPPORTED' }));
     await click(button(container, 'Run'));
-    expect(container.textContent).toContain('Merged answers don\'t apply to this query (semantics "merged" does not apply to a working-memory read by assertion name). Turn Merged off to match per asset.');
+    expect(container.textContent).toContain('Search across assets doesn\'t apply to this query here (semantics "merged" does not apply to a working-memory read by assertion name). Turn it off to search each asset on its own.');
 
     executeQueryMock.mockRejectedValue(new HttpError(400, 'Parse error at line 1'));
     await click(button(container, 'Run'));
     expect(container.textContent).toContain('Parse error at line 1');
-    expect(container.textContent).not.toContain('Turn Merged off');
+    expect(container.textContent).not.toContain('Turn it off');
   });
 
-  it('fixes the view while a loaded query is shown, and runs it with the Merged toggle', async () => {
+  it('fixes the memory while a loaded query is shown, and runs it with the toggle', async () => {
     const container = await render();
     await chooseView(container, 'verifiable-memory');
     await click(mergedBox(container));
@@ -177,7 +184,7 @@ describe('ContextGraphQueryView view and Merged toggle', () => {
     expect(viewSelect(container).disabled).toBe(false);
   });
 
-  it('saves a query with the view it runs in, and loads it back in that view', async () => {
+  it('saves a query with the memory it runs in, and loads it back in that memory', async () => {
     const container = await render();
     await typeInto(container.querySelector('textarea')!, 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 5');
     await chooseView(container, 'shared-working-memory');
@@ -199,7 +206,7 @@ describe('ContextGraphQueryView view and Merged toggle', () => {
     expect(lastRun()).toMatchObject({ sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 5', view: 'shared-working-memory', semantics: 'merged' });
   });
 
-  it('resets to the context graph query without a view', async () => {
+  it('resets to the context graph query in all graphs', async () => {
     const container = await render();
     const first = executeQueryMock.mock.calls[0][0];
     await chooseView(container, 'working-memory');

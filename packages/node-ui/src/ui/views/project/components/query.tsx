@@ -684,8 +684,8 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
           <button className="v10-mlv-run-btn" type="button" onClick={runQuery}>Run</button>
           <button className="v10-mlv-save-btn" type="button" onClick={openSaveForm}>Save</button>
           <button className="v10-mlv-clear-btn" type="button" onClick={resetQuery}>Reset</button>
-          <QueryViewControls options={options} locked={session.kind === 'catalog'} onChange={setOptions} />
         </div>
+        <QueryViewControls options={options} locked={session.kind === 'catalog'} onChange={setOptions} />
       </div>
 
       {saveOpen && (

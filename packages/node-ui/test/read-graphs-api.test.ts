@@ -2,8 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HttpError } from '../src/ui/http.js';
 import {
   READ_GRAPH_SETTINGS_PATH,
+  RESULT_CHANGES_PATH,
   decodeReadGraphSettings,
+  decodeResultChanges,
   fetchReadGraphSettings,
+  fetchResultChanges,
   setReadGraphMode,
 } from '../src/ui/read-graphs-api.js';
 
@@ -24,7 +27,7 @@ afterEach(() => {
 });
 
 describe('decodeReadGraphSettings', () => {
-  it('gives each layer its mode in force, whether it is set here, whether it is allowed, and its read graphs by state', () => {
+  it('gives each layer its mode in force, whether it is set here, whether it is allowed, its states and how far its build has got', () => {
     const settings = decodeReadGraphSettings({
       policy: { enabled: true, layers: ['shared-working-memory', 'verifiable-memory'] },
       contextGraphs: [
@@ -35,8 +38,8 @@ describe('decodeReadGraphSettings', () => {
           effective: { layers: { 'working-memory': 'off', 'shared-working-memory': 'build', 'verifiable-memory': 'serve' } },
           readGraphs: [
             { readGraph: 'urn:rg:vm', layer: 'vm', state: 'ready', generation: 3 },
-            { readGraph: 'urn:rg:swm', layer: 'swm', state: 'building', generation: 1 },
-            { readGraph: 'urn:rg:swm-2', layer: 'shared-working-memory', state: 'ready', generation: 1 },
+            { readGraph: 'urn:rg:swm', layer: 'swm', state: 'building', generation: 1, progress: 0.4 },
+            { readGraph: 'urn:rg:swm-notes', layer: 'shared-working-memory', state: 'building', generation: 1 },
           ],
         },
       ],
@@ -46,9 +49,9 @@ describe('decodeReadGraphSettings', () => {
       contextGraphId: CG,
       enabled: true,
       layers: [
-        { view: 'working-memory', mode: 'off', setHere: false, allowed: false, states: {} },
-        { view: 'shared-working-memory', mode: 'build', setHere: false, allowed: true, states: { building: 1, ready: 1 } },
         { view: 'verifiable-memory', mode: 'serve', setHere: true, allowed: true, states: { ready: 1 } },
+        { view: 'shared-working-memory', mode: 'build', setHere: false, allowed: true, states: { building: 2 }, progress: 0.2 },
+        { view: 'working-memory', mode: 'off', setHere: false, allowed: false, states: {} },
       ],
     });
   });
@@ -76,6 +79,8 @@ describe('decodeReadGraphSettings', () => {
           { layer: 'ltm', state: 'ready' },
           { layer: 'vm', state: '' },
           { layer: 'vm' },
+          { layer: 'vm', state: 'building', progress: -1 },
+          { layer: 'swm', state: 'building', progress: 7 },
           'not a read graph',
         ],
         extra: true,
@@ -85,9 +90,9 @@ describe('decodeReadGraphSettings', () => {
     expect(settings.refused).toBeUndefined();
     expect(settings.enabled).toBe(true);
     expect(settings.layers).toEqual([
+      { view: 'verifiable-memory', setHere: false, allowed: true, states: { building: 1 } },
+      { view: 'shared-working-memory', setHere: false, allowed: true, states: { building: 1 }, progress: 1 },
       { view: 'working-memory', mode: 'build', setHere: true, allowed: true, states: { dirty: 1 } },
-      { view: 'shared-working-memory', setHere: false, allowed: true, states: {} },
-      { view: 'verifiable-memory', setHere: false, allowed: true, states: {} },
     ]);
   });
 
@@ -97,6 +102,36 @@ describe('decodeReadGraphSettings', () => {
       expect(settings.layers.map(layer => layer.mode)).toEqual([undefined, undefined, undefined]);
       expect(settings.layers.every(layer => !layer.setHere && layer.allowed)).toBe(true);
     }
+  });
+});
+
+describe('decodeResultChanges', () => {
+  it('counts the compared queries and those whose results would differ', () => {
+    const changes = decodeResultChanges({
+      contextGraphs: [
+        { contextGraphId: 'another', since: '2026-11-01T00:00:00.000Z', kinds: { none: 9 } },
+        {
+          contextGraphId: CG,
+          since: '2026-11-12T06:00:00.000Z',
+          samples: 50,
+          skipped: 6,
+          uncomparable: 4,
+          kinds: { 'none': 30, 'copies-removed': 5, 'rows-added': 2, 'rows-removed-or-changed': 3 },
+          shapes: [],
+        },
+      ],
+    }, CG);
+    expect(changes).toEqual({ compared: 40, different: 5, since: '2026-11-12T06:00:00.000Z' });
+  });
+
+  it('counts nothing for a context graph the report doesn\'t hold, and ignores counts it can\'t use', () => {
+    expect(decodeResultChanges({ contextGraphs: [] }, CG)).toEqual({ compared: 0, different: 0 });
+    expect(decodeResultChanges(null, CG)).toEqual({ compared: 0, different: 0 });
+    expect(decodeResultChanges({
+      contextGraphs: [{ contextGraphId: CG, since: '2026-11-12T06:00:00.000Z', kinds: { 'none': -3, 'rows-added': 2.7, 'rows-removed-or-changed': '4' } }],
+    }, CG)).toEqual({ compared: 2, different: 2, since: '2026-11-12T06:00:00.000Z' });
+    expect(decodeResultChanges({ contextGraphs: [{ contextGraphId: CG, since: '2026-11-12T06:00:00.000Z', kinds: {} }] }, CG))
+      .toEqual({ compared: 0, different: 0 });
   });
 });
 
@@ -112,7 +147,7 @@ describe('fetchReadGraphSettings', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][0]).toBe(`${READ_GRAPH_SETTINGS_PATH}?contextGraphId=${encodeURIComponent(CG)}`);
     expect(load.kind).toBe('settings');
-    expect(load.kind === 'settings' && load.settings.layers[2].mode).toBe('build');
+    expect(load.kind === 'settings' && load.settings.layers[0]).toMatchObject({ view: 'verifiable-memory', mode: 'build' });
   });
 
   it.each([
@@ -161,5 +196,20 @@ describe('setReadGraphMode', () => {
     const failure = setReadGraphMode(CG, 'verifiable-memory', 'build');
     await expect(failure).rejects.toBeInstanceOf(HttpError);
     await expect(failure).rejects.toMatchObject({ status: 409, message: refusal.error, body: refusal });
+  });
+});
+
+describe('fetchResultChanges', () => {
+  it('asks for one context graph\'s comparison and decodes it', async () => {
+    const fetchMock = stubFetch(200, {
+      contextGraphs: [{ contextGraphId: CG, since: '2026-11-12T06:00:00.000Z', kinds: { 'none': 3, 'rows-added': 1 } }],
+    });
+    await expect(fetchResultChanges(CG)).resolves.toEqual({ compared: 4, different: 1, since: '2026-11-12T06:00:00.000Z' });
+    expect(fetchMock.mock.calls[0][0]).toBe(`${RESULT_CHANGES_PATH}?contextGraphId=${encodeURIComponent(CG)}`);
+  });
+
+  it('throws a refusal with the node\'s sentence', async () => {
+    stubFetch(403, { error: 'GET /api/query/view-semantics-delta requires a node-level admin token.' });
+    await expect(fetchResultChanges(CG)).rejects.toMatchObject({ status: 403, message: 'GET /api/query/view-semantics-delta requires a node-level admin token.' });
   });
 });

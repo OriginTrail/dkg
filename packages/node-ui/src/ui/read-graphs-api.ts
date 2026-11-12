@@ -1,20 +1,24 @@
 // A context graph's read-graph settings, which only the node admin reads and
-// changes: `GET` and `PUT /api/store/read-graphs/settings`. Every answer is
-// decoded here, so the panel never reads the node's JSON itself.
+// changes: `GET` and `PUT /api/store/read-graphs/settings`, and the node's
+// comparison of sampled queries answered both ways
+// (`GET /api/query/view-semantics-delta`). Every answer is decoded here, so the
+// panel never reads the node's JSON itself. Users see the feature as "Search
+// across assets"; the API keeps the engine words.
 
 import type { GetView } from '@origintrail-official/dkg-core';
 import { HttpError, authHeaders, getBoundedJson, requestLongMutation } from './http.js';
 
 export const READ_GRAPH_SETTINGS_PATH = '/api/store/read-graphs/settings';
+export const RESULT_CHANGES_PATH = '/api/query/view-semantics-delta';
 
 export type ReadGraphMode = 'off' | 'build' | 'serve';
 export const READ_GRAPH_MODES: readonly ReadGraphMode[] = ['off', 'build', 'serve'];
 
 /** The layers in the order the panel lists them. */
-export const READ_GRAPH_VIEWS: readonly GetView[] = ['working-memory', 'shared-working-memory', 'verifiable-memory'];
+export const READ_GRAPH_VIEWS: readonly GetView[] = ['verifiable-memory', 'shared-working-memory', 'working-memory'];
 
 /** The node reads its read-graph states from the store, which can take a while on a busy node. */
-const SETTINGS_READ_TIMEOUT_MS = 30_000;
+const READ_TIMEOUT_MS = 30_000;
 
 /** The read-graph status names a layer by its short label. */
 const LAYER_OF_LABEL: Readonly<Record<string, GetView>> = {
@@ -34,6 +38,12 @@ export interface ReadGraphLayerSettings {
   readonly allowed: boolean;
   /** How many of the layer's read graphs are in each state, for example `{ ready: 1 }`. */
   readonly states: Readonly<Record<string, number>>;
+  /**
+   * How far the layer's read graphs being built have got, from 0 to 1. The node
+   * reports it for the one its builder is working on; the others count as not
+   * started. Absent when the node reports it for none.
+   */
+  readonly progress?: number;
 }
 
 export interface ReadGraphSettings {
@@ -49,6 +59,16 @@ export interface ReadGraphSettings {
 /** `hidden`: the caller isn't the node admin, or the node has no settings to show. */
 export type ReadGraphSettingsLoad = { readonly kind: 'hidden' } | { readonly kind: 'settings'; readonly settings: ReadGraphSettings };
 
+/** How a context graph's sampled queries would have answered across assets. */
+export interface ResultChanges {
+  /** Queries the node ran both ways and compared. */
+  readonly compared: number;
+  /** Of those, the ones whose results would be different. */
+  readonly different: number;
+  /** When the node started comparing, once it has compared any. */
+  readonly since?: string;
+}
+
 function objectOf(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
@@ -61,6 +81,29 @@ function viewOf(value: unknown): GetView | undefined {
   return READ_GRAPH_VIEWS.find(view => view === value) ?? (typeof value === 'string' ? LAYER_OF_LABEL[value] : undefined);
 }
 
+/** A finite, non-negative number, or `undefined`. */
+function amountOf(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function entryOf(body: unknown, contextGraphId: string): Record<string, unknown> | undefined {
+  const entries = objectOf(body)?.contextGraphs;
+  return (Array.isArray(entries) ? entries : []).map(objectOf).find(entry => entry?.contextGraphId === contextGraphId);
+}
+
+interface HeldReadGraph { readonly state: string; readonly progress?: number }
+
+/** A layer's read graphs by state, and how far those being built have got. */
+function heldOf(held: readonly HeldReadGraph[]): Pick<ReadGraphLayerSettings, 'states' | 'progress'> {
+  const states: Record<string, number> = {};
+  for (const { state } of held) states[state] = (states[state] ?? 0) + 1;
+  const building = held.filter(readGraph => readGraph.state === 'building');
+  const progress = building.some(readGraph => readGraph.progress !== undefined)
+    ? building.reduce((sum, readGraph) => sum + Math.min(1, readGraph.progress ?? 0), 0) / building.length
+    : undefined;
+  return { states, ...(progress === undefined ? {} : { progress }) };
+}
+
 /**
  * Decode a settings answer for one context graph. Fields this page doesn't
  * know are ignored, and a field the node left out shows as unknown: without
@@ -71,19 +114,17 @@ export function decodeReadGraphSettings(body: unknown, contextGraphId: string): 
   const policy = objectOf(answer.policy);
   const allowedLayers = Array.isArray(policy?.layers) ? policy.layers.map(viewOf) : undefined;
   const refused = objectOf(answer.refused);
-  const entry = (Array.isArray(answer.contextGraphs) ? answer.contextGraphs : [])
-    .map(objectOf)
-    .find(candidate => candidate?.contextGraphId === contextGraphId);
+  const entry = entryOf(body, contextGraphId);
   const rows = objectOf(entry?.layers);
   const effective = objectOf(objectOf(entry?.effective)?.layers);
-  const states = new Map<GetView, Record<string, number>>(READ_GRAPH_VIEWS.map(view => [view, {}]));
+  const held = new Map<GetView, HeldReadGraph[]>(READ_GRAPH_VIEWS.map(view => [view, []]));
   for (const readGraph of Array.isArray(entry?.readGraphs) ? entry.readGraphs : []) {
     const row = objectOf(readGraph);
     const view = viewOf(row?.layer);
     const state = row?.state;
     if (view === undefined || typeof state !== 'string' || state === '') continue;
-    const counts = states.get(view)!;
-    counts[state] = (counts[state] ?? 0) + 1;
+    const progress = amountOf(row?.progress);
+    held.get(view)!.push({ state, ...(progress === undefined ? {} : { progress }) });
   }
   return {
     contextGraphId,
@@ -99,17 +140,27 @@ export function decodeReadGraphSettings(body: unknown, contextGraphId: string): 
         ...(mode === undefined ? {} : { mode }),
         setHere: setHere !== undefined,
         allowed: allowedLayers === undefined || allowedLayers.includes(view),
-        states: states.get(view)!,
+        ...heldOf(held.get(view)!),
       };
     }),
   };
+}
+
+/** Decode the comparison report for one context graph: queries compared, and those whose results would differ. */
+export function decodeResultChanges(body: unknown, contextGraphId: string): ResultChanges {
+  const summary = entryOf(body, contextGraphId);
+  const kinds = objectOf(summary?.kinds);
+  const count = (kind: string) => Math.floor(amountOf(kinds?.[kind]) ?? 0);
+  const different = count('rows-added') + count('rows-removed-or-changed');
+  const compared = different + count('none') + count('copies-removed');
+  return { compared, different, ...(compared > 0 && typeof summary?.since === 'string' ? { since: summary.since } : {}) };
 }
 
 /** The settings of one context graph, or `hidden` for a caller who isn't the node admin (403) or a node without them (404). */
 export async function fetchReadGraphSettings(contextGraphId: string): Promise<ReadGraphSettingsLoad> {
   try {
     const path = `${READ_GRAPH_SETTINGS_PATH}?contextGraphId=${encodeURIComponent(contextGraphId)}`;
-    const body = await getBoundedJson<unknown>(path, SETTINGS_READ_TIMEOUT_MS);
+    const body = await getBoundedJson<unknown>(path, READ_TIMEOUT_MS);
     return { kind: 'settings', settings: decodeReadGraphSettings(body, contextGraphId) };
   } catch (error) {
     if (error instanceof HttpError && (error.status === 403 || error.status === 404)) return { kind: 'hidden' };
@@ -129,4 +180,10 @@ export async function setReadGraphMode(contextGraphId: string, view: GetView, mo
     body: JSON.stringify({ contextGraphId, layers: { [view]: mode } }),
   }, 'The node did not answer in time. The change may still apply: refresh to see the current settings.');
   return decodeReadGraphSettings(body, contextGraphId);
+}
+
+/** How the node's sampled queries on one context graph would have answered across assets. */
+export async function fetchResultChanges(contextGraphId: string): Promise<ResultChanges> {
+  const path = `${RESULT_CHANGES_PATH}?contextGraphId=${encodeURIComponent(contextGraphId)}`;
+  return decodeResultChanges(await getBoundedJson<unknown>(path, READ_TIMEOUT_MS), contextGraphId);
 }
