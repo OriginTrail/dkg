@@ -594,7 +594,7 @@ export interface GraphSetIndexConfig {
   enabled?: boolean;
   /** Revalidate the named-graph index after this many milliseconds. 0 means every read. */
   revalidateMs?: number;
-  /** `background` (the default) answers from a warm index while it revalidates; `blocking` makes the caller that finds it due wait. */
+  /** `blocking` (the default) makes the caller that finds the index due wait for it; `background` answers from a warm index while it revalidates. */
   revalidate?: 'background' | 'blocking';
 }
 

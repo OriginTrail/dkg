@@ -83,8 +83,7 @@ no marketplace contracts yet.
 ### Changed
 
 - A scoped query costs what the context graph it reads costs: it finds its
-  graphs in the node's graph catalog, which is answered warm while it
-  refreshes in the background, instead of listing the whole store. A
+  graphs in the node's graph catalog instead of listing the whole store. A
   caller's byte budget covers only the reads made for its own query.
 - Core nodes send fewer RPC requests for Knowledge Assets that wait to reach
   Verifiable Memory. The VM reconcile pass and the StorageACK promotion lanes
