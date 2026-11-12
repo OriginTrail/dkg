@@ -17,6 +17,14 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ### Fixed
 
+- A node that turns the marketplace on where its chain has none of the
+  marketplace's contracts, as on the mainnets for now, keeps buying and
+  selling off with one log line. Before, the buyer's job started anyway,
+  failed on every tick and posted a "Marketplace renewal failed"
+  notification each time. The node asks its chain for the contracts once at
+  start-up, and only when the marketplace is on. A failed RPC call says
+  nothing about the contracts, so the node then starts the marketplace as
+  before.
 - A node built from source without the semantic runtime's pinned Rust
   toolchain builds again. Its build skips the semantic runtime's Wasm with a
   warning, where it used to fail the whole build and stop git-based updates;
