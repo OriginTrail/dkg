@@ -25,7 +25,7 @@ describe('layerNoun', () => {
 
 const profile: ProjectProfile = {
   contextGraphId: 'cg-test',
-  displayName: 'Context Graph Test',
+  displayName: 'Context graph Test',
   primaryColor: '#64748b',
   accentColor: '#22c55e',
   subGraphs: [],
@@ -89,7 +89,7 @@ describe('KADetailView navigation label', () => {
     vi.clearAllMocks();
   });
 
-  it('renders Back to Context Graph and calls onClose', async () => {
+  it('links back to the Context Graph and calls onClose', async () => {
     const onClose = vi.fn();
     await act(async () => {
       root.render(
@@ -107,10 +107,9 @@ describe('KADetailView navigation label', () => {
       );
     });
 
-    const back = query('.v10-ka-back');
-    expect(back.textContent).toContain('Back to Context Graph');
-    expect(back.textContent).not.toContain('Back to Project');
-
+    const back = query('button.ds-crumb');
+    expect(back.textContent).toBe('Context graph');
+    
     await act(async () => {
       back.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });

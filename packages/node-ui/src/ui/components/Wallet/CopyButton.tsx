@@ -58,12 +58,12 @@ export function CopyButton({
     <>
       <button
         type="button"
-        className={['v10-pca-copy-btn', className].filter(Boolean).join(' ')}
+        className={['v10-pca-copy-btn ds-btn ds-ghost ds-sm ds-icon', className].filter(Boolean).join(' ')}
         onClick={() => copy(value)}
         aria-label={accessibleName}
         title={accessibleName}
       >
-        {copied ? <Check size={13} aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}
+        {copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
       </button>
       <span className="v10-pca-copy-announce" aria-live="polite">
         {copied ? 'Copied' : ''}

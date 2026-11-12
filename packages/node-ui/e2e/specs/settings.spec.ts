@@ -15,16 +15,16 @@ import { fetchApiInPage } from '../helpers/page-api.js';
  *     dependent — devnet ships 7 days), never mutated.
  */
 test.describe('Settings page (rc.12 rewrite)', () => {
-  test.beforeEach(async ({ shell, header, settingsPage }) => {
+  test.beforeEach(async ({ shell, leftPanel, settingsPage }) => {
     await shell.goto();
-    await header.openSettings();
+    await leftPanel.openSettings();
     await settingsPage.waitForLoaded();
     // Gate on the async /api/status fetch so identity-derived assertions never
     // race the "—" first paint (status can lag under the local parallel load).
     await settingsPage.waitForIdentityLoaded();
   });
 
-  test('opens as the active, closable center tab from the header gear', async ({ centerPanel, settingsPage }) => {
+  test('opens as the active, closable center tab from the sidebar', async ({ centerPanel, settingsPage }) => {
     await expect(settingsPage.title).toBeVisible();
     expect(await centerPanel.getTabNames()).toContain('Settings');
     expect((await centerPanel.getActiveTabName())?.trim()).toBe('Settings');
@@ -33,17 +33,17 @@ test.describe('Settings page (rc.12 rewrite)', () => {
 
   test('renders exactly the seven section cards in order', async ({ settingsPage }) => {
     expect(await settingsPage.getSectionTitles()).toEqual([
-      'Node Identity',
-      'Node Identity Wallets',
-      'Blockchain Config',
+      'Node identity',
+      'Node identity wallets',
+      'Blockchain config',
       'Publisher Conviction',
-      'Network Telemetry',
-      'Local Data Retention',
-      'Danger Zone',
+      'Network telemetry',
+      'Local data retention',
+      'Danger zone',
     ]);
   });
 
-  test('Node Identity fields are populated from the live node (no em-dash placeholders)', async ({ settingsPage }) => {
+  test('Node identity fields are populated from the live node (no em-dash placeholders)', async ({ settingsPage }) => {
     for (const label of ['Name', 'Peer ID', 'Role', 'Network', 'Store']) {
       const value = (await settingsPage.fieldValue(label).first().textContent())?.trim() ?? '';
       expect(value.length, `${label} should render a real value`).toBeGreaterThan(0);
@@ -53,13 +53,14 @@ test.describe('Settings page (rc.12 rewrite)', () => {
     // boots the first NUM_CORE_NODES nodes as `core` and the rest as `edge`, so
     // assert against the role derived for the UI's target node rather than a
     // hard-coded `core` (which would falsely fail when repointed at an edge node
-    // via UI_NODE_ID). Default CI run targets node1 → core.
-    expect((await settingsPage.fieldValue('Role').first().textContent())?.trim()).toBe(EXPECTED_NODE_ROLE);
+    // via UI_NODE_ID). Default CI run targets node1 → core. The page shows the role
+    // as a name: Core or Edge.
+    expect((await settingsPage.fieldValue('Role').first().textContent())?.trim()).toBe(EXPECTED_NODE_ROLE === 'core' ? 'Core' : 'Edge');
     // libp2p peer ids are base58 starting 12D3Koo… — catches a truncated/garbled id.
     expect((await settingsPage.fieldValue('Peer ID').first().textContent())?.trim()).toMatch(/^12D3Koo\w{20,}$/);
   });
 
-  test('Node Identity Name + Peer ID exactly match GET /api/status', async ({ settingsPage, page }) => {
+  test('Node identity Name + Peer ID exactly match GET /api/status', async ({ settingsPage, page }) => {
     // Authed in-page fetch (same bearer the UI uses) — a raw fetch would 401 on
     // an auth-enabled node and falsely fail even though Settings rendered fine.
     // Retries ride out transient 5xx under heavy parallel load, like the UI poll.
@@ -70,20 +71,18 @@ test.describe('Settings page (rc.12 rewrite)', () => {
     expect((await settingsPage.fieldValue('Peer ID').first().textContent())?.trim()).toBe(status.peerId);
   });
 
-  test('Node Identity status pill reports ONLINE for a live daemon', async ({ settingsPage }) => {
-    await expect(settingsPage.onlinePill).toBeVisible();
-    expect(await settingsPage.getOnlinePillText()).toMatch(/●\s*ONLINE/);
-    // The pill summary line carries peer/connection/uptime detail, never the
-    // "Node is not responding" string a dead daemon would show.
-    await expect(settingsPage.root.getByText('Node is not responding')).toHaveCount(0);
+  test('Node identity shows the same status as the header for a live daemon', async ({ settingsPage, header }) => {
+    await expect(settingsPage.nodeStatus).toHaveText(/^(Connected|No peers)$/, { timeout: 5_000 });
+    await expect(settingsPage.nodeStatus).toHaveText((await header.status.textContent()) ?? '');
+    await expect(settingsPage.root.getByText('The node is not responding')).toHaveCount(0);
   });
 
-  test('Blockchain Config shows the local hardhat chain, a wallet, and the testnet banner', async ({ settingsPage }) => {
+  test('Blockchain config shows the local hardhat chain, a wallet, and the testnet banner', async ({ settingsPage }) => {
     // Chain + wallet derive from the async /api/wallets/balances fetch — until it
     // resolves the field reads the "Unknown" fallback. The testnet banner renders
     // from the SAME payload, so waiting for it gates the whole assertion on a
     // loaded chainId (rather than racing the first paint).
-    await expect(settingsPage.root.getByText(/Testnet Mode/i)).toBeVisible({ timeout: 15_000 });
+    await expect(settingsPage.root.getByText(/Testnet mode/i)).toBeVisible({ timeout: 15_000 });
     // At least one 0x… operational wallet address is rendered.
     await expect(settingsPage.root.getByText(/0x[a-fA-F0-9]{40}/).first()).toBeVisible();
     // chainLabel(31337) → "Local (Hardhat)"; once loaded it must never be the bare
@@ -103,7 +102,7 @@ test.describe('Settings page (rc.12 rewrite)', () => {
     await expect(page.locator(sel.settings.rpcRevealBtn)).toBeVisible();
   });
 
-  test('Local Data Retention select exposes all five windows and a valid current value', async ({ settingsPage }) => {
+  test('Local data retention select exposes all five windows and a valid current value', async ({ settingsPage }) => {
     await expect(settingsPage.retentionSelect).toBeVisible();
     await expect(settingsPage.retentionSelect).toBeEnabled();
     expect(await settingsPage.getRetentionOptions()).toEqual([
@@ -137,12 +136,12 @@ test.describe('Settings page (rc.12 rewrite)', () => {
     await expect(settingsPage.telemetrySwitch).toHaveAttribute('aria-checked', 'false');
   });
 
-  test('Danger Zone Shutdown is a two-click confirm — the first click only arms it and never kills the node', async ({ settingsPage, page }) => {
-    await expect(settingsPage.shutdownButton).toHaveText('Shutdown Node');
+  test('Danger zone Shutdown is a two-click confirm — the first click only arms it and never kills the node', async ({ settingsPage, page }) => {
+    await expect(settingsPage.shutdownButton).toHaveText('Shut down node');
 
     // First click arms the confirm; it must NOT shut the daemon down.
     await settingsPage.shutdownButton.click();
-    await expect(settingsPage.shutdownButton).toHaveText('Confirm Shutdown');
+    await expect(settingsPage.shutdownButton).toHaveText('Confirm shutdown');
     await expect(settingsPage.root.getByText(/Click again to confirm/i)).toBeVisible();
 
     // Prove the daemon is still alive (the arming click had no side effect).
@@ -154,10 +153,10 @@ test.describe('Settings page (rc.12 rewrite)', () => {
     expect(res.status).toBe(200);
   });
 
-  test('Settings tab can be closed and reopened from the header', async ({ centerPanel, header, settingsPage }) => {
+  test('Settings tab can be closed and reopened from the sidebar', async ({ centerPanel, leftPanel, settingsPage }) => {
     await centerPanel.closeTab('Settings');
     expect(await centerPanel.getTabNames()).not.toContain('Settings');
-    await header.openSettings();
+    await leftPanel.openSettings();
     await settingsPage.waitForLoaded();
     expect(await centerPanel.getTabNames()).toContain('Settings');
   });

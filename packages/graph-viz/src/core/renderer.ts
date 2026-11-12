@@ -4,6 +4,7 @@ import type { GraphNode, GraphEdge, ForceNode, ForceLink } from './types.js';
 import type { RendererBackend, RendererBackendConfig } from './renderer-backend.js';
 import type { AnimationConfig } from './view-config.js';
 import type { ColorPalette } from './palette.js';
+import { withAlpha } from './palette.js';
 import { HexagonPainter } from './hexagon-painter.js';
 import { StyleEngine } from './style-engine.js';
 import { GraphEventEmitter } from './events.js';
@@ -137,14 +138,16 @@ export class Canvas2DRenderer implements RendererBackend {
         if (fl._graphEdge) {
           return this._styleEngine.getEdgeColor(fl._graphEdge);
         }
-        return styleConfig.defaultEdgeColor;
+        // Live config: the palette and style can change after init (setStyle / applyView).
+        return this._styleEngine.config.defaultEdgeColor;
       })
       .linkWidth(styleConfig.edgeWidth)
       .linkDirectionalArrowLength(styleConfig.edgeArrowSize)
       .linkDirectionalArrowRelPos(1)
       .linkCanvasObjectMode(() => 'after')
       .linkCanvasObject((link: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
-        if (globalScale < 0.3) return;
+        const fadeStart = this._styleEngine.config.edgeLabelMinZoom ?? 0.3;
+        if (globalScale < fadeStart) return;
 
         const fl = link as ForceLink;
         if (!fl._graphEdge) return;
@@ -152,8 +155,7 @@ export class Canvas2DRenderer implements RendererBackend {
         const label = fl._graphEdge.label;
         if (!label) return;
 
-        const fadeStart = 0.3;
-        const fadeFull = 0.8;
+        const fadeFull = fadeStart + 0.5;
         const opacity = Math.min(1, (globalScale - fadeStart) / (fadeFull - fadeStart));
 
         const fontSize = 12 / globalScale;
@@ -167,14 +169,16 @@ export class Canvas2DRenderer implements RendererBackend {
 
         ctx.save();
         ctx.globalAlpha = opacity;
-        ctx.font = `${fontSize}px ${styleConfig.fontFamily}`;
+        ctx.font = `${fontSize}px ${this._styleEngine.config.fontFamily}`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
 
-        // Background pill for readability
+        // Background pill for readability, from the active palette so it
+        // reads as the canvas (not a dark box) in light themes.
+        const palette = this._styleEngine.palette;
         const textWidth = ctx.measureText(label).width;
         const pad = 2 / globalScale;
-        ctx.fillStyle = 'rgba(15, 23, 42, 0.75)';
+        ctx.fillStyle = withAlpha(palette.background, 0.8);
         ctx.beginPath();
         ctx.roundRect(
           midX - textWidth / 2 - pad,
@@ -185,7 +189,7 @@ export class Canvas2DRenderer implements RendererBackend {
         );
         ctx.fill();
 
-        ctx.fillStyle = '#94a3b8';
+        ctx.fillStyle = palette.edgeLabel;
         ctx.fillText(label, midX, midY);
         ctx.restore();
       })

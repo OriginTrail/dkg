@@ -2,9 +2,12 @@ import React from 'react';
 import type { ReactNode } from 'react';
 import { CopyButton } from './CopyButton.js';
 import { truncateAddress } from './truncateAddress.js';
+import { StatusGlyph } from '../ds/Badge.js';
 
 /** Textual status tone for the wallet's approval/funding state. */
 export type WalletRowTone = 'success' | 'warn' | 'danger' | 'neutral';
+
+const STATUS_GLYPH = { success: 'success', warn: 'warning', danger: 'danger' } as const;
 
 /**
  * A centralised truncated-address row, reused everywhere a wallet appears
@@ -37,7 +40,7 @@ export function WalletRow({
 
   return (
     <div
-      className={['v10-wallet-row', className].filter(Boolean).join(' ')}
+      className={['v10-wallet-row ds-card-nested', className].filter(Boolean).join(' ')}
       role="group"
       aria-label={ariaLabel}
     >
@@ -50,6 +53,7 @@ export function WalletRow({
           className="v10-wallet-status"
           data-tone={statusTone}
         >
+          {statusTone !== 'neutral' && <StatusGlyph tone={STATUS_GLYPH[statusTone]} />}
           {status}
         </span>
       )}

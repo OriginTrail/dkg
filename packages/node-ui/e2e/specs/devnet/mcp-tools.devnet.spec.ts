@@ -23,7 +23,7 @@ test.describe('MCP server tools (devnet API smoke)', () => {
     expect(json.agentAddress).toMatch(/^0x[a-fA-F0-9]{40}$/);
   });
 
-  test('context graph list is non-empty on seeded devnet', async () => {
+  test('Context Graph list is non-empty on seeded devnet', async () => {
     const res = await devnetApiFetch('/api/context-graphs');
     expect(res.ok).toBe(true);
     const json = (await res.json()) as { contextGraphs: unknown[] };
@@ -48,7 +48,7 @@ test.describe('MCP server tools (devnet API smoke)', () => {
     expect(json.result!.bindings!.length).toBeGreaterThan(0);
   });
 
-  test('context graph manifest endpoint responds', async () => {
+  test('Context Graph manifest endpoint responds', async () => {
     const cgs = await devnetApiFetch('/api/context-graphs');
     const { contextGraphs } = (await cgs.json()) as { contextGraphs: Array<{ id: string }> };
     requireDevnetPrecondition(test, contextGraphs.length === 0, 'No CGs');

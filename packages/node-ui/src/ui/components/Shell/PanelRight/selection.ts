@@ -1,29 +1,9 @@
 import type { LocalAgentIntegration, MemorySession } from '../../../api.js';
-import { getDefaultLocalAgentSessionId } from '../../../api.js';
+import { getLocalAgentConversationStateKey, resolveLocalAgentConversation } from '../../../conversations/identity.js';
+
+export { getLocalAgentConversationStateKey, resolveLocalAgentConversation };
 import { ADD_AGENT_TAB_ID } from './constants.js';
 import type { LocalAgentMessage, LocalAgentSessionSummary } from './types.js';
-
-export function getLocalAgentConversationStateKey(
-  integrationId: string,
-  sessionId: string | null,
-): string {
-  return sessionId?.trim() || `integration:${integrationId}`;
-}
-
-export function resolveLocalAgentConversation(args: {
-  integrationId: string;
-  sessionId: string | null;
-  defaultSessionId?: string | null;
-}): { integrationId: string; sessionId: string | null; stateKey: string } {
-  const resolvedSessionId = args.sessionId
-    ?? args.defaultSessionId
-    ?? getDefaultLocalAgentSessionId(args.integrationId);
-  return {
-    integrationId: args.integrationId,
-    sessionId: resolvedSessionId,
-    stateKey: getLocalAgentConversationStateKey(args.integrationId, resolvedSessionId),
-  };
-}
 
 function integrationIdFromSessionId(
   sessionId: string,

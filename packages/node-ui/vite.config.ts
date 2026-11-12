@@ -66,6 +66,11 @@ export default defineConfig({
       },
     },
   ],
+  resolve: {
+    // Only three-render-objects imports three/webgpu, and graph-viz never turns WebGPU on.
+    // The stub keeps three.js's WebGPU build out of the bundle (see three-webgpu-stub.ts).
+    alias: [{ find: /^three\/webgpu$/, replacement: resolve(__dirname, 'src/ui/lib/three-webgpu-stub.ts') }],
+  },
   root: 'src/ui',
   base: '/ui/',
   build: {

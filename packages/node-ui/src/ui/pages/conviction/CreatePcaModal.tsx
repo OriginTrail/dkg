@@ -26,20 +26,17 @@ import {
   DeviceConfirmProgress,
   DiscountTierLadder,
   WalletConnectControl,
-  WalletPill,
   WalletRow,
   formatPcaTrac,
   discountTierForTrac,
   PrimaryNodePicker,
 } from '../../components/Pca/index.js';
 import { PcaModalShell } from './PcaModalShell.js';
+import { StatusGlyph } from '../../components/ds/Badge.js';
+import { formatBps } from '../../lib/format.js';
+import { ExternalMark } from '../../components/ds/ExternalMark.js';
 
 type Phase = 'form' | 'creating' | 'success' | 'reconcile';
-
-function pctFromBps(bps: number): string {
-  const p = bps / 100;
-  return `${p % 1 === 0 ? p.toFixed(0) : p.toFixed(1)}%`;
-}
 
 const AMOUNT_RE = /^\d+(\.\d+)?$/;
 
@@ -219,7 +216,7 @@ export function CreatePcaModal({
       if (!hardwarePrimaryLive) {
         onPrimaryNodeRejected();
         refreshNodes();
-        setError('The selected primary node is no longer in the live staked-node list. Pick another staked node before signing.');
+        setError('The selected primary node is no longer an active Core node. Pick another one before signing.');
         return;
       }
     }
@@ -333,17 +330,17 @@ export function CreatePcaModal({
     return (
       <PcaModalShell onClose={onClose} testId="pca-create-modal" title="Confirm before retrying">
         <div className="v10-modal-body">
-          <div className="v10-modal-warning" role="alert">
-            ⚠ Your create transaction was submitted but we lost confirmation. We’re checking the chain
-            before letting you retry — creating again could lock a <strong>second</strong> commitment of
-            TRAC.
+          <div className="v10-modal-warning ds-card-nested" role="alert">
+            <StatusGlyph tone="warning" /> Your create transaction was submitted but we lost confirmation. We’re checking the chain
+            before letting you retry — creating again could commit TRAC a <strong>second</strong>
+            time.
           </div>
           <div className="v10-pca-create-recon">
             {pendingTxHash && (
               <p>
                 Broadcast tx{' '}
                 {txUrl ? (
-                  <a href={txUrl} target="_blank" rel="noreferrer">{pendingTxHash} ↗</a>
+                  <a href={txUrl} target="_blank" rel="noreferrer">{pendingTxHash} <ExternalMark /></a>
                 ) : (
                   <code>{pendingTxHash}</code>
                 )}
@@ -355,8 +352,8 @@ export function CreatePcaModal({
                 explorer whether a PCA was minted to <code>{pendingOwner ?? 'your owner wallet'}</code>:
               </p>
             ) : (
-              <p className="v10-pca-create-warn" role="alert">
-                ⚠ This browser blocked saving the safety marker (storage disabled or full), so this
+              <p className="v10-pca-create-warn ds-card-nested" role="alert">
+                <StatusGlyph tone="warning" /> This browser blocked saving the safety marker (storage disabled or full), so this
                 guard will <strong>NOT</strong> survive a refresh. Do not create again until you’ve
                 verified on the explorer whether a PCA was minted to{' '}
                 <code>{pendingOwner ?? 'your owner wallet'}</code>:
@@ -370,16 +367,16 @@ export function CreatePcaModal({
         </div>
         <div className="v10-modal-footer">
           {txUrl && (
-            <a className="v10-modal-btn" href={txUrl} target="_blank" rel="noreferrer">Recheck on explorer ↗</a>
+            <a className="v10-modal-btn ds-btn" href={txUrl} target="_blank" rel="noreferrer">Recheck on explorer <ExternalMark /></a>
           )}
           <button
             type="button"
-            className="v10-modal-btn"
+            className="v10-modal-btn ds-btn"
             onClick={() => { clearCreatePending(); setPendingTxHash(undefined); setPhase('form'); }}
           >
             No PCA minted — clear &amp; retry
           </button>
-          <button type="button" className="v10-modal-btn" onClick={onClose}>Close</button>
+          <button type="button" className="v10-modal-btn ds-btn" onClick={onClose}>Close</button>
         </div>
       </PcaModalShell>
     );
@@ -399,7 +396,7 @@ export function CreatePcaModal({
           </p>
         </div>
         <div className="v10-modal-footer">
-          <button type="button" className="v10-modal-btn" onClick={onClose}>Close</button>
+          <button type="button" className="v10-modal-btn ds-btn" onClick={onClose}>Close</button>
         </div>
       </PcaModalShell>
     );
@@ -418,39 +415,39 @@ export function CreatePcaModal({
             <div className="v10-pca-create-success-stats">
               <span>Account <strong>#{result.accountId}</strong></span>
               {typeof realBps === 'number' && (
-                <span>Discount tier <strong>{pctFromBps(realBps)}</strong></span>
+                <span>Discount tier <strong>{formatBps(realBps)}</strong></span>
               )}
               <span>Committed <strong>{formatPcaTrac(result.committedTokens)} TRAC</strong></span>
             </div>
             {delta && (
-              <p className="v10-pca-create-warn">
-                Heads up: the created account returned a {pctFromBps(realBps!)} discount tier instead of the previewed {pctFromBps(estBps)} tier.
+              <p className="v10-pca-create-warn ds-card-nested">
+                The new PCA has a {formatBps(realBps!)} discount, not the {formatBps(estBps)} shown before you created it.
               </p>
             )}
             {result.txHash && (
               <p className="v10-pca-create-tx">
                 Tx{' '}
-                {txUrl ? <a href={txUrl} target="_blank" rel="noreferrer">{result.txHash} ↗</a> : <code>{result.txHash}</code>}
+                {txUrl ? <a href={txUrl} target="_blank" rel="noreferrer">{result.txHash} <ExternalMark /></a> : <code>{result.txHash}</code>}
               </p>
             )}
-            <div className="v10-pca-create-warn" role="alert">
-              ⚠ 0/100 wallets approved — this PCA discounts nothing yet. It covers nothing until you
-              approve this node’s operational (signing) wallets.
+            <div className="v10-pca-create-warn ds-card-nested" role="alert">
+              <StatusGlyph tone="warning" /> No wallets are approved yet, so no publishes get the discount. Approve this
+              node’s publishing wallets to start using it.
             </div>
           </div>
         </div>
         <div className="v10-modal-footer">
           <button
             type="button"
-            className="v10-modal-btn primary"
+            className="v10-modal-btn primary ds-btn ds-primary"
             data-testid="pca-approve-own-wallets"
             onClick={() => onApproveOwnWallets(result.accountId)}
           >
             {replacingAccountId
               ? `Re-approve PCA #${replacingAccountId}’s wallets`
-              : 'Approve this node’s operational wallets'}
+              : 'Approve this node’s publishing (operational) wallets'}
           </button>
-          <button type="button" className="v10-modal-btn" onClick={() => onManage(result.accountId)}>
+          <button type="button" className="v10-modal-btn ds-btn" onClick={() => onManage(result.accountId)}>
             Manage PCA #{result.accountId}
           </button>
         </div>
@@ -464,15 +461,15 @@ export function CreatePcaModal({
       onClose={onClose}
       testId="pca-create-modal"
       title={replacingAccountId ? `Renew — new PCA to replace #${replacingAccountId}` : 'Create a Publisher Conviction Account'}
-      subtitle={replacingAccountId ? 'Re-mint a fresh account seeded from the expiring one.' : 'Lock TRAC up front to publish at a discount.'}
+      subtitle={replacingAccountId ? 'Create a new PCA that carries over the expiring one’s wallets.' : 'Commit TRAC up front to publish at a discount.'}
       dismissDisabled={hardwareDismissDisabled}
     >
       <div className="v10-modal-body">
-        {error && <div className="v10-modal-error" role="alert">{error}</div>}
+        {error && <div className="v10-modal-error ds-card-nested" role="alert">{error}</div>}
         {hardwareSelected && phase === 'creating' && (
-          <div className="v10-modal-warning" role="status" data-testid="pca-create-hw-lock">
-            Finish or reject the prompt in your wallet. Closing, backdrop click, and Esc are disabled while the
-            approve-to-create sequence is in flight.
+          <div className="v10-modal-warning ds-card-nested" role="status" data-testid="pca-create-hw-lock">
+            Your wallet asks you to confirm up to two steps: letting the PCA contract take the TRAC, then
+            creating the PCA. Confirm or reject each one in your wallet. This dialog stays open until you do.
           </div>
         )}
         {hardwareSelected && phase === 'creating' && (
@@ -485,9 +482,9 @@ export function CreatePcaModal({
 
         {/* Section 1 — Owner key (H-D). Hardware is recommended but not verifiable; hot stays daemon-signed. */}
         <section className="v10-pca-create-section" data-testid="pca-create-owner-key">
-          <h3 className="v10-pca-create-section-title">1 · Owner key</h3>
-          <div className="v10-pca-owner-key-grid" role="radiogroup" aria-label="PCA owner key">
-            <label className={`v10-pca-owner-key-card${ownerKey === 'hardware' ? ' selected' : ''}`}>
+          <h3 className="v10-pca-create-section-title">Step 1 of 4: Owner wallet</h3>
+          <div className="v10-pca-owner-key-grid" role="radiogroup" aria-label="PCA owner wallet">
+            <label className={`v10-pca-owner-key-card ds-card-nested${ownerKey === 'hardware' ? ' selected' : ''}`}>
               <input
                 type="radio"
                 name="pca-owner-key"
@@ -499,12 +496,12 @@ export function CreatePcaModal({
               <span>
                 <strong>Hardware wallet (recommended)</strong>
                 <small>
-                  If your browser wallet is backed by a device, verify the amount and contract there.
-                  The app cannot verify hardware backing from provider metadata.
+                  Connect a hardware wallet through your browser, and check the amount and contract on the
+                  device before you confirm. The app can’t tell whether a browser wallet is backed by a device.
                 </small>
               </span>
             </label>
-            <label className={`v10-pca-owner-key-card${ownerKey === 'hot' ? ' selected' : ''}`}>
+            <label className={`v10-pca-owner-key-card ds-card-nested${ownerKey === 'hot' ? ' selected' : ''}`}>
               <input
                 type="radio"
                 name="pca-owner-key"
@@ -515,7 +512,7 @@ export function CreatePcaModal({
               />
               <span>
                 <strong>This node&apos;s hot wallet</strong>
-                <small>No connected browser wallet is required. The daemon signs with this node&apos;s primary operational wallet.</small>
+                <small>This node signs with its primary operational wallet. You don’t need to connect a wallet.</small>
               </span>
             </label>
           </div>
@@ -523,7 +520,7 @@ export function CreatePcaModal({
             <div className="v10-pca-owner-key-readiness">
               <WalletConnectControl testId="pca-wallet-connect" />
               {hardwareReadiness && (
-                <p className="v10-pca-create-warn" role="status" data-testid="pca-create-hw-readiness">
+                <p className="v10-pca-create-warn ds-card-nested" role="status" data-testid="pca-create-hw-readiness">
                   {hardwareReadiness}
                 </p>
               )}
@@ -540,10 +537,11 @@ export function CreatePcaModal({
             identity (edge / no-identity). Create is NOT gated; this just surfaces the free
             alternative. Never a redirect that prevents Create. */}
         {noOwnIdentity && !replacingAccountId && (
-          <div className="v10-modal-tip" role="status" data-testid="pca-create-no-identity-note">
-            This node has no staked identity of its own — you can still create a PCA by choosing a
-            staked node as its primary node below (you get the discount; the reward weight accrues to
-            the node you pick).
+          <div className="v10-modal-tip ds-card-nested" role="status" data-testid="pca-create-no-identity-note">
+            Every PCA needs a primary node: an active Core node on the network, with TRAC staked on it.
+            {nodeStatus?.nodeRole === 'edge' ? ' This node is an Edge node' : ' This node isn’t registered on the network yet'},
+            so pick a Core node below. The primary node gets credit for the PCA’s TRAC when the protocol shares
+            out rewards. It doesn’t change who gets the discount.
           </div>
         )}
 
@@ -551,61 +549,61 @@ export function CreatePcaModal({
             account discounts NONE of your own publishes. NOT a block. (Only the ones on a LIVE
             sponsor PCA are actually "free"; dead ones get the separate warning below.) */}
         {b1.zeroSelfCoverage && (
-          <div className="v10-modal-warning" role="alert" data-testid="pca-b1-zero-coverage">
-            ⚠ All of this node’s operational wallets are already approved on other PCAs
-            {b1.sponsorBound.length > 0 ? ' (you already get the discount free where those are live)' : ''}.
-            This new account will <strong>NOT</strong> discount your own publishes. Create it only if
-            you intend to approve publishing wallets for other nodes; otherwise getting added to an
-            existing PCA avoids locking TRAC.
+          <div className="v10-modal-warning ds-card-nested" role="alert" data-testid="pca-b1-zero-coverage">
+            <StatusGlyph tone="warning" /> Every publishing wallet on this node is already on another PCA, and a
+            wallet can only be on one PCA. This new PCA <strong>can’t</strong> discount this node’s publishes.
+            Create it only if you want to approve other nodes’ wallets on it.
           </div>
         )}
         {b1.sponsorDead.length > 0 && (
-          <div className="v10-modal-warning" role="alert" data-testid="pca-b1-sponsor-dead">
-            Warning: {b1.sponsorDead.length} of this node&apos;s wallet(s) are approved on another PCA that is
-            <strong> expired or swept</strong> - they are <strong>not covered</strong>, and this node
-            cannot free them (it does not own that account). Ask that PCA owner to remove you, then
-            re-approve them here; otherwise they stay uncovered.
+          <div className="v10-modal-warning ds-card-nested" role="alert" data-testid="pca-b1-sponsor-dead">
+            <StatusGlyph tone="warning" /> {b1.sponsorDead.length} of this node’s wallets
+            {b1.sponsorDead.length === 1 ? ' is' : ' are'} approved on another PCA that has <strong>expired</strong>,
+            so they get no discount. Only that PCA’s owner can remove them: ask them to, then approve the
+            wallets here.
           </div>
         )}
         {!b1.zeroSelfCoverage && b1.sponsorBound.length > 0 && (
-          <div className="v10-modal-tip" role="status" data-testid="pca-b1-preview">
-            After creating, {b1.sponsorBound.length} of your wallet(s) stay on another PCA
-            (already discounted) and will not be moved; the rest are approved on the new account
-            (any already on a PCA you own are deregistered from it first).
+          <div className="v10-modal-tip ds-card-nested" role="status" data-testid="pca-b1-preview">
+            {b1.sponsorBound.length} of this node’s wallets
+            {b1.sponsorBound.length === 1 ? ' is' : ' are'} on someone else’s PCA, which already discounts
+            {b1.sponsorBound.length === 1 ? ' it, so it stays' : ' them, so they stay'} there. You can approve this
+            node’s other publishing wallets on the new PCA in the next step.
           </div>
         )}
         {/* Own-bound migration must be disclosed: these wallets are MOVED off a PCA this node
             already owns. Independent of the sponsor-bound preview (fires even when sponsorBound===0). */}
         {!b1.zeroSelfCoverage && b1.ownBound.length > 0 && (
-          <div className="v10-modal-warning" role="status" data-testid="pca-b1-own-bound">
-            ⚠ {b1.ownBound.length} of this node’s wallet(s) are already approved on a PCA you own.
-            Self-coverage will <strong>move</strong> them — deregister from that account, then approve
-            on the new one. The old account’s committed TRAC stays locked until its own expiry and
-            would then cover nothing, so only proceed if you’re replacing it.
+          <div className="v10-modal-warning ds-card-nested" role="status" data-testid="pca-b1-own-bound">
+            <StatusGlyph tone="warning" /> {b1.ownBound.length} of this node’s wallets
+            {b1.ownBound.length === 1 ? ' is' : ' are'} on another PCA you own. A wallet can only be on one PCA,
+            so approving {b1.ownBound.length === 1 ? 'it' : 'them'} on the new PCA in the next step <strong>moves</strong>{' '}
+            {b1.ownBound.length === 1 ? 'it' : 'them'} off the other one. Creating the PCA on its own doesn’t move
+            anything. Your other PCA then stops discounting {b1.ownBound.length === 1 ? 'that wallet' : 'those wallets'},
+            but its committed TRAC is still used up until it ends. Only go ahead if you’re replacing the other PCA.
           </div>
         )}
 
         {/* Renew — HONEST framing: this is a NEW separate account, not an in-place
-            extension; the old account's TRAC stays locked until its own expiry. */}
+            extension; the old account's committed TRAC is not returned. */}
         {replacingAccountId && (
-          <div className="v10-modal-warning" role="status" data-testid="pca-renew-note">
-            ⓘ This creates a <strong>new, separate</strong> account (a new id) — it does not extend or
-            reclaim PCA #{replacingAccountId}. The old account’s committed TRAC stays locked until its
-            own expiry (it can’t be withdrawn early), and the new account starts at <strong>0/100</strong>
-            approved wallets. The next step is pre-filled with the old account’s wallets for one-step
-            re-approval.
+          <div className="v10-modal-warning ds-card-nested" role="status" data-testid="pca-renew-note">
+            <StatusGlyph tone="warning" /> This creates a <strong>new, separate</strong> PCA with its own number. It doesn’t
+            extend PCA #{replacingAccountId}, and PCA #{replacingAccountId}’s TRAC isn’t returned. The new PCA
+            starts with <strong>0/100</strong> approved wallets. After you create it, you can approve
+            PCA #{replacingAccountId}’s wallets on the new PCA in one step, so they get the new PCA’s discount.
           </div>
         )}
 
         {/* Section 2 — Commitment */}
         <section className="v10-pca-create-section">
-          <h3 className="v10-pca-create-section-title">2 · Commitment</h3>
+          <h3 className="v10-pca-create-section-title">Step 2 of 4: Commitment</h3>
           <div className="v10-form-group">
             <label className="v10-form-label" htmlFor="pca-create-tokens">Commit amount (TRAC)</label>
             <input
               id="pca-create-tokens"
               data-testid="pca-create-tokens"
-              className="v10-form-input"
+              className="v10-form-input ds-input"
               type="text"
               inputMode="decimal"
               value={tokens}
@@ -621,8 +619,8 @@ export function CreatePcaModal({
             </p>
           )}
           {belowMinTier && (
-            <div className="v10-modal-warning">
-              ⚠ Under 25,000 TRAC earns a 0% discount — you’d lock TRAC for no benefit.
+            <div className="v10-modal-warning ds-card-nested">
+              <StatusGlyph tone="warning" /> Under 25,000 TRAC gets no discount, and committed TRAC isn’t returned. Commit at least 25,000 TRAC if you want a discount on publishing.
             </div>
           )}
           <DiscountTierLadder committedTrac={amountValid ? amountNum : null} />
@@ -630,14 +628,14 @@ export function CreatePcaModal({
 
         {/* Section 3 — Primary node (§3b: the always-visible, REQUIRED staked-node picker) */}
         <section className="v10-pca-create-section" data-testid="pca-create-primary-node">
-          <h3 className="v10-pca-create-section-title">3 · Primary node</h3>
+          <h3 className="v10-pca-create-section-title">Step 3 of 4: Primary node</h3>
           {/* S2b renew (LOW) — the old account's primary node couldn't be read, so the picker
               fell back to THIS node. Surface it rather than silently defaulting. */}
           {replacingAccountId && seed?.primaryNodeUnknown && (
-            <p className="v10-pca-create-hint" role="status" data-testid="pca-renew-primary-unknown">
-              ⓘ Couldn’t read PCA #{replacingAccountId}’s primary node — defaulting to this node. Pick a
-              different staked node below if the replacement should point elsewhere.
-            </p>
+            <div className="v10-modal-warning ds-card-nested" role="status" data-testid="pca-renew-primary-unknown">
+              <StatusGlyph tone="warning" /> We couldn’t find out which primary node PCA #{replacingAccountId} uses, so this node is
+              selected. If the new PCA should use a different node, pick it below.
+            </div>
           )}
           <PrimaryNodePicker
             nodes={stakedNodes}
@@ -654,10 +652,10 @@ export function CreatePcaModal({
 
         {/* Section 4 — Review */}
         <section className="v10-pca-create-section">
-          <h3 className="v10-pca-create-section-title">4 · Review</h3>
+          <h3 className="v10-pca-create-section-title">Step 4 of 4: Review</h3>
           <div className="v10-pca-create-review">
             <div><span>Commit</span><strong>{amountValid ? `${formatPcaTrac(tokens)} TRAC` : '—'}</strong></div>
-            <div><span>Discount tier</span><strong>{pctFromBps(estTier.bps)}</strong></div>
+            <div><span>Discount tier</span><strong>{formatBps(estTier.bps)}</strong></div>
             <div><span>Primary node</span><strong>{primaryValid ? `#${primaryNode.trim()}` : '—'}</strong></div>
           </div>
           {createOwnerAddress && (
@@ -670,12 +668,14 @@ export function CreatePcaModal({
             </div>
           )}
           <p className="v10-pca-create-owner-note">
-            Owner = the wallet that signs the create. <strong>Being the owner does not discount your
-            own publishes</strong> — you approve your publishing wallets in the next step.
+            The owner is the wallet that signs to create the PCA and manages it afterwards. <strong>Being
+            the PCA’s owner doesn’t give that wallet a discount</strong>: only the publishing wallets you
+            approve in the next step get it.
           </p>
-          <div className="v10-modal-tip">
-            Committed TRAC is locked for the lock period (a global protocol parameter — there’s no
-            lock-length input). The owner wallet still needs native gas to create the account.
+          <div className="v10-modal-tip ds-card-nested">
+            A PCA runs for a fixed number of epoch-long billing periods that the protocol sets, so there’s no length to choose.
+            Committed TRAC isn’t returned, even if you don’t use it all. The owner wallet also needs gas to pay
+            for creating the PCA.
           </div>
         </section>
       </div>
@@ -683,7 +683,7 @@ export function CreatePcaModal({
       <div className="v10-modal-footer">
         <button
           type="button"
-          className="v10-modal-btn"
+          className="v10-modal-btn ds-btn"
           onClick={() => {
             if (!hardwareDismissDisabled) onClose();
           }}
@@ -693,7 +693,7 @@ export function CreatePcaModal({
         </button>
         <button
           type="button"
-          className="v10-modal-btn primary"
+          className="v10-modal-btn primary ds-btn ds-primary"
           data-testid="pca-create-submit"
           onClick={handleCreate}
           disabled={!canSubmit}

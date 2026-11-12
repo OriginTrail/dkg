@@ -19,15 +19,16 @@ import type {
   ActivityItem,
   ActionResult,
 } from '../../hooks/useNotificationsFeed.js';
+import { AgentDot } from '../AgentDot.js';
+import { ContextGraphChip } from '../ds/ContextGraphChip.js';
+import { BadgePercent, Check, KeyRound, Plus, X, RefreshCw } from 'lucide-react';
+import { LayerGlyph } from '../ds/Badge.js';
+import { formatDateTime, bpsToPercent, truncateAddress } from '../../lib/format.js';
 
 /** `shortId` — never render a blank CG name (ui-brief §3 / UX §3). */
 function cgLabel(name: string | undefined, cgId: string): string {
   if (name && name.trim()) return name;
   return cgId.length > 20 ? `${cgId.slice(0, 16)}…` : cgId;
-}
-
-function shortAddr(addr: string): string {
-  return addr.length > 12 ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : addr;
 }
 
 // ─── Join request (actionable) ──────────────────────────────────────────────
@@ -55,7 +56,7 @@ export function JoinRequestRow({
 }) {
   const [phase, setPhase] = useState<JoinRowPhase>({ kind: 'idle' });
   const cg = cgLabel(item.contextGraphName, item.cgId);
-  const who = item.agentName?.trim() || shortAddr(item.agentAddress);
+  const who = item.agentName?.trim() || truncateAddress(item.agentAddress);
 
   const run = async (action: 'approve' | 'deny') => {
     setPhase({ kind: 'working', action });
@@ -83,7 +84,7 @@ export function JoinRequestRow({
   if (phase.kind === 'done') {
     return (
       <div className="v10-notif-row v10-notif-row-terminal" role="status" aria-live="polite">
-        <span className="v10-notif-glyph" aria-hidden="true">✓</span>
+        <span className="v10-notif-glyph" aria-hidden="true"><Check size={14} /></span>
         <span className="v10-notif-terminal-text">{phase.label}</span>
       </div>
     );
@@ -93,24 +94,18 @@ export function JoinRequestRow({
 
   return (
     <div className="v10-notif-row v10-notif-row-join">
-      <span className="v10-notif-glyph v10-notif-glyph-join" aria-hidden="true">🔑</span>
+      <span className="v10-notif-glyph v10-notif-glyph-join" aria-hidden="true"><KeyRound size={14} /></span>
       <div className="v10-notif-row-body">
         <div className="v10-notif-row-title">Join request</div>
         <div className="v10-notif-row-detail">
+          <AgentDot uri={item.agentAddress} label={item.agentName?.trim() || item.agentAddress} size={16} className="v10-notif-agent" />
           <span className="v10-notif-actor">{who}</span> wants to join{' '}
-          <button
-            type="button"
-            className="v10-notif-cg-link"
-            onClick={() => onOpen(item.cgId)}
-            title={`Open ${cg}`}
-          >
-            {cg}
-          </button>
+          <ContextGraphChip id={item.cgId} name={cg} onOpen={onOpen} title={`Open ${cg}`} className="v10-notif-cg-link" />
         </div>
         <div className="v10-notif-row-sub">
-          <span className="v10-notif-addr" title={item.agentAddress}>{shortAddr(item.agentAddress)}</span>
+          <span className="v10-notif-addr" title={item.agentAddress}>{truncateAddress(item.agentAddress)}</span>
           <span className="v10-notif-dot">·</span>
-          <span className="v10-notif-time" title={new Date(item.ts).toLocaleString()}>
+          <span className="v10-notif-time" title={formatDateTime(item.ts)}>
             {formatNotificationTimestamp(item.ts)}
           </span>
         </div>
@@ -118,7 +113,7 @@ export function JoinRequestRow({
           <div className="v10-notif-row-error" role="status" aria-live="polite">
             {phase.message}{' '}
             <button type="button" className="v10-notif-retry" onClick={() => run(phase.action)}>
-              Retry
+              <RefreshCw size={12} />Retry
             </button>
           </div>
         )}
@@ -155,7 +150,7 @@ export function JoinRequestRow({
             <span className="v10-notif-deny-confirm-label">Deny?</span>
             <button
               type="button"
-              className="v10-notif-btn v10-notif-btn-deny"
+              className="v10-notif-btn v10-notif-btn-deny ds-btn ds-danger ds-sm"
               onClick={() => run('deny')}
               aria-label={`Confirm deny join request from ${who} for ${cg}`}
             >
@@ -163,7 +158,7 @@ export function JoinRequestRow({
             </button>
             <button
               type="button"
-              className="v10-notif-btn v10-notif-btn-ghost"
+              className="v10-notif-btn v10-notif-btn-ghost ds-btn ds-ghost ds-sm"
               onClick={() => setPhase({ kind: 'idle' })}
               autoFocus
             >
@@ -174,7 +169,7 @@ export function JoinRequestRow({
           <>
             <button
               type="button"
-              className="v10-notif-btn v10-notif-btn-approve"
+              className="v10-notif-btn v10-notif-btn-approve ds-btn ds-primary ds-sm"
               onClick={() => run('approve')}
               disabled={working}
               aria-label={`Approve join request from ${who} for ${cg}`}
@@ -183,7 +178,7 @@ export function JoinRequestRow({
             </button>
             <button
               type="button"
-              className="v10-notif-btn v10-notif-btn-ghost"
+              className="v10-notif-btn v10-notif-btn-ghost ds-btn ds-ghost ds-sm"
               onClick={() => setPhase({ kind: 'confirming-deny' })}
               disabled={working}
               aria-label={`Deny join request from ${who} for ${cg}`}
@@ -199,10 +194,10 @@ export function JoinRequestRow({
 
 // ─── Activity digest (informational) ────────────────────────────────────────
 
-const ACTIVITY_GLYPH: Record<'created' | 'promoted' | 'published', string> = {
-  created: '+',
-  promoted: '⇡',
-  published: '◉',
+const ACTIVITY_GLYPH: Record<'created' | 'promoted' | 'published', React.ReactNode> = {
+  created: <Plus size={14} />,
+  promoted: <LayerGlyph layer="swm" />,
+  published: <LayerGlyph layer="vm" />,
 };
 
 /** Digest copy per kind, with singular/plural (mirrors ActivityFeed).
@@ -251,9 +246,14 @@ export function ActivityDigestRow({
         {ACTIVITY_GLYPH[item.event]}
       </span>
       <span className="v10-notif-row-body" aria-hidden="true">
-        <span className="v10-notif-row-detail">{text} in <span className="v10-notif-cg-name">{cg}</span></span>
+        <span className="v10-notif-row-detail">
+          {item.actorAgentDid && !item.bySelf && (
+            <AgentDot uri={item.actorAgentDid} label={item.actorAgentName?.trim() || item.actorAgentDid} size={16} className="v10-notif-agent" />
+          )}
+          {text} in <ContextGraphChip id={item.cgId} name={cg} className="v10-notif-cg-name" />
+        </span>
       </span>
-      <span className="v10-notif-time" aria-hidden="true" title={new Date(item.ts).toLocaleString()}>
+      <span className="v10-notif-time" aria-hidden="true" title={formatDateTime(item.ts)}>
         {when}
       </span>
     </button>
@@ -278,17 +278,17 @@ export function ConfirmationRow({
         className={`v10-notif-glyph ${approved ? 'v10-notif-glyph-approved' : 'v10-notif-glyph-rejected'}`}
         aria-hidden="true"
       >
-        {approved ? '✓' : '✕'}
+        {approved ? <Check size={14} /> : <X size={14} />}
       </span>
       <span className="v10-notif-row-body">
         <span className="v10-notif-row-title">{approved ? 'Request approved' : 'Request declined'}</span>
         <span className="v10-notif-row-detail">
           {approved
-            ? <>You can now access <span className="v10-notif-cg-name">{cg}</span></>
-            : <>Your request to join <span className="v10-notif-cg-name">{cg}</span> wasn’t approved</>}
+            ? <>You can now access <ContextGraphChip id={item.cgId} name={cg} className="v10-notif-cg-name" /></>
+            : <>Your request to join <ContextGraphChip id={item.cgId} name={cg} className="v10-notif-cg-name" /> wasn’t approved</>}
         </span>
       </span>
-      <span className="v10-notif-time" title={new Date(item.ts).toLocaleString()}>
+      <span className="v10-notif-time" title={formatDateTime(item.ts)}>
         {formatNotificationTimestamp(item.ts)}
       </span>
     </>
@@ -332,7 +332,7 @@ export function PcaCostCoveredRow({
   item: Extract<ActivityItem, { kind: 'pca_cost_covered' }>;
 }) {
   const bps = convictionDiscountBps(item.covered);
-  const pct = bps != null ? (bps / 100).toFixed(bps % 100 === 0 ? 0 : 1) : null;
+  const pct = bps != null ? bpsToPercent(bps) : null;
   let saved: string | null = null;
   try {
     const base = BigInt(item.covered.baseCost);
@@ -360,12 +360,12 @@ export function PcaCostCoveredRow({
       role="status"
       aria-label={`${title}, ${detail}${when ? `, ${when}` : ''}.`}
     >
-      <span className="v10-notif-glyph v10-notif-glyph-approved" aria-hidden="true">◉</span>
+      <span className="v10-notif-glyph v10-notif-glyph-approved" aria-hidden="true"><BadgePercent size={14} /></span>
       <span className="v10-notif-row-body" aria-hidden="true">
         <span className="v10-notif-row-title">{title}</span>
         <span className="v10-notif-row-detail">{detail}</span>
       </span>
-      <span className="v10-notif-time" aria-hidden="true" title={new Date(item.ts).toLocaleString()}>
+      <span className="v10-notif-time" aria-hidden="true" title={formatDateTime(item.ts)}>
         {when}
       </span>
     </div>

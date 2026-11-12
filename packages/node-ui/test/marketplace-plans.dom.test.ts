@@ -111,7 +111,7 @@ describe('marketplace Plans', () => {
   it('says when the marketplace is off', async () => {
     useFixtureNode('off');
     const c = await render(plans());
-    await waitForText(c, 'The marketplace is off on this node');
+    await waitForText(c, 'The NS Marketplace is off on this node');
     expect(byTestId(c, 'mkt-plans')?.getAttribute('data-state')).toBe('off');
   });
 

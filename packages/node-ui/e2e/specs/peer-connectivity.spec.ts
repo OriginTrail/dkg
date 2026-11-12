@@ -100,7 +100,7 @@ test.describe('Peer connectivity (multi-node devnet)', () => {
     // by the adjacent "N direct / N relayed" figure.
     await rightPanel.switchMode('Network');
     const peerStat = page.locator(
-      '.v10-agents-summary span[title*="Unique libp2p peers"]',
+      '.v10-agents-summary span[title*="Unique peers"]',
     );
     await expect(peerStat).toBeVisible({ timeout: 15_000 });
     await expect

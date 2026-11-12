@@ -1,7 +1,7 @@
 import { test, expect } from '../fixtures/rich.js';
 import { PRIMARY_CG } from '../helpers/real-node.js';
 
-test.describe('Context graph invites — share modal', () => {
+test.describe('Context Graph invites — share modal', () => {
   test.beforeEach(async ({ shell, leftPanel, projectLayer }) => {
     await shell.goto();
     await leftPanel.expandProject(PRIMARY_CG);
@@ -44,7 +44,7 @@ test.describe('Context graph invites — share modal', () => {
   });
 });
 
-test.describe('Context graph invites — overview panel', () => {
+test.describe('Context Graph invites — overview panel', () => {
   test('overview shows pending join requests card', async ({ shell, leftPanel, page }) => {
     await shell.goto();
     await leftPanel.expandProject(PRIMARY_CG);

@@ -9,13 +9,15 @@ import { useMemoryEntities, canonicalEntityUri, type TrustLevel, type MemoryEnti
 import { useProjectProfileContext, type QueryCatalog } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
-import { SubGraphBar } from '../../../components/SubGraphBar.js';
-import { memoryGraphLabels } from '../../../lib/memoryLabels.js';
-import { TRUST_COLORS, LAYER_CONFIG, CODE_CLASS_COLORS, CODE_PREDICATE_COLORS, entityAuthorUri, entityMeta, neutraliseBuiltinNamespaces, useLayerTriples, useCanonicalTriples, applyCanonicalAdmission, filterTriplesToEntities, admitTripleForScope, entityTimestamp, formatTimelineBucket, type SubGraphTab, type SubGraphEntitySort } from '../helpers.js';
+import { trustColors, LAYER_CONFIG, entityAuthorUri, entityMeta, useCanonicalTriples, applyCanonicalAdmission, filterTriplesToEntities, admitTripleForScope, entityTimestamp, formatTimelineBucket, type SubGraphTab, type SubGraphEntitySort } from '../helpers.js';
 import { EmptyState } from '../../../components/ContextGraphPrimitives.js';
 import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../../../lib/subGraphs.js';
 import { applyHeaviestSubjectsCap, RdfGraph, LayerGraphPanel } from './graph.js';
 import { EntityList, DocumentsList } from './entities.js';
+import { useGraphPalette } from '../../../hooks/useGraphPalette.js';
+import { subGraphMiniGraphOptions } from './subgraph-mini-graph.js';
+import { Check, Play, ArrowUpRight } from 'lucide-react';
+import { LayerGlyph, StatusGlyph } from '../../../components/ds/Badge.js';
 // ─── Subgraph Explorer header (page identity + permanent intro) ────
 // Shared between the All / Subgraphs-overview state and every chip
 // detail (named or Root). The three-sentence intro is non-dismissible —
@@ -25,9 +27,9 @@ import { EntityList, DocumentsList } from './entities.js';
 export function SubGraphExplorerHeader() {
   return (
     <div className="v10-subgraph-explorer-header">
-      <div className="v10-subgraph-explorer-title">Subgraph Explorer</div>
+      <div className="v10-subgraph-explorer-title">Subgraph explorer</div>
       <p className="v10-subgraph-explorer-intro">
-        Subgraphs are optional topical partitions inside this Context Graph.
+        Subgraphs are optional topical partitions inside this context graph.
         An entity belongs to one or more memory layers and, optionally,
         to one or more subgraphs. Entities in no subgraph live in the
         context graph root.
@@ -48,6 +50,7 @@ export function SubGraphOverviewGrid({
   onSelectSubGraph: (slug: string) => void;
 }) {
   const profile = useProjectProfileContext();
+  const palette = useGraphPalette();
   const [subGraphs, setSubGraphs] = useState<SubGraphInfo[]>([]);
   const [loading, setLoading] = useState(true);
   // Track fetch failure separately from "the daemon returned no
@@ -73,7 +76,7 @@ export function SubGraphOverviewGrid({
       })
       .catch((err: unknown) => {
         if (!cancelled) {
-          setFetchError(err instanceof Error ? err.message : 'Failed to load subgraphs');
+          setFetchError(err instanceof Error ? err.message : 'Couldn’t load subgraphs.');
           // Don't blow away prior `subGraphs` on a refresh failure —
           // the error branch below gates on `cards.length === 0` so
           // last-good cards stay rendered with a stale-but-readable
@@ -289,7 +292,7 @@ export function SubGraphOverviewGrid({
         return {
           slug: sg.name,
           icon: binding.icon ?? '•',
-          color: binding.color ?? '#64748b',
+          color: binding.color ?? palette.neutral.node,
           displayName: binding.displayName ?? sg.name,
           description: binding.description,
           rank: binding.rank ?? 99,
@@ -340,7 +343,7 @@ export function SubGraphOverviewGrid({
         };
       })
       .sort((a, b) => a.rank - b.rank);
-  }, [subGraphs, profile, triplesBySubGraph, tripleCountBySubGraph, layerCountsBySubGraph, entityUrisBySubGraph, entityTrustByUriBySubGraph]);
+  }, [subGraphs, profile, palette, triplesBySubGraph, tripleCountBySubGraph, layerCountsBySubGraph, entityUrisBySubGraph, entityTrustByUriBySubGraph]);
 
   // GH #813 — Root mini-card. Synthesizes a card for the
   // "entities not in any named sub-graph" bucket so the grid
@@ -475,7 +478,7 @@ export function SubGraphOverviewGrid({
       // Color left unset — the chrome falls through to neutral
       // tokens via the `.v10-sgov-card.root` modifier (mirrors
       // the chip's `--text-tertiary` neutral fallback).
-      color: binding.color ?? '#64748b',
+      color: binding.color ?? palette.neutral.node,
       displayName: binding.displayName ?? 'Root',
       description: binding.description,
       rank: 999,
@@ -492,14 +495,14 @@ export function SubGraphOverviewGrid({
       layerCounts: { wm, swm, vm },
       entityTrustByUri: rootEntityTrust,
     };
-  }, [memory.entityList, memory.allTriples, memory.entities, profile]);
+  }, [memory.entityList, memory.allTriples, memory.entities, profile, palette]);
 
   if (loading && cards.length === 0) {
     return (
       <EmptyState
+        busy
         compact
-        icon="#"
-        title="Loading subgraphs..."
+        title="Loading subgraphs…"
         className="v10-sgov-state"
       />
     );
@@ -545,13 +548,13 @@ export function SubGraphOverviewGrid({
     return (
       <EmptyState
         icon="#"
-        title="No subgraphs in this Context Graph yet."
+        title="No subgraphs in this context graph yet."
         description={
           <>
-            A subgraph is a named topical slice of this Context Graph
+            A subgraph is a named topical slice of this context graph
             (e.g. <code>recipes</code>, <code>decisions</code>). Agents
             create one when they scope an assertion to a subgraph. All
-            current entities live in the Context Graph root.
+            current entities live in the context graph root.
           </>
         }
         actions={[
@@ -661,7 +664,7 @@ export function SubGraphMiniCard({
   // Per-URI trust palette for the mini-graph (#3 polish).
   // ui-locked priority chain (graph-viz style engine):
   //   1. `nodeColors[uri]` — wins for any entity carrying a
-  //      canonical trust level (TRUST_COLORS[e.trustLevel]).
+  //      canonical trust level (trustColors(palette)[e.trustLevel]).
   //   2. `defaultNodeColor: card.color` — fallback for non-entity
   //      URIs (vocabulary IRIs, blank-node anchors) preserves the
   //      card's chrome identity.
@@ -676,51 +679,33 @@ export function SubGraphMiniCard({
   // subjects/objects survive promotion without falling through to
   // `card.color`. Mirrors the dual-key shape in `trustNodeColors`
   // further down this file.
+  const palette = useGraphPalette();
   const nodeColors = useMemo(() => {
+    const trust = trustColors(palette);
     const out: Record<string, string> = {};
     for (const [uri, trustLevel] of card.entityTrustByUri) {
-      out[uri] = TRUST_COLORS[trustLevel];
+      out[uri] = trust[trustLevel];
     }
     return out;
-  }, [card.entityTrustByUri]);
+  }, [card.entityTrustByUri, palette]);
 
   // A compact-mode graph options block — pared-down labels, smaller nodes,
   // brighter default color (driven by the sub-graph's profile color) so each
   // card reads as a distinct "island" at a glance.
-  const graphOptions = useMemo(() => ({
-    labelMode: 'humanized' as const,
-    renderer: '2d' as const,
-    labels: memoryGraphLabels({ minZoomForLabels: 0.8 }), // Keep labels out of the way in the mini view.
-    style: {
-      classColors: CODE_CLASS_COLORS,
-      predicateColors: CODE_PREDICATE_COLORS,
-      namespaceColors: neutraliseBuiltinNamespaces(card.color),
-      // Per-URI tints sit ABOVE classColors / namespaceColors in
-      // the style-engine priority stack — TRUST_COLORS wins for
-      // every entity in the card's scope (#3 polish).
-      ...(Object.keys(nodeColors).length > 0 ? { nodeColors } : {}),
-      defaultNodeColor: card.color,
-      defaultEdgeColor: '#475569',
-      edgeWidth: 1.0,
-      fontSize: 12 /* px: the canvas renderer takes a number */,
-      gradient: true,
-      gradientIntensity: 0.35,
-    },
-    hexagon: { baseSize: 6, minSize: 3, maxSize: 16, scaleWithDegree: true },
-    focus: { maxNodes: 5000, hops: 999 },
-  }), [card.color, nodeColors]);
+  // Canvas labels follow the app theme (dark palette text was unreadable in light mode).
+  const miniViewConfig = useMemo(() => ({ name: `sg-mini:${palette.theme}`, palette: palette.theme }), [palette]);
+  const graphOptions = useMemo(() => subGraphMiniGraphOptions(palette, card.color, nodeColors), [palette, card.color, nodeColors]);
 
   const isRoot = variant === 'root';
   return (
     <div
-      className={`v10-sgov-card${isRoot ? ' root' : ''}`}
+      className={`v10-sgov-card ds-card${isRoot ? ' root' : ''}`}
       style={isRoot
         // Root card: chrome falls through to neutral tokens via
         // the `.root` modifier — no per-card color injection.
         ? undefined
         : {
             '--sg-color': card.color,
-            borderColor: card.color + '55',
           } as React.CSSProperties}
     >
       <div className="v10-sgov-card-head">
@@ -731,8 +716,8 @@ export function SubGraphMiniCard({
             <div className="v10-sgov-card-desc" title={card.description}>{card.description}</div>
           )}
         </div>
-        <button type="button" className="v10-sgov-card-open" onClick={onOpen} title={`Focus on ${card.displayName}`}>
-          ↗
+        <button type="button" className="v10-sgov-card-open" onClick={onOpen} title={`Focus on ${card.displayName}`} aria-label={`Focus on ${card.displayName}`}>
+          <ArrowUpRight size={12} aria-hidden="true" />
         </button>
       </div>
       <div className="v10-sgov-card-stats">
@@ -811,7 +796,7 @@ export function SubGraphMiniCard({
             {/* Two-branch wording locked by ux-lead in the #2 amendment.
                 `entityCount > 0` AND mini-graph empty means the
                 sub-graph has content but no WM-shaped data this card
-                can render — pair the literal with the existing ↗ open
+                can render — pair the literal with the existing arrow open
                 button so the next action is obvious. */}
             {card.entityCount > 0 ? 'Promoted — open to view' : 'No data yet'}
           </div>
@@ -821,7 +806,8 @@ export function SubGraphMiniCard({
               data={card.triples}
               format="triples"
               options={graphOptions}
-              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
+              viewConfig={miniViewConfig}
+              className="v10-graph-fill"
               onNodeClick={onNodeClick}
               initialFit
             />
@@ -852,9 +838,9 @@ export function MiniLayerBar({
     return compact ? null : <div className="v10-minibar v10-minibar-empty">No data</div>;
   }
   const rows: Array<{ key: TrustLevel; short: string; count: number; color: string; label: string }> = [
-    { key: 'verified', short: 'VM',  count: counts.vm,  color: '#22c55e', label: 'Verifiable' },
-    { key: 'shared',   short: 'SWM', count: counts.swm, color: '#f59e0b', label: 'Shared' },
-    { key: 'working',  short: 'WM',  count: counts.wm,  color: '#64748b', label: 'Working' },
+    { key: 'verified', short: 'VM',  count: counts.vm,  color: 'var(--layer-verified)', label: 'Verifiable' },
+    { key: 'shared',   short: 'SWM', count: counts.swm, color: 'var(--layer-shared)', label: 'Shared' },
+    { key: 'working',  short: 'WM',  count: counts.wm,  color: 'var(--layer-working)', label: 'Working' },
   ];
   const interactive = !!onClickLayer;
   return (
@@ -882,7 +868,7 @@ export function MiniLayerBar({
             <button
               key={r.key}
               type="button"
-              className={`v10-minibar-chip${active ? '' : ' dim'}${interactive ? ' interactive' : ''}`}
+              className={`v10-minibar-chip${active ? '' : ' dim'}${interactive ? ' interactive ds-filter ds-sm' : ''}`}
               onClick={interactive ? () => onClickLayer!(r.key) : undefined}
               disabled={!interactive}
               title={`${r.label} Memory — ${r.count} entities${interactive ? ' (click to toggle)' : ''}`}
@@ -1038,6 +1024,7 @@ export function SubGraphDetailView({
   onOpenQueryCatalog?: () => void;
 }) {
   const profile = useProjectProfileContext();
+  const palette = useGraphPalette();
   const binding = profile?.forSubGraph(slug);
   const chips = profile?.chipsFor(slug) ?? [];
   const queryCatalogs = profile?.savedQueryCatalogsFor(slug) ?? [];
@@ -1303,21 +1290,22 @@ export function SubGraphDetailView({
   // `layer={singleLayer ?? 'wm'}` and painted every node WM-gray
   // when no single layer was active — even in a sub-graph spanning
   // SWM and VM. Build a `nodeColors` map keyed by entity URI using
-  // the canonical `TRUST_COLORS` palette (same hex values as the
+  // the canonical trust colours (same hex values as the
   // layer chips and the Knowledge Pipeline bar). When a single
   // layer is active, every panel entity belongs to that layer by
   // construction, so the per-URI map collapses to the layer default
   // and we can skip the override (saves a copy on the common path).
   const trustNodeColors = useMemo(() => {
     if (singleLayer) return undefined;
+    const trust = trustColors(palette);
     const out: Record<string, string> = {};
     for (const e of graphPanelEntities) {
-      out[e.uri] = TRUST_COLORS[e.trustLevel];
+      out[e.uri] = trust[e.trustLevel];
       const canonical = canonicalEntityUri(e.uri);
-      if (canonical !== e.uri) out[canonical] = TRUST_COLORS[e.trustLevel];
+      if (canonical !== e.uri) out[canonical] = trust[e.trustLevel];
     }
     return out;
-  }, [singleLayer, graphPanelEntities]);
+  }, [singleLayer, graphPanelEntities, palette]);
 
   // Locked active-layer chip pill copy (UX §4.4.1). "All layers"
   // when every layer is enabled; otherwise the single enabled
@@ -1431,7 +1419,7 @@ export function SubGraphDetailView({
       if (resultType !== 'bindings') {
         throw new Error(
           `${q.name} returns ${resultType === 'boolean' ? 'an ASK result' : 'graph quads'} `
-          + 'and cannot be used as an entity filter. Open it in Query Catalogue instead.',
+          + 'and cannot be used as an entity filter. Open it in Query catalogue instead.',
         );
       }
       const bindings = result.bindings;
@@ -1460,7 +1448,7 @@ export function SubGraphDetailView({
   // detail header, the project breadcrumb strip — reads the same
   // identity. Root's color is left unset so the CSS neutral
   // (--text-tertiary via the `--sg-color` fallback) wins.
-  const color = binding?.color ?? (isRoot ? 'var(--text-tertiary)' : '#64748b');
+  const color = binding?.color ?? 'var(--text-tertiary)';
   const icon = binding?.icon ?? '•';
   const title = binding?.displayName ?? slug;
   const desc = binding?.description;
@@ -1554,7 +1542,7 @@ export function SubGraphDetailView({
             aria-pressed={enabledLayers.has('working')}
             onClick={() => toggleLayer('working')}
           >
-            <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: TRUST_COLORS.working }}>◇</span>
+            <span className="v10-subgraph-cross-layer-cell-icon" ><LayerGlyph layer="wm" /></span>
             <span className="v10-subgraph-cross-layer-cell-label">Working</span>
             <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.wm}</span>
           </button>
@@ -1573,7 +1561,7 @@ export function SubGraphDetailView({
               ? 'Showing Shared Working Memory only — graph is colored by contributing agent (see legend).'
               : undefined}
           >
-            <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: TRUST_COLORS.shared }}>◈</span>
+            <span className="v10-subgraph-cross-layer-cell-icon" ><LayerGlyph layer="swm" /></span>
             <span className="v10-subgraph-cross-layer-cell-label">Shared</span>
             <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.swm}</span>
           </button>
@@ -1585,7 +1573,7 @@ export function SubGraphDetailView({
             aria-pressed={enabledLayers.has('verified')}
             onClick={() => toggleLayer('verified')}
           >
-            <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: TRUST_COLORS.verified }}>◉</span>
+            <span className="v10-subgraph-cross-layer-cell-icon" ><LayerGlyph layer="vm" /></span>
             <span className="v10-subgraph-cross-layer-cell-label">Verifiable</span>
             <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.vm}</span>
           </button>
@@ -1615,9 +1603,8 @@ export function SubGraphDetailView({
           {queryCatalogs.map(catalog => (
             <React.Fragment key={catalog.slug}>
               <span
-                className="v10-subgraph-savedqueries-label"
+                className="v10-subgraph-savedqueries-label v10-subgraph-savedqueries-count"
                 title={catalog.description || catalog.name}
-                style={{ marginLeft: 8, opacity: 0.8 }}
               >
                 {catalog.name}
               </span>
@@ -1631,12 +1618,12 @@ export function SubGraphDetailView({
                     className={`v10-subgraph-savedquery${isActive ? ' active' : ''}`}
                     onClick={() => isActive ? clearQuery() : runQuery(q)}
                     title={requiresParameters
-                      ? `${q.description || q.name} Open Query Catalogue to enter parameters.`
+                      ? `${q.description || q.name} Open Query catalogue to enter parameters.`
                       : q.description || q.name}
                     disabled={queryLoading && !isActive}
                   >
                     <span className="v10-subgraph-savedquery-glyph">
-                      {requiresParameters ? '↗' : queryLoading && isActive ? '…' : isActive ? '✓' : '◎'}
+                      {requiresParameters ? <ArrowUpRight size={12} aria-hidden="true" /> : queryLoading && isActive ? '…' : isActive ? <Check size={12} /> : <Play size={12} />}
                     </span>
                     {q.name}
                   </button>
@@ -1645,7 +1632,7 @@ export function SubGraphDetailView({
             </React.Fragment>
           ))}
           {queryError && (
-            <span className="v10-subgraph-savedquery-error" title={queryError}>✕ query failed</span>
+            <span className="v10-subgraph-savedquery-error" title={queryError}><StatusGlyph tone="danger" /> query failed</span>
           )}
           {queryResults && activeQuerySlug && (
             <span className="v10-subgraph-savedquery-count">
@@ -1669,7 +1656,7 @@ export function SubGraphDetailView({
                       <button
                         key={v}
                         type="button"
-                        className={`v10-subgraph-filter-chip${on ? ' active' : ''}`}
+                        className={`v10-subgraph-filter-chip ds-filter ds-sm${on ? ' active' : ''}`}
                         onClick={() => toggleChip(chip.slug, v)}
                       >
                         {v}
@@ -1691,27 +1678,27 @@ export function SubGraphDetailView({
       <div className="v10-layer-detail-body">
         <div className="v10-layer-expand-tabs">
           <button
-            className={`v10-layer-expand-tab ${selectedTab === 'items' ? 'active' : ''}`}
+            className={`v10-layer-expand-tab ds-tab ${selectedTab === 'items' ? 'active' : ''}`}
             onClick={() => setSelectedTab('items')}
           >
             Entities ({filteredEntities.length}{filteredEntities.length !== scopedEntities.length ? ` / ${scopedEntities.length}` : ''})
           </button>
           <button
-            className={`v10-layer-expand-tab ${selectedTab === 'graph' ? 'active' : ''}`}
+            className={`v10-layer-expand-tab ds-tab ${selectedTab === 'graph' ? 'active' : ''}`}
             onClick={() => setSelectedTab('graph')}
           >
             Graph
           </button>
           {timelinePredicate && (
             <button
-              className={`v10-layer-expand-tab ${selectedTab === 'timeline' ? 'active' : ''}`}
+              className={`v10-layer-expand-tab ds-tab ${selectedTab === 'timeline' ? 'active' : ''}`}
               onClick={() => setSelectedTab('timeline')}
             >
               Timeline
             </button>
           )}
           <button
-            className={`v10-layer-expand-tab ${selectedTab === 'docs' ? 'active' : ''}`}
+            className={`v10-layer-expand-tab ds-tab ${selectedTab === 'docs' ? 'active' : ''}`}
             onClick={() => setSelectedTab('docs')}
           >
             Documents
@@ -1722,19 +1709,17 @@ export function SubGraphDetailView({
           <div className="v10-layer-expand-body entities-tab" data-cg-scroll-key={`subgraph:${slug}:items`}>
             <EntityList
               entities={sortedEntities}
-              layerKey="wm"
-              layerIcon={icon}
+              emptyIcon={icon}
               onSelectEntity={onSelectEntity}
               externallySorted
               sortLabel={sortLabel}
               timestampPredicate={timelinePredicate}
-              perEntityTrustBadge
 
               headerExtra={
                 <label className="v10-entity-list-sort">
                   <span className="v10-entity-list-sort-label">Sort</span>
                   <select
-                    className="v10-entity-list-sort-select"
+                    className="v10-entity-list-sort-select ds-input ds-sm"
                     value={entitySort}
                     onChange={(e) => setEntitySort(e.target.value as SubGraphEntitySort)}
                     aria-label="Sort entities"

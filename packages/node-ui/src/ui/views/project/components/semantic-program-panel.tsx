@@ -1,5 +1,6 @@
 import { randomUUID } from '../../../lib/randomUUID.js';
 import React, { useEffect, useState } from 'react';
+import { Check, X } from 'lucide-react';
 import { forkSemanticProgram, invokeSemanticProgram, resolveSemanticProgram, type SemanticMemoryLayer, type SemanticProgramResolution } from '../../../api.js';
 
 // ─── KA Detail View (split-pane: content+triples+graph | provenance) ─────
@@ -68,7 +69,7 @@ export function SemanticProgramPanel({
         || result.executionLayer !== executionLayer
         || (executionLayer === 'vm' && !result.executionUal)
       ) {
-        throw new Error('The daemon did not confirm Execution persistence');
+        throw new Error('The node didn’t confirm that it stored the execution.');
       }
       await Promise.resolve(onRefresh());
       onNavigate(result.executionIri, undefined, executionLayer);
@@ -108,7 +109,7 @@ export function SemanticProgramPanel({
         || result.programLayer !== forkLayer
         || (forkLayer === 'vm' && !result.programUal)
       ) {
-        throw new Error('The daemon did not confirm forked Program persistence');
+        throw new Error('The node didn’t confirm that it stored the forked Program.');
       }
       await Promise.resolve(onRefresh());
       onNavigate(result.programIri, undefined, forkLayer);
@@ -133,10 +134,12 @@ export function SemanticProgramPanel({
             <span className="v10-ka-prop-key">Operator Policy</span>
             <span className="v10-ka-prop-val mono">{resolution.selectedPolicy.iri} · v{resolution.selectedPolicy.version}</span>
           </div>
-          <div className="v10-ka-section-title" style={{ marginTop: 12 }}>Required Tools</div>
+          <div className="v10-ka-section-title semantic-program-gap">Required tools</div>
           {resolution.requiredTools.map((tool) => (
             <div key={tool.toolIri} className="v10-ka-prop" data-testid="semantic-tool-resolution">
-              <span className="v10-ka-prop-key">{tool.effective ? '✓ Available' : '✕ Unavailable'}</span>
+              <span className="v10-ka-prop-key">{tool.effective
+                  ? <><Check size={12} aria-hidden /> Available</>
+                  : <><X size={12} aria-hidden /> Unavailable</>}</span>
               <span className="v10-ka-prop-val">
                 <span className="mono">{tool.toolIri}</span><br />
                 requested · {tool.offered ? 'offered' : 'not offered'} · {tool.policyAllowed ? 'policy allowed' : 'policy denied'} · {tool.locallyInstalled ? 'installed' : 'not installed'} · {tool.locallyEnabled ? 'enabled' : 'disabled'}
@@ -146,7 +149,7 @@ export function SemanticProgramPanel({
           ))}
           {resolution.previousExecutions.length > 0 && (
             <>
-              <div className="v10-ka-section-title" style={{ marginTop: 12 }}>Previous Executions</div>
+              <div className="v10-ka-section-title semantic-program-gap">Previous executions</div>
               {resolution.previousExecutions.map((execution) => (
                 <button key={execution} className="v10-ka-conn" onClick={() => onNavigate(execution)}>
                   <span className="v10-ka-conn-target mono">{execution}</span>
@@ -154,12 +157,12 @@ export function SemanticProgramPanel({
               ))}
             </>
           )}
-          <label className="v10-form-label" htmlFor="semantic-execution-layer" style={{ marginTop: 12 }}>
+          <label className="v10-form-label semantic-program-gap" htmlFor="semantic-execution-layer">
             Store Execution in
           </label>
           <select
             id="semantic-execution-layer"
-            className="v10-form-input"
+            className="v10-form-input ds-input"
             data-testid="semantic-execution-layer"
             value={executionLayer}
             disabled={running}
@@ -170,46 +173,44 @@ export function SemanticProgramPanel({
           >
             <option value="">Choose a layer…</option>
             <option value="wm">Working Memory — local</option>
-            <option value="swm">Shared Working Memory — Context Graph members</option>
+            <option value="swm">Shared Working Memory — context graph members</option>
             <option value="vm">Verifiable Memory — published</option>
           </select>
           <button
-            className="v10-ka-back"
+            className="v10-ka-back semantic-program-gap"
             data-testid="run-semantic-program"
             disabled={!resolution.executable || !executionLayer || running}
             onClick={run}
-            style={{ marginTop: 12 }}
           >
             {running ? 'Running and storing…' : 'Run Program'}
           </button>
           {!showFork && (
             <button
-              className="v10-ka-back"
+              className="v10-ka-back semantic-program-gap-sm"
               data-testid="fork-semantic-program"
               disabled={running || forking}
               onClick={beginFork}
-              style={{ marginTop: 8 }}
             >
               Fork Program
             </button>
           )}
           {showFork && (
-            <div data-testid="semantic-program-fork-form" style={{ marginTop: 12 }}>
+            <div className="semantic-program-gap" data-testid="semantic-program-fork-form">
               <label className="v10-form-label" htmlFor="semantic-program-fork-iri">New Program IRI</label>
               <input
                 id="semantic-program-fork-iri"
-                className="v10-form-input mono"
+                className="v10-form-input ds-input mono"
                 data-testid="semantic-program-fork-iri"
                 value={forkIri}
                 disabled={forking}
                 onChange={(event) => setForkIri(event.target.value)}
               />
-              <label className="v10-form-label" htmlFor="semantic-program-fork-layer" style={{ marginTop: 8 }}>
+              <label className="v10-form-label semantic-program-gap-sm" htmlFor="semantic-program-fork-layer">
                 Store copied Program in
               </label>
               <select
                 id="semantic-program-fork-layer"
-                className="v10-form-input"
+                className="v10-form-input ds-input"
                 data-testid="semantic-program-fork-layer"
                 value={forkLayer}
                 disabled={forking}
@@ -217,10 +218,10 @@ export function SemanticProgramPanel({
               >
                 <option value="">Choose a layer…</option>
                 <option value="wm">Working Memory — local</option>
-                <option value="swm">Shared Working Memory — Context Graph members</option>
+                <option value="swm">Shared Working Memory — context graph members</option>
                 <option value="vm">Verifiable Memory — published</option>
               </select>
-              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <div className="semantic-program-actions">
                 <button
                   className="v10-ka-back"
                   data-testid="confirm-fork-semantic-program"
