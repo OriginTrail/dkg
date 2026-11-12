@@ -34,7 +34,7 @@ import {
   type OpenClawStreamResponse,
 } from './openclaw.js';
 
-export const HERMES_CHANNEL_RESPONSE_TIMEOUT_MS = 15 * 60_000;
+export { HERMES_CHANNEL_RESPONSE_TIMEOUT_MS } from './hermes-response-timeout.js';
 export const DEFAULT_HERMES_BRIDGE_URL = 'http://127.0.0.1:9202';
 export const DEFAULT_HERMES_API_SERVER_URL = 'http://127.0.0.1:8642';
 
