@@ -50,7 +50,7 @@ const ECHO: ToolSpec = {
  */
 export const TOOLS_CHECKS: readonly CompletionCall[] = [
   { messages: [{ role: 'user', content: 'Reply with OK.' }], maxTokens: 16, tools: [ECHO] },
-  { messages: [{ role: 'user', content: 'Echo the word OK.' }], maxTokens: 16, tools: [ECHO], toolChoice: { type: 'function', function: { name: 'echo' } } },
+  { messages: [{ role: 'user', content: 'Echo the word OK.' }], maxTokens: 16, tools: [ECHO], tool_choice: { type: 'function', function: { name: 'echo' } } },
 ];
 
 export interface ServiceBackendSettings {

@@ -461,16 +461,10 @@ export class Seller {
     const { requestDigest, unitCap } = at;
     let completion;
     try {
-      const { tools, tool_choice: toolChoice, parallel_tool_calls: parallelToolCalls } = call.body;
+      const { max_tokens: maxTokens, ...body } = call.body;
       // A call with tools refused as made may first wait, within its time limit, for the check of the backend's tools.
-      completion = await this.backendFor(service).complete({
-        messages: call.body.messages,
-        // No more output than the cap pays for once the input takes the most it could.
-        maxTokens: Number(minBig(BigInt(call.body.max_tokens), at.room)),
-        ...(tools ? { tools } : {}),
-        ...(tools && toolChoice !== undefined ? { toolChoice } : {}),
-        ...(tools && parallelToolCalls !== undefined ? { parallelToolCalls } : {}),
-      });
+      // No more output than the cap pays for once the input takes the most it could.
+      completion = await this.backendFor(service).complete({ ...body, maxTokens: Number(minBig(BigInt(maxTokens), at.room)) });
     } catch (err) {
       // The backend's detail (a missing key's variable, an address, its own words) stays in the log.
       this.deps.log?.(`[marketplace] the backend of ${service.model} failed: ${err instanceof UpstreamError ? err.message : String(err)}`);
