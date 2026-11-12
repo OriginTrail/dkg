@@ -220,7 +220,7 @@ export interface MarketplaceParts {
 export async function startMarketplace(options: MarketplaceStartOptions): Promise<MarketplaceParts> {
   const { agent, wallets, dataDir, dashDb, log } = options;
   const config = withNetworkMarketplaceContextGraph(options.config, options.network);
-  const settings = config.marketplace as { enabled?: unknown; seller?: { enabled?: unknown } } | undefined;
+  const settings = config.marketplace;
   if ((settings?.enabled === true || settings?.seller?.enabled === true) && await chainLacksMarketplace(agent)) {
     log('[marketplace] the chain has no marketplace contracts: buying and selling stay off');
     return { marketplace: undefined, marketplaceGateway: undefined, marketplaceSeller: undefined };
