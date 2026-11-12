@@ -1,5 +1,6 @@
 import { Option, type Command } from 'commander';
 import { ApiClient } from '../api-client.js';
+import { registerReadGraphSettingsCommands } from './read-graph-settings.js';
 import {
   READ_GRAPH_LAYER_LABELS,
   parseReadGraphsRequest,
@@ -19,7 +20,9 @@ interface CommandOptions {
 
 /**
  * `dkg store read-graphs status | check | rebuild | drop`: the read graphs a
- * running node keeps, the merged copies of a context graph's layers. `status`,
+ * running node keeps, the merged copies of a context graph's layers that let
+ * queries search across assets; `enable`, `disable`, `settings` and
+ * `default-semantics` switch them (./read-graph-settings.ts). `status`,
  * `rebuild` and `drop` take `--context-graph` and `--layer` to narrow them;
  * `check` checks every ready read graph. Every command takes `--json` to print
  * the node's answer, with the same exit code, and needs the node-admin token.
@@ -28,7 +31,7 @@ export function registerReadGraphsCommand(program: Command): void {
   const store = program.commands.find((command) => command.name() === 'store')
     ?? program.command('store').description('The node\'s triple store');
   const readGraphs = store.command('read-graphs')
-    .description('Read graphs: the merged copies of a context graph\'s layers that a node keeps (node-admin token)');
+    .description('Search across assets: the combined copies (read graphs) of a context graph\'s memories that a node keeps (node-admin token)');
   const command = (name: string) => readGraphs.command(name).option('--json', 'Print the node\'s answer as JSON');
   const scoped = (name: string) => command(name)
     .option('-c, --context-graph <id>', 'Only the read graphs of this context graph')
@@ -104,6 +107,8 @@ export function registerReadGraphsCommand(program: Command): void {
         console.log(`${removed.outcome}${removed.error ? `: ${removed.error}` : ''} ${removed.readGraph}`);
       }
     }));
+
+  registerReadGraphSettingsCommands(readGraphs);
 }
 
 function scopeOf(options: CommandOptions): Record<string, string> {
