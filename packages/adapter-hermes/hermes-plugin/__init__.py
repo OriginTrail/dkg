@@ -456,6 +456,13 @@ DKG_SUBSCRIBE_SCHEMA = {
     },
 }
 
+_CONTEXT_GRAPH_ADMIN_TOOLS_DISABLED = (
+    "Context graph admin tools are disabled by the adapter guard. "
+    "Enable DKG_ALLOW_CONTEXT_GRAPH_ADMIN_TOOLS explicitly."
+)
+# The create tool's search-across-assets options, offered only with the admin tools.
+_READ_GRAPH_CREATE_OPTIONS = ("read_graphs", "read_graph_layer")
+
 _READ_GRAPH_LAYER_DESCRIPTION = (
     "Which memory: 'verifiable-memory' (published assets, the default), "
     "'shared-working-memory' (shared memory, shared with your team), "
@@ -1247,6 +1254,11 @@ class DKGMemoryProvider(MemoryProvider):
             if self._context_graph_admin_tools_allowed()
             else "  dkg_participant_list / dkg_join_request_list — Review project access state\n"
         )
+        read_graphs_guidance = (
+            "  dkg_read_graphs_status/set — See or change where queries search across assets (node admin token only)\n"
+            if self._context_graph_admin_tools_allowed()
+            else "  dkg_read_graphs_status — See where queries search across assets (node admin token only)\n"
+        )
 
         blocks.append(
             "DKG TOOLS — Your node is connected to a Decentralized Knowledge Graph.\n"
@@ -1277,7 +1289,7 @@ class DKGMemoryProvider(MemoryProvider):
             "  dkg_context_graph_create — Create a new project/knowledge space\n"
             "  dkg_subscribe — Join an existing project on the network\n"
             "  dkg_sub_graph_create/list — Manage project sub-graphs\n"
-            "  dkg_read_graphs_status/set — See or change where queries search across assets (node admin token only)\n"
+            f"{read_graphs_guidance}"
             f"{admin_guidance}"
             "  dkg_status — Node health, peers, context graphs\n"
             "\n"
@@ -1329,7 +1341,6 @@ class DKGMemoryProvider(MemoryProvider):
             DKG_SUB_GRAPH_CREATE_SCHEMA,
             DKG_SUB_GRAPH_LIST_SCHEMA,
             DKG_READ_GRAPHS_STATUS_SCHEMA,
-            DKG_READ_GRAPHS_SET_SCHEMA,
         ]
         if self._direct_publish_allowed():
             publish_index = schemas.index(DKG_STATUS_SCHEMA)
@@ -1345,6 +1356,12 @@ class DKGMemoryProvider(MemoryProvider):
                 DKG_JOIN_REQUEST_APPROVE_SCHEMA,
                 DKG_JOIN_REQUEST_REJECT_SCHEMA,
             ]
+            schemas.append(DKG_READ_GRAPHS_SET_SCHEMA)
+        else:
+            create_index = schemas.index(DKG_CREATE_CONTEXT_GRAPH_SCHEMA)
+            parameters = DKG_CREATE_CONTEXT_GRAPH_SCHEMA["parameters"]
+            properties = {key: value for key, value in parameters["properties"].items() if key not in _READ_GRAPH_CREATE_OPTIONS}
+            schemas[create_index] = {**DKG_CREATE_CONTEXT_GRAPH_SCHEMA, "parameters": {**parameters, "properties": properties}}
         return schemas
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
@@ -1933,6 +1950,8 @@ class DKGMemoryProvider(MemoryProvider):
                 cleaned.append(trimmed)
             if cleaned:
                 allowed_agents = cleaned
+        if any(args.get(key) is not None for key in _READ_GRAPH_CREATE_OPTIONS) and not self._context_graph_admin_tools_allowed():
+            return tool_error(_CONTEXT_GRAPH_ADMIN_TOOLS_DISABLED)
         from .read_graphs import create_option, describe_create_outcome
         read_graphs, read_graphs_error = create_option(args)
         if read_graphs_error:
@@ -1964,6 +1983,8 @@ class DKGMemoryProvider(MemoryProvider):
         return json.dumps({"summary": describe_settings(answer), **answer})
 
     def _handle_read_graphs_set(self, args: Dict[str, Any]) -> str:
+        if not self._context_graph_admin_tools_allowed():
+            return tool_error(_CONTEXT_GRAPH_ADMIN_TOOLS_DISABLED)
         if self._offline:
             return tool_error("DKG daemon is offline.")
         from .read_graphs import change_of, describe_changes, describe_refusal, describe_settings

@@ -215,3 +215,15 @@ describe('DkgNodePlugin', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('a refused token', () => {
+  it.each([401, 403])('gets exactly one request per tool call, with no other token and no retry (%i)', async (status) => {
+    const fetchMock = answering(json(status, { error: 'Requires a node-level admin token.' }));
+    const byName = tools();
+    expect(parsed(await byName.get('dkg_read_graphs_status')!.execute('tc', {})).error).toMatch(/^Only the node admin/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(parsed(await byName.get('dkg_read_graphs_set')!.execute('tc', { context_graph_id: 'team', mode: 'off' })).error).toMatch(/^Only the node admin/);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.map(([, init]) => new Headers(init?.headers).get('Authorization'))).toEqual(['Bearer admin-token', 'Bearer admin-token']);
+  });
+});

@@ -403,3 +403,49 @@ def test_create_without_the_setting_or_after_a_failure_adds_nothing(provider_fac
     provider_factory.post.return_value = {"success": False, "error": "Context graph already exists"}
     failed = json.loads(provider.handle_tool_call("dkg_context_graph_create", {"name": "Team", "read_graphs": "preview"}))
     assert failed == {"success": False, "error": "Context graph already exists"}
+
+
+# -- The admin-tools switch ------------------------------------------------------
+
+GUARD = "Context graph admin tools are disabled by the adapter guard. Enable DKG_ALLOW_CONTEXT_GRAPH_ADMIN_TOOLS explicitly."
+
+
+def test_admin_switch_on_by_default_offers_the_set_tool_and_create_options(provider_factory, send):
+    provider = provider_factory()
+    provider._cache["memory"] = [{"target": "memory", "content": "remember"}]
+    schemas = {schema["name"]: schema for schema in provider.get_tool_schemas()}
+    assert {"dkg_read_graphs_status", "dkg_read_graphs_set"} <= set(schemas)
+    assert {"read_graphs", "read_graph_layer"} <= set(schemas["dkg_context_graph_create"]["parameters"]["properties"])
+    assert "dkg_read_graphs_status/set — See or change where queries search across assets" in provider.system_prompt_block()
+
+
+def test_admin_switch_off_keeps_status_and_refuses_changes_without_io(provider_factory, send):
+    provider = provider_factory({"allow_context_graph_admin_tools": False})
+    provider._cache["memory"] = [{"target": "memory", "content": "remember"}]
+    schemas = {schema["name"]: schema for schema in provider.get_tool_schemas()}
+    assert "dkg_read_graphs_status" in schemas and "dkg_read_graphs_set" not in schemas
+    create = schemas["dkg_context_graph_create"]["parameters"]["properties"]
+    assert not {"read_graphs", "read_graph_layer"} & set(create) and {"name", "public", "allowed_agents"} <= set(create)
+    prompt = provider.system_prompt_block()
+    assert "dkg_read_graphs_status — See where queries search across assets" in prompt and "dkg_read_graphs_status/set" not in prompt
+    provider_factory.post.reset_mock()
+    for tool, args in [
+        ("dkg_read_graphs_set", {"context_graph_id": "team", "mode": "on"}),
+        ("dkg_context_graph_create", {"name": "Team", "read_graphs": "on"}),
+        ("dkg_context_graph_create", {"name": "Team", "read_graph_layer": "all"}),
+    ]:
+        assert json.loads(provider.handle_tool_call(tool, args)) == {"error": GUARD}
+    send.assert_not_called()
+    provider_factory.post.assert_not_called()
+    assert json.loads(provider.handle_tool_call("dkg_read_graphs_status", {}))["summary"] == SUMMARY
+    provider_factory.post.return_value = {"created": "team", "uri": "did:dkg:context-graph:team"}
+    assert json.loads(provider.handle_tool_call("dkg_context_graph_create", {"name": "Team"})) == {"created": "team", "uri": "did:dkg:context-graph:team"}
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_refused_token_makes_exactly_one_request(client_class, monkeypatch, hermes_host, status):
+    client, calls = _client_answering(client_class, monkeypatch, _Response(status, {"error": "Requires a node-level admin token."}))
+    assert client.read_graph_settings()["status"] == status
+    assert len(calls) == 1
+    assert client.set_read_graph_settings({"contextGraphId": "team", "layers": {"verifiable-memory": "off"}})["status"] == status
+    assert len(calls) == 2

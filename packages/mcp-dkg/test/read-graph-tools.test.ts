@@ -234,3 +234,14 @@ describe('dkg_context_graph_create with search across assets', () => {
     expect(calls).toHaveLength(0);
   });
 });
+
+describe('a refused token', () => {
+  it.each([401, 403])('gets exactly one request per tool call, with no other token and no retry (%i)', async (status) => {
+    const { server, calls } = setup(() => json(status, { error: 'Requires a node-level admin token.' }), 'agent-token');
+    expect((await server.call('dkg_read_graphs_status', {})).isError).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect((await server.call('dkg_read_graphs_set', { contextGraphId: 'team', mode: 'off' })).isError).toBe(true);
+    expect(calls).toHaveLength(2);
+    expect(calls.map((call) => call.authorization)).toEqual(['Bearer agent-token', 'Bearer agent-token']);
+  });
+});
