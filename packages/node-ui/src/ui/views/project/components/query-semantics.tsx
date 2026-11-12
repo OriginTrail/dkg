@@ -31,9 +31,13 @@ export function sameQueryRun(a: QueryRunIdentity, b: QueryRunIdentity): boolean 
   return a.sparql === b.sparql && a.view === b.view && a.subGraphName === b.subGraphName && a.semantics === b.semantics;
 }
 
-/** The run with `semantics: "merged"` when it searches across assets and has a memory, which that needs. */
+/**
+ * A run in a memory says how to search it, so the toggle holds whatever the
+ * node's default is: `merged` when on, `per-asset` when off. A run without a
+ * memory says nothing, since it can't search across assets.
+ */
 export function withSemantics<T extends QueryRunIdentity>(run: T, merged: boolean): T {
-  return merged && run.view !== undefined ? { ...run, semantics: 'merged' } : run;
+  return run.view === undefined ? run : { ...run, semantics: merged ? 'merged' : 'per-asset' };
 }
 
 /** A refused search across assets, explained for the query view; any other error is returned as it is. */

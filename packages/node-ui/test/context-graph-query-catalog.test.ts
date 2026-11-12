@@ -282,7 +282,7 @@ describe('ContextGraphQueryView', () => {
     expect(textarea.value).toContain('schema.org/name');
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('schema.org/name'),
-      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory', includeContextGraphPartitions: true },
+      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory', semantics: 'per-asset', includeContextGraphPartitions: true },
       { timeoutMs: null, maxResponseBytes: null },
     );
 
@@ -296,7 +296,7 @@ describe('ContextGraphQueryView', () => {
     });
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('schema.org/name'),
-      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory', includeContextGraphPartitions: true },
+      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory', semantics: 'per-asset', includeContextGraphPartitions: true },
       { timeoutMs: null, maxResponseBytes: null },
     );
 
@@ -383,7 +383,7 @@ describe('ContextGraphQueryView', () => {
 
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('"748387\\" } UNION { ?s ?p ?o"'),
-      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'verifiable-memory' },
+      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'verifiable-memory', semantics: 'per-asset' },
       { timeoutMs: null, maxResponseBytes: null },
     );
     await act(async () => {

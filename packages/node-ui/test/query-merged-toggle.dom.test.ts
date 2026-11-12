@@ -132,7 +132,7 @@ describe('ContextGraphQueryView memory picker and Search across assets', () => {
     await click(mergedBox(container));
     executeQueryMock.mockResolvedValue(bindings('per-asset'));
     await click(button(container, 'Run'));
-    expect(lastRun()).toMatchObject({ view: 'verifiable-memory', semantics: undefined });
+    expect(lastRun()).toMatchObject({ view: 'verifiable-memory', semantics: 'per-asset' });
     expect(resultCount(container)).toBe('1 result · each asset searched on its own');
 
     await click(mergedBox(container));
@@ -218,7 +218,7 @@ describe('ContextGraphQueryView memory picker and Search across assets', () => {
     const first = executeQueryMock.mock.calls[0][0];
     await chooseView(container, 'working-memory');
     await click(button(container, 'Run'));
-    expect(lastRun()).toMatchObject({ view: 'working-memory', includeContextGraphPartitions: true });
+    expect(lastRun()).toMatchObject({ view: 'working-memory', semantics: 'per-asset', includeContextGraphPartitions: true });
 
     await click(button(container, 'Reset'));
     expect(viewSelect(container).value).toBe('');
@@ -231,9 +231,10 @@ describe('ContextGraphQueryView memory picker and Search across assets', () => {
 });
 
 describe('query run helpers', () => {
-  it('adds merged semantics only to a run with a view', () => {
+  it('says how to search a run in a memory either way, and nothing for a run without one', () => {
     expect(withSemantics({ sparql: 'ASK {}' }, true)).toEqual({ sparql: 'ASK {}' });
-    expect(withSemantics({ sparql: 'ASK {}', view: 'verifiable-memory' }, false)).toEqual({ sparql: 'ASK {}', view: 'verifiable-memory' });
+    expect(withSemantics({ sparql: 'ASK {}' }, false)).toEqual({ sparql: 'ASK {}' });
+    expect(withSemantics({ sparql: 'ASK {}', view: 'verifiable-memory' }, false)).toEqual({ sparql: 'ASK {}', view: 'verifiable-memory', semantics: 'per-asset' });
     expect(withSemantics({ sparql: 'ASK {}', view: 'verifiable-memory' }, true)).toEqual({ sparql: 'ASK {}', view: 'verifiable-memory', semantics: 'merged' });
   });
 
