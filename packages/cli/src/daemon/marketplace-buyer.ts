@@ -17,6 +17,7 @@
  */
 import { join } from 'node:path';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { isHubBindingNotFoundError } from '@origintrail-official/dkg-chain';
 import {
   AccessKeys,
   Buyer,
@@ -54,7 +55,7 @@ async function chainLacksMarketplace(agent: DKGAgent): Promise<boolean> {
     await chain.getMarketplaceContracts();
     return false;
   } catch (err) {
-    return err instanceof Error && /^Hub\w*NotFoundError$/.test(err.name);
+    return isHubBindingNotFoundError(err);
   }
 }
 

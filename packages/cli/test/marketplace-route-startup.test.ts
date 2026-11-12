@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import { MockChainAdapter, marketplaceChainOf } from '@origintrail-official/dkg-chain';
+import { HubContractNotFoundError, MockChainAdapter, marketplaceChainOf } from '@origintrail-official/dkg-chain';
 import { Buyer } from '@origintrail-official/dkg-marketplace';
 import { startMarketplace, type MarketplaceStartOptions } from '../src/daemon/marketplace-buyer.js';
 import { withNetworkMarketplaceContextGraph } from '../src/daemon/marketplace-network-default.js';
@@ -61,7 +61,7 @@ describe('the marketplace at boot', () => {
   });
 
   it('stays off, logged once, on a chain without the marketplace contracts', async () => {
-    const missing = Object.assign(new Error('ServiceSubscriptions is not in the Hub'), { name: 'HubContractNotFoundError' });
+    const missing = new HubContractNotFoundError('ServiceSubscriptions', '0x0000000000000000000000000000000000000001');
     vi.spyOn(chainOf(), 'getMarketplaceContracts').mockRejectedValue(missing);
     const starts = vi.spyOn(Buyer.prototype, 'start');
     const registers = vi.fn(() => () => undefined);
@@ -74,13 +74,17 @@ describe('the marketplace at boot', () => {
   });
 
   it('starts as before when the contract check fails for another reason', async () => {
-    vi.spyOn(chainOf(), 'getMarketplaceContracts').mockRejectedValueOnce(new Error('no RPC endpoint answered'));
-    const parts = await startMarketplace(options({ enabled: true, tickSeconds: 3_600 }));
-    expect(parts.marketplace).toBeInstanceOf(Buyer);
-    expect(parts.marketplaceGateway).toBeDefined();
+    // An error that only reads like a Hub miss says nothing about the contracts either.
+    const lookalike = Object.assign(new Error('Contract "ServiceSubscriptions" not found in Hub'), { name: 'HubContractNotFoundError' });
+    for (const failure of [new Error('no RPC endpoint answered'), lookalike]) {
+      vi.spyOn(chainOf(), 'getMarketplaceContracts').mockRejectedValueOnce(failure);
+      const parts = await startMarketplace(options({ enabled: true, tickSeconds: 3_600 }));
+      expect(parts.marketplace).toBeInstanceOf(Buyer);
+      expect(parts.marketplaceGateway).toBeDefined();
+      await parts.marketplaceGateway!.stop();
+      await parts.marketplace!.stop();
+    }
     expect(log).not.toHaveBeenCalledWith(expect.stringContaining('no marketplace contracts'));
-    await parts.marketplaceGateway!.stop();
-    await parts.marketplace!.stop();
   });
 
   it('leaves buying off, logged and its job stopped, when the gateway cannot read its files', async () => {

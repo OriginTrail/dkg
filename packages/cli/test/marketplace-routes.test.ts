@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 import { ethers } from 'ethers';
-import { ChainRpcTransportError, MockChainAdapter, marketplaceChainOf, type MarketplaceChainAdapter } from '@origintrail-official/dkg-chain';
+import { ChainRpcTransportError, HubContractNotFoundError, MockChainAdapter, marketplaceChainOf, type MarketplaceChainAdapter } from '@origintrail-official/dkg-chain';
 import { AccessKeys, Buyer, BuyerStore, Gateway, Router, Seller, parsePlan, signServiceOffer } from '@origintrail-official/dkg-marketplace';
 import { ApiClient } from '../src/api-client.js';
 import { registerMarketplaceCommand } from '../src/commands/marketplace.js';
@@ -390,7 +390,7 @@ describe('the marketplace routes', () => {
     const times = vi.spyOn(chain, 'getEpochTimes');
     times.mockRejectedValueOnce(new ChainRpcTransportError('RPC_TIMEOUT', 'timed out after 30000ms'));
     expect(await api('GET', '/api/marketplace/subscriptions')).toMatchObject({ status: 504, body: { code: 'TIMEOUT', retryable: true } });
-    times.mockRejectedValueOnce(Object.assign(new Error('Contract "Chronos" not found in Hub'), { name: 'HubContractNotFoundError' }));
+    times.mockRejectedValueOnce(new HubContractNotFoundError('Chronos', '0x0000000000000000000000000000000000000001'));
     expect(await api('GET', '/api/marketplace/subscriptions')).toMatchObject({ status: 503, body: { code: 'MarketplaceOff' } });
     times.mockRejectedValueOnce(new Error('call failed at https://rpc.example/key'));
     const failed = await api('GET', '/api/marketplace/subscriptions');
