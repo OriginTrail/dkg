@@ -232,7 +232,8 @@ import { daemonReadGraphRequests } from './routes/read-graphs.js';
 import { startContextGraphCatchupProgress } from './context-graph-catchup-progress-sources.js';
 import { beginAsyncAdmissionTrace } from './async-admission-trace.js';
 import { authenticateHttpRequest, canAdministerNode, loadTokens } from '../auth.js';
-import { AGENT_HTTP_HEADERS, normalizeOperatorAgentAddresses } from '../agent-http-auth.js';
+import { normalizeOperatorAgentAddresses } from '../agent-http-auth.js';
+import { corsPreflightHeaders } from './cors-preflight.js';
 import { SqliteAgentHttpNonceStore } from '../agent-http-nonce-store.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
@@ -483,7 +484,8 @@ import { configureApiQueryPriority } from './api-query-priority.js';
 import { configureWritePreflightCoalescing } from './write-preflight-coalescing.js';
 import { startRetention, type RetentionHandle } from './retention-sweeps.js';
 import { resolveRetentionConfig } from '../retention-config.js';
-import { checkDaemonQuerySection, noteReadGraphStoreSupport, prepareDaemonReadGraphSettings } from '../read-graph-settings-start.js';
+import { checkDaemonQuerySection, prepareDaemonReadGraphSettings } from '../read-graph-settings-start.js';
+import { startReadGraphSettingsControl } from './read-graph-settings-control.js';
 import { applyGraphCatalogConfig } from '../graph-catalog-config.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
@@ -2113,7 +2115,8 @@ async function runDaemonInnerWithStartupOwnership(
       config.apiPort, config.apiHost, writeApiPort);
   }
   const agent = checkpointAgent ?? await DKGAgent.create(agentConfig);
-  noteReadGraphStoreSupport(readGraphSettings, agent.store, log);
+  const readGraphSettingsControl = startReadGraphSettingsControl({ settings: readGraphSettings, table: protocolStores.readGraphSettingsStore, agent, role,
+    checkpoint: Boolean(checkpointMode), log });
   agent.configurePromoteQueue(promoteQueuePolicy);
   const publicSnapshotStore = agent.publicSnapshotStore;
 
@@ -3502,13 +3505,7 @@ async function runDaemonInnerWithStartupOwnership(
           res.writeHead(403).end();
           return;
         }
-        res.writeHead(204, {
-          ...(reqCorsOrigin
-            ? { "Access-Control-Allow-Origin": reqCorsOrigin }
-            : {}),
-          "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": AGENT_HTTP_HEADERS,
-        });
+        res.writeHead(204, corsPreflightHeaders(reqCorsOrigin));
         res.end();
         return;
       }
@@ -3663,6 +3660,7 @@ async function runDaemonInnerWithStartupOwnership(
         marketplace,
         marketplaceGateway,
         marketplaceSeller: marketplaceSeller?.seller,
+        readGraphSettings: readGraphSettingsControl,
         emitMemoryGraphChanged,
         emitNotification,
       });
