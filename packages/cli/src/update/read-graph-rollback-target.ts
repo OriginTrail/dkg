@@ -1,7 +1,8 @@
 /**
  * A node keeps read graphs only where the release it would roll back to recognizes them (OT-RFC-74). A release that recognizes read graphs hides their
  * partition, refuses writes into it, marks them all dirty when it starts without maintaining them, and drops them on its own rollback. An older release would
- * read and write them as ordinary graphs. So the daemon refuses `query.readGraphs` other than `off` while its rollback target is older.
+ * read and write them as ordinary graphs. So the daemon refuses `query.readGraphs` other than `off` while its rollback target is older, and turns the modes
+ * of its settings table off.
  *
  * The rollback target is what `dkg rollback` and the automatic rollback activate: the other blue-green slot on a Core, the version recorded in
  * `previous-version` on an Edge. Without one there is nothing to roll back to, and nothing is refused.
@@ -10,7 +11,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { keepsAnyReadGraph } from '@origintrail-official/dkg-storage';
 import { activeSlot, dkgDir, releasesDir, slotEntryPoint } from '../config.js';
-import { QueryConfigError, resolveQueryConfig, type ResolvedQueryConfig } from '../read-graphs-config.js';
+import { QueryConfigError, nodeReadGraphModes, resolveQuerySection, type QueryPolicy, type QuerySection, type ReadGraphsRefusal } from '../read-graphs-config.js';
 import { compareSemver } from './npm-registry.js';
 import { readSlotVersion } from './rollback-stores.js';
 
@@ -67,49 +68,56 @@ export function rollbackTargetRecognizesReadGraphs(target: ReadGraphRollbackTarg
   return !Number.isNaN(order) && order >= 0;
 }
 
-/**
- * The start-up check: throws a `QueryConfigError` naming `query.readGraphs` when the settings keep a read graph and the rollback target does not recognize
- * read graphs.
- */
-export async function assertRollbackTargetRecognizesReadGraphs(config: ResolvedQueryConfig, role: 'core' | 'edge'): Promise<void> {
-  if (!keepsAnyReadGraph(config.readGraphs)) return;
-  const target = await readGraphRollbackTarget(role);
-  if (target.kind === 'none' || rollbackTargetRecognizesReadGraphs(target)) return;
-  throw new QueryConfigError([{
-    key: 'query.readGraphs',
-    message: `must be "off" while the rollback target (${target.source}: ${target.version ?? 'version unknown'}) is older than `
-      + `${READ_GRAPHS_FIRST_RECOGNIZING_RELEASE}, the first release that recognizes read graphs`,
-  }]);
+/** Why a rollback target keeps the node from keeping read graphs, or `undefined` when it recognizes them. */
+export function rollbackTargetRefusal(target: ReadGraphRollbackTarget): ReadGraphsRefusal | undefined {
+  if (target.kind === 'none' || rollbackTargetRecognizesReadGraphs(target)) return undefined;
+  return {
+    code: 'READ_GRAPHS_ROLLBACK_TARGET_OLDER',
+    message: `the rollback target (${target.source}: ${target.version ?? 'version unknown'}) is older than ${READ_GRAPHS_FIRST_RECOGNIZING_RELEASE}, `
+      + 'the first release that recognizes read graphs',
+    rollbackTarget: { source: target.source, version: target.version },
+    firstRecognizingRelease: READ_GRAPHS_FIRST_RECOGNIZING_RELEASE,
+  };
 }
 
 /**
- * The daemon's boot check of the `query` settings. A node that starts from a
+ * The start-up check: throws a `QueryConfigError` naming `query.readGraphs` when the node's own modes, with its policy applied, keep a read graph and the
+ * rollback target does not recognize read graphs. The settings table's modes never stop a start.
+ */
+export async function assertRollbackTargetRecognizesReadGraphs(policy: QueryPolicy, role: 'core' | 'edge'): Promise<void> {
+  if (!keepsAnyReadGraph(nodeReadGraphModes(policy))) return;
+  const refusal = rollbackTargetRefusal(await readGraphRollbackTarget(role));
+  if (refusal !== undefined) throw new QueryConfigError([{ key: 'query.readGraphs', message: `must be "off" while ${refusal.message}` }]);
+}
+
+/**
+ * The daemon's boot check of the node's own modes. A node that starts from a
  * public checkpoint gets its store from the checkpoint, which keeps no read
- * graphs, so settings that keep one are refused there; elsewhere the rollback
+ * graphs, so modes that keep one are refused there; elsewhere the rollback
  * target must recognize read graphs.
  */
-export async function assertQueryConfigFitsNode(config: ResolvedQueryConfig, role: 'core' | 'edge', checkpoint: boolean): Promise<void> {
-  if (checkpoint && keepsAnyReadGraph(config.readGraphs)) {
+export async function assertQueryConfigFitsNode(policy: QueryPolicy, role: 'core' | 'edge', checkpoint: boolean): Promise<void> {
+  if (checkpoint && keepsAnyReadGraph(nodeReadGraphModes(policy))) {
     throw new QueryConfigError([{
       key: 'query.readGraphs',
       message: 'must be "off" on a node that starts from a public checkpoint, whose store the checkpoint builds',
     }]);
   }
-  await assertRollbackTargetRecognizesReadGraphs(config, role);
+  await assertRollbackTargetRecognizesReadGraphs(policy, role);
 }
 
 /**
  * The `dkg start` form, before a detached daemon could hide a problem: resolve the `query` section and check the rollback target, log every offending key and
- * stop the start. Returns the resolved settings when they are accepted.
+ * stop the start. Returns the resolved section when it is accepted.
  */
 export async function resolveQueryConfigOrExit(
   config: { readonly query?: unknown; readonly nodeRole?: 'core' | 'edge' },
   log: (message: string) => void,
-): Promise<ResolvedQueryConfig> {
+): Promise<QuerySection> {
   try {
-    const resolved = resolveQueryConfig(config.query);
-    await assertRollbackTargetRecognizesReadGraphs(resolved, config.nodeRole ?? 'edge');
-    return resolved;
+    const section = resolveQuerySection(config.query);
+    await assertRollbackTargetRecognizesReadGraphs(section.policy, config.nodeRole ?? 'edge');
+    return section;
   } catch (error) {
     if (!(error instanceof QueryConfigError)) throw error;
     log(`[QUERY-CONFIG] ${error.issues.length} validation error(s) - refusing to start.`);
