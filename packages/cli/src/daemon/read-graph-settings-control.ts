@@ -33,6 +33,7 @@ import {
 } from '../read-graph-settings-store.js';
 import {
   MEMORY_IN_SENTENCES,
+  type ReadGraphCreateOutcome,
   type ReadGraphContextGraphSettings,
   type ReadGraphSettingsAnswer,
   type ReadGraphSettingsReadGraph,
@@ -61,10 +62,7 @@ export interface ReadGraphSettingsOutcome {
   readonly body: ReadGraphSettingsAnswer | (ReadGraphSettingsRefusal & { readonly changes?: readonly ReadGraphModeChange[] });
 }
 
-/** The `readGraphs` part of a context graph's creation answer. */
-export type ReadGraphCreateOutcome =
-  | { readonly applied: true; readonly changes: readonly ReadGraphModeChange[] }
-  | { readonly refused: string; readonly code: string };
+export type { ReadGraphCreateOutcome } from '../read-graph-settings-wire.js';
 
 /** The `readGraphs` field of a context graph's creation, on a node whose control may not run yet. */
 export async function readGraphSettingsOnCreate(

@@ -80,6 +80,16 @@ export interface ReadGraphSettingsAnswer {
   readonly changes?: readonly ReadGraphModeChange[];
 }
 
+/** The `readGraphs` field of `POST /api/context-graph/create`: the modes to set once the context graph exists. */
+export interface ReadGraphCreateSettings {
+  readonly layers: Readonly<Partial<Record<GetView, ReadGraphMode>>>;
+}
+
+/** The `readGraphs` part of a context graph's creation answer: applied with what it did, or refused with why. */
+export type ReadGraphCreateOutcome =
+  | { readonly applied: true; readonly changes: readonly ReadGraphModeChange[] }
+  | { readonly refused: string; readonly code: string };
+
 export type ReadGraphSettingsRequestParse = { readonly request: ReadGraphSettingsRequest } | { readonly error: string };
 
 /**
@@ -109,7 +119,7 @@ export function parseReadGraphSettingsRequest(raw: unknown): ReadGraphSettingsRe
 }
 
 /** The `readGraphs` field of `POST /api/context-graph/create`: `{ layers: { [layer]: mode } }`. */
-export function parseCreateReadGraphSettings(raw: unknown): { readonly layers: Readonly<Partial<Record<GetView, ReadGraphMode>>> } | { readonly error: string } {
+export function parseCreateReadGraphSettings(raw: unknown): ReadGraphCreateSettings | { readonly error: string } {
   const parsed = parseSettingsFields(raw, ['layers']);
   if ('error' in parsed) return { error: `readGraphs: ${parsed.error}` };
   const modes = parseLayers(parsed.fields['layers']);
