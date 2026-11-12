@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": "type-tests",
+    "sourceMap": false
+  },
+  "include": ["type-tests/**/*.ts"]
+}
