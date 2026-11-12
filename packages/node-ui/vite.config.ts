@@ -69,6 +69,9 @@ export default defineConfig({
   build: {
     outDir: '../../dist-ui',
     emptyOutDir: true,
+    // Gzipping every chunk only to report its size pushed the build past its 896 MB heap
+    // ceiling about one build in three once the editor was bundled.
+    reportCompressedSize: false,
   },
   server: {
     proxy: {
