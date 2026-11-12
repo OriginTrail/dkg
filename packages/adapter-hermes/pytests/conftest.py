@@ -102,10 +102,12 @@ def recording_client(client_module, hermes_host):
         def __init__(self):
             super().__init__()
             self.posts = []
+            self.post_headers = []
             self.responder = None
 
-        def _post(self, path, data=None):  # type: ignore[override]
+        def _post(self, path, data=None, headers=None):  # type: ignore[override]
             self.posts.append((path, data))
+            self.post_headers.append(headers)
             if self.responder is not None:
                 return self.responder(path, data)
             return {"success": True, "echoed": data}

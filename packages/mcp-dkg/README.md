@@ -144,7 +144,7 @@ When neither `DKG_HOME` nor a workspace `.dkg/config.yaml` is present, the MCP s
 
 CLI `status --daemon` and `join --daemon` resolve the selected endpoint before loading automatic credentials. For a remote daemon, supply `--token`, `DKG_TOKEN`, or an explicit `--token-file` for join. The legacy implicit token-file fallback is restricted to a token-only home at its recorded local port (9200 when unrecorded); configured homes use normal configuration resolution. `join` takes `--token`, `DKG_TOKEN` or an explicit `--token-file` first, then a workspace or `DKG_HOME` binding, then automatically discovered credentials. The generated `.dkg/config.yaml` records the file its token was read from; after a literal token it records the `--token-file` value or its default `~/.dkg/auth.token`, because a literal token is never written.
 
-## Tool surface (33 tools)
+## Tool surface (36 tools)
 
 All tools are available the moment `dkg mcp setup` registers the MCP with your client. They group into seven categories tracking how a session typically uses memory: check health, discover the graph, set it up, drive the knowledge-asset lifecycle (create → write → finalize → share → publish), recall from it, query it, and message other agents.
 
@@ -171,10 +171,19 @@ All tools are available the moment `dkg mcp setup` registers the MCP with your c
 
 | Tool | What it does |
 |---|---|
-| `dkg_context_graph_create` | Create a context graph (called "projects" in the DKG node UI). The `id` slug is auto-derived from `name` when omitted. Idempotent — pre-existing CGs are returned unchanged. |
+| `dkg_context_graph_create` | Create a context graph (called "projects" in the DKG node UI). The `id` slug is auto-derived from `name` when omitted. Idempotent — pre-existing CGs are returned unchanged. Optional `readGraphs` (`preview` or `on`) lets queries search across its assets; it needs the node admin token, and the context graph is created either way. |
 | `dkg_context_graph_register` | Register an existing context graph on-chain. Supports policy overrides and PCA-backed registration by the PCA owner or a wallet registered to that exact PCA. An eligible PCA uses a quota-backed registration-deposit waiver. |
 | `dkg_subscribe` | Subscribe to a context graph so its data syncs locally from peers. Defaults to also syncing Shared Working Memory; pass `includeSharedMemory: false` to skip SWM. |
 | `dkg_sub_graph_create` | Create a named sub-graph inside a context graph (e.g. `code`, `tasks`, `meta`). Idempotent — pre-existing sub-graphs are silently reused. |
+
+### Search across assets (node admin)
+
+Both tools need the node admin token (`~/.dkg/auth.token`); with any other token the node refuses and the tool says so. They answer in plain words: Off, Preview (a combined copy is prepared without changing any results) and On (queries that ask for it search across assets).
+
+| Tool | What it does |
+|---|---|
+| `dkg_read_graphs_status` | For each context graph and memory (published assets, shared memory, private drafts): Off, Preview or On, and how far its combined copy is. Read-only. |
+| `dkg_read_graphs_set` | Turn search across assets Off, to Preview or On for one context graph, in one memory or all three, and set whether its queries search across assets by default (`defaultSemantics`). |
 
 ### Write (the canonical knowledge-asset lifecycle)
 
@@ -311,7 +320,7 @@ Per-turn state is kept in `~/.cache/dkg-mcp/sessions/*.json`; safe to delete at 
 
 | File | Purpose |
 |---|---|
-| `src/index.ts` | Stdio MCP server entrypoint. Boots `McpServer` and registers the 33 tools. |
+| `src/index.ts` | Stdio MCP server entrypoint. Boots `McpServer` and registers the 36 tools. |
 | `src/tools.ts` | Read tools (`dkg_list_context_graphs`, `dkg_sub_graph_list`, `dkg_query`, `dkg_get_entity`, `dkg_get_entity_sources`, `dkg_list_activity`, `dkg_get_agent`). |
 | `src/tools/query-catalog.ts` | Versioned query-catalog list/run/save MCP facade shared with the CLI and Node UI contract. |
 | `src/tools/assertions.ts` | Knowledge-asset lifecycle (`dkg_knowledge_asset_*` × 13: create/write/finalize/share/publish/pull_from/discard/query/history/import_file + import_artifact_resolve/read_markdown + semantic_enrichment_write). |

@@ -29,6 +29,7 @@ import {
   resolveDaemonRequestDeadlines,
   type DaemonRequestDeadlines,
 } from '@origintrail-official/dkg-core/daemon-request-deadlines';
+import { readGraphSettingsActorHeaders, readGraphSettingsPath, type ReadGraphSettingsChange, type ReadGraphsCreateSetting } from '@origintrail-official/dkg-core/read-graph-settings';
 
 export type { AgentListFilters, AgentListPageOptions } from '@origintrail-official/dkg-core';
 
@@ -462,9 +463,9 @@ export class DkgClient {
     method: HttpMethod,
     route: string,
     body?: unknown,
-    opts: { longMutation?: boolean } = {},
+    opts: { longMutation?: boolean; headers?: Record<string, string> } = {},
   ): Promise<T> {
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { ...opts.headers };
     if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
     if (body !== undefined) headers['Content-Type'] = 'application/json';
 
@@ -1171,29 +1172,24 @@ export class DkgClient {
     accessPolicy?: number;
     /** 0 = curated publishing, 1 = open publishing. Forwarded to the daemon verbatim. */
     publishPolicy?: number;
-  }): Promise<{ created: string; uri: string; alreadyExists: boolean }> {
+    /** Read graphs to switch on once it exists (node admin only); `readGraphs` in the answer says whether they were. */
+    readGraphs?: ReadGraphsCreateSetting;
+  }): Promise<{ created: string; uri: string; alreadyExists: boolean; readGraphs?: unknown }> {
     try {
-      const response = await this.request<{ created: string; uri: string }>(
-        'POST',
-        '/api/context-graph/create',
-        {
-          id: args.id,
-          name: args.name,
-          description: args.description,
-          ...(args.accessPolicy !== undefined ? { accessPolicy: args.accessPolicy } : {}),
-          ...(args.publishPolicy !== undefined ? { publishPolicy: args.publishPolicy } : {}),
-        },
-      );
+      const response = await this.request<{ created: string; uri: string; readGraphs?: unknown }>('POST', '/api/context-graph/create', {
+        id: args.id,
+        name: args.name,
+        description: args.description,
+        ...(args.accessPolicy !== undefined ? { accessPolicy: args.accessPolicy } : {}),
+        ...(args.publishPolicy !== undefined ? { publishPolicy: args.publishPolicy } : {}),
+        ...(args.readGraphs !== undefined ? { readGraphs: args.readGraphs } : {}),
+      }, args.readGraphs !== undefined ? { headers: readGraphSettingsActorHeaders('mcp') } : {});
       return { ...response, alreadyExists: false };
     } catch (err) {
       // Daemon returns 409 with "already exists" / "duplicate" / "conflict"
       // in the body when the id is taken; treat any of those as the
       // idempotent already-exists case rather than a hard failure.
-      if (
-        err instanceof DkgHttpError &&
-        err.status === 409 &&
-        /already exists|duplicate|conflict/i.test(String(err.message))
-      ) {
+      if (err instanceof DkgHttpError && err.status === 409 && /already exists|duplicate|conflict/i.test(String(err.message))) {
         return {
           created: args.id,
           uri: `did:dkg:context-graph:${args.id}`,
@@ -1204,6 +1200,14 @@ export class DkgClient {
     }
   }
 
+  /** The node's read-graph settings, all or one context graph's (node admin only). */
+  async readGraphSettings(contextGraphId?: string): Promise<unknown> {
+    return this.request('GET', readGraphSettingsPath(contextGraphId));
+  }
+  /** Change one context graph's read-graph settings (node admin only); the answer is the settings in force after. */
+  async setReadGraphSettings(change: ReadGraphSettingsChange): Promise<unknown> {
+    return this.request('PUT', readGraphSettingsPath(), change, { headers: readGraphSettingsActorHeaders('mcp') });
+  }
 
   /**
    * Register a context graph on-chain. Optional — `vm/publish` auto-registers

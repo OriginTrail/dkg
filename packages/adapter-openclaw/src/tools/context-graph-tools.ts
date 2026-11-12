@@ -8,6 +8,7 @@
  */
 import type { OpenClawTool } from '../types.js';
 import { EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION } from '../dkg-node-plugin-constants.js';
+import { READ_GRAPHS_CREATE_PROPERTIES } from './read-graph-tools.js';
 import type { DkgToolHost } from './tool-host.js';
 
 export function buildContextGraphTools(ctx: DkgToolHost): OpenClawTool[] {
@@ -40,6 +41,7 @@ export function buildContextGraphTools(ctx: DkgToolHost): OpenClawTool[] {
         'Defaults to a curated/private context graph — the creator is auto-included in the allowlist ' +
         'and can immediately write to working/shared memory. Pass `public: true` for an open/discoverable ' +
         'context graph, or `allowed_agents` to invite collaborators atomically with creation. ' +
+        'Pass `read_graphs` to let queries search across its assets (needs the node admin token). ' +
         'For later writes, use the exact returned id or full did:dkg:context-graph:<id> URI.',
       parameters: {
         type: 'object',
@@ -68,6 +70,7 @@ export function buildContextGraphTools(ctx: DkgToolHost): OpenClawTool[] {
             items: { type: 'string' },
             description: 'Optional agent addresses (0x...) to add to the curation allowlist at creation time. The creator\'s own address is auto-added regardless. Ignored when public is true.',
           },
+          ...READ_GRAPHS_CREATE_PROPERTIES,
         },
         required: ['name'],
       },
