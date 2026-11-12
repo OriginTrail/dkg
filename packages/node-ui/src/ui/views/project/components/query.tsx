@@ -675,6 +675,8 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
           aria-label="SPARQL editor"
           value={draftQuery}
           onChange={(e) => {
+            // An edited saved query runs as ad-hoc SPARQL, without the saved query's memory.
+            if (session.kind === 'catalog') setOptions(previous => ({ ...previous, view: undefined }));
             setSession({ kind: 'ad-hoc', draft: e.target.value });
             setParameterError(null);
           }}

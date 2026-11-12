@@ -205,7 +205,8 @@ export async function fetchReadGraphSettings(contextGraphId: string): Promise<Re
 export async function setReadGraphMode(contextGraphId: string, view: GetView, mode: ReadGraphMode): Promise<ReadGraphSettings> {
   const body = await requestLongMutation<unknown>(READ_GRAPH_SETTINGS_PATH, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    // The node records who changed the settings.
+    headers: { 'Content-Type': 'application/json', 'X-DKG-Actor': 'ui', ...authHeaders() },
     body: JSON.stringify({ contextGraphId, layers: { [view]: mode } }),
   }, 'The node did not answer in time. The change may still apply: refresh to see the current settings.');
   return decodeReadGraphSettings(body, contextGraphId);

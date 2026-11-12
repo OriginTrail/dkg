@@ -214,6 +214,7 @@ describe('setReadGraphMode', () => {
     expect(path).toBe(READ_GRAPH_SETTINGS_PATH);
     expect(init?.method).toBe('PUT');
     expect(new Headers(init?.headers).get('Content-Type')).toBe('application/json');
+    expect(new Headers(init?.headers).get('X-DKG-Actor')).toBe('ui');
     expect(JSON.parse(String(init?.body))).toEqual({ contextGraphId: CG, layers: { 'shared-working-memory': 'serve' } });
     expect(settings.layers[1]).toMatchObject({ view: 'shared-working-memory', mode: 'serve', setHere: true });
   });

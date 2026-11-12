@@ -204,6 +204,13 @@ describe('ContextGraphQueryView memory picker and Search across assets', () => {
     await click(mergedBox(container));
     await click(container.querySelector<HTMLButtonElement>('button[aria-label^="Load query: Shared subjects"]')!);
     expect(lastRun()).toMatchObject({ sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 5', view: 'shared-working-memory', semantics: 'merged' });
+
+    // Edited, the saved query runs as ad-hoc SPARQL in all graphs, as the picker then shows.
+    await typeInto(container.querySelector('textarea')!, 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 6');
+    expect(viewSelect(container).disabled).toBe(false);
+    expect(viewSelect(container).value).toBe('');
+    await click(button(container, 'Run'));
+    expect(lastRun()).toMatchObject({ sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 6', view: undefined, semantics: undefined });
   });
 
   it('resets to the context graph query in all graphs', async () => {
