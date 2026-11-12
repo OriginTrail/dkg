@@ -288,7 +288,7 @@ describe('PUT /api/store/read-graphs/settings', () => {
     expect(table.get(CG).layers).toEqual({ 'shared-working-memory': 'off' });
   });
 
-  it('puts the context graph\'s rows back exactly when the apply refuses or fails', async () => {
+  it('writes nothing when the apply refuses or fails', async () => {
     const refusedChange: ReadGraphModeChange = { contextGraphId: CG, layer: 'verifiable-memory', from: 'off', to: 'build', outcome: { refused: 'the store refused' } };
     const store = layeredStore();
     const apply = vi.fn<ReadGraphSettingsAgent['applyReadGraphModesV1']>()
@@ -299,7 +299,7 @@ describe('PUT /api/store/read-graphs/settings', () => {
     const before = rowsOf(CG);
     const refused = await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'build', 'working-memory': 'off' }, viewSemantics: null });
     expect(refused).toMatchObject({ status: 409, body: { code: 'READ_GRAPHS_APPLY_REFUSED', changes: [refusedChange] } });
-    expect(refused.body!.error).toBe(`Search across assets couldn't be changed for ${CG}, so its previous settings are back: the store refused.`);
+    expect(refused.body!.error).toBe(`Search across assets couldn't be changed for ${CG}, and its settings stay as they were: the store refused.`);
     expect(rowsOf(CG)).toEqual(before);
     // The apply got the whole settings in force with the change written.
     expect(readGraphModeOfLayer(apply.mock.calls[0]![0], CG, MemoryLayer.VerifiableMemory)).toBe('build');
@@ -315,17 +315,44 @@ describe('PUT /api/store/read-graphs/settings', () => {
     expect(rowsOf(CG)).toEqual(before);
   });
 
-  it('says so when the rows of a change the node did not apply cannot be put back, and the running node keeps its settings', async () => {
+  it('writes the change at the apply\'s commit point, after everything that can fail', async () => {
+    let during: ReturnType<typeof rowsOf> | undefined;
+    const store = layeredStore();
+    const apply = vi.fn(async (next: ReadGraphModes, options?: { signal?: AbortSignal; viewSemantics?: ViewSemanticsSettings; beforeCommit?: () => void }) => {
+      during = rowsOf(CG);
+      return applyReadGraphModes(store, next, options ?? {});
+    });
+    const { control } = controlOf({ agent: agentOf(store, { applyReadGraphModesV1: apply }) });
+    const before = rowsOf(CG);
+    expect((await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'build' } })).status).toBe(200);
+    // Before the commit point the table held nothing of the change; after it, the table and the node agree.
+    expect(during).toEqual(before);
+    expect(rowsOf(CG).modes).toMatchObject([{ layer: 'verifiable-memory', mode: 'build', updatedBy: 'api' }]);
+    expect(readGraphModeOfLayer(readGraphRuntimeOf(store)!.modes, CG, MemoryLayer.VerifiableMemory)).toBe('build');
+  });
+
+  it('leaves the running node as it was when the settings write fails', async () => {
     const lines: string[] = [];
-    const apply = vi.fn<ReadGraphSettingsAgent['applyReadGraphModesV1']>().mockRejectedValueOnce(new Error('apply refused'));
-    const { control, agent } = controlOf({ agent: agentOf(layeredStore(), { applyReadGraphModesV1: apply }), log: lines });
-    vi.spyOn(table, 'restore').mockImplementationOnce(() => { throw new Error('disk I/O error'); });
+    const store = layeredStore();
+    const { control } = controlOf({ agent: agentOf(store), log: lines });
+    vi.spyOn(table, 'set').mockImplementationOnce(() => { throw new Error('disk I/O error'); });
     const answer = await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'build' } });
     expect(answer).toMatchObject({ status: 503, body: { code: 'READ_GRAPH_SETTINGS_UNAVAILABLE' } });
-    expect(answer.body!.error).toBe(`Search across assets wasn't changed for ${CG} now, but the change is still saved (disk I/O error), so the next change or a `
-      + 'restart puts it in force: set the previous settings again to undo it.');
-    expect(lines).toEqual([`[read-graphs] The previous settings of ${CG} could not be put back after a change the node did not apply: disk I/O error`]);
-    expect(readGraphModeOfLayer(readGraphRuntimeOf(agent.store)!.modes, CG, MemoryLayer.VerifiableMemory)).toBe('off');
+    expect(answer.body!.error).toBe('This node\'s search-across-assets settings can\'t be changed now: disk I/O error.');
+    expect(table.get(CG)).toEqual({ layers: {} });
+    expect(readGraphModeOfLayer(readGraphRuntimeOf(store)!.modes, CG, MemoryLayer.VerifiableMemory)).toBe('off');
+    expect(lines).toEqual([]);
+  });
+
+  it('writes the change once the settings are taken by a host that has no commit point', async () => {
+    const store = layeredStore();
+    const apply = vi.fn(async (next: ReadGraphModes, options?: { signal?: AbortSignal; viewSemantics?: ViewSemanticsSettings }) =>
+      applyReadGraphModes(store, next, { ...(options?.signal ? { signal: options.signal } : {}), ...(options?.viewSemantics ? { viewSemantics: options.viewSemantics } : {}) }));
+    const { control } = controlOf({ agent: agentOf(store, { applyReadGraphModesV1: apply }) });
+    expect((await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'serve' } })).status).toBe(200);
+    expect(table.get(CG)).toEqual({ layers: { 'verifiable-memory': 'serve' } });
+    vi.spyOn(table, 'set').mockImplementationOnce(() => { throw new Error('disk I/O error'); });
+    expect((await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'build' } })).body).toMatchObject({ code: 'READ_GRAPH_SETTINGS_UNAVAILABLE' });
   });
 
   it('refuses a change once the node shuts down, and ends a running one before it changes anything', async () => {
@@ -353,17 +380,17 @@ describe('PUT /api/store/read-graphs/settings', () => {
     expect(res.statusCode).toBe(503);
     expect(JSON.parse(res.body)).toMatchObject({ code: 'NODE_SHUTTING_DOWN' });
     expect(rowsOf(CG)).toEqual(before);
-    // A change still saved after a failed put-back keeps its own answer, even during shutdown.
+    // A settings write that fails keeps its own answer, even during shutdown.
     const saved = new ReadGraphRequests();
-    const failing = vi.fn(async (_next: ReadGraphModes, options?: { signal?: AbortSignal }) => {
-      queueMicrotask(() => saved.end());
-      await new Promise((_resolve, reject) => options?.signal?.addEventListener('abort', () => reject(options.signal!.reason), { once: true }));
+    const failing = vi.fn(async (_next: ReadGraphModes, options?: { beforeCommit?: () => void }) => {
+      saved.end();
+      options?.beforeCommit?.();
       return [];
     });
-    const putBackFails = controlOf({ agent: agentOf(layeredStore(), { applyReadGraphModesV1: failing }) }).control;
-    vi.spyOn(table, 'restore').mockImplementationOnce(() => { throw new Error('disk I/O error'); });
+    const writeFails = controlOf({ agent: agentOf(layeredStore(), { applyReadGraphModesV1: failing }) }).control;
+    vi.spyOn(table, 'set').mockImplementationOnce(() => { throw new Error('disk I/O error'); });
     const kept = fakeRes();
-    await handleReadGraphSettingsRoutes({ ...ctx, res: kept, readGraphSettings: putBackFails,
+    await handleReadGraphSettingsRoutes({ ...ctx, res: kept, readGraphSettings: writeFails,
       req: fakeReq('PUT', READ_GRAPH_SETTINGS_PATH, JSON.stringify({ contextGraphId: 'settings-route-third', layers: { 'verifiable-memory': 'build' } }), {}) } as unknown as RequestContext,
       { requests: saved });
     expect(kept.statusCode).toBe(503);
@@ -391,6 +418,13 @@ describe('PUT /api/store/read-graphs/settings', () => {
     const restarted = await start();
     expect(readGraphModeOfLayer(restarted.effective.readGraphs, CG, MemoryLayer.VerifiableMemory)).toBe('serve');
     expect(readGraphModeOfLayer(restarted.effective.readGraphs, CG, MemoryLayer.WorkingMemory)).toBe('build');
+    // And off, through the next restart too, while config.json still says build.
+    expect((await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'off', 'working-memory': 'off', 'shared-working-memory': 'off' } })).status)
+      .toBe(200);
+    const again = await start();
+    for (const layer of [MemoryLayer.VerifiableMemory, MemoryLayer.WorkingMemory, MemoryLayer.SharedWorkingMemory]) {
+      expect(readGraphModeOfLayer(again.effective.readGraphs, CG, layer)).toBe('off');
+    }
   });
 
   it('runs changes one at a time, each applying the settings with every earlier change in them', async () => {

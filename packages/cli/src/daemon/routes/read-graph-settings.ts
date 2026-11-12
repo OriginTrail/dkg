@@ -56,9 +56,9 @@ export async function handleReadGraphSettingsRoutes(
   const untrack = requests.track(gone);
   try {
     const outcome = await control.change(parsed.request, actor ?? 'api', gone.signal);
-    // Shutdown ended the change before it changed anything; a change still saved after a failed put-back keeps its own answer.
-    const stillSaved = 'code' in outcome.body && outcome.body.code === 'READ_GRAPH_SETTINGS_UNAVAILABLE';
-    if (gone.signal.aborted && requests.ending && outcome.status !== 200 && !stillSaved) {
+    // Shutdown ended the change before it changed anything; a settings write that failed keeps its own answer.
+    const writeFailed = 'code' in outcome.body && outcome.body.code === 'READ_GRAPH_SETTINGS_UNAVAILABLE';
+    if (gone.signal.aborted && requests.ending && outcome.status !== 200 && !writeFailed) {
       return jsonResponse(res, 503, SHUTTING_DOWN, undefined, { 'Retry-After': '30' });
     }
     return jsonResponse(res, outcome.status, outcome.body);
