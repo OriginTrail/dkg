@@ -7,19 +7,23 @@
 export const NODE_SQLITE_SUPPORTED_RANGE = '>=22.13.0 <23.0.0 || >=23.4.0';
 
 /**
- * First release on each supported Node.js line with the 2026-10-21 security
- * fixes (CVE-2026-111497, a Brotli decoder RCE reachable through fetch(), plus
- * DNS and TLS hostname bugs). The capability probe cannot see these, so this is
- * the one place the version string matters.
+ * First release on each supported Node.js line with the latest Node.js
+ * security fixes, from the security release of NODE_SECURITY_RELEASE_DATE.
+ * Each one also carries the fixes of the earlier security releases on its
+ * line. The capability probe cannot see these, so this is the one place the
+ * version string matters. When Node.js publishes a new security release,
+ * update the table, the date and the advisory URL together.
  */
 export const NODE_SECURITY_RELEASES: Readonly<Record<number, string>> = {
-  22: '22.23.4',
-  24: '24.22.1',
-  26: '26.12.1',
+  22: '22.23.5',
+  24: '24.22.3',
+  26: '26.13.1',
 };
 
+export const NODE_SECURITY_RELEASE_DATE = '2026-11-11';
+
 export const NODE_SECURITY_ADVISORY_URL =
-  'https://nodejs.org/en/blog/vulnerability/october-2026-security-releases';
+  'https://nodejs.org/en/blog/vulnerability/november-2026-security-releases';
 
 export interface NodeRuntimeProbe {
   version: string;
@@ -98,7 +102,7 @@ export function nodeSecurityAdvisory(version: string): string | null {
   const [, floorMinor, floorPatch] = parseNodeVersion(patched)!;
   if (minor > floorMinor || (minor === floorMinor && patch >= floorPatch)) return null;
   return (
-    `Node.js ${version} is missing the 2026-10-21 security release (CVE-2026-111497 and others). `
+    `Node.js ${version} is missing the ${NODE_SECURITY_RELEASE_DATE} Node.js security release. `
     + `Upgrade to Node.js ${patched} or later: ${NODE_SECURITY_ADVISORY_URL}`
   );
 }
