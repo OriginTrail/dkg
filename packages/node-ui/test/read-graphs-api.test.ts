@@ -223,8 +223,8 @@ describe('setReadGraphMode', () => {
     const refusal = {
       code: 'READ_GRAPHS_ROLLBACK_TARGET_OLDER',
       error: 'The rollback target of this node is older than the first release that recognizes read graphs.',
-      rollbackTarget: { source: 'config', version: '10.1.1' },
-      firstRecognizingRelease: '10.1.2',
+      rollbackTarget: { source: 'config', version: '10.1.0' },
+      firstRecognizingRelease: '10.1.1',
     };
     stubFetch(409, refusal);
 

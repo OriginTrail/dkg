@@ -33,7 +33,7 @@ async function warmIndex(options: ConstructorParameters<typeof GraphSetIndexStor
   const inner = new OxigraphStore();
   await inner.insert([q(CACHED)]);
   const counting = new CountingStore(inner);
-  const store = new GraphSetIndexStore(counting, { revalidateMs: 100, now: () => clock.now, ...options });
+  const store = new GraphSetIndexStore(counting, { revalidateMs: 100, revalidate: 'background', now: () => clock.now, ...options });
   await expect(store.listGraphs()).resolves.toEqual([CACHED]);
   await inner.insert([q(EXTERNAL)]);
   return { clock, inner, counting, store };
@@ -105,7 +105,7 @@ describe('a warm graph catalog that is due', () => {
       const inner = new OxigraphStore();
       await inner.insert([q(CACHED)]);
       const listing = new HeldListing(inner);
-      const store = new GraphSetIndexStore(listing, { revalidateMs: 100, now: () => clock.now });
+      const store = new GraphSetIndexStore(listing, { revalidateMs: 100, revalidate: 'background', now: () => clock.now });
       await expect(store.listGraphs()).resolves.toEqual([CACHED]);
 
       // The catalog is due; the background flight it starts is held before it lists.
@@ -184,10 +184,24 @@ describe('a warm graph catalog that is due', () => {
     await expect(read).resolves.toEqual([CACHED, EXTERNAL]);
   });
 
+  it('makes the caller wait by default, so a due read sees graphs written outside the index', async () => {
+    // Without a mode the store blocks: a node that has just synced metadata
+    // through another path reads it on the next due read, not a refresh later.
+    const { clock, counting, store } = await warmIndex({ revalidate: undefined });
+    const scan = gate();
+    counting.listGraphsGate = scan.promise;
+    clock.now += 100;
+
+    const read = store.listGraphs();
+    expect(await stillWaiting(read)).toBe(true);
+    scan.open();
+    await expect(read).resolves.toEqual([CACHED, EXTERNAL]);
+  });
+
   it('still makes a read wait for a cold seed, a dirty rebuild and a store that revalidates on every read', async () => {
     const inner = new OxigraphStore();
     await inner.insert([q(CACHED)]);
-    for (const options of [{}, { revalidateMs: 0 }]) {
+    for (const options of [{ revalidate: 'background' as const }, { revalidate: 'background' as const, revalidateMs: 0 }]) {
       const counting = new CountingStore(inner);
       const store = new GraphSetIndexStore(counting, options);
       for (const prepare of [
@@ -223,7 +237,7 @@ describe('the revalidation cadence', () => {
       }
     }
     const counting = new SlowListing(new OxigraphStore());
-    const store = new GraphSetIndexStore(counting, { revalidateMs: 100, now: () => clock.now });
+    const store = new GraphSetIndexStore(counting, { revalidateMs: 100, revalidate: 'background', now: () => clock.now });
     const current: QueryOptions & CurrentGraphCatalogReadOptions = { currentCatalog: true };
     await store.listGraphs();
     // The seed published at 1,050: the cadence is due at 2,050, the interval at 1,150.
@@ -247,7 +261,7 @@ describe('the revalidation cadence', () => {
       }
     }
     const counting = new SlowListing(new OxigraphStore());
-    const store = new GraphSetIndexStore(counting, { revalidateMs: 100, now: () => clock.now });
+    const store = new GraphSetIndexStore(counting, { revalidateMs: 100, revalidate: 'background', now: () => clock.now });
     await store.listGraphs();
     // The seed took 50 ms and published at 1,050, so the catalog is due at 2,050.
     clock.now = 2_049;

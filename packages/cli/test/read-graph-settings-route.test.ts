@@ -32,6 +32,7 @@ import { checkDaemonQuerySection, prepareDaemonReadGraphSettings } from '../src/
 import { resolveQuerySection } from '../src/read-graphs-config.js';
 import { SqliteReadGraphSettingsStore } from '../src/read-graph-settings-store.js';
 import { READ_GRAPH_SETTINGS_PATH } from '../src/read-graph-settings-wire.js';
+import { READ_GRAPHS_FIRST_RECOGNIZING_RELEASE } from '../src/update/read-graph-rollback-target.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const CG = 'settings-route';
@@ -274,19 +275,19 @@ describe('PUT /api/store/read-graphs/settings', () => {
     expect(await put(checkpoint, { contextGraphId: CG, layers: { 'verifiable-memory': 'off' } }))
       .toMatchObject({ status: 409, body: { code: 'READ_GRAPHS_CHECKPOINT_NODE' } });
 
-    await writeFile(join(home, 'previous-version'), '10.1.1\n');
+    await writeFile(join(home, 'previous-version'), '10.1.0\n');
     const { control, table } = controlOf();
     const older = await put(control, { contextGraphId: CG, layers: { 'shared-working-memory': 'serve' } });
     expect(older).toMatchObject({
       status: 409,
       body: {
         code: 'READ_GRAPHS_ROLLBACK_TARGET_OLDER',
-        rollbackTarget: { source: join(home, 'previous-version'), version: '10.1.1' },
-        firstRecognizingRelease: '10.1.2',
+        rollbackTarget: { source: join(home, 'previous-version'), version: '10.1.0' },
+        firstRecognizingRelease: READ_GRAPHS_FIRST_RECOGNIZING_RELEASE,
       },
     });
-    expect(older.body!.error).toBe('Search across assets can be turned on after this node\'s next update: the release it would roll back to (10.1.1) '
-      + 'doesn\'t support it, and 10.1.2 is the first that does.');
+    expect(older.body!.error).toBe('Search across assets can be turned on after this node\'s next update: the release it would roll back to (10.1.0) '
+      + `doesn't support it, and ${READ_GRAPHS_FIRST_RECOGNIZING_RELEASE} is the first that does.`);
     expect((await put(control, { contextGraphId: CG, layers: { 'shared-working-memory': 'off' } })).status).toBe(200);
     expect(table.get(CG).layers).toEqual({ 'shared-working-memory': 'off' });
   });

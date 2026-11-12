@@ -4,8 +4,87 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+## [10.1.1] - Unreleased
+
+10.1.1 is the first 10.1 release for mainnet: nodes moving from 10.0.27
+also get everything in 10.1.0 below. It fixes problems found while 10.1.0
+ran on testnet, in the Marketplace, the MCP server and the public catalog.
+It gives the node UI a new design system and makes a scoped query cost what
+the context graph it reads costs. It also adds merged view queries and a
+developer preview of Graph Computer Programs, both off until a node turns
+them on. On mainnet the marketplace stays off, as the mainnet chains have
+no marketplace contracts yet.
+
+### Node UI
+
+- The node UI has one design system, in dark and light themes: colour,
+  type, spacing and corner sizes all come from shared tokens. Each colour
+  means one thing: the memory layers are slate (Working Memory), cyan
+  (Shared Working Memory) and purple (Verifiable Memory); green, amber and
+  red mean done, needs your action and failed; and blue marks roles and
+  access.
+- Tabs behave like browser tabs, and pages share one header, breadcrumbs
+  and navigation.
+- The header says only what the node reports: Connecting, Connected with
+  its peer count, No peers, or Unavailable after three failed status checks
+  in a row.
+- The app works on small screens: below 860 px the side panels open one at
+  a time, the header fits down to 320 px, and tables scroll inside their
+  cards.
+- Every view reads a Verifiable Memory receipt's on-chain evidence through
+  one shared model, so they all show the same receipt.
+- The wording is plainer: it says what the node does for its user rather
+  than how it is built.
+- Publisher Conviction Accounts are easier to follow on the Dashboard,
+  Settings and PCA screens, and a "What is a PCA?" dialog explains them in
+  the app.
+- A reply in the agent panel finishes even when the panel is closed while
+  it streams.
+- The Marketplace section follows the light and dark themes like the rest
+  of the app.
+
+### Added
+
+- A developer preview of Graph Computer Programs: S-expression and
+  TypeScript Programs stored in a context graph, which a node runs once its
+  user approves their effects and records with RDF receipts. The node runs
+  them only when `semanticRuntime.enabled` is `true` in its config, and it
+  is off by default. Two new packages carry it:
+  `@origintrail-official/dkg-semantic-runtime`, the runtime, and
+  `@origintrail-official/dkg-graph-computer`, a TypeScript client that
+  uploads, approves and invokes Programs. The node UI adds a TypeScript
+  Program editor to each project.
+- Building the semantic runtime's Wasm takes a pinned Rust toolchain (see
+  `rust/README.md`). A node built from source without it skips the Wasm with
+  a warning and can't run the semantic runtime; set
+  `DKG_SEMANTIC_RUNTIME_WASM=required` to make that build fail instead. CI
+  and release packing require the Wasm, so the published package includes
+  it.
+- Merged view queries, opt-in. A view query can ask for
+  `semantics: "merged"` and match its patterns across all of a layer's
+  assets at once, from a read graph the node keeps. Requests without
+  `semantics` keep per-asset answers, and the response's `semantics` field
+  says which answered. `query.readGraphs` turns read graphs on per node,
+  layer or context graph (`off`, the default, `build` or `serve`), and
+  `query.viewSemantics` sets the default per context graph.
+  `dkg store read-graphs status | check | rebuild | drop` manages them, and
+  `dkg view-semantics report` shows how merged answers would differ. A node
+  keeps read graphs off while the release `dkg rollback` would activate
+  doesn't recognize them, so a node updating from 10.1.0 or 10.0.27 keeps
+  them off. See [Read graphs](docs/use-dkg/read-graphs.md).
+- A limit on the node's graph catalog, its in-memory list of the store's
+  graphs: `store.graphCatalog.maxBytes`, 256 MiB by default
+  (`DKG_STORE_GRAPH_CATALOG_MAX_BYTES` wins when set). The node warns at
+  50 % and 80 % of it, the alert set has a rule on the 80 % warning, and a
+  query that needs the catalog past its limit gets a retryable
+  `503 STORE_INTERNAL_LIMIT` rather than an answer cut short. See
+  [Graph catalog limit](docs/use-dkg/graph-catalog-limit.md).
+
 ### Changed
 
+- A scoped query costs what the context graph it reads costs: it finds its
+  graphs in the node's graph catalog instead of listing the whole store. A
+  caller's byte budget covers only the reads made for its own query.
 - Core nodes send fewer RPC requests for Knowledge Assets that wait to reach
   Verifiable Memory. The VM reconcile pass and the StorageACK promotion lanes
   read an asset's latest Merkle root and then its publisher, a request each,
@@ -14,33 +93,22 @@ All notable changes to the DKG V10 node are documented here. The format is based
   request. On the mainnet Core nodes measured, that is up to about 14,000
   fewer requests a day on Gnosis and 24,000 on Base, depending on how many
   assets are pending.
+- The node UI build fits its 896 MB heap ceiling, which suits a 1.5 GiB
+  node service, with the Program editor bundled: icon and lodash imports
+  load only the modules they use, the Graph Computer SDK loads only the
+  parts of ethers it uses, and the build no longer gzips every chunk just to
+  report its size.
 
 ### Fixed
 
-- A node built from source without the semantic runtime's pinned Rust
-  toolchain builds again. Its build skips the semantic runtime's Wasm with a
-  warning, where it used to fail the whole build and stop git-based updates;
-  that node can't run the semantic runtime until the toolchain is installed
-  and it builds with `DKG_SEMANTIC_RUNTIME_WASM=required`. CI and release
-  packing still require the Wasm.
-- The node UI build fits its 896 MB heap ceiling again, in CI and in
-  git-based updates. Since the UI added the Program editor, the build ran
-  out of memory in about one build in three on macOS and in most builds on
-  Linux. It now parses half as many modules and needs about 90 MB less
-  heap: icon and lodash imports load only the modules they use, the Graph
-  Computer SDK loads only the parts of ethers it uses, and the build no
-  longer gzips every chunk just to report its size. The ceiling stays where
-  it fits a 1.5 GiB node service.
-- A Core node no longer spends a large share of its RPC on context graphs
-  that peers announced but nobody registered on chain. A Core node subscribes
-  to every graph it hears of over gossip. For one that was never registered,
-  every reconcile attempt paid for a live chain scan and then failed with
-  "has no resolved on-chain id", and the node asked about such graphs every
-  minute, up to eight a minute, for as long as it ran. On a Base mainnet Core
-  node that came to about 80,000 requests a day. The node now waits before
-  asking again about a graph whose name the chain holds no id for: a minute
-  at first, doubling up to an hour. A graph that does get registered is
-  picked up as soon as the node sees it on chain, as before.
+- A seller can serve tool calls on an OpenAI reasoning model that takes
+  function tools on chat completions only with no reasoning. Set
+  `marketplace.seller.services[].backend.reasoningEffortWithTools` to
+  `none` for that service. Calls with tools then carry
+  `reasoning_effort: "none"`, and calls without tools keep the model's own
+  reasoning. A model that refuses `none` as well takes function tools only on
+  the Responses API, so it can't serve tool calls: set `tools: false` for its
+  service, and buyers then get `tools_unsupported` instead of refused calls.
 - An error from one service's backend no longer takes a seller's other
   services away from buyers. When the backend refuses a call as made (400,
   404, 413, 415 or 422), the seller refuses it with a code buyers don't
@@ -53,6 +121,14 @@ All notable changes to the DKG V10 node are documented here. The format is based
   If the backend refuses both, the service stops offering tools until the
   node restarts, so buyers answer such calls with `tools_unsupported`
   instead of sending them.
+- A node that turns the marketplace on where its chain has none of the
+  marketplace's contracts, as on the mainnets for now, keeps buying and
+  selling off with one log line. Before, the buyer's job started anyway,
+  failed on every tick and posted a "Marketplace renewal failed"
+  notification each time. The node asks its chain for the contracts once at
+  start-up, and only when the marketplace is on. A failed RPC call says
+  nothing about the contracts, so the node then starts the marketplace as
+  before.
 - A node with an endpoint in `chain.rpcUrls` that never answers no longer
   piles up RPC requests while its node UI is open. Each
   `GET /api/wallets/balances`, which the UI's Settings page sends every
@@ -62,33 +138,16 @@ All notable changes to the DKG V10 node are documented here. The format is based
   the budget within a day and stopped its proofs. The route now uses the
   configured chain's network, so it asks no endpoint for it, and closes its
   connections once it answers.
-
-### Security
-
-- The Node.js release that `dkg start`, daemon start, auto-update slot
-  activation and the `node-security` check of `dkg doctor` expect is now the
-  [2026-11-11 Node.js security release](https://nodejs.org/en/blog/vulnerability/november-2026-security-releases):
-  22.23.5, 24.22.3 or 26.13.1 (was 22.23.4, 24.22.1 or 26.12.1). Older
-  releases log a `WARNING` and the node still starts. Upgrade Node.js on every
-  host that runs a node and restart the node. The README, the quickstart and
-  [Updates and rollback](docs/use-dkg/updates-and-rollback.md#nodejs-security-releases)
-  name the new releases.
-
-## [10.1.1] - Unreleased
-
-10.1.1 fixes problems found while 10.1.0 ran on testnet, in the
-Marketplace, the MCP server and the public catalog.
-
-### Fixed
-
-- A seller can serve tool calls on an OpenAI reasoning model that takes
-  function tools on chat completions only with no reasoning. Set
-  `marketplace.seller.services[].backend.reasoningEffortWithTools` to
-  `none` for that service. Calls with tools then carry
-  `reasoning_effort: "none"`, and calls without tools keep the model's own
-  reasoning. A model that refuses `none` as well takes function tools only on
-  the Responses API, so it can't serve tool calls: set `tools: false` for its
-  service, and buyers then get `tools_unsupported` instead of refused calls.
+- A Core node no longer spends a large share of its RPC on context graphs
+  that peers announced but nobody registered on chain. A Core node subscribes
+  to every graph it hears of over gossip. For one that was never registered,
+  every reconcile attempt paid for a live chain scan and then failed with
+  "has no resolved on-chain id", and the node asked about such graphs every
+  minute, up to eight a minute, for as long as it ran. On a Base mainnet Core
+  node that came to about 80,000 requests a day. The node now waits before
+  asking again about a graph whose name the chain holds no id for: a minute
+  at first, doubling up to an hour. A graph that does get registered is
+  picked up as soon as the node sees it on chain, as before.
 - An MCP server registered by hand, with no `DKG_HOME` or workspace config
   selected, now loads the default node home's credentials, so its
   authenticated tools no longer answer `401`. An explicit home or workspace
@@ -101,6 +160,21 @@ Marketplace, the MCP server and the public catalog.
   untouched.
 - An agent built on a pre-built chain adapter verifies finalized public
   catalog heads over the RPC endpoints its adapter names, as a node does.
+- Query routes answer a context graph the node holds nothing of the same
+  way as one the caller may not read.
+- Every store write path checks its terms and protocol metadata before they
+  reach the store.
+
+### Security
+
+- The Node.js release that `dkg start`, daemon start, auto-update slot
+  activation and the `node-security` check of `dkg doctor` expect is now the
+  [2026-11-11 Node.js security release](https://nodejs.org/en/blog/vulnerability/november-2026-security-releases):
+  22.23.5, 24.22.3 or 26.13.1 (was 22.23.4, 24.22.1 or 26.12.1). Older
+  releases log a `WARNING` and the node still starts. Upgrade Node.js on every
+  host that runs a node and restart the node. The README, the quickstart and
+  [Updates and rollback](docs/use-dkg/updates-and-rollback.md#nodejs-security-releases)
+  name the new releases.
 
 ### Documentation
 
@@ -108,12 +182,12 @@ Marketplace, the MCP server and the public catalog.
   not detect it, with the supported client locations and formats, and how
   to recover when authenticated tools answer `401`.
 
-## [10.1.0] - Unreleased
+## [10.1.0] - 2026-11-10 (testnet only)
 
 10.1.0 opens the NeuroSymbolic Marketplace on testnet, where nodes that opt
 in buy and sell inference. It also keeps publishing and recovery steady
-under load and gives the node UI a new look. This entry describes a release
-candidate; publication and production qualification are still pending.
+under load and gives the node UI a new look. It was published for testnet
+only; mainnet moves from 10.0.27 straight to 10.1.1.
 
 ### Highlights
 

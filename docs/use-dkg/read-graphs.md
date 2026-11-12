@@ -11,7 +11,7 @@ A view query (`POST /api/query` with a `view`) matches each pattern inside one a
 
 Search across assets is off by default, for every context graph. You switch it per context graph and memory layer while the node runs, from the CLI, the API, an agent or the node UI. No restart is needed. Queries that don't ask for it are answered per asset, as before.
 
-Search across assets and these settings come with DKG 10.1.2. Earlier releases have neither.
+Nodes recognize read graphs from DKG 10.1.1. Switching search across assets per context graph through the CLI, the API, agent tools and the node UI comes with DKG 10.1.2.
 
 ## The settings
 
@@ -42,7 +42,7 @@ Search across assets and these settings come with DKG 10.1.2. Earlier releases h
   - a `sparql-http` endpoint whose `consistencyProfile` is `atomic-update` or stronger.
 
   On any other store the node refuses the setting with `READ_GRAPHS_UNSUPPORTED`.
-- **One node per store backend.** The combined copies assume that the node is its store's only writer, as the node's graph catalog does. Two nodes that share one store backend are not supported with search across assets in 10.1.2.
+- **One node per store backend.** The combined copies assume that the node is its store's only writer, as the node's graph catalog does. Two nodes that share one store backend are not supported with search across assets.
 - **Not on a checkpoint node.** A node that starts from a public checkpoint keeps no settings, and refuses every change with `READ_GRAPHS_CHECKPOINT_NODE`.
 - **The rollback target must recognize it.** The rollback target is the release `dkg rollback` would activate: the other slot on a Core, or the version in `previous-version` on an Edge. A release that doesn't recognize read graphs would treat them as ordinary graphs, so the node refuses Preview and On while the rollback target is such a release. The refusal is `READ_GRAPHS_ROLLBACK_TARGET_OLDER`, with the target's version and the first release that recognizes read graphs. Once a node that runs such a release updates again, its rollback target recognizes read graphs too.
 - **Plan for the space.** A combined copy holds one copy of each distinct triple of its layer, so the store grows by up to the size of that layer.

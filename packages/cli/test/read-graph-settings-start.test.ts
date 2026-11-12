@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryLayer, readScope, type ReadGraphKey } from '@origintrail-official/dkg-core';
 import { READ_GRAPH_PLANNED_METHODS, OxigraphStore, readGraphModeOf, viewSemanticsOf, wrapReadGraphLayer, type TripleStore } from '@origintrail-official/dkg-storage';
 import { QueryConfigError } from '../src/read-graphs-config.js';
+import { READ_GRAPHS_FIRST_RECOGNIZING_RELEASE } from '../src/update/read-graph-rollback-target.js';
 import { SqliteReadGraphSettingsStore } from '../src/read-graph-settings-store.js';
 import {
   checkDaemonQuerySection,
@@ -98,12 +99,12 @@ describe('the daemon\'s read-graph settings at start', () => {
 
   it('turn the table\'s modes off while the rollback target does not recognize read graphs, and still stop on the node\'s own', async () => {
     table.set(CURATED, { layers: { 'verifiable-memory': 'serve', 'working-memory': 'off' } }, 'api');
-    await writeFile(join(home, 'previous-version'), '10.1.1\n');
+    await writeFile(join(home, 'previous-version'), '10.1.0\n');
     const settings = await start({ viewSemantics: 'merged' });
     expect(readGraphModeOf(settings.effective.readGraphs, vm(CURATED))).toBe('off');
     expect(lines).toEqual([
-      `[read-graphs] Read graphs set for ${CURATED} (verifiable-memory) are off: the rollback target (${join(home, 'previous-version')}: 10.1.1) `
-        + 'is older than 10.1.2, the first release that recognizes read graphs.',
+      `[read-graphs] Read graphs set for ${CURATED} (verifiable-memory) are off: the rollback target (${join(home, 'previous-version')}: 10.1.0) `
+        + `is older than ${READ_GRAPHS_FIRST_RECOGNIZING_RELEASE}, the first release that recognizes read graphs.`,
     ]);
     await expect(start({ readGraphs: { layers: { 'verifiable-memory': 'build' } } })).rejects.toBeInstanceOf(QueryConfigError);
     // An unreadable rollback target refuses too, and with nothing the table keeps, nothing is looked up.
