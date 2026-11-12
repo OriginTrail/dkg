@@ -107,7 +107,10 @@ export function describeReadGraphSettings(answer: unknown): string {
   const node = recordOf(answer, 'node');
   const nodeModes = recordOf(node, 'layers');
   if (nodeModes) {
-    const modes = READ_GRAPH_LAYERS.map((layer) => `${LAYER_WORDS[layer]}: ${wordOf(nodeModes[layer] ?? 'not set')}`);
+    const modes = READ_GRAPH_LAYERS.map((layer) => {
+      const mode = modeOf(nodeModes[layer]);
+      return `${LAYER_WORDS[layer]}: ${mode ? MODE_WORDS[mode] : 'not set'}`;
+    });
     if (node?.viewSemantics === 'merged' || node?.viewSemantics === 'per-asset') {
       modes.push(`Queries search across assets: ${node.viewSemantics === 'merged' ? 'On' : 'Off'}`);
     }
