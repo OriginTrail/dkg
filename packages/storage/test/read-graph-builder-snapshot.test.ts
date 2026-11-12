@@ -63,8 +63,8 @@ describe('a read-graph build on the file-backed embedded store', () => {
       expect(rowChanges.length).toBeLessThan(batches.length / 2);
       expect(duringBuild).toBeLessThanOrEqual(rowChanges.length);
 
-      // The snapshot scheduled by the change that published the read graph holds all of it; read-only, so the
-      // reopened store never writes the file the first one writes.
+      // The snapshot scheduled by the change that published the read graph holds all of it, also when it fell
+      // due while an earlier snapshot was being written. Read-only, so the reopened store never writes the file.
       await vi.waitFor(async () => {
         const reopened = new OxigraphStore(path, { readOnly: true });
         try {

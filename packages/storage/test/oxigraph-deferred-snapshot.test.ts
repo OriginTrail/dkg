@@ -16,6 +16,29 @@ const fileHolds = async (path: string, name: string) => existsSync(path) && (awa
 /** Well past the 50 ms debounce of a scheduled snapshot. */
 const pastDebounce = () => new Promise((resolve) => setTimeout(resolve, 400));
 
+describe('a snapshot that falls due while another is being written', () => {
+  let dir: string;
+  afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  it('is written once that one ends, not dropped', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'snapshot-in-flight-'));
+    const path = join(dir, 'store.nq');
+    const store = new OxigraphStore(path);
+    try {
+      // A store large enough that its snapshot is still being written when the next one falls due, 50 ms later.
+      await store.insert(Array.from({ length: 300_000 }, (_, i) => ({ subject: `urn:s${i}`, predicate: 'urn:p', object: `"${i}"`, graph: GRAPH })));
+      await store.flush();
+      const inFlight = (store as unknown as { flushNow(): Promise<void> }).flushNow();
+      // Once its temporary file exists, the snapshot in flight has read the store: the update below is not in it.
+      await vi.waitFor(() => expect(existsSync(`${path}.tmp`)).toBe(true), { timeout: 10_000, interval: 1 });
+      await store.update(insert('late'));
+      await inFlight;
+      expect(await fileHolds(path, 'late'), 'the snapshot that was in flight').toBe(false);
+      await vi.waitFor(async () => expect(await fileHolds(path, 'late')).toBe(true), { timeout: 20_000, interval: 100 });
+    } finally { await store.close(); }
+  }, 60_000);
+});
+
 describe.each([
   ['in process', (path: string): TripleStore => new OxigraphStore(path)],
   ['in its worker', (path: string): TripleStore => new OxigraphWorkerStore(path)],

@@ -44,7 +44,8 @@ are in-memory stores and provide no restart durability.
 
 - Mutations update the in-memory store immediately and schedule a full N-Quads
   snapshot after a 50 ms debounce. A successful mutation does not by itself
-  mean the snapshot has reached disk.
+  mean the snapshot has reached disk. A snapshot that falls due while another
+  is being written waits for it, and is then written.
 - Callers that require an operation to survive an immediate restart must await
   `flush()`. It cancels a pending debounce, waits for an in-flight snapshot,
   and then writes the current state.
