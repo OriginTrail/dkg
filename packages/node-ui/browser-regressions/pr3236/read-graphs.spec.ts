@@ -82,7 +82,7 @@ test('Search across assets asks for merged answers in a memory, and one that is 
 
   const merged = page.getByRole('checkbox', { name: 'Search across assets' });
   await expect(page.locator('.v10-mlv-result-count')).toHaveText('1 result');
-  await expect(merged).toBeDisabled();
+  await expect(merged).toHaveCount(0);
   await page.getByRole('combobox', { name: 'Search in' }).selectOption('verifiable-memory');
   await merged.check();
   await page.getByRole('button', { name: 'Run', exact: true }).click();

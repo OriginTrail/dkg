@@ -26,18 +26,28 @@ const VIEW_LABELS: Readonly<Record<GetView, string>> = {
 };
 
 export const SEARCH_ACROSS_ASSETS_HINT = 'On: one query can link facts from different assets. Off: each asset is searched on its own.';
+export const DRAFTS_SEARCHED_TOGETHER = 'Drafts are searched together.';
+
+/**
+ * Whether a query in this memory chooses between searching across assets and
+ * each asset on its own. Private drafts are always searched together, as the
+ * query view has done before: there is no per-asset search to choose.
+ */
+export function searchesAcrossAssets(view: GetView | undefined): boolean {
+  return view === 'verifiable-memory' || view === 'shared-working-memory';
+}
 
 export function sameQueryRun(a: QueryRunIdentity, b: QueryRunIdentity): boolean {
   return a.sparql === b.sparql && a.view === b.view && a.subGraphName === b.subGraphName && a.semantics === b.semantics;
 }
 
 /**
- * A run in a memory says how to search it, so the toggle holds whatever the
- * node's default is: `merged` when on, `per-asset` when off. A run without a
- * memory says nothing, since it can't search across assets.
+ * A run in Published assets or Shared memory says how to search it, so the
+ * toggle holds whatever the node's default is: `merged` when on, `per-asset`
+ * when off. Any other run says nothing and is searched as before.
  */
 export function withSemantics<T extends QueryRunIdentity>(run: T, merged: boolean): T {
-  return run.view === undefined ? run : { ...run, semantics: merged ? 'merged' : 'per-asset' };
+  return searchesAcrossAssets(run.view) ? { ...run, semantics: merged ? 'merged' : 'per-asset' } : run;
 }
 
 /** A refused search across assets, explained for the query view; any other error is returned as it is. */
@@ -53,9 +63,10 @@ export function explainMergedRefusal(error: unknown): unknown {
 }
 
 /**
- * The memory a query runs in, and the "Search across assets" toggle, which
- * needs a memory. A loaded saved query brings its own memory, so the picker
- * is fixed while it's loaded.
+ * The memory a query runs in, and the "Search across assets" toggle for
+ * Published assets and Shared memory. In Private drafts a line says the drafts
+ * are searched together. A loaded saved query brings its own memory, so the
+ * picker is fixed while it's loaded.
  */
 export function QueryViewControls({ options, locked, onChange }: {
   options: QueryViewOptions;
@@ -81,27 +92,28 @@ export function QueryViewControls({ options, locked, onChange }: {
           ))}
         </select>
       </label>
-      <label
-        className="v10-cg-query-option v10-cg-query-merged"
-        title={view ? undefined : 'Choose a memory to search across its assets.'}
-      >
-        <input
-          type="checkbox"
-          checked={options.merged && view !== undefined}
-          disabled={view === undefined}
-          aria-describedby={hintId}
-          onChange={event => onChange({ ...options, merged: event.target.checked })}
-        />
-        <span>Search across assets</span>
-      </label>
-      <span className="v10-cg-query-merged-hint" id={hintId}>{SEARCH_ACROSS_ASSETS_HINT}</span>
+      {searchesAcrossAssets(view) && (
+        <>
+          <label className="v10-cg-query-option v10-cg-query-merged">
+            <input
+              type="checkbox"
+              checked={options.merged}
+              aria-describedby={hintId}
+              onChange={event => onChange({ ...options, merged: event.target.checked })}
+            />
+            <span>Search across assets</span>
+          </label>
+          <span className="v10-cg-query-merged-hint" id={hintId}>{SEARCH_ACROSS_ASSETS_HINT}</span>
+        </>
+      )}
+      {view === 'working-memory' && <span className="v10-cg-query-merged-hint">{DRAFTS_SEARCHED_TOGETHER}</span>}
     </div>
   );
 }
 
-/** How the node searched a memory: across assets, or each asset on its own. */
+/** How the node searched Published assets or Shared memory: across assets, or each asset on its own. */
 export function AnsweredSemantics({ view, semantics }: { view?: GetView; semantics?: ViewQuerySemantics }) {
-  if (view === undefined || semantics === undefined) return null;
+  if (!searchesAcrossAssets(view) || semantics === undefined) return null;
   return (
     <span className="v10-cg-query-answered" data-semantics={semantics}>
       {semantics === 'merged' ? ' · searched across assets' : ' · each asset searched on its own'}

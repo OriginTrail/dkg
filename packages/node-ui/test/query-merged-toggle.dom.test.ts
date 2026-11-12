@@ -106,22 +106,21 @@ afterEach(async () => {
 });
 
 describe('ContextGraphQueryView memory picker and Search across assets', () => {
-  it('searches across assets only in a memory, and says how the node searched it', async () => {
+  it('searches across assets in Published assets and Shared memory, and says how the node searched it', async () => {
     const container = await render();
     expect(lastRun()).toMatchObject({ contextGraphId: CG, view: undefined, semantics: undefined });
     expect(viewSelect(container).value).toBe('');
-    expect(mergedBox(container).disabled).toBe(true);
+    expect(mergedBox(container)).toBeNull();
     expect(resultCount(container)).toBe('1 result');
     const options = container.querySelector<HTMLElement>('.v10-cg-query-options')!;
     expect(options.querySelector('label span')?.textContent).toBe('Search in');
     expect(Array.from(viewSelect(container).options).map(option => option.textContent)).toEqual(['All graphs', 'Published assets', 'Shared memory', 'Private drafts']);
+
+    await chooseView(container, 'verifiable-memory');
     expect(options.querySelector('.v10-cg-query-merged span')?.textContent).toBe('Search across assets');
     const hint = document.getElementById(mergedBox(container).getAttribute('aria-describedby')!);
     expect(hint?.textContent).toBe('On: one query can link facts from different assets. Off: each asset is searched on its own.');
-    expect(options.querySelector('.v10-cg-query-merged')?.getAttribute('title')).toBe('Choose a memory to search across its assets.');
-
-    await chooseView(container, 'verifiable-memory');
-    expect(mergedBox(container).disabled).toBe(false);
+    expect(mergedBox(container).checked).toBe(false);
     await click(mergedBox(container));
     expect(mergedBox(container).checked).toBe(true);
     executeQueryMock.mockResolvedValue(bindings('merged'));
@@ -136,9 +135,10 @@ describe('ContextGraphQueryView memory picker and Search across assets', () => {
     expect(resultCount(container)).toBe('1 result · each asset searched on its own');
 
     await click(mergedBox(container));
+    await chooseView(container, 'shared-working-memory');
+    expect(mergedBox(container).checked).toBe(true);
     await chooseView(container, '');
-    expect(mergedBox(container).checked).toBe(false);
-    expect(mergedBox(container).disabled).toBe(true);
+    expect(mergedBox(container)).toBeNull();
     await click(button(container, 'Run'));
     expect(lastRun()).toMatchObject({ view: undefined, semantics: undefined });
   });
@@ -217,10 +217,12 @@ describe('ContextGraphQueryView memory picker and Search across assets', () => {
     const container = await render();
     const first = executeQueryMock.mock.calls[0][0];
     await chooseView(container, 'working-memory');
+    // Private drafts are searched together, as before: there is no toggle, and a line says so.
+    expect(mergedBox(container)).toBeNull();
+    expect(container.querySelector('.v10-cg-query-options')?.textContent).toContain('Drafts are searched together.');
     await click(button(container, 'Run'));
-    expect(lastRun()).toMatchObject({ view: 'working-memory', semantics: 'per-asset' });
-    // Private drafts are searched each on its own: nothing merges them into one dataset.
-    expect(lastRun()).not.toHaveProperty('includeContextGraphPartitions');
+    expect(lastRun()).toMatchObject({ view: 'working-memory', semantics: undefined, includeContextGraphPartitions: true });
+    expect(resultCount(container)).toBe('1 result');
 
     await click(button(container, 'Reset'));
     expect(viewSelect(container).value).toBe('');
@@ -233,9 +235,11 @@ describe('ContextGraphQueryView memory picker and Search across assets', () => {
 });
 
 describe('query run helpers', () => {
-  it('says how to search a run in a memory either way, and nothing for a run without one', () => {
+  it('says how to search a run in Published assets or Shared memory either way, and nothing for other runs', () => {
     expect(withSemantics({ sparql: 'ASK {}' }, true)).toEqual({ sparql: 'ASK {}' });
     expect(withSemantics({ sparql: 'ASK {}' }, false)).toEqual({ sparql: 'ASK {}' });
+    expect(withSemantics({ sparql: 'ASK {}', view: 'working-memory' }, true)).toEqual({ sparql: 'ASK {}', view: 'working-memory' });
+    expect(withSemantics({ sparql: 'ASK {}', view: 'shared-working-memory' }, true)).toEqual({ sparql: 'ASK {}', view: 'shared-working-memory', semantics: 'merged' });
     expect(withSemantics({ sparql: 'ASK {}', view: 'verifiable-memory' }, false)).toEqual({ sparql: 'ASK {}', view: 'verifiable-memory', semantics: 'per-asset' });
     expect(withSemantics({ sparql: 'ASK {}', view: 'verifiable-memory' }, true)).toEqual({ sparql: 'ASK {}', view: 'verifiable-memory', semantics: 'merged' });
   });

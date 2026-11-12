@@ -331,6 +331,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
       view: activeExecution.view,
       subGraphName: activeExecution.subGraphName,
       semantics: activeExecution.semantics,
+      ...(activeExecution.view === 'working-memory' ? { includeContextGraphPartitions: true } : {}),
     }, { timeoutMs: null, maxResponseBytes: null }).catch(error => { throw explainMergedRefusal(error); }),
     [activeExecution.sparql, activeExecution.subGraphName, activeExecution.view, activeExecution.semantics, contextGraphId],
     0,
