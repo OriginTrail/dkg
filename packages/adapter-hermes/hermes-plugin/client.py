@@ -61,6 +61,7 @@ _LONG_MUTATION_TIMEOUT = 240
 _LONG_MUTATION_VERBS = ("/vm/publish", "/swm/share", "/wm/import-file")
 _MAX_IMPORT_FILE_BYTES = 25 * 1024 * 1024
 _CONTEXT_GRAPH_URI_PREFIX = "did:dkg:context-graph:"
+_READ_GRAPH_SETTINGS_PATH = "/api/store/read-graphs/settings"
 _CG_ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 _BLOCKED_IMPORT_NAMES = {
     ".env",
@@ -787,6 +788,7 @@ class DKGClient:
         *,
         access_policy: Optional[int] = None,
         allowed_agents: Optional[list] = None,
+        read_graphs: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """POST /api/context-graph/create — create a new context graph.
         Daemon requires both `id` and `name`; auto-generates id from name if not given.
@@ -829,7 +831,54 @@ class DKGClient:
             body["accessPolicy"] = access_policy
         if isinstance(allowed_agents, list) and allowed_agents:
             body["allowedAgents"] = allowed_agents
+        # Read graphs to switch on once it exists (node admin only); `readGraphs`
+        # in the answer says whether they were.
+        if read_graphs:
+            body["readGraphs"] = read_graphs
         return self._post("/api/context-graph/create", body)
+
+    # -- Read-graph settings (node admin only) ---------------------------------
+
+    def read_graph_settings(self, context_graph_id: Optional[str] = None) -> Dict[str, Any]:
+        """GET /api/store/read-graphs/settings — every context graph's, or one's."""
+        path = _READ_GRAPH_SETTINGS_PATH
+        if context_graph_id is not None:
+            path += "?" + urlencode({"contextGraphId": _normalize_context_graph_id(context_graph_id)})
+        return self._send("GET", path)
+
+    def set_read_graph_settings(self, change: Dict[str, Any]) -> Dict[str, Any]:
+        """PUT /api/store/read-graphs/settings — change one context graph's; the answer is the settings in force after."""
+        body = dict(change)
+        body["contextGraphId"] = _normalize_context_graph_id(str(change.get("contextGraphId", "")))
+        return self._send("PUT", _READ_GRAPH_SETTINGS_PATH, body)
+
+    def _send(self, method: str, path: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """One JSON request whose refusal keeps the HTTP status, the node's code and its
+        per-layer changes: ``{"success": False, "status", "code"?, "changes"?, "error"}``;
+        without an answer, no status."""
+        try:
+            response = self._get_session().request(
+                method,
+                f"{self.base_url}{path}",
+                data=None if data is None else json.dumps(data),
+                timeout=self.timeout,
+            )
+        except Exception as e:
+            return {"success": False, "error": redact_text(str(e), self._token)}
+        try:
+            body = response.json()
+        except Exception:
+            body = None
+        if response.ok and isinstance(body, dict):
+            return body
+        failure: Dict[str, Any] = {"success": False, "status": response.status_code}
+        said = body.get("error") if isinstance(body, dict) else None
+        failure["error"] = redact_text(str(said if said is not None else (response.text or response.reason or "")), self._token)
+        if isinstance(body, dict) and isinstance(body.get("code"), str):
+            failure["code"] = body["code"]
+        if isinstance(body, dict) and isinstance(body.get("changes"), list):
+            failure["changes"] = body["changes"]
+        return failure
 
     def register_context_graph(self, context_graph_id: str, access_policy: Optional[int] = None) -> Dict[str, Any]:
         """POST /api/context-graph/register — register a local CG on-chain."""

@@ -30,6 +30,11 @@
       "import": "./dist/daemon-request-deadlines.js",
       "default": "./dist/daemon-request-deadlines.js"
     },
+    "./read-graph-settings": {
+      "types": "./dist/read-graph-settings.d.ts",
+      "import": "./dist/read-graph-settings.js",
+      "default": "./dist/read-graph-settings.js"
+    },
     "./query-catalog-parameters": {
       "types": "./dist/query-catalog-parameters.d.ts",
       "import": "./dist/query-catalog-parameters.js",

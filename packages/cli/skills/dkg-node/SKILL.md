@@ -198,7 +198,7 @@ Drop to HTTP when the operation isn't in the table — participant self-service 
 | `dkg_status` | `GET /api/status` | Node health and subscribed CGs |
 | `dkg_wallet_balances` | `GET /api/wallets/balances` | TRAC / ETH balances |
 | `dkg_list_context_graphs` | `GET /api/context-graph/list` | List context graphs. Tool surfaces default to caller-created/joined graphs; pass `scope: "all"` for every known graph. Entries carry `subscribed`, `synced`, and caller involvement when available |
-| `dkg_context_graph_create` | `POST /api/context-graph/create` | Create a simple context graph (tool schema accepts only `name` / `description` / `id` — no multi-sig inputs). On chain-enabled nodes the daemon may auto-register on-chain as a best-effort side-effect — see §6 for the register semantics. Multi-sig CGs are HTTP-only |
+| `dkg_context_graph_create` | `POST /api/context-graph/create` | Create a simple context graph (tool schema accepts only `name` / `description` / `id` — no multi-sig inputs). On chain-enabled nodes the daemon may auto-register on-chain as a best-effort side-effect — see §6 for the register semantics. Multi-sig CGs are HTTP-only. Optional `readGraphs` (`preview` or `on`) lets queries search across its assets; it needs the node admin token, and the context graph is created either way |
 | `dkg_subscribe` | `POST /api/context-graph/subscribe` | Subscribe + catch up an existing CG |
 | `dkg_context_graph_invite` | `POST /api/context-graph/invite` | Create a ready-to-share invite for another peer to join a context graph |
 | `dkg_participant_add` | `POST /api/context-graph/{id}/add-participant` | Add an agent address to a curated/private context graph allowlist |
@@ -222,6 +222,8 @@ Drop to HTTP when the operation isn't in the table — participant self-service 
 | `dkg_knowledge_asset_semantic_enrichment_write` | `POST /api/knowledge-assets/semantic-enrichment/write` | Append model-derived semantic triples and provenance to the imported assertion |
 | `dkg_sub_graph_create` | `POST /api/sub-graph/create` | Register a sub-graph inside a CG |
 | `dkg_sub_graph_list` | `GET /api/sub-graph/list` | List sub-graphs in a CG |
+| `dkg_read_graphs_status` | `GET /api/store/read-graphs/settings` | Where queries can search across assets: for each context graph and memory, Off, Preview or On, and how far its combined copy is. Node admin token only |
+| `dkg_read_graphs_set` | `PUT /api/store/read-graphs/settings` | Turn search across assets Off, to Preview or On for one context graph (one memory or all three), and set whether its queries search across assets by default. Node admin token only |
 | `dkg_query` | `POST /api/query` | Read-only SPARQL across assertions in a CG. Pass `view` (`working-memory` / `shared-working-memory` / `verifiable-memory`) to pick the layer — when `view` is set, `context_graph_id` is required; for WM reads, optional `agent_address` targets another agent's WM (when omitted it defaults to this node's primary agent wallet, falling back to the peer ID on nodes without a configured default agent). Omit `view` for a legacy cross-graph data-path query. |
 | `dkg_query_catalog_list` | `POST /api/profile/query-catalog/read` | List saved SPARQL queries declared in the project profile query catalog |
 | `dkg_query_catalog_run` | `POST /api/profile/query-catalog/read` + `POST /api/query` | Run a saved catalog query by slug or exact display name |

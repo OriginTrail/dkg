@@ -7,6 +7,7 @@
  */
 
 import { loadAuthTokenSync } from '@origintrail-official/dkg-core';
+import { readGraphSettingsPath, type ReadGraphSettingsChange, type ReadGraphsCreateSetting } from '@origintrail-official/dkg-core/read-graph-settings';
 import {
   serializeAgentListOptions,
   serializeRawAgentListArgs,
@@ -1082,8 +1083,8 @@ export class DkgDaemonClient {
     id: string,
     name: string,
     description?: string,
-    opts?: { accessPolicy?: number; allowedAgents?: string[] },
-  ): Promise<{ created: string; uri: string }> {
+    opts?: { accessPolicy?: number; allowedAgents?: string[]; readGraphs?: ReadGraphsCreateSetting },
+  ): Promise<{ created: string; uri: string; readGraphs?: unknown }> {
     const body: Record<string, unknown> = { id, name, description };
     if (typeof opts?.accessPolicy === 'number') {
       body.accessPolicy = opts.accessPolicy;
@@ -1091,7 +1092,19 @@ export class DkgDaemonClient {
     if (Array.isArray(opts?.allowedAgents) && opts.allowedAgents.length > 0) {
       body.allowedAgents = opts.allowedAgents;
     }
+    // Read graphs to switch on once it exists (node admin only); `readGraphs` in the answer says whether they were.
+    if (opts?.readGraphs) body.readGraphs = opts.readGraphs;
     return this.post('/api/context-graph/create', body);
+  }
+
+  /** The node's read-graph settings, all or one context graph's (node admin only). */
+  async readGraphSettings(contextGraphId?: string): Promise<unknown> {
+    return this.get(readGraphSettingsPath(contextGraphId === undefined ? undefined : normalizeContextGraphId(contextGraphId)));
+  }
+
+  /** Change one context graph's read-graph settings (node admin only); the answer is the settings in force after. */
+  async setReadGraphSettings(change: ReadGraphSettingsChange): Promise<unknown> {
+    return this.put(readGraphSettingsPath(), { ...change, contextGraphId: normalizeContextGraphId(change.contextGraphId) });
   }
 
   async registerContextGraph(
