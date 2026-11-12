@@ -6,8 +6,8 @@ import path from 'node:path';
 import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
-import { EVM_SCOPES, MANIFEST_READER_ENV, NODE_TEST_ARTIFACT_LANES, githubOutputsForPlan } from '../ci-delta.mjs';
-import { PRIMARY_LANE_JOBS } from '../ci-results.mjs';
+import { EVM_SCOPES, MANIFEST_READER_ENV, NODE_TEST_ARTIFACT_LANES, githubOutputsForPlan, planCi } from '../ci-delta.mjs';
+import { PRIMARY_LANE_JOBS, validatePrimaryResults } from '../ci-results.mjs';
 import { CONTROLLER_POLICY_FILES, validateTrustedControllerPins } from '../../ci/trusted-controller-pins.mjs';
 import {
   PROTECTED_BRANCHES,
@@ -19,6 +19,7 @@ import {
   protectedBranchContaining,
 } from '../../ci/fetch-trusted-controller.mjs';
 import {
+  LANE_JOBS,
   NON_SOLIDITY_LANES,
   REPO_ROOT,
   TRUSTED_CI_CONTROLLER_SHA,
@@ -610,6 +611,25 @@ test('the trusted controller runs from a checkout of exactly its policy files', 
   assert.equal(gate.status, 0, gate.stderr);
 });
 
+test('a push proves its contracts with the Solidity shards, and coverage runs only where the controller requires it', () => {
+  const { jobs } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
+  const runs = (job, eventName) => Function('github', 'needs', `return (${jobs[job].if});`)(
+    { event_name: eventName }, { changes: { outputs: { contracts: 'true' } } });
+  for (const eventName of ['pull_request', 'merge_group']) assert.equal(runs('solidity-coverage', eventName), false, eventName);
+  // Every non-candidate plan is full, so these events always select contracts.
+  for (const eventName of ['push', 'workflow_dispatch', 'schedule']) {
+    const solidity = runs('solidity', eventName);
+    const coverage = runs('solidity-coverage', eventName);
+    assert.deepEqual([solidity, coverage], [eventName === 'push', eventName !== 'push'], eventName);
+    const needs = gateNeeds(succeeded(
+      'build', LANE_JOBS, 'abi-freshness', 'tornado-static-analysis', 'evm-node-test-artifacts', 'evm-devnet-test-artifacts',
+      solidity ? ['solidity'] : [], coverage ? ['solidity-coverage'] : [],
+    ));
+    const errors = validatePrimaryResults({ eventName, plan: planCi({ eventName }), needs });
+    assert.deepEqual(errors.filter((error) => /solidity/.test(error)), [], eventName);
+  }
+});
+
 test('every planner output is wired to a real workflow job and omitted tests stay covered', () => {
   const workflow = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
   for (const [lane, job] of Object.entries(PRIMARY_LANE_JOBS)) {
@@ -626,9 +646,9 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.equal(parse(workflow).jobs.build.if, "needs.changes.outputs.run_node == 'true'");
   assert.ok(
     workflow.includes(
-      "if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.contracts == 'true'",
+      "if: (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && needs.changes.outputs.contracts == 'true'",
     ),
-    'the sharded Solidity suite must protect contract PRs and exact merge candidates',
+    'the sharded Solidity suite must protect contract PRs, exact merge candidates and protected pushes',
   );
   assert.ok(
     workflow.includes('run: node candidate/scripts/check-npm-metadata.mjs'),
