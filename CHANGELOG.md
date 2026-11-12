@@ -120,6 +120,17 @@ and gives the node UI a new design system.
 - An agent built on a pre-built chain adapter verifies finalized public
   catalog heads over the RPC endpoints its adapter names, as a node does.
 
+### Security
+
+- The Node.js release that `dkg start`, daemon start, auto-update slot
+  activation and the `node-security` check of `dkg doctor` expect is now the
+  [2026-11-11 Node.js security release](https://nodejs.org/en/blog/vulnerability/november-2026-security-releases):
+  22.23.5, 24.22.3 or 26.13.1 (was 22.23.4, 24.22.1 or 26.12.1). Older
+  releases log a `WARNING` and the node still starts. Upgrade Node.js on every
+  host that runs a node and restart the node. The README, the quickstart and
+  [Updates and rollback](docs/use-dkg/updates-and-rollback.md#nodejs-security-releases)
+  name the new releases.
+
 ### Documentation
 
 - The MCP guide explains how to configure a client by hand when setup does
