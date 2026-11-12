@@ -29,7 +29,7 @@ import {
   resolveDaemonRequestDeadlines,
   type DaemonRequestDeadlines,
 } from '@origintrail-official/dkg-core/daemon-request-deadlines';
-import { readGraphSettingsPath, type ReadGraphSettingsChange, type ReadGraphsCreateSetting } from '@origintrail-official/dkg-core/read-graph-settings';
+import { readGraphSettingsActorHeaders, readGraphSettingsPath, type ReadGraphSettingsChange, type ReadGraphsCreateSetting } from '@origintrail-official/dkg-core/read-graph-settings';
 
 export type { AgentListFilters, AgentListPageOptions } from '@origintrail-official/dkg-core';
 
@@ -463,9 +463,9 @@ export class DkgClient {
     method: HttpMethod,
     route: string,
     body?: unknown,
-    opts: { longMutation?: boolean } = {},
+    opts: { longMutation?: boolean; headers?: Record<string, string> } = {},
   ): Promise<T> {
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { ...opts.headers };
     if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
     if (body !== undefined) headers['Content-Type'] = 'application/json';
 
@@ -1183,7 +1183,7 @@ export class DkgClient {
         ...(args.accessPolicy !== undefined ? { accessPolicy: args.accessPolicy } : {}),
         ...(args.publishPolicy !== undefined ? { publishPolicy: args.publishPolicy } : {}),
         ...(args.readGraphs !== undefined ? { readGraphs: args.readGraphs } : {}),
-      });
+      }, args.readGraphs !== undefined ? { headers: readGraphSettingsActorHeaders('mcp') } : {});
       return { ...response, alreadyExists: false };
     } catch (err) {
       // Daemon returns 409 with "already exists" / "duplicate" / "conflict"
@@ -1206,7 +1206,7 @@ export class DkgClient {
   }
   /** Change one context graph's read-graph settings (node admin only); the answer is the settings in force after. */
   async setReadGraphSettings(change: ReadGraphSettingsChange): Promise<unknown> {
-    return this.request('PUT', readGraphSettingsPath(), change);
+    return this.request('PUT', readGraphSettingsPath(), change, { headers: readGraphSettingsActorHeaders('mcp') });
   }
 
   /**

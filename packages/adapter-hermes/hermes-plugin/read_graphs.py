@@ -106,6 +106,13 @@ def describe_settings(answer: Any) -> str:
     refused = _record(answer, "refused")
     if refused is not None:
         lines.append(f"This node can't turn search across assets on: {_sentence(refused)}")
+    node = _record(answer, "node")
+    node_modes = _record(node, "layers")
+    if node_modes is not None:
+        modes = [f"{_LAYER_WORDS[layer]}: {_word(node_modes.get(layer, 'not set'))}" for layer in LAYERS]
+        if node.get("viewSemantics") in ("merged", "per-asset"):
+            modes.append(f"Queries search across assets: {'On' if node['viewSemantics'] == 'merged' else 'Off'}")
+        lines.append(f"This node's default: {' · '.join(modes)}.")
     allowed = policy.get("layers") if policy is not None and isinstance(policy.get("layers"), list) else None
     context_graphs = _records(answer, "contextGraphs")
     if not context_graphs:
@@ -128,7 +135,8 @@ def describe_create_outcome(context_graph_id: str, requested: Dict[str, Any], ou
     where = f"{context_graph_id}'s {_phrase_list(list(layers))}"
     result = outcome if isinstance(outcome, dict) else {}
     if "refused" in result:
-        return (f"Search across assets was not turned on for {context_graph_id}: {_reason(result['refused'])} "
+        code = f" ({result['code']})" if isinstance(result["refused"], str) and isinstance(result.get("code"), str) else ""
+        return (f"Search across assets was not turned on for {context_graph_id}: {_reason(result['refused'])}{code} "
                 "The context graph was created; search across assets can be turned on later with dkg_read_graphs_set.")
     if "applied" in result:
         if mode == "serve":
@@ -261,6 +269,11 @@ def _where(context_graph_id: Any, layer: Any) -> str:
 def _phrase_list(layers: List[str]) -> str:
     phrases = [_LAYER_PHRASES[_layer(layer)] if _layer(layer) else layer for layer in layers]
     return "".join(phrases) if len(phrases) < 2 else f"{', '.join(phrases[:-1])} and {phrases[-1]}"
+
+
+def _word(value: Any) -> str:
+    mode = _mode(value)
+    return _MODE_WORDS[mode] if mode else str(value)
 
 
 def _mode(value: Any) -> Optional[str]:

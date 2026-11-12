@@ -88,6 +88,21 @@ def test_settings_with_rows_only_and_unknown_states(wording):
         assert wording.describe_settings(empty) == "No context graph has search across assets set up."
 
 
+def test_settings_show_the_nodes_own_default(wording):
+    answer = {"node": {"layers": {"verifiable-memory": "build", "shared-working-memory": "off", "working-memory": "serve"}, "viewSemantics": "merged"}, "contextGraphs": []}
+    assert wording.describe_settings(answer).split("\n") == [
+        "This node's default: Published assets: Preview · Shared memory, shared with your team: Off · Private drafts: On · Queries search across assets: On.",
+        "No context graph has search across assets set up.",
+    ]
+    assert wording.describe_settings({"node": {"layers": {"verifiable-memory": "off"}, "viewSemantics": "per-asset"}, "contextGraphs": []}).split("\n")[0] == (
+        "This node's default: Published assets: Off · Shared memory, shared with your team: not set · Private drafts: not set · Queries search across assets: Off."
+    )
+    assert wording.describe_settings({"node": {"layers": {"verifiable-memory": "off"}}, "contextGraphs": []}).split("\n")[0] == (
+        "This node's default: Published assets: Off · Shared memory, shared with your team: not set · Private drafts: not set."
+    )
+    assert wording.describe_settings({"node": {}, "contextGraphs": []}) == "No context graph has search across assets set up."
+
+
 def test_settings_say_how_far_the_copy_being_built_is(wording):
     answer = {"contextGraphs": [{
         "contextGraphId": "team",
@@ -186,6 +201,10 @@ def test_create_outcome_in_plain_words(wording):
     )
     assert "was not turned on for my-project: Off for this node. (READ_GRAPHS_DISABLED) " in wording.describe_create_outcome(
         "my-project", preview, {"refused": {"code": "READ_GRAPHS_DISABLED", "error": "Off for this node."}})
+    assert wording.describe_create_outcome("my-project", preview, {"refused": "Only the node admin can turn search across assets on.", "code": "NODE_ADMIN_REQUIRED"}) == (
+        "Search across assets was not turned on for my-project: Only the node admin can turn search across assets on. (NODE_ADMIN_REQUIRED) "
+        "The context graph was created; search across assets can be turned on later with dkg_read_graphs_set."
+    )
     for outcome in (None, "applied", {}):
         assert wording.describe_create_outcome("my-project", preview, outcome).startswith(
             "Search across assets was not turned on for my-project: the node did not apply the setting")
@@ -243,8 +262,8 @@ def _client_answering(client_class, monkeypatch, *responses):
     client._token = "admin-token"
     calls = []
 
-    def request(method, url, data=None, timeout=None):
-        calls.append((method, url, None if data is None else json.loads(data)))
+    def request(method, url, data=None, timeout=None, headers=None):
+        calls.append((method, url, None if data is None else json.loads(data), headers))
         response = responses[min(len(calls), len(responses)) - 1]
         if isinstance(response, Exception):
             raise response
@@ -260,9 +279,10 @@ def test_client_reads_and_changes_settings(client_class, monkeypatch, hermes_hos
     assert client.read_graph_settings("did:dkg:context-graph:0xabc/team") == SETTINGS
     assert client.set_read_graph_settings({"contextGraphId": "did:dkg:context-graph:team", "layers": {"verifiable-memory": "build"}}) == SETTINGS
     assert calls == [
-        ("GET", "http://127.0.0.1:9200/api/store/read-graphs/settings", None),
-        ("GET", "http://127.0.0.1:9200/api/store/read-graphs/settings?contextGraphId=0xabc%2Fteam", None),
-        ("PUT", "http://127.0.0.1:9200/api/store/read-graphs/settings", {"contextGraphId": "team", "layers": {"verifiable-memory": "build"}}),
+        ("GET", "http://127.0.0.1:9200/api/store/read-graphs/settings", None, None),
+        ("GET", "http://127.0.0.1:9200/api/store/read-graphs/settings?contextGraphId=0xabc%2Fteam", None, None),
+        ("PUT", "http://127.0.0.1:9200/api/store/read-graphs/settings", {"contextGraphId": "team", "layers": {"verifiable-memory": "build"}},
+         {"X-DKG-Actor": "agent:hermes"}),
     ]
 
 
@@ -289,6 +309,7 @@ def test_create_sends_the_read_graph_setting_only_when_asked(recording_client):
     recording_client.create_context_graph("Team", read_graphs={"layers": {"verifiable-memory": "serve"}})
     recording_client.create_context_graph("Team")
     assert [body.get("readGraphs") for _, body in recording_client.posts] == [{"layers": {"verifiable-memory": "serve"}}, None]
+    assert recording_client.post_headers == [{"X-DKG-Actor": "agent:hermes"}, None]
 
 
 # -- The tools ----------------------------------------------------------------------
@@ -314,6 +335,7 @@ def test_set_tool_puts_the_engine_modes(provider_factory, send):
     send.return_value = SETTINGS
     cleared = json.loads(provider.handle_tool_call("dkg_read_graphs_set", {"context_graph_id": "team", "mode": "on", "layer": "all", "default_semantics": "none"}))
     assert cleared["summary"] == SUMMARY
+    assert all(call.kwargs == {"headers": {"X-DKG-Actor": "agent:hermes"}} for call in send.call_args_list)
     assert [call.args[2] for call in send.call_args_list] == [
         {"contextGraphId": "team", "layers": {"verifiable-memory": "build"}},
         {"contextGraphId": "team", "layers": {"verifiable-memory": "serve", "shared-working-memory": "serve", "working-memory": "serve"}, "viewSemantics": None},
@@ -366,6 +388,7 @@ def test_create_reports_the_read_graph_setting(provider_factory):
     path, body = provider_factory.post.call_args.args
     assert path == "/api/context-graph/create"
     assert body["readGraphs"] == {"layers": {"shared-working-memory": "serve"}}
+    assert provider_factory.post.call_args.kwargs == {"headers": {"X-DKG-Actor": "agent:hermes"}}
     assert out["searchAcrossAssets"] == "Turned search across assets on for team's shared memory."
 
 
@@ -375,6 +398,7 @@ def test_create_without_the_setting_or_after_a_failure_adds_nothing(provider_fac
     provider_factory.post.return_value = {"created": "team", "uri": "did:dkg:context-graph:team"}
     out = json.loads(provider.handle_tool_call("dkg_context_graph_create", {"name": "Team"}))
     assert "readGraphs" not in provider_factory.post.call_args.args[1]
+    assert provider_factory.post.call_args.kwargs == {}
     assert "searchAcrossAssets" not in out
     provider_factory.post.return_value = {"success": False, "error": "Context graph already exists"}
     failed = json.loads(provider.handle_tool_call("dkg_context_graph_create", {"name": "Team", "read_graphs": "preview"}))

@@ -10,6 +10,15 @@
 /** `GET` lists the settings and `PUT` changes them; both answer only the node admin. */
 const READ_GRAPH_SETTINGS_PATH = '/api/store/read-graphs/settings';
 
+/**
+ * The header naming who changes a setting, which the node records with it: an
+ * agent tool sends `agent:<runtime>` on a `PUT` and on a creation that sets
+ * search across assets. Without it the node records `api`.
+ */
+export function readGraphSettingsActorHeaders(runtime: string): Record<string, string> {
+  return { 'X-DKG-Actor': `agent:${runtime}` };
+}
+
 const READ_GRAPH_LAYERS = ['verifiable-memory', 'shared-working-memory', 'working-memory'] as const;
 export type ReadGraphLayer = (typeof READ_GRAPH_LAYERS)[number];
 /** A tool's layer argument: one layer, or all three. */
@@ -95,6 +104,15 @@ export function describeReadGraphSettings(answer: unknown): string {
   if (policy?.enabled === false) lines.push('Search across assets is switched off for this whole node.');
   const refused = recordOf(answer, 'refused');
   if (refused) lines.push(`This node can't turn search across assets on: ${sentenceOf(refused)}`);
+  const node = recordOf(answer, 'node');
+  const nodeModes = recordOf(node, 'layers');
+  if (nodeModes) {
+    const modes = READ_GRAPH_LAYERS.map((layer) => `${LAYER_WORDS[layer]}: ${wordOf(nodeModes[layer] ?? 'not set')}`);
+    if (node?.viewSemantics === 'merged' || node?.viewSemantics === 'per-asset') {
+      modes.push(`Queries search across assets: ${node.viewSemantics === 'merged' ? 'On' : 'Off'}`);
+    }
+    lines.push(`This node's default: ${modes.join(' · ')}.`);
+  }
   const allowed = policy && Array.isArray(policy.layers) ? policy.layers as readonly unknown[] : undefined;
   const contextGraphs = arrayOf(answer, 'contextGraphs');
   if (contextGraphs.length === 0) lines.push('No context graph has search across assets set up.');
@@ -118,7 +136,8 @@ export function describeReadGraphsCreateOutcome(contextGraphId: string, requeste
   const where = `${contextGraphId}'s ${phraseList(Object.keys(requested.layers))}`;
   const result = outcome !== null && typeof outcome === 'object' ? outcome as Record<string, unknown> : {};
   if (result.refused !== undefined) {
-    return `Search across assets was not turned on for ${contextGraphId}: ${reasonOf(result.refused)} ` +
+    const code = typeof result.refused === 'string' && typeof result.code === 'string' ? ` (${result.code})` : '';
+    return `Search across assets was not turned on for ${contextGraphId}: ${reasonOf(result.refused)}${code} ` +
       'The context graph was created; search across assets can be turned on later with dkg_read_graphs_set.';
   }
   if (result.applied !== undefined) {

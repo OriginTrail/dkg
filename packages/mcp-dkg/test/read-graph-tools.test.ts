@@ -9,6 +9,7 @@ interface Call {
   method: string;
   url: string;
   authorization: string | null;
+  actor: string | null;
   body?: unknown;
 }
 
@@ -32,6 +33,7 @@ function setup(answer: (call: Call) => Response | Promise<Response>, token = 'ad
         method: init?.method ?? 'GET',
         url: String(url),
         authorization: headers.get('Authorization'),
+        actor: headers.get('X-DKG-Actor'),
         ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }),
       };
       calls.push(call);
@@ -53,9 +55,9 @@ describe('dkg_read_graphs_status', () => {
     const all = await server.call('dkg_read_graphs_status', {});
     const one = await server.call('dkg_read_graphs_status', { contextGraphId: 'did:dkg:context-graph:0xabc/team' });
 
-    expect(calls.map((call) => [call.method, call.url, call.authorization])).toEqual([
-      ['GET', 'http://localhost:9200/api/store/read-graphs/settings', 'Bearer admin-token'],
-      ['GET', 'http://localhost:9200/api/store/read-graphs/settings?contextGraphId=0xabc%2Fteam', 'Bearer admin-token'],
+    expect(calls.map((call) => [call.method, call.url, call.authorization, call.actor])).toEqual([
+      ['GET', 'http://localhost:9200/api/store/read-graphs/settings', 'Bearer admin-token', null],
+      ['GET', 'http://localhost:9200/api/store/read-graphs/settings?contextGraphId=0xabc%2Fteam', 'Bearer admin-token', null],
     ]);
     expect(all.isError).toBeUndefined();
     expect(text(all)).toBe([
@@ -130,6 +132,7 @@ describe('dkg_read_graphs_set', () => {
       method: 'PUT',
       url: 'http://localhost:9200/api/store/read-graphs/settings',
       authorization: 'Bearer admin-token',
+      actor: 'agent:mcp',
       body: { contextGraphId: 'team', layers: { 'verifiable-memory': 'build' } },
     }]);
     expect(text(result)).toBe("Getting search across assets ready for team's published assets. Preview shows how results would change before it is turned on.\n\nSearch across assets in team:\n"
@@ -185,6 +188,7 @@ describe('dkg_context_graph_create with search across assets', () => {
     const { server, calls } = setup(() => created({ applied: true }));
     const result = await server.call('dkg_context_graph_create', { name: 'Team', readGraphs: 'preview' });
     expect(calls[0].body).toEqual({ id: 'team', name: 'Team', accessPolicy: 1, publishPolicy: 0, readGraphs: { layers: { 'verifiable-memory': 'build' } } });
+    expect(calls[0].actor).toBe('agent:mcp');
     expect(text(result)).toBe("Created context graph 'team'.\nURI: did:dkg:context-graph:team\nName: Team\n"
       + "Getting search across assets ready for team's published assets. Preview shows how results would change before it is turned on.");
   });
@@ -209,6 +213,7 @@ describe('dkg_context_graph_create with search across assets', () => {
     const { server, calls } = setup(() => created());
     const result = await server.call('dkg_context_graph_create', { name: 'Team' });
     expect(calls[0].body).toEqual({ id: 'team', name: 'Team', accessPolicy: 1, publishPolicy: 0 });
+    expect(calls[0].actor).toBeNull();
     expect(text(result)).toBe("Created context graph 'team'.\nURI: did:dkg:context-graph:team\nName: Team");
   });
 

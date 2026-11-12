@@ -62,6 +62,8 @@ _LONG_MUTATION_VERBS = ("/vm/publish", "/swm/share", "/wm/import-file")
 _MAX_IMPORT_FILE_BYTES = 25 * 1024 * 1024
 _CONTEXT_GRAPH_URI_PREFIX = "did:dkg:context-graph:"
 _READ_GRAPH_SETTINGS_PATH = "/api/store/read-graphs/settings"
+# Who changes a read-graph setting, which the node records with it.
+_READ_GRAPH_ACTOR_HEADERS = {"X-DKG-Actor": "agent:hermes"}
 _CG_ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 _BLOCKED_IMPORT_NAMES = {
     ".env",
@@ -341,13 +343,14 @@ class DKGClient:
             return (self.timeout, self.long_mutation_timeout)
         return self.timeout
 
-    def _post(self, path: str, data: Dict[str, Any] = None) -> Dict[str, Any]:
+    def _post(self, path: str, data: Dict[str, Any] = None, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         long_mutation = _is_long_mutation(path, data)
         try:
             r = self._get_session().post(
                 f"{self.base_url}{path}",
                 data=json.dumps(data or {}),
                 timeout=self._timeout_for(long_mutation),
+                headers=headers,
             )
             r.raise_for_status()
             return r.json()
@@ -835,6 +838,7 @@ class DKGClient:
         # in the answer says whether they were.
         if read_graphs:
             body["readGraphs"] = read_graphs
+            return self._post("/api/context-graph/create", body, headers=_READ_GRAPH_ACTOR_HEADERS)
         return self._post("/api/context-graph/create", body)
 
     # -- Read-graph settings (node admin only) ---------------------------------
@@ -850,9 +854,10 @@ class DKGClient:
         """PUT /api/store/read-graphs/settings — change one context graph's; the answer is the settings in force after."""
         body = dict(change)
         body["contextGraphId"] = _normalize_context_graph_id(str(change.get("contextGraphId", "")))
-        return self._send("PUT", _READ_GRAPH_SETTINGS_PATH, body)
+        return self._send("PUT", _READ_GRAPH_SETTINGS_PATH, body, headers=_READ_GRAPH_ACTOR_HEADERS)
 
-    def _send(self, method: str, path: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _send(self, method: str, path: str, data: Optional[Dict[str, Any]] = None,
+              headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """One JSON request whose refusal keeps the HTTP status, the node's code and its
         per-layer changes: ``{"success": False, "status", "code"?, "changes"?, "error"}``;
         without an answer, no status."""
@@ -862,6 +867,7 @@ class DKGClient:
                 f"{self.base_url}{path}",
                 data=None if data is None else json.dumps(data),
                 timeout=self.timeout,
+                headers=headers,
             )
         except Exception as e:
             return {"success": False, "error": redact_text(str(e), self._token)}

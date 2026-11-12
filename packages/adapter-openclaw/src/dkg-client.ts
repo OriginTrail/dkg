@@ -7,7 +7,7 @@
  */
 
 import { loadAuthTokenSync } from '@origintrail-official/dkg-core';
-import { readGraphSettingsPath, type ReadGraphSettingsChange, type ReadGraphsCreateSetting } from '@origintrail-official/dkg-core/read-graph-settings';
+import { readGraphSettingsActorHeaders, readGraphSettingsPath, type ReadGraphSettingsChange, type ReadGraphsCreateSetting } from '@origintrail-official/dkg-core/read-graph-settings';
 import {
   serializeAgentListOptions,
   serializeRawAgentListArgs,
@@ -1094,7 +1094,7 @@ export class DkgDaemonClient {
     }
     // Read graphs to switch on once it exists (node admin only); `readGraphs` in the answer says whether they were.
     if (opts?.readGraphs) body.readGraphs = opts.readGraphs;
-    return this.post('/api/context-graph/create', body);
+    return this.post('/api/context-graph/create', body, 'default', opts?.readGraphs ? readGraphSettingsActorHeaders('openclaw') : {});
   }
 
   /** The node's read-graph settings, all or one context graph's (node admin only). */
@@ -1104,7 +1104,7 @@ export class DkgDaemonClient {
 
   /** Change one context graph's read-graph settings (node admin only); the answer is the settings in force after. */
   async setReadGraphSettings(change: ReadGraphSettingsChange): Promise<unknown> {
-    return this.put(readGraphSettingsPath(), { ...change, contextGraphId: normalizeContextGraphId(change.contextGraphId) });
+    return this.put(readGraphSettingsPath(), { ...change, contextGraphId: normalizeContextGraphId(change.contextGraphId) }, readGraphSettingsActorHeaders('openclaw'));
   }
 
   async registerContextGraph(
@@ -1173,18 +1173,19 @@ export class DkgDaemonClient {
     path: string,
     body: unknown,
     timeoutClass: RequestTimeoutClass = 'default',
+    extraHeaders: Record<string, string> = {},
   ): Promise<T> {
     return this.requestJson<T>(path, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', ...this.authHeaders() },
+      headers: { ...extraHeaders, 'Content-Type': 'application/json', 'Accept': 'application/json', ...this.authHeaders() },
       body: JSON.stringify(body),
     }, timeoutClass);
   }
 
-  private async put<T>(path: string, body: unknown): Promise<T> {
+  private async put<T>(path: string, body: unknown, extraHeaders: Record<string, string> = {}): Promise<T> {
     return this.requestJson<T>(path, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', ...this.authHeaders() },
+      headers: { ...extraHeaders, 'Content-Type': 'application/json', 'Accept': 'application/json', ...this.authHeaders() },
       body: JSON.stringify(body),
     });
   }

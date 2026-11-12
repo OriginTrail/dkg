@@ -51,9 +51,9 @@ describe('dkg_read_graphs_status', () => {
     const all = await status.execute('tc', {});
     await status.execute('tc', { context_graph_id: 'did:dkg:context-graph:0xabc/team' });
 
-    expect(fetchMock.mock.calls.map(([url, init]) => [String(url), init?.method, new Headers(init?.headers).get('Authorization')])).toEqual([
-      ['http://localhost:9200/api/store/read-graphs/settings', 'GET', 'Bearer admin-token'],
-      ['http://localhost:9200/api/store/read-graphs/settings?contextGraphId=0xabc%2Fteam', 'GET', 'Bearer admin-token'],
+    expect(fetchMock.mock.calls.map(([url, init]) => [String(url), init?.method, new Headers(init?.headers).get('Authorization'), new Headers(init?.headers).get('X-DKG-Actor')])).toEqual([
+      ['http://localhost:9200/api/store/read-graphs/settings', 'GET', 'Bearer admin-token', null],
+      ['http://localhost:9200/api/store/read-graphs/settings?contextGraphId=0xabc%2Fteam', 'GET', 'Bearer admin-token', null],
     ]);
     expect(parsed(all)).toEqual({ summary: SUMMARY, ...SETTINGS });
     expect(all.details).toEqual({ summary: SUMMARY, ...SETTINGS });
@@ -98,8 +98,8 @@ describe('dkg_read_graphs_set', () => {
     const result = await tools().get('dkg_read_graphs_set')!.execute('tc', { context_graph_id: 'did:dkg:context-graph:team', mode: 'on' });
 
     const [url, init] = fetchMock.mock.calls[0];
-    expect([String(url), init?.method, new Headers(init?.headers).get('Authorization')])
-      .toEqual(['http://localhost:9200/api/store/read-graphs/settings', 'PUT', 'Bearer admin-token']);
+    expect([String(url), init?.method, new Headers(init?.headers).get('Authorization'), new Headers(init?.headers).get('X-DKG-Actor')])
+      .toEqual(['http://localhost:9200/api/store/read-graphs/settings', 'PUT', 'Bearer admin-token', 'agent:openclaw']);
     expect(JSON.parse(String(init?.body))).toEqual({ contextGraphId: 'team', layers: { 'verifiable-memory': 'serve' } });
     expect(parsed(result)).toEqual({ summary: `Turned search across assets on for team's published assets.\n\n${SUMMARY}`, ...answer });
   });
@@ -196,6 +196,7 @@ describe('DkgNodePlugin', () => {
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
       id: 'team', name: 'Team', accessPolicy: 1, readGraphs: { layers: { 'verifiable-memory': 'serve' } },
     });
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('X-DKG-Actor')).toBe('agent:openclaw');
     expect(parsed(result).searchAcrossAssets).toBe(
       'Search across assets was not turned on for team: Only the node admin can change this. '
         + 'The context graph was created; search across assets can be turned on later with dkg_read_graphs_set.',
@@ -207,6 +208,7 @@ describe('DkgNodePlugin', () => {
     const create = plugin().get('dkg_context_graph_create')!;
     const plain = await create.execute('tc', { name: 'Team', public: true });
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ id: 'team', name: 'Team' });
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('X-DKG-Actor')).toBeNull();
     expect(parsed(plain)).toEqual({ created: 'team', uri: 'did:dkg:context-graph:team' });
     expect(parsed(await create.execute('tc', { name: 'Team', read_graphs: 'everything' })))
       .toEqual({ error: '"read_graphs" must be one of preview, on.' });

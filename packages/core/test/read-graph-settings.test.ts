@@ -9,6 +9,7 @@ import {
   describeReadGraphsCreateOutcome,
   readGraphModeOf,
   readGraphModes,
+  readGraphSettingsActorHeaders,
   readGraphSettingsPath,
 } from '../src/read-graph-settings.js';
 
@@ -20,6 +21,10 @@ describe('read-graph settings requests', () => {
   it('names the settings route, for every context graph or one', () => {
     expect(readGraphSettingsPath()).toBe('/api/store/read-graphs/settings');
     expect(readGraphSettingsPath('0xabc/team notes&x')).toBe('/api/store/read-graphs/settings?contextGraphId=0xabc%2Fteam+notes%26x');
+  });
+
+  it('names the agent runtime that changes a setting', () => {
+    expect(readGraphSettingsActorHeaders('openclaw')).toEqual({ 'X-DKG-Actor': 'agent:openclaw' });
   });
 
   it('takes only the words users see for a mode', () => {
@@ -97,6 +102,21 @@ describe('describeReadGraphSettings', () => {
       '- Shared memory, shared with your team: not set',
       '- Private drafts: not set',
     ]);
+  });
+
+  it("shows the node's own default for context graphs without settings of their own", () => {
+    expect(describeReadGraphSettings({
+      node: { layers: { 'verifiable-memory': 'build', 'shared-working-memory': 'off', 'working-memory': 'serve' }, viewSemantics: 'merged' },
+      contextGraphs: [],
+    }).split('\n')).toEqual([
+      "This node's default: Published assets: Preview · Shared memory, shared with your team: Off · Private drafts: On · Queries search across assets: On.",
+      'No context graph has search across assets set up.',
+    ]);
+    expect(describeReadGraphSettings({ node: { layers: { 'verifiable-memory': 'off' }, viewSemantics: 'per-asset' }, contextGraphs: [] }).split('\n')[0])
+      .toBe("This node's default: Published assets: Off · Shared memory, shared with your team: not set · Private drafts: not set · Queries search across assets: Off.");
+    expect(describeReadGraphSettings({ node: { layers: { 'verifiable-memory': 'off' } }, contextGraphs: [] }).split('\n')[0])
+      .toBe("This node's default: Published assets: Off · Shared memory, shared with your team: not set · Private drafts: not set.");
+    expect(describeReadGraphSettings({ node: {}, contextGraphs: [] })).toBe('No context graph has search across assets set up.');
   });
 
   it('says how far the copy being built is', () => {
@@ -230,6 +250,9 @@ describe('describeReadGraphsCreateOutcome', () => {
     expect(describeReadGraphsCreateOutcome('my-project', preview, { refused: { code: 'READ_GRAPHS_DISABLED', error: 'Switched off for this node.' } }))
       .toContain('was not turned on for my-project: Switched off for this node. (READ_GRAPHS_DISABLED) ');
     expect(describeReadGraphsCreateOutcome('my-project', preview, { refused: null })).toContain('was not turned on for my-project: no reason given ');
+    expect(describeReadGraphsCreateOutcome('my-project', preview, { refused: 'Only the node admin can turn search across assets on.', code: 'NODE_ADMIN_REQUIRED' }))
+      .toBe('Search across assets was not turned on for my-project: Only the node admin can turn search across assets on. (NODE_ADMIN_REQUIRED) '
+        + 'The context graph was created; search across assets can be turned on later with dkg_read_graphs_set.');
   });
 
   it('says a node that answers without the setting did not apply it', () => {
