@@ -73,6 +73,23 @@ describe('decodeReadGraphSettings', () => {
     expect(settings.layers.map(layer => layer.triples)).toEqual([1204, undefined, undefined]);
   });
 
+  it('sums the asset counts of a layer\'s read graphs on the same rule', () => {
+    const settings = decodeReadGraphSettings({
+      contextGraphs: [{
+        contextGraphId: CG,
+        effective: { layers: { 'verifiable-memory': 'serve', 'shared-working-memory': 'serve', 'working-memory': 'serve' } },
+        readGraphs: [
+          { layer: 'vm', state: 'ready', members: 12000, triples: 9 },
+          { layer: 'vm', state: 'building', members: 400.5 },
+          { layer: 'swm', state: 'ready', members: 'many' },
+          { layer: 'wm', state: 'ready', members: 3 },
+        ],
+      }],
+    }, CG);
+    expect(settings.layers.map(layer => layer.members)).toEqual([12400, undefined, 3]);
+    expect(settings.layers.map(layer => layer.triples)).toEqual([undefined, undefined, undefined]);
+  });
+
   it('keeps the node-wide refusal and the kill switch', () => {
     const settings = decodeReadGraphSettings({
       policy: { enabled: false },

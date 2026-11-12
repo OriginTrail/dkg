@@ -61,13 +61,24 @@ export function searchStateText(layer: ReadGraphLayerSettings): string {
   return 'Checking';
 }
 
+/** How many of something, in users' words: "1 asset", "12,400 assets". */
+function counted(count: number, one: string, many: string): string {
+  return `${count.toLocaleString()} ${count === 1 ? one : many}`;
+}
+
+/** How many assets a memory's combined copy held at its last build: "12,400 assets". */
+export function searchAssetsText(layer: ReadGraphLayerSettings): string | undefined {
+  if (layer.members === undefined || layer.mode === 'off') return undefined;
+  return counted(layer.members, 'asset', 'assets');
+}
+
 /**
- * How much a memory's combined copy holds, in users' words: "Holds about 1,204
- * facts". The node counts when a build ends, and writes since then change it.
+ * How many facts a memory's combined copy held at its last build: "About
+ * 1,204 facts, at its last build". Writes since then change it.
  */
 export function searchSizeText(layer: ReadGraphLayerSettings): string | undefined {
   if (layer.triples === undefined || layer.mode === 'off') return undefined;
-  return `Holds about ${layer.triples.toLocaleString()} ${layer.triples === 1 ? 'fact' : 'facts'}`;
+  return `About ${counted(layer.triples, 'fact', 'facts')}, at its last build`;
 }
 
 /** Why a memory can't be switched to Preview or On, if it can't. Off is always allowed. */
@@ -194,11 +205,15 @@ export function ReadGraphsSection({ contextGraphId }: { contextGraphId: string }
               const { name, detail } = LAYER_NAMES[layer.view];
               const blocked = switchOnBlocked(settings, layer);
               const size = searchSizeText(layer);
+              const assets = searchAssetsText(layer);
               return (
                 <div key={layer.view} className="v10-po-rg-row" data-layer={layer.view} data-mode={layer.mode ?? 'unknown'}>
                   <div className="v10-po-rg-main">
                     <div className="v10-po-join-info">
-                      <span className="v10-po-join-name">{name}</span>
+                      <span className="v10-po-join-name">
+                        {name}
+                        {assets && <span className="v10-po-rg-assets" data-testid="search-assets"> · {assets}</span>}
+                      </span>
                       <span className="v10-po-rg-state">
                         <span data-testid="search-state">{searchStateText(layer)}</span>
                         {size && <span data-testid="search-size"> · {size}</span>}

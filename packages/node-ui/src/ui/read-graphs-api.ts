@@ -44,8 +44,10 @@ export interface ReadGraphLayerSettings {
    * started. Absent when the node reports it for none.
    */
   readonly progress?: number;
-  /** How many triples the layer's read graphs hold, when the node says for each of them. */
+  /** How many triples the layer's read graphs held at their last build, when the node says for each of them. */
   readonly triples?: number;
+  /** How many asset (or draft) graphs the layer's read graphs held at their last build, when the node says for each of them. */
+  readonly members?: number;
 }
 
 export interface ReadGraphSettings {
@@ -93,20 +95,35 @@ function entryOf(body: unknown, contextGraphId: string): Record<string, unknown>
   return (Array.isArray(entries) ? entries : []).map(objectOf).find(entry => entry?.contextGraphId === contextGraphId);
 }
 
-interface HeldReadGraph { readonly state: string; readonly progress?: number; readonly triples?: number }
+interface HeldReadGraph { readonly state: string; readonly progress?: number; readonly triples?: number; readonly members?: number }
 
-/** A layer's read graphs by state, how far those being built have got, and how many triples they hold. */
-function heldOf(held: readonly HeldReadGraph[]): Pick<ReadGraphLayerSettings, 'states' | 'progress' | 'triples'> {
+/**
+ * A count summed over a layer's read graphs, only when the node gives it for
+ * each of them: a partial sum would stand one read graph's count in for all.
+ */
+function totalOf(held: readonly HeldReadGraph[], count: (readGraph: HeldReadGraph) => number | undefined): number | undefined {
+  const counts = held.map(count);
+  return counts.length > 0 && counts.every(value => value !== undefined)
+    ? counts.reduce<number>((sum, value) => sum + value!, 0)
+    : undefined;
+}
+
+/** A layer's read graphs by state, how far those being built have got, and what they held at their last build. */
+function heldOf(held: readonly HeldReadGraph[]): Pick<ReadGraphLayerSettings, 'states' | 'progress' | 'triples' | 'members'> {
   const states: Record<string, number> = {};
   for (const { state } of held) states[state] = (states[state] ?? 0) + 1;
   const building = held.filter(readGraph => readGraph.state === 'building');
   const progress = building.some(readGraph => readGraph.progress !== undefined)
     ? building.reduce((sum, readGraph) => sum + Math.min(1, readGraph.progress ?? 0), 0) / building.length
     : undefined;
-  const triples = held.length > 0 && held.every(readGraph => readGraph.triples !== undefined)
-    ? held.reduce((sum, readGraph) => sum + readGraph.triples!, 0)
-    : undefined;
-  return { states, ...(progress === undefined ? {} : { progress }), ...(triples === undefined ? {} : { triples }) };
+  const triples = totalOf(held, readGraph => readGraph.triples);
+  const members = totalOf(held, readGraph => readGraph.members);
+  return {
+    states,
+    ...(progress === undefined ? {} : { progress }),
+    ...(triples === undefined ? {} : { triples }),
+    ...(members === undefined ? {} : { members }),
+  };
 }
 
 /**
@@ -130,10 +147,12 @@ export function decodeReadGraphSettings(body: unknown, contextGraphId: string): 
     if (view === undefined || typeof state !== 'string' || state === '') continue;
     const progress = amountOf(row?.progress);
     const triples = amountOf(row?.triples);
+    const members = amountOf(row?.members);
     held.get(view)!.push({
       state,
       ...(progress === undefined ? {} : { progress }),
       ...(triples === undefined ? {} : { triples: Math.floor(triples) }),
+      ...(members === undefined ? {} : { members: Math.floor(members) }),
     });
   }
   return {
