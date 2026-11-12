@@ -259,12 +259,12 @@ describe('ReadGraphsSection', () => {
 
   it('shows the node\'s refusal on the memory and keeps its mode', async () => {
     getAnswers = [[200, settings()]];
-    const sentence = 'This node\'s rollback target is 10.1.1, and this needs 10.1.2 or later there first.';
+    const sentence = 'This node\'s rollback target is 10.1.0, and this needs 10.1.1 or later there first.';
     putAnswer = async () => [409, {
       code: 'READ_GRAPHS_ROLLBACK_TARGET_OLDER',
       error: sentence,
-      rollbackTarget: { source: 'config', version: '10.1.1' },
-      firstRecognizingRelease: '10.1.2',
+      rollbackTarget: { source: 'config', version: '10.1.0' },
+      firstRecognizingRelease: '10.1.1',
     }];
     const container = await render();
 

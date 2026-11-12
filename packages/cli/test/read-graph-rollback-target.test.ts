@@ -164,7 +164,7 @@ describe('dkg start', () => {
 
 describe('the modes the rollback-target check looks at', () => {
   it('are the node\'s own, with its policy applied: rules for single context graphs and modes the policy turns off pass', async () => {
-    await writeFile(join(home, 'previous-version'), '10.1.1\n');
+    await writeFile(join(home, 'previous-version'), '10.1.0\n');
     await expect(assertRollbackTargetRecognizesReadGraphs(BUILD, 'edge')).rejects.toBeInstanceOf(QueryConfigError);
     for (const query of [
       { readGraphs: { contextGraphs: { notes: { layers: { 'verifiable-memory': 'build' } } } } },
@@ -184,12 +184,12 @@ describe('the modes the rollback-target check looks at', () => {
     expect(rollbackTargetRefusal({ kind: 'release', source: 'slot b', version: '10.1.1', holdsPartitionGuard: true })).toBeUndefined();
     expect(rollbackTargetRefusal({ kind: 'release', source: 'slot b', version: READ_GRAPHS_FIRST_RECOGNIZING_RELEASE, holdsPartitionGuard: false }))
       .toBeUndefined();
-    await writeFile(join(home, 'previous-version'), '10.1.1\n');
+    await writeFile(join(home, 'previous-version'), '10.1.0\n');
     expect(rollbackTargetRefusal(await readGraphRollbackTarget('edge'))).toEqual({
       code: 'READ_GRAPHS_ROLLBACK_TARGET_OLDER',
-      message: `the rollback target (${join(home, 'previous-version')}: 10.1.1) is older than ${READ_GRAPHS_FIRST_RECOGNIZING_RELEASE}, `
+      message: `the rollback target (${join(home, 'previous-version')}: 10.1.0) is older than ${READ_GRAPHS_FIRST_RECOGNIZING_RELEASE}, `
         + 'the first release that recognizes read graphs',
-      rollbackTarget: { source: join(home, 'previous-version'), version: '10.1.1' },
+      rollbackTarget: { source: join(home, 'previous-version'), version: '10.1.0' },
       firstRecognizingRelease: READ_GRAPHS_FIRST_RECOGNIZING_RELEASE,
     });
   });
