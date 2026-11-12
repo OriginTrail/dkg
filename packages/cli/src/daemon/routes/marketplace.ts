@@ -56,7 +56,7 @@ import {
   type HeldValue,
   type Seller,
 } from '@origintrail-official/dkg-marketplace';
-import type { BuyerLimits } from '@origintrail-official/dkg-chain';
+import { isHubBindingNotFoundError, type BuyerLimits } from '@origintrail-official/dkg-chain';
 import { canAdministerNode } from '../../auth.js';
 import { jsonResponse, readBody, respondIfChainRpcTransportError, sanitizeRpcMessage, SMALL_BODY_BYTES } from '../http-utils.js';
 import type { RequestContext } from './context.js';
@@ -327,7 +327,7 @@ export async function handleMarketplaceRoutes(ctx: RequestContext): Promise<void
     if (err instanceof PlanError || err instanceof URIError) return refuse(res, 'InvalidRequest', err.message);
     const refusal = refusalOf(err);
     if (refusal) return refuse(res, refusal.code, `${refusal.code}(${refusal.args.join(', ')})`, refusal.args);
-    if (err instanceof Error && /^Hub\w*NotFoundError$/.test(err.name)) {
+    if (isHubBindingNotFoundError(err)) {
       return refuse(res, 'MarketplaceOff', 'The chain has no marketplace contracts');
     }
     if (respondIfChainRpcTransportError(res, err, { retryable: true })) return;

@@ -17,6 +17,7 @@
  */
 import { join } from 'node:path';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { isHubBindingNotFoundError } from '@origintrail-official/dkg-chain';
 import {
   AccessKeys,
   Buyer,
@@ -41,6 +42,22 @@ import { startMarketplaceSeller, type MarketplaceSellerRuntime } from './marketp
 import { withNetworkMarketplaceContextGraph } from './marketplace-network-default.js';
 
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/**
+ * Whether the node's chain lacks the marketplace's contracts: its Hub names none
+ * of them. Only the Hub's own answer counts. A failed RPC call says nothing about
+ * the contracts, so the marketplace then starts as before and its parts handle it.
+ */
+async function chainLacksMarketplace(agent: DKGAgent): Promise<boolean> {
+  const chain = agent.marketplaceChain();
+  if (!chain) return false;
+  try {
+    await chain.getMarketplaceContracts();
+    return false;
+  } catch (err) {
+    return isHubBindingNotFoundError(err);
+  }
+}
 
 export interface MarketplaceBuyerOptions {
   config: Pick<DkgConfig, 'marketplace'>;
@@ -196,11 +213,18 @@ export interface MarketplaceParts {
  * seller. A part that fails to start is logged and stays off, and never stops
  * the boot: a buyer whose gateway fails stops with it, since nothing could
  * spend what it funds. Both use the network's Marketplace Context Graph unless
- * the node's config names its own.
+ * the node's config names its own. On a chain without the marketplace's
+ * contracts (the mainnets, for now) both stay off, logged once: the buyer's
+ * job would fail on every tick, and a seller could offer nothing.
  */
 export async function startMarketplace(options: MarketplaceStartOptions): Promise<MarketplaceParts> {
   const { agent, wallets, dataDir, dashDb, log } = options;
   const config = withNetworkMarketplaceContextGraph(options.config, options.network);
+  const settings = config.marketplace;
+  if ((settings?.enabled === true || settings?.seller?.enabled === true) && await chainLacksMarketplace(agent)) {
+    log('[marketplace] the chain has no marketplace contracts: buying and selling stay off');
+    return { marketplace: undefined, marketplaceGateway: undefined, marketplaceSeller: undefined };
+  }
   let marketplace: Buyer | undefined;
   let marketplaceGateway: Gateway | undefined;
   try {

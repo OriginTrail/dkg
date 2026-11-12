@@ -292,3 +292,18 @@ The host checks current tenant approval and graph access before and after the qu
 Limits are mandatory: at most 30,000 ms, 1,000 combined bindings/quads and 1 MiB of serialized output, with any tighter tenant values enforced. An overdue request fails and signals cancellation to the query engine; late results are discarded. Cancellation is cooperative with the storage backend, and the result cap is checked after the engine materializes the result. These limits are not a hard CPU/memory sandbox for the RDF engine. Use selective queries and the store's own resource controls; the WASM sandbox does not enclose the host database.
 
 An existing `dkg.query` grant does not authorize this tool. Arbitrary SPARQL UPDATE is still unavailable. A Program may compose raw reads, named reads and explicitly approved asset creation across delegates; each delegate makes one typed call. A raw read does not itself confer write authority or supply dynamic values to the asset-create call.
+
+### Calling an exact approved version
+
+For a binding hosted on the called node, the bound `POST /api/programs/execute`
+form accepts optional `expectedBindingDigest`: the lowercase SHA-256 digest returned
+by `GET /api/programs/bindings`. The node compares it against the same approval
+snapshot it will execute, before starting the Program. A changed approval returns
+`409 PROGRAM_BINDING_CHANGED`; malformed digests return `400 INVALID_BINDING_DIGEST`.
+Successful local bound calls, including receipt replays, return `bindingDigest`.
+Existing callers may omit the field and retain their existing behavior.
+
+This pin currently applies to local bindings. An outbound Program route with the
+field returns `409 PROGRAM_PINNED_ROUTE_UNSUPPORTED`, rather than silently dropping
+the requested pin when forwarding. It does not grant authority: the existing caller,
+graph, binding and execution-capability checks still apply.

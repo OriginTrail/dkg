@@ -14,6 +14,13 @@ import { bytesEqual, checksumAgentAddress, hashParts, historyIsAtLayer, programP
 import { assertExecutionCapabilityAuthorized, assertProgramInvocationAuthorized } from './semantic-runtime-invocation-policy.js';
 import { buildExecutionQuads, loadExecutionOutputs, persistExecutionKnowledgeAsset } from './semantic-runtime-execution-persistence.js';
 
+export interface BoundSemanticInvocationOptions {
+  inputs?: unknown[];
+  /** Host-created child execution authority; never parsed from a caller payload. */
+  composition?: TypeScriptComposition;
+  expectedBindingDigest?: string;
+}
+
 /** Invoke-only access to one tenant-approved, immutable Program/query pair. */
 export async function invokeBoundSemanticProgram(
   agent: DKGAgent,
@@ -23,9 +30,9 @@ export async function invokeBoundSemanticProgram(
   invocationId: string,
   config: SemanticRuntimeConfig,
   authenticatedCaller: string | undefined,
-  inputs?: unknown[],
-  composition?: TypeScriptComposition,
+  options: BoundSemanticInvocationOptions = {},
 ): Promise<SemanticInvocationResult> {
+  const { inputs, composition, expectedBindingDigest } = options;
   const denied = () => new SemanticProgramError('PROGRAM_INVOCATION_FORBIDDEN', 'This operation is not authorized for the caller', 403);
   const bindings = config.programBindings ?? [];
   if (!Array.isArray(bindings)) throw new Error('INVALID_PROGRAM_BINDINGS');
@@ -39,6 +46,9 @@ export async function invokeBoundSemanticProgram(
   }
   const binding = structuredClone(selected);
   const digest = programBindingDigest(binding);
+  // Compare the caller's saved pin to the same snapshot execution will use, before any effect.
+  if (expectedBindingDigest !== undefined && expectedBindingDigest !== digest)
+    throw new SemanticProgramError('PROGRAM_BINDING_CHANGED', 'The approved Program binding differs from the requested pin', 409);
   const assertAuthorized = async () => {
     await composition?.assertParent();
     const checkGrant = () => {
@@ -66,7 +76,7 @@ export async function invokeBoundSemanticProgram(
         inputs ?? [], assertAuthorized, composition);
       // Every waiter needs a current gate after the shared promise settles.
       await assertDisclosure(result.executionIri, 'completed');
-      return result;
+      return { ...result, bindingDigest: digest };
     } catch (error) {
       if (error instanceof SemanticProgramError && error.trace !== undefined) {
         const executionIri = `urn:sr:execution:${invocationId.toLowerCase()}`;
@@ -114,7 +124,7 @@ export async function invokeBoundSemanticProgram(
   }
   await assertAuthorized();
   assertExecutionCapabilityAuthorized(runtime, result.executionIri, 'completed');
-  return result;
+  return { ...result, bindingDigest: digest };
 }
 
 export async function invokeStoredSemanticProgram(
