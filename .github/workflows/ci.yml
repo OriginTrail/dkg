@@ -1,4 +1,9 @@
 name: CI
+# A dispatch's run is named after its execution profile, "CI (<profile>)", so
+# the weekly CI health report can place it in its concurrency group. Every
+# other event keeps GitHub's own name: a run-name of only whitespace falls
+# back to it.
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('CI ({0})', inputs.profile) || ' ' }}
 
 # Trigger rules:
 #   * pull_request : fail-closed delta plan for fast iteration. Label changes
@@ -49,7 +54,10 @@ concurrency:
 # most older repos is the legacy "permissive" `contents: write + …` profile.
 # That permissive default is what a TeamPCP-style code-execution exploit on
 # any step needs to write to the repo or push a release tag. Locking it down
-# here is the single highest-leverage defence-in-depth control.
+# here is the single highest-leverage defence-in-depth control. The one
+# exception is the canary-alert job at the end, which also reads this run's
+# jobs and writes the `ci-alert` issues under its own job-level grant, and
+# runs only for protected testnet-canary pushes and dispatches.
 permissions:
   contents: read
 
@@ -2123,3 +2131,68 @@ jobs:
           PLAN_JSON: ${{ needs.changes.outputs.plan_json }}
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: node trusted-ci/scripts/ci/assert-ci-results.mjs --workflow primary
+
+  # ------------------------------------------------------------------
+  # Red-canary alert. When the CI gate of a finished push or dispatched run
+  # (the nightly included) on testnet-canary is red, open the `ci-alert`
+  # issue of the run's profile, or comment on it while it stays red; close it
+  # once a later run of that profile passes (scripts/ci/canary-alert.mjs).
+  # A pass with no alert open records itself on the profile's last closed
+  # alert, so that a failing re-run of an older run cannot open a new one.
+  # The standard profile (pushes, standard dispatches) and the
+  # nightly-equivalent one (the nightly) each have their own issue, written
+  # only by runs of that profile. Those runs share one concurrency group
+  # above, which runs them one at a time, so no two alert jobs write the
+  # same issue at once. It is a job here, not a `workflow_run` workflow,
+  # because GitHub fires `workflow_run` and `schedule` only from the default
+  # branch (main), which takes testnet-canary at releases.
+  #
+  # `!cancelled()` runs it after a red gate, but not in a run that was
+  # cancelled, by a newer run or by hand (the gate still runs there, and
+  # fails). It never runs for pull_request or merge_group runs, whose code is
+  # the candidate's: only for the protected commit this run tested, of which
+  # it checks out the alert script alone. It is not part of the gate, and its
+  # own failure cannot turn a run red.
+  # ------------------------------------------------------------------
+  canary-alert:
+    name: Alert on red testnet-canary CI
+    needs: [changes, ci-gate]
+    if: >-
+      ${{ !cancelled()
+      && github.repository == 'OriginTrail/dkg'
+      && github.ref == 'refs/heads/testnet-canary'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-24.04
+    # A timeout cancels the job, and a cancelled job turns the whole run
+    # `cancelled`, a green nightly included. The script gives up after three
+    # minutes (ALERT_LIMITS in scripts/ci/canary-alert.mjs), a failure that
+    # continue-on-error keeps out of the run, well inside this timeout.
+    timeout-minutes: 10
+    continue-on-error: true
+    # No job concurrency group: it would cancel a pending alert job, with the
+    # same effect.
+    permissions:
+      contents: read # check out the alert script at this run's commit
+      actions: read # read this run and its jobs' failed steps
+      issues: write # create the ci-alert label; open, comment on and close the profile's alert, and record passes on its last closed one
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          sparse-checkout: |
+            .nvmrc
+            scripts/ci/canary-alert.mjs
+            scripts/lib/canary-alert.mjs
+            scripts/lib/ci-health.mjs
+            scripts/lib/github-rest.mjs
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+      - name: Open, update or close the ci-alert issue
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_GATE_RESULT: ${{ needs.ci-gate.result }}
+          CI_PROFILE: ${{ needs.changes.outputs.profile || inputs.profile || 'standard' }}
+        run: node scripts/ci/canary-alert.mjs
