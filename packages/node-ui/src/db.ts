@@ -8,6 +8,7 @@ import {
   RoutineLogRetention,
   installRoutineLogRetentionSchema,
 } from './routine-log-retention.js';
+import { installReadGraphSettingsSchema } from './read-graph-settings-schema.js';
 // Protocol persistence (outbox, sync checkpoints, changelog cursors, KA
 // numbers, message idempotency, chain log and cursors) moved to
 // `@origintrail-official/dkg-node-store`. `DashboardDB` still opens
@@ -28,7 +29,7 @@ export {
   type SqliteProtocolOutboxStoreOptions,
 } from '@origintrail-official/dkg-node-store';
 
-export const SCHEMA_VERSION = 38;
+export const SCHEMA_VERSION = 39;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -474,6 +475,7 @@ export class DashboardDB {
       ensureChainEventLogSchema();
       ensureChainEventKaPointReadIndex();
       installRoutineLogRetentionSchema(this.db);
+      installReadGraphSettingsSchema(this.db);
       return;
     }
 
@@ -1430,6 +1432,7 @@ export class DashboardDB {
       ensureChainEventLogSchema();
       ensureChainEventKaPointReadIndex();
     }
+    if (version < 39) installReadGraphSettingsSchema(this.db); // read-graph settings per context graph
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
       this.retentionDays = LEGACY_IMPLICIT_RETENTION_DAYS;

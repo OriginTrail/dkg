@@ -1,55 +1,48 @@
-import { existsSync, statSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import Database from 'better-sqlite3';
+import { DashboardDB, SCHEMA_VERSION } from '@origintrail-official/dkg-node-ui';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  READ_GRAPH_SETTINGS_FILE,
+  NODE_DATABASE_FILE,
   ReadGraphSettingsError,
   ReadGraphSettingsUnavailableError,
-  openReadGraphSettingsStore,
+  SqliteReadGraphSettingsStore,
   readReadGraphSettings,
-  type SqliteReadGraphSettingsStore,
 } from '../src/read-graph-settings-store.js';
 
 const CURATED = `0x${'cd'.repeat(20)}/my-project`;
 
 let dir: string;
-const opened: SqliteReadGraphSettingsStore[] = [];
+let dashboards: DashboardDB[];
+/** The node's database, as the daemon opens it, and the settings store over its handle. */
 const open = () => {
-  const store = openReadGraphSettingsStore(dir);
-  opened.push(store);
-  return store;
+  const dashboard = new DashboardDB({ dataDir: dir });
+  dashboards.push(dashboard);
+  return { dashboard, store: new SqliteReadGraphSettingsStore(dashboard) };
 };
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'dkg-read-graph-settings-'));
+  dashboards = [];
 });
 
 afterEach(async () => {
-  for (const store of opened.splice(0)) store.close();
+  for (const dashboard of dashboards.splice(0)) dashboard.close();
   vi.useRealTimers();
   await rm(dir, { recursive: true, force: true });
 });
 
-/** The rows as stored, read straight from the file. */
-function rows(sql: string): Array<Record<string, unknown>> {
-  const db = new DatabaseSync(join(dir, READ_GRAPH_SETTINGS_FILE), { readOnly: true });
-  try {
-    return db.prepare(sql).all() as Array<Record<string, unknown>>;
-  } finally {
-    db.close();
-  }
-}
-
-describe('the read-graph settings table', () => {
-  it('is created owner-only in WAL mode with schema v1, and holds no settings', () => {
-    const store = open();
-    const path = join(dir, READ_GRAPH_SETTINGS_FILE);
-    expect(statSync(path).mode & 0o777).toBe(0o600);
-    expect(rows('PRAGMA journal_mode')).toEqual([{ journal_mode: 'wal' }]);
-    expect(rows('SELECT key, value FROM schema_meta')).toEqual([{ key: 'version', value: '1' }]);
+describe('the read-graph settings in the node\'s database', () => {
+  it('live in node-ui.db, whose schema holds their tables, and start empty', () => {
+    const { dashboard, store } = open();
+    expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(39);
+    const tables = (dashboard.db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'
+      AND name IN ('read_graph_modes', 'view_semantics_defaults', 'read_graph_settings_meta') ORDER BY name`).all() as Array<{ name: string }>)
+      .map((row) => row.name);
+    expect(tables).toEqual(['read_graph_modes', 'read_graph_settings_meta', 'view_semantics_defaults']);
     expect(store.list()).toEqual([]);
     expect(store.get(CURATED)).toEqual({ layers: {} });
     expect(store.importedFromConfigAt()).toBeUndefined();
@@ -57,7 +50,7 @@ describe('the read-graph settings table', () => {
 
   it('sets modes and a view-semantics default in one change, and lists them by context graph', () => {
     vi.useFakeTimers({ now: 1_000, toFake: ['Date'] });
-    const store = open();
+    const { dashboard, store } = open();
     store.set(CURATED, { layers: { 'verifiable-memory': 'serve', 'working-memory': 'build' }, viewSemantics: 'merged' }, 'api');
     store.set('notes', { viewSemantics: 'per-asset' }, 'agent:0xabc');
     expect(store.get(CURATED)).toEqual({ layers: { 'verifiable-memory': 'serve', 'working-memory': 'build' }, viewSemantics: 'merged' });
@@ -65,7 +58,7 @@ describe('the read-graph settings table', () => {
       { contextGraphId: CURATED, layers: { 'verifiable-memory': 'serve', 'working-memory': 'build' }, viewSemantics: 'merged' },
       { contextGraphId: 'notes', layers: {}, viewSemantics: 'per-asset' },
     ]);
-    expect(rows('SELECT context_graph_id, layer, mode, updated_at, updated_by FROM read_graph_modes ORDER BY layer')).toEqual([
+    expect(dashboard.db.prepare('SELECT context_graph_id, layer, mode, updated_at, updated_by FROM read_graph_modes ORDER BY layer').all()).toEqual([
       { context_graph_id: CURATED, layer: 'verifiable-memory', mode: 'serve', updated_at: 1_000, updated_by: 'api' },
       { context_graph_id: CURATED, layer: 'working-memory', mode: 'build', updated_at: 1_000, updated_by: 'api' },
     ]);
@@ -73,33 +66,41 @@ describe('the read-graph settings table', () => {
 
   it('keeps the time and actor of a mode\'s last change when a change leaves it as it is, and removes a default on null', () => {
     vi.useFakeTimers({ now: 1_000, toFake: ['Date'] });
-    const store = open();
+    const { store } = open();
     store.set(CURATED, { layers: { 'verifiable-memory': 'build', 'working-memory': 'off' }, viewSemantics: 'merged' }, 'cli');
     vi.setSystemTime(2_000);
     store.set(CURATED, { layers: { 'verifiable-memory': 'serve', 'working-memory': 'off' }, viewSemantics: 'merged' }, 'ui');
-    expect(rows('SELECT layer, mode, updated_at, updated_by FROM read_graph_modes ORDER BY layer')).toEqual([
-      { layer: 'verifiable-memory', mode: 'serve', updated_at: 2_000, updated_by: 'ui' },
-      { layer: 'working-memory', mode: 'off', updated_at: 1_000, updated_by: 'cli' },
-    ]);
-    expect(rows('SELECT semantics, updated_at, updated_by FROM view_semantics_defaults')).toEqual([
-      { semantics: 'merged', updated_at: 1_000, updated_by: 'cli' },
-    ]);
+    expect(store.rowsOf(CURATED)).toEqual({
+      modes: [
+        { layer: 'verifiable-memory', mode: 'serve', updatedAt: 2_000, updatedBy: 'ui' },
+        { layer: 'working-memory', mode: 'off', updatedAt: 1_000, updatedBy: 'cli' },
+      ],
+      semantics: { semantics: 'merged', updatedAt: 1_000, updatedBy: 'cli' },
+    });
     store.set(CURATED, { viewSemantics: null }, 'api');
     expect(store.get(CURATED)).toEqual({ layers: { 'verifiable-memory': 'serve', 'working-memory': 'off' } });
   });
 
-  it('removes every setting of a context graph', () => {
-    const store = open();
-    store.set(CURATED, { layers: { 'verifiable-memory': 'serve' }, viewSemantics: 'merged' }, 'api');
+  it('removes every setting of a context graph, and puts rows back exactly as they were read', () => {
+    vi.useFakeTimers({ now: 1_000, toFake: ['Date'] });
+    const { store } = open();
+    store.set(CURATED, { layers: { 'verifiable-memory': 'serve' }, viewSemantics: 'merged' }, 'ui');
     store.set('notes', { layers: { 'verifiable-memory': 'build' } }, 'api');
+    const before = store.rowsOf(CURATED);
+    vi.setSystemTime(5_000);
     store.remove(CURATED, 'api');
     expect(store.list()).toEqual([{ contextGraphId: 'notes', layers: { 'verifiable-memory': 'build' } }]);
+    store.restore(CURATED, before);
+    expect(store.rowsOf(CURATED)).toEqual(before);
+    store.set(CURATED, { layers: { 'working-memory': 'build' } }, 'cli');
+    store.restore(CURATED, before);
+    expect(store.rowsOf(CURATED)).toEqual(before);
     store.remove('never-set', 'cli');
-    expect(store.list()).toHaveLength(1);
+    expect(store.list()).toHaveLength(2);
   });
 
   it('refuses a change it cannot hold, and writes nothing of it', () => {
-    const store = open();
+    const { store } = open();
     const refused = (contextGraphId: unknown, change: unknown, actor: unknown) => {
       try {
         store.set(contextGraphId as string, change as never, actor as string);
@@ -122,13 +123,14 @@ describe('the read-graph settings table', () => {
       '"someone" is not an actor (cli, api, ui, import or agent:<id>)',
     ]);
     expect(refused(CURATED, { layers: { 'verifiable-memory': 'build' } }, 'agent:')).toHaveLength(1);
+    expect(refused(CURATED, { layers: { 'verifiable-memory': 'build' } }, 'agent:mcp‮')).toHaveLength(1);
     expect(refused(CURATED, ['build'], 'api')).toEqual(['the change must be an object']);
     expect(() => store.remove(CURATED, 'agent:has space')).toThrow(ReadGraphSettingsError);
     expect(store.list()).toEqual([]);
   });
 
-  it('imports config.json\'s rules once, in one transaction, with the time of the import', async () => {
-    const store = open();
+  it('imports config.json\'s rules once, in one transaction, with the time of the import', () => {
+    const { store } = open();
     store.set('notes', { layers: { 'working-memory': 'serve' } }, 'api');
     store.importFromConfig([
       { contextGraphId: CURATED, layers: { 'verifiable-memory': 'serve', 'shared-working-memory': 'serve', 'working-memory': 'serve' }, viewSemantics: 'merged' },
@@ -139,34 +141,24 @@ describe('the read-graph settings table', () => {
       { contextGraphId: CURATED, layers: { 'verifiable-memory': 'serve', 'shared-working-memory': 'serve', 'working-memory': 'serve' }, viewSemantics: 'merged' },
       { contextGraphId: 'notes', layers: { 'working-memory': 'serve', 'verifiable-memory': 'build' } },
     ]);
-    expect(rows("SELECT layer, updated_by FROM read_graph_modes WHERE context_graph_id = 'notes' ORDER BY layer")).toEqual([
-      { layer: 'verifiable-memory', updated_by: 'import' },
-      { layer: 'working-memory', updated_by: 'api' },
-    ]);
-    // A refused entry imports nothing and records no time.
-    const other = await mkdtemp(join(tmpdir(), 'dkg-read-graph-settings-'));
-    const fresh = openReadGraphSettingsStore(other);
-    try {
-      expect(() => fresh.importFromConfig([
-        { contextGraphId: 'notes', layers: { 'verifiable-memory': 'build' } },
-        { contextGraphId: '_private', layers: { 'verifiable-memory': 'build' } },
-      ], 6_000)).toThrow(ReadGraphSettingsError);
-      expect(fresh.importedFromConfigAt()).toBeUndefined();
-      expect(fresh.list()).toEqual([]);
-    } finally {
-      fresh.close();
-      await rm(other, { recursive: true, force: true });
-    }
+    expect(store.rowsOf('notes').modes.map((row) => [row.layer, row.updatedBy])).toEqual([['verifiable-memory', 'import'], ['working-memory', 'api']]);
+    // A refused entry imports nothing and leaves the recorded time as it was.
+    store.remove(CURATED, 'cli');
+    store.remove('notes', 'cli');
+    expect(() => store.importFromConfig([
+      { contextGraphId: 'notes', layers: { 'verifiable-memory': 'build' } },
+      { contextGraphId: '_private', layers: { 'verifiable-memory': 'build' } },
+    ], 6_000)).toThrow(ReadGraphSettingsError);
+    expect(store.importedFromConfigAt()).toBe(5_000);
+    expect(store.list()).toEqual([]);
   });
 
   it('leaves nothing of an import that SQLite stops part way, and records no import time', () => {
-    const store = open();
+    const { dashboard, store } = open();
     store.set('drafts', { layers: { 'working-memory': 'build' } }, 'cli');
     // A trigger refuses the second entry's rows, after the first entry's are written.
-    const db = new DatabaseSync(join(dir, READ_GRAPH_SETTINGS_FILE));
-    db.exec(`CREATE TRIGGER refuse_notes BEFORE INSERT ON read_graph_modes WHEN NEW.context_graph_id = 'notes'
+    dashboard.db.exec(`CREATE TRIGGER refuse_notes BEFORE INSERT ON read_graph_modes WHEN NEW.context_graph_id = 'notes'
       BEGIN SELECT RAISE(ABORT, 'refused by the test'); END;`);
-    db.close();
     expect(() => store.importFromConfig([
       { contextGraphId: CURATED, layers: { 'verifiable-memory': 'serve' }, viewSemantics: 'merged' },
       { contextGraphId: 'notes', layers: { 'verifiable-memory': 'build' } },
@@ -175,68 +167,37 @@ describe('the read-graph settings table', () => {
     expect(store.importedFromConfigAt()).toBeUndefined();
   });
 
-  it('keeps a change made within a decision only when the decision keeps it, and shows it to no other reader before', async () => {
-    vi.useFakeTimers({ now: 1_000, toFake: ['Date'] });
-    const store = open();
-    store.set(CURATED, { layers: { 'verifiable-memory': 'build' }, viewSemantics: 'merged' }, 'ui');
-    const before = rows('SELECT * FROM read_graph_modes');
-    vi.setSystemTime(2_000);
-    const seen: unknown[] = [];
-    const kept = await store.changeWithin(CURATED, { layers: { 'verifiable-memory': 'serve' }, viewSemantics: null }, 'api', async (entries) => {
-      seen.push(entries, rows('SELECT * FROM read_graph_modes'));
-      return { keep: true, result: 'kept' };
-    });
-    expect(kept).toBe('kept');
-    // The decision sees the change; another reader does not until it is kept.
-    expect(seen).toEqual([[{ contextGraphId: CURATED, layers: { 'verifiable-memory': 'serve' } }], before]);
-    expect(store.get(CURATED)).toEqual({ layers: { 'verifiable-memory': 'serve' } });
-    const after = rows('SELECT * FROM read_graph_modes');
-    expect(after).toEqual([{ context_graph_id: CURATED, layer: 'verifiable-memory', mode: 'serve', updated_at: 2_000, updated_by: 'api' }]);
-    // A decision that drops the change, or throws, leaves every row as it was, times and actors included.
-    expect(await store.changeWithin(CURATED, { layers: { 'working-memory': 'build' } }, 'cli', async () => ({ keep: false, result: 'dropped' }))).toBe('dropped');
-    await expect(store.changeWithin(CURATED, { viewSemantics: 'merged' }, 'cli', async () => { throw new Error('apply failed'); })).rejects.toThrow('apply failed');
-    expect(rows('SELECT * FROM read_graph_modes')).toEqual(after);
-    expect(store.get(CURATED)).toEqual({ layers: { 'verifiable-memory': 'serve' } });
-    // A change it cannot hold is refused before any transaction.
-    await expect(store.changeWithin('_private', { layers: { 'verifiable-memory': 'build' } }, 'api', async () => ({ keep: true, result: 0 })))
-      .rejects.toBeInstanceOf(ReadGraphSettingsError);
-  });
-
-  it('keeps its settings across a reopen, and is read by another process without writing', () => {
-    const store = open();
+  it('is read by another process without writing, through the node\'s database opened read-only', () => {
+    const { dashboard, store } = open();
     store.set(CURATED, { layers: { 'verifiable-memory': 'serve' } }, 'cli');
     store.importFromConfig([], 7_000);
-    store.close();
+    dashboard.close();
+    dashboards.splice(0);
     expect(readReadGraphSettings(dir)).toEqual({
       entries: [{ contextGraphId: CURATED, layers: { 'verifiable-memory': 'serve' } }],
       importedFromConfigAt: 7_000,
     });
-    expect(open().get(CURATED)).toEqual({ layers: { 'verifiable-memory': 'serve' } });
+    // A store over a read-only handle writes nothing.
+    const db = new Database(join(dir, NODE_DATABASE_FILE), { readonly: true });
+    try {
+      expect(() => new SqliteReadGraphSettingsStore({ db }, { readOnly: true }).set(CURATED, { layers: { 'verifiable-memory': 'off' } }, 'cli'))
+        .toThrow(ReadGraphSettingsUnavailableError);
+    } finally {
+      db.close();
+    }
   });
 
-  it('gives nothing to read in a directory without a table, and creates none there', async () => {
+  it('gives nothing to read where there is no node database, or one from before the settings', async () => {
     expect(readReadGraphSettings(dir)).toBeUndefined();
-    expect(existsSync(join(dir, READ_GRAPH_SETTINGS_FILE))).toBe(false);
-  });
-
-  it('refuses a table that a newer release wrote, and leaves it unchanged', () => {
-    const db = new DatabaseSync(join(dir, READ_GRAPH_SETTINGS_FILE));
-    db.exec("CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO schema_meta VALUES ('version', '2');");
-    db.close();
-    expect(() => openReadGraphSettingsStore(dir)).toThrow(ReadGraphSettingsUnavailableError);
-    expect(() => openReadGraphSettingsStore(dir)).toThrow(/schema version 2, which this release does not read/);
-    expect(rows("SELECT name FROM sqlite_master WHERE type = 'table'")).toEqual([{ name: 'schema_meta' }]);
-    expect(() => readReadGraphSettings(dir)).toThrow(ReadGraphSettingsUnavailableError);
-  });
-
-  it('refuses a file that is not a table', async () => {
-    await writeFile(join(dir, READ_GRAPH_SETTINGS_FILE), 'not a database, only text that is long enough to have a header'.repeat(4));
-    expect(() => openReadGraphSettingsStore(dir)).toThrow(ReadGraphSettingsUnavailableError);
+    expect(existsSync(join(dir, NODE_DATABASE_FILE))).toBe(false);
+    const older = new Database(join(dir, NODE_DATABASE_FILE));
+    older.exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL); PRAGMA user_version = 38;');
+    older.close();
+    expect(readReadGraphSettings(dir)).toBeUndefined();
   });
 
   it('answers nothing once closed', () => {
-    const store = openReadGraphSettingsStore(dir);
-    store.close();
+    const { store } = open();
     store.close();
     expect(() => store.list()).toThrow(ReadGraphSettingsUnavailableError);
   });
