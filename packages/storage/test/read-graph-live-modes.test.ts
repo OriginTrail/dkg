@@ -74,11 +74,21 @@ function owned(builder: ReadGraphBuilder): ReadGraphBuilder {
 const layerAt = (contextGraphId: string, layer: MemoryLayer, mode: 'off' | 'build' | 'serve'): ReadGraphModes =>
   ({ contextGraphs: { [contextGraphId]: { layers: { [layer]: mode } } } });
 
-/** A node over a store with the fixture's data, started with `modes`, as a daemon starts. */
-async function open(options: { readonly modes?: ReadGraphModes; readonly adapter?: HookedStore; readonly dataDir?: string; readonly fixture?: LayerFixture } = {}) {
+/**
+ * A node over a store with the fixture's data, started with `modes`, as a
+ * daemon starts. `modes` can be given from the fixture, whose context graph
+ * this helper names.
+ */
+async function open(options: {
+  readonly modes?: ReadGraphModes | ((fixture: LayerFixture) => ReadGraphModes);
+  readonly adapter?: HookedStore;
+  readonly dataDir?: string;
+  readonly fixture?: LayerFixture;
+} = {}) {
   const adapter = options.adapter ?? new HookedStore();
   const fixture = options.fixture ?? layerFixture(`live-${sequence += 1}`);
-  const layer = wrapReadGraphLayer(adapter, { backend: 'oxigraph', ...(options.modes ? { readGraphs: { modes: options.modes } } : {}) });
+  const modes = typeof options.modes === 'function' ? options.modes(fixture) : options.modes;
+  const layer = wrapReadGraphLayer(adapter, { backend: 'oxigraph', ...(modes ? { readGraphs: { modes } } : {}) });
   const store = guardReadGraphPartition(layer);
   if (!options.adapter) {
     await adapter.insert([
@@ -210,7 +220,7 @@ describe('switching read graphs live', () => {
   });
 
   it('build to serve and back: serving follows the mode, and the rows and their maintenance stay as they are under write load', async () => {
-    const node = await open({ modes: layerAt(`live-${sequence + 1}`, VM, 'build') });
+    const node = await open({ modes: (fixture) => layerAt(fixture.contextGraphId, VM, 'build') });
     const { adapter, fixture, layer, store } = node;
     const [wholeVm] = fixture.keys as [ReadGraphKey];
     const builder = builderOf(node);
@@ -389,7 +399,7 @@ describe('switching read graphs live', () => {
   });
 
   it('throws before it changes anything when the data directory cannot take what a maintaining runtime writes there', async () => {
-    const node = await open({ modes: layerAt(`live-${sequence + 1}`, VM, 'build') });
+    const node = await open({ modes: (fixture) => layerAt(fixture.contextGraphId, VM, 'build') });
     const { fixture, layer, store } = node;
     const wholeVm = readGraphIri(fixture.keys[0]!);
     const builder = builderOf(node);
@@ -451,7 +461,7 @@ describe('switching read graphs live', () => {
   });
 
   it('reports how much of the read graph in progress it has copied, and nothing once the build ends', async () => {
-    const node = await open({ modes: layerAt(`live-${sequence + 1}`, VM, 'build') });
+    const node = await open({ modes: (fixture) => layerAt(fixture.contextGraphId, VM, 'build') });
     const { adapter, fixture, store, dataDir, layer } = node;
     const wholeVm = readGraphIri(fixture.keys[0]!);
     const builder = owned(new ReadGraphBuilder({
@@ -559,7 +569,7 @@ describe('switching read graphs live', () => {
   });
 
   it('leaves a builder without an off rule to remove nothing, and forgets a drop asked for a read graph that is on again', async () => {
-    const node = await open({ modes: layerAt(`live-${sequence + 1}`, VM, 'build') });
+    const node = await open({ modes: (fixture) => layerAt(fixture.contextGraphId, VM, 'build') });
     const { adapter, fixture, layer, store, dataDir } = node;
     const [wholeVm] = fixture.keys as [ReadGraphKey];
     const plain = owned(new ReadGraphBuilder({ store, dataDir, intervalMs: 3_600_000, batching: { pauseRatio: 0 }, wanted: () => [wholeVm] }));
@@ -577,7 +587,7 @@ describe('switching read graphs live', () => {
   });
 
   it('ends a removal at its next batch once the read graph is switched on again while it drops', async () => {
-    const node = await open({ modes: layerAt(`live-${sequence + 1}`, VM, 'build') });
+    const node = await open({ modes: (fixture) => layerAt(fixture.contextGraphId, VM, 'build') });
     const { adapter, fixture, layer, store, dataDir } = node;
     const [wholeVm] = fixture.keys as [ReadGraphKey];
     const readGraph = readGraphIri(wholeVm);
@@ -605,7 +615,7 @@ describe('switching read graphs live', () => {
   });
 
   it('ends a build that waited for the background slot once its layer is switched off, without taking it back into the mirror', async () => {
-    const node = await open({ modes: layerAt(`live-${sequence + 1}`, VM, 'build') });
+    const node = await open({ modes: (fixture) => layerAt(fixture.contextGraphId, VM, 'build') });
     const { adapter, fixture, layer, store, dataDir } = node;
     const [wholeVm, , codeVm] = fixture.keys.map((key) => readGraphIri(key)) as [string, string, string];
     const builder = builderOf(node);
@@ -639,7 +649,7 @@ describe('switching read graphs live', () => {
   });
 
   it('asks at a start with every mode off for the drop of each row it finds, so a drop that a restart cut short ends', async () => {
-    const node = await open({ modes: layerAt(`live-${sequence + 1}`, VM, 'build') });
+    const node = await open({ modes: (fixture) => layerAt(fixture.contextGraphId, VM, 'build') });
     const { adapter, fixture, dataDir } = node;
     const [wholeVm, , codeVm] = fixture.keys.map((key) => readGraphIri(key)) as [string, string, string];
     const builder = builderOf(node);
@@ -663,7 +673,7 @@ describe('switching read graphs live', () => {
   });
 
   it('ends a removal that waited for the background slot once its layer is switched back on, and keeps the read graph', async () => {
-    const node = await open({ modes: layerAt(`live-${sequence + 1}`, VM, 'build') });
+    const node = await open({ modes: (fixture) => layerAt(fixture.contextGraphId, VM, 'build') });
     const { adapter, fixture, layer, store, dataDir } = node;
     const [wholeVm, , codeVm] = fixture.keys.map((key) => readGraphIri(key)) as [string, string, string];
     const builder = builderOf(node);
@@ -756,7 +766,7 @@ describe('switching read graphs live', () => {
   });
 
   it('applies a switch off whose dirty mark the store refuses, and the builder removes the read graph once the store answers', async () => {
-    const node = await open({ modes: layerAt(`live-${sequence + 1}`, VM, 'build') });
+    const node = await open({ modes: (fixture) => layerAt(fixture.contextGraphId, VM, 'build') });
     const { adapter, fixture, layer, store } = node;
     const wholeVm = readGraphIri(fixture.keys[0]!);
     const builder = builderOf(node);
