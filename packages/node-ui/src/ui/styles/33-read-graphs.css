@@ -1,0 +1,91 @@
+/* Search across assets: the node admin's section under Pending join
+   requests, and the query view's memory picker and toggle. Rows are nested
+   cards, the mode switch is the segmented control, and states are badges. */
+.v10-po-rg-desc,
+.v10-po-rg-changes,
+.v10-po-rg-detail,
+.v10-po-rg-source,
+.v10-po-rg-status {
+  margin: 0;
+  font-size: var(--fs-label);
+  color: var(--text-tertiary);
+}
+.v10-po-rg-desc { margin-bottom: var(--space-4); color: var(--text-secondary); }
+.v10-po-rg-desc strong { font-weight: 600; color: var(--text-primary); }
+.v10-po-rg-changes-toggle { margin: var(--space-4) 0 var(--space-8); }
+.v10-po-rg-changes { margin-bottom: var(--space-8); color: var(--text-secondary); }
+.v10-po-rg-notice {
+  margin: 0 0 var(--space-8);
+  padding: var(--pad-nested-sm);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  font-size: var(--fs-label);
+  color: var(--text-secondary);
+}
+.v10-po-rg-list { display: flex; flex-direction: column; gap: var(--space-6); }
+.v10-po-rg-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding: var(--pad-nested-sm);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+}
+.v10-po-rg-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-12);
+}
+.v10-po-rg-name { display: inline-flex; align-items: center; gap: var(--space-6); }
+.v10-po-rg-facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-6);
+  margin-top: var(--space-4);
+}
+.v10-po-rg-source { margin-top: var(--space-2); }
+.v10-po-rg-modes { flex-shrink: 0; }
+.v10-po-rg-modes .ds-seg-item:disabled { opacity: var(--opacity-disabled); cursor: default; }
+.v10-po-rg-confirm,
+.v10-po-rg-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-8);
+  font-size: var(--fs-label);
+  color: var(--text-secondary);
+}
+.v10-po-rg-error p,
+.v10-po-rg-refusal {
+  margin: 0;
+  font-size: var(--fs-label);
+  color: var(--text-danger);
+}
+
+.v10-cg-query-options {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-6) var(--space-16);
+}
+.v10-cg-query-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  font-size: var(--fs-label);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.v10-cg-query-option .ds-input { width: auto; }
+.v10-cg-query-merged { cursor: pointer; }
+.v10-cg-query-merged input { accent-color: var(--text-primary); }
+.v10-cg-query-merged-hint {
+  flex-basis: 100%;
+  font-size: var(--fs-label);
+  color: var(--text-tertiary);
+}
+.v10-cg-query-answered { margin-left: var(--space-8); }

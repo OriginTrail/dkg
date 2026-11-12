@@ -30,7 +30,7 @@ import {
   KADetailView,
   SubGraphDetailView,
   ProjectOverviewCard,
-  PendingJoinRequestsSection,
+  PendingJoinRequestsSection, ReadGraphsSection,
   OverviewPrimerEntry,
   curatorStatusForOverview,
   SubGraphOverviewGrid,
@@ -910,9 +910,8 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             })}
             onParticipantsChanged={refreshParticipants}
           />
-          {rawMemory.loading && (
-            <Loading block label="Loading memory…" />
-          )}
+          <ReadGraphsSection contextGraphId={contextGraphId} />
+          {rawMemory.loading && <Loading block label="Loading memory…" />}
           {rawMemory.error && (
             <div className="v10-me-error">Error: {rawMemory.error}</div>
           )}

@@ -18,6 +18,7 @@ export {
   AssertionsList, LayerDetailView, DocumentsList,
 } from './components/entities.js';
 export { ContextGraphQueryView } from './components/query.js';
+export { ReadGraphsSection } from './components/read-graphs.js';
 export {
   SubGraphBadge, VerifyOnDkgButton, KADetailView, ProvenanceTrail, TrailEvent,
 } from './components/ka.js';
