@@ -47,8 +47,8 @@ export class NoChainAdapter implements ChainAdapter {
   // The 7 #519 PCA write+read methods are OMITTED on purpose: they are
   // optional on ChainAdapter, so the DKGAgent facade's `typeof guard`
   // returns the documented `null` (feature-unavailable) in no-chain mode
-  // instead of throwing. Do NOT re-add them as noChain() stubs. The same holds
-  // for the marketplace methods (`MarketplaceChain`, marketplace.ts).
+  // instead of throwing. Do NOT re-add them as noChain() stubs. Nor is there a
+  // `marketplaceChain()`: without one, `marketplaceChainOf` answers `null`.
   isV10Ready(): boolean { return false; }
   isRandomSamplingReady(): boolean { return false; }
 }

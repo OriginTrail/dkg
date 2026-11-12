@@ -29,6 +29,7 @@ import { enrichEvmError } from './evm-adapter-errors.js';
 import { EVMChainAdapterBase, type ScanProvider } from './evm-adapter-base.js';
 import { BUYER_SCAN_PAGE_BLOCKS } from './evm-adapter-constants.js';
 import type { EvmSigner } from './evm-signer.js';
+import type { EVMChainAdapter } from './evm-adapter.js';
 import type { ScannedEvent } from './incremental-event-scan.js';
 import {
   BUYER_GRANT_TYPES,
@@ -45,6 +46,7 @@ import {
   type EpochTimes,
   type EpochTotals,
   type KnowledgeAssetExtension,
+  type MarketplaceChainAdapter,
   type MarketplaceContracts,
   type MarketplaceWriteOptions,
   type NodeEpoch,
@@ -143,6 +145,11 @@ function requireToken(token: Contract | undefined): Contract {
 }
 
 export class MarketplaceMethods extends EVMChainAdapterBase {
+  /** The marketplace: the adapter itself, whose mixins implement all of it (evm-adapter.ts). */
+  marketplaceChain(this: EVMChainAdapter): MarketplaceChainAdapter {
+    return this;
+  }
+
   async getMarketplaceContracts(): Promise<MarketplaceContracts> {
     await this.init();
     const contracts = await Promise.all([

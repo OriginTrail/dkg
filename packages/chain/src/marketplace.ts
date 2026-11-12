@@ -2,7 +2,7 @@
 
 /**
  * The NeuroSymbolic Marketplace (OT-RFC-27) on the chain: its types, its three
- * EIP-712 messages, and the optional `ChainAdapter` methods.
+ * EIP-712 messages, and the marketplace a `ChainAdapter` may have.
  *
  * A buyer funds a subscription of one epoch, from its wallet
  * (`ServiceSubscriptionsWallet`) or from a Conviction Account that granted it
@@ -318,141 +318,150 @@ export interface MarketplaceWriteOptions {
 }
 
 /**
- * The marketplace methods of `ChainAdapter`. All are optional: an adapter
- * without them has no marketplace. A contract's revert is thrown with its
- * custom error decoded (`err.revert.name`, `err.revert.args`), and a Hub
- * without the contracts throws `HubContractNotFoundError`.
+ * The marketplace's methods: every one is implemented by an adapter that has
+ * the marketplace, and an adapter without it has none (no `marketplaceChain()`).
+ * A contract's revert is thrown with its custom error decoded
+ * (`err.revert.name`, `err.revert.args`), and a Hub without the contracts
+ * throws `HubContractNotFoundError`.
  */
 export interface MarketplaceChain {
-  getMarketplaceContracts?(): Promise<MarketplaceContracts>;
-  getEpochTimes?(): Promise<EpochTimes>;
+  getMarketplaceContracts(): Promise<MarketplaceContracts>;
+  getEpochTimes(): Promise<EpochTimes>;
 
   // ServiceSubscriptions: an account's owner.
-  setServiceSpending?(accountId: bigint, enabled: boolean, opts?: MarketplaceWriteOptions): Promise<TxResult>;
+  setServiceSpending(accountId: bigint, enabled: boolean, opts?: MarketplaceWriteOptions): Promise<TxResult>;
   /** A party that sends the transaction consents by sending it, with an empty signature (`'0x'`). */
-  addBuyer?(terms: BuyerGrantTerms, ownerSignature: string, buyerSignature: string, opts?: MarketplaceWriteOptions): Promise<TxResult>;
-  removeBuyer?(accountId: bigint, buyer: string, opts?: MarketplaceWriteOptions): Promise<TxResult>;
-  setBuyerLimits?(accountId: bigint, buyer: string, limits: BuyerLimits, opts?: MarketplaceWriteOptions): Promise<TxResult>;
-  advanceGrantNonce?(accountId: bigint, opts?: MarketplaceWriteOptions): Promise<TxResult>;
+  addBuyer(terms: BuyerGrantTerms, ownerSignature: string, buyerSignature: string, opts?: MarketplaceWriteOptions): Promise<TxResult>;
+  removeBuyer(accountId: bigint, buyer: string, opts?: MarketplaceWriteOptions): Promise<TxResult>;
+  setBuyerLimits(accountId: bigint, buyer: string, limits: BuyerLimits, opts?: MarketplaceWriteOptions): Promise<TxResult>;
+  advanceGrantNonce(accountId: bigint, opts?: MarketplaceWriteOptions): Promise<TxResult>;
   // ServiceSubscriptions: the buyer.
   /** The buyer's consent to `terms`, by the wallet `terms.buyer`: a 64-byte signature. Sends nothing. */
-  signBuyerGrant?(terms: BuyerGrantTerms): Promise<{ digest: string; signature: string }>;
-  fundFromAccount?(request: AccountFundingRequest, opts?: MarketplaceWriteOptions): Promise<SubscriptionFunding>;
-  topUpFromAccount?(subscriptionId: string, additions: ServiceBudget[], planDigest: string, opts?: MarketplaceWriteOptions): Promise<SubscriptionTopUp>;
-  previewCost?(accountId: bigint, value: bigint): Promise<{ cost: bigint; discountBps: number }>;
-  currentWindowAllowance?(accountId: bigint): Promise<WindowAllowance>;
+  signBuyerGrant(terms: BuyerGrantTerms): Promise<{ digest: string; signature: string }>;
+  fundFromAccount(request: AccountFundingRequest, opts?: MarketplaceWriteOptions): Promise<SubscriptionFunding>;
+  topUpFromAccount(subscriptionId: string, additions: ServiceBudget[], planDigest: string, opts?: MarketplaceWriteOptions): Promise<SubscriptionTopUp>;
+  previewCost(accountId: bigint, value: bigint): Promise<{ cost: bigint; discountBps: number }>;
+  currentWindowAllowance(accountId: bigint): Promise<WindowAllowance>;
   // ServiceSubscriptionsWallet, and the Token allowance it pulls payments under.
-  fundFromWallet?(request: WalletFundingRequest, opts?: MarketplaceWriteOptions): Promise<SubscriptionFunding>;
-  topUpFromWallet?(subscriptionId: string, additions: ServiceBudget[], planDigest: string, opts?: MarketplaceWriteOptions): Promise<SubscriptionTopUp>;
+  fundFromWallet(request: WalletFundingRequest, opts?: MarketplaceWriteOptions): Promise<SubscriptionFunding>;
+  topUpFromWallet(subscriptionId: string, additions: ServiceBudget[], planDigest: string, opts?: MarketplaceWriteOptions): Promise<SubscriptionTopUp>;
   /** `Token.approve(ServiceSubscriptionsWallet, amount)`. */
-  approveServiceSubscriptionsWallet?(amount: bigint, opts?: MarketplaceWriteOptions): Promise<TxResult>;
+  approveServiceSubscriptionsWallet(amount: bigint, opts?: MarketplaceWriteOptions): Promise<TxResult>;
   /** `Token.allowance(owner, ServiceSubscriptionsWallet)`. */
-  getServiceSubscriptionsWalletAllowance?(owner: string): Promise<bigint>;
+  getServiceSubscriptionsWalletAllowance(owner: string): Promise<bigint>;
   // ServiceSubscriptionsStorage.
   /** `null` when no subscription is recorded under the id. */
-  getSubscription?(subscriptionId: string): Promise<Subscription | null>;
-  getBudgets?(subscriptionId: string): Promise<ServiceBudget[]>;
-  subscriptionExists?(subscriptionId: string): Promise<boolean>;
+  getSubscription(subscriptionId: string): Promise<Subscription | null>;
+  getBudgets(subscriptionId: string): Promise<ServiceBudget[]>;
+  subscriptionExists(subscriptionId: string): Promise<boolean>;
   /** `null` when the buyer was never granted on the account. */
-  getGrant?(accountId: bigint, buyer: string): Promise<BuyerGrant | null>;
-  grantEnd?(accountId: bigint, buyer: string, nonce: bigint): Promise<number>;
-  grantNonce?(accountId: bigint): Promise<bigint>;
-  getServiceSpending?(accountId: bigint): Promise<ServiceSpending>;
-  maxBudgetsPerSubscription?(): Promise<number>;
+  getGrant(accountId: bigint, buyer: string): Promise<BuyerGrant | null>;
+  grantEnd(accountId: bigint, buyer: string, nonce: bigint): Promise<number>;
+  grantNonce(accountId: bigint): Promise<bigint>;
+  getServiceSpending(accountId: bigint): Promise<ServiceSpending>;
+  maxBudgetsPerSubscription(): Promise<number>;
   /** Every buyer ever granted on the account (`buyerCount`, `buyerAt`), in grant order. */
-  getAccountBuyers?(accountId: bigint): Promise<string[]>;
+  getAccountBuyers(accountId: bigint): Promise<string[]>;
   /** The accounts whose `BuyerAdded` events name `buyer`, ascending: those that granted it, revoked or not. */
-  listBuyerAccounts?(buyer: string): Promise<bigint[]>;
+  listBuyerAccounts(buyer: string): Promise<bigint[]>;
   // QueryInferenceSettlement.
   /**
    * Sent from a registered operational wallet, as a random-sampling proof is.
    * Simulated first: a fault rejects with the revert and sends nothing. A
    * batch that is mined and reverts rejects with `receipt.status` 0.
    */
-  submitReceiptBatch?(groups: ReceiptGroup[], opts?: ReceiptBatchSendOptions): Promise<ReceiptBatch>;
+  submitReceiptBatch(groups: ReceiptGroup[], opts?: ReceiptBatchSendOptions): Promise<ReceiptBatch>;
   /**
    * Send a batch's signed transaction again, as `onBroadcast` was given it: the same hash and nonce, so it lands
    * at most once. One the network already holds is no error; its outcome is read with `getReceiptBatchOutcome`.
    */
-  rebroadcastReceiptBatch?(signedTx: string): Promise<void>;
-  getReceiptBatchOutcome?(txHash: string): Promise<ReceiptBatchOutcome>;
+  rebroadcastReceiptBatch(signedTx: string): Promise<void>;
+  getReceiptBatchOutcome(txHash: string): Promise<ReceiptBatchOutcome>;
   /**
    * The groups landed for the subscription (`ReceiptsLanded`, its id indexed),
    * oldest first, from `fromBlock` (the settlement's deployment by default) to
    * the head; `toBlock` is the head read, where the next read can start after.
    */
-  listReceiptsLanded?(subscriptionId: string, fromBlock?: number): Promise<{ groups: LandedGroup[]; toBlock: number }>;
-  budgetLeft?(subscriptionId: string, budgetIndex: number): Promise<bigint>;
-  stakeFactor?(identityId: bigint): Promise<bigint>;
-  epochPool?(epoch: number): Promise<bigint>;
-  queryInferenceGross?(epoch: number, identityId: bigint): Promise<bigint>;
+  listReceiptsLanded(subscriptionId: string, fromBlock?: number): Promise<{ groups: LandedGroup[]; toBlock: number }>;
+  budgetLeft(subscriptionId: string, budgetIndex: number): Promise<bigint>;
+  stakeFactor(identityId: bigint): Promise<bigint>;
+  epochPool(epoch: number): Promise<bigint>;
+  queryInferenceGross(epoch: number, identityId: bigint): Promise<bigint>;
   // QueryInferenceStorage.
-  batchState?(): Promise<BatchState>;
-  nonceWord?(subscriptionId: string, identityId: bigint, word: bigint): Promise<bigint>;
-  budgetUsed?(subscriptionId: string, budgetIndex: number): Promise<bigint>;
-  fundingIn?(epoch: number): Promise<EpochFunding>;
-  getEpochTotals?(epoch: number): Promise<EpochTotals>;
-  getNodeEpoch?(identityId: bigint, epoch: number): Promise<NodeEpoch>;
+  batchState(): Promise<BatchState>;
+  nonceWord(subscriptionId: string, identityId: bigint, word: bigint): Promise<bigint>;
+  budgetUsed(subscriptionId: string, budgetIndex: number): Promise<bigint>;
+  fundingIn(epoch: number): Promise<EpochFunding>;
+  getEpochTotals(epoch: number): Promise<EpochTotals>;
+  getNodeEpoch(identityId: bigint, epoch: number): Promise<NodeEpoch>;
   // ShardingTableStorage and RandomSamplingStorage.
   /**
    * `ShardingTableStorage.getNode(identityId).nodeId`, as hex; `null` when the
    * node is not in the table. A node whose profile `ensureProfile` created
    * registered 32 random bytes there, not its peer id.
    */
-  getShardingTableNodeId?(identityId: bigint): Promise<string | null>;
-  getNodeEpochScore?(epoch: number, identityId: bigint): Promise<bigint>;
+  getShardingTableNodeId(identityId: bigint): Promise<string | null>;
+  getNodeEpochScore(epoch: number, identityId: bigint): Promise<bigint>;
   // A node's Core Node gate: ProfileStorage, ConvictionStakingStorage and ParametersStorage.
-  profileExists?(identityId: bigint): Promise<boolean>;
+  profileExists(identityId: bigint): Promise<boolean>;
   /** The node's V10 stake, the one the sharding table admits it by. */
-  getNodeStake?(identityId: bigint): Promise<bigint>;
+  getNodeStake(identityId: bigint): Promise<bigint>;
   /** The stake a node needs for a place in the sharding table. */
-  getMinimumStake?(): Promise<bigint>;
+  getMinimumStake(): Promise<bigint>;
   // ParametersStorage and the Token.
   /** `ParametersStorage.protocolTreasury()`: while it is wired, accounts cannot pay for services. */
-  getProtocolTreasury?(): Promise<string>;
+  getProtocolTreasury(): Promise<string>;
   /** A wallet's ETH and TRAC. */
-  getWalletBalances?(address: string): Promise<{ eth: bigint; trac: bigint }>;
+  getWalletBalances(address: string): Promise<{ eth: bigint; trac: bigint }>;
   /** How many of a wallet's transactions are mined: its next nonce at the latest block. */
-  getMinedNonce?(address: string): Promise<number>;
+  getMinedNonce(address: string): Promise<number>;
   /** The latest block's base fee in wei; `null` on a chain without one. */
-  getBaseFee?(): Promise<bigint | null>;
+  getBaseFee(): Promise<bigint | null>;
   // KnowledgeAssetsLifecycle: a seller's offer is a Knowledge Asset, kept by extending its lifetime.
   /**
    * `extendKnowledgeAssetLifetime(kaId, epochs, tokenAmount)`, from `opts.from` or else the wallet a publish
    * would pay from (gas, and the TRAC it costs), which pays the ask for the asset's bytes over `epochs` more
    * epochs (at least 1 wei), approved first. Anyone may extend any asset; no ACKs, no Conviction discount.
    */
-  extendKnowledgeAssetLifetime?(kaId: bigint, epochs: number, opts?: MarketplaceWriteOptions): Promise<KnowledgeAssetExtension>;
+  extendKnowledgeAssetLifetime(kaId: bigint, epochs: number, opts?: MarketplaceWriteOptions): Promise<KnowledgeAssetExtension>;
 }
 
-/**
- * A chain adapter with the whole marketplace, the Conviction Account reads it
- * uses, and the node's identity: its id, the sharding table, which keys are an
- * identity's operational keys, the identity a wallet is an operational key of
- * (`IdentityStorage.getIdentityId`, the settlement's read of a batch's
- * sender), typed-data signing with its wallets, and a Knowledge Asset's
- * update context, whose end epoch an offer is valid through.
- */
-export type MarketplaceChainAdapter = Required<MarketplaceChain> & Required<Pick<ChainAdapter,
-  | 'getPublishingConvictionAccountInfo'
-  | 'getConvictionAccountLockDurationEpochs'
-  | 'getPublishingConvictionAgents'
-  | 'listNodePublishingConvictionAccounts'
-  | 'getPublishingConvictionContracts'
-  | 'getIdentityId'
-  | 'getIdentityIdForAddress'
-  | 'isShardingTableMember'
-  | 'verifyACKIdentityDetailed'
-  | 'signTypedDataAs'
-  | 'getKnowledgeAssetUpdateContext'
->>;
+/** A method `ChainAdapter` declares optional, which the marketplace needs present. */
+type AdapterMethod<K extends keyof ChainAdapter> = NonNullable<ChainAdapter[K]>;
 
-/** `chain` as a `MarketplaceChainAdapter`, or `null` when it has no marketplace (no chain). */
+/**
+ * The marketplace as a buyer or seller is handed it: the whole marketplace,
+ * the Conviction Account reads it uses, and the node's identity: its id, the
+ * sharding table, which keys are an identity's operational keys, the identity
+ * a wallet is an operational key of (`IdentityStorage.getIdentityId`, the
+ * settlement's read of a batch's sender), typed-data signing with its wallets,
+ * and a Knowledge Asset's update context, whose end epoch an offer is valid
+ * through. An adapter's `marketplaceChain()` returns it, so the compiler
+ * checks that the adapter implements all of it.
+ */
+export interface MarketplaceChainAdapter extends MarketplaceChain {
+  getPublishingConvictionAccountInfo: AdapterMethod<'getPublishingConvictionAccountInfo'>;
+  getConvictionAccountLockDurationEpochs: AdapterMethod<'getConvictionAccountLockDurationEpochs'>;
+  getPublishingConvictionAgents: AdapterMethod<'getPublishingConvictionAgents'>;
+  listNodePublishingConvictionAccounts: AdapterMethod<'listNodePublishingConvictionAccounts'>;
+  getPublishingConvictionContracts: AdapterMethod<'getPublishingConvictionContracts'>;
+  getIdentityId: AdapterMethod<'getIdentityId'>;
+  getIdentityIdForAddress: AdapterMethod<'getIdentityIdForAddress'>;
+  isShardingTableMember: AdapterMethod<'isShardingTableMember'>;
+  verifyACKIdentityDetailed: AdapterMethod<'verifyACKIdentityDetailed'>;
+  signTypedDataAs: AdapterMethod<'signTypedDataAs'>;
+  getKnowledgeAssetUpdateContext: AdapterMethod<'getKnowledgeAssetUpdateContext'>;
+}
+
+/** The marketplace's one member of `ChainAdapter`. */
+export interface MarketplaceCapability {
+  /** The marketplace, all of it; absent on an adapter without one (no chain). */
+  marketplaceChain?(): MarketplaceChainAdapter;
+}
+
+/** The chain's marketplace, or `null` when it has none (no chain). */
 export function marketplaceChainOf(chain: ChainAdapter): MarketplaceChainAdapter | null {
-  return typeof chain.getMarketplaceContracts === 'function'
-    && typeof chain.getPublishingConvictionAccountInfo === 'function'
-    ? chain as MarketplaceChainAdapter
-    : null;
+  return chain.marketplaceChain?.() ?? null;
 }
 
 // ---------------------------------------------------------------------------
