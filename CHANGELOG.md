@@ -60,11 +60,11 @@ and gives the node UI a new design system.
   request. On the mainnet Core nodes measured, that is up to about 14,000
   fewer requests a day on Gnosis and 24,000 on Base, depending on how many
   assets are pending.
-- The node UI build no longer reports its chunks' compressed sizes. With the
-  code editor bundled, gzipping every chunk only to report its size pushed
-  the build past its 896 MB heap ceiling in about one build in three, in CI
-  and in git-based updates. The ceiling stays where it fits a 1.5 GiB node
-  service.
+- The node UI build fits its 896 MB heap ceiling, which suits a 1.5 GiB
+  node service, with the Program editor bundled: icon and lodash imports
+  load only the modules they use, the Graph Computer SDK loads only the
+  parts of ethers it uses, and the build no longer gzips every chunk just to
+  report its size.
 
 ### Fixed
 
