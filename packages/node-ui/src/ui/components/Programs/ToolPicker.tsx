@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { X } from 'lucide-react';
 import type { OutputSchema, RequestedToolPermissions } from '@origintrail-official/dkg-graph-computer';
 import type { QueryCatalogItem } from '@origintrail-official/dkg-core/query-catalog';
 import { fetchProgramTools, fetchProgramQueries, type ProgramTool } from './client.js';
@@ -39,7 +40,7 @@ function OutputContract({ schema, onChange }: { schema: OutputSchema; onChange(v
       <button type="button" aria-label={`Remove column ${name}`} disabled={columns.length === 1} onClick={() => {
         onChange({ ...schema, properties: { bindings: { ...rows.rows, items: { ...rows.item,
           properties: Object.fromEntries(columns.filter(([key]) => key !== name)), required: rows.item.required.filter(key => key !== name) } } } } as OutputSchema);
-      }}>×</button>
+      }}><X size={12} aria-hidden /></button>
     </div>)}
     <button type="button" disabled={columns.length >= 64} onClick={() => {
       let name = 'value'; for (let n = 2; Object.hasOwn(rows.item.properties, name); n++) name = `value${n}`;

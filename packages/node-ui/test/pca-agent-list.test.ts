@@ -109,12 +109,12 @@ describe('PcaAgentList (B3)', () => {
 
   it('renders a per-address explorer link only when an explorer base is provided', async () => {
     const r1 = await render(React.createElement(PcaAgentList, { ...baseProps, explorer: 'https://exp' }));
-    const link = r1.container.querySelector('a.v10-pca-card-explorer') as HTMLAnchorElement;
+    const link = r1.container.querySelector('a.v10-pca-text-link') as HTMLAnchorElement;
     expect(link?.getAttribute('href')).toBe(`https://exp/address/${NODE}`);
     await r1.unmount();
 
     const r2 = await render(React.createElement(PcaAgentList, { ...baseProps, explorer: null }));
-    expect(r2.container.querySelector('a.v10-pca-card-explorer')).toBeNull();
+    expect(r2.container.querySelector('a.v10-pca-text-link')).toBeNull();
     await r2.unmount();
   });
 });

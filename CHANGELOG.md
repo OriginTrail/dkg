@@ -17,6 +17,20 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ### Fixed
 
+- A node built from source without the semantic runtime's pinned Rust
+  toolchain builds again. Its build skips the semantic runtime's Wasm with a
+  warning, where it used to fail the whole build and stop git-based updates;
+  that node can't run the semantic runtime until the toolchain is installed
+  and it builds with `DKG_SEMANTIC_RUNTIME_WASM=required`. CI and release
+  packing still require the Wasm.
+- The node UI build fits its 896 MB heap ceiling again, in CI and in
+  git-based updates. Since the UI added the Program editor, the build ran
+  out of memory in about one build in three on macOS and in most builds on
+  Linux. It now parses half as many modules and needs about 90 MB less
+  heap: icon and lodash imports load only the modules they use, the Graph
+  Computer SDK loads only the parts of ethers it uses, and the build no
+  longer gzips every chunk just to report its size. The ceiling stays where
+  it fits a 1.5 GiB node service.
 - A Core node no longer spends a large share of its RPC on context graphs
   that peers announced but nobody registered on chain. A Core node subscribes
   to every graph it hears of over gossip. For one that was never registered,
@@ -48,6 +62,17 @@ All notable changes to the DKG V10 node are documented here. The format is based
   the budget within a day and stopped its proofs. The route now uses the
   configured chain's network, so it asks no endpoint for it, and closes its
   connections once it answers.
+
+### Security
+
+- The Node.js release that `dkg start`, daemon start, auto-update slot
+  activation and the `node-security` check of `dkg doctor` expect is now the
+  [2026-11-11 Node.js security release](https://nodejs.org/en/blog/vulnerability/november-2026-security-releases):
+  22.23.5, 24.22.3 or 26.13.1 (was 22.23.4, 24.22.1 or 26.12.1). Older
+  releases log a `WARNING` and the node still starts. Upgrade Node.js on every
+  host that runs a node and restart the node. The README, the quickstart and
+  [Updates and rollback](docs/use-dkg/updates-and-rollback.md#nodejs-security-releases)
+  name the new releases.
 
 ## [10.1.1] - Unreleased
 

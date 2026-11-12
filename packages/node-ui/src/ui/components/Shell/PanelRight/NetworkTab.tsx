@@ -1,8 +1,13 @@
 import React, { useId, useState } from 'react';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, RefreshCw } from 'lucide-react';
 import { formatDuration } from './format.js';
 import { buildPeers, shortAgentUri, shortPeerId } from './peer-model.js';
 import type { AgentInfo, ConnectionRow, PeerInfo } from './types.js';
+import { Badge } from '../../ds/Badge.js';
+import { humanizeStatus } from '../../../lib/formatLabels.js';
+import { Loading } from '../../ds/Loading.js';
+import { useNavigate } from 'react-router-dom';
+import { observabilityHref } from '../../../lib/observabilityTab.js';
 
 // Per-peer card: header + meta + agents-as-chips. Nodes are
 // infrastructure; agents live on them. Up to 3 chips inline, with a
@@ -23,13 +28,13 @@ function NetworkPeerCard({ peer }: { peer: PeerInfo }) {
       ? 'Direct + relay paths active — direct shown'
       : undefined;
   return (
-    <div className={`v10-agent-card v10-peer-card ${statusClass}`}>
+    <div className={`v10-agent-card ds-card-nested v10-peer-card ${statusClass}`}>
       <div className="v10-agent-card-header">
         <span className={`v10-agent-card-dot ${statusClass}`} />
         <span className="v10-peer-card-name">{displayName}</span>
-        <span className="v10-agent-card-badge" title={transportTitle}>
-          {transportLabel}
-        </span>
+        <Badge tone="muted" size="sm" className="v10-agent-card-badge" title={transportTitle}>
+          {humanizeStatus(String(transportLabel))}
+        </Badge>
       </div>
       <div className="v10-peer-card-meta">
         <span title={peer.peerId}>{shortPeerId(peer.peerId)}</span>
@@ -64,7 +69,7 @@ function NetworkPeerCard({ peer }: { peer: PeerInfo }) {
             <li>
               <button
                 type="button"
-                className="v10-peer-chip-more"
+                className="v10-peer-chip-more ds-btn ds-ghost ds-sm"
                 aria-expanded={expanded}
                 aria-controls={chipsId}
                 onClick={() => setExpanded((e) => !e)}
@@ -137,6 +142,9 @@ export function NetworkTab(props: {
   onRefresh: () => void;
 }) {
   const { peerAgents, connections, loading, onRefresh } = props;
+  const navigate = useNavigate();
+  // The address opens Observability on Network, and showing the page follows from it.
+  const openConnectionDetails = () => navigate(observabilityHref('network'));
   const [connectedExpanded, setConnectedExpanded] = useState(true);
   const [recentlySeenExpanded, setRecentlySeenExpanded] = useState(false);
 
@@ -159,7 +167,7 @@ export function NetworkTab(props: {
               non-zero — so a brief skew between the two endpoints
               doesn't briefly show "disconnected" while data is in flight. */}
           <span className={`v10-agents-stat-dot ${connected.length > 0 || connections.total > 0 ? 'connected' : 'known'}`} />
-          <span title="Unique libp2p peers connected to this node — matches the count in the header.">
+          <span title="Unique peers connected to this node — matches the count in the header.">
             {connected.length} peer{connected.length === 1 ? '' : 's'}
           </span>
         </span>
@@ -169,16 +177,17 @@ export function NetworkTab(props: {
             isn't completely hidden. */}
         <span
           className="v10-agents-stat"
-          title="Preferred transport per peer (peers reachable via direct + relay are bucketed under direct)"
+          title="How each peer connects. A peer connected both ways counts as direct."
         >
           {directCount} direct / {relayedCount} relayed
         </span>
-        <button className="v10-agents-refresh" onClick={onRefresh} title="Refresh network peers">
-          Refresh
+        <button type="button" className="v10-agents-details" onClick={openConnectionDetails} aria-label="Connection details" title="Connection details in Observability">Details</button>
+        <button className="v10-agents-refresh ds-btn ds-sm" onClick={onRefresh} title="Refresh network peers">
+          <RefreshCw size={12} />Refresh
         </button>
       </div>
 
-      {loading && <p className="v10-agents-loading">Loading peers...</p>}
+      {loading && <Loading label="Loading peers…" />}
       {!loading && connected.length === 0 && recentlySeen.length === 0 && connections.total === 0 && (
         <div className="v10-agent-empty-state">No network peers detected yet.</div>
       )}

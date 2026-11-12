@@ -3,7 +3,7 @@
 // N4 — PcaDashboardRow (the Dashboard "Publisher discount" row, the primary
 // discovery surface) was the lone untested PCA component. Pins: covered shows the
 // exact discount tier (data-covered=true); uncovered shows
-// "None — publishing at the direct cost"; the CTA label is role-dependent and
+// "None. A PCA can cut the publishing fee by up to 75%."; the CTA label is role-dependent and
 // opens the conviction tab. Deps are mocked (the row is pure presentation).
 
 import React, { act } from 'react';
@@ -16,13 +16,24 @@ const state = vi.hoisted(() => ({
   openTab: vi.fn(),
 }));
 
-vi.mock('../src/ui/hooks/usePcaOverview.js', () => ({ usePcaOverview: () => state.overview }));
+// The components read the coverage state; derive it from the test's flags unless a test sets it.
+vi.mock('../src/ui/hooks/usePcaOverview.js', () => ({
+  usePcaOverview: () => ({
+    ...state.overview,
+    coverage: (state.overview as { coverage?: unknown }).coverage ?? {
+      status: state.overview.covered ? 'covered' : state.overview.walletsInconclusive ? 'uncertain' : 'not-covered',
+      uncertainty: state.overview.walletsInconclusive ? 'wallets-unreadable' : null,
+    },
+  }),
+}));
 vi.mock('../src/ui/hooks/usePcaScopeBootstrap.js', () => ({ usePcaScopeBootstrap: () => {} }));
 vi.mock('../src/ui/stores/agents.js', () => ({
   useAgentsStore: (sel: (s: unknown) => unknown) => sel({ nodeStatus: { nodeRole: state.nodeRole } }),
 }));
 vi.mock('../src/ui/stores/tabs.js', () => ({
-  useTabsStore: (sel: (s: unknown) => unknown) => sel({ openTab: state.openTab }),
+  useTabsStore: Object.assign((sel: (s: unknown) => unknown) => sel({ openTab: state.openTab }), {
+    getState: () => ({ activeTabId: 'dashboard', openTab: (...a: unknown[]) => state.openTab(...a) }),
+  }),
 }));
 
 const { PcaDashboardRow } = await import('../src/ui/pages/conviction/PcaDashboardRow.js');
@@ -50,27 +61,40 @@ describe('PcaDashboardRow', () => {
     const { container, unmount } = await render(React.createElement(PcaDashboardRow));
     const value = container.querySelector('.v10-ws-pca-value')!;
     expect(value.getAttribute('data-covered')).toBe('true');
-    expect(value.textContent).toBe('10% discount');
+    expect(value.textContent).toBe('10%');
     expect(value.textContent).not.toContain('pending confirmation');
+    // A covered node has nothing to join, so the CTA manages instead.
+    expect(container.querySelector('.v10-ws-pca-cta')!.textContent).toMatch(/Manage PCA/);
     await unmount();
   });
 
-  it('uncovered → "None — publishing at the direct cost", data-covered=false', async () => {
+  it('uncovered → "None. A PCA can cut the publishing fee by up to 75%.", data-covered=false', async () => {
     state.overview = { covered: false, bestCoveringDiscountBps: null, walletsInconclusive: false };
     const { container, unmount } = await render(React.createElement(PcaDashboardRow));
     const value = container.querySelector('.v10-ws-pca-value')!;
     expect(value.getAttribute('data-covered')).toBe('false');
-    expect(value.textContent).toBe('None — publishing at the direct cost');
+    expect(value.textContent).toBe('None. A PCA can cut the publishing fee by up to 75%.');
     await unmount();
   });
 
   // T2/#9 — unreadable wallets must not read as "None".
-  it('walletsInconclusive → "Couldn’t verify your wallets", not "None"', async () => {
+  it('walletsInconclusive → "Couldn’t check your wallets" with Retry, not "None" or a way in', async () => {
     state.overview = { covered: false, bestCoveringDiscountBps: null, walletsInconclusive: true };
     const { container, unmount } = await render(React.createElement(PcaDashboardRow));
     const value = container.querySelector('.v10-ws-pca-value')!;
-    expect(value.textContent).toContain('Couldn’t verify your wallets');
-    expect(value.textContent).not.toContain('None — publishing');
+    expect(value.textContent).toContain('Couldn’t check your wallets');
+    expect(value.textContent).not.toContain('None.');
+    expect(container.querySelector('.v10-ws-pca-cta')!.textContent).toBe('Retry');
+    expect(container.querySelector('.v10-ws-pca-cta svg')).toBeTruthy();
+    await unmount();
+  });
+
+  // #9 — the wallets read fine, but a tracked PCA or a wallet's approval on it couldn't be checked.
+  it('a failed approval check → "Couldn’t check your wallets" with Retry, not "None" or a way in', async () => {
+    state.overview = { covered: false, bestCoveringDiscountBps: null, walletsInconclusive: false, coverage: { status: 'uncertain', uncertainty: 'probe-inconclusive', recovery: 'retry-read' } } as typeof state.overview;
+    const { container, unmount } = await render(React.createElement(PcaDashboardRow));
+    expect(container.querySelector('.v10-ws-pca-value')!.textContent).toBe('Couldn’t check your wallets');
+    expect(container.querySelector('.v10-ws-pca-cta')!.textContent).toBe('Retry');
     await unmount();
   });
 

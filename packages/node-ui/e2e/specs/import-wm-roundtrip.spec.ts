@@ -63,7 +63,7 @@ test.describe('Import → Working Memory round-trip (per-KA)', () => {
     // empty (data sat in the orphaned legacy graph). Accept any of the canonical
     // entity-content signals the shared MemoryLayerView renders.
     const wmContent = page.locator(
-      '.v10-entity-card, .v10-entity-card-triples, .v10-item-count, .v10-me-entity',
+      '.v10-entity-card, .v10-entity-card-triples, .v10-item-count',
     );
     await expect(wmContent.first()).toBeVisible({ timeout: 20_000 });
 

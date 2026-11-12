@@ -122,7 +122,7 @@ describe('PrimaryNodePicker', () => {
     const { container, unmount } = await render(base({ ownIdentityId: '22', role: 'core' }));
     await focus(container.querySelector('[data-testid="pca-primary-node-search"]')!);
     const ownRow = opts(container).find((o) => o.textContent?.includes('#22'))!;
-    expect(ownRow.textContent).toContain('✓ this node');
+    expect(ownRow.textContent).toContain('this node');
     await unmount();
   });
 
@@ -139,7 +139,7 @@ describe('PrimaryNodePicker', () => {
     await click(container.querySelector('[data-testid="pca-primary-node-paste-use"]')!);
     expect(onChange).not.toHaveBeenCalled();
     expect(container.querySelector('[data-testid="pca-primary-node-paste-error"]')?.textContent)
-      .toContain('Not a staked sharding-table node');
+      .toContain('Not an active Core node');
     await unmount();
   });
 
@@ -161,7 +161,7 @@ describe('PrimaryNodePicker', () => {
   it('loading / error(+retry) / empty states', async () => {
     const onRetry = vi.fn();
     let h = await render(base({ loading: true }));
-    expect(h.container.textContent).toContain('Loading staked nodes');
+    expect(h.container.textContent).toContain('Loading Core nodes');
     expect(h.container.querySelector('[data-testid="pca-primary-node-search"]')).toBeNull();
     await h.unmount();
 
@@ -172,7 +172,7 @@ describe('PrimaryNodePicker', () => {
     await h.unmount();
 
     h = await render(base({ nodes: [] }));
-    expect(h.container.textContent).toContain('No staked nodes found');
+    expect(h.container.textContent).toContain('No Core nodes found');
     await h.unmount();
   });
 

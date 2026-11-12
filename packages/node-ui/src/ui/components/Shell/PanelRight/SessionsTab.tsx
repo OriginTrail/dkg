@@ -11,7 +11,7 @@ export function SessionsTab(props: {
   return (
     <div className="v10-agent-scroll-tab">
       <div className="v10-sessions-list">
-        <div className="v10-local-agent-copy" style={{ marginBottom: 12 }}>
+        <div className="v10-local-agent-copy v10-local-agent-copy-gap">
           Sessions track DKG-persisted conversations for your integrated agents.
         </div>
         {sessions.length === 0 ? (

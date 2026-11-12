@@ -14,6 +14,7 @@ import type { OwnerActionSubmitter } from '../../pca/ownerActions.js';
 import type { WalletTxProgress } from '../../pca/useWalletTxProgress.js';
 import type { DetailDeviceAction } from '../../pca/detailWalletTx.js';
 import type { PcaOwnerAccess } from '../../pca/ownerAccess.js';
+import { ExternalMark } from '../../components/ds/ExternalMark.js';
 
 /** Funding — top-up + the W2 ambiguous-broadcast / pending-receipt honesty. */
 export function FundingSection({
@@ -83,7 +84,7 @@ export function FundingSection({
             warning: {
               txHash,
               message:
-                'Your top-up was submitted but we lost confirmation — it may already be on-chain. Verify on the explorer before adding again; a second top-up would lock additional TRAC.',
+                'Your top-up was submitted but we lost confirmation — it may already be on-chain. Check the explorer before adding again, or you could top up twice.',
             },
           });
           return;
@@ -131,13 +132,13 @@ export function FundingSection({
     <section className="v10-pca-detail-section">
       <h3 className="v10-pca-detail-section-title">Funding</h3>
       <p className="v10-pca-detail-hint">
-        Top-up raises the spendable buffer. It does <strong>not</strong> extend the lock period —
-        when the account expires you create a new one.
+        A top-up adds TRAC that publishes use after each billing period’s share runs out. It does <strong>not</strong>
+        make the PCA last longer: when the PCA expires, you create a new one.
       </p>
       {ownerTrac != null && <p className="v10-pca-detail-hint">Owner balance: {formatPcaTrac(ownerTrac)} TRAC</p>}
       <div className="v10-pca-detail-form">
         <input
-          className="v10-form-input"
+          className="v10-form-input ds-input"
           type="text"
           inputMode="decimal"
           value={topUp}
@@ -148,7 +149,7 @@ export function FundingSection({
         />
         <button
           type="button"
-          className="v10-pca-card-btn primary"
+          className="v10-pca-card-btn primary ds-btn ds-primary"
           data-testid="pca-topup-btn"
           onClick={runFund}
           disabled={!access.writesEnabled || fund.busy || !!topUpPending || !/^\d+(\.\d+)?$/.test(topUp.trim()) || Number(topUp.trim()) <= 0}
@@ -159,11 +160,11 @@ export function FundingSection({
       </div>
       <ActionFeedback state={fund} explorer={explorer} onRecheck={refresh} />
       {topUpPending && (
-        <p className="v10-pca-create-warn" data-testid="pca-topup-pending" role="alert">
+        <p className="v10-pca-create-warn ds-card-nested" data-testid="pca-topup-pending" role="alert">
           Top-up transaction <code>{topUpPending.txHash}</code> is pending confirmation. The top-up
-          button is disabled while this exact receipt is checked; adding again could lock more TRAC.
+          button is disabled while this exact receipt is checked; adding again could top up twice.
           {' '}
-          <button type="button" className="v10-pca-card-btn" onClick={refresh}>Recheck account</button>
+          <button type="button" className="v10-pca-card-btn ds-btn" onClick={refresh}>Recheck account</button>
         </p>
       )}
     </section>
@@ -183,27 +184,27 @@ function ActionFeedback({
     // W2 — ambiguous broadcast: role=alert, tx + recheck, NOT a benign "try again".
     const txUrl = explorer && state.warning.txHash ? `${explorer}/tx/${state.warning.txHash}` : undefined;
     return (
-      <p className="v10-pca-create-warn" data-testid="pca-action-warning" role="alert">
+      <p className="v10-pca-create-warn ds-card-nested" data-testid="pca-action-warning" role="alert">
         {state.warning.message}{' '}
         {state.warning.txHash &&
           (txUrl ? (
-            <a href={txUrl} target="_blank" rel="noreferrer">{state.warning.txHash} ↗</a>
+            <a href={txUrl} target="_blank" rel="noreferrer">{state.warning.txHash} <ExternalMark /></a>
           ) : (
             <code>{state.warning.txHash}</code>
           ))}{' '}
         {onRecheck && (
-          <button type="button" className="v10-pca-card-btn" onClick={onRecheck}>Recheck</button>
+          <button type="button" className="v10-pca-card-btn ds-btn" onClick={onRecheck}>Recheck</button>
         )}
       </p>
     );
   }
-  if (state.error) return <p className="v10-modal-error" role="alert">{state.error}</p>;
+  if (state.error) return <p className="v10-modal-error ds-card-nested" role="alert">{state.error}</p>;
   if (!state.result) return null;
   const txUrl = explorer && state.result.txHash ? `${explorer}/tx/${state.result.txHash}` : undefined;
   return (
     <p className="v10-pca-detail-result" data-testid="pca-action-result" role="status">
       {state.result.message}{' '}
-      {txUrl && <a href={txUrl} target="_blank" rel="noreferrer">tx ↗</a>}{' '}
+      {txUrl && <a href={txUrl} target="_blank" rel="noreferrer">tx <ExternalMark /></a>}{' '}
       Still pending? You can close this and verify here.
     </p>
   );

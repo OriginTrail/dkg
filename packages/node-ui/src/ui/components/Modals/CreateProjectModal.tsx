@@ -2,13 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { createContextGraph, fetchCurrentAgent } from '../../api.js';
 import { refreshContextGraphInventoryAfterMutation } from '../../hooks/useContextGraphInventory.js';
 import { useProjectsStore } from '../../stores/projects.js';
-import { useTabsStore } from '../../stores/tabs.js';
+import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 import { useJourneyStore } from '../../stores/journey.js';
 import { installOntology, listStarters } from '../../lib/ontologyInstall.js';
 import { publishProjectManifest } from '../../lib/projectManifest.js';
 import { WireWorkspacePanel } from '../Workspace/WireWorkspacePanel.js';
 import { useModalDismiss } from './useModalDismiss.js';
 import { CG_NAME_MAX_LENGTH, sanitiseCgName, validateCgName } from './cgNameValidation.js';
+import { ChevronRight, X, RefreshCw } from 'lucide-react';
 
 function slugify(str: string): string {
   return str
@@ -39,9 +40,9 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   const starters = listStarters();
   const [starterSlug, setStarterSlug] = useState<string>(starters[0]?.slug ?? 'coding-project');
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [quorum, setQuorum] = useState('off');
-  const [swmTtl, setSwmTtl] = useState('7d');
-  const [swmCap, setSwmCap] = useState('100k');
+  const [quorum] = useState('off');
+  const [swmTtl] = useState('7d');
+  const [swmCap] = useState('100k');
   const [creating, setCreating] = useState(false);
   const [progress, setProgress] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -67,7 +68,6 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   const [identityError, setIdentityError] = useState(false);
 
   const { contextGraphs, setActiveProject } = useProjectsStore();
-  const { openTab } = useTabsStore();
   const { setStage, stage } = useJourneyStore();
 
   const loadAgentIdentity = () => {
@@ -296,7 +296,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
         role="presentation"
       >
         <div
-          className="v10-modal-box"
+          className="v10-modal-box ds-overlay"
           ref={wiredDismiss.dialogRef}
           role="dialog"
           aria-modal="true"
@@ -304,13 +304,12 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
         >
           <button
             type="button"
-            className="v10-modal-close"
+            className="v10-modal-close ds-btn ds-ghost ds-icon v10-modal-close-corner"
             onClick={handleWireDone}
             aria-label="Close wire workspace dialog"
             title="Close (Esc)"
-            style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4 }}
           >
-            ×
+            <X size={14} />
           </button>
           <div className="v10-modal-header">
             <div id="dkg-wire-modal-title" className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
@@ -320,7 +319,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           </div>
           <div className="v10-modal-body">
             {registrationWarning && (
-              <div className="v10-modal-warning">
+              <div className="v10-modal-warning ds-card-nested">
                 {registrationWarning}
               </div>
             )}
@@ -343,7 +342,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
       role="presentation"
     >
       <div
-        className="v10-modal-box"
+        className="v10-modal-box ds-overlay"
         ref={wireDismiss.dialogRef}
         role="dialog"
         aria-modal="true"
@@ -352,16 +351,15 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
       >
         <button
           type="button"
-          className="v10-modal-close"
+          className="v10-modal-close ds-btn ds-ghost ds-icon v10-modal-close-corner"
           onClick={onClose}
           aria-label="Close create context graph dialog"
           title="Close (Esc)"
-          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
         >
-          ×
+          <X size={14} />
         </button>
         <div className="v10-modal-header">
-          <div id="dkg-create-cg-title" className="v10-modal-title">Create New Context Graph</div>
+          <div id="dkg-create-cg-title" className="v10-modal-title">Create new context graph</div>
           <div id="dkg-create-cg-subtitle" className="v10-modal-subtitle">
             A context graph gives your agent structured memory — a place to draft, share, and publish knowledge.
           </div>
@@ -369,19 +367,19 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
 
         <div className="v10-modal-body">
           {error && (
-            <div className="v10-modal-error">
+            <div role="alert" className="v10-modal-error ds-card-nested">
               {error}
             </div>
           )}
 
           {registrationWarning && (
-            <div className="v10-modal-warning">
+            <div className="v10-modal-warning ds-card-nested">
               {registrationWarning}
             </div>
           )}
 
           {isFirstProject && (
-            <div className="v10-modal-tip">
+            <div className="v10-modal-tip ds-card-nested">
               <div className="v10-modal-tip-title">First context graph tip</div>
               This is your agent's first memory space. Consider importing any existing knowledge
               your agent has — notes, documents, conversation logs — so it can build on what it already knows.
@@ -389,11 +387,11 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           )}
 
           <div className="v10-form-group">
-            <label className="v10-form-label" htmlFor="dkg-cg-name">Context Graph Name</label>
+            <label className="v10-form-label" htmlFor="dkg-cg-name">Context graph name</label>
             <input
               id="dkg-cg-name"
               name="dkg-cg-name"
-              className="v10-form-input"
+              className="v10-form-input ds-input"
               type="text"
               placeholder="e.g. Pharma Drug Interactions"
               value={name}
@@ -407,7 +405,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             />
             <div
               id="dkg-cg-name-help"
-              style={{ marginTop: 4, fontSize: 'var(--font-size-caption)', color: nameValidationError ? 'var(--red, #f87171)' : 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}
+              className={nameValidationError ? 'v10-cg-name-help v10-cg-name-help-error' : 'v10-cg-name-help'}
             >
               {nameValidationError
                 ? nameValidationError
@@ -422,7 +420,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             <textarea
               id="dkg-cg-description"
               name="dkg-cg-description"
-              className="v10-form-textarea"
+              className="v10-form-textarea ds-input"
               placeholder="What should your agent remember? Describe the domain, goals, or context..."
               value={description}
               onChange={(e) => setDescription(e.target.value)}
@@ -437,11 +435,11 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             <div className="v10-form-radio-group">
               <label className="v10-form-radio">
                 <input type="radio" checked={access === 'curated'} onChange={() => setAccess('curated')} />
-                Invite-only — only invited agents can read and subscribe
+                <strong>Invite-only:</strong> only invited agents can read and subscribe
               </label>
               <label className="v10-form-radio">
                 <input type="radio" checked={access === 'public'} onChange={() => setAccess('public')} />
-                Open — publicly discoverable; anyone can subscribe
+                <strong>Open:</strong> publicly discoverable; anyone can subscribe
               </label>
             </div>
           </div>
@@ -451,35 +449,33 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             <div className="v10-form-radio-group">
               <label className="v10-form-radio">
                 <input type="radio" checked={publishPolicy === 'curator-only'} onChange={() => setPublishPolicy('curator-only')} />
-                Curators-only — only the curator may publish to Verifiable Memory
+                <strong>Curators-only:</strong> only the curator may publish to Verifiable Memory
               </label>
               <label className="v10-form-radio">
                 <input type="radio" checked={publishPolicy === 'open'} onChange={() => setPublishPolicy('open')} />
-                Open — any wallet may publish to Verifiable Memory (not just members)
+                <strong>Open:</strong> any wallet may publish to Verifiable Memory (not just members)
               </label>
             </div>
             {access === 'curated' && publishPolicy === 'open' && (
-              <div style={{ marginTop: 6, fontSize: 'var(--font-size-caption)', color: 'var(--text-tertiary)' }}>
-                Note: an invite-only sharing graph with open contribution still lets <em>any</em> wallet
-                publish to Verifiable Memory — the on-chain publish check is not gated by the allowlist.
-                See SPEC_CG_MEMORY_MODEL §2.5.
+              <div className="v10-create-hint">
+                Note: invites control who can read this graph, not who can publish. With open contribution, any wallet can publish to Verifiable Memory.
               </div>
             )}
           </div>
 
           <div className="v10-form-group">
             <label className="v10-form-label">On-chain registration</label>
-            <label className="v10-form-radio" style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+            <label className="v10-form-radio v10-create-radio">
               <input
                 type="checkbox"
                 checked={registerOnChain}
                 onChange={(e) => setRegisterOnChain(e.target.checked)}
-                style={{ marginTop: 3 }}
+                className="v10-create-radio-input"
               />
               <span>
                 Register on chain now (required for Verifiable Memory publishing)
-                <div style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-tertiary)', marginTop: 4 }}>
-                  Off by default — the project is created locally and can be registered later
+                <div className="v10-create-radio-note">
+                  Off by default: the project is created locally and can be registered later
                   from its Settings tab when your wallet is funded and a working RPC is configured.
                 </div>
               </span>
@@ -491,12 +487,12 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             <div className="v10-form-radio-group">
               <label className="v10-form-radio">
                 <input type="radio" checked={ontology === 'community'} onChange={() => setOntology('community')} />
-                Choose a starter — install one of the bundled context-graph-type ontologies
+                Choose a starter: install one of the bundled context-graph-type ontologies
               </label>
               {ontology === 'community' && (
-                <div style={{ marginLeft: 24, marginTop: 4, marginBottom: 8 }}>
-                  <select
-                    className="v10-form-select"
+                <div className="v10-create-radio-indent">
+                  <select aria-label="Community ontology"
+                    className="v10-form-select ds-input"
                     value={starterSlug}
                     onChange={(e) => setStarterSlug(e.target.value)}
                   >
@@ -504,57 +500,57 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                       <option key={s.slug} value={s.slug}>{s.displayName}</option>
                     ))}
                   </select>
-                  <div style={{ marginTop: 6, fontSize: 'var(--font-size-caption)', color: 'var(--text-tertiary)' }}>
+                  <div className="v10-create-hint">
                     {starters.find((s) => s.slug === starterSlug)?.description}
                   </div>
                 </div>
               )}
               <label className="v10-form-radio">
                 <input type="radio" checked={ontology === 'agent'} onChange={() => setOntology('agent')} />
-                Let agent decide — defaults to the closest starter (v1)
+                Let agent decide: defaults to the closest starter (v1)
               </label>
               {ontology === 'agent' && (
-                <div className="v10-form-radio-desc" style={{ marginLeft: 24, marginTop: 4, marginBottom: 8 }}>
+                <div className="v10-form-radio-desc v10-create-radio-indent">
                   v1 installs the <code>{starterSlug}</code> starter as a sensible default. A future
                   release will have the agent draft a context-graph-specific ontology by extending the closest
                   starter from the context graph description.
                 </div>
               )}
-              <label className="v10-form-radio" style={{ opacity: 0.5 }}>
+              <label className="v10-form-radio v10-create-radio-off">
                 <input type="radio" checked={ontology === 'upload'} onChange={() => setOntology('upload')} disabled />
-                Upload an ontology file (.ttl, .owl, .rdf) <span style={{ fontSize: 'var(--font-size-meta)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span>
+                Upload an ontology file (.ttl, .owl, .rdf) <span className="v10-create-tag">(coming soon)</span>
               </label>
             </div>
           </div>
 
-          <div className="v10-form-advanced-toggle" onClick={() => setShowAdvanced(!showAdvanced)}>
-            <span className={`v10-form-adv-chevron ${showAdvanced ? 'open' : ''}`}>▸</span>
+          <button type="button" className="v10-form-advanced-toggle" aria-expanded={showAdvanced} onClick={() => setShowAdvanced(!showAdvanced)}>
+            <span className={`v10-form-adv-chevron ${showAdvanced ? 'open' : ''}`}><ChevronRight size={12} /></span>
             <span>Advanced settings</span>
-          </div>
+          </button>
 
           {showAdvanced && (
-            <div className="v10-form-advanced-body" style={{ opacity: 0.5, pointerEvents: 'none' }}>
+            <div className="v10-form-advanced-body ds-card-nested v10-create-advanced-off">
               <div className="v10-form-group">
-                <label className="v10-form-label">Consensus Quorum <span style={{ fontSize: 'var(--font-size-meta)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
-                <select className="v10-form-select" value={quorum} disabled>
-                  <option value="off">Off — no consensus verification required</option>
-                  <option value="2of3">2 of 3 — lightweight consensus</option>
-                  <option value="3of5">3 of 5 — standard consensus (recommended for teams)</option>
-                  <option value="custom">Custom — set your own M of N</option>
+                <label className="v10-form-label">Consensus quorum <span className="v10-create-tag">(coming soon)</span></label>
+                <select aria-label="Consensus quorum" className="v10-form-select ds-input" value={quorum} disabled>
+                  <option value="off">Off: no consensus verification required</option>
+                  <option value="2of3">2 of 3: lightweight consensus</option>
+                  <option value="3of5">3 of 5: standard consensus (recommended for teams)</option>
+                  <option value="custom">Custom: set your own M of N</option>
                 </select>
               </div>
               <div className="v10-form-group">
-                <label className="v10-form-label">SWM TTL <span style={{ fontSize: 'var(--font-size-meta)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
-                <select className="v10-form-select" value={swmTtl} disabled>
+                <label className="v10-form-label">Shared Working Memory lifetime <span className="v10-create-tag">(coming soon)</span></label>
+                <select aria-label="SWM TTL" className="v10-form-select ds-input" value={swmTtl} disabled>
                   <option value="7d">7 days (default)</option>
                   <option value="1h">1 hour</option>
                   <option value="1d">1 day</option>
                   <option value="30d">30 days</option>
                 </select>
               </div>
-              <div className="v10-form-group" style={{ marginBottom: 0 }}>
-                <label className="v10-form-label">SWM Size Cap <span style={{ fontSize: 'var(--font-size-meta)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
-                <select className="v10-form-select" value={swmCap} disabled>
+              <div className="v10-form-group v10-create-group-last">
+                <label className="v10-form-label">Shared Working Memory size limit <span className="v10-create-tag">(coming soon)</span></label>
+                <select aria-label="Shared Working Memory size limit" className="v10-form-select ds-input" value={swmCap} disabled>
                   <option value="100k">100K triples (default)</option>
                   <option value="10k">10K triples</option>
                   <option value="1m">1M triples</option>
@@ -566,14 +562,14 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
         </div>
 
         <div className="v10-modal-footer">
-          <button className="v10-modal-btn" onClick={onClose}>Cancel</button>
+          <button className="v10-modal-btn ds-btn" onClick={onClose}>Cancel</button>
           {identityError && (
-            <button className="v10-modal-btn" onClick={loadAgentIdentity} disabled={identityLoading}>
-              {identityLoading ? 'Retrying…' : 'Retry Loading Agent'}
+            <button className="v10-modal-btn ds-btn" onClick={loadAgentIdentity} disabled={identityLoading}>
+              {identityLoading ? 'Retrying…' : <><RefreshCw size={12} />Retry loading agent</>}
             </button>
           )}
           <button
-            className="v10-modal-btn primary"
+            className="v10-modal-btn primary ds-btn ds-primary"
             onClick={handleCreate}
             disabled={!name.trim() || !!validateCgName(name) || creating || !agentAddress || identityLoading}
           >
@@ -585,7 +581,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                 // fetch) the address is simply not resolved yet, so show a
                 // loading state instead of flashing an error label. (F4)
                 ? (identityError ? 'Agent unavailable' : 'Loading agent…')
-                : 'Create Context Graph'}
+                : 'Create context graph'}
           </button>
         </div>
       </div>

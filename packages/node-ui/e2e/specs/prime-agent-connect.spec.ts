@@ -28,7 +28,7 @@ test.describe('Prime Agent connect surface (real node)', () => {
     // Same rationale as hermes-connect: on a reused devnet another agent may
     // already be connected and own the default tab, so select the "+" add-agent
     // tab explicitly.
-    const addTab = page.getByRole('tab', { name: 'Add another integrated agent' });
+    const addTab = page.getByRole('button', { name: 'Add another integrated agent' });
     await addTab.click({ timeout: 15_000 });
   });
 

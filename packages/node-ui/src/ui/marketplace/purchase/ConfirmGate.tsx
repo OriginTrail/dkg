@@ -29,7 +29,7 @@ export function ConfirmGate({ catalog, funding, confirming, busy, err, onConfirm
   const source = preview?.source.kind === 'account' ? copy('source.account', { id: preview.source.accountId }) : copy('source.wallet');
   const canConfirm = !busy && !refusal;
   return (
-    <div className="mkt-card mkt-gate" data-testid="mkt-confirm-gate">
+    <div className="ds-card mkt-card mkt-gate" data-testid="mkt-confirm-gate">
       <h2 data-copy={preview ? 'gate.title' : 'gate.title.plan'}>{copy(preview ? 'gate.title' : 'gate.title.plan')}</h2>
       {preview && (
         <div className="mkt-wallet" data-testid="mkt-gate-source">
@@ -38,6 +38,7 @@ export function ConfirmGate({ catalog, funding, confirming, busy, err, onConfirm
           {funding && <span className="mkt-muted mkt-xs" data-copy="gate.wallet">{copy('gate.wallet', { eth: funding.buyerWallet.ethEther })}</span>}
         </div>
       )}
+      <div className="ds-table-scroll">
       <table className="mkt-act" data-testid="mkt-gate-lines">
         <tbody>
           {plan.services.map((s) => (
@@ -52,6 +53,7 @@ export function ConfirmGate({ catalog, funding, confirming, busy, err, onConfirm
           ))}
         </tbody>
       </table>
+      </div>
       {preview && (
         <div className="mkt-sec" data-testid="mkt-gate-total" data-copy="gate.total">
           {copy('gate.total', { value: fmtTrac(preview.value), cost: fmtTrac(preview.cost), usd: usdOf(preview.cost, catalog.fx.tracUsd) ?? '' })}
@@ -63,8 +65,8 @@ export function ConfirmGate({ catalog, funding, confirming, busy, err, onConfirm
       <p className="mkt-muted mkt-xs" data-copy="gate.note">{copy('gate.note')}</p>
       {err ? <ErrorCard err={err} onRetry={onConfirm} /> : null}
       <div className="mkt-fork mkt-gate-actions">
-        <button type="button" className="mkt-btn" data-copy="gate.cancel" data-testid="mkt-gate-cancel" onClick={onCancel} disabled={busy}>{copy('gate.cancel')}</button>
-        <button type="button" className="mkt-btn mkt-btn--primary" data-testid="mkt-gate-confirm" data-copy={preview ? 'gate.confirm' : 'gate.confirm.plan'} onClick={onConfirm} disabled={!canConfirm}>
+        <button type="button" className="ds-btn" data-copy="gate.cancel" data-testid="mkt-gate-cancel" onClick={onCancel} disabled={busy}>{copy('gate.cancel')}</button>
+        <button type="button" className="ds-btn ds-primary" data-testid="mkt-gate-confirm" data-copy={preview ? 'gate.confirm' : 'gate.confirm.plan'} onClick={onConfirm} disabled={!canConfirm}>
           {busy ? copy('state.working') : copy(preview ? 'gate.confirm' : 'gate.confirm.plan')}
         </button>
       </div>

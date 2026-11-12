@@ -111,15 +111,15 @@ test.describe('WM → SWM → VM UI verification', () => {
       const body = request.postDataJSON();
       return body.contextGraphId === run.cgId && body.sparql?.includes('_verifiable_memory_meta');
     });
-    await page.getByRole('button', { name: 'Refresh Context Graph data' }).click();
+    await page.getByRole('button', { name: 'Refresh context graph data' }).click();
     const response = await (await refreshed).response();
     expect(response?.ok(), 'Refresh must complete a successful VM read').toBe(true);
     await expect(page.getByText(run.label!, { exact: true })).toBeVisible({ timeout: 15_000 });
   });
 
-  test('operations view loads after publish activity', async ({ shell, header, page }) => {
+  test('operations view loads after publish activity', async ({ shell, leftPanel, page }) => {
     await shell.goto();
-    await header.openObservability();
+    await leftPanel.openObservability();
     await expect(page.getByRole('heading', { name: 'Observability' })).toBeVisible({ timeout: 15_000 });
   });
 });

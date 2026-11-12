@@ -1274,7 +1274,7 @@ describe('runDoctor orchestrator', () => {
   describe('node-security dispatch', () => {
     const sqlite = () => ({ DatabaseSync: class {} });
     const unpatched = { version: 'v22.20.0', getBuiltinModule: sqlite };
-    const patched = { version: 'v22.23.4', getBuiltinModule: sqlite };
+    const patched = { version: 'v22.23.5', getBuiltinModule: sqlite };
     // Skip everything else so the exit code reflects node-security alone.
     const otherChecks = ALL_CHECK_IDS.filter((id) => id !== 'node-security');
 

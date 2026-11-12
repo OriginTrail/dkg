@@ -1,6 +1,7 @@
 import React from 'react';
 import { useTabsStore } from '../stores/tabs.js';
 import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../lib/contextGraphPrimer.js';
+import { PageHeader } from '../components/ds/PageHeader.js';
 
 const primerSections = [
   {
@@ -9,19 +10,27 @@ const primerSections = [
   },
   {
     title: 'Subgraphs',
-    body: 'Subgraphs organize the same Context Graph by topic or source. They cut across memory layers, so a subgraph can contain Working, Shared Working, and Verifiable Memory at the same time.',
+    body: 'Subgraphs organize the same context graph by topic or source. They cut across memory layers, so a subgraph can contain Working, Shared Working, and Verifiable Memory at the same time.',
   },
   {
     title: 'Entities and Knowledge Assets',
-    body: 'Working Memory and Shared Working Memory contain entities. When published, an assertion/triple bundle is anchored as a Knowledge Asset in Verifiable Memory, giving included entities on-chain provenance.',
+    body: 'Working Memory and Shared Working Memory contain entities. When you publish those entities to Verifiable Memory, they become a Knowledge Asset, with an on-chain record of where they came from.',
+  },
+  {
+    title: 'Triples',
+    body: 'A triple is one fact: a subject, a relation and a value, such as “Aspirin treats headache”. Counts in the node UI show how many facts are stored.',
   },
   {
     title: 'Assertions',
-    body: 'Assertions are batches of triples that explain how entities entered or moved through the Context Graph. They are useful for reviewing provenance and lifecycle state.',
+    body: 'An assertion is a batch of facts added to the context graph together. Use assertions to see where information came from and what happened to it.',
+  },
+  {
+    title: 'Ontology',
+    body: 'An ontology describes the kinds of things in a context graph and how they relate, so agents use the same terms.',
   },
   {
     title: 'Roles',
-    body: 'A curator controls access and publication policy. A participant can collaborate inside the Context Graph according to that policy.',
+    body: 'A curator controls access and publication policy. A participant can collaborate inside the context graph according to that policy.',
   },
 ];
 
@@ -48,24 +57,23 @@ export function ContextGraphPrimerView() {
 
   return (
     <div className="v10-primer-view">
-      <header className="v10-primer-header">
+      <div className="v10-primer-header">
         <button
           type="button"
-          className="v10-primer-back"
+          className="v10-primer-back ds-btn ds-ghost"
           onClick={dismiss}
           aria-label="Close primer and return to the previous tab"
         >
           ← Back
         </button>
-        <p className="v10-primer-kicker">Context Graph Primer</p>
-        <h1>What is a Context Graph?</h1>
-        <p>
-          A Context Graph is a shared knowledge workspace where agents stage,
-          review, organize, and publish structured memory.
-        </p>
-      </header>
+        <p className="v10-primer-kicker">Context graph primer</p>
+        <PageHeader
+          title="What is a context graph?"
+          description="A context graph is a shared knowledge workspace where agents stage, review, organize, and publish structured memory."
+        />
+      </div>
 
-      <section className="v10-primer-pipeline" aria-label="Context Graph pipeline">
+      <section className="v10-primer-pipeline" aria-label="Context graph pipeline">
         <span className="wm">Working Memory</span>
         <span className="connector" aria-hidden="true" />
         <span className="swm">Shared Working Memory</span>

@@ -708,14 +708,14 @@ describe('UI API tests', () => {
       // the copy must NOT tell the user to republish/retry.
       expect(withDetail).not.toMatch(/republish|re-publish|try again|retry/i);
       expect(withDetail).toMatch(/on-chain/i);
-      expect(withDetail).toMatch(/context graph/i);
+      expect(withDetail).toMatch(/Context graph/i);
       expect(withDetail).toContain('binding failed'); // appends the daemon detail
       // Works without a detail string too.
       expect(partialPublishWarning()).not.toMatch(/republish|re-publish|retry/i);
       expect(partialPublishWarning()).not.toContain('(');
     });
 
-    it('createKnowledgeAsset normalizes context graph URIs before POSTing', async () => {
+    it('createKnowledgeAsset normalizes Context Graph URIs before POSTing', async () => {
       await createKnowledgeAsset('did:dkg:context-graph:cg-1', 'f');
       const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/knowledge-assets'));
       const body = JSON.parse(call?.body ?? '{}');
@@ -800,7 +800,7 @@ describe('UI API tests', () => {
       requestLog.length = 0;
       expect(() =>
         knowledgeAssetShare('cg-1', 'asset', { entities: ['urn:root'] } as any),
-      ).toThrow('root-entity selection is not supported');
+      ).toThrow('share only some of its entities');
       expect(requestLog).toHaveLength(0);
 
       expect(() =>
@@ -865,7 +865,7 @@ describe('UI API tests', () => {
 
       requestLog.length = 0;
       expect(() => promoteAssertion('cg-1', 'asset', ['urn:root'])).toThrow(
-        'root-entity selection is not supported',
+        'share only some of its entities',
       );
       expect(requestLog).toHaveLength(0);
     });

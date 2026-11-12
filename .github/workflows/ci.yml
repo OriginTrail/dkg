@@ -1296,6 +1296,9 @@ jobs:
       - name: node-ui memory preview and WebGL regressions
         if: matrix.shard == 1
         run: pnpm --dir packages/node-ui exec playwright test --config playwright.pr3236.config.ts
+      - name: node-ui shell panels and badge contrast (mocked node)
+        if: matrix.shard == 2
+        run: pnpm --dir packages/node-ui exec playwright test --config playwright.shell.config.ts
       - name: "node-ui real-node Playwright e2e (shard ${{ matrix.shard }}/7)"
         run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright test --shard=${{ matrix.shard }}/7
       - name: Clean up only Playwright-owned devnet processes

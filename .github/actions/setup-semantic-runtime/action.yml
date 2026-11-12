@@ -33,3 +33,6 @@ runs:
           || [[ "$(wasm-bindgen --version)" != "wasm-bindgen 0.2.127" ]]; then
           cargo +nightly-2026-08-18 install wasm-bindgen-cli --version 0.2.127 --locked
         fi
+    - name: Require the semantic runtime Wasm in this job
+      shell: bash
+      run: echo "DKG_SEMANTIC_RUNTIME_WASM=required" >> "$GITHUB_ENV"

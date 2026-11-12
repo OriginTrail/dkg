@@ -192,7 +192,7 @@ describe('JoinProjectModal public subscription interaction', () => {
   it('makes restart-durable synchronization an explicit public-graph choice', async () => {
     const { container } = await renderModal('open-project');
     const keepSynced = container.querySelector(
-      'input[aria-label="Keep this Context Graph synchronized after restart"]',
+      'input[aria-label="Keep this context graph synchronized after restart"]',
     ) as HTMLInputElement;
     expect(keepSynced.checked).toBe(false);
 

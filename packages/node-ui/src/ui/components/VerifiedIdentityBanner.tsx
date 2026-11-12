@@ -20,6 +20,10 @@ import { useEntityOnChainReceipt } from '../hooks/useEntityOnChainReceipt.js';
 import { useFetch } from '../hooks.js';
 import { fetchStatus } from '../api.js';
 import { AgentChip } from './AgentChip.js';
+import { Badge, LayerGlyph } from './ds/Badge.js';
+import { Check, Copy } from 'lucide-react';
+import { formatDateTime } from '../lib/format.js';
+import { ExternalMark } from './ds/ExternalMark.js';
 
 export interface VerifiedIdentityBannerProps {
   contextGraphId: string;
@@ -50,7 +54,7 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
   // Trail still renders below.
   if (!identity.ual && !identity.owner && !identity.publishedAt && !onChain) return null;
 
-  const publishedAt = identity.publishedAt ? formatWhen(identity.publishedAt) : null;
+  const publishedAt = identity.publishedAt ? formatDateTime(identity.publishedAt) : null;
   const publisherAgentUri = identity.publisherPeerId && agents
     ? agentFromPeerId(identity.publisherPeerId, agents.agents)
     : null;
@@ -65,11 +69,11 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
   };
 
   return (
-    <div className="v10-vm-identity">
+    <div className="v10-vm-identity ds-card">
       <div className="v10-vm-identity-head">
-        <span className="v10-vm-identity-glyph">◉</span>
+        <span className="v10-vm-identity-glyph"><LayerGlyph layer="vm" /></span>
         <span className="v10-vm-identity-title">On-chain identity</span>
-        <span className="v10-vm-identity-badge">VERIFIED</span>
+        <Badge tone="vm" size="sm" icon={<Check size={12} />} className="v10-vm-identity-badge">Verified</Badge>
       </div>
 
       {onChainUal && (
@@ -82,8 +86,8 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
             type="button"
             className="v10-vm-identity-copy"
             onClick={() => copy(onChainUal)}
-            title="Copy UAL"
-          >⎘</button>
+            aria-label="Copy UAL" title="Copy UAL"
+          ><Copy size={12} /></button>
         </div>
       )}
 
@@ -98,7 +102,7 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
               rel="noopener noreferrer"
               title={receipt.txHash}
             >
-              {truncateId(receipt.txHash, 10, 8)} ↗
+              {truncateId(receipt.txHash, 10, 8)} <ExternalMark />
             </a>
           ) : (
             <span className="v10-vm-identity-val mono" title={receipt.txHash}>
@@ -109,8 +113,8 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
             type="button"
             className="v10-vm-identity-copy"
             onClick={() => copy(receipt.txHash!)}
-            title="Copy transaction hash"
-          >⎘</button>
+            aria-label="Copy transaction hash" title="Copy transaction hash"
+          ><Copy size={12} /></button>
           {receipt.blockNumber && (
             <span className="v10-vm-identity-opid mono">· block {receipt.blockNumber}</span>
           )}
@@ -119,7 +123,7 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
 
       {onChain && receipt.kaId && (
         <div className="v10-vm-identity-row">
-          <span className="v10-vm-identity-lbl">KA id</span>
+          <span className="v10-vm-identity-lbl">Knowledge Asset ID</span>
           <span className="v10-vm-identity-val mono" title={receipt.kaId}>
             {truncateId(receipt.kaId, 8, 8)}
           </span>
@@ -127,8 +131,8 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
             type="button"
             className="v10-vm-identity-copy"
             onClick={() => copy(receipt.kaId!)}
-            title="Copy KA id"
-          >⎘</button>
+            aria-label="Copy Knowledge Asset ID" title="Copy Knowledge Asset ID"
+          ><Copy size={12} /></button>
         </div>
       )}
 
@@ -153,8 +157,8 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
                 type="button"
                 className="v10-vm-identity-copy"
                 onClick={() => copy(identity.owner!)}
-                title="Copy owner id"
-              >⎘</button>
+                aria-label="Copy owner id" title="Copy owner id"
+              ><Copy size={12} /></button>
             </>
           )}
         </div>
@@ -190,11 +194,3 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
   );
 };
 
-function formatWhen(raw: string): string {
-  const d = new Date(raw.replace(/^"|"$/g, ''));
-  if (!Number.isFinite(d.getTime())) return raw;
-  return d.toLocaleString(undefined, {
-    month: 'short', day: 'numeric', year: 'numeric',
-    hour: 'numeric', minute: '2-digit',
-  });
-}

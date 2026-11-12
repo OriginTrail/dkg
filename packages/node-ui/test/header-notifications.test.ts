@@ -51,19 +51,19 @@ async function flush(): Promise<void> {
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 }
 
-async function renderHeader() {
+const LOADED_NODE_STATUS = {
+  synced: true,
+  connectedPeers: 3,
+  connections: { direct: 2, relayed: 1 },
+  uptimeMs: 60_000,
+  name: 'TestNode',
+};
+
+async function renderHeader(nodeStatus: unknown = LOADED_NODE_STATUS) {
   const { Header } = await import('../src/ui/components/Shell/Header.js');
   const { useAgentsStore } = await import('../src/ui/stores/agents.js');
   act(() => {
-    useAgentsStore.setState({
-      nodeStatus: {
-        synced: true,
-        connectedPeers: 3,
-        connections: { direct: 2, relayed: 1 },
-        uptimeMs: 60_000,
-        name: 'TestNode',
-      } as any,
-    });
+    useAgentsStore.setState({ nodeStatus: nodeStatus as any });
   });
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -143,14 +143,34 @@ describe('Header — notifications bell + peer status wiring', () => {
     expect(container.querySelector('.v10-header-notif-badge')?.textContent).toBe('2');
   });
 
-  it('peer count exposes the multiline connection tooltip without a global sync claim', async () => {
+  it('status pill exposes the multiline tooltip with connected + peer breakdown (BUG-020 wiring)', async () => {
     fetchNotificationsFeedMock.mockResolvedValue({ notifications: [], badgeCount: 0 });
     const container = await renderHeader();
     const meta = container.querySelector('.v10-header-meta') as HTMLElement | null;
     expect(meta).toBeTruthy();
     const tooltip = meta!.getAttribute('title') ?? '';
+    expect(tooltip).toContain('Connected to the network');
     expect(tooltip).toContain('3 peers (2 direct, 1 relayed)');
     expect(tooltip).toContain('Uptime');
     expect(tooltip).not.toMatch(/sync(?:ed|ing)/i);
+    expect(meta!.textContent).toContain('Connected');
+    expect(meta!.textContent).toContain('3 peers');
+  });
+
+  it('says Connecting and hides the peer count before any status has loaded', async () => {
+    fetchNotificationsFeedMock.mockResolvedValue({ notifications: [], badgeCount: 0 });
+    const container = await renderHeader(null);
+    const meta = container.querySelector('.v10-header-meta') as HTMLElement | null;
+    expect(meta?.querySelector('.ds-tone-pending')?.textContent).toBe('Connecting');
+    expect(meta?.textContent).not.toContain('peer');
+    expect(meta?.getAttribute('title')).toBe('Connecting to the node');
+  });
+
+  it('says No peers, with no count, when the node has none', async () => {
+    fetchNotificationsFeedMock.mockResolvedValue({ notifications: [], badgeCount: 0 });
+    const container = await renderHeader({ ...LOADED_NODE_STATUS, connectedPeers: 0 });
+    const meta = container.querySelector('.v10-header-meta') as HTMLElement | null;
+    expect(meta?.querySelector('.ds-tone-warning')?.textContent).toBe('No peers');
+    expect(meta?.textContent).not.toContain('0 peers');
   });
 });

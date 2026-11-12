@@ -3,55 +3,49 @@ import React from 'react';
 // presentation file only consumes `PcaHealthState` for its pill (every other consumer
 // imports the derivation directly from `pca/health.js`, so no re-export here).
 import { type PcaHealthState } from '../../pca/health.js';
+import { Badge, type BadgeTone, StatusGlyph } from '../ds/Badge.js';
 
 interface HealthMeta {
-  glyph: string;
+  glyph: React.ReactNode;
   label: string;
-  /** Badge tone class from `12-observability.css`. */
-  toneClass: string;
+  tone: BadgeTone;
   /** Longer advisory shown on hover (`title`). */
   hint: string;
 }
 
 export const HEALTH_CHIP_META: Record<PcaHealthState, HealthMeta> = {
   healthy: {
-    glyph: '✓',
+    glyph: <StatusGlyph tone="success" />,
     label: 'Healthy',
-    toneClass: 'badge-success',
+    tone: 'success',
     hint: 'Active, solvent, and not expiring soon.',
   },
   expiring: {
-    glyph: '⏳',
+    glyph: <StatusGlyph tone="pending" />,
     label: 'Expiring soon',
-    toneClass: 'badge-warn',
-    hint: 'The lock period ends soon — top-up does NOT extend it; renew to keep the discount.',
+    tone: 'warning',
+    hint: 'This PCA ends soon. Topping up doesn’t make it last longer. Renew to keep the discount.',
   },
   expired: {
-    glyph: '✕',
+    glyph: <StatusGlyph tone="danger" />,
     label: 'Expired',
-    toneClass: 'badge-error',
-    hint: 'The lock period has ended — publishes no longer get this discount. Renew to continue.',
+    tone: 'danger',
+    hint: 'This PCA has ended, so publishes no longer get its discount. Renew to continue.',
   },
   insolvent: {
-    glyph: '⚠',
+    glyph: <StatusGlyph tone="warning" />,
     label: 'Insolvent',
     // Danger tone (§6.4 / G5): insolvency is more severe than the warn-tone
     // Expiring-soon / Cap-near states — a depleted buffer means publishes pay
     // the direct cost (or fail). Distinct from those amber states.
-    toneClass: 'badge-error',
-    hint: 'The spendable buffer is depleted — publishes will quietly pay the direct cost. Top up.',
-  },
-  swept: {
-    glyph: '⊘',
-    label: 'Fully swept',
-    toneClass: 'badge',
-    hint: 'Every epoch budget has been swept to the staker reward pool.',
+    tone: 'danger',
+    hint: 'The spendable buffer has run out, so publishes pay the full fee, without warning. Top up.',
   },
   'cap-near': {
-    glyph: '⚠',
+    glyph: <StatusGlyph tone="warning" />,
     label: 'Cap near 100',
-    toneClass: 'badge-warn',
-    hint: 'Approaching the 100 approved-publishing-wallet cap.',
+    tone: 'warning',
+    hint: 'Close to the limit of 100 approved publishing wallets.',
   },
 };
 
@@ -71,22 +65,17 @@ export function HealthChip({
 }) {
   const meta = HEALTH_CHIP_META[state];
   const text = label ?? meta.label;
-  // Dedupe tokens — the `swept` neutral tone reuses the base `.badge` class, so
-  // a naive join would emit "badge badge".
-  const classes = [...new Set(['badge', meta.toneClass, 'v10-pca-health-chip', className])]
-    .filter(Boolean)
-    .join(' ');
   return (
-    <span
-      className={classes}
+    <Badge
+      tone={meta.tone}
+      size="sm"
+      icon={<span className="v10-pca-health-glyph" aria-hidden="true">{meta.glyph}</span>}
+      className={['v10-pca-health-chip', className].filter(Boolean).join(' ')}
       data-testid="pca-health-chip"
       data-health={state}
       title={meta.hint}
     >
-      <span className="v10-pca-health-glyph" aria-hidden="true">
-        {meta.glyph}
-      </span>
       <span className="v10-pca-health-label">{text}</span>
-    </span>
+    </Badge>
   );
 }
