@@ -137,7 +137,7 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
       }
       const result = route
         ? await invokeBoundSemanticProgramOnPeer(agent, config.semanticRuntime, graph, body.operationIri, body.invocationId, authenticatedCaller, body.authorization, body.inputs)
-        : await invokeBoundSemanticProgram(agent, semanticRuntimeHost, graph, body.operationIri, body.invocationId, config.semanticRuntime, authenticatedCaller, body.inputs, undefined, body.expectedBindingDigest);
+        : await invokeBoundSemanticProgram(agent, semanticRuntimeHost, graph, body.operationIri, body.invocationId, config.semanticRuntime, authenticatedCaller, { inputs: body.inputs, expectedBindingDigest: body.expectedBindingDigest });
       return jsonResponse(res, 200, result);
     } catch (error) {
       if (error instanceof SemanticProgramError) return jsonResponse(res, error.status, { code: error.code, error: error.message, ...(error.trace ? { trace: error.trace } : {}) });

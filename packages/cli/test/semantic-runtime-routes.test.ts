@@ -199,6 +199,26 @@ describe('signed outbound operation route', () => {
     return result;
   }
 
+  it('rejects a pinned outbound call before dispatch while an unpinned call still forwards', async () => {
+    const input = { contextGraphId: body.contextGraphId, operationIri: body.programIri,
+      invocationId: body.invocationId, inputs: [{ value: 3 }] };
+    const denied = routed({ ...input, expectedBindingDigest: 'a'.repeat(64) });
+    await handleSemanticRuntimeRoutes(denied.ctx);
+    expect(denied.res.statusCode).toBe(409);
+    expect(denied.res.body.code).toBe('PROGRAM_PINNED_ROUTE_UNSUPPORTED');
+    expect(invokeBoundSemanticProgramOnPeer).not.toHaveBeenCalled();
+    expect(invokeBoundSemanticProgram).not.toHaveBeenCalled();
+    expect(invokeSemanticProgramOnAuthorNode).not.toHaveBeenCalled();
+    const accepted = routed(input);
+    vi.mocked(invokeBoundSemanticProgramOnPeer).mockResolvedValue({ persisted: true } as any);
+    await handleSemanticRuntimeRoutes(accepted.ctx);
+    expect(accepted.res.statusCode).toBe(200);
+    expect(invokeBoundSemanticProgramOnPeer).toHaveBeenCalledExactlyOnceWith(accepted.ctx.agent,
+      accepted.ctx.config.semanticRuntime, input.contextGraphId, input.operationIri,
+      input.invocationId, caller, undefined, input.inputs);
+    expect(invokeBoundSemanticProgram).not.toHaveBeenCalled();
+  });
+
   it('routes the existing three-field API request using only the authenticated caller', async () => {
     const { ctx, res } = routed();
     vi.mocked(invokeBoundSemanticProgramOnPeer).mockResolvedValue({ persisted: true } as any);

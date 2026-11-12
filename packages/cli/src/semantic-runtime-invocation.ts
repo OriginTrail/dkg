@@ -14,6 +14,13 @@ import { bytesEqual, checksumAgentAddress, hashParts, historyIsAtLayer, programP
 import { assertExecutionCapabilityAuthorized, assertProgramInvocationAuthorized } from './semantic-runtime-invocation-policy.js';
 import { buildExecutionQuads, loadExecutionOutputs, persistExecutionKnowledgeAsset } from './semantic-runtime-execution-persistence.js';
 
+export interface BoundSemanticInvocationOptions {
+  inputs?: unknown[];
+  /** Host-created child execution authority; never parsed from a caller payload. */
+  composition?: TypeScriptComposition;
+  expectedBindingDigest?: string;
+}
+
 /** Invoke-only access to one tenant-approved, immutable Program/query pair. */
 export async function invokeBoundSemanticProgram(
   agent: DKGAgent,
@@ -23,10 +30,9 @@ export async function invokeBoundSemanticProgram(
   invocationId: string,
   config: SemanticRuntimeConfig,
   authenticatedCaller: string | undefined,
-  inputs?: unknown[],
-  composition?: TypeScriptComposition,
-  expectedBindingDigest?: string,
+  options: BoundSemanticInvocationOptions = {},
 ): Promise<SemanticInvocationResult> {
+  const { inputs, composition, expectedBindingDigest } = options;
   const denied = () => new SemanticProgramError('PROGRAM_INVOCATION_FORBIDDEN', 'This operation is not authorized for the caller', 403);
   const bindings = config.programBindings ?? [];
   if (!Array.isArray(bindings)) throw new Error('INVALID_PROGRAM_BINDINGS');

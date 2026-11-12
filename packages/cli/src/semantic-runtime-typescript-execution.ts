@@ -231,7 +231,7 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
           const hex = hashParts([invocationId, String(effect.id)]);
           const childId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
           const result = await invokeBoundSemanticProgram(agent, runtime, pin.contextGraphId, pin.operationIri, childId,
-            config, caller, effect.args, { ancestors: [...(parent?.ancestors ?? []), operationKey], budget, assertParent: check });
+            config, caller, { inputs: effect.args, composition: { ancestors: [...(parent?.ancestors ?? []), operationKey], budget, assertParent: check } });
           await check();
           call.executionIri = result.executionIri;
           childExecutions.push(result.executionIri);
