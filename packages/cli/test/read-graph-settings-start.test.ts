@@ -3,11 +3,11 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryLayer, readScope, type ReadGraphKey } from '@origintrail-official/dkg-core';
 import { READ_GRAPH_PLANNED_METHODS, OxigraphStore, readGraphModeOf, viewSemanticsOf, wrapReadGraphLayer, type TripleStore } from '@origintrail-official/dkg-storage';
 import { QueryConfigError } from '../src/read-graphs-config.js';
-import { READ_GRAPH_SETTINGS_FILE, openReadGraphSettingsStore } from '../src/read-graph-settings-store.js';
+import { READ_GRAPH_SETTINGS_FILE, SqliteReadGraphSettingsStore, openReadGraphSettingsStore } from '../src/read-graph-settings-store.js';
 import { noteReadGraphStoreSupport, prepareDaemonReadGraphSettings, readGraphSettingsOutsideDaemon } from '../src/read-graph-settings-start.js';
 
 const CURATED = `0x${'cd'.repeat(20)}/my-project`;
@@ -29,6 +29,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   if (previousHome === undefined) delete process.env.DKG_HOME;
   else process.env.DKG_HOME = previousHome;
   await rm(home, { recursive: true, force: true });
@@ -38,7 +39,6 @@ async function start(query: unknown, options: { checkpoint?: boolean; now?: numb
   const settings = await prepareDaemonReadGraphSettings({
     query, role: 'edge', checkpoint: options.checkpoint ?? false, dataDir: home, log, now: () => options.now ?? 1_000,
   });
-  settings.table?.close();
   return settings;
 }
 
@@ -114,7 +114,6 @@ describe('the daemon\'s read-graph settings at start', () => {
   it('create no table on a node that starts from a public checkpoint, which keeps no read graphs', async () => {
     const settings = await start({ viewSemantics: 'merged', readGraphs: { contextGraphs: { [CURATED]: 'serve' } } }, { checkpoint: true });
     expect(existsSync(join(home, READ_GRAPH_SETTINGS_FILE))).toBe(false);
-    expect(settings.table).toBeUndefined();
     expect(settings.storeSettings).toBeUndefined();
     expect(readGraphModeOf(settings.effective.readGraphs, vm(CURATED))).toBe('off');
     expect(lines).toEqual(['[read-graphs] query.readGraphs.contextGraphs in config.json is deprecated and ignored.']);
@@ -126,12 +125,32 @@ describe('the daemon\'s read-graph settings at start', () => {
     db.exec("CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO schema_meta VALUES ('version', '2');");
     db.close();
     const settings = await start({ readGraphs: 'build', viewSemantics: { contextGraphs: { [CURATED]: 'merged' } } });
-    expect(settings.table).toBeUndefined();
     expect(settings.effective).toEqual({ readGraphs: { default: 'build' }, viewSemantics: {} });
     expect(lines).toEqual([
       expect.stringMatching(/^\[read-graphs\] read-graph-settings\.db cannot be opened, so no context graph has read-graph settings of its own: .*schema version 2/),
       '[read-graphs] query.viewSemantics.contextGraphs in config.json is deprecated and ignored.',
     ]);
+  });
+
+  it('go on with the node\'s own settings when the table opens but cannot be read', async () => {
+    const db = new DatabaseSync(join(home, READ_GRAPH_SETTINGS_FILE));
+    db.exec("CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO schema_meta VALUES ('version', '1');");
+    db.close();
+    const settings = await start({ readGraphs: 'build' });
+    expect(settings.effective.readGraphs).toEqual({ default: 'build' });
+    expect(lines).toEqual([
+      expect.stringMatching(/^\[read-graphs\] read-graph-settings\.db cannot be read, so no context graph has read-graph settings of its own: .*read_graph_modes/),
+    ]);
+  });
+
+  it('close the table once they are read: each change opens it again', async () => {
+    const close = vi.spyOn(SqliteReadGraphSettingsStore.prototype, 'close');
+    await start({ readGraphs: { contextGraphs: { [CURATED]: 'serve' } } });
+    expect(close).toHaveBeenCalledTimes(1);
+    // The file is free for another writer at once.
+    const table = openReadGraphSettingsStore(home);
+    table.set(CURATED, { layers: { 'working-memory': 'off' } }, 'cli');
+    table.close();
   });
 
   it('say so after the store opens when it cannot keep the read graphs that the table sets', async () => {

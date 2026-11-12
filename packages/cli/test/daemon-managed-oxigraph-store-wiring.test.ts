@@ -131,9 +131,9 @@ describe('daemon managed Oxigraph store construction', () => {
     expect(buildAgentRuntimeStoreConfig({ ...base, dataDir: '/tmp/dkg-home' })).toBeUndefined();
     // Settings that keep no read graph reach it too: the view semantics of the node, and of each context graph in the settings table.
     const { policy } = resolveQuerySection({ readGraphs: 'off', viewSemantics: 'merged' });
-    const semantics = readGraphStoreSettings(resolveEffectiveQueryConfig(policy, {
-      list: () => [{ contextGraphId: 'notes', layers: {}, viewSemantics: 'per-asset' }],
-    }, { refusals: [] }).config);
+    const semantics = readGraphStoreSettings(resolveEffectiveQueryConfig(policy, [
+      { contextGraphId: 'notes', layers: {}, viewSemantics: 'per-asset' },
+    ], { refusals: [] }).config);
     const config = buildAgentRuntimeStoreConfig({ ...base, readGraphs: semantics, dataDir: '/tmp/dkg-home' });
     expect(config).toEqual({ backend: 'oxigraph-worker', options: { path: '/tmp/dkg-home/store.nq' }, readGraphs: semantics });
     expect(viewSemanticsOf(config?.readGraphs?.viewSemantics, 'notes')).toBe('per-asset');
