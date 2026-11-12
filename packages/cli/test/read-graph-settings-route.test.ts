@@ -26,6 +26,7 @@ import { ReadGraphSettingsControl, readGraphSettingsOnCreate, type ReadGraphSett
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
 import { handleReadGraphSettingsRoutes } from '../src/daemon/routes/read-graph-settings.js';
+import { prepareDaemonReadGraphSettings } from '../src/read-graph-settings-start.js';
 import { resolveQuerySection } from '../src/read-graphs-config.js';
 import { openReadGraphSettingsStore, type SqliteReadGraphSettingsStore } from '../src/read-graph-settings-store.js';
 import { READ_GRAPH_SETTINGS_PATH } from '../src/read-graph-settings-wire.js';
@@ -303,6 +304,18 @@ describe('PUT /api/store/read-graphs/settings', () => {
     expect(unsupported).toMatchObject({ status: 409, body: { code: 'READ_GRAPHS_UNSUPPORTED' } });
     expect(unsupported.body!.error).toBe('This node\'s store can\'t search across assets (the adapter cannot maintain read graphs).');
     expect(table!.rowsOf(CG)).toEqual(before);
+  });
+
+  it('keeps a change to an imported setting through a restart: the next start puts it in force', async () => {
+    const query = { readGraphs: { contextGraphs: { [CG]: 'build' } } };
+    const start = () => prepareDaemonReadGraphSettings({ query, role: 'edge', checkpoint: false, dataDir: home, log: () => undefined });
+    // The first start imports config.json's rule.
+    expect(readGraphModeOfLayer((await start()).effective.readGraphs, CG, MemoryLayer.VerifiableMemory)).toBe('build');
+    const { control } = controlOf();
+    expect((await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'serve' } })).status).toBe(200);
+    const restarted = await start();
+    expect(readGraphModeOfLayer(restarted.effective.readGraphs, CG, MemoryLayer.VerifiableMemory)).toBe('serve');
+    expect(readGraphModeOfLayer(restarted.effective.readGraphs, CG, MemoryLayer.WorkingMemory)).toBe('build');
   });
 
   it('runs changes one at a time, each applying the settings with every earlier change in them', async () => {
