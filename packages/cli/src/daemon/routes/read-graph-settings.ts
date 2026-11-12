@@ -36,7 +36,9 @@ export async function handleReadGraphSettingsRoutes(
     if (contextGraphId !== undefined && !isReadGraphEligibleContextGraphId(contextGraphId)) {
       return jsonResponse(res, 400, { code: 'READ_GRAPH_SETTINGS_INVALID', error: 'contextGraphId must be the ID of a context graph that can search across assets.' });
     }
-    return jsonResponse(res, 200, await control.answer(contextGraphId));
+    // A table that can't be read answers 503, and the settings in force stay as they are.
+    const outcome = await control.read(contextGraphId);
+    return jsonResponse(res, outcome.status, outcome.body);
   }
   const parsed = parseReadGraphSettingsRequest(jsonOf(await readBody(req, SMALL_BODY_BYTES)));
   if ('error' in parsed) return jsonResponse(res, 400, { code: 'READ_GRAPH_SETTINGS_INVALID', error: parsed.error });

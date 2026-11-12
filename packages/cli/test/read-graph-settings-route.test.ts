@@ -201,6 +201,35 @@ describe('GET /api/store/read-graphs/settings', () => {
     const unsupported = controlOf({ agent: agentOf(layeredStore(false)) }).control;
     expect((await call(unsupported, 'GET', READ_GRAPH_SETTINGS_PATH)).body!.refused).toMatchObject({ code: 'READ_GRAPHS_UNSUPPORTED' });
   });
+
+  it('answers 503 when the settings table can\'t be read, and changes nothing in force', async () => {
+    const store = layeredStore();
+    const apply = vi.fn((next: ReadGraphModes, options?: { signal?: AbortSignal; viewSemantics?: ViewSemanticsSettings; beforeCommit?: () => void }) =>
+      applyReadGraphModes(store, next, options ?? {}));
+    const { control, table } = controlOf({ agent: agentOf(store, { applyReadGraphModesV1: apply }) });
+    expect((await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'build' } })).status).toBe(200);
+    const runtime = readGraphRuntimeOf(store)!;
+    const inForce = structuredClone(runtime.modes);
+    const unreadable = vi.spyOn(table, 'list').mockImplementation(() => { throw new Error('disk I/O error'); });
+    for (const target of [READ_GRAPH_SETTINGS_PATH, `${READ_GRAPH_SETTINGS_PATH}?contextGraphId=${CG}`]) {
+      expect(await call(control, 'GET', target), target).toEqual({
+        handled: true,
+        status: 503,
+        body: { code: 'READ_GRAPH_SETTINGS_UNAVAILABLE', error: 'This node\'s search-across-assets settings can\'t be read now: disk I/O error.' },
+      });
+    }
+    // The settings in force stay in force: nothing was applied, and the node still keeps the read graph.
+    expect(apply).toHaveBeenCalledTimes(1);
+    expect(runtime.modes).toEqual(inForce);
+    expect(readGraphModeOfLayer(runtime.modes, CG, MemoryLayer.VerifiableMemory)).toBe('build');
+    // A node that starts from a public checkpoint keeps no settings, so it answers without the table, as before.
+    const checkpoint = await call(controlOf({ checkpoint: true }).control, 'GET', READ_GRAPH_SETTINGS_PATH);
+    expect(checkpoint.status).toBe(200);
+    expect(checkpoint.body!.contextGraphs).toEqual([]);
+    // Once the table can be read again, the answer holds the settings again.
+    unreadable.mockRestore();
+    expect((await call(control, 'GET', `${READ_GRAPH_SETTINGS_PATH}?contextGraphId=${CG}`)).body!.contextGraphs[0].layers).toEqual({ 'verifiable-memory': 'build' });
+  });
 });
 
 describe('PUT /api/store/read-graphs/settings', () => {
@@ -346,6 +375,32 @@ describe('PUT /api/store/read-graphs/settings', () => {
     expect(table.get(CG)).toEqual({ layers: {} });
     expect(readGraphModeOfLayer(readGraphRuntimeOf(store)!.modes, CG, MemoryLayer.VerifiableMemory)).toBe('off');
     expect(lines).toEqual([]);
+  });
+
+  it('answers an applied change with the settings it wrote when the table can\'t be read back', async () => {
+    const lines: string[] = [];
+    const store = layeredStore();
+    const { control, table } = controlOf({ agent: agentOf(store), log: lines });
+    // The change reads the table before it applies; the read for its answer fails.
+    const list = table.list.bind(table);
+    const unreadable = vi.spyOn(table, 'list').mockImplementationOnce(list).mockImplementation(() => { throw new Error('disk I/O error'); });
+    const answer = await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'build' }, viewSemantics: 'merged' });
+    expect(answer.status).toBe(200);
+    expect(answer.body!.contextGraphs).toEqual([expect.objectContaining({
+      contextGraphId: CG,
+      layers: { 'verifiable-memory': 'build' },
+      viewSemantics: 'merged',
+      effective: { layers: { 'working-memory': 'off', 'shared-working-memory': 'off', 'verifiable-memory': 'build' }, viewSemantics: 'merged' },
+    })]);
+    expect(answer.body!.changes).toContainEqual({ contextGraphId: CG, layer: 'verifiable-memory', from: 'off', to: 'build', outcome: 'applied' });
+    // The change stays applied: the table and the running node hold it, and the log says so.
+    expect(rowsOf(CG).modes).toMatchObject([{ layer: 'verifiable-memory', mode: 'build', updatedBy: 'api' }]);
+    expect(readGraphModeOfLayer(readGraphRuntimeOf(store)!.modes, CG, MemoryLayer.VerifiableMemory)).toBe('build');
+    expect(lines).toEqual([`[read-graphs] api changed the settings of ${CG}: verifiable-memory off -> build, view semantics merged.`]);
+    // The answer is what a read of the table gives once it can be read again.
+    unreadable.mockRestore();
+    const { changes: _changes, ...settings } = answer.body!;
+    expect((await call(control, 'GET', `${READ_GRAPH_SETTINGS_PATH}?contextGraphId=${CG}`)).body).toEqual(settings);
   });
 
   it('refuses a change once the node shuts down, and ends a running one before it changes anything', async () => {

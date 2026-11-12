@@ -292,7 +292,7 @@ Node-wide policy stays in `~/.dkg/config.json`. The daemon reads it at start, so
 | `409 READ_GRAPHS_CHECKPOINT_NODE` | The node starts from a public checkpoint, and keeps no settings. |
 | `409 READ_GRAPHS_ROLLBACK_TARGET_OLDER` | The rollback target doesn't recognize read graphs. The answer names the target's version and the first release that recognizes read graphs. |
 | `409 READ_GRAPHS_APPLY_REFUSED` | The node couldn't apply the change. The settings were put back, and the answer lists the changes it tried. |
-| `503 READ_GRAPH_SETTINGS_UNAVAILABLE` | The node can't open its settings. |
+| `503 READ_GRAPH_SETTINGS_UNAVAILABLE` | The node can't read or write its stored settings. The settings in force stay in force. |
 
 Metrics are exported once an OTLP endpoint is set; see [Monitor Store and Queue Pressure](backpressure-observability.md).
 
@@ -304,7 +304,7 @@ Metrics are exported once an OTLP endpoint is set; see [Monitor Store and Queue 
 | `enable` is refused with `READ_GRAPHS_ROLLBACK_TARGET_OLDER` | Update so that the rollback target recognizes read graphs, then try again. |
 | `enable` is refused with `READ_GRAPHS_DISABLED` or `READ_GRAPHS_LAYER_NOT_ALLOWED` | `query.readGraphsPolicy` turns it off on the node, or doesn't allow the layer. |
 | A change is refused with `READ_GRAPHS_APPLY_REFUSED` | The settings were put back. Read the answer's `error` and the daemon log, wait for running checks or rebuilds to end, and try again. |
-| Settings calls answer `503 READ_GRAPH_SETTINGS_UNAVAILABLE` | The node can't open its stored settings. Look for the reason in the daemon log. Queries keep working with the settings in force. |
+| Settings calls answer `503 READ_GRAPH_SETTINGS_UNAVAILABLE` | The node can't read or write its stored settings. The answer's `error` says why. Queries keep working with the settings in force. |
 | `dkg start` refuses: the rollback target is older than the first release that recognizes read graphs | A node-wide setting in `config.json` isn't Off. Update so that the rollback target recognizes read graphs, or set it to `off`. |
 | A layer stays Off after a start, and the daemon log says why | The setting isn't allowed on this node now: the policy, the store or the rollback target. It applies again once allowed; switch it again to apply it at once. |
 | A copy stays "Rebuilding" | Requests to search across assets get `503` until it is ready; per-asset answers keep working. Look for the check line in the daemon log. If it repeats, turn it Off and open an issue with those log lines. |
