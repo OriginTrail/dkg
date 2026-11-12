@@ -534,8 +534,7 @@ export class DkgClient {
   }
 
   // ── Query ──────────────────────────────────────────────────────
-  /**
-   * Memory-layer routing is controlled by `view` + `graphSuffix`:
+  /** Memory-layer routing is controlled by `view` + `graphSuffix`:
    *   view=undefined, graphSuffix=undefined  — WM (default, private)
    *   graphSuffix="_shared_memory"           — SWM
    *   graphSuffix="_shared_memory_meta"      — SWM metadata (UAL, owner, publisher)
@@ -559,6 +558,7 @@ export class DkgClient {
     if (args.includeContextGraphPartitions != null) body.includeContextGraphPartitions = args.includeContextGraphPartitions;
     if (args.includeSharedMemoryMeta != null) body.includeSharedMemoryMeta = args.includeSharedMemoryMeta;
     if (args.view != null) body.view = args.view;
+    if (args.semantics != null) body.semantics = args.semantics;
     if (args.verifiedGraph != null) body.verifiedGraph = args.verifiedGraph;
     if (args.assertionName) body.assertionName = args.assertionName;
     if (args.agentAddress) body.agentAddress = args.agentAddress;

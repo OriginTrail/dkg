@@ -20,7 +20,7 @@ function planTimestamp(subject: string, predicate: string, at: Date) {
   if (!isStorageAckLedgerTimestamp(predicate)) throw new TypeError('Unknown StorageACK ledger timestamp');
   const graph = STORAGE_ACK_LEDGER_GRAPH;
   const quad = { graph, subject, predicate, object: xsdDateTimeLiteral(at) };
-  return { sparql: storageAckLedgerMarkUpdate(subject, predicate, at),
+  return { sparql: storageAckLedgerMarkUpdate(subject, predicate, at), graph,
     mutation: { removals: [{ graph, subject, predicate }], quads: [quad] } };
 }
 
@@ -29,7 +29,7 @@ export const applyStorageAckLedgerTimestamp = (store: TripleStore): StorageAckLe
   async (subject, predicate, at, options) => {
     if (typeof store.update !== 'function') return false;
     const plan = planTimestamp(subject, predicate, at);
-    await store.update(plan.sparql, options);
+    await store.update(plan.sparql, { ...options, writtenGraphs: [plan.graph] });
     return true;
   }
 );
@@ -41,7 +41,7 @@ export function createStorageAckLedgerTimestampWriter(
   return async (subject, predicate, at, options) => {
     if (typeof store.update !== 'function') return false;
     const plan = planTimestamp(subject, predicate, at);
-    await executeMutation(() => store.update!(plan.sparql, options), () => true, plan.mutation, 'update');
+    await executeMutation(() => store.update!(plan.sparql, { ...options, writtenGraphs: [plan.graph] }), () => true, plan.mutation, 'update');
     return true;
   };
 }
@@ -65,7 +65,7 @@ export async function markStorageAckLedgerTimestamp(
     if (isStorageAckLedgerTimestamp(predicate)) {
       if (await writer(subject, predicate, new Date(at), options)) return;
     }
-    await store.update(storageAckLedgerMarkUpdate(subject, predicate, new Date(at)), options);
+    await store.update(storageAckLedgerMarkUpdate(subject, predicate, new Date(at)), { ...options, writtenGraphs: [STORAGE_ACK_LEDGER_GRAPH] });
     return;
   }
   await store.insert([{ subject, predicate, object: xsdDateTimeLiteral(new Date(at)),

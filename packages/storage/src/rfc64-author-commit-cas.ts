@@ -22,6 +22,7 @@ import {
   type Rfc64AuthorCommitPredicateReplacementPlanV1,
   type Rfc64AuthorCommitSubjectReplacementPlanV1,
 } from './rfc64-author-commit-plan-codec.js';
+import { formatGuardedGraphReplacement, formatGuardedSubjectReplacement } from './rfc64-author-commit-guarded-replacement.js';
 export type {
   NormalizedRfc64AuthorCommitCasV1,
   NormalizedRfc64LegacyAuthorCommitCasV1,
@@ -929,35 +930,6 @@ function formatExactSubjectGuard(
     `sameTerm(?guardO${index}, ${expectedObject}))`).join(' || ');
   return `${required}\n  FILTER NOT EXISTS { GRAPH <${graphUri}> { ` +
     `<${subject}> ?guardP${index} ?guardO${index} . FILTER(!(${allowed})) } }`;
-}
-
-function formatGuardedGraphReplacement(
-  targetGraph: string,
-  stagingGraph: string,
-  receiptPattern: string,
-): string {
-  return `DELETE { GRAPH <${targetGraph}> { ?dataS ?dataP ?dataO . } }\n` +
-    `WHERE { ${receiptPattern} OPTIONAL { GRAPH <${targetGraph}> { ?dataS ?dataP ?dataO . } } };\n` +
-    `INSERT { GRAPH <${targetGraph}> { ?dataS ?dataP ?dataO . } }\n` +
-    `WHERE { ${receiptPattern} GRAPH <${stagingGraph}> { ?dataS ?dataP ?dataO . } }`;
-}
-
-function formatGuardedSubjectReplacement(
-  targetGraph: string,
-  targetSubject: string,
-  stagingGraph: string | null,
-  receiptPattern: string,
-): string {
-  const variableSuffix = randomUUID().replaceAll('-', '');
-  const predicate = `?subjectP${variableSuffix}`;
-  const object = `?subjectO${variableSuffix}`;
-  const remove =
-    `DELETE { GRAPH <${targetGraph}> { <${targetSubject}> ${predicate} ${object} . } }\n` +
-    `WHERE { ${receiptPattern} OPTIONAL { GRAPH <${targetGraph}> { <${targetSubject}> ${predicate} ${object} . } } }`;
-  if (stagingGraph === null) return remove;
-  return `${remove};\n` +
-    `INSERT { GRAPH <${targetGraph}> { <${targetSubject}> ${predicate} ${object} . } }\n` +
-    `WHERE { ${receiptPattern} GRAPH <${stagingGraph}> { <${targetSubject}> ${predicate} ${object} . } }`;
 }
 
 function assertNonBlankNodeIri(value: string, label: string): string {

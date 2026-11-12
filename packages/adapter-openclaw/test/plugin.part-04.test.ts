@@ -67,6 +67,20 @@ describe("DkgNodePlugin", () => {
     });
 
 
+    it('dkg_query forwards `semantics`, and refuses other values before the daemon', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1', context_graph_id: 'my-cg', view: 'verifiable-memory', semantics: 'merged',
+      });
+      expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string)).toMatchObject({ view: 'verifiable-memory', semantics: 'merged' });
+      const refused = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1', context_graph_id: 'my-cg', view: 'verifiable-memory', semantics: 'joined',
+      });
+      expect(JSON.parse(refused.content[0].text).error).toBe('"semantics" must be one of: merged, per-asset.');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+
     it('dkg_subscribe rejects a stringified include_shared_memory (same rationale as dkg_query)', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
       const result = await byName.get('dkg_subscribe')!.execute('tc', {

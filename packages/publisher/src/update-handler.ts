@@ -24,7 +24,8 @@ import {
 import { decodeKAUpdateRequest } from '@origintrail-official/dkg-core';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { skolemizeByEntity } from './auto-partition.js';
-import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
+import { assertWritableQuadTerms, validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
+import { assertNoReceivedProtocolMetadata } from './protocol-metadata.js';
 import { computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
 import { hasValidGraphScopedContent } from './graph-publish-envelope.js';
 import {
@@ -246,10 +247,12 @@ export class UpdateHandler {
         }
       }
 
+      const wireQuads = assertNoReceivedProtocolMetadata(parseSimpleNQuads(new TextDecoder().decode(nquads)));
       if (graphUpdate) {
         await this.applyGraphScopedUpdate({
           request,
           graphUpdate,
+          wireQuads,
           fromPeerId,
           verifiedMerkleRoot,
           verifiedBlockNumber,
@@ -261,15 +264,11 @@ export class UpdateHandler {
       }
 
       // Merkle root integrity: recompute from the received payload (flat mode).
-      //
-      // Issue #31: the KC root on-chain is computed over public triple hashes
-      // *plus* each KA's privateMerkleRoot as a synthetic leaf (matches
-      // publisher/dkg-publisher.ts#computeUpdateAndPublish and publish-handler
-      // on ingest). Passing `[]` here would only match updates that carry zero
-      // private quads — any legitimate update with private commitments would be
-      // silently rejected for "merkle root mismatch". The manifest carries each
-      // root's privateMerkleRoot in the same order the publisher used to build
-      // the KC root, so we just forward them.
+      // Issue #31: the KC root on-chain covers public triple hashes *plus* each
+      // KA's privateMerkleRoot as a synthetic leaf (as computeUpdateAndPublish
+      // and publish-handler do). Passing `[]` would reject every update with
+      // private commitments; the manifest carries each root's privateMerkleRoot
+      // in the order the publisher used, so we forward them.
       await this.graphManager.ensureContextGraph(contextGraphId);
       // Uniform layout: a KA update replaces the published data in the SAME per-KA
       // verifiable-memory graph the original publish wrote (…/_verifiable_memory/{author}/{number}),
@@ -281,8 +280,7 @@ export class UpdateHandler {
         '0x' + (vmBatch >> 96n).toString(16).padStart(40, '0'),
         vmBatch & ((1n << 96n) - 1n),
       );
-      const nquadsStr = new TextDecoder().decode(nquads);
-      const quads = parseSimpleNQuads(nquadsStr);
+      const quads = assertWritableQuadTerms(wireQuads, manifest.map((m) => m.rootEntity));
 
       const privateRoots = manifest
         .map((m) => m.privateMerkleRoot)
@@ -487,6 +485,7 @@ export class UpdateHandler {
   private async applyGraphScopedUpdate(input: {
     request: KAUpdateRequestMsg;
     graphUpdate: GraphScopedUpdateRequest;
+    wireQuads: Quad[];
     fromPeerId: string;
     verifiedMerkleRoot?: Uint8Array;
     verifiedBlockNumber?: number;
@@ -497,6 +496,7 @@ export class UpdateHandler {
     const {
       request,
       graphUpdate,
+      wireQuads: parsed,
       fromPeerId,
       verifiedMerkleRoot,
       verifiedBlockNumber,
@@ -562,7 +562,6 @@ export class UpdateHandler {
       return;
     }
 
-    const parsed = parseSimpleNQuads(new TextDecoder().decode(request.nquads));
     const publicQuads = parsed.map((quad) => ({ ...quad, graph: '' }));
     if (publicQuads.length !== graphUpdate.publicTripleCount) {
       this.log.warn(
@@ -806,7 +805,7 @@ export class UpdateHandler {
       `INSERT DATA { GRAPH <${metaGraph}> {\n${metaTriples}\n} }`,
     ].filter(Boolean).join(';\n');
     await this.store.update(update, {
-      touchedGraphs: [vmGraph, metaGraph],
+      touchedGraphs: [vmGraph, metaGraph], writtenGraphs: [vmGraph, metaGraph],
       source: 'publisher.updateHandler.graphScopedMaterialization',
     });
     return true;

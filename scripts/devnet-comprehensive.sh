@@ -10,7 +10,8 @@
 #   5. rc.12 feature probes (hub-rotation, multi-RPC failover, libp2p tunables,
 #      CG-phonebook agent discovery, structured ACK rejection reasons)
 #   6. node-ui smoke
-#   7. soak suite (libp2p / SWM / RS)
+#   7. large graph catalog (scoped queries on a node of about 100,000 graphs)
+#   8. soak suite (libp2p / SWM / RS)
 #
 # Bash 3.2 compatible (uses parallel indexed arrays instead of
 # `declare -A`).
@@ -233,6 +234,13 @@ fi
 if [ "${SKIP_UI:-0}" != "1" ]; then
   register "node-ui-smoke" "node-ui" "$REPO_ROOT/scripts/devnet-test-node-ui-smoke.sh"
 fi
+
+# Group: large-catalog — scoped queries on a small context graph of a node whose
+# store holds about 100,000 graphs, a graph catalog larger than any caller's
+# limit, and the answer to a node-side limit. It loads the graphs into one
+# node's store, restarts that node, and removes the graphs again, so the soak
+# after it meets that node with its usual store.
+register "large-catalog" "large-catalog" "$REPO_ROOT/scripts/devnet-test-large-catalog.sh"
 
 # Group: soak (LONG)
 if [ "${SKIP_SOAK:-0}" != "1" ]; then

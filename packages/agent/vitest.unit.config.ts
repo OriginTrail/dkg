@@ -92,6 +92,7 @@ export default defineConfig({
       "test/manifest-bound-snapshot-walk.test.ts",
       "test/private-swm-recovery-budget.test.ts",
       "test/swm-target-executor.test.ts",
+      "test/swm-target-executor-read-graph-pass.test.ts",
       "test/finalized-swm-twin-memo.test.ts",
       "test/swm-sync-sub-graph-registration.test.ts",
       "test/registered-public-sub-graph-first-write.test.ts",
@@ -161,6 +162,13 @@ export default defineConfig({
       "test/query-refused-aggregate.test.ts",
       "test/query-source-labels.test.ts",
       "test/query-private-authority-pending.test.ts",
+      "test/view-semantics-authority-order.test.ts",
+      "test/read-graph-qualification-views.test.ts",
+      "test/view-semantics-delta-report.test.ts",
+      "test/context-graph-held-graphs.test.ts",
+      "test/read-graph-declared-updates.test.ts",
+      "test/query-unheld-context-graph.test.ts",
+      "test/unheld-context-graph-read.test.ts",
       "test/unscoped-query-admission.test.ts",
       "test/prepare-unscoped-context-graph-read-checks.test.ts",
       "test/unscoped-query-consistency.test.ts",
@@ -359,6 +367,11 @@ export default defineConfig({
       "test/selected-swm-meta-transfer-coordinator.test.ts",
       "test/selected-swm-meta-budget.test.ts",
       "test/legacy-sync-graph-candidate.test.ts",
+      // Read-graph partitions stay out of every enumerating surface.
+      "test/read-graph-partition-comparison.test.ts",
+      "test/read-graph-runtime.test.ts",
+      "test/read-graph-settings-builder.test.ts",
+      "test/read-graph-working-memory.test.ts",
       "test/outbox-shutdown-lifecycle.test.ts",
       // Keyed persist scheduler shared by membership and subscription writes,
       // and the subscription drain / reopen that stop() and start() drive.
@@ -420,10 +433,14 @@ export default defineConfig({
       "test/vm-reconcile-self-prime.test.ts",
       "test/vm-reconcile-self-prime-budget.test.ts",
       "test/vm-reconcile-sweep.test.ts",
+      // The sweep's unbound lane spaces graphs whose name the chain holds no id for.
+      "test/vm-reconcile-absent-target-backoff.test.ts",
       "test/vm-reconcile-lifecycle-timer.test.ts",
       // #2858 — refresh of confirmed VM copies after an on-chain KA update.
       "test/vm-refresh-after-update.test.ts",
       "test/vm-promotion-gate.test.ts",
+      // A KA's latest root and publisher in one batched request; stub and real adapter, no hardhat.
+      "test/ka-latest-root-and-publisher.test.ts",
       "test/vm-recovery-microbatch-planner.test.ts",
       "test/vm-recovery-phase-timing.test.ts",
       // #3081 — where a confirmed publication waits for its catalog placement (observation only).

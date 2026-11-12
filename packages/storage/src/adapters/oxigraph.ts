@@ -1,10 +1,10 @@
-import { oxigraphGraphEnumerationVisibility } from '../graph-enumeration-visibility.js';
+import { storeGraphEnumerationVisibility } from '../graph-enumeration-visibility.js';
 import { assertJsonResponseWithinLimit, mapBoundedSelectResult, mapBoundedConstructResult } from './bounded-query-result.js';
 import type { QueryOptions } from '../triple-store.js';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import oxigraph from 'oxigraph';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
-import { assertGraphCatalogWithinResponseLimit } from '../graph-catalog-response-limit.js';
+import { assertGraphCatalogWithinInternalLimit } from '../graph-catalog-internal-limit.js';
 import { withheldGraphQueryDataset } from './withheld-graph-dataset.js';
 import { existsSync, renameSync } from 'node:fs';
 import { mkdir, open, rename } from 'node:fs/promises';
@@ -44,6 +44,8 @@ import {
 } from '../rfc64-author-commit-cas.js';
 import { quadsToNQuads } from '../bounded-rdf.js';
 import { sparqlStatements } from './sparql-statements.js';
+import { refuseReadGraphOperations, withReadGraphOperations, withReadGraphOperationsAroundCallerUpdate, withReadGraphs } from './read-graph-request.js';
+import { deleteMatching, deleteQuads, OXIGRAPH_READ_GRAPH_CAPABILITIES, quadsRemoved, type ReadGraphCapableAdapter } from './oxigraph-read-graph-writes.js';
 import {
   assertQuadLiteralsMutf8Safe,
   classifySparqlOperation,
@@ -70,13 +72,18 @@ type OxStore = InstanceType<typeof oxigraph.Store>;
 type OxTerm = oxigraph.Term;
 type OxQuad = oxigraph.Quad;
 
-export class OxigraphStore implements TripleStore {
+/** How long after a write the store waits before it writes its snapshot, by default. */
+const DEFAULT_FLUSH_DELAY_MS = 50;
+
+export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
   readonly writeRevisionCoverage = 'all-writers' as const;
-  readonly graphEnumerationVisibility = oxigraphGraphEnumerationVisibility;
+  readonly graphEnumerationVisibility = storeGraphEnumerationVisibility;
   readonly sparqlEngine = 'oxigraph' as const;
+  readonly restrictsQueryDataset = true as const;
   readonly queryCancellation = 'pre-dispatch' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
   readonly rfc64SemanticReadCertifiedV1 = true as const;
+  readonly readGraphCapabilities = OXIGRAPH_READ_GRAPH_CAPABILITIES;
   private store: OxStore;
   private persistPath: string | undefined;
   private readonly readOnly: boolean;
@@ -99,6 +106,8 @@ export class OxigraphStore implements TripleStore {
     this.store = new oxigraph.Store();
     this.persistPath = persistPath;
     this.readOnly = options.readOnly === true;
+    this.flushDelayMs = typeof options.flushDelayMs === 'number' && Number.isFinite(options.flushDelayMs) && options.flushDelayMs >= 0
+      ? Math.floor(options.flushDelayMs) : DEFAULT_FLUSH_DELAY_MS;
     if (persistPath) {
       this.hydrateSync(persistPath);
     }
@@ -166,6 +175,7 @@ export class OxigraphStore implements TripleStore {
 
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private flushing = false;
+  private readonly flushDelayMs: number;
 
   /** The native store for a write. A read-only store refuses before anything changes. */
   private get writable(): OxStore {
@@ -188,7 +198,7 @@ export class OxigraphStore implements TripleStore {
             `Next flush will retry; explicit flush() / close() will surface the error.`,
         );
       });
-    }, 50);
+    }, this.flushDelayMs);
   }
 
   /**
@@ -276,7 +286,8 @@ export class OxigraphStore implements TripleStore {
     }
   }
 
-  async insert(quads: DKGQuad[]): Promise<void> {
+  async insert(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
+    refuseReadGraphOperations(options, 'OxigraphStore.insert');
     if (quads.length === 0) return;
     // Oversize parity with the Blazegraph adapter (OT-RFC-56 §4.6): Oxigraph
     // itself has no literal-size limit, which made oxigraph-backed nodes
@@ -297,8 +308,8 @@ export class OxigraphStore implements TripleStore {
         label: 'OxigraphStore.insert',
       });
     }
-    // The N-Quads load bypasses the SPARQL builders; it rejects a relative or
-    // RFC 3987-invalid IRI, failing the whole batch.
+    // The N-Quads load bypasses the SPARQL builders: every term is checked
+    // first, so a malformed one fails the whole batch before anything loads.
     statements.checkIris.insert(quads);
     const nquads = `${quadsToNQuads(quads)}\n`;
     this.writable.load(nquads, { format: 'application/n-quads' });
@@ -309,37 +320,32 @@ export class OxigraphStore implements TripleStore {
     });
   }
 
-  async delete(quads: DKGQuad[]): Promise<void> {
-    for (const q of quads) {
-      const oxQuad = toOxQuad(q);
-      if (oxQuad) this.writable.delete(oxQuad);
-    }
+  async delete(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
+    deleteQuads(() => this.writable, quads, options, toOxQuad);
     this.scheduleFlush();
-    this.writeGen.recordWrite({
+    this.writeGen.recordWrite(withReadGraphs({
       kind: 'graphs',
       graphs: [...new Set(quads.map((q) => q.graph || ''))],
-    });
+    }, options));
   }
 
-  async deleteByPattern(pattern: Partial<DKGQuad>): Promise<number> {
-    const matches = this.store.match(
+  async deleteByPattern(pattern: Partial<DKGQuad>, options?: QueryOptions): Promise<number> {
+    const terms = [
       pattern.subject ? oxigraph.namedNode(pattern.subject) : null,
       pattern.predicate ? oxigraph.namedNode(pattern.predicate) : null,
       pattern.object ? parseTerm(pattern.object) : null,
       pattern.graph ? oxigraph.namedNode(pattern.graph) : null,
-    );
-    for (const q of matches) {
-      this.writable.delete(q);
-    }
-    if (matches.length > 0) this.scheduleFlush();
-    this.writeGen.recordWrite(pattern.graph
+    ] as const;
+    const matches = this.store.match(...terms);
+    if (deleteMatching(() => this.writable, terms, matches, options)) this.scheduleFlush();
+    this.writeGen.recordWrite(withReadGraphs(pattern.graph
       ? { kind: 'graphs', graphs: [pattern.graph] }
-      : { kind: 'all' });
+      : { kind: 'all' }, options));
     return matches.length;
   }
 
-  async deleteByPatternWithoutCount(pattern: Partial<DKGQuad>): Promise<void> {
-    await this.deleteByPattern(pattern);
+  async deleteByPatternWithoutCount(pattern: Partial<DKGQuad>, options?: QueryOptions): Promise<void> {
+    await this.deleteByPattern(pattern, options);
   }
 
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
@@ -351,7 +357,7 @@ export class OxigraphStore implements TripleStore {
     // cannot interrupt this native call mid-flight. Use oxigraph-worker or an
     // HTTP backend when long sync queries need prompt cancellation.
     const withheld = options?.withheldGraphRoots;
-    const result = withheld?.length
+    const result = withheld
       ? this.store.query(sparql, withheldGraphQueryDataset(this.store, withheld, this.graphEnumerationVisibility))
       : this.store.query(sparql);
     throwIfAborted(options?.signal);
@@ -430,14 +436,14 @@ export class OxigraphStore implements TripleStore {
     return this.writeGen.getWriteRevision(graphPrefix);
   }
 
-  async dropGraph(graphUri: string): Promise<void> {
+  async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
     const plan = statements.dropGraph(graphUri);
-    this.writable.update(plan.update);
+    this.writable.update(withReadGraphOperations(plan.update, options));
     this.scheduleFlush();
-    this.writeGen.recordWrite(plan.scope);
+    this.writeGen.recordWrite(withReadGraphs(plan.scope, options));
   }
 
-  async replaceGraph(graphUri: string, quads: DKGQuad[]): Promise<void> {
+  async replaceGraph(graphUri: string, quads: DKGQuad[], options?: QueryOptions): Promise<void> {
     const guarded = quads.filter(
       (q) => !(q.graph && SHARED_MEMORY_DATA_SEGMENT_RE.test(q.graph)),
     );
@@ -450,7 +456,7 @@ export class OxigraphStore implements TripleStore {
     const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
     statements.checkIris.replaceGraph(graphUri, quads);
     try {
-      this.writable.update(plan.update);
+      this.writable.update(withReadGraphOperations(plan.update, options));
     } catch (error) {
       if (plan.cleanup) {
         try {
@@ -464,16 +470,16 @@ export class OxigraphStore implements TripleStore {
       throw error;
     }
     this.scheduleFlush();
-    this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
+    this.writeGen.recordWrite(withReadGraphs({ kind: 'graphs', graphs: [graphUri] }, options));
   }
 
   async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
     const plan = buildAtomicAssetGroupUpdate(assets);
     statements.checkIris.replaceAssetGroup(assets);
     options?.signal?.throwIfAborted();
-    this.writable.update(plan.update);
+    this.writable.update(withReadGraphOperations(plan.update, options));
     this.scheduleFlush();
-    this.writeGen.recordWrite({ kind: 'graphs', graphs: plan.graphs });
+    this.writeGen.recordWrite(withReadGraphs({ kind: 'graphs', graphs: plan.graphs }, options));
   }
 
   async replaceGraphAndSubject(
@@ -482,6 +488,7 @@ export class OxigraphStore implements TripleStore {
     metaGraphUri: string,
     metadataSubject: string,
     metadataQuads: DKGQuad[],
+    options?: QueryOptions,
   ): Promise<void> {
     assertQuadLiteralsMutf8Safe([...graphQuads, ...metadataQuads], {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
@@ -502,7 +509,7 @@ export class OxigraphStore implements TripleStore {
       metadataQuads,
     );
     try {
-      this.writable.update(plan.update);
+      this.writable.update(withReadGraphOperations(plan.update, options));
     } catch (error) {
       try {
         this.writable.update(plan.cleanup);
@@ -513,10 +520,10 @@ export class OxigraphStore implements TripleStore {
       throw error;
     }
     this.scheduleFlush();
-    this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri, metaGraphUri] });
+    this.writeGen.recordWrite(withReadGraphs({ kind: 'graphs', graphs: [graphUri, metaGraphUri] }, options));
   }
 
-  async replaceSubject(graphUri: string, subject: string, quads: DKGQuad[]): Promise<void> {
+  async replaceSubject(graphUri: string, subject: string, quads: DKGQuad[], options?: QueryOptions): Promise<void> {
     const guarded = quads.filter(
       (q) => !(q.graph && SHARED_MEMORY_DATA_SEGMENT_RE.test(q.graph)),
     );
@@ -532,9 +539,9 @@ export class OxigraphStore implements TripleStore {
     // rolls the whole thing back.
     const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
     statements.checkIris.replaceSubject(graphUri, subject, quads);
-    this.writable.update(update);
+    this.writable.update(withReadGraphOperations(update, options));
     this.scheduleFlush();
-    this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
+    this.writeGen.recordWrite(withReadGraphs({ kind: 'graphs', graphs: [graphUri] }, options));
   }
 
   async replaceSubjectAndInsert(
@@ -552,9 +559,9 @@ export class OxigraphStore implements TripleStore {
     }
     const update = buildAtomicSubjectAndInsertUpdate(graphUri, subject, replacementQuads, insertQuads);
     statements.checkIris.replaceSubjectAndInsert(graphUri, subject, quads);
-    this.writable.update(update);
+    this.writable.update(withReadGraphOperations(update, options));
     this.scheduleFlush();
-    this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
+    this.writeGen.recordWrite(withReadGraphs({ kind: 'graphs', graphs: [graphUri] }, options));
   }
 
   async rfc64AuthorCommitCasV1(
@@ -563,21 +570,21 @@ export class OxigraphStore implements TripleStore {
   ): Promise<Rfc64AuthorCommitCasResultV1> {
     throwIfAborted(options?.signal);
     return this.executeRfc64AuthorCommitCasPlanV1(
-      buildRfc64AuthorCommitCasUpdateV1(input),
+      buildRfc64AuthorCommitCasUpdateV1(input), options,
     );
   }
 
   /** Worker-only transport boundary for the structured-cloned internal plan. */
   async rfc64AuthorCommitCasNormalizedV1(
-    input: unknown,
+    input: unknown, options?: QueryOptions,
   ): Promise<Rfc64AuthorCommitCasResultV1> {
     return this.executeRfc64AuthorCommitCasPlanV1(
-      buildRfc64AuthorCommitCasUpdateFromNormalizedV1(input),
+      buildRfc64AuthorCommitCasUpdateFromNormalizedV1(input), options,
     );
   }
 
   private async executeRfc64AuthorCommitCasPlanV1(
-    plan: Rfc64AuthorCommitCasUpdateV1,
+    plan: Rfc64AuthorCommitCasUpdateV1, options?: QueryOptions,
   ): Promise<Rfc64AuthorCommitCasResultV1> {
     const guarded = plan.semanticQuads.filter(
       (quad) => !(quad.graph && SHARED_MEMORY_DATA_SEGMENT_RE.test(quad.graph)),
@@ -590,7 +597,7 @@ export class OxigraphStore implements TripleStore {
     }
     statements.checkIris.rfc64AuthorCommitCasV1(plan);
     return executeRfc64AuthorCommitCasV1({
-      executeUpdate: () => this.writable.update(plan.update),
+      executeUpdate: () => this.writable.update(withReadGraphOperations(plan.update, options)),
       readReceipt: () => this.store.query(plan.receiptAsk),
       cleanup: () => {
         try {
@@ -600,7 +607,7 @@ export class OxigraphStore implements TripleStore {
         }
       },
       onCommitted: () => {
-        this.writeGen.recordWrite({ kind: 'graphs', graphs: [...plan.touchedGraphs] });
+        this.writeGen.recordWrite(withReadGraphs({ kind: 'graphs', graphs: [...plan.touchedGraphs] }, options));
       },
     });
   }
@@ -611,10 +618,7 @@ export class OxigraphStore implements TripleStore {
     // NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY.
     const result = this.store.query(NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY);
     throwIfAborted(options?.signal);
-    if (typeof result === 'boolean' || typeof result === 'string' || !Array.isArray(result)) {
-      assertGraphCatalogWithinResponseLimit([], options?.maxResponseBytes);
-      return [];
-    }
+    if (typeof result === 'boolean' || typeof result === 'string' || !Array.isArray(result)) return [];
     const graphs = (result as Map<string, OxTerm>[])
       .filter((row): row is Map<string, OxTerm> => row instanceof Map)
       .map((row) => {
@@ -622,20 +626,17 @@ export class OxigraphStore implements TripleStore {
         return g ? g.value : '';
       })
       .filter(this.graphEnumerationVisibility);
-    assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
+    // The complete list is node state: the internal catalog ceiling bounds it, not a caller's limit.
+    assertGraphCatalogWithinInternalLimit(graphs);
     return graphs;
   }
 
-  async deleteBySubjectPrefix(
-    graphUri: string,
-    prefix: string,
-  ): Promise<number> {
+  async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
     const plan = statements.deleteBySubjectPrefix(graphUri, prefix);
-    const before = this.store.size;
-    this.writable.update(plan.update);
-    const removed = before - this.store.size;
+    const update = withReadGraphOperations(plan.update, options);
+    const removed = quadsRemoved(this.store, graphUri, options, () => this.writable.update(update));
     if (removed > 0) this.scheduleFlush();
-    this.writeGen.recordWrite(plan.scope);
+    this.writeGen.recordWrite(withReadGraphs(plan.scope, options));
     return removed;
   }
 
@@ -644,12 +645,11 @@ export class OxigraphStore implements TripleStore {
    * graph-to-graph `INSERT…WHERE` copies keep terms byte-identical (no JS
    * termToString→parseTerm round-trip). See {@link TripleStore.update}.
    */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async update(sparql: string, _options?: UpdateOptions): Promise<void> {
+  async update(sparql: string, options?: UpdateOptions): Promise<void> {
     // In-process oxigraph is never wrapped by a graph-set index, so the
     // `touchedGraphs` hint is inapplicable here — accepted for a uniform
     // update contract, ignored.
-    this.writable.update(sparql);
+    this.writable.update(withReadGraphOperationsAroundCallerUpdate(sparql, options));
     this.scheduleFlush();
     // A raw UPDATE's write scope is not derivable at the call site
     // (`touchedGraphs` hints only membership changes) — unscoped bump.

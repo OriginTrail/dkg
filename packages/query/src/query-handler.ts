@@ -5,9 +5,12 @@ import {
   quadsToNQuads,
   type StoreSchedulerBusyErrorLike,
 } from '@origintrail-official/dkg-storage';
+import { isQueryResultTooLargeError } from './query-result-size-error.js';
+import { isQueryMaterializationTooLargeError } from './query-materialization-error.js';
 import { prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { validateReadOnlySparql } from './sparql-guard.js';
 import type { DKGQueryEngine } from './dkg-query-engine.js';
+import type { QueryOptions } from './query-engine.js';
 import type {
   QueryRequest,
   QueryResponse,
@@ -24,6 +27,11 @@ const MAX_LIMIT = 1000;
 const DEFAULT_TIMEOUT_MS = 5000;
 const MAX_TIMEOUT_MS = 30000;
 const MAX_RESULT_BYTES = 1_048_576; // 1 MB
+/**
+ * What a remote lookup may materialize, for SPARQL, entities by type and entity
+ * triples alike: the HTTP query route's result budget.
+ */
+export const REMOTE_SPARQL_MAX_RESULT_BYTES = 10 * 1024 * 1024;
 const STORE_BUSY_RETRY_AFTER_MS = 1_000;
 // PR #1107 review (🔴): cache isContextGraphPublic verdicts so repeated
 // remote queries against the same CG don't each burn an RPC round-trip on
@@ -88,6 +96,7 @@ export class QueryHandler {
   private readonly defaultRatePerMinute: number;
   private readonly deps: QueryHandlerDeps;
   private readonly publicCgCache = new Map<string, { value: boolean; expiresAt: number }>();
+  private readonly internalLimitWarnings = createStoreInternalLimitWarnings();
 
   constructor(queryEngine: DKGQueryEngine, config: QueryAccessConfig, deps: QueryHandlerDeps = {}) {
     this.queryEngine = queryEngine;
@@ -187,8 +196,18 @@ export class QueryHandler {
     } catch (err) {
       const busyError = storeSchedulerBusyCause(err);
       if (busyError) return storeBusyResponse(opId, busyError);
+      const internalLimit = storeInternalLimitCause(err);
+      if (internalLimit) {
+        this.internalLimitWarnings.record(internalLimit);
+        return storeInternalLimitResponse(opId);
+      }
       if (err instanceof UalResolutionError) {
         return errorResponse(opId, 'ERROR', err.message);
+      }
+      const overBudget = resultOverBudget(err);
+      if (overBudget) {
+        return errorResponse(opId, 'ERROR',
+          `Query result exceeds byte limit (${overBudget.actualBytes} > ${overBudget.maxBytes})`);
       }
       return errorResponse(opId, 'ERROR', 'Internal error processing query');
     }
@@ -394,7 +413,7 @@ export class QueryHandler {
     }
 
     const sparql = `SELECT DISTINCT ?entity WHERE { ?entity a <${assertSafeIri(rdfType)}> } LIMIT ${limit}`;
-    const result = await this.queryEngine.query(sparql, { contextGraphId, view: 'verifiable-memory' });
+    const result = await this.queryEngine.query(sparql, remoteLookupOptions(contextGraphId, 'verifiable-memory'));
     const entityUris = result.bindings.map(b => b['entity']);
 
     return {
@@ -416,7 +435,7 @@ export class QueryHandler {
     }
 
     const sparql = `SELECT ?p ?o WHERE { <${assertSafeIri(entityUri)}> ?p ?o }`;
-    const result = await this.queryEngine.query(sparql, { contextGraphId, view: 'verifiable-memory' });
+    const result = await this.queryEngine.query(sparql, remoteLookupOptions(contextGraphId, 'verifiable-memory'));
 
     const ntriples = result.bindings
       .map(b => `<${entityUri}> <${b['p']}> ${formatObject(b['o'])} .`)
@@ -471,30 +490,28 @@ export class QueryHandler {
     // bounds the *response* latency but does not cancel the underlying
     // SPARQL execution — the engine has no cancellation hook, so an
     // expensive remote query keeps consuming CPU/memory in the background
-    // until it completes naturally. Likewise `limit` below is applied as a
-    // post-materialization `.slice()`, so a high-cardinality query is fully
-    // materialized before being truncated. Genuinely enforcing either bound
-    // requires threading an `AbortSignal` + result cap through
-    // `QueryEngine.query()` → storage → the oxigraph worker. Injecting a
-    // `LIMIT` into the user query here is NOT a safe shortcut: for scoped
+    // until it completes naturally. The result budget bounds the bytes the
+    // engine materializes; `limit` below still slices the rows after that.
+    // Injecting a `LIMIT` into the user query here is NOT a safe shortcut: for scoped
     // queries it would push the statement into the multi-graph
     // solution-set-modifier rejection path (see #789), so it is
     // deliberately left to the engine-level follow-up.
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const result = await Promise.race([
-      this.queryEngine.query(sparql, { contextGraphId }),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('timeout')), timeout);
-      }),
-    ]).catch(err => {
-      if (err.message === 'timeout') {
-        return { _timeout: true } as any;
+    let result: Awaited<ReturnType<DKGQueryEngine['query']>>;
+    try {
+      result = await Promise.race([
+        this.queryEngine.query(sparql, remoteLookupOptions(contextGraphId)),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('timeout')), timeout);
+        }),
+      ]);
+    } catch (err) {
+      if ((err as { message?: unknown } | null)?.message === 'timeout') {
+        return errorResponse(opId, 'GAS_LIMIT_EXCEEDED', `Query exceeded time limit (${timeout}ms)`);
       }
       throw err;
-    }).finally(() => clearTimeout(timer!));
-
-    if (result._timeout) {
-      return errorResponse(opId, 'GAS_LIMIT_EXCEEDED', `Query exceeded time limit (${timeout}ms)`);
+    } finally {
+      clearTimeout(timer);
     }
 
     const bindings = result.bindings.slice(0, limit);
@@ -518,6 +535,24 @@ export class QueryHandler {
       bindings: response.bindings?.slice(0, MAX_RESULT_BYTES) ?? response.bindings,
     };
   }
+}
+
+/** The engine options of a remote lookup: its scope, with the result budget every remote lookup gets. */
+function remoteLookupOptions(contextGraphId: string, view?: 'verifiable-memory'): QueryOptions {
+  return {
+    contextGraphId,
+    ...(view === undefined ? {} : { view }),
+    maxResponseBytes: REMOTE_SPARQL_MAX_RESULT_BYTES,
+    maxMaterializedBytes: REMOTE_SPARQL_MAX_RESULT_BYTES,
+  };
+}
+
+/** A result over the lookup's budget: one store response, or the request's materialized total. */
+function resultOverBudget(error: unknown): { maxBytes: number; actualBytes: number | bigint } | null {
+  if (!isQueryResultTooLargeError(error) && !isQueryMaterializationTooLargeError(error)) return null;
+  const { maxBytes, actualBytes } = error as { maxBytes?: unknown; actualBytes?: unknown };
+  return typeof maxBytes === 'number' && (typeof actualBytes === 'number' || typeof actualBytes === 'bigint')
+    ? { maxBytes, actualBytes } : null;
 }
 
 function errorResponse(
@@ -558,6 +593,65 @@ function storeBusyResponse(
     retryable: true,
     retryAfterMs: STORE_BUSY_RETRY_AFTER_MS,
     reason: error.reason,
+  };
+}
+
+/**
+ * A node-side store limit: the node's own state passed one of its internal
+ * bounds. Recognized by its code, as the store error crosses package and
+ * worker boundaries.
+ */
+function isStoreInternalLimit(error: unknown): error is { code: 'STORE_INTERNAL_LIMIT'; limitName?: unknown } {
+  return typeof error === 'object' && error !== null
+    && (error as { code?: unknown }).code === 'STORE_INTERNAL_LIMIT';
+}
+
+function storeInternalLimitCause(error: unknown): { limitName?: unknown } | null {
+  if (isStoreInternalLimit(error)) return error;
+  if (error instanceof UalResolutionError && isStoreInternalLimit(error.cause)) return error.cause;
+  return null;
+}
+
+/** The retryable BUSY answer. A remote peer learns only that it is a node-side condition. */
+function storeInternalLimitResponse(opId: string): QueryBusyResponse {
+  return {
+    operationId: opId,
+    status: 'BUSY',
+    truncated: false,
+    resultCount: 0,
+    error: 'Node storage reached an internal limit. Retry later.',
+    code: 'STORE_INTERNAL_LIMIT',
+    retryable: true,
+    retryAfterMs: STORE_BUSY_RETRY_AFTER_MS,
+  };
+}
+
+const LIMIT_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+
+/**
+ * One warning per interval naming the limit; the next warning reports how many
+ * answers it held back.
+ */
+function createStoreInternalLimitWarnings(
+  now: () => number = () => performance.now(),
+  intervalMs = 60_000,
+): { record(error: { limitName?: unknown }): void } {
+  let warnedAt: number | undefined;
+  let heldBack = 0;
+  return {
+    record(error) {
+      const at = now();
+      if (warnedAt !== undefined && at - warnedAt >= 0 && at - warnedAt < intervalMs) {
+        heldBack += 1;
+        return;
+      }
+      const limit = typeof error.limitName === 'string' && LIMIT_NAME.test(error.limitName)
+        ? error.limitName : 'unknown';
+      console.warn(`[query-handler] Node-side store limit reached, answered BUSY STORE_INTERNAL_LIMIT: limit=${limit}`
+        + (heldBack > 0 ? ` (${heldBack} more since the last warning)` : ''));
+      warnedAt = at;
+      heldBack = 0;
+    },
   };
 }
 

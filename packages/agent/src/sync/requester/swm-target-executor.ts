@@ -98,6 +98,12 @@ export interface SwmTargetExecutorPortsV1 {
   readonly logInfo: (ctx: OperationContext, message: string) => void;
   readonly logWarn: (ctx: OperationContext, message: string) => void;
   readonly logDebug: (ctx: OperationContext, message: string) => void;
+  /**
+   * Asks the read-graph builder for a pass at once. Called after a round that wrote snapshot graphs:
+   * the read-graph layer maintains each write, and the pass rebuilds at once what the import changed
+   * for the builder, such as a membership, instead of at its next interval.
+   */
+  readonly requestReadGraphBuild?: () => void;
 }
 
 interface PublicSwmTargetBaseV1 {
@@ -185,6 +191,7 @@ export class SwmTargetExecutorV1 {
     const ctx = createOperationContext('sync');
     const admission = () => this.#getSubGraphAdmission(target.contextGraphId);
     let snapshotLease: PrivateSwmSnapshotWalkLease | undefined;
+    const snapshots = { wrote: false };
     const options: Omit<RecoverContextGraphSwmOptions, 'deadline' | 'workAdmission'> = {
       ctx,
       remotePeerId: target.remotePeerId,
@@ -211,7 +218,7 @@ export class SwmTargetExecutorV1 {
       processSharedMemoryBatch: this.#ports.processSharedMemoryBatch,
       writeLocks: this.#ports.writeLocks,
       publicSnapshotStore: this.#ports.publicSnapshotStore,
-      snapshotMaterializer: this.#snapshotMaterializer,
+      snapshotMaterializer: noteSnapshotWrites(this.#snapshotMaterializer, snapshots),
       resolveRootAtomicCompanion: this.#ports.resolveRootSnapshotAtomicCompanion,
       store: this.#recoveryMutation.store,
       replaceMetaForRoots: (roots, metaGraphs) => this.#recoveryMutation
@@ -246,9 +253,14 @@ export class SwmTargetExecutorV1 {
       createRoundDeadline: () => this.#ports.createContextGraphSyncDeadline(1),
       onRetry: target.onRetry,
       snapshotProgressRetention: () => snapshotLease?.kind ?? 'detached',
-      recover: (_round, workAdmission, deadline) =>
-        recoverContextGraphSwm({ ...options, deadline, workAdmission }),
-    });
+      recover: async (_round, workAdmission, deadline) => {
+        const round = await recoverContextGraphSwm({ ...options, deadline, workAdmission });
+        // Private recovery replaces a named sub-graph's snapshot graphs through its own store, not
+        // the materializer: each retry's count of replaced graphs says whether it wrote any.
+        if (round.replacedGraphs > 0) snapshots.wrote = true;
+        return round;
+      },
+    }).finally(() => this.#afterSnapshotRound(snapshots));
     if (result.completed) snapshotLease?.release();
     return result;
   }
@@ -286,6 +298,7 @@ export class SwmTargetExecutorV1 {
       });
       await this.#registerSyncedSubGraphs(target, quads);
     };
+    const snapshots = { wrote: false };
     return runSharedMemorySync({
       mode,
       freshSnapshot: target.freshSnapshot,
@@ -312,7 +325,7 @@ export class SwmTargetExecutorV1 {
       includeRootScope: target.includeRootScope,
       stopOnBackoffWorthyFailure: target.stopOnBackoffWorthyFailure,
       ensureContextGraph: this.#recoveryMutation.ensureContextGraph,
-      snapshotMaterializer: this.#snapshotMaterializer,
+      snapshotMaterializer: noteSnapshotWrites(this.#snapshotMaterializer, snapshots),
       ordinaryRootSnapshotApplyAllowed: this.#ports.ordinaryRootSnapshotApplyAllowed,
       resolveRootSnapshotAtomicCompanion:
         this.#ports.resolveRootSnapshotAtomicCompanion,
@@ -330,7 +343,12 @@ export class SwmTargetExecutorV1 {
       logInfo: this.#ports.logInfo,
       logWarn: this.#ports.logWarn,
       logDebug: this.#ports.logDebug,
-    });
+    }).finally(() => this.#afterSnapshotRound(snapshots));
+  }
+
+  /** After a round that wrote snapshot graphs, ask the read-graph builder for a pass at once. */
+  #afterSnapshotRound(snapshots: { readonly wrote: boolean }): void {
+    if (snapshots.wrote) this.#ports.requestReadGraphBuild?.();
   }
 
   /**
@@ -557,4 +575,22 @@ export async function isKnownContextGraphUri(
     { source: 'agent.subGraphClassification.knownContextGraph' },
   );
   return result.type === 'boolean' && result.value;
+}
+
+/** The materializer for one round, noting in `snapshots` whether the round wrote a snapshot graph. */
+function noteSnapshotWrites(
+  materializer: SharedMemorySnapshotMaterializer,
+  snapshots: { wrote: boolean },
+): SharedMemorySnapshotMaterializer {
+  return {
+    ...materializer,
+    replaceGraph: async (graphUri, quads) => {
+      await materializer.replaceGraph(graphUri, quads);
+      snapshots.wrote = true;
+    },
+    replaceGraphWithAtomicCompanion: async (graphUri, quads, companion) => {
+      await materializer.replaceGraphWithAtomicCompanion(graphUri, quads, companion);
+      snapshots.wrote = true;
+    },
+  };
 }

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import * as sparqlHttp from '../src/adapters/sparql-http.js';
 import * as atomicGraphReplace from '../src/atomic-graph-replace.js';
 import { sparqlStatements } from '../src/adapters/sparql-statements.js';
+import { SparqlTermValidationError } from '@origintrail-official/dkg-core';
 import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 // These helpers moved, but `dist/adapters/sparql-http.js` and
@@ -30,10 +31,12 @@ describe('exports kept at their former module paths', () => {
       const shimmed = [valid, invalid].map((quads) => sparqlHttp.buildBlankNodeSafeDelete(quads));
       // The shim, like the function it replaces, reports nothing.
       expect(observed.counted).toEqual([]);
-      // The adapters' factory builds the same updates, and reports the invalid term once.
-      expect([valid, invalid].map((quads) => sparqlStatements('sparql-http').deleteData(quads)!.update))
-        .toEqual(shimmed);
-      expect(observed.counted.map((point) => [point.operation, point.position])).toEqual([['delete', 'predicate']]);
+      // The adapters' factory builds the same update for well-formed terms, and
+      // refuses the invalid one, reporting it once.
+      expect(sparqlStatements('sparql-http').deleteData(valid)!.update).toBe(shimmed[0]);
+      expect(() => sparqlStatements('sparql-http').deleteData(invalid)).toThrow(SparqlTermValidationError);
+      expect(observed.counted.map((point) => [point.operation, point.position, point.enforcement]))
+        .toEqual([['delete', 'predicate', 'reject']]);
     } finally {
       observed.restore();
     }

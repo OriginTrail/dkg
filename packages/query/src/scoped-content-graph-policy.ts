@@ -2,7 +2,7 @@ import { validateSubGraphName } from '@origintrail-official/dkg-core';
 // SPDX-License-Identifier: Apache-2.0
 import { contextGraphDataUri, contextGraphSharedMemoryMetaUri } from '@origintrail-official/dkg-core';
 import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
-import { classifyScopedContentGraph, isExcludedContentGraphTail, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
+import { classifyScopedContentGraph, isExcludedContentGraph, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
 import { resolveDraftAccessPolicy, isContentPartitionEligible } from './content-partition-policy.js';
 import type { ContentPartition } from './content-partition-policy.js';
 import type { QueryOptions } from './query-engine.js';
@@ -52,7 +52,7 @@ export function selectScopedRoutePartitions(policy: RoutePolicy, partitions: rea
 /** Legacy explicit IRIs retain prefix authority without gaining classified draft expansion. */
 export function selectLegacyScopedRouteGraphs(policy: RoutePolicy, partitions: ReadonlyMap<string, readonly string[]>): string[] {
   return mergeRouteGraphs(policy, scopedRouteContentPrefixes(policy).flatMap(({ root }) =>
-    (partitions.get(root) ?? []).filter(graph => !isExcludedContentGraphTail(graph.slice(policy.rootGraph.length + 1)))));
+    (partitions.get(root) ?? []).filter(graph => !isExcludedContentGraph(graph, policy.rootGraph))));
 }
 export function isScopedRoutePartition(policy: RoutePolicy,
   graph: string, registeredSubGraphs: Set<string>, registeredAssertionGraphs: Set<string>, children: Set<string>): boolean {

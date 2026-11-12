@@ -3,6 +3,7 @@ import type {
   GetView,
   TrustLevel,
   OperationContext,
+  ViewQuerySemantics,
 } from "@origintrail-official/dkg-core";
 import type { PublicSnapshotMode } from "./public-snapshot-evidence.js";
 export interface AgentQueryOptions {
@@ -43,6 +44,8 @@ export interface AgentQueryOptions {
   source?: string;
   operationCtx?: OperationContext;
   view?: GetView;
+  /** How a view query matches its patterns; the node's default for the context graph when absent. */
+  semantics?: ViewQuerySemantics;
   agentAddress?: string;
   verifiedGraph?: string;
   assertionName?: string;

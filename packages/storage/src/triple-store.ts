@@ -1,22 +1,18 @@
 import type { MeasuredGraphInventory } from './graph-inventory-materialization.js';
+import { configureStoreGraphCatalogMaxBytes } from './graph-catalog-internal-limit.js';
 /**
  * TripleStore — pure SPARQL 1.1 interface for any RDF repository.
  * No vendor-specific methods. Any SPARQL-capable store (Oxigraph, Blazegraph,
  * Neptune, GraphDB, Jena, etc.) can implement this interface.
  */
-import { dirname, join } from 'node:path';
+import { SharedMemoryLiteralBlobStore } from './shared-memory-literal-blob-store.js';
 import {
-  DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES,
-  SharedMemoryLiteralBlobStore,
-} from './shared-memory-literal-blob-store.js';
-import {
-  GraphSetIndexStore,
-  type GraphSetIndexStoreOptions,
-} from './graph-set-index-store.js';
-import {
-  ChangelogStore,
-  type ChangelogStoreOptions,
-} from './changelog-store.js';
+  resolveAdapterOptions,
+  resolveLargeLiteralStorageOptions,
+  wrapChangelog,
+  wrapGraphSetIndex,
+  type TripleStoreConfig,
+} from './triple-store-composition.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 import type { StoreOperation } from './store-operation-outcome.js';
 import type {
@@ -32,9 +28,9 @@ import type {
   Rfc64ExactBindingsReadOperationV1,
   Rfc64SemanticReadCapabilityResultV1,
 } from './rfc64-exact-bindings-read-capability.js';
-import {
-  getManagedOxigraphRuntimeConstructionAuthorityV1,
-} from './managed-oxigraph-runtime-store.js';
+import { getManagedOxigraphRuntimeConstructionAuthorityV1 } from './managed-oxigraph-runtime-store.js';
+import { guardReadGraphPartition } from './read-graph-partition-store.js';
+import { wrapReadGraphLayer } from './read-graph/read-graph-store.js';
 
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 
@@ -124,9 +120,9 @@ export interface QueryOptions {
   /** Independent bound on hydrated literal bytes; defaults to maxResponseBytes. */
   maxLiteralHydrationBytes?: number;
   /**
-   * Named graphs the query must not read: each IRI and every graph below it. The
-   * query runs over the default graph and every other named graph, replacing any
-   * dataset it names; a store that cannot restrict its dataset refuses it.
+   * Named graphs the query must not read: each IRI and every graph below it. The query
+   * runs over the default graph and every other visible named graph, replacing any
+   * dataset it names. A store that cannot restrict its dataset refuses a non-empty list.
    */
   withheldGraphRoots?: readonly string[];
 }
@@ -177,6 +173,13 @@ export interface UpdateOptions extends QueryOptions {
    * back to a lazy full rebuild).
    */
   touchedGraphs?: readonly string[];
+  /**
+   * Every named graph whose triples this UPDATE may change. A store that holds
+   * read graphs refuses an update without it, and an empty list declares that
+   * the update changes no graph's triples. Unlike `touchedGraphs`, which names
+   * only the graphs whose existence changes, this names every graph written.
+   */
+  writtenGraphs?: readonly string[];
 }
 
 export interface TripleStore {
@@ -326,7 +329,7 @@ export interface TripleStore {
    */
   readonly graphEnumerationVisibility?: (graph: string) => boolean;
   listGraphs(options?: QueryOptions): Promise<string[]>;
-  /** Internal measured enumeration; decorators retain source cost across projections. */
+  /** Measured enumeration: the graphs returned, sized as returned; its full reads run under the internal ceiling. */
   readGraphInventory?(prefix: string | undefined, options?: QueryOptions): Promise<MeasuredGraphInventory>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 
@@ -437,6 +440,9 @@ export async function deleteByPatternWithoutCount<Pattern>(
 
 /**
  * Run a server-side update whose affected named graphs are known by the caller.
+ * `options.writtenGraphs` names every graph whose triples the update may change:
+ * a store that holds read graphs refuses an update without it. `touchedGraphs`
+ * names the graphs whose existence it may change, for the graph-set index.
  * Returns `false` when the store does not support `update()` directly, or when
  * a decorator reports that its wrapped store lacks the capability. Genuine
  * update execution errors propagate so feature code cannot mask an outage or
@@ -446,7 +452,7 @@ export async function tryUpdateWithTouchedGraphs(
   store: TripleStore,
   sparql: string,
   touchedGraphs: readonly string[],
-  options: QueryOptions = {},
+  options: QueryOptions & { readonly writtenGraphs: readonly string[] },
 ): Promise<boolean> {
   const update = store.update;
   if (typeof update !== 'function') return false;
@@ -592,7 +598,7 @@ export async function tryRfc64AuthorCommitCasV1(
   }
 }
 
-export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-worker' | 'blazegraph' | 'sparql-http' | string;
+export type { LargeLiteralStorageConfig, TripleStoreBackend, TripleStoreConfig } from './triple-store-composition.js';
 
 // Backends that talk to a remote SPARQL endpoint over HTTP rather than
 // owning local files. The local/external split governs three pieces of
@@ -658,30 +664,6 @@ export function getSparqlEndpoint(storeConfig: TripleStoreConfig): SparqlEndpoin
   return { queryUrl: queryEndpoint, updateUrl: updateEndpoint, headers };
 }
 
-export interface LargeLiteralStorageConfig {
-  /** Enable large SWM literal blob storage. Defaults to true when present. */
-  enabled?: boolean;
-  /** Externalize literal object terms larger than this UTF-8 byte size. */
-  thresholdBytes?: number;
-  /** Content-addressed blob directory. Defaults to `<dirname(options.path)>/literal-blobs` when a persistent path is available. */
-  directory?: string;
-}
-
-export interface TripleStoreConfig {
-  backend: TripleStoreBackend;
-  options?: Record<string, unknown>;
-  largeLiteralStorage?: LargeLiteralStorageConfig;
-  graphSetIndex?: boolean | GraphSetIndexStoreOptions;
-  /**
-   * OT-RFC-59 append-only change log (write-side). **Default OFF** — opt-in per
-   * store, independent of backend (unlike `graphSetIndex`, which is gated to
-   * local Oxigraph): the changelog must work on Blazegraph too, and its cost is
-   * a few marker quads per write. Enable ONLY on a single-writer (daemon) store;
-   * see the {@link ChangelogStore} single-writer caveat.
-   */
-  changelog?: boolean | ChangelogStoreOptions;
-}
-
 type AdapterFactory = (
   options?: Record<string, unknown>,
   constructionAuthority?: object,
@@ -700,14 +682,13 @@ export async function createTripleStore(
   config: TripleStoreConfig,
 ): Promise<TripleStore> {
   const factory = adapterRegistry.get(config.backend);
-  if (!factory) {
-    throw new Error(
-      `Unknown TripleStore backend: "${config.backend}". ` +
-        `Registered: [${[...adapterRegistry.keys()].join(', ')}]`,
-    );
-  }
+  if (!factory) throw new Error(`Unknown TripleStore backend: "${config.backend}". Registered: [${[...adapterRegistry.keys()].join(', ')}]`);
+  // Before the adapter exists, so its first catalog read is bounded by the configured ceiling.
+  if (config.graphCatalog?.maxBytes !== undefined) configureStoreGraphCatalogMaxBytes(config.graphCatalog.maxBytes);
   const constructionAuthority = getManagedOxigraphRuntimeConstructionAuthorityV1(config);
-  const store = await factory(resolveAdapterOptions(config), constructionAuthority);
+  // The read-graph layer sits directly above the adapter and under the partition guard.
+  const adapter = await factory(resolveAdapterOptions(config), constructionAuthority);
+  const store = guardReadGraphPartition(wrapReadGraphLayer(adapter, config));
   const largeLiteralStorage = resolveLargeLiteralStorageOptions(config);
   const withLargeLiteralStorage = largeLiteralStorage
     ? new SharedMemoryLiteralBlobStore(store, largeLiteralStorage)
@@ -717,84 +698,4 @@ export async function createTripleStore(
   // reuses the graph-set index's fast listGraphs() for reconcile, and hides its
   // own reserved graph from everything above.
   return wrapChangelog(withGraphSetIndex, config);
-}
-
-function wrapChangelog(store: TripleStore, config: TripleStoreConfig): TripleStore {
-  const changelog = config.changelog;
-  if (changelog == null || changelog === false) return store; // default OFF
-  if (typeof changelog === 'object' && changelog.enabled === false) return store;
-  const options = typeof changelog === 'object' ? changelog : undefined;
-  return new ChangelogStore(store, options);
-}
-
-function resolveAdapterOptions(config: TripleStoreConfig): Record<string, unknown> | undefined {
-  if (
-    config.backend !== 'sparql-http' ||
-    config.options?.managedByDkg !== true ||
-    isGraphSetIndexExplicitlyDisabled(config.graphSetIndex) ||
-    !shouldEnableGraphSetIndex(config)
-  ) {
-    return config.options;
-  }
-  // The outer GraphSetIndexStore replaces the adapter-local graph-list cache,
-  // so clear only that cache-ownership flag. A daemon-supervised Oxigraph
-  // process carries separate storage-issued runtime provenance; never derive
-  // that consistency proof from persisted namespace ownership.
-  return Object.freeze({
-    ...config.options,
-    managedByDkg: false,
-  });
-}
-
-function wrapGraphSetIndex(
-  store: TripleStore,
-  config: TripleStoreConfig,
-): TripleStore {
-  const graphSetIndex = config.graphSetIndex;
-  if (isGraphSetIndexExplicitlyDisabled(graphSetIndex)) return store;
-  if (!shouldEnableGraphSetIndex(config)) return store;
-  const options = typeof graphSetIndex === 'object' ? graphSetIndex : undefined;
-  return new GraphSetIndexStore(store, options);
-}
-
-function isGraphSetIndexExplicitlyDisabled(
-  graphSetIndex: TripleStoreConfig['graphSetIndex'],
-): boolean {
-  return graphSetIndex === false ||
-    (typeof graphSetIndex === 'object' && graphSetIndex.enabled === false);
-}
-
-function shouldEnableGraphSetIndex(config: TripleStoreConfig): boolean {
-  if (config.graphSetIndex === true || typeof config.graphSetIndex === 'object') return true;
-  if (isDefaultLocalGraphSetIndexBackend(config.backend)) return true;
-  return config.options?.managedByDkg === true;
-}
-
-function isDefaultLocalGraphSetIndexBackend(backend: TripleStoreBackend): boolean {
-  return backend === 'oxigraph'
-    || backend === 'oxigraph-persistent'
-    || backend === 'oxigraph-worker';
-}
-
-function resolveLargeLiteralStorageOptions(
-  config: TripleStoreConfig,
-): { blobDir: string; thresholdBytes: number } | undefined {
-  const largeLiteralStorage = config.largeLiteralStorage;
-  if (!largeLiteralStorage || largeLiteralStorage.enabled === false) return undefined;
-
-  const thresholdBytes = largeLiteralStorage.thresholdBytes ?? DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES;
-  const directory = largeLiteralStorage.directory ?? inferLiteralBlobDirectory(config.options);
-  if (!directory) {
-    throw new Error(
-      'largeLiteralStorage.directory is required when the triple-store options do not include a persistent path',
-    );
-  }
-
-  return { blobDir: directory, thresholdBytes };
-}
-
-function inferLiteralBlobDirectory(options: Record<string, unknown> | undefined): string | undefined {
-  const persistPath = options?.path;
-  if (typeof persistPath !== 'string' || persistPath.trim().length === 0) return undefined;
-  return join(dirname(persistPath), 'literal-blobs');
 }
