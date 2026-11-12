@@ -13,9 +13,10 @@ import {
   readGraphStateCompareAndSet,
   withReadGraphBackgroundSlot,
   wrapReadGraphLayer,
+  type ReadGraphModes,
 } from '@origintrail-official/dkg-storage';
 import { ContextGraphPartitionQueryMethods } from '../src/internal/context-graph-partition-query.js';
-import { READ_GRAPHS_OFF, ReadGraphWorkloadOwnerV1, readGraphWorkloadOf, type ReadGraphModesV1 } from '../src/read-graph-runtime.js';
+import { READ_GRAPHS_OFF, ReadGraphWorkloadOwnerV1, readGraphWorkloadOf } from '../src/read-graph-runtime.js';
 
 const CG = 'read-graph-runtime';
 const ROOT = `did:dkg:context-graph:${CG}`;
@@ -34,8 +35,9 @@ class InsertOnlyOxigraph extends OxigraphStore {
   }
 }
 
-async function agentView(options: { readonly subscribed?: readonly string[] } = {}) {
-  const store = wrapReadGraphLayer(new InsertOnlyOxigraph(), { backend: 'oxigraph' });
+/** An agent over a store of its own, its read graphs at `modes` (all off without them), as the node's settings set them. */
+async function agentView(options: { readonly subscribed?: readonly string[]; readonly modes?: ReadGraphModes } = {}) {
+  const store = wrapReadGraphLayer(new InsertOnlyOxigraph(), { backend: 'oxigraph', ...(options.modes ? { readGraphs: { modes: options.modes } } : {}) });
   await store.insert([
     { subject: `${ROOT}/code`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph', graph: `${ROOT}/_meta` },
     { subject: `${ROOT}/code`, predicate: 'http://schema.org/name', object: '"code"', graph: `${ROOT}/_meta` },
@@ -53,7 +55,7 @@ async function agentView(options: { readonly subscribed?: readonly string[] } = 
 }
 
 const logger = () => ({ info: vi.fn(), warn: vi.fn() });
-const modes = (on: (key: ReadGraphKey) => boolean): ReadGraphModesV1 => ({ modeOf: (key) => (on(key) ? 'build' : 'off'), keepsAny: () => true });
+const VM_BUILT: ReadGraphModes = { layers: { [MemoryLayer.VerifiableMemory]: 'build' } };
 
 describe('the agent read-graph workload', () => {
   it('does not start while every read graph is off', async () => {
@@ -67,9 +69,9 @@ describe('the agent read-graph workload', () => {
   });
 
   it('wants each kept layer of each subscribed context graph, whole and per registered sub-graph, and working memory per agent', async () => {
-    const { view, store } = await agentView();
+    const { view, store } = await agentView({ modes: { layers: { [MemoryLayer.VerifiableMemory]: 'build', [MemoryLayer.WorkingMemory]: 'build' } } });
     const query = vi.spyOn(store, 'query');
-    const owner = new ReadGraphWorkloadOwnerV1(view, { logger: logger(), modes: modes((key) => key.layer !== MemoryLayer.SharedWorkingMemory) });
+    const owner = new ReadGraphWorkloadOwnerV1(view, { logger: logger() });
     const keys = await owner.wanted();
     expect(keys.map((key) => readGraphIri(key)).sort()).toEqual([
       { scope: readScope(CG), layer: MemoryLayer.VerifiableMemory },
@@ -81,16 +83,17 @@ describe('the agent read-graph workload', () => {
     ].map((key) => readGraphIri(key as ReadGraphKey)).sort());
     expect(query.mock.calls.filter(([sparql]) => sparql.includes('SubGraph'))).toHaveLength(1);
     // A context graph that keeps nothing needs no registry read.
-    query.mockClear();
-    const none = new ReadGraphWorkloadOwnerV1(view, { logger: logger(), modes: modes(() => false) });
+    const off = await agentView();
+    const offQuery = vi.spyOn(off.store, 'query');
+    const none = new ReadGraphWorkloadOwnerV1(off.view, { logger: logger() });
     expect(await none.wanted()).toEqual([]);
-    expect(query.mock.calls.filter(([sparql]) => sparql.includes('SubGraph'))).toHaveLength(0);
+    expect(offQuery.mock.calls.filter(([sparql]) => sparql.includes('SubGraph'))).toHaveLength(0);
   });
 
   it('sets the identity rule, and marks working-memory read graphs dirty when it changes', async () => {
-    const { view, store, setDefaultAgent } = await agentView();
+    const { view, store, setDefaultAgent } = await agentView({ modes: { default: 'build' } });
     const runtime = readGraphRuntimeOf(store)!;
-    const owner = new ReadGraphWorkloadOwnerV1(view, { logger: logger(), modes: modes(() => true) });
+    const owner = new ReadGraphWorkloadOwnerV1(view, { logger: logger() });
     const wm = readGraphIri({ scope: readScope(CG), layer: MemoryLayer.WorkingMemory, agentAddress: AGENT });
     const vm = readGraphIri({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory });
     const ready = (readGraph: string) => ({ readGraph, state: 'ready' as const, generation: 5, ...CURRENT_READ_GRAPH_VERSIONS });
@@ -114,10 +117,10 @@ describe('the agent read-graph workload', () => {
   });
 
   it('logs a pass that fails', async () => {
-    const { view } = await agentView();
+    const { view } = await agentView({ modes: { default: 'build' } });
     const log = logger();
     const failing = { ...view, getSubscribedContextGraphs: (): ReadonlyMap<string, unknown> => { throw new Error('not started'); } };
-    const owner = new ReadGraphWorkloadOwnerV1(failing, { logger: log, intervalMs: 60_000, modes: modes(() => true) });
+    const owner = new ReadGraphWorkloadOwnerV1(failing, { logger: log, intervalMs: 60_000 });
     owner.start(ctx);
     await owner.whenIdle();
     expect(log.warn).toHaveBeenCalledWith(ctx, 'Read-graph build pass failed: not started');
@@ -125,17 +128,15 @@ describe('the agent read-graph workload', () => {
   });
 
   it('builds the read graphs it wants once started, and stops on close', async () => {
-    const { view, store } = await agentView({ subscribed: [CG] });
+    const { view, store } = await agentView({ subscribed: [CG], modes: VM_BUILT });
     const log = logger();
-    const owner = new ReadGraphWorkloadOwnerV1(view, {
-      logger: log, intervalMs: 60_000, modes: modes((key) => key.layer === MemoryLayer.VerifiableMemory && key.scope.kind === 'context-graph'),
-    });
+    const owner = new ReadGraphWorkloadOwnerV1(view, { logger: log, intervalMs: 60_000 });
     owner.start(ctx);
     owner.start(ctx);
     await owner.whenIdle();
     const vm = readGraphIri({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory });
     expect(readGraphRuntimeOf(store)!.mirror.get(vm)?.state).toBe('ready');
-    expect(owner.status()).toMatchObject({ lastJob: { readGraph: vm, outcome: 'done' } });
+    expect(owner.status()).toMatchObject({ lastJob: { outcome: 'done' } });
     expect(log.info).toHaveBeenCalledWith(ctx, expect.stringContaining(`Built read graph ${vm}`));
     await owner.close();
     expect(owner.status()).toBeUndefined();
@@ -143,12 +144,10 @@ describe('the agent read-graph workload', () => {
   });
 
   it('asks its builder for a pass on request once started, and nothing before start or after close', async () => {
-    const { view } = await agentView({ subscribed: [CG] });
+    const { view } = await agentView({ subscribed: [CG], modes: VM_BUILT });
     const requested = vi.spyOn(ReadGraphBuilder.prototype, 'request');
     try {
-      const owner = new ReadGraphWorkloadOwnerV1(view, {
-        logger: logger(), intervalMs: 60_000, modes: modes((key) => key.layer === MemoryLayer.VerifiableMemory),
-      });
+      const owner = new ReadGraphWorkloadOwnerV1(view, { logger: logger(), intervalMs: 60_000 });
       owner.request();
       expect(requested).not.toHaveBeenCalled();
       owner.start(ctx);
@@ -164,28 +163,25 @@ describe('the agent read-graph workload', () => {
   });
 
   it('runs the checks beside the builder, checks every ready read graph on request, and reports both in its status', async () => {
-    const { view } = await agentView({ subscribed: [CG] });
-    const owner = new ReadGraphWorkloadOwnerV1(view, {
-      logger: logger(), intervalMs: 60_000, modes: modes((key) => key.layer === MemoryLayer.VerifiableMemory && key.scope.kind === 'context-graph'),
-    });
+    const { view } = await agentView({ subscribed: [CG], modes: VM_BUILT });
+    const owner = new ReadGraphWorkloadOwnerV1(view, { logger: logger(), intervalMs: 60_000 });
     // The agent reaches its workload for requests from outside.
     expect(readGraphWorkloadOf(view)).toBe(owner);
     owner.start(ctx);
     await owner.whenIdle();
-    const vm = readGraphIri({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory });
-    expect(owner.readGraphStatus()).toMatchObject({ checking: true, lastCheck: undefined, readGraphs: [{ readGraph: vm, state: 'ready' }] });
+    // The whole graph's and the registered sub-graph's, which follows its context graph.
+    const kept = [readGraphIri({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory }), readGraphIri({ scope: readScope(CG, 'code'), layer: MemoryLayer.VerifiableMemory })].sort();
+    expect(owner.readGraphStatus()).toMatchObject({ checking: true, lastCheck: undefined, readGraphs: kept.map((readGraph) => ({ readGraph, state: 'ready' })) });
     const report = await owner.checkNow();
-    expect(report).toMatchObject({ mode: 'full', results: [{ readGraph: vm, mode: 'full', outcome: 'consistent' }] });
+    expect(report).toMatchObject({ mode: 'full', results: kept.map((readGraph) => ({ readGraph, mode: 'full', outcome: 'consistent' })) });
     expect(owner.readGraphStatus().lastCheck).toBe(report);
     await owner.close();
     expect(owner.readGraphStatus()).toMatchObject({ checking: false, builder: undefined });
   });
 
   it('ends a check run on request when it stops, and refuses one asked for while it stops', async () => {
-    const { view } = await agentView({ subscribed: [CG] });
-    const owner = new ReadGraphWorkloadOwnerV1(view, {
-      logger: logger(), intervalMs: 60_000, modes: modes((key) => key.layer === MemoryLayer.VerifiableMemory && key.scope.kind === 'context-graph'),
-    });
+    const { view } = await agentView({ subscribed: [CG], modes: VM_BUILT });
+    const owner = new ReadGraphWorkloadOwnerV1(view, { logger: logger(), intervalMs: 60_000 });
     owner.start(ctx);
     await owner.whenIdle();
     let release: (() => void) | undefined;

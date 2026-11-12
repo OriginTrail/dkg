@@ -53,6 +53,7 @@ import { isReadGraphStateGraph } from '../graph-enumeration-visibility.js';
 import { readGraphPartitionMaintenanceStore } from '../read-graph-partition-store.js';
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
+import { noteReadGraphPartitionsOfRuntime } from './data-directories.js';
 import { forgetReadGraphDropRequest, requestReadGraphDrops } from './drop-requests.js';
 import { useReadGraphMarkJournal } from './mark-journal.js';
 import { readGraphLayerOf, type ReadGraphStore } from './read-graph-store.js';
@@ -222,14 +223,17 @@ async function switchOff(context: ReadGraphJobContext, runtime: ReadGraphBackend
 }
 
 /**
- * Ready a runtime for maintenance, as a start-up that keeps read graphs does:
- * the marks the store refuses from now on go to the data directory's journal,
+ * Ready a runtime for maintenance, as a start-up that keeps read graphs does.
+ * The data directory notes first that the backend may hold read-graph
+ * partitions, as a build does before its first row, and a directory that
+ * cannot take the note throws before it is registered or anything changes.
+ * The marks the store refuses from now on go to the data directory's journal,
  * which also records the working-memory identity, and a later start-up of
- * this process shares the mirror rather than load it again. It writes in the
- * data directory, and throws when it cannot.
+ * this process shares the mirror rather than load it again.
  */
 function prepareMaintenance(runtime: ReadGraphBackendRuntime, dataDir: string | undefined): void {
   if (dataDir !== undefined) {
+    noteReadGraphPartitionsOfRuntime(runtime, dataDir);
     useReadGraphMarkJournal(runtime, dataDir);
     noteWorkingMemoryIdentityDirectory(runtime, dataDir);
   }

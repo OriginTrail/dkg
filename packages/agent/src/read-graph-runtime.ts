@@ -89,7 +89,6 @@ export interface ReadGraphAgentViewV1 {
 export interface ReadGraphWorkloadOptionsV1 {
   readonly dataDir?: string;
   readonly logger: { info(ctx: OperationContext, message: string): void; warn(ctx: OperationContext, message: string): void };
-  readonly modes?: ReadGraphModesV1;
   /** The time between the builder's passes. */
   readonly intervalMs?: number;
 }
@@ -152,7 +151,8 @@ export class ReadGraphWorkloadOwnerV1 {
   constructor(agent: ReadGraphAgentViewV1, options: ReadGraphWorkloadOptionsV1) {
     this.#agent = agent;
     this.#options = options;
-    this.#modes = options.modes ?? readGraphModesOfStore(agent.store);
+    // The runtime's settings, which a live switch changes: the workload decides from what it applies.
+    this.#modes = readGraphModesOfStore(agent.store);
     OWNERS.set(agent, this);
   }
 

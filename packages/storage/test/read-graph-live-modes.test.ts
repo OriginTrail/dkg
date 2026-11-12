@@ -723,4 +723,23 @@ describe('switching read graphs live', () => {
     expect(await triplesOf(adapter, wholeVm)).toEqual([]);
     expect(layer.runtime.mirror.size).toBe(0);
   });
+
+  it('refuses a first switch on whose data directory cannot take the partitions note, before it registers the directory or changes anything', async () => {
+    const node = await open();
+    const { fixture, layer, store } = node;
+    // All off, with no row: the runtime never held a partition, so no note was written yet.
+    expect(layer.runtime.mayHoldPartitions).not.toBe(true);
+    const file = join(node.dataDir, 'not-a-directory');
+    writeFileSync(file, '');
+    const unusable = join(file, 'data');
+    const before = { modes: layer.runtime.modes, semantics: layer.runtime.viewSemantics };
+    await expect(applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'build'), {
+      dataDir: unusable, viewSemantics: { default: 'merged' }, wanted: () => fixture.keys.filter((key) => key.layer === VM),
+    })).rejects.toThrow();
+    expect(layer.runtime.modes).toBe(before.modes);
+    expect(layer.runtime.viewSemantics).toBe(before.semantics);
+    expect(layer.runtime.mirror.size).toBe(0);
+    expect(readGraphDataDirectories(layer.runtime)).not.toContain(unusable);
+    expect(await stored(node.adapter)).toEqual({});
+  });
 });
