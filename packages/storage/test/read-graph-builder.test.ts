@@ -1,7 +1,7 @@
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdir } from 'node:fs/promises';
+import { chmod, mkdir } from 'node:fs/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryLayer, readGraphIri, readScope, type ReadGraphKey } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
@@ -530,6 +530,50 @@ describe('building a read graph', () => {
     expect(layer.runtime.mirror.get(fixture.readGraphs.wholeVm)).toMatchObject({ state: 'dirty', generation: before.generation + 1 });
     expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done' });
     expect(await triplesOf(adapter, fixture.readGraphs.wholeVm)).toContain(`urn:s:docs ${P} "d"`);
+  });
+
+  it('measures a full check against the registry the store holds, so a registration made past the layer is not certified', async () => {
+    const { adapter, fixture, layer, store, context } = await open();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    const { wholeVm } = fixture.readGraphs;
+    // A sub-graph registered past the layer, with data of its own, before the next builder pass refreshes the registry.
+    const docs = `${fixture.root}/docs`;
+    await adapter.insert([
+      { subject: docs, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph', graph: `${fixture.root}/_meta` },
+      { subject: docs, predicate: 'http://schema.org/name', object: '"docs"', graph: `${fixture.root}/_meta` },
+      q('urn:s:docs', '"d"', `${docs}/_verifiable_memory/${AGENT}/9`),
+    ]);
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code']);
+    expect(await checkReadGraph(store, wholeVm, 'full', { alert: () => undefined })).toMatchObject({ outcome: 'mismatch', direction: 'missing' });
+    expect(servingReadGraphGeneration(layer.runtime.mirror.get(wholeVm))).toBeUndefined();
+  });
+
+  it('takes every read graph a registry change moves out of service before it sends a mark, so one the store refuses leaves none serving', async () => {
+    const { adapter, fixture, layer, context } = await open();
+    const [vm, swm] = fixture.keys as [ReadGraphKey, ReadGraphKey];
+    for (const key of [vm, swm]) expect(await buildReadGraph(context, key)).toMatchObject({ outcome: 'done', row: { state: 'ready' } });
+    const { wholeVm, wholeSwm } = fixture.readGraphs;
+    // A sub-graph registered past the layer moves the membership of both.
+    const docs = `${fixture.root}/docs`;
+    await adapter.insert([
+      { subject: docs, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph', graph: `${fixture.root}/_meta` },
+      { subject: docs, predicate: 'http://schema.org/name', object: '"docs"', graph: `${fixture.root}/_meta` },
+    ]);
+    let refused = 0;
+    adapter.onUpdate = (sparql) => {
+      if (refused === 0 && sparql.includes('"dirty"')) {
+        refused += 1;
+        throw new Error('connection reset');
+      }
+    };
+    await expect(refreshReadGraphRegistry(context, fixture.contextGraphId)).rejects.toThrow('connection reset');
+    adapter.onUpdate = undefined;
+    for (const readGraph of [wholeVm, wholeSwm]) expect(servingReadGraphGeneration(layer.runtime.mirror.get(readGraph))).toBeUndefined();
+    // The cache keeps the registry the marks were measured against: the next refresh marks again, and takes the new one.
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code']);
+    expect(await refreshReadGraphRegistry(context, fixture.contextGraphId)).toBe(true);
+    expect(layer.runtime.registries.get(fixture.contextGraphId)?.subGraphNames).toEqual(['code', 'docs']);
   });
 
   it('takes the facts a refresh reads when the membership stays the same, so a later exact delete is predicted from them', async () => {
@@ -1364,6 +1408,26 @@ describe('read-graph start-up', () => {
     expect(await startReadGraphs(third, { dataDir, maintains: () => true })).toEqual({ marked: 0, maintained: 1 });
   });
 
+  it('keeps no ready row at start when a refused mark could not be written to the journal either', async () => {
+    const { adapter, fixture, store, context, dataDir } = await open();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    const { wholeVm } = fixture.readGraphs;
+    expect(await startReadGraphs(store, { dataDir, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    const built = (await buildReadGraph(context, vm)).row!;
+    // The journal can be read but not written. A full check finds a triple no member holds, and the store refuses its mark.
+    writeFileSync(readGraphMarkJournalPath(dataDir), '');
+    await chmod(readGraphMarkJournalPath(dataDir), 0o444);
+    await adapter.insert([q('urn:s:stray', '"stray"', wholeVm)]);
+    adapter.onUpdate = (sparql) => { if (sparql.includes('"dirty"')) throw new Error('connection reset'); };
+    expect(await checkReadGraph(store, wholeVm, 'full', { alert: () => undefined })).toMatchObject({ outcome: 'mismatch' });
+    adapter.onUpdate = undefined;
+    expect(readUnstoredReadGraphMarks(dataDir)).toEqual(new Map());
+    // The next process keeps no ready row, so the one the journal missed is marked too.
+    const restarted = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
+    expect(await startReadGraphs(restarted, { dataDir, maintains: () => true })).toEqual({ marked: 1, maintained: 1 });
+    expect((await storedRows(adapter))[wholeVm]).toBe(`dirty@${built.generation + 1}`);
+  });
+
   it('keeps no ready row across a start without a data directory, where no journal kept a refused mark', async () => {
     const { adapter, fixture, context } = await open();
     const [vm] = fixture.keys as [ReadGraphKey];
@@ -1612,6 +1676,27 @@ describe('read-graph start-up', () => {
     expect((await storedRows(adapter))[wholeVm]).toBe(`dirty@${built.generation + 1}`);
   });
 
+  it('gives an agent that joins the backend the marks the store refused before it joined', async () => {
+    const { adapter, fixture, store, other, context, first, second } = await sharedBackend();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    const { wholeVm } = fixture.readGraphs;
+    expect(await startReadGraphs(store, { dataDir: first, maintains: () => true })).toEqual({ marked: 0, maintained: 0 });
+    const built = (await buildReadGraph(context, vm)).row!;
+    // A full check through the first agent finds a mismatch, and the store refuses its dirty mark: only its journal has it.
+    await adapter.insert([q('urn:s:stray', '"stray"', wholeVm)]);
+    adapter.onUpdate = (sparql) => { if (sparql.includes('"dirty"')) throw new Error('connection reset'); };
+    expect(await checkReadGraph(store, wholeVm, 'full', { alert: () => undefined })).toMatchObject({ outcome: 'mismatch' });
+    expect(readUnstoredReadGraphMarks(second)).toEqual(new Map());
+    // The second agent joins while the store still refuses the mark: its journal takes the mark as it joins.
+    expect(await startReadGraphs(other, { dataDir: second, maintains: () => true })).toEqual({ marked: 0, maintained: 1 });
+    adapter.onUpdate = undefined;
+    expect(readUnstoredReadGraphMarks(second)).toEqual(new Map([[wholeVm, new Set([built.generation])]]));
+    // The next process starts the second agent alone, with only its own data directory.
+    const restarted = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
+    expect(await startReadGraphs(restarted, { dataDir: second, maintains: () => true })).toEqual({ marked: 1, maintained: 1 });
+    expect((await storedRows(adapter))[wholeVm]).toBe(`dirty@${built.generation + 1}`);
+  });
+
   it('fails a start-up whose data directory holds a journal it cannot read, rather than take it for an empty one', async () => {
     const { store, other, first, second } = await sharedBackend();
     // A directory where the journal's file belongs: reading it fails, as it does without permission.
@@ -1767,6 +1852,27 @@ describe('a store restored to an earlier state', () => {
     // The next process marks that row dirty rather than trust what the restore may have cut short.
     const restarted = guardReadGraphPartition(wrapReadGraphLayer(adapter, { backend: 'oxigraph' }));
     expect(await startReadGraphs(restarted, { dataDir, maintains: () => true })).toMatchObject({ marked: 1 });
+  });
+
+  it('ends a build whose first row a reported restore overlaps, and leaves the background slot free', async () => {
+    const { adapter, fixture, layer, store, context, dataDir } = await open();
+    const [vm] = fixture.keys as [ReadGraphKey];
+    const { wholeVm } = fixture.readGraphs;
+    const creating = `<${wholeVm}> <${READ_GRAPH_STATE_PREDICATES.state}> "building"`;
+    adapter.onUpdate = (sparql) => {
+      // The restore is reported while the request that creates the row is on its way: the cached registry goes.
+      if (sparql.split('\n').some((line) => line.startsWith('INSERT {') && line.includes(creating))) noteReadGraphStoreRestored(store);
+    };
+    expect(await buildReadGraph(context, vm)).toMatchObject({ outcome: 'lost' });
+    adapter.onUpdate = undefined;
+    expect(servingReadGraphGeneration(layer.runtime.mirror.get(wholeVm))).toBeUndefined();
+    // Nothing still holds the read graph's lock or the background slot: a builder's pass builds it, and the builder closes.
+    const builder = new ReadGraphBuilder({ store, dataDir, wanted: () => [vm], batching: { pauseRatio: 0 }, intervalMs: 60_000 });
+    builder.start();
+    await builder.whenIdle();
+    expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('ready');
+    await builder.close();
+    await expectUnion(adapter, layer, fixture, vm);
   });
 
   it('takes every read graph out of service once a supervised backend tells of a restart, before the next query is served', async () => {

@@ -115,26 +115,32 @@ export async function checkReadGraph(
 }
 
 async function runCheck(store: TripleStore, readGraph: string, mode: ReadGraphCheckMode, options: ReadGraphCheckOptions): Promise<ReadGraphCheckResult> {
-  const context = await contextOf(store, readGraph, options);
+  const context = await contextOf(store, readGraph, options, mode === 'full');
   if (!context) return { readGraph, mode, outcome: 'skipped' };
   const verdict = mode === 'sampled' ? await sampled(context, options) : await full(context, options);
   if (verdict === 'consistent' || verdict === 'skipped' || verdict === 'interrupted') return { readGraph, mode, outcome: verdict };
   return { readGraph, mode, outcome: 'mismatch', direction: verdict.direction };
 }
 
-async function contextOf(store: TripleStore, readGraph: string, options: ReadGraphCheckOptions): Promise<CheckContext | undefined> {
+/**
+ * What a check measures against. A full check reads the registry the store
+ * holds, not the cached one, so a registration made past the layer cannot
+ * leave a union of the old members certified; the cache keeps its own,
+ * which the layer and the builder bring up to date with their marks.
+ */
+async function contextOf(store: TripleStore, readGraph: string, options: ReadGraphCheckOptions, fresh: boolean): Promise<CheckContext | undefined> {
   const layer = readGraphLayerOf(store);
   const key = parseReadGraphIri(readGraph);
-  const row = layer?.runtime.mirror.get(readGraph);
-  if (!layer || !key || row?.state !== 'ready') return undefined;
+  if (!layer || !key || layer.runtime.mirror.get(readGraph)?.state !== 'ready') return undefined;
   const target = readGraphPartitionMaintenanceStore(store);
   const queryOptions: QueryOptions = { signal: options.signal, priority: 'background', source: SOURCE };
   const contextGraphId = key.scope.contextGraphId;
-  let registry = layer.runtime.registries.get(contextGraphId);
-  if (!registry) {
-    registry = await readReadGraphRegistry(target, contextGraphId, queryOptions);
-    layer.runtime.registries.set(registry);
-  }
+  const cached = layer.runtime.registries.get(contextGraphId);
+  const registry = cached && !fresh ? cached : await readReadGraphRegistry(target, contextGraphId, queryOptions);
+  if (!cached) layer.runtime.registries.set(registry);
+  // The row as it is once the registry is read: one that left service meanwhile is not checked.
+  const row = layer.runtime.mirror.get(readGraph);
+  if (row?.state !== 'ready') return undefined;
   const membership = readGraphMembership(key, registry, layer.runtime.workingMemoryIdentity);
   return {
     readGraph, layer, target, catalog: store, row,
