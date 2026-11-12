@@ -441,6 +441,8 @@ class ReadGraphJob {
   private batches = 0;
   /** Whether this job replaced a damaged row. */
   replacedRow = false;
+  /** While a batch runs: its writes are the read graph's own contents, which skip the store's whole-store snapshot. */
+  private inBatch = false;
   /** The runtime's recovery generation when the job began (`./recovery.ts`). */
   private readonly recovery: number | undefined;
 
@@ -468,7 +470,7 @@ class ReadGraphJob {
 
   async send(update: string): Promise<void> {
     this.context.signal?.throwIfAborted();
-    await this.maintenance.update!(update, this.options);
+    await this.maintenance.update!(update, this.inBatch ? { ...this.options, snapshot: 'deferred' as const } : this.options);
   }
 
   stored() {
@@ -688,7 +690,8 @@ class ReadGraphJob {
     const began = performance.now();
     const sent = await this.locked(async () => {
       if (this.restarted() || !inService()) return false;
-      await send();
+      this.inBatch = true;
+      try { await send(); } finally { this.inBatch = false; }
       return true;
     });
     if (sent) {

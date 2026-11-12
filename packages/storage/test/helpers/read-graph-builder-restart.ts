@@ -28,12 +28,15 @@ const WRITER = fileURLToPath(new URL('./read-graph-builder-kill-writer.ts', impo
 /**
  * Where the builder process dies: `delayMs` after copy batch `batch` returned to it, after the
  * builder flushed the store to its file following that batch, or after the store received and
- * answered that batch while the answer is kept from the builder.
+ * answered that batch while the answer is kept from the builder. With `gapMs`, the builder waits
+ * that long before each copy batch: past the embedded store's 50 ms snapshot debounce, so a
+ * snapshot a batch scheduled would have reached the file.
  */
 export interface BuilderKillPoint {
   readonly batch: number;
   readonly after: 'receipt' | 'return' | 'flush';
   readonly delayMs: number;
+  readonly gapMs?: number;
 }
 
 /** A proxy holding back the store's answer to one copy batch. */
@@ -106,7 +109,10 @@ async function killBuilderAt(
   if ((point.after === 'receipt') !== (received !== undefined)) throw new Error('A receipt kill point needs the store\'s receipt, and only it does');
   const child = spawn(process.execPath, ['--import', 'tsx', WRITER], {
     cwd: REPO,
-    env: { ...process.env, ...env, DKG_KILL_BATCHES: String(point.batch), DKG_KILL_FLUSH: point.after === 'flush' ? '1' : '0' },
+    env: {
+      ...process.env, ...env, DKG_KILL_BATCHES: String(point.batch), DKG_KILL_FLUSH: point.after === 'flush' ? '1' : '0',
+      DKG_KILL_GAP_MS: String(point.gapMs ?? 0),
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const arming = point.after === 'return' ? `returned ${point.batch}` : point.after === 'flush' ? `flushed ${point.batch}` : undefined;
@@ -121,12 +127,12 @@ async function killBuilderAt(
  * Kill points for each engine. Blazegraph applies each request as it arrives: once a copy batch has
  * returned, and once the store has received and answered one whose answer a proxy keeps from the
  * builder. Embedded Oxigraph applies a batch in memory at once and writes its file a moment later:
- * once the builder's explicit flush has written the file, and right after a batch returned, before
- * the file need hold it.
+ * once the builder's explicit flush has written the file, right after a batch returned, before the
+ * file need hold it, and well after batches that skip the snapshot had time to reach the file.
  */
 export const BUILDER_KILL_POINTS: Readonly<Record<'oxigraph' | 'blazegraph', readonly BuilderKillPoint[]>> = {
   blazegraph: [{ batch: 2, after: 'return', delayMs: 0 }, { batch: 3, after: 'receipt', delayMs: 0 }],
-  oxigraph: [{ batch: 2, after: 'flush', delayMs: 0 }, { batch: 3, after: 'return', delayMs: 0 }],
+  oxigraph: [{ batch: 2, after: 'flush', delayMs: 0 }, { batch: 3, after: 'return', delayMs: 0 }, { batch: 3, after: 'return', delayMs: 300, gapMs: 300 }],
 };
 
 /**
@@ -205,6 +211,11 @@ export function readGraphBuilderRestartSuite(backend: 'oxigraph' | 'blazegraph')
             const partial = [...new Set(seeded.filter(quad => copied.has(quad.graph)).map(quad => `${quad.subject} ${quad.predicate} ${quad.object}`))].sort();
             expect(partial.length, 'the copied member graphs hold data').toBeGreaterThan(0);
             expect(await readGraphTriples(adapter, fixture, wholeVm), 'the read graph the dead builder left').toEqual(partial);
+          }
+          if (backend === 'oxigraph' && point.gapMs !== undefined) {
+            // The copy batches skip the snapshot: the file holds the build's row and none of the batches, though each had time to reach it.
+            expect(left, 'the row the dead builder left').toMatchObject({ state: 'building' });
+            expect(await readGraphTriples(adapter, fixture, wholeVm), 'the copy batches in the file').toEqual([]);
           }
           await startReadGraphs(store, { maintains: (key) => key.scope.contextGraphId === fixture.contextGraphId });
           if (left) {

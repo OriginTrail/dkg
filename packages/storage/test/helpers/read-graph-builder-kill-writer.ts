@@ -2,8 +2,8 @@
  * A builder process for the restart lane, run as its own process with `node --import tsx`. It builds
  * one context graph's whole verifiable-memory read graph, one member graph per copy batch. It prints
  * `batch <n> <member graphs>` before copy batch n goes to the store and `returned <n>` once the store
- * answered. With DKG_KILL_FLUSH=1 it then flushes the store to its file and prints `flushed <n>`. After
- * copy batch DKG_KILL_BATCHES it stops and waits to be killed.
+ * answered. With DKG_KILL_FLUSH=1 it then flushes the store to its file and prints `flushed <n>`. It waits
+ * DKG_KILL_GAP_MS before each copy batch. After copy batch DKG_KILL_BATCHES it stops and waits to be killed.
  *
  * DKG_KILL_BACKEND is `blazegraph` (with DKG_KILL_URL) or `oxigraph` (with DKG_KILL_PATH, a persistent
  * store, which dumps itself shortly after each write). DKG_KILL_CG names the context graph.
@@ -19,6 +19,7 @@ if (!contextGraphId) throw new Error('DKG_KILL_CG is required');
 const stopAfter = Number(process.env.DKG_KILL_BATCHES);
 if (!Number.isSafeInteger(stopAfter) || stopAfter < 1) throw new Error('DKG_KILL_BATCHES must name a copy batch by its number');
 const flushEach = process.env.DKG_KILL_FLUSH === '1';
+const gapMs = Number(process.env.DKG_KILL_GAP_MS ?? 0);
 
 const { adapter, config } = openKillWriterStore();
 
@@ -29,6 +30,7 @@ adapter.update = async (sparql, options) => {
   if (!sparql.includes('VALUES ?g')) return update(sparql, options);
   copies += 1;
   const n = copies;
+  if (gapMs > 0) await new Promise((resolve) => setTimeout(resolve, gapMs));
   const graphs = [...(/VALUES \?g \{([^}]*)\}/.exec(sparql)?.[1] ?? '').matchAll(/<([^>]+)>/g)].map(match => match[1]);
   process.stdout.write(`batch ${n} ${graphs.join(' ')}\n`);
   await update(sparql, options);
