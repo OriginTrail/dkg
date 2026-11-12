@@ -124,6 +124,14 @@ export interface ApplyReadGraphModesOptions {
   readonly source?: string;
   /** Told of each step that failed after the modes changed ({@link ReadGraphModeDeferral}). A hook that throws changes nothing. */
   readonly onDeferred?: (deferral: ReadGraphModeDeferral) => void;
+  /**
+   * Called once, synchronously, after every refusal is decided and every step
+   * that can fail has run, just before the modes and view semantics are
+   * published: for a caller that commits its own record of the settings with
+   * them. If it throws, the apply throws that error and publishes nothing. A
+   * refused or aborted apply does not call it.
+   */
+  readonly beforeCommit?: () => void;
 }
 
 /** The memory layers, in the order a report lists them, with the view name it gives each. */
@@ -160,6 +168,7 @@ export async function applyReadGraphModes(
   if (!layer) {
     options.signal?.throwIfAborted();
     if (keepsAnyReadGraph(modes)) throw new ReadGraphsUnsupportedError('none', [], 'This store has no read-graph layer, so it keeps no read graphs');
+    options.beforeCommit?.();
     return outcomes(changesOf({}, modes, options.contextGraphIds ?? []), () => undefined);
   }
   const runtime = layer.runtime;
@@ -212,6 +221,8 @@ async function apply(
   // node default switched on lists no context graph before the first subscription, and the builder builds there all
   // the same.
   if (keepsAnyReadGraph(next)) prepareMaintenance(runtime, options.dataDir);
+  // The caller's own record of the settings, committed with them: nothing awaited lies between it and the publication.
+  options.beforeCommit?.();
   runtime.modes = next;
   runtime.modesApplied = true;
   if (semantics) setViewSemantics(runtime, semantics);

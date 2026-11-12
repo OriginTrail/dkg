@@ -54,7 +54,7 @@ export class ContextGraphPartitionQueryMethods extends DKGAgentBase {
   async applyReadGraphModesV1(
     this: DKGAgent,
     next: ReadGraphModes,
-    options: { signal?: AbortSignal; viewSemantics?: ViewSemanticsSettings } = {},
+    options: { signal?: AbortSignal; viewSemantics?: ViewSemanticsSettings; beforeCommit?: () => void } = {},
   ): Promise<readonly ReadGraphModeChange[]> {
     const owner = readGraphWorkloadOf(this);
     if (owner) return owner.applyReadGraphModes(next, options);

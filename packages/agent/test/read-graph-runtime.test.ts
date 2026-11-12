@@ -245,8 +245,11 @@ describe('the agent read-graph workload', () => {
     const owner = new ReadGraphWorkloadOwnerV1(view, { logger: logger(), intervalMs: 60_000 });
     const next = { contextGraphs: { [CG]: { layers: { [MemoryLayer.VerifiableMemory]: 'build' as const } } } };
     const apply = ContextGraphPartitionQueryMethods.prototype.applyReadGraphModesV1;
-    const changes = await apply.call(view as never, next, { viewSemantics: { contextGraphs: { [CG]: 'merged' } } });
+    const committed = vi.fn();
+    const changes = await apply.call(view as never, next, { viewSemantics: { contextGraphs: { [CG]: 'merged' } }, beforeCommit: committed });
     expect(runtime.viewSemantics).toEqual({ contextGraphs: { [CG]: 'merged' } });
+    // The caller's own record of the settings is committed with them, once.
+    expect(committed).toHaveBeenCalledTimes(1);
     expect(changes.find((change) => change.layer === 'verifiable-memory')?.outcome).toBe('applied');
     // Not started: the rows are there, and no builder runs until the workload starts.
     expect(runtime.mirror.get(readGraphIri({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory }))?.state).toBe('dirty');

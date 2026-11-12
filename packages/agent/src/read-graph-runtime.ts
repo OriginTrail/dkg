@@ -267,11 +267,12 @@ export class ReadGraphWorkloadOwnerV1 {
    */
   async applyReadGraphModes(
     next: ReadGraphModes,
-    options: { readonly signal?: AbortSignal; readonly viewSemantics?: ViewSemanticsSettings } = {},
+    options: { readonly signal?: AbortSignal; readonly viewSemantics?: ViewSemanticsSettings; readonly beforeCommit?: () => void } = {},
   ): Promise<readonly ReadGraphModeChange[]> {
     const changes = await applyReadGraphModes(this.#agent.store, next, {
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.viewSemantics ? { viewSemantics: options.viewSemantics } : {}),
+      ...(options.beforeCommit ? { beforeCommit: options.beforeCommit } : {}),
       ...(this.#options.dataDir !== undefined ? { dataDir: this.#options.dataDir } : {}),
       contextGraphIds: [...this.#agent.getSubscribedContextGraphs().keys()],
       wanted: () => this.wanted(),

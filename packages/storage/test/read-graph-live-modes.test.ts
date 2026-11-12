@@ -866,4 +866,42 @@ describe('switching read graphs live', () => {
     expect(await triplesOf(adapter, wholeVm)).not.toContain('urn:s:stale urn:test:p "stale"');
     await expectUnion(node, fixture.keys[0]!);
   });
+
+  it('calls beforeCommit once, after every refusal and every step that can fail, just before it publishes the settings', async () => {
+    const node = await open();
+    const { fixture, layer, store, dataDir } = node;
+    const wholeVm = readGraphIri(fixture.keys[0]!);
+    const before = { modes: layer.runtime.modes, semantics: layer.runtime.viewSemantics };
+    const seen: Array<{ readonly modes: unknown; readonly semantics: unknown; readonly mirrored: number }> = [];
+    const changes = await applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'build'), {
+      dataDir, viewSemantics: { default: 'merged' }, wanted: () => [fixture.keys[0]!],
+      beforeCommit: () => seen.push({ modes: layer.runtime.modes, semantics: layer.runtime.viewSemantics, mirrored: layer.runtime.mirror.size }),
+    });
+    // Called once, with nothing published yet: the old modes and semantics, and no read graph taken into service.
+    expect(seen).toEqual([{ modes: before.modes, semantics: before.semantics, mirrored: 0 }]);
+    expect(outcomeOf(changes, 'verifiable-memory')).toBe('applied');
+    expect(layer.runtime.viewSemantics).toEqual({ default: 'merged' });
+    expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('dirty');
+    // One that throws: the apply throws its error, and publishes nothing.
+    const committed = { modes: layer.runtime.modes, semantics: layer.runtime.viewSemantics };
+    await expect(applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'off'), {
+      viewSemantics: { default: 'per-asset' },
+      beforeCommit: () => {
+        throw new Error('the settings table refused');
+      },
+    })).rejects.toThrow('the settings table refused');
+    expect(layer.runtime.modes).toBe(committed.modes);
+    expect(layer.runtime.viewSemantics).toBe(committed.semantics);
+    expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('dirty');
+    expect(readGraphWork(layer.runtime, 'drop')).toEqual([]);
+    // A refused apply, an unsupported one and an aborted one never call it; one with nothing changed does.
+    const calls = vi.fn();
+    await applyReadGraphModes(store, { contextGraphs: { 'not eligible/_x': { default: 'build' } } }, { beforeCommit: calls });
+    await expect(applyReadGraphModes(new OxigraphStore(), { default: 'build' }, { beforeCommit: calls })).rejects.toMatchObject({ code: 'READ_GRAPHS_UNSUPPORTED' });
+    await expect(applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'serve'), { signal: AbortSignal.abort(new Error('gone')), beforeCommit: calls }))
+      .rejects.toThrow('gone');
+    expect(calls).not.toHaveBeenCalled();
+    await applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'build'), { beforeCommit: calls });
+    expect(calls).toHaveBeenCalledTimes(1);
+  });
 });
