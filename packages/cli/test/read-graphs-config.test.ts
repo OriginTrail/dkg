@@ -88,6 +88,17 @@ describe('the query section', () => {
     expect(nodeReadGraphModes(resolveQuerySection({ readGraphs: 'build' }).policy)).toEqual({ default: 'build' });
   });
 
+  it('keeps no read graph when the policy allows no layer, whatever the node\'s default', () => {
+    for (const query of [
+      { readGraphs: 'serve', readGraphsPolicy: { layers: [] } },
+      { readGraphs: { default: 'build', layers: { 'verifiable-memory': 'serve' } }, readGraphsPolicy: { layers: [] } },
+      // Every layer the node names off is the same: nothing is kept.
+      { readGraphs: { default: 'serve', layers: { 'working-memory': 'off', 'shared-working-memory': 'off', 'verifiable-memory': 'off' } } },
+    ]) {
+      expect(nodeReadGraphModes(resolveQuerySection(query).policy), JSON.stringify(query)).toEqual({ default: 'off' });
+    }
+  });
+
   it('names every offending key in one error, and refuses unknown keys', () => {
     const issues = issuesOf({
       readGraphs: {
