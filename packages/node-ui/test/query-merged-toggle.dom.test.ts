@@ -87,8 +87,15 @@ function lastRun(): Record<string, unknown> {
   return { sparql: calls[calls.length - 1][0], ...calls[calls.length - 1][1] };
 }
 
+/** The result count, without the tag that says how the node searched. */
 function resultCount(container: HTMLElement): string {
-  return container.querySelector('.v10-mlv-result-count')?.textContent ?? '';
+  const count = container.querySelector('.v10-mlv-result-count');
+  return (count?.textContent ?? '').replace(answered(container) ?? '', '');
+}
+
+/** The tag that says how the node searched a memory, if any. */
+function answered(container: HTMLElement): string | null {
+  return container.querySelector('.v10-cg-query-answered')?.textContent ?? null;
 }
 
 beforeEach(() => {
@@ -126,13 +133,14 @@ describe('ContextGraphQueryView memory picker and Search across assets', () => {
     executeQueryMock.mockResolvedValue(bindings('merged'));
     await click(button(container, 'Run'));
     expect(lastRun()).toMatchObject({ contextGraphId: CG, view: 'verifiable-memory', semantics: 'merged' });
-    expect(resultCount(container)).toBe('1 result · searched across assets');
+    expect(resultCount(container)).toBe('1 result');
+    expect(answered(container)).toBe('Searched across assets');
 
     await click(mergedBox(container));
     executeQueryMock.mockResolvedValue(bindings('per-asset'));
     await click(button(container, 'Run'));
     expect(lastRun()).toMatchObject({ view: 'verifiable-memory', semantics: 'per-asset' });
-    expect(resultCount(container)).toBe('1 result · each asset searched on its own');
+    expect(answered(container)).toBe('Each asset searched on its own');
 
     await click(mergedBox(container));
     await chooseView(container, 'shared-working-memory');
@@ -238,6 +246,7 @@ describe('ContextGraphQueryView memory picker and Search across assets', () => {
     await click(button(container, 'Run'));
     expect(lastRun()).toMatchObject({ view: 'working-memory', semantics: undefined, includeContextGraphPartitions: true });
     expect(resultCount(container)).toBe('1 result');
+    expect(answered(container)).toBeNull();
 
     await click(button(container, 'Reset'));
     expect(viewSelect(container).value).toBe('');

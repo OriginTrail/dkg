@@ -86,7 +86,7 @@ test('Search across assets asks for merged answers in a memory, and one that is 
   await page.getByRole('combobox', { name: 'Search in' }).selectOption('verifiable-memory');
   await merged.check();
   await page.getByRole('button', { name: 'Run', exact: true }).click();
-  await expect(page.locator('.v10-mlv-result-count')).toHaveText('1 result · searched across assets');
+  await expect(page.locator('.v10-cg-query-answered')).toHaveText('Searched across assets');
   expect(bodies.at(-1)).toMatchObject({ contextGraphId: cg, view: 'verifiable-memory', semantics: 'merged' });
 
   await page.getByRole('combobox', { name: 'Search in' }).selectOption('shared-working-memory');

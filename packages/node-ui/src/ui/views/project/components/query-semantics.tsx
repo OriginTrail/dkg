@@ -2,6 +2,7 @@ import React, { useId } from 'react';
 import type { GetView } from '@origintrail-official/dkg-core';
 import type { ViewQuerySemantics } from '@origintrail-official/dkg-core/query-result';
 import { HttpError } from '../../../http.js';
+import { Badge } from '../../../components/ds/Badge.js';
 
 // Users see `semantics: "merged"` as "Search across assets".
 
@@ -80,7 +81,7 @@ export function QueryViewControls({ options, locked, onChange }: {
       <label className="v10-cg-query-option">
         <span>Search in</span>
         <select
-          className="v10-form-input"
+          className="v10-form-input ds-input ds-sm"
           value={view ?? ''}
           disabled={locked}
           title={locked ? 'The loaded query sets its own memory.' : undefined}
@@ -115,8 +116,8 @@ export function QueryViewControls({ options, locked, onChange }: {
 export function AnsweredSemantics({ view, semantics }: { view?: GetView; semantics?: ViewQuerySemantics }) {
   if (!searchesAcrossAssets(view) || semantics === undefined) return null;
   return (
-    <span className="v10-cg-query-answered" data-semantics={semantics}>
-      {semantics === 'merged' ? ' · searched across assets' : ' · each asset searched on its own'}
-    </span>
+    <Badge size="sm" className="v10-cg-query-answered" data-semantics={semantics}>
+      {semantics === 'merged' ? 'Searched across assets' : 'Each asset searched on its own'}
+    </Badge>
   );
 }

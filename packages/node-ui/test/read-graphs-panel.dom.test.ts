@@ -7,7 +7,7 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
-import { READ_GRAPHS_POLL_MS, ReadGraphsSection, searchAssetsText, searchSizeText, searchStateText } from '../src/ui/views/project/components/read-graphs.js';
+import { READ_GRAPHS_POLL_MS, ReadGraphsSection, searchAssetsText, searchSizeText, searchStateText, searchStateTone } from '../src/ui/views/project/components/read-graphs.js';
 
 const CG = '0x1111111111111111111111111111111111111111/read-graphs';
 const SETTINGS = '/api/store/read-graphs/settings';
@@ -146,7 +146,8 @@ describe('ReadGraphsSection', () => {
     expect([vm, swm, wm].map(state)).toEqual(['In use', 'Getting ready', 'Off']);
     expect([vm, swm, wm].map(pressed)).toEqual([['On'], ['Preview'], ['Off']]);
     expect(vm.querySelector('.v10-po-rg-source')?.textContent).toBe('Set for this context graph');
-    expect(swm.querySelector('.v10-po-rg-source')?.textContent).toBe('Shared with your team · Node default');
+    expect(swm.querySelector('.v10-po-rg-source')?.textContent).toBe('Node default');
+    expect(swm.querySelector('.v10-po-rg-detail')?.textContent).toBe('Shared with your team.');
     expect(button(swm, 'Preview').title).toBe('Prepares the combined copy and shows how results would change, without changing any results yet.');
     expect(button(swm, 'On').title).toBe('Lets queries that ask for it search across assets.');
     expect(container.querySelectorAll('button:disabled')).toHaveLength(0);
@@ -162,8 +163,9 @@ describe('ReadGraphsSection', () => {
     expect(row(container, 'shared-working-memory').querySelector('[data-testid="search-size"]')).toBeNull();
     expect(row(container, 'shared-working-memory').querySelector('[data-testid="search-assets"]')).toBeNull();
     const vm = row(container, 'verifiable-memory');
-    expect(vm.querySelector('[data-testid="search-size"]')?.textContent).toBe(` · About ${(1204).toLocaleString()} facts, at its last build`);
-    expect(vm.querySelector('.v10-po-join-name')?.textContent).toBe(`Published assets · ${(12400).toLocaleString()} assets`);
+    expect(vm.querySelector('[data-testid="search-size"]')?.textContent).toBe(`About ${(1204).toLocaleString()} facts, at its last build`);
+    expect(vm.querySelector('[data-testid="search-assets"]')?.textContent).toBe(`${(12400).toLocaleString()} assets`);
+    expect(vm.querySelector('.v10-po-join-name')?.textContent).toBe('Published assets');
   });
 
   it('switches a memory, shows the node\'s answer, and reads the settings again', async () => {
@@ -335,7 +337,8 @@ describe('ReadGraphsSection', () => {
     const second = await render();
     expect(second.querySelector('[role="note"]')).toBeNull();
     const wm = row(second, 'working-memory');
-    expect(wm.querySelector('.v10-po-rg-source')?.textContent).toBe('Node default · not allowed on this node');
+    expect(wm.querySelector('.v10-po-rg-source')?.textContent).toBe('Node default');
+    expect(wm.querySelector('[data-testid="search-not-allowed"]')?.textContent).toBe('Not allowed on this node');
     expect(button(wm, 'Preview').disabled).toBe(true);
     expect(button(wm, 'Preview').title).toBe('This node\'s config doesn\'t allow it for this memory.');
     expect(button(row(second, 'verifiable-memory'), 'Preview').disabled).toBe(false);
@@ -360,7 +363,7 @@ describe('ReadGraphsSection', () => {
     const since = '2026-11-12T06:00:00.000Z';
     changesAnswer = [200, { contextGraphs: [{ contextGraphId: CG, since, kinds: { 'none': 35, 'rows-added': 3, 'rows-removed-or-changed': 2 } }] }];
     const container = await render();
-    const link = button(container, 'shows how results would change');
+    const link = button(container, 'How results would change');
     expect(link.getAttribute('aria-expanded')).toBe('false');
     expect(requests.some(request => request.url.startsWith(CHANGES))).toBe(false);
 
@@ -378,18 +381,18 @@ describe('ReadGraphsSection', () => {
   it('says when no query was compared yet, and when the comparison isn\'t available', async () => {
     getAnswers = [[200, settings()]];
     const container = await render();
-    await click(button(container, 'shows how results would change'));
+    await click(button(container, 'How results would change'));
     expect(container.querySelector('.v10-po-rg-changes')?.textContent)
       .toBe('No queries compared yet. The node compares some of the queries people run on this context graph.');
-    await click(button(container, 'shows how results would change'));
+    await click(button(container, 'How results would change'));
 
     changesAnswer = [200, { contextGraphs: [{ contextGraphId: CG, since: 'not a date', kinds: { 'rows-added': 1 } }] }];
-    await click(button(container, 'shows how results would change'));
+    await click(button(container, 'How results would change'));
     expect(container.querySelector('.v10-po-rg-changes')?.textContent).toBe('1 of 1 compared query would give different results.');
-    await click(button(container, 'shows how results would change'));
+    await click(button(container, 'How results would change'));
 
     changesAnswer = [404, { error: 'Not found' }];
-    await click(button(container, 'shows how results would change'));
+    await click(button(container, 'How results would change'));
     expect(container.querySelector('.v10-po-rg-changes')?.textContent).toBe('The comparison isn\'t available: Not found');
   });
 
@@ -464,6 +467,16 @@ describe('searchStateText', () => {
     expect(searchStateText(layer('serve', { surprising: 1 }))).toBe('Checking');
     expect(searchStateText(layer('serve', { ready: 2 }))).toBe('In use');
     expect(searchStateText(layer('build', { ready: 1 }))).toBe('Ready to turn on');
+  });
+
+  it('draws ready states as success, work under way as pending, and the rest as a muted tag', () => {
+    expect(searchStateTone(layer('serve', { ready: 1 }))).toBe('success');
+    expect(searchStateTone(layer('build', { ready: 1 }))).toBe('success');
+    expect(searchStateTone(layer('serve', { building: 1 }))).toBe('pending');
+    expect(searchStateTone(layer('serve', { dirty: 1, ready: 1 }))).toBe('pending');
+    expect(searchStateTone(layer('build', { rebuilding: 1 }))).toBe('pending');
+    expect(searchStateTone(layer('off', {}))).toBe('muted');
+    expect(searchStateTone(layer(undefined, {}))).toBe('muted');
   });
 
   it('says Off for a memory that is off, and when the node didn\'t say', () => {

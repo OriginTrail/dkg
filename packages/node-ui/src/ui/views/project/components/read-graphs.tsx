@@ -1,6 +1,10 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { GetView } from '@origintrail-official/dkg-core';
 import { useFetch } from '../../../hooks.js';
+import { Badge, LayerGlyph, type BadgeTone } from '../../../components/ds/Badge.js';
+import { Button } from '../../../components/ds/Button.js';
+import { Loading } from '../../../components/ds/Loading.js';
+import { RetryButton } from '../../../components/ds/RetryButton.js';
 import {
   READ_GRAPH_MODES,
   fetchReadGraphSettings,
@@ -15,10 +19,10 @@ import {
 // Preview (the node keeps a combined copy, which no query reads yet) or On
 // (queries that ask for it read the combined copy).
 
-const LAYER_NAMES: Readonly<Record<GetView, { readonly name: string; readonly detail?: string }>> = {
-  'verifiable-memory': { name: 'Published assets' },
-  'shared-working-memory': { name: 'Shared memory', detail: 'Shared with your team' },
-  'working-memory': { name: 'Private drafts' },
+const LAYER_NAMES: Readonly<Record<GetView, { readonly name: string; readonly detail?: string; readonly glyph: 'wm' | 'swm' | 'vm' }>> = {
+  'verifiable-memory': { name: 'Published assets', glyph: 'vm' },
+  'shared-working-memory': { name: 'Shared memory', detail: 'Shared with your team.', glyph: 'swm' },
+  'working-memory': { name: 'Private drafts', glyph: 'wm' },
 };
 
 const MODE_LABELS: Readonly<Record<ReadGraphMode, string>> = { off: 'Off', build: 'Preview', serve: 'On' };
@@ -61,6 +65,14 @@ export function searchStateText(layer: ReadGraphLayerSettings): string {
   return 'Checking';
 }
 
+/** How a memory's state draws: ready states as success, work under way as pending, and the rest as a muted tag. */
+export function searchStateTone(layer: ReadGraphLayerSettings): BadgeTone {
+  const text = searchStateText(layer);
+  if (text === 'In use' || text === 'Ready to turn on') return 'success';
+  if (text === 'Off' || text === 'Not known') return 'muted';
+  return 'pending';
+}
+
 /** How many of something, in users' words: "1 asset", "12,400 assets". */
 function counted(count: number, one: string, many: string): string {
   return `${count.toLocaleString()} ${count === 1 ? one : many}`;
@@ -91,20 +103,23 @@ function switchOnBlocked(settings: ReadGraphSettings, layer: ReadGraphLayerSetti
 
 /** The node's comparison of this context graph's sampled queries, answered both ways. */
 function ResultChangesLine({ contextGraphId }: { contextGraphId: string }) {
-  const { data, error, loading } = useFetch(() => fetchResultChanges(contextGraphId), [contextGraphId], 0,
+  const { data, error } = useFetch(() => fetchResultChanges(contextGraphId), [contextGraphId], 0,
     { scope: contextGraphId, retention: 'scope' });
-  let text: string;
-  if (data) {
-    const since = data.since === undefined || Number.isNaN(Date.parse(data.since))
-      ? ''
-      : `Since ${new Date(data.since).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}: `;
-    text = data.compared === 0
-      ? 'No queries compared yet. The node compares some of the queries people run on this context graph.'
-      : `${since}${data.different} of ${data.compared} compared ${data.compared === 1 ? 'query' : 'queries'} would give different results.`;
-  } else {
-    text = error ? `The comparison isn't available: ${error}` : loading ? 'Loading the comparison…' : '';
+  if (!data) {
+    return error
+      ? <p className="v10-po-rg-changes" role="status">The comparison isn't available: {error}</p>
+      : <Loading label="Loading the comparison…" className="v10-po-rg-changes" />;
   }
-  return <p className="v10-po-rg-changes" role="status">{text}</p>;
+  const since = data.since === undefined || Number.isNaN(Date.parse(data.since))
+    ? ''
+    : `Since ${new Date(data.since).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}: `;
+  return (
+    <p className="v10-po-rg-changes" role="status">
+      {data.compared === 0
+        ? 'No queries compared yet. The node compares some of the queries people run on this context graph.'
+        : `${since}${data.different} of ${data.compared} compared ${data.compared === 1 ? 'query' : 'queries'} would give different results.`}
+    </p>
+  );
 }
 
 /**
@@ -191,53 +206,48 @@ export function ReadGraphsSection({ contextGraphId }: { contextGraphId: string }
   return (
     <section className="v10-po-join v10-po-read-graphs" data-section="read-graphs" aria-labelledby={headingId}>
       <header className="v10-po-join-head">
-        <span className="v10-po-section-title" id={headingId}>Search across assets</span>
+        <h2 className="v10-po-section-title" id={headingId}>Search across assets</h2>
       </header>
-      <p className="v10-po-rg-desc">
-        <strong>Preview:</strong> Prepares the combined copy and{' '}
-        <button type="button" className="v10-po-rg-link" aria-expanded={showChanges} onClick={() => setShowChanges(shown => !shown)}>
-          shows how results would change
-        </button>, without changing any results yet.
-      </p>
-      {showChanges && <ResultChangesLine contextGraphId={contextGraphId} />}
+      <p className="v10-po-rg-desc"><strong>Preview:</strong> {PREVIEW}</p>
       <p className="v10-po-rg-desc"><strong>On:</strong> {ON}</p>
+      <Button variant="ghost" size="sm" className="v10-po-rg-changes-toggle" aria-expanded={showChanges} onClick={() => setShowChanges(shown => !shown)}>
+        How results would change
+      </Button>
+      {showChanges && <ResultChangesLine contextGraphId={contextGraphId} />}
       {!settings ? (
-        <div className="v10-po-rg-error" role="alert">
-          <span>Search across assets settings are unavailable: {error}</span>
-          <button type="button" className="v10-po-join-btn" onClick={() => refresh()}>Retry</button>
+        <div className="v10-po-rg-error">
+          <p role="alert">Search across assets settings are unavailable: {error}</p>
+          <RetryButton onClick={() => refresh()} />
         </div>
       ) : (
         <>
-          {notice && <p className="v10-po-rg-notice" role="note">{notice}</p>}
+          {notice && <p className="v10-po-rg-notice ds-card-nested" role="note">{notice}</p>}
           <div className="v10-po-rg-list">
             {settings.layers.map(layer => {
-              const { name, detail } = LAYER_NAMES[layer.view];
+              const { name, detail, glyph } = LAYER_NAMES[layer.view];
               const blocked = switchOnBlocked(settings, layer);
               const size = searchSizeText(layer);
               const assets = searchAssetsText(layer);
               return (
-                <div key={layer.view} className="v10-po-rg-row" data-layer={layer.view} data-mode={layer.mode ?? 'unknown'}>
+                <div key={layer.view} className="v10-po-rg-row ds-card-nested" data-layer={layer.view} data-mode={layer.mode ?? 'unknown'}>
                   <div className="v10-po-rg-main">
                     <div className="v10-po-join-info">
-                      <span className="v10-po-join-name">
-                        {name}
-                        {assets && <span className="v10-po-rg-assets" data-testid="search-assets"> · {assets}</span>}
+                      <span className="v10-po-join-name v10-po-rg-name"><LayerGlyph layer={glyph} />{name}</span>
+                      {detail && <span className="v10-po-rg-detail">{detail}</span>}
+                      <span className="v10-po-rg-facts">
+                        <Badge tone={searchStateTone(layer)} size="sm" data-testid="search-state">{searchStateText(layer)}</Badge>
+                        {assets && <Badge size="sm" data-testid="search-assets">{assets}</Badge>}
+                        {size && <Badge size="sm" data-testid="search-size">{size}</Badge>}
+                        {!layer.allowed && <Badge tone="muted" size="sm" data-testid="search-not-allowed">Not allowed on this node</Badge>}
                       </span>
-                      <span className="v10-po-rg-state">
-                        <span data-testid="search-state">{searchStateText(layer)}</span>
-                        {size && <span data-testid="search-size"> · {size}</span>}
-                      </span>
-                      <span className="v10-po-rg-source">
-                        {[detail, layer.setHere ? 'Set for this context graph' : 'Node default', layer.allowed ? undefined : 'not allowed on this node']
-                          .filter(Boolean).join(' · ')}
-                      </span>
+                      <span className="v10-po-rg-source">{layer.setHere ? 'Set for this context graph' : 'Node default'}</span>
                     </div>
-                    <div className="v10-po-rg-modes" role="group" aria-label={`Search across assets in ${name}`}>
+                    <div className="ds-seg v10-po-rg-modes" role="group" aria-label={`Search across assets in ${name}`}>
                       {READ_GRAPH_MODES.map(mode => (
                         <button
                           key={mode}
                           type="button"
-                          className="v10-po-rg-mode"
+                          className="ds-seg-item"
                           aria-pressed={layer.mode === mode}
                           title={mode === 'off' ? undefined : blocked ?? MODE_HINTS[mode]}
                           disabled={pending !== null || (mode !== 'off' && blocked !== undefined)}
@@ -248,16 +258,16 @@ export function ReadGraphsSection({ contextGraphId }: { contextGraphId: string }
                       ))}
                     </div>
                   </div>
-                  {pending === layer.view && <div className="v10-po-rg-status" role="status">Applying…</div>}
+                  {pending === layer.view && <Loading label="Applying…" className="v10-po-rg-status" />}
                   {confirming === layer.view && (
                     <div className="v10-po-rg-confirm" role="group" aria-label={`Turn off ${name}`}>
                       <span>Turning this off removes the combined copy. Getting it ready again takes time.</span>
-                      <button type="button" className="v10-po-join-btn reject" onClick={() => void apply(layer.view, 'off')}>Turn off</button>
-                      <button type="button" className="v10-po-join-btn" onClick={() => setConfirming(null)}>Cancel</button>
+                      <Button variant="danger" size="sm" onClick={() => void apply(layer.view, 'off')}>Turn off</Button>
+                      <Button variant="ghost" size="sm" onClick={() => setConfirming(null)}>Cancel</Button>
                     </div>
                   )}
                   {refusal?.contextGraphId === contextGraphId && refusal.view === layer.view && (
-                    <div className="v10-po-rg-refusal" role="alert">{refusal.message}</div>
+                    <p className="v10-po-rg-refusal" role="alert">{refusal.message}</p>
                   )}
                 </div>
               );
