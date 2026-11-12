@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
  * The marketplace at boot (`startMarketplace`, which the daemon's start-up
- * calls): off without its settings; a part that fails to start is logged and
- * stays off, its job stopped, and the boot goes on with the other part.
+ * calls): off without its settings, and off, logged once, on a chain without
+ * the marketplace's contracts; a part that fails to start is logged and stays
+ * off, its job stopped, and the boot goes on with the other part.
  */
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -24,6 +25,8 @@ const SELLING = {
 let dir: string;
 let agent: Record<string, unknown>;
 let log: ReturnType<typeof vi.fn>;
+/** The chain the fake agent hands out: the same one on every call. */
+const chainOf = () => (agent.marketplaceChain as () => NonNullable<ReturnType<typeof marketplaceChainOf>>)();
 
 const options = (marketplace?: Record<string, unknown>): MarketplaceStartOptions => ({
   config: marketplace ? { marketplace } : {},
@@ -51,8 +54,33 @@ afterEach(async () => {
 
 describe('the marketplace at boot', () => {
   it('stays off without its settings, and says nothing', async () => {
+    const asks = vi.spyOn(chainOf(), 'getMarketplaceContracts');
     expect(await startMarketplace(options())).toEqual({ marketplace: undefined, marketplaceGateway: undefined, marketplaceSeller: undefined });
     expect(log).not.toHaveBeenCalled();
+    expect(asks).not.toHaveBeenCalled();
+  });
+
+  it('stays off, logged once, on a chain without the marketplace contracts', async () => {
+    const missing = Object.assign(new Error('ServiceSubscriptions is not in the Hub'), { name: 'HubContractNotFoundError' });
+    vi.spyOn(chainOf(), 'getMarketplaceContracts').mockRejectedValue(missing);
+    const starts = vi.spyOn(Buyer.prototype, 'start');
+    const registers = vi.fn(() => () => undefined);
+    agent.registerMarketplaceHandlers = registers;
+    const parts = await startMarketplace(options({ enabled: true, tickSeconds: 3_600, seller: SELLING }));
+    expect(parts).toEqual({ marketplace: undefined, marketplaceGateway: undefined, marketplaceSeller: undefined });
+    expect(log.mock.calls).toEqual([['[marketplace] the chain has no marketplace contracts: buying and selling stay off']]);
+    expect(starts).not.toHaveBeenCalled();
+    expect(registers).not.toHaveBeenCalled();
+  });
+
+  it('starts as before when the contract check fails for another reason', async () => {
+    vi.spyOn(chainOf(), 'getMarketplaceContracts').mockRejectedValueOnce(new Error('no RPC endpoint answered'));
+    const parts = await startMarketplace(options({ enabled: true, tickSeconds: 3_600 }));
+    expect(parts.marketplace).toBeInstanceOf(Buyer);
+    expect(parts.marketplaceGateway).toBeDefined();
+    expect(log).not.toHaveBeenCalledWith(expect.stringContaining('no marketplace contracts'));
+    await parts.marketplaceGateway!.stop();
+    await parts.marketplace!.stop();
   });
 
   it('leaves buying off, logged and its job stopped, when the gateway cannot read its files', async () => {
