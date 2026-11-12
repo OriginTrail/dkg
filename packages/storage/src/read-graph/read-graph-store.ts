@@ -198,7 +198,7 @@ export class ReadGraphStore implements TripleStoreDecorator {
    * `termSite` names the adapter whose renderer the delta forms use, so they
    * name each term exactly as the adapter's own statement does.
    */
-  constructor(inner: TripleStore, runtime: ReadGraphBackendRuntime, private readonly termSite: SparqlTermSite['adapter'] = 'oxigraph') {
+  constructor(inner: TripleStore, runtime: ReadGraphBackendRuntime, readonly termSite: SparqlTermSite['adapter'] = 'oxigraph') {
     this.innerStore = inner;
     this.runtime = runtime;
     RUNTIME_BELOW_LAYER.set(inner, runtime);

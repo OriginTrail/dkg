@@ -16,12 +16,13 @@ const DIRECTORIES = new WeakMap<ReadGraphBackendRuntime, Set<string>>();
 
 /**
  * Add a node's data directory to the runtime's. If the backend may already
- * hold read-graph partitions, the directory notes so at once.
+ * hold read-graph partitions, the directory notes so at once; one that cannot
+ * take the note throws, and is not added.
  */
 export function addReadGraphDataDirectory(runtime: ReadGraphBackendRuntime, dataDir: string): void {
+  if (runtime.mayHoldPartitions === true) noteReadGraphPartitions(dataDir);
   const directories = DIRECTORIES.get(runtime) ?? new Set<string>();
   DIRECTORIES.set(runtime, directories.add(dataDir));
-  if (runtime.mayHoldPartitions === true) noteReadGraphPartitions(dataDir);
 }
 
 /** The runtime's data directories. */

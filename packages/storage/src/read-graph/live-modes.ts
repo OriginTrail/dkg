@@ -27,8 +27,14 @@
  * default from its next plan on.
  *
  * One apply runs at a time per backend, and the modes the runtime already has
- * change nothing. Refusals are decided before anything changes; if any change
- * is refused, none is made. An apply throws only before it changes the modes.
+ * change nothing. Refusals are decided before anything changes:
+ * - a store that cannot maintain read graphs, or has no read-graph layer,
+ *   refuses settings that keep any, whether or not a context graph is listed:
+ *   the apply throws `ReadGraphsUnsupportedError` (`READ_GRAPHS_UNSUPPORTED`);
+ * - a context graph ID that cannot have read graphs, switched on, refuses the
+ *   apply: every change is refused in the result, and none is made.
+ * An apply throws only before it changes the modes; the steps that can fail
+ * on the data directory run before that too.
  * After that, a step that fails on one read graph is left to the builder,
  * which finds the read graph from its mode: one switched on is built where the
  * node keeps it, and one switched off that the mirror still holds is removed.
@@ -50,6 +56,7 @@ import { missingReadGraphMethods } from './adapter-contract.js';
 import { forgetReadGraphDropRequest, requestReadGraphDrops } from './drop-requests.js';
 import { useReadGraphMarkJournal } from './mark-journal.js';
 import { readGraphLayerOf, type ReadGraphStore } from './read-graph-store.js';
+import { ReadGraphsUnsupportedError } from './read-graphs-unsupported.js';
 import { markReadGraphDirty, refreshReadGraphRegistry, retireReadGraph, type ReadGraphJobContext } from './rebuild.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
 import {
@@ -115,7 +122,7 @@ const APPLIES = new WeakMap<ReadGraphBackendRuntime, Promise<unknown>>();
  * Switch the node's read graphs to `next`, the whole settings, not a change:
  * see the module documentation. Lists every layer of each context graph that
  * `next` names and every other layer whose mode changes, in context-graph
- * order. A store without a read-graph layer refuses every switch on.
+ * order.
  */
 export async function applyReadGraphModes(
   store: TripleStore,
@@ -127,8 +134,8 @@ export async function applyReadGraphModes(
   const layer = readGraphLayerOf(store);
   if (!layer) {
     options.signal?.throwIfAborted();
-    const changes = changesOf({}, modes, options.contextGraphIds ?? []);
-    return outcomes(changes, (change) => (change.to !== 'off' ? 'this store has no read-graph layer' : undefined));
+    if (keepsAnyReadGraph(modes)) throw new ReadGraphsUnsupportedError('none', [], 'This store has no read-graph layer, so it keeps no read graphs');
+    return outcomes(changesOf({}, modes, options.contextGraphIds ?? []), () => undefined);
   }
   const runtime = layer.runtime;
   const run = (APPLIES.get(runtime) ?? Promise.resolve()).then(() => apply(store, layer, modes, semantics, options));
@@ -161,6 +168,9 @@ async function apply(
   options: ApplyReadGraphModesOptions,
 ): Promise<readonly ReadGraphModeChange[]> {
   options.signal?.throwIfAborted();
+  // Settings that keep read graphs are refused here whether or not they list a context graph: a node default, too.
+  const missing = missingReadGraphMethods(layer.innerStore, layer.adapterCapabilities);
+  if (missing.length > 0 && keepsAnyReadGraph(next)) throw new ReadGraphsUnsupportedError(layer.termSite, missing);
   const runtime = layer.runtime;
   const source = options.source ?? 'storage.readGraphModes';
   const target = readGraphPartitionMaintenanceStore(store);
@@ -168,20 +178,18 @@ async function apply(
   options.signal?.throwIfAborted();
   const candidates = [...(options.contextGraphIds ?? []), ...runtime.mirror.contextGraphIds(), ...stored.map((readGraph) => parseReadGraphIri(readGraph)!.scope.contextGraphId)];
   const changes = changesOf(runtime.modes, next, candidates);
-  const missing = missingReadGraphMethods(layer.innerStore, layer.adapterCapabilities);
-  const refusal = (change: Omit<ReadGraphModeChange, 'outcome'>): string | undefined => {
-    if (change.from !== 'off' || change.to === 'off') return undefined;
-    if (missing.length > 0) return `this store's adapter cannot maintain read graphs: it does not send read-graph operations with ${missing.join(', ')}`;
-    return isReadGraphEligibleContextGraphId(change.contextGraphId) ? undefined : 'this context graph ID cannot have read graphs';
-  };
+  const refusal = (change: Omit<ReadGraphModeChange, 'outcome'>): string | undefined =>
+    (change.from === 'off' && change.to !== 'off' && !isReadGraphEligibleContextGraphId(change.contextGraphId)
+      ? 'this context graph ID cannot have read graphs' : undefined);
   if (changes.some((change) => refusal(change) !== undefined)) return outcomes(changes, refusal);
 
+  // What can fail on the data directory, before anything changes. From the settings, not from the changes listed: a
+  // node default switched on lists no context graph before the first subscription, and the builder builds there all
+  // the same.
+  if (keepsAnyReadGraph(next)) prepareMaintenance(runtime, options.dataDir);
   runtime.modes = next;
   runtime.modesApplied = true;
   if (semantics) setViewSemantics(runtime, semantics);
-  // From the settings, not from the changes listed: a node default switched on lists no context graph before the first
-  // subscription, and the builder then builds there all the same.
-  if (keepsAnyReadGraph(next)) prepareMaintenance(runtime, options.dataDir);
   const context: ReadGraphJobContext = { store, ...(options.dataDir !== undefined ? { dataDir: options.dataDir } : {}), source };
   await switchOff(context, runtime, next, stored);
   const on = changes.filter((change) => change.from === 'off' && change.to !== 'off');
@@ -217,7 +225,8 @@ async function switchOff(context: ReadGraphJobContext, runtime: ReadGraphBackend
  * Ready a runtime for maintenance, as a start-up that keeps read graphs does:
  * the marks the store refuses from now on go to the data directory's journal,
  * which also records the working-memory identity, and a later start-up of
- * this process shares the mirror rather than load it again.
+ * this process shares the mirror rather than load it again. It writes in the
+ * data directory, and throws when it cannot.
  */
 function prepareMaintenance(runtime: ReadGraphBackendRuntime, dataDir: string | undefined): void {
   if (dataDir !== undefined) {

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setImmediate as nextTurn } from 'node:timers/promises';
@@ -300,20 +300,58 @@ describe('switching read graphs live', () => {
     expect(layer.runtime.modes).toBe(before);
     // So does a mode that is not one.
     await expect(applyReadGraphModes(store, { default: 'on' as never })).rejects.toThrow(TypeError);
-    // A store whose adapter cannot maintain read graphs refuses every switch on, and keeps every switch off.
+  });
+
+  it('refuses settings that keep read graphs on a store that cannot keep them, a node default with no context graph included', async () => {
     const plain = new OxigraphStore();
-    const unsupported = guardReadGraphPartition(wrapReadGraphLayer(new Proxy(plain, {
+    const layer = wrapReadGraphLayer(new Proxy(plain, {
       get(target, property) {
         if (property === 'readGraphCapabilities') return undefined;
         const value: unknown = Reflect.get(target, property, target);
         return typeof value === 'function' ? value.bind(target) : value;
       },
-    }), { backend: 'oxigraph' }));
-    const outcome = outcomeOf(await applyReadGraphModes(unsupported, layerAt(fixture.contextGraphId, VM, 'serve')), 'verifiable-memory');
-    expect(outcome).toEqual({ refused: expect.stringContaining('cannot maintain read graphs') });
-    // A store without the read-graph layer has nothing to switch on.
-    expect(outcomeOf(await applyReadGraphModes(new OxigraphStore(), layerAt(fixture.contextGraphId, VM, 'build')), 'verifiable-memory'))
-      .toEqual({ refused: 'this store has no read-graph layer' });
+    }), { backend: 'oxigraph' });
+    const unsupported = guardReadGraphPartition(layer);
+    const before = { modes: layer.runtime.modes, semantics: layer.runtime.viewSemantics };
+    // A switch of a named context graph, a node default and a node-wide layer, with no context graph to list: all refused.
+    for (const next of [layerAt('live-unsupported', VM, 'serve'), { default: 'build' as const }, { layers: { [VM]: 'serve' as const } }]) {
+      await expect(applyReadGraphModes(unsupported, next, { viewSemantics: { default: 'merged' } }))
+        .rejects.toMatchObject({ code: 'READ_GRAPHS_UNSUPPORTED', message: expect.stringContaining('does not send read-graph operations with') });
+      expect(layer.runtime.modes).toBe(before.modes);
+      expect(layer.runtime.viewSemantics).toBe(before.semantics);
+    }
+    // Settings that keep nothing are no switch on: they apply.
+    expect(await applyReadGraphModes(unsupported, layerAt('live-unsupported', VM, 'off'))).toEqual([
+      { contextGraphId: 'live-unsupported', layer: 'working-memory', from: 'off', to: 'off', outcome: 'unchanged' },
+      { contextGraphId: 'live-unsupported', layer: 'shared-working-memory', from: 'off', to: 'off', outcome: 'unchanged' },
+      { contextGraphId: 'live-unsupported', layer: 'verifiable-memory', from: 'off', to: 'off', outcome: 'unchanged' },
+    ]);
+    // A store without the read-graph layer refuses them the same way.
+    for (const next of [layerAt('live-unsupported', VM, 'build'), { layers: { [VM]: 'serve' as const } }]) {
+      await expect(applyReadGraphModes(new OxigraphStore(), next)).rejects.toMatchObject({ code: 'READ_GRAPHS_UNSUPPORTED' });
+    }
+  });
+
+  it('throws before it changes anything when the data directory cannot take what a maintaining runtime writes there', async () => {
+    const node = await open({ modes: layerAt(`live-${sequence + 1}`, VM, 'build') });
+    const { fixture, layer, store } = node;
+    const wholeVm = readGraphIri(fixture.keys[0]!);
+    const builder = builderOf(node);
+    await pass(builder);
+    await builder.close();
+    expect(layer.runtime.mayHoldPartitions).toBe(true);
+    const file = join(node.dataDir, 'not-a-directory');
+    writeFileSync(file, '');
+    const before = { modes: layer.runtime.modes, semantics: layer.runtime.viewSemantics, row: layer.runtime.mirror.get(wholeVm) };
+    // One layer off and another on, with the data directory a path under a file: its partitions note cannot be written.
+    const next: ReadGraphModes = { contextGraphs: { [fixture.contextGraphId]: { layers: { [VM]: 'off', [SWM]: 'build' } } } };
+    await expect(applyReadGraphModes(store, next, { dataDir: join(file, 'data'), viewSemantics: { default: 'merged' } })).rejects.toThrow();
+    expect(layer.runtime.modes).toBe(before.modes);
+    expect(layer.runtime.viewSemantics).toBe(before.semantics);
+    expect(layer.runtime.mirror.get(wholeVm)).toEqual(before.row);
+    expect(readGraphDropRequests(layer.runtime)).toEqual([]);
+    // Nor is that directory one of the runtime's, where later notes would fail too.
+    expect(readGraphDataDirectories(layer.runtime)).not.toContain(join(file, 'data'));
   });
 
   it('keeps the modes and view semantics applied live when another store object over the backend is made from the configuration', async () => {
