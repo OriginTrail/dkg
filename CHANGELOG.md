@@ -8,8 +8,12 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 10.1.1 is the first 10.1 release for mainnet: nodes moving from 10.0.27
 also get everything in 10.1.0 below. It fixes problems found while 10.1.0
-ran on testnet, in the Marketplace, the MCP server and the public catalog,
-and gives the node UI a new design system.
+ran on testnet, in the Marketplace, the MCP server and the public catalog.
+It gives the node UI a new design system and makes a scoped query cost what
+the context graph it reads costs. It also adds merged view queries and a
+developer preview of Graph Computer Programs, both off until a node turns
+them on. On mainnet the marketplace stays off, as the mainnet chains have
+no marketplace contracts yet.
 
 ### Node UI
 
@@ -56,9 +60,32 @@ and gives the node UI a new design system.
   `DKG_SEMANTIC_RUNTIME_WASM=required` to make that build fail instead. CI
   and release packing require the Wasm, so the published package includes
   it.
+- Merged view queries, opt-in. A view query can ask for
+  `semantics: "merged"` and match its patterns across all of a layer's
+  assets at once, from a read graph the node keeps. Requests without
+  `semantics` keep per-asset answers, and the response's `semantics` field
+  says which answered. `query.readGraphs` turns read graphs on per node,
+  layer or context graph (`off`, the default, `build` or `serve`), and
+  `query.viewSemantics` sets the default per context graph.
+  `dkg store read-graphs status | check | rebuild | drop` manages them, and
+  `dkg view-semantics report` shows how merged answers would differ. A node
+  keeps read graphs off while the release `dkg rollback` would activate
+  doesn't recognize them, so a node updating from 10.1.0 or 10.0.27 keeps
+  them off. See [Read graphs](docs/use-dkg/read-graphs.md).
+- A limit on the node's graph catalog, its in-memory list of the store's
+  graphs: `store.graphCatalog.maxBytes`, 256 MiB by default
+  (`DKG_STORE_GRAPH_CATALOG_MAX_BYTES` wins when set). The node warns at
+  50 % and 80 % of it, the alert set has a rule on the 80 % warning, and a
+  query that needs the catalog past its limit gets a retryable
+  `503 STORE_INTERNAL_LIMIT` rather than an answer cut short. See
+  [Graph catalog limit](docs/use-dkg/graph-catalog-limit.md).
 
 ### Changed
 
+- A scoped query costs what the context graph it reads costs: it finds its
+  graphs in the node's graph catalog, which is answered warm while it
+  refreshes in the background, instead of listing the whole store. A
+  caller's byte budget covers only the reads made for its own query.
 - Core nodes send fewer RPC requests for Knowledge Assets that wait to reach
   Verifiable Memory. The VM reconcile pass and the StorageACK promotion lanes
   read an asset's latest Merkle root and then its publisher, a request each,
@@ -95,6 +122,12 @@ and gives the node UI a new design system.
   If the backend refuses both, the service stops offering tools until the
   node restarts, so buyers answer such calls with `tools_unsupported`
   instead of sending them.
+- A node that turns the marketplace on where its chain has none of the
+  marketplace's contracts, as on the mainnets for now, keeps buying and
+  selling off with one log line. Before, the buyer's job started anyway,
+  failed on every tick and posted a "Marketplace renewal failed"
+  notification each time. The node asks its chain for the contracts once at
+  start-up, and only when the marketplace is on.
 - A node with an endpoint in `chain.rpcUrls` that never answers no longer
   piles up RPC requests while its node UI is open. Each
   `GET /api/wallets/balances`, which the UI's Settings page sends every
@@ -126,6 +159,10 @@ and gives the node UI a new design system.
   untouched.
 - An agent built on a pre-built chain adapter verifies finalized public
   catalog heads over the RPC endpoints its adapter names, as a node does.
+- Query routes answer a context graph the node holds nothing of the same
+  way as one the caller may not read.
+- Every store write path checks its terms and protocol metadata before they
+  reach the store.
 
 ### Security
 
