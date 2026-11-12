@@ -49,7 +49,6 @@ import {
   type GetView,
   type ReadGraphKey,
 } from '@origintrail-official/dkg-core';
-import { isReadGraphStateGraph } from '../graph-enumeration-visibility.js';
 import { readGraphPartitionMaintenanceStore } from '../read-graph-partition-store.js';
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
@@ -73,7 +72,7 @@ import {
   type ViewSemanticsSettings,
 } from './settings.js';
 import { noteReadGraphRuntimeLoaded } from './startup.js';
-import { parseReadGraphStateRows, readGraphStateRowsQuery } from './state.js';
+import { readStoredReadGraphStates } from './state.js';
 import { noteWorkingMemoryIdentityDirectory } from './working-memory-identity.js';
 
 /** What an apply did with one context graph's layer. */
@@ -314,10 +313,7 @@ function outcomes(
 
 /** The read graphs with a state row in the store, read below the layer. */
 async function storedReadGraphs(store: TripleStore, options: QueryOptions): Promise<string[]> {
-  const result = await store.query(readGraphStateRowsQuery(), options);
-  if (result.type !== 'bindings') throw new Error('A read-graph state read expected bindings');
-  const bindings = result.bindings.filter((binding) => binding.stateGraph !== undefined && isReadGraphStateGraph(binding.stateGraph));
-  const { rows, damaged } = parseReadGraphStateRows(bindings);
+  const { rows, damaged } = await readStoredReadGraphStates(store, options);
   return [...new Set([...rows.map((row) => row.readGraph), ...damaged])].filter((readGraph) => parseReadGraphIri(readGraph) !== undefined);
 }
 

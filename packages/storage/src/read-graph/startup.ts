@@ -34,7 +34,6 @@
  */
 
 import { MemoryLayer, parseReadGraphIri, type ReadGraphKey } from '@origintrail-official/dkg-core';
-import { isReadGraphStateGraph } from '../graph-enumeration-visibility.js';
 import { mayHoldReadGraphPartitions, noteReadGraphPartitions } from '../read-graph-partition-marker.js';
 import { markReadGraphsDirtyAtStart } from '../read-graph-partition-startup.js';
 import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore } from '../read-graph-partition-store.js';
@@ -63,12 +62,11 @@ import {
   MAX_READ_GRAPH_GENERATION,
   isReadGraphRowAccepted,
   newReadGraphGeneration,
-  parseReadGraphStateRows,
   nextReadGraphState,
   readGraphStateMarkDirty,
   readGraphStateMarkDirtyAtStart,
   readGraphStateReset,
-  readGraphStateRowsQuery,
+  readStoredReadGraphStates,
   type ReadGraphStateRow,
   type ReadGraphVersions,
 } from './state.js';
@@ -307,8 +305,6 @@ async function registryRecords(store: TripleStore, options: QueryOptions) {
 }
 
 async function stateRows(store: TripleStore, options: QueryOptions) {
-  const result = await store.query(readGraphStateRowsQuery(), options);
-  if (result.type !== 'bindings') throw new Error('Read-graph start-up expected state-row bindings');
-  const bindings = result.bindings.filter((binding) => binding.stateGraph !== undefined && isReadGraphStateGraph(binding.stateGraph));
-  return { count: bindings.length, ...parseReadGraphStateRows(bindings) };
+  const { bindings, rows, damaged } = await readStoredReadGraphStates(store, options);
+  return { count: bindings.length, rows, damaged };
 }

@@ -32,6 +32,8 @@ import {
   sparqlString,
 } from '@origintrail-official/dkg-core';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
+import { isReadGraphStateGraph } from '../graph-enumeration-visibility.js';
+import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { READ_GRAPH_MEMBERSHIP_RULE_VERSION } from './membership.js';
 
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
@@ -307,6 +309,23 @@ function rowsQuery(selection: string): string {
   }
   ${IN_STATE_GRAPH}
 }`;
+}
+
+/**
+ * The state rows a store holds, read with one lookup below the read-graph
+ * layer: only rows in a context graph's own state graph count, as for every
+ * enumeration. The bindings come back with the rows and the damaged read
+ * graphs, for a caller that writes damaged rows again from them.
+ */
+export async function readStoredReadGraphStates(store: TripleStore, options: QueryOptions = {}): Promise<{
+  readonly bindings: readonly Readonly<Record<string, string | undefined>>[];
+  readonly rows: ReadGraphStateRow[];
+  readonly damaged: string[];
+}> {
+  const result = await store.query(readGraphStateRowsQuery(), options);
+  if (result.type !== 'bindings') throw new Error('A read-graph state read expected state-row bindings');
+  const bindings = result.bindings.filter((binding) => binding.stateGraph !== undefined && isReadGraphStateGraph(binding.stateGraph));
+  return { bindings, ...parseReadGraphStateRows(bindings) };
 }
 
 /**

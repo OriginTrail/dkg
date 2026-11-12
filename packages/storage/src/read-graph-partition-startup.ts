@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri, parseReadGraphIri, readGraphStateGraphIri } from '@origintrail-official/dkg-core';
-import { isReadGraphStateGraph } from './graph-enumeration-visibility.js';
 import { mayHoldReadGraphPartitions, noteReadGraphPartitions } from './read-graph-partition-marker.js';
 import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore } from './read-graph-partition-store.js';
 import {
@@ -8,9 +7,8 @@ import {
   MAX_READ_GRAPH_GENERATION,
   READ_GRAPH_STATE_PREDICATES,
   newReadGraphGeneration,
-  parseReadGraphStateRows,
   readGraphStateCompareAndSet,
-  readGraphStateRowsQuery,
+  readStoredReadGraphStates,
   type ReadGraphStateRow,
 } from './read-graph/state.js';
 import type { UpdateOptions, TripleStore } from './triple-store.js';
@@ -48,16 +46,13 @@ export async function markReadGraphsDirtyAtStart(
 ): Promise<number> {
   const target = readGraphPartitionMaintenanceStore(store);
   const storeOptions: UpdateOptions = { signal: options.signal, priority: 'background', source: 'storage.readGraphStartup' };
-  const result = await target.query(readGraphStateRowsQuery(), storeOptions);
-  if (result.type !== 'bindings') throw new Error('Read-graph start-up expected state-row bindings');
-  const bindings = result.bindings.filter(binding => binding.stateGraph !== undefined && isReadGraphStateGraph(binding.stateGraph));
+  const { bindings, rows, damaged } = await readStoredReadGraphStates(target, storeOptions);
   const found = bindings.length > 0;
   if (found && options.dataDir !== undefined) noteReadGraphPartitions(options.dataDir);
   if (found || (options.dataDir !== undefined && mayHoldReadGraphPartitions(options.dataDir))) {
     noteStoreMayHoldReadGraphPartitions(target);
   }
   if (!found) return 0;
-  const { rows, damaged } = parseReadGraphStateRows(bindings);
   options.found?.([...rows.map(row => row.readGraph), ...damaged].filter(readGraph => parseReadGraphIri(readGraph) !== undefined));
   const notDirty = rows.filter(row => row.state !== 'dirty');
   const advancing = notDirty.filter(row => row.generation < MAX_READ_GRAPH_GENERATION);
