@@ -38,7 +38,9 @@
 #             and a default view semantics, followed by a request that names
 #             none. Then, on READ_GRAPHS_LIVE_LOAD_NODE, switch its layers between
 #             build and serve while the node's own agent writes drafts into it
-#             (writes must be acknowledged between every two switches, or the
+#             (each switch must take effect while the writes go on: the modes it
+#             asked for, and the merged join answered or refused accordingly;
+#             writes must be acknowledged between every two switches, or the
 #             phase is INCONCLUSIVE; every acknowledged write must be there after
 #             it, and the full check clean), and restart the node: the settings
 #             must hold and the join be answered across assets again without
@@ -983,7 +985,9 @@ live_node() {
 # writes, k of them between the first and last switch>") or why, and fails.
 live_under_load() {
   local n="$LOAD_NODE" acked="$RESULTS/live-load.acked" switched="$RESULTS/live-load.switched" writer step switches=0
-  local i t body why refused="" missing="" id gaps during
+  local i t body why refused="" wrong="" missing="" id gaps during want got expect
+  # The modes the switches start from, as live_node leaves them.
+  local wm=serve swm=build vm=serve
   : > "$acked"; : > "$switched"
   (
     export DKG_API_MAXTIME=15
@@ -1004,12 +1008,24 @@ live_under_load() {
     sleep 3
     switches=$((switches + 1))
     # shellcheck disable=SC2086 # the step is three words
+    set -- $step
+    [ "$1" = - ] || wm="$1"; [ "$2" = - ] || swm="$2"; [ "$3" = - ] || vm="$3"
+    # shellcheck disable=SC2086
     body="$(live_body $step)"
-    why="$(live_put "$n" "load-$switches" "$body")" || refused="$refused; switch $switches ($step): $why"
+    if ! why="$(live_put "$n" "load-$switches" "$body")"; then
+      refused="$refused; switch $switches ($step): $why"; echo "$switches $(date +%s)" >> "$switched"; continue
+    fi
     echo "$switches $(date +%s)" >> "$switched"
+    # The switch must have taken effect while the writes go on: the modes it asked for, and the merged join answered
+    # where working memory is served and refused where it is not.
+    want="wm=$wm swm=$swm vm=$vm"; got="$(live_layers "$n" "load-$switches")"
+    [ "$got" = "$want" ] || { wrong="$wrong; switch $switches ($step): the effective modes are $got, not $want"; continue; }
+    if [ "$wm" = serve ]; then expect="200 merged 1"; else expect="400 SEMANTICS_UNSUPPORTED"; fi
+    got="$(live_expect "$n" "load-$switches" join merged "$expect" 30)" || wrong="$wrong; switch $switches ($step): the merged join answered $got, not $expect"
   done
   wait "$writer" 2>/dev/null; rm -f "$RESULTS/live-load.writer"
   [ -z "$refused" ] || { echo "switches under write load were refused${refused}"; return 1; }
+  [ -z "$wrong" ] || { echo "switches under write load did not take effect${wrong}"; return 1; }
   # Writes acknowledged between every two switches, or the switches were not under load.
   gaps="$(awk 'NR == FNR { at[$1] = $2; last = $1; next } { done_at[++w] = $2 }
     END { for (k = 1; k < last; k++) { c = 0; for (j = 1; j <= w; j++) if (done_at[j] >= at[k] && done_at[j] <= at[k + 1]) c++; if (c == 0) printf " %d-%d", k, k + 1 } }' "$switched" "$acked")"
@@ -1064,7 +1080,7 @@ phase_live() {
   esac
   why="$(live_restart)" || { record live FAIL "$(( $(now) - started ))" "node$LOAD_NODE, $LIVE_CG across a restart: $why"; return; }
   set -- $outcome
-  record live PASS "$(( $(now) - started ))" "$LIVE_CG through the settings API on nodes $holders: off dropped its read graphs; build rebuilt them with a clean full check; serve answered a join across two working-memory drafts with the joined row when merged and none per asset, and merged queries on verifiable memory; the default semantics was followed and removed. On node$LOAD_NODE: $1 switches between build and serve with writes acknowledged between every two ($3 of $2 acknowledged drafts between the first and last switch), every draft there afterwards and a clean full check; after a restart the settings held and the join was answered across assets again"
+  record live PASS "$(( $(now) - started ))" "$LIVE_CG through the settings API on nodes $holders: off dropped its read graphs; build rebuilt them with a clean full check; serve answered a join across two working-memory drafts with the joined row when merged and none per asset, and merged queries on verifiable memory; the default semantics was followed and removed. On node$LOAD_NODE: $1 switches between build and serve, each taking effect while the writes went on (its modes, and the merged join answered or refused accordingly), with writes acknowledged between every two ($3 of $2 acknowledged drafts between the first and last switch), every draft there afterwards and a clean full check; after a restart the settings held and the join was answered across assets again"
 }
 
 # gate_verdict <exit code>: PASS, INCONCLUSIVE or FAIL for the gate. The comprehensive run writes REPORT.json
