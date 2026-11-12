@@ -927,7 +927,9 @@ test('an ACK still running when the drain gives up is in the results, censored a
     ],
     'the operation it was in is censored too',
   );
-  assert.ok(opEvents.at(-1).ms >= 100);
+  const stuckOp = opEvents.at(-1);
+  assert.ok(stuckOp.ms >= 100, `it lasted at least the drain (${Math.round(stuckOp.ms)} ms)`);
+  assert.ok(Math.abs(stuckOp.t + stuckOp.ms - cutAt) < 15, 'its duration is censored at the moment the drain gave up');
 
   const s = probeAckSummary({ ackState: load.state, from: 0, to: 1e9 });
   assert.deepEqual(
@@ -946,6 +948,20 @@ test('an ACK still running when the drain gives up is in the results, censored a
   await sleep(60);
   assert.deepEqual([load.state.events.length, load.state.opEvents.length], [2, 11]);
   assert.equal(probeAckSummary({ ackState: load.state, from: 0, to: 1e9 }).ack.acksUnfinished, 1);
+});
+
+test('the ACK drain waits out its cap when a timer fires short of its delay', async (t) => {
+  // On performance.now() a timer can fire a little before its delay, and the blocked operation can have begun only just
+  // before the drain did. Here every long timer fires 30 ms short, so a single wait would censor it well under the cap.
+  const realSetTimeout = globalThis.setTimeout;
+  t.mock.method(globalThis, 'setTimeout', (fn, ms, ...args) => realSetTimeout(fn, ms > 50 ? ms - 30 : ms, ...args));
+  const { load, left } = await runWithOneBlockedAck(ackStoreBlockingAt(3), 100);
+  assert.equal(left, 1);
+  const stuck = load.state.events.at(-1);
+  const stuckOp = load.state.opEvents.at(-1);
+  assert.deepEqual([stuck.unfinished, stuckOp.unfinished], [true, true]);
+  assert.ok(stuck.ms >= 100, `the ACK ran for at least the cap (${stuck.ms} ms)`);
+  assert.ok(stuckOp.ms >= 100, `the operation ran for at least the cap (${stuckOp.ms} ms)`);
 });
 
 test('an unfinished ACK is counted run-wide even when it began before the window, its operation by its own start', async () => {

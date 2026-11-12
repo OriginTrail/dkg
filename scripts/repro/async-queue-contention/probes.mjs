@@ -432,7 +432,11 @@ export function startAckLoad(world, { deleteByPatternWithoutCount }, cfg) {
     },
     async drain(capMs) {
       const finished = Symbol('finished');
-      if ((await within(loop.then(() => finished), capMs)) === finished) return 0;
+      // The whole cap, as the probe load's drain waits: a timer can fire a little short of its delay on performance.now(),
+      // and what is censored below has then run for at least the cap
+      const deadline = performance.now() + capMs;
+      for (let left = capMs; left > 0; left = deadline - performance.now())
+        if ((await within(loop.then(() => finished), left)) === finished) return 0;
       const at = performance.now();
       closed = true;
       stopped = true;
