@@ -97,6 +97,7 @@ export default defineConfig({
           'test/semantic-runtime-native-assets.test.ts',
           'test/semantic-runtime-sparql-adapter.test.ts',
           'test/semantic-runtime-configuration-api.test.ts',
+          'test/semantic-runtime-binding-pin.test.ts',
           'test/semantic-runtime-studio-authority.test.ts',
           'test/semantic-runtime-n8n-authority.test.ts',
           'test/semantic-runtime-n8n-recovery.test.ts',

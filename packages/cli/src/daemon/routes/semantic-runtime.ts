@@ -116,10 +116,13 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
   // even if a route has been removed or a binding has never been installed.
   if (Object.hasOwn(body, 'operationIri')) {
     if (typeof body.operationIri !== 'string' || typeof body.contextGraphId !== 'string' || typeof body.invocationId !== 'string'
-      || Object.keys(body).some((key) => !['contextGraphId', 'operationIri', 'invocationId', 'authorization', 'inputs'].includes(key))) {
+      || Object.keys(body).some((key) => !['contextGraphId', 'operationIri', 'invocationId', 'authorization', 'inputs', 'expectedBindingDigest'].includes(key))) {
       return jsonResponse(res, 400, { error: 'Bound invocation requires contextGraphId, operationIri and invocationId, with optional client-signed authorization' });
     }
     try {
+      if (Object.hasOwn(body, 'expectedBindingDigest') &&
+          (typeof body.expectedBindingDigest !== 'string' || !/^[a-f0-9]{64}$/.test(body.expectedBindingDigest)))
+        throw new SemanticProgramError('INVALID_BINDING_DIGEST', 'expectedBindingDigest must be a SHA-256 digest', 400);
       if (Object.hasOwn(body, 'inputs')) {
         try { canonicalProgramInputs(body.inputs); }
         catch { throw new SemanticProgramError('INVALID_PROGRAM_INPUTS', 'inputs must be a bounded JSON array', 400); }
@@ -127,12 +130,14 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
       const graph = canonicalProgramGraphId(body.contextGraphId);
       const route = config.semanticRuntime?.programRoutes?.find((entry) => entry.contextGraphId === graph && entry.operationIri === body.operationIri);
       if (!config.semanticRuntime) throw new SemanticProgramError('SEMANTIC_RUNTIME_DISABLED', 'Semantic runtime is unavailable', 409);
+      if (route && body.expectedBindingDigest !== undefined)
+        throw new SemanticProgramError('PROGRAM_PINNED_ROUTE_UNSUPPORTED', 'Pinned execution requires the binding on this node', 409);
       if (!route && Object.hasOwn(body, 'authorization')) {
         throw new SemanticProgramError('PROGRAM_INVOCATION_FORBIDDEN', 'Forwarded authorization requires an exact outbound route', 403);
       }
       const result = route
         ? await invokeBoundSemanticProgramOnPeer(agent, config.semanticRuntime, graph, body.operationIri, body.invocationId, authenticatedCaller, body.authorization, body.inputs)
-        : await invokeBoundSemanticProgram(agent, semanticRuntimeHost, graph, body.operationIri, body.invocationId, config.semanticRuntime, authenticatedCaller, body.inputs);
+        : await invokeBoundSemanticProgram(agent, semanticRuntimeHost, graph, body.operationIri, body.invocationId, config.semanticRuntime, authenticatedCaller, { inputs: body.inputs, expectedBindingDigest: body.expectedBindingDigest });
       return jsonResponse(res, 200, result);
     } catch (error) {
       if (error instanceof SemanticProgramError) return jsonResponse(res, error.status, { code: error.code, error: error.message, ...(error.trace ? { trace: error.trace } : {}) });
