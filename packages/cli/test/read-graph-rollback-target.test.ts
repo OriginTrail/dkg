@@ -181,7 +181,7 @@ describe('the modes the rollback-target check looks at', () => {
 
   it('give the table the same refusal, with the target and the first recognizing release', async () => {
     expect(rollbackTargetRefusal({ kind: 'none' })).toBeUndefined();
-    expect(rollbackTargetRefusal({ kind: 'release', source: 'slot b', version: '10.1.1', holdsPartitionGuard: true })).toBeUndefined();
+    expect(rollbackTargetRefusal({ kind: 'release', source: 'slot b', version: '10.1.0', holdsPartitionGuard: true })).toBeUndefined();
     expect(rollbackTargetRefusal({ kind: 'release', source: 'slot b', version: READ_GRAPHS_FIRST_RECOGNIZING_RELEASE, holdsPartitionGuard: false }))
       .toBeUndefined();
     await writeFile(join(home, 'previous-version'), '10.1.0\n');
