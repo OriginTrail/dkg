@@ -15,11 +15,18 @@ and gives the node UI a new design system.
 
 - The node UI has one design system, in dark and light themes: colour,
   type, spacing and corner sizes all come from shared tokens. Each colour
-  means one thing. The memory layers are slate (Working Memory), cyan
-  (Shared Working Memory) and purple (Verifiable Memory), and everything
-  else is neutral.
+  means one thing: the memory layers are slate (Working Memory), cyan
+  (Shared Working Memory) and purple (Verifiable Memory); green, amber and
+  red mean done, needs your action and failed; and blue marks roles and
+  access.
 - Tabs behave like browser tabs, and pages share one header, breadcrumbs
   and navigation.
+- The header says only what the node reports: Connecting, Connected with
+  its peer count, No peers, or Unavailable after three failed status checks
+  in a row.
+- The app works on small screens: below 860 px the side panels open one at
+  a time, the header fits down to 320 px, and tables scroll inside their
+  cards.
 - Every view reads a Verifiable Memory receipt's on-chain evidence through
   one shared model, so they all show the same receipt.
 - The wording is plainer: it says what the node does for its user rather
