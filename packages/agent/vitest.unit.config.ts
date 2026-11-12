@@ -568,7 +568,9 @@ export default defineConfig({
       "test/context-graph-cache-invalidating-store-callback.test.ts",
     ],
     testTimeout: 60_000,
-    maxWorkers: 1,
+    // Experiment: these files share no Hardhat node or other global setup,
+    // and each shard ran them one at a time on a 4-core runner.
+    maxWorkers: 2,
     pool: "forks",
     execArgv: SQLITE_EXEC_ARGV,
   },
