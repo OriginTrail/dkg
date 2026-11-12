@@ -53,6 +53,28 @@ export interface ReadGraphSettingsStore {
   close(): void;
 }
 
+/**
+ * The entries a change to one context graph leaves, as the table holds them after it: each mode the change sets replaces that layer's, a layer it does
+ * not name keeps its own, an omitted view-semantics default stays, and `null` removes it. Entries stay in ID order. The one rule for every preview of
+ * the table: a change before it is written, and config.json's rules before they are imported.
+ */
+export function withSettingsChange(
+  entries: ReadonlyArray<ReadGraphSettingsEntry>,
+  contextGraphId: string,
+  change: ReadGraphSettingsChange,
+): ReadonlyArray<ReadGraphSettingsEntry> {
+  const held = entries.find((entry) => entry.contextGraphId === contextGraphId);
+  const layers: Partial<Record<GetView, ReadGraphMode>> = { ...held?.layers };
+  for (const view of GET_VIEWS) {
+    const mode = change.layers?.[view];
+    if (mode !== undefined) layers[view] = mode;
+  }
+  const viewSemantics = change.viewSemantics === undefined ? held?.viewSemantics : change.viewSemantics ?? undefined;
+  const changed = entryOf(contextGraphId, { layers, ...(viewSemantics === undefined ? {} : { viewSemantics }) });
+  return Object.freeze([...entries.filter((entry) => entry.contextGraphId !== contextGraphId), changed]
+    .sort((left, right) => (left.contextGraphId < right.contextGraphId ? -1 : left.contextGraphId > right.contextGraphId ? 1 : 0)));
+}
+
 /** A change the table refuses: a context graph ID that can't have read graphs, an unknown layer or value, or an unknown actor. */
 export class ReadGraphSettingsError extends Error {
   readonly code = 'READ_GRAPH_SETTINGS_INVALID';
@@ -69,12 +91,6 @@ export class ReadGraphSettingsUnavailableError extends Error {
     super(message, options);
     this.name = 'ReadGraphSettingsUnavailableError';
   }
-}
-
-/** One context graph's rows as stored, for putting them back after a change the node refuses. */
-export interface ReadGraphSettingsRows {
-  readonly modes: ReadonlyArray<{ readonly layer: string; readonly mode: string; readonly updatedAt: number; readonly updatedBy: string }>;
-  readonly semantics?: { readonly semantics: string; readonly updatedAt: number; readonly updatedBy: string };
 }
 
 /** What another process reads of the settings: their entries, and when config.json's rules were imported. */
@@ -156,33 +172,6 @@ export class SqliteReadGraphSettingsStore implements ReadGraphSettingsStore {
     const issues = [...(typeof contextGraphId === 'string' ? [] : ['the context graph ID must be a string']), ...actorIssues(actor)];
     if (issues.length > 0) throw new ReadGraphSettingsError(issues);
     this.#transaction(() => this.#delete(contextGraphId));
-  }
-
-  /** One context graph's rows as stored, with when and by whom each changed: what {@link restore} puts back. */
-  rowsOf(contextGraphId: string): ReadGraphSettingsRows {
-    const db = this.#open();
-    const modes = (db.prepare('SELECT layer, mode, updated_at, updated_by FROM read_graph_modes WHERE context_graph_id = ? ORDER BY layer')
-      .all(contextGraphId) as Array<Record<string, unknown>>)
-      .map((row) => ({ layer: String(row['layer']), mode: String(row['mode']), updatedAt: Number(row['updated_at']), updatedBy: String(row['updated_by']) }));
-    const row = db.prepare('SELECT semantics, updated_at, updated_by FROM view_semantics_defaults WHERE context_graph_id = ?')
-      .get(contextGraphId) as Record<string, unknown> | undefined;
-    const semantics = row === undefined
-      ? undefined
-      : { semantics: String(row['semantics']), updatedAt: Number(row['updated_at']), updatedBy: String(row['updated_by']) };
-    return Object.freeze({ modes: Object.freeze(modes), ...(semantics === undefined ? {} : { semantics }) });
-  }
-
-  /** Put a context graph's rows back exactly as {@link rowsOf} read them, in one transaction. */
-  restore(contextGraphId: string, rows: ReadGraphSettingsRows): void {
-    this.#transaction(() => {
-      this.#delete(contextGraphId);
-      const insert = this.#db.prepare('INSERT INTO read_graph_modes (context_graph_id, layer, mode, updated_at, updated_by) VALUES (?, ?, ?, ?, ?)');
-      for (const mode of rows.modes) insert.run(contextGraphId, mode.layer, mode.mode, mode.updatedAt, mode.updatedBy);
-      if (rows.semantics !== undefined) {
-        this.#db.prepare('INSERT INTO view_semantics_defaults (context_graph_id, semantics, updated_at, updated_by) VALUES (?, ?, ?, ?)')
-          .run(contextGraphId, rows.semantics.semantics, rows.semantics.updatedAt, rows.semantics.updatedBy);
-      }
-    });
   }
 
   /** When config.json's rules for single context graphs were imported (unix milliseconds), or `undefined` before they are. */
