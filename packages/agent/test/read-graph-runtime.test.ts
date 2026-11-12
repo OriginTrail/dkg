@@ -3,7 +3,7 @@ import { MemoryLayer, createOperationContext, readGraphIri, readScope, type Read
 import {
   CURRENT_READ_GRAPH_VERSIONS,
   OxigraphStore,
-  readGraphDropRequests,
+  readGraphWork,
   readStoredReadGraphRow,
   startReadGraphs,
   READ_GRAPH_PLANNED_METHODS,
@@ -231,7 +231,7 @@ describe('the agent read-graph workload', () => {
     expect(off.find((change) => change.layer === 'verifiable-memory')).toMatchObject({ from: 'serve', to: 'off', outcome: 'applied' });
     expect(runtime.mirror.size).toBe(0);
     await owner.whenIdle();
-    expect(readGraphDropRequests(runtime)).toEqual([]);
+    expect(readGraphWork(runtime)).toEqual([]);
     expect(owner.readGraphStatus().readGraphs).toEqual([]);
     const below = readGraphLayerOf(store)!.innerStore;
     const left = await below.query(`ASK { GRAPH <${vm}> { ?s ?p ?o } }`);
@@ -300,7 +300,7 @@ describe('the agent read-graph workload', () => {
     owner.start(ctx);
     expect(owner.status()).toBeDefined();
     await owner.whenIdle();
-    expect(readGraphDropRequests(readGraphRuntimeOf(store)!)).toEqual([]);
+    expect(readGraphWork(readGraphRuntimeOf(store)!)).toEqual([]);
     expect(await below.query(`ASK { GRAPH <${vm}> { ?s ?p ?o } }`)).toMatchObject({ type: 'boolean', value: false });
     expect(await readStoredReadGraphRow(below, vm)).toEqual({ row: undefined, damaged: false });
     await owner.close();

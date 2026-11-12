@@ -554,7 +554,7 @@ export {
   type ReadGraphModeDeferral,
   type ReadGraphModeOutcome,
 } from './read-graph/live-modes.js';
-export { readGraphDropRequests } from './read-graph/drop-requests.js';
+export { readGraphWork, type ReadGraphWorkKind } from './read-graph/pending-work.js';
 export {
   READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE,
   installWorkingMemoryIdentity,

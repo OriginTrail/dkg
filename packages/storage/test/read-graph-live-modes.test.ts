@@ -9,12 +9,18 @@ import { missingReadGraphMethods } from '../src/read-graph/adapter-contract.js';
 import { guardReadGraphPartition } from '../src/read-graph-partition-store.js';
 import { withReadGraphBackgroundSlot } from '../src/read-graph/background-slot.js';
 import { ReadGraphBuilder } from '../src/read-graph/builder.js';
-import { readGraphBuildRequests, readGraphDropRequests, requestReadGraphDrops } from '../src/read-graph/drop-requests.js';
+import { readGraphWork, requestReadGraphWork } from '../src/read-graph/pending-work.js';
 import { applyReadGraphModes, applyViewSemantics, type ReadGraphModeChange, type ReadGraphModeDeferral } from '../src/read-graph/live-modes.js';
 import { ReadGraphWriteRefusedError, wrapReadGraphLayer } from '../src/read-graph/read-graph-store.js';
 import { markReadGraphDirty, removeReadGraph } from '../src/read-graph/rebuild.js';
 import { readGraphModeOf, type ReadGraphModes } from '../src/read-graph/settings.js';
-import { READ_GRAPH_STATE_PREDICATES, parseReadGraphStateRows, readGraphStateCompareAndSet, readGraphStateRowsQuery } from '../src/read-graph/state.js';
+import {
+  READ_GRAPH_STATE_PREDICATES,
+  parseReadGraphStateRows,
+  readGraphStateCompareAndSet,
+  readGraphStateRowsQuery,
+  servingReadGraphGeneration,
+} from '../src/read-graph/state.js';
 import { readGraphDataDirectories } from '../src/read-graph/data-directories.js';
 import { startReadGraphs } from '../src/read-graph/startup.js';
 import { noteReadGraphStoreRestored } from '../src/read-graph/store-restored.js';
@@ -248,7 +254,7 @@ describe('switching read graphs live', () => {
       expect(layer.runtime.mirror.get(readGraph)).toBeUndefined();
       expect((await stored(adapter))[readGraph]).toBe('dirty');
     }
-    expect([...readGraphDropRequests(layer.runtime)].sort()).toEqual([readGraphIri(codeVm), readGraphIri(wholeVm)].sort());
+    expect([...readGraphWork(layer.runtime, 'drop')].sort()).toEqual([readGraphIri(codeVm), readGraphIri(wholeVm)].sort());
     expect(layer.runtime.mirror.get(readGraphIri(wholeSwm))?.state).toBe('ready');
     // A write after the switch no longer maintains them.
     await store.insert([q('urn:s:after-off', '"x"', fixture.graphs[1]!)]);
@@ -268,7 +274,7 @@ describe('switching read graphs live', () => {
     expect(await stored(adapter)).toEqual({ [readGraphIri(wholeSwm)]: 'ready' });
     expect(await triplesOf(adapter, readGraphIri(wholeVm))).toEqual([]);
     expect(await triplesOf(adapter, readGraphIri(codeVm))).toEqual([]);
-    expect(readGraphDropRequests(layer.runtime)).toEqual([]);
+    expect(readGraphWork(layer.runtime, 'drop')).toEqual([]);
     await expectUnion(node, wholeSwm);
   });
 
@@ -327,7 +333,7 @@ describe('switching read graphs live', () => {
     expect(readGraphModeOf(layer.runtime.modes, fixture.keys[0]!)).toBe('off');
     expect(layer.runtime.mirror.size).toBe(0);
     expect(await stored(adapter)).toEqual({ [wholeVm]: 'dirty', [codeVm]: 'dirty' });
-    expect([...readGraphDropRequests(layer.runtime)].sort()).toEqual([codeVm, wholeVm].sort());
+    expect([...readGraphWork(layer.runtime, 'drop')].sort()).toEqual([codeVm, wholeVm].sort());
   });
 
   it('refuses every change when one is refused, and changes nothing before it would', async () => {
@@ -399,7 +405,7 @@ describe('switching read graphs live', () => {
     expect(layer.runtime.modes).toBe(before.modes);
     expect(layer.runtime.viewSemantics).toBe(before.semantics);
     expect(layer.runtime.mirror.get(wholeVm)).toEqual(before.row);
-    expect(readGraphDropRequests(layer.runtime)).toEqual([]);
+    expect(readGraphWork(layer.runtime, 'drop')).toEqual([]);
     // Nor is that directory one of the runtime's, where later notes would fail too.
     expect(readGraphDataDirectories(layer.runtime)).not.toContain(join(file, 'data'));
   });
@@ -507,7 +513,7 @@ describe('switching read graphs live', () => {
 
     // The next process starts with the settings the switch left, and its builder ends the drop.
     const restarted = await open({ modes: next, adapter: node.adapter, dataDir: node.dataDir, fixture });
-    expect(readGraphDropRequests(restarted.layer.runtime)).toEqual([switchedOff]);
+    expect(readGraphWork(restarted.layer.runtime, 'drop')).toEqual([switchedOff]);
     const after = owned(new ReadGraphBuilder({
       store: restarted.store, dataDir: restarted.dataDir, intervalMs: 3_600_000, batching: { pauseRatio: 0 },
       wanted: () => [kept.keys[0]!],
@@ -558,7 +564,7 @@ describe('switching read graphs live', () => {
     const [wholeVm] = fixture.keys as [ReadGraphKey];
     const plain = owned(new ReadGraphBuilder({ store, dataDir, intervalMs: 3_600_000, batching: { pauseRatio: 0 }, wanted: () => [wholeVm] }));
     await pass(plain);
-    requestReadGraphDrops(layer.runtime, [readGraphIri(wholeVm)]);
+    requestReadGraphWork(layer.runtime, 'drop', [readGraphIri(wholeVm)]);
     await pass(plain);
     await plain.close();
     expect((await stored(adapter))[readGraphIri(wholeVm)]).toBe('ready');
@@ -566,7 +572,7 @@ describe('switching read graphs live', () => {
     const builder = builderOf(node);
     await pass(builder);
     await builder.close();
-    expect(readGraphDropRequests(layer.runtime)).toEqual([]);
+    expect(readGraphWork(layer.runtime, 'drop')).toEqual([]);
     expect((await stored(adapter))[readGraphIri(wholeVm)]).toBe('ready');
   });
 
@@ -647,7 +653,7 @@ describe('switching read graphs live', () => {
     // The next process starts with every mode off: nothing is maintained, and the rows found are to drop.
     const restarted = await open({ adapter, dataDir, fixture });
     expect(restarted.layer.runtime.mirror.size).toBe(0);
-    expect([...readGraphDropRequests(restarted.layer.runtime)].sort()).toEqual([codeVm, wholeVm].sort());
+    expect([...readGraphWork(restarted.layer.runtime, 'drop')].sort()).toEqual([codeVm, wholeVm].sort());
     const after = builderOf(restarted);
     await pass(after);
     await after.close();
@@ -680,7 +686,7 @@ describe('switching read graphs live', () => {
     expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('dirty');
     expect(layer.runtime.mirror.get(codeVm)?.state).toBe('dirty');
     expect(await stored(adapter)).toEqual({ [wholeVm]: 'dirty', [codeVm]: 'dirty' });
-    expect(readGraphDropRequests(layer.runtime)).toEqual([]);
+    expect(readGraphWork(layer.runtime, 'drop')).toEqual([]);
     await pass(builder);
     await builder.close();
     expect(await stored(adapter)).toEqual({ [wholeVm]: 'ready', [codeVm]: 'ready' });
@@ -777,7 +783,7 @@ describe('switching read graphs live', () => {
     // Out of service in the mirror, whatever the store still says, and its drop asked for.
     expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('dirty');
     expect((await stored(adapter))[wholeVm]).toBe('ready');
-    expect(readGraphDropRequests(layer.runtime)).toContain(wholeVm);
+    expect(readGraphWork(layer.runtime, 'drop')).toContain(wholeVm);
     await pass(builder);
     await builder.close();
     expect(await stored(adapter)).toEqual({});
@@ -827,7 +833,7 @@ describe('switching read graphs live', () => {
     expect(outcomeOf(changes, 'verifiable-memory')).toBe('applied');
     expect(deferrals).toMatchObject([{ step: 'admit', readGraph: wholeVm }]);
     expect(layer.runtime.mirror.get(wholeVm)).toBeUndefined();
-    expect(readGraphBuildRequests(layer.runtime)).toEqual([wholeVm]);
+    expect(readGraphWork(layer.runtime, 'build')).toEqual([wholeVm]);
     // A builder that wants nothing of this context graph builds it all the same, from the build the admission asked for.
     const builder = owned(new ReadGraphBuilder({
       store, dataDir, intervalMs: 3_600_000, batching: { pauseRatio: 0 }, wanted: () => [],
@@ -835,7 +841,29 @@ describe('switching read graphs live', () => {
     }));
     await pass(builder);
     expect(layer.runtime.mirror.get(wholeVm)?.state).toBe('ready');
-    expect(readGraphBuildRequests(layer.runtime)).toEqual([]);
+    expect(readGraphWork(layer.runtime, 'build')).toEqual([]);
+    await expectUnion(node, fixture.keys[0]!);
+  });
+
+  it('switches a stale ready read graph on as dirty at a newer generation, and serves it only once rebuilt', async () => {
+    const node = await open();
+    const { adapter, fixture, layer, store, dataDir } = node;
+    const wholeVm = readGraphIri(fixture.keys[0]!);
+    // Contents under a row stored ready at generation 4 while the mode was off: nothing maintained them since.
+    await adapter.update(readGraphStateCompareAndSet(undefined, readyRow(wholeVm, 4)));
+    await adapter.insert([q('urn:s:stale', '"stale"', wholeVm)]);
+    const changes = await applyReadGraphModes(store, layerAt(fixture.contextGraphId, VM, 'serve'), { dataDir, wanted: () => [fixture.keys[0]!] });
+    expect(outcomeOf(changes, 'verifiable-memory')).toBe('applied');
+    const admitted = layer.runtime.mirror.get(wholeVm)!;
+    expect(admitted.state).toBe('dirty');
+    expect(admitted.generation).toBeGreaterThan(4);
+    expect((await stored(adapter))[wholeVm]).toBe('dirty');
+    // No serving generation, so a merged request gets VIEW_NOT_READY (the query engine's plan) until the rebuild.
+    expect(servingReadGraphGeneration(admitted)).toBeUndefined();
+    const builder = builderOf(node);
+    await pass(builder);
+    expect(servingReadGraphGeneration(layer.runtime.mirror.get(wholeVm))).toBeGreaterThan(admitted.generation);
+    expect(await triplesOf(adapter, wholeVm)).not.toContain('urn:s:stale urn:test:p "stale"');
     await expectUnion(node, fixture.keys[0]!);
   });
 });

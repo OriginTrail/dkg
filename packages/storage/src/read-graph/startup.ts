@@ -22,7 +22,7 @@
  * a record it is marked dirty. The rows it does not
  * maintain take the rule of a release that does not maintain read graphs:
  * dirty, unless they already are; the builder then drops them while their
- * mode stays `off` (`./drop-requests.ts`).
+ * mode stays `off` (`./pending-work.ts`).
  *
  * It then reads the rows back, makes the backend's mirror hold exactly the
  * maintained ones, reads the registry of each context graph that has one, so
@@ -40,7 +40,7 @@ import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
 import { noteReadGraphPartitionsOfRuntime } from './data-directories.js';
-import { requestReadGraphDrops } from './drop-requests.js';
+import { requestReadGraphWork } from './pending-work.js';
 import { clearUnstoredReadGraphMarks, readGraphMarksAtStart, unstoredReadGraphMarksText, useReadGraphMarkJournal } from './mark-journal.js';
 import { syncReadGraphRuntimeWithRecovery } from './recovery.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
@@ -104,7 +104,7 @@ export async function startReadGraphs(store: TripleStore, options: ReadGraphStar
   if (!maintains || !layer || missingReadGraphMethods(layer.innerStore, layer.adapterCapabilities).length > 0) {
     await noteRecordOnlyPartitions(store, options);
     // Nothing is maintained: the builder drops what it finds, while its mode stays `off`.
-    const found = layer ? { found: (readGraphs: readonly string[]) => requestReadGraphDrops(layer.runtime, readGraphs) } : {};
+    const found = layer ? { found: (readGraphs: readonly string[]) => requestReadGraphWork(layer.runtime, 'drop', readGraphs) } : {};
     return { marked: await markReadGraphsDirtyAtStart(store, { ...options, ...found }), maintained: 0 };
   }
   const target = readGraphPartitionMaintenanceStore(store);
@@ -214,7 +214,7 @@ async function loadReadGraphs(
   if (options.dataDir !== undefined && journaled.size > 0) clearUnstoredReadGraphMarks(options.dataDir);
   const after = await stateRows(target, queryOptions);
   for (const row of after.rows) if (maintained(row.readGraph)) mirror.set(row);
-  requestReadGraphDrops(layer.runtime, after.rows.map((row) => row.readGraph)
+  requestReadGraphWork(layer.runtime, 'drop', after.rows.map((row) => row.readGraph)
     .filter((readGraph) => !maintained(readGraph) && parseReadGraphIri(readGraph) !== undefined));
   // Before anything writes: the facts go in with the snapshot, so the layer predicts its first registry write from them.
   // Every row that does not follow this registry is dirty now, so it is the one to record.

@@ -20,7 +20,7 @@
  * - `build` or `serve` to `off`: each read graph of the layer is marked dirty
  *   and leaves the mirror, so nothing serves it and writes stop maintaining
  *   it. The builder then drops its contents and its row in the background, as
- *   `dkg store read-graphs drop` does (`./drop-requests.ts`).
+ *   `dkg store read-graphs drop` does (`./pending-work.ts`).
  *
  * The view-semantics defaults switch with the modes, or alone
  * ({@link applyViewSemantics}): a view query without `semantics` gets the new
@@ -53,7 +53,7 @@ import { readGraphPartitionMaintenanceStore } from '../read-graph-partition-stor
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
 import { noteReadGraphPartitionsOfRuntime } from './data-directories.js';
-import { forgetReadGraphBuildRequest, forgetReadGraphDropRequest, requestReadGraphBuilds, requestReadGraphDrops } from './drop-requests.js';
+import { forgetReadGraphWork, requestReadGraphWork } from './pending-work.js';
 import { readGraphLayerOf, type ReadGraphStore } from './read-graph-store.js';
 import { ReadGraphsUnsupportedError } from './read-graphs-unsupported.js';
 import { markReadGraphDirty, refreshReadGraphRegistry, retireReadGraph, type ReadGraphJobContext } from './rebuild.js';
@@ -126,11 +126,20 @@ export interface ApplyReadGraphModesOptions {
   readonly onDeferred?: (deferral: ReadGraphModeDeferral) => void;
 }
 
-const LAYERS: ReadonlyArray<readonly [GetView, MemoryLayer]> = [
-  ['working-memory', MemoryLayer.WorkingMemory],
-  ['shared-working-memory', MemoryLayer.SharedWorkingMemory],
-  ['verifiable-memory', MemoryLayer.VerifiableMemory],
-];
+/** The memory layers, in the order a report lists them, with the view name it gives each. */
+const VIEW_OF_LAYER: ReadonlyMap<MemoryLayer, GetView> = new Map([
+  [MemoryLayer.WorkingMemory, 'working-memory'],
+  [MemoryLayer.SharedWorkingMemory, 'shared-working-memory'],
+  [MemoryLayer.VerifiableMemory, 'verifiable-memory'],
+]);
+
+/** One context graph's layer in an apply, before its outcome; the report names the layer by its view. */
+interface Transition {
+  readonly contextGraphId: string;
+  readonly layer: MemoryLayer;
+  readonly from: ReadGraphMode;
+  readonly to: ReadGraphMode;
+}
 const NOT_APPLIED = 'not applied: another change in the same apply was refused';
 const APPLIES = new WeakMap<ReadGraphBackendRuntime, Promise<unknown>>();
 
@@ -194,7 +203,7 @@ async function apply(
   options.signal?.throwIfAborted();
   const candidates = [...(options.contextGraphIds ?? []), ...runtime.mirror.contextGraphIds(), ...stored.map((readGraph) => parseReadGraphIri(readGraph)!.scope.contextGraphId)];
   const changes = changesOf(runtime.modes, next, candidates);
-  const refusal = (change: Omit<ReadGraphModeChange, 'outcome'>): string | undefined =>
+  const refusal = (change: Transition): string | undefined =>
     (change.from === 'off' && change.to !== 'off' && !isReadGraphEligibleContextGraphId(change.contextGraphId)
       ? 'this context graph ID cannot have read graphs' : undefined);
   if (changes.some((change) => refusal(change) !== undefined)) return outcomes(changes, refusal);
@@ -239,7 +248,7 @@ async function switchOff(
     return key !== undefined && readGraphModeOf(next, key) === 'off';
   };
   const dropped = [...new Set([...runtime.mirror.rows().map((row) => row.readGraph), ...stored])].filter(off).sort(compareCodePoint);
-  requestReadGraphDrops(runtime, dropped);
+  requestReadGraphWork(runtime, 'drop', dropped);
   for (const readGraph of dropped) {
     if (runtime.mirror.get(readGraph) === undefined) continue;
     try {
@@ -278,13 +287,13 @@ function prepareMaintenance(runtime: ReadGraphBackendRuntime, dataDir: string | 
 async function switchOn(
   context: ReadGraphJobContext,
   runtime: ReadGraphBackendRuntime,
-  on: readonly Omit<ReadGraphModeChange, 'outcome'>[],
+  on: readonly Transition[],
   stored: readonly string[],
   options: ApplyReadGraphModesOptions,
   deferred: (deferral: ReadGraphModeDeferral) => void,
 ): Promise<void> {
   const switched = (key: ReadGraphKey | undefined) => key !== undefined
-    && on.some((change) => change.contextGraphId === key.scope.contextGraphId && layerOfView(change.layer) === key.layer);
+    && on.some((change) => change.contextGraphId === key.scope.contextGraphId && change.layer === key.layer);
   const admitted = new Set(stored.filter((readGraph) => switched(parseReadGraphIri(readGraph))));
   try {
     for (const key of (await options.wanted?.()) ?? []) if (switched(key)) admitted.add(readGraphIri(key));
@@ -293,13 +302,13 @@ async function switchOn(
     deferred({ step: 'wanted', error });
   }
   for (const readGraph of [...admitted].sort(compareCodePoint)) {
-    forgetReadGraphDropRequest(runtime, readGraph);
+    // Its drop, if one was asked for, is no longer.
+    forgetReadGraphWork(runtime, readGraph);
     try {
       await markReadGraphDirty(context, readGraph, { create: true });
-      forgetReadGraphBuildRequest(runtime, readGraph);
     } catch (error) {
       // The node may not list it among the read graphs it wants: the builder is asked for it, and builds it into service.
-      requestReadGraphBuilds(runtime, [readGraph]);
+      requestReadGraphWork(runtime, 'build', [readGraph]);
       deferred({ step: 'admit', readGraph, error });
     }
   }
@@ -318,31 +327,32 @@ async function switchOn(
  * candidate whose mode changes. A candidate that cannot have read graphs is
  * left out unless `next` names it.
  */
-function changesOf(current: ReadGraphModes, next: ReadGraphModes, candidates: Iterable<string>): Omit<ReadGraphModeChange, 'outcome'>[] {
+function changesOf(current: ReadGraphModes, next: ReadGraphModes, candidates: Iterable<string>): Transition[] {
   const named = new Set(ownKeys(next.contextGraphs));
   const contextGraphIds = new Set([...named, ...ownKeys(current.contextGraphs), ...candidates]);
-  const changes: Omit<ReadGraphModeChange, 'outcome'>[] = [];
+  const changes: Transition[] = [];
   for (const contextGraphId of [...contextGraphIds].sort(compareCodePoint)) {
     if (!named.has(contextGraphId) && !isReadGraphEligibleContextGraphId(contextGraphId)) continue;
-    for (const [view, layer] of LAYERS) {
+    for (const layer of VIEW_OF_LAYER.keys()) {
       const from = readGraphModeOfLayer(current, contextGraphId, layer);
       const to = readGraphModeOfLayer(next, contextGraphId, layer);
-      if (from !== to || named.has(contextGraphId)) changes.push({ contextGraphId, layer: view, from, to });
+      if (from !== to || named.has(contextGraphId)) changes.push({ contextGraphId, layer, from, to });
     }
   }
   return changes;
 }
 
-/** The outcome of each change: refused where `refusal` gives a reason, and then every other change too. */
-function outcomes(
-  changes: readonly Omit<ReadGraphModeChange, 'outcome'>[],
-  refusal: (change: Omit<ReadGraphModeChange, 'outcome'>) => string | undefined,
-): ReadGraphModeChange[] {
+/**
+ * The report: each change with its layer's view name and its outcome, refused
+ * where `refusal` gives a reason, and then every other change too.
+ */
+function outcomes(changes: readonly Transition[], refusal: (change: Transition) => string | undefined): ReadGraphModeChange[] {
   const refused = changes.some((change) => refusal(change) !== undefined);
   return changes.map((change): ReadGraphModeChange => {
-    if (change.from === change.to) return { ...change, outcome: 'unchanged' };
-    if (!refused) return { ...change, outcome: 'applied' };
-    return { ...change, outcome: { refused: refusal(change) ?? NOT_APPLIED } };
+    const reported = { contextGraphId: change.contextGraphId, layer: VIEW_OF_LAYER.get(change.layer)!, from: change.from, to: change.to };
+    if (change.from === change.to) return { ...reported, outcome: 'unchanged' };
+    if (!refused) return { ...reported, outcome: 'applied' };
+    return { ...reported, outcome: { refused: refusal(change) ?? NOT_APPLIED } };
   });
 }
 
@@ -357,7 +367,7 @@ function checkedModes(modes: ReadGraphModes): ReadGraphModes {
   const rule = (value: ReadGraphModeRule, where: string): ReadGraphModeRule => {
     const layers: Partial<Record<MemoryLayer, ReadGraphMode>> = {};
     for (const [layer, mode] of Object.entries(value.layers ?? {})) {
-      if (!LAYERS.some(([, known]) => known === layer)) throw new TypeError(`${where}: not a memory layer: ${layer}`);
+      if (!VIEW_OF_LAYER.has(layer as MemoryLayer)) throw new TypeError(`${where}: not a memory layer: ${layer}`);
       layers[layer as MemoryLayer] = checkedMode(mode, `${where}.layers.${layer}`);
     }
     return Object.freeze({
@@ -395,10 +405,6 @@ function checkedViewSemantics(settings: ViewSemanticsSettings): ViewSemanticsSet
 function checkedMode(mode: unknown, where: string): ReadGraphMode {
   if (!READ_GRAPH_MODES.includes(mode as ReadGraphMode)) throw new TypeError(`${where}: not a read-graph mode: ${String(mode)}`);
   return mode as ReadGraphMode;
-}
-
-function layerOfView(view: GetView): MemoryLayer {
-  return LAYERS.find(([known]) => known === view)![1];
 }
 
 function ownKeys(record: object | undefined): string[] {

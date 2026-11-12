@@ -40,7 +40,7 @@ import {
   installWorkingMemoryIdentity,
   keepsAnyReadGraph,
   readGraphLayerOf,
-  readGraphDropRequests,
+  readGraphWork,
   readGraphModeOf,
   readGraphRuntimeOf,
   readReadGraphRegistry,
@@ -158,10 +158,10 @@ export class ReadGraphWorkloadOwnerV1 {
     OWNERS.set(agent, this);
   }
 
-  /** Start the builder, when any read graph may be kept or one whose mode is `off` waits to be removed. */
+  /** Start the builder, when any read graph may be kept or work a switch or the start-up left waits for it. */
   start(ctx: OperationContext): void {
     this.#started = ctx;
-    if (this.#builder || !(this.#modes.keepsAny() || this.#removalsAsked())) return;
+    if (this.#builder || !(this.#modes.keepsAny() || this.#workAsked())) return;
     const { logger } = this.#options;
     this.#builder = new ReadGraphBuilder({
       store: this.#agent.store,
@@ -285,10 +285,10 @@ export class ReadGraphWorkloadOwnerV1 {
     return changes;
   }
 
-  /** Whether a drop of a read graph whose mode is `off` waits for the builder. */
-  #removalsAsked(): boolean {
+  /** Whether work a switch or the start-up left waits for the builder (`readGraphWork`). */
+  #workAsked(): boolean {
     const runtime = readGraphRuntimeOf(this.#agent.store);
-    return runtime !== undefined && readGraphDropRequests(runtime).length > 0;
+    return runtime !== undefined && readGraphWork(runtime).length > 0;
   }
 
   /** The node's read graphs, what the builder does, and the last check run on request: for `dkg store read-graphs status`. */
