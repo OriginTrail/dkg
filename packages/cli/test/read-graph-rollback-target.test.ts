@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { QueryConfigError, resolveQueryConfig } from '../src/read-graphs-config.js';
+import { QueryConfigError, resolveQuerySection } from '../src/read-graphs-config.js';
 import {
   READ_GRAPHS_FIRST_RECOGNIZING_RELEASE,
   assertQueryConfigFitsNode,
@@ -10,6 +10,7 @@ import {
   readGraphRollbackTarget,
   resolveQueryConfigOrExit,
   rollbackTargetRecognizesReadGraphs,
+  rollbackTargetRefusal,
 } from '../src/update/read-graph-rollback-target.js';
 
 let home: string;
@@ -27,8 +28,8 @@ afterEach(async () => {
   await rm(home, { recursive: true, force: true });
 });
 
-const BUILD = resolveQueryConfig({ readGraphs: { contextGraphs: { notes: { layers: { 'verifiable-memory': 'build' } } } } });
-const OFF = resolveQueryConfig({ readGraphs: 'off', viewSemantics: 'merged' });
+const BUILD = resolveQuerySection({ readGraphs: { layers: { 'verifiable-memory': 'build' } } }).policy;
+const OFF = resolveQuerySection({ readGraphs: 'off', viewSemantics: 'merged' }).policy;
 
 /** A built slot in the git layout: `releases/<slot>` with the CLI entry point and its package version. */
 async function slot(name: 'a' | 'b', version: string, options: { guard?: 'git' | 'npm' } = {}): Promise<string> {
@@ -127,7 +128,7 @@ describe('read graphs on a node that starts from a public checkpoint', () => {
       key: 'query.readGraphs',
       message: 'must be "off" on a node that starts from a public checkpoint, whose store the checkpoint builds',
     }]);
-    for (const config of [OFF, resolveQueryConfig({})]) await expect(assertQueryConfigFitsNode(config, 'edge', true)).resolves.toBeUndefined();
+    for (const policy of [OFF, resolveQuerySection({}).policy]) await expect(assertQueryConfigFitsNode(policy, 'edge', true)).resolves.toBeUndefined();
     // Without a checkpoint, the same settings pass to the rollback-target check.
     await expect(assertQueryConfigFitsNode(BUILD, 'edge', false)).resolves.toBeUndefined();
     await writeFile(join(home, 'previous-version'), '10.1.1\n');
@@ -150,9 +151,45 @@ describe('dkg start', () => {
       await expect(resolveQueryConfigOrExit({ query: { viewSemantics: 'joined' } }, (line) => lines.push(line))).rejects.toThrow('exit 1');
       expect(lines[1]).toBe('  query.viewSemantics: must be one of "per-asset", "merged" (got "joined")');
       await expect(resolveQueryConfigOrExit({ query: { readGraphs: 'off' } }, (line) => lines.push(line)))
-        .resolves.toEqual(resolveQueryConfig({ readGraphs: 'off' }));
+        .resolves.toEqual(resolveQuerySection({ readGraphs: 'off' }));
+      // Rules for single context graphs go to the settings table, which never stops a start.
+      await expect(resolveQueryConfigOrExit({ query: { readGraphs: { contextGraphs: { notes: 'serve' } } } }, (line) => lines.push(line)))
+        .resolves.toMatchObject({ deprecatedKeys: ['query.readGraphs.contextGraphs'] });
     } finally {
       exit.mockRestore();
     }
+  });
+});
+
+describe('the modes the rollback-target check looks at', () => {
+  it('are the node\'s own, with its policy applied: rules for single context graphs and modes the policy turns off pass', async () => {
+    await writeFile(join(home, 'previous-version'), '10.1.1\n');
+    await expect(assertRollbackTargetRecognizesReadGraphs(BUILD, 'edge')).rejects.toBeInstanceOf(QueryConfigError);
+    for (const query of [
+      { readGraphs: { contextGraphs: { notes: { layers: { 'verifiable-memory': 'build' } } } } },
+      { readGraphs: 'build', readGraphsPolicy: { enabled: false } },
+      { readGraphs: { layers: { 'verifiable-memory': 'build' } }, readGraphsPolicy: { layers: ['working-memory'] } },
+      { readGraphs: 'serve', readGraphsPolicy: { layers: [] } },
+    ]) {
+      await expect(assertRollbackTargetRecognizesReadGraphs(resolveQuerySection(query).policy, 'edge')).resolves.toBeUndefined();
+    }
+    // Nor does a node that starts from a public checkpoint refuse modes its policy turns all off.
+    await expect(assertQueryConfigFitsNode(resolveQuerySection({ readGraphs: 'serve', readGraphsPolicy: { layers: [] } }).policy, 'edge', true))
+      .resolves.toBeUndefined();
+  });
+
+  it('give the table the same refusal, with the target and the first recognizing release', async () => {
+    expect(rollbackTargetRefusal({ kind: 'none' })).toBeUndefined();
+    expect(rollbackTargetRefusal({ kind: 'release', source: 'slot b', version: '10.1.1', holdsPartitionGuard: true })).toBeUndefined();
+    expect(rollbackTargetRefusal({ kind: 'release', source: 'slot b', version: READ_GRAPHS_FIRST_RECOGNIZING_RELEASE, holdsPartitionGuard: false }))
+      .toBeUndefined();
+    await writeFile(join(home, 'previous-version'), '10.1.1\n');
+    expect(rollbackTargetRefusal(await readGraphRollbackTarget('edge'))).toEqual({
+      code: 'READ_GRAPHS_ROLLBACK_TARGET_OLDER',
+      message: `the rollback target (${join(home, 'previous-version')}: 10.1.1) is older than ${READ_GRAPHS_FIRST_RECOGNIZING_RELEASE}, `
+        + 'the first release that recognizes read graphs',
+      rollbackTarget: { source: join(home, 'previous-version'), version: '10.1.1' },
+      firstRecognizingRelease: READ_GRAPHS_FIRST_RECOGNIZING_RELEASE,
+    });
   });
 });

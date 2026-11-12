@@ -1,16 +1,20 @@
 import { join } from 'node:path';
-import { createTripleStore, startReadGraphs, type TripleStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
+import { createTripleStore, startReadGraphs, type ReadGraphStoreConfig, type TripleStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
 import type { DkgConfig } from './config.js';
-import { readGraphStoreSettings, resolveQueryConfig } from './read-graphs-config.js';
+import { readGraphSettingsOutsideDaemon } from './read-graph-settings-start.js';
 import { applyGraphCatalogConfig } from './graph-catalog-config.js';
 
 /**
  * The store configuration of a publisher runtime or inspector built outside the daemon (`dkg publisher run`). Like every store object the node builds over
- * its backend, it carries the node's read-graph settings when config.json has a `query` section. `readOnly`: an embedded Oxigraph store is opened
- * read-only and its file is never written (#3551).
+ * its backend, it carries the node's read-graph settings (`readGraphSettingsOutsideDaemon`), when config.json or the settings table has any. `readOnly`: an
+ * embedded Oxigraph store is opened read-only and its file is never written (#3551).
  */
-export function publisherStoreConfig(dataDir: string, config: DkgConfig, readOnly = false): TripleStoreConfig {
-  const readGraphs = config.query === undefined ? undefined : readGraphStoreSettings(resolveQueryConfig(config.query));
+export function publisherStoreConfig(
+  dataDir: string,
+  config: DkgConfig,
+  readOnly: boolean,
+  readGraphs: ReadGraphStoreConfig | undefined,
+): TripleStoreConfig {
   const storeConfig = config.store;
   if (storeConfig?.backend) { // a store section with only settings keeps the default store
     return {
@@ -50,7 +54,7 @@ export function publisherStoreConfig(dataDir: string, config: DkgConfig, readOnl
 export async function createPublisherStore(dataDir: string, config: DkgConfig, readOnly = false): Promise<TripleStore> {
   // A bad `store.graphCatalog` or DKG_STORE_GRAPH_CATALOG_MAX_BYTES stops it here, before the store opens.
   applyGraphCatalogConfig(config.store?.graphCatalog);
-  const store = await createTripleStore(publisherStoreConfig(dataDir, config, readOnly));
+  const store = await createTripleStore(publisherStoreConfig(dataDir, config, readOnly, await readGraphSettingsOutsideDaemon(dataDir, config)));
   if (readOnly) return store;
   try {
     await startReadGraphs(store, { dataDir });
