@@ -155,17 +155,17 @@ describe('decodeResultChanges', () => {
         },
       ],
     }, CG);
-    expect(changes).toEqual({ compared: 40, different: 5, since: '2026-11-12T06:00:00.000Z' });
+    expect(changes).toEqual({ compared: 40, different: 5, copiesRemoved: 5, since: '2026-11-12T06:00:00.000Z' });
   });
 
   it('counts nothing for a context graph the report doesn\'t hold, and ignores counts it can\'t use', () => {
-    expect(decodeResultChanges({ contextGraphs: [] }, CG)).toEqual({ compared: 0, different: 0 });
-    expect(decodeResultChanges(null, CG)).toEqual({ compared: 0, different: 0 });
+    expect(decodeResultChanges({ contextGraphs: [] }, CG)).toEqual({ compared: 0, different: 0, copiesRemoved: 0 });
+    expect(decodeResultChanges(null, CG)).toEqual({ compared: 0, different: 0, copiesRemoved: 0 });
     expect(decodeResultChanges({
       contextGraphs: [{ contextGraphId: CG, since: '2026-11-12T06:00:00.000Z', kinds: { 'none': -3, 'rows-added': 2.7, 'rows-removed-or-changed': '4' } }],
-    }, CG)).toEqual({ compared: 2, different: 2, since: '2026-11-12T06:00:00.000Z' });
+    }, CG)).toEqual({ compared: 2, different: 2, copiesRemoved: 0, since: '2026-11-12T06:00:00.000Z' });
     expect(decodeResultChanges({ contextGraphs: [{ contextGraphId: CG, since: '2026-11-12T06:00:00.000Z', kinds: {} }] }, CG))
-      .toEqual({ compared: 0, different: 0 });
+      .toEqual({ compared: 0, different: 0, copiesRemoved: 0 });
   });
 });
 
@@ -239,7 +239,7 @@ describe('fetchResultChanges', () => {
     const fetchMock = stubFetch(200, {
       contextGraphs: [{ contextGraphId: CG, since: '2026-11-12T06:00:00.000Z', kinds: { 'none': 3, 'rows-added': 1 } }],
     });
-    await expect(fetchResultChanges(CG)).resolves.toEqual({ compared: 4, different: 1, since: '2026-11-12T06:00:00.000Z' });
+    await expect(fetchResultChanges(CG)).resolves.toEqual({ compared: 4, different: 1, copiesRemoved: 0, since: '2026-11-12T06:00:00.000Z' });
     expect(fetchMock.mock.calls[0][0]).toBe(`${RESULT_CHANGES_PATH}?contextGraphId=${encodeURIComponent(CG)}`);
   });
 

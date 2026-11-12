@@ -49,28 +49,23 @@ function inTransition(layer: ReadGraphLayerSettings): boolean {
 }
 
 /**
- * A memory's state in users' words: Off, Getting ready (with how far when the
- * node says), Rebuilding, Checking, In use or Ready to turn on.
+ * A memory's state in users' words, with the tone it draws in: Off and Not
+ * known as a muted tag; Getting ready (with how far when the node says),
+ * Rebuilding and Checking as work under way; In use and Ready to turn on as
+ * ready.
  */
-export function searchStateText(layer: ReadGraphLayerSettings): string {
-  if (layer.mode === 'off') return 'Off';
-  if (layer.mode === undefined) return 'Not known';
+export function searchState(layer: ReadGraphLayerSettings): { readonly text: string; readonly tone: BadgeTone } {
+  if (layer.mode === 'off') return { text: 'Off', tone: 'muted' };
+  if (layer.mode === undefined) return { text: 'Not known', tone: 'muted' };
   const states = layer.states;
   const held = heldCount(layer);
   if (held === 0 || (states.building ?? 0) > 0) {
-    return layer.progress === undefined ? 'Getting ready' : `Getting ready ${Math.min(99, Math.floor(layer.progress * 100))}%`;
+    const text = layer.progress === undefined ? 'Getting ready' : `Getting ready ${Math.min(99, Math.floor(layer.progress * 100))}%`;
+    return { text, tone: 'pending' };
   }
-  if ((states.rebuilding ?? 0) + (states.repairing ?? 0) > 0) return 'Rebuilding';
-  if ((states.ready ?? 0) === held) return layer.mode === 'serve' ? 'In use' : 'Ready to turn on';
-  return 'Checking';
-}
-
-/** How a memory's state draws: ready states as success, work under way as pending, and the rest as a muted tag. */
-export function searchStateTone(layer: ReadGraphLayerSettings): BadgeTone {
-  const text = searchStateText(layer);
-  if (text === 'In use' || text === 'Ready to turn on') return 'success';
-  if (text === 'Off' || text === 'Not known') return 'muted';
-  return 'pending';
+  if ((states.rebuilding ?? 0) + (states.repairing ?? 0) > 0) return { text: 'Rebuilding', tone: 'pending' };
+  if ((states.ready ?? 0) === held) return { text: layer.mode === 'serve' ? 'In use' : 'Ready to turn on', tone: 'success' };
+  return { text: 'Checking', tone: 'pending' };
 }
 
 /** How many of something, in users' words: "1 asset", "12,400 assets". */
@@ -117,7 +112,8 @@ function ResultChangesLine({ contextGraphId }: { contextGraphId: string }) {
     <p className="v10-po-rg-changes" role="status">
       {data.compared === 0
         ? 'No queries compared yet. The node compares some of the queries people run on this context graph.'
-        : `${since}${data.different} of ${data.compared} compared ${data.compared === 1 ? 'query' : 'queries'} would give different results.`}
+        : `${since}${data.different} of ${data.compared} compared ${data.compared === 1 ? 'query' : 'queries'} would give different results`
+          + `${data.copiesRemoved > 0 ? `, and ${data.copiesRemoved} would only drop repeated rows` : ''}.`}
     </p>
   );
 }
@@ -228,6 +224,7 @@ export function ReadGraphsSection({ contextGraphId }: { contextGraphId: string }
               const blocked = switchOnBlocked(settings, layer);
               const size = searchSizeText(layer);
               const assets = searchAssetsText(layer);
+              const state = searchState(layer);
               return (
                 <div key={layer.view} className="v10-po-rg-row ds-card-nested" data-layer={layer.view} data-mode={layer.mode ?? 'unknown'}>
                   <div className="v10-po-rg-main">
@@ -235,7 +232,7 @@ export function ReadGraphsSection({ contextGraphId }: { contextGraphId: string }
                       <span className="v10-po-join-name v10-po-rg-name"><LayerGlyph layer={glyph} />{name}</span>
                       {detail && <span className="v10-po-rg-detail">{detail}</span>}
                       <span className="v10-po-rg-facts">
-                        <Badge tone={searchStateTone(layer)} size="sm" data-testid="search-state">{searchStateText(layer)}</Badge>
+                        <Badge tone={state.tone} size="sm" data-testid="search-state">{state.text}</Badge>
                         {assets && <Badge size="sm" data-testid="search-assets">{assets}</Badge>}
                         {size && <Badge size="sm" data-testid="search-size">{size}</Badge>}
                         {!layer.allowed && <Badge tone="muted" size="sm" data-testid="search-not-allowed">Not allowed on this node</Badge>}

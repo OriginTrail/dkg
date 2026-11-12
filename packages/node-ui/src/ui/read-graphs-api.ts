@@ -69,6 +69,8 @@ export interface ResultChanges {
   readonly compared: number;
   /** Of those, the ones whose results would be different. */
   readonly different: number;
+  /** Of those, the ones whose results would only lose rows that repeat. */
+  readonly copiesRemoved: number;
   /** When the node started comparing, once it has compared any. */
   readonly since?: string;
 }
@@ -181,8 +183,9 @@ export function decodeResultChanges(body: unknown, contextGraphId: string): Resu
   const kinds = objectOf(summary?.kinds);
   const count = (kind: string) => Math.floor(amountOf(kinds?.[kind]) ?? 0);
   const different = count('rows-added') + count('rows-removed-or-changed');
-  const compared = different + count('none') + count('copies-removed');
-  return { compared, different, ...(compared > 0 && typeof summary?.since === 'string' ? { since: summary.since } : {}) };
+  const copiesRemoved = count('copies-removed');
+  const compared = different + copiesRemoved + count('none');
+  return { compared, different, copiesRemoved, ...(compared > 0 && typeof summary?.since === 'string' ? { since: summary.since } : {}) };
 }
 
 /** The settings of one context graph, or `hidden` for a caller who isn't the node admin (403) or a node without them (404). */

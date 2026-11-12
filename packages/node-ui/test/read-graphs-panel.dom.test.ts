@@ -7,7 +7,7 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
-import { READ_GRAPHS_POLL_MS, ReadGraphsSection, searchAssetsText, searchSizeText, searchStateText, searchStateTone } from '../src/ui/views/project/components/read-graphs.js';
+import { READ_GRAPHS_POLL_MS, ReadGraphsSection, searchAssetsText, searchSizeText, searchState } from '../src/ui/views/project/components/read-graphs.js';
 
 const CG = '0x1111111111111111111111111111111111111111/read-graphs';
 const SETTINGS = '/api/store/read-graphs/settings';
@@ -191,7 +191,9 @@ describe('ReadGraphsSection', () => {
     await click(button(row(container, 'shared-working-memory'), 'On'));
     expect(puts().map(request => request.body)).toEqual([{ contextGraphId: CG, layers: { 'shared-working-memory': 'serve' } }]);
     expect(row(container, 'shared-working-memory').querySelector('[role="status"]')?.textContent).toBe('Applying…');
-    expect(Array.from(container.querySelectorAll<HTMLButtonElement>('.v10-po-rg-mode')).every(node => node.disabled)).toBe(true);
+    const modes = Array.from(container.querySelectorAll<HTMLButtonElement>('.v10-po-rg-modes button'));
+    expect(modes).toHaveLength(9);
+    expect(modes.every(node => node.disabled)).toBe(true);
 
     getAnswers = [[200, settings({
       effective: { 'working-memory': 'off', 'shared-working-memory': 'serve', 'verifiable-memory': 'serve' },
@@ -391,6 +393,12 @@ describe('ReadGraphsSection', () => {
     expect(container.querySelector('.v10-po-rg-changes')?.textContent).toBe('1 of 1 compared query would give different results.');
     await click(button(container, 'How results would change'));
 
+    changesAnswer = [200, { contextGraphs: [{ contextGraphId: CG, kinds: { 'none': 2, 'copies-removed': 3, 'rows-added': 1 } }] }];
+    await click(button(container, 'How results would change'));
+    expect(container.querySelector('.v10-po-rg-changes')?.textContent)
+      .toBe('1 of 6 compared queries would give different results, and 3 would only drop repeated rows.');
+    await click(button(container, 'How results would change'));
+
     changesAnswer = [404, { error: 'Not found' }];
     await click(button(container, 'How results would change'));
     expect(container.querySelector('.v10-po-rg-changes')?.textContent).toBe('The comparison isn\'t available: Not found');
@@ -449,39 +457,39 @@ describe('ReadGraphsSection', () => {
   });
 });
 
-describe('searchStateText', () => {
+describe('searchState', () => {
   const layer = (mode: 'off' | 'build' | 'serve' | undefined, states: Record<string, number>, progress?: number) =>
     ({ view: 'verifiable-memory' as const, mode, setHere: false, allowed: true, states, ...(progress === undefined ? {} : { progress }) });
 
   it('says a memory is getting ready while it is built, with how far when the node says', () => {
-    expect(searchStateText(layer('serve', { building: 1 }))).toBe('Getting ready');
-    expect(searchStateText(layer('build', { building: 1, ready: 1 }, 0.426))).toBe('Getting ready 42%');
-    expect(searchStateText(layer('build', { building: 1 }, 1))).toBe('Getting ready 99%');
-    expect(searchStateText(layer('serve', {}))).toBe('Getting ready');
+    expect(searchState(layer('serve', { building: 1 })).text).toBe('Getting ready');
+    expect(searchState(layer('build', { building: 1, ready: 1 }, 0.426)).text).toBe('Getting ready 42%');
+    expect(searchState(layer('build', { building: 1 }, 1)).text).toBe('Getting ready 99%');
+    expect(searchState(layer('serve', {})).text).toBe('Getting ready');
   });
 
   it('says a memory is rebuilding, being checked, in use or ready to turn on', () => {
-    expect(searchStateText(layer('serve', { ready: 1, rebuilding: 1 }))).toBe('Rebuilding');
-    expect(searchStateText(layer('build', { repairing: 1 }))).toBe('Rebuilding');
-    expect(searchStateText(layer('serve', { dirty: 1, ready: 2 }))).toBe('Checking');
-    expect(searchStateText(layer('serve', { surprising: 1 }))).toBe('Checking');
-    expect(searchStateText(layer('serve', { ready: 2 }))).toBe('In use');
-    expect(searchStateText(layer('build', { ready: 1 }))).toBe('Ready to turn on');
+    expect(searchState(layer('serve', { ready: 1, rebuilding: 1 })).text).toBe('Rebuilding');
+    expect(searchState(layer('build', { repairing: 1 })).text).toBe('Rebuilding');
+    expect(searchState(layer('serve', { dirty: 1, ready: 2 })).text).toBe('Checking');
+    expect(searchState(layer('serve', { surprising: 1 })).text).toBe('Checking');
+    expect(searchState(layer('serve', { ready: 2 })).text).toBe('In use');
+    expect(searchState(layer('build', { ready: 1 })).text).toBe('Ready to turn on');
   });
 
   it('draws ready states as success, work under way as pending, and the rest as a muted tag', () => {
-    expect(searchStateTone(layer('serve', { ready: 1 }))).toBe('success');
-    expect(searchStateTone(layer('build', { ready: 1 }))).toBe('success');
-    expect(searchStateTone(layer('serve', { building: 1 }))).toBe('pending');
-    expect(searchStateTone(layer('serve', { dirty: 1, ready: 1 }))).toBe('pending');
-    expect(searchStateTone(layer('build', { rebuilding: 1 }))).toBe('pending');
-    expect(searchStateTone(layer('off', {}))).toBe('muted');
-    expect(searchStateTone(layer(undefined, {}))).toBe('muted');
+    expect(searchState(layer('serve', { ready: 1 })).tone).toBe('success');
+    expect(searchState(layer('build', { ready: 1 })).tone).toBe('success');
+    expect(searchState(layer('serve', { building: 1 })).tone).toBe('pending');
+    expect(searchState(layer('serve', { dirty: 1, ready: 1 })).tone).toBe('pending');
+    expect(searchState(layer('build', { rebuilding: 1 })).tone).toBe('pending');
+    expect(searchState(layer('off', {})).tone).toBe('muted');
+    expect(searchState(layer(undefined, {})).tone).toBe('muted');
   });
 
   it('says Off for a memory that is off, and when the node didn\'t say', () => {
-    expect(searchStateText(layer('off', { ready: 1 }))).toBe('Off');
-    expect(searchStateText(layer(undefined, {}))).toBe('Not known');
+    expect(searchState(layer('off', { ready: 1 })).text).toBe('Off');
+    expect(searchState(layer(undefined, {})).text).toBe('Not known');
   });
 });
 
