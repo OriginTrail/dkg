@@ -56,6 +56,23 @@ describe('decodeReadGraphSettings', () => {
     });
   });
 
+  it('sums the triples of a layer\'s read graphs only when the node gives them for each', () => {
+    const settings = decodeReadGraphSettings({
+      contextGraphs: [{
+        contextGraphId: CG,
+        effective: { layers: { 'verifiable-memory': 'serve', 'shared-working-memory': 'serve', 'working-memory': 'serve' } },
+        readGraphs: [
+          { layer: 'vm', state: 'ready', triples: 1000 },
+          { layer: 'vm', state: 'ready', triples: 204.9 },
+          { layer: 'swm', state: 'ready', triples: 5 },
+          { layer: 'swm', state: 'ready' },
+          { layer: 'wm', state: 'ready', triples: -1 },
+        ],
+      }],
+    }, CG);
+    expect(settings.layers.map(layer => layer.triples)).toEqual([1204, undefined, undefined]);
+  });
+
   it('keeps the node-wide refusal and the kill switch', () => {
     const settings = decodeReadGraphSettings({
       policy: { enabled: false },

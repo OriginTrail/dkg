@@ -7,7 +7,7 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
-import { READ_GRAPHS_POLL_MS, ReadGraphsSection, searchStateText } from '../src/ui/views/project/components/read-graphs.js';
+import { READ_GRAPHS_POLL_MS, ReadGraphsSection, searchSizeText, searchStateText } from '../src/ui/views/project/components/read-graphs.js';
 
 const CG = '0x1111111111111111111111111111111111111111/read-graphs';
 const SETTINGS = '/api/store/read-graphs/settings';
@@ -144,13 +144,16 @@ describe('ReadGraphsSection', () => {
     expect(container.querySelectorAll('button:disabled')).toHaveLength(0);
   });
 
-  it('says how far a memory has got while it is getting ready', async () => {
+  it('says how far a memory has got while it is getting ready, and how many facts a combined copy holds', async () => {
     getAnswers = [[200, settings({ readGraphs: [
-      { readGraph: 'urn:rg:vm', layer: 'vm', state: 'ready', generation: 2 },
+      { readGraph: 'urn:rg:vm', layer: 'vm', state: 'ready', generation: 2, triples: 1204 },
       { readGraph: 'urn:rg:swm', layer: 'swm', state: 'building', generation: 1, progress: 0.426 },
     ] })]];
     const container = await render();
     expect(state(row(container, 'shared-working-memory'))).toBe('Getting ready 42%');
+    expect(row(container, 'shared-working-memory').querySelector('[data-testid="search-size"]')).toBeNull();
+    expect(row(container, 'verifiable-memory').querySelector('[data-testid="search-size"]')?.textContent)
+      .toBe(` · Holds about ${(1204).toLocaleString()} facts`);
   });
 
   it('switches a memory, shows the node\'s answer, and reads the settings again', async () => {
@@ -429,5 +432,16 @@ describe('searchStateText', () => {
   it('says Off for a memory that is off, and when the node didn\'t say', () => {
     expect(searchStateText(layer('off', { ready: 1 }))).toBe('Off');
     expect(searchStateText(layer(undefined, {}))).toBe('Not known');
+  });
+});
+
+describe('searchSizeText', () => {
+  it('counts facts in a memory that is on or in preview, once the node gives the count', () => {
+    const layer = (mode: 'off' | 'build' | 'serve', triples?: number) =>
+      ({ view: 'verifiable-memory' as const, mode, setHere: false, allowed: true, states: { ready: 1 }, ...(triples === undefined ? {} : { triples }) });
+    expect(searchSizeText(layer('serve', 1))).toBe('Holds about 1 fact');
+    expect(searchSizeText(layer('build', 0))).toBe('Holds about 0 facts');
+    expect(searchSizeText(layer('serve'))).toBeUndefined();
+    expect(searchSizeText(layer('off', 40))).toBeUndefined();
   });
 });

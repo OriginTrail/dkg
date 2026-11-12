@@ -44,6 +44,8 @@ export interface ReadGraphLayerSettings {
    * started. Absent when the node reports it for none.
    */
   readonly progress?: number;
+  /** How many triples the layer's read graphs hold, when the node says for each of them. */
+  readonly triples?: number;
 }
 
 export interface ReadGraphSettings {
@@ -91,17 +93,20 @@ function entryOf(body: unknown, contextGraphId: string): Record<string, unknown>
   return (Array.isArray(entries) ? entries : []).map(objectOf).find(entry => entry?.contextGraphId === contextGraphId);
 }
 
-interface HeldReadGraph { readonly state: string; readonly progress?: number }
+interface HeldReadGraph { readonly state: string; readonly progress?: number; readonly triples?: number }
 
-/** A layer's read graphs by state, and how far those being built have got. */
-function heldOf(held: readonly HeldReadGraph[]): Pick<ReadGraphLayerSettings, 'states' | 'progress'> {
+/** A layer's read graphs by state, how far those being built have got, and how many triples they hold. */
+function heldOf(held: readonly HeldReadGraph[]): Pick<ReadGraphLayerSettings, 'states' | 'progress' | 'triples'> {
   const states: Record<string, number> = {};
   for (const { state } of held) states[state] = (states[state] ?? 0) + 1;
   const building = held.filter(readGraph => readGraph.state === 'building');
   const progress = building.some(readGraph => readGraph.progress !== undefined)
     ? building.reduce((sum, readGraph) => sum + Math.min(1, readGraph.progress ?? 0), 0) / building.length
     : undefined;
-  return { states, ...(progress === undefined ? {} : { progress }) };
+  const triples = held.length > 0 && held.every(readGraph => readGraph.triples !== undefined)
+    ? held.reduce((sum, readGraph) => sum + readGraph.triples!, 0)
+    : undefined;
+  return { states, ...(progress === undefined ? {} : { progress }), ...(triples === undefined ? {} : { triples }) };
 }
 
 /**
@@ -124,7 +129,12 @@ export function decodeReadGraphSettings(body: unknown, contextGraphId: string): 
     const state = row?.state;
     if (view === undefined || typeof state !== 'string' || state === '') continue;
     const progress = amountOf(row?.progress);
-    held.get(view)!.push({ state, ...(progress === undefined ? {} : { progress }) });
+    const triples = amountOf(row?.triples);
+    held.get(view)!.push({
+      state,
+      ...(progress === undefined ? {} : { progress }),
+      ...(triples === undefined ? {} : { triples: Math.floor(triples) }),
+    });
   }
   return {
     contextGraphId,

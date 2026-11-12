@@ -61,6 +61,15 @@ export function searchStateText(layer: ReadGraphLayerSettings): string {
   return 'Checking';
 }
 
+/**
+ * How much a memory's combined copy holds, in users' words: "Holds about 1,204
+ * facts". The node counts when a build ends, and writes since then change it.
+ */
+export function searchSizeText(layer: ReadGraphLayerSettings): string | undefined {
+  if (layer.triples === undefined || layer.mode === 'off') return undefined;
+  return `Holds about ${layer.triples.toLocaleString()} ${layer.triples === 1 ? 'fact' : 'facts'}`;
+}
+
 /** Why a memory can't be switched to Preview or On, if it can't. Off is always allowed. */
 function switchOnBlocked(settings: ReadGraphSettings, layer: ReadGraphLayerSettings): string | undefined {
   if (!settings.enabled) return SWITCHED_OFF;
@@ -184,12 +193,16 @@ export function ReadGraphsSection({ contextGraphId }: { contextGraphId: string }
             {settings.layers.map(layer => {
               const { name, detail } = LAYER_NAMES[layer.view];
               const blocked = switchOnBlocked(settings, layer);
+              const size = searchSizeText(layer);
               return (
                 <div key={layer.view} className="v10-po-rg-row" data-layer={layer.view} data-mode={layer.mode ?? 'unknown'}>
                   <div className="v10-po-rg-main">
                     <div className="v10-po-join-info">
                       <span className="v10-po-join-name">{name}</span>
-                      <span className="v10-po-rg-state" data-testid="search-state">{searchStateText(layer)}</span>
+                      <span className="v10-po-rg-state">
+                        <span data-testid="search-state">{searchStateText(layer)}</span>
+                        {size && <span data-testid="search-size"> · {size}</span>}
+                      </span>
                       <span className="v10-po-join-addr">
                         {[detail, layer.setHere ? 'Set for this context graph' : 'Node default', layer.allowed ? undefined : 'not allowed on this node']
                           .filter(Boolean).join(' · ')}
