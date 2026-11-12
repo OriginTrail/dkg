@@ -6,6 +6,7 @@ import {
   nodeReadGraphModes,
   readGraphStoreSettings,
   resolveEffectiveQueryConfig,
+  resolveQueryConfig,
   resolveQuerySection,
   type ReadGraphsRefusal,
 } from '../src/read-graphs-config.js';
@@ -16,7 +17,7 @@ const AGENT = `0x${'ab'.repeat(20)}`;
 const key = (contextGraphId: string, layer: MemoryLayer): ReadGraphKey => layer === MemoryLayer.WorkingMemory
   ? { scope: readScope(contextGraphId), layer, agentAddress: AGENT }
   : { scope: readScope(contextGraphId), layer };
-const table = (...entries: ReadGraphSettingsEntry[]) => ({ list: () => entries });
+const table = (...entries: ReadGraphSettingsEntry[]): ReadGraphSettingsEntry[] => entries;
 const NONE = { refusals: [] };
 
 function issuesOf(input: unknown): Array<{ key: string; message: string }> {
@@ -86,6 +87,17 @@ describe('the query section', () => {
     expect(readGraphModeOf(modes, key('any', MemoryLayer.WorkingMemory))).toBe('off');
     expect(readGraphModeOf(modes, key('any', MemoryLayer.SharedWorkingMemory))).toBe('off');
     expect(nodeReadGraphModes(resolveQuerySection({ readGraphs: 'build' }).policy)).toEqual({ default: 'build' });
+  });
+
+  it('keeps no read graph when the policy allows no layer, whatever the node\'s default', () => {
+    for (const query of [
+      { readGraphs: 'serve', readGraphsPolicy: { layers: [] } },
+      { readGraphs: { default: 'build', layers: { 'verifiable-memory': 'serve' } }, readGraphsPolicy: { layers: [] } },
+      // Every layer the node names off is the same: nothing is kept.
+      { readGraphs: { default: 'serve', layers: { 'working-memory': 'off', 'shared-working-memory': 'off', 'verifiable-memory': 'off' } } },
+    ]) {
+      expect(nodeReadGraphModes(resolveQuerySection(query).policy), JSON.stringify(query)).toEqual({ default: 'off' });
+    }
   });
 
   it('names every offending key in one error, and refuses unknown keys', () => {
@@ -191,14 +203,26 @@ describe('the settings in force', () => {
     ]);
   });
 
-  it('never fail on the table: an ID that can\'t have read graphs is skipped, and a table that cannot be read gives the node\'s own', () => {
+  it('never fail on the table: an ID that can\'t have read graphs is skipped, with a warning', () => {
     const { policy } = resolveQuerySection({ readGraphs: 'build' });
     const skipped = resolveEffectiveQueryConfig(policy, table({ contextGraphId: '_private', layers: { 'verifiable-memory': 'serve' } }), NONE);
     expect(skipped.config.readGraphs).toEqual({ default: 'build' });
     expect(skipped.warnings).toEqual(['read graphs set for _private are off: it is not a context graph ID that can have read graphs']);
-    const broken = resolveEffectiveQueryConfig(policy, { list: () => { throw new Error('disk I/O error'); } }, NONE);
-    expect(broken.config).toEqual({ readGraphs: { default: 'build' }, viewSemantics: { default: 'per-asset' } });
-    expect(broken.warnings).toEqual(['the read-graph settings table cannot be read, so no context graph has settings of its own: disk I/O error']);
+  });
+
+  it('of config.json alone, its rules for single context graphs included, are what tools without a node read', () => {
+    const config = resolveQueryConfig({
+      readGraphs: { layers: { 'verifiable-memory': 'build' }, contextGraphs: { [CURATED]: 'serve', notes: { layers: { 'verifiable-memory': 'off' } } } },
+      viewSemantics: { default: 'merged', contextGraphs: { notes: 'per-asset' } },
+      readGraphsPolicy: { layers: ['verifiable-memory', 'shared-working-memory'] },
+    });
+    expect(readGraphModeOf(config.readGraphs, key(CURATED, MemoryLayer.SharedWorkingMemory))).toBe('serve');
+    expect(readGraphModeOf(config.readGraphs, key(CURATED, MemoryLayer.WorkingMemory))).toBe('off');
+    expect(readGraphModeOf(config.readGraphs, key('notes', MemoryLayer.VerifiableMemory))).toBe('off');
+    expect(readGraphModeOf(config.readGraphs, key('other', MemoryLayer.VerifiableMemory))).toBe('build');
+    expect(viewSemanticsOf(config.viewSemantics, 'notes')).toBe('per-asset');
+    expect(viewSemanticsOf(config.viewSemantics, CURATED)).toBe('merged');
+    expect(() => resolveQueryConfig({ readGraphs: 'on' })).toThrow(QueryConfigError);
   });
 
   it('give the store configuration both settings', () => {

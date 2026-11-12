@@ -39,8 +39,6 @@ export const CHECKPOINT_NODE_REFUSAL: ReadGraphsRefusal = Object.freeze({
 });
 
 export interface DaemonReadGraphSettings {
-  /** The settings table, open for the daemon's lifetime; `undefined` on a node that starts from a public checkpoint, or when it cannot be opened. */
-  readonly table: SqliteReadGraphSettingsStore | undefined;
   readonly policy: QueryPolicy;
   /** The settings in force at start. */
   readonly effective: ResolvedQueryConfig;
@@ -61,20 +59,11 @@ export async function prepareDaemonReadGraphSettings(input: {
   const section = resolveQuerySection(input.query);
   await assertQueryConfigFitsNode(section.policy, input.role, input.checkpoint);
   // A node that starts from a public checkpoint keeps no read graphs, and its data directory holds only what that start expects.
-  const table = input.checkpoint ? undefined : openTable(input.dataDir, log);
-  if (table !== undefined) importOnce(table, section, (input.now ?? Date.now)(), log);
-  else if (section.deprecatedKeys.length > 0) log(`[read-graphs] ${deprecated(section)} deprecated and ignored.`);
-  let entries: ReadonlyArray<ReadGraphSettingsEntry> = [];
-  try {
-    entries = table?.list() ?? [];
-  } catch (error) {
-    log(`[read-graphs] ${READ_GRAPH_SETTINGS_FILE} cannot be read, so no context graph has read-graph settings of its own: ${messageOf(error)}`);
-  }
+  const entries = input.checkpoint ? noTable(section, log) : importAndRead(input.dataDir, section, (input.now ?? Date.now)(), log);
   const refusals = input.checkpoint ? [CHECKPOINT_NODE_REFUSAL] : await rollbackRefusals(entries, input.role);
-  const { config: effective, warnings } = resolveEffectiveQueryConfig(section.policy, { list: () => entries }, { refusals });
+  const { config: effective, warnings } = resolveEffectiveQueryConfig(section.policy, entries, { refusals });
   for (const warning of warnings) log(`[read-graphs] ${capitalized(warning)}.`);
   return {
-    table,
     policy: section.policy,
     effective,
     storeSettings: input.checkpoint || (input.query === undefined && entries.length === 0) ? undefined : storeSettingsOf(section, effective),
@@ -114,7 +103,7 @@ export async function readGraphSettingsOutsideDaemon(
   const entries = overlaid(snapshot?.entries ?? [], pending);
   if (config.query === undefined && entries.length === 0) return undefined;
   const refusals = await rollbackRefusals(entries, config.nodeRole ?? 'edge');
-  return storeSettingsOf(section, resolveEffectiveQueryConfig(section.policy, { list: () => entries }, { refusals }).config);
+  return storeSettingsOf(section, resolveEffectiveQueryConfig(section.policy, entries, { refusals }).config);
 }
 
 /**
@@ -125,13 +114,34 @@ function storeSettingsOf(section: QuerySection, effective: ResolvedQueryConfig):
   return { ...readGraphStoreSettings(effective), whenUnsupported: keepsAnyReadGraph(nodeReadGraphModes(section.policy)) ? 'refuse' : 'off' };
 }
 
-function openTable(dataDir: string, log: (message: string) => void): SqliteReadGraphSettingsStore | undefined {
+/**
+ * Open the table, import config.json's rules once, read its entries and close it again: the daemon reads it at start, and opens it again for each change.
+ * A table that cannot be opened or read gives no entries, with a warning.
+ */
+function importAndRead(dataDir: string, section: QuerySection, now: number, log: (message: string) => void): ReadonlyArray<ReadGraphSettingsEntry> {
+  let table: SqliteReadGraphSettingsStore;
   try {
-    return openReadGraphSettingsStore(dataDir);
+    table = openReadGraphSettingsStore(dataDir);
   } catch (error) {
     log(`[read-graphs] ${READ_GRAPH_SETTINGS_FILE} cannot be opened, so no context graph has read-graph settings of its own: ${messageOf(error)}`);
-    return undefined;
+    if (section.deprecatedKeys.length > 0) log(`[read-graphs] ${deprecated(section)} deprecated and ignored.`);
+    return [];
   }
+  try {
+    importOnce(table, section, now, log);
+    return table.list();
+  } catch (error) {
+    log(`[read-graphs] ${READ_GRAPH_SETTINGS_FILE} cannot be read, so no context graph has read-graph settings of its own: ${messageOf(error)}`);
+    return [];
+  } finally {
+    table.close();
+  }
+}
+
+/** A node that starts from a public checkpoint has no table: config.json's rules for single context graphs are ignored there too. */
+function noTable(section: QuerySection, log: (message: string) => void): ReadonlyArray<ReadGraphSettingsEntry> {
+  if (section.deprecatedKeys.length > 0) log(`[read-graphs] ${deprecated(section)} deprecated and ignored.`);
+  return [];
 }
 
 /** Import config.json's rules for single context graphs once; from then on, warn at each start that they are ignored. */

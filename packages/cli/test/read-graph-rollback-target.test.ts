@@ -169,9 +169,13 @@ describe('the modes the rollback-target check looks at', () => {
       { readGraphs: { contextGraphs: { notes: { layers: { 'verifiable-memory': 'build' } } } } },
       { readGraphs: 'build', readGraphsPolicy: { enabled: false } },
       { readGraphs: { layers: { 'verifiable-memory': 'build' } }, readGraphsPolicy: { layers: ['working-memory'] } },
+      { readGraphs: 'serve', readGraphsPolicy: { layers: [] } },
     ]) {
       await expect(assertRollbackTargetRecognizesReadGraphs(resolveQuerySection(query).policy, 'edge')).resolves.toBeUndefined();
     }
+    // Nor does a node that starts from a public checkpoint refuse modes its policy turns all off.
+    await expect(assertQueryConfigFitsNode(resolveQuerySection({ readGraphs: 'serve', readGraphsPolicy: { layers: [] } }).policy, 'edge', true))
+      .resolves.toBeUndefined();
   });
 
   it('give the table the same refusal, with the target and the first recognizing release', async () => {

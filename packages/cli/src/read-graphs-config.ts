@@ -41,7 +41,7 @@ import {
   type ViewSemantics,
   type ViewSemanticsSettings,
 } from '@origintrail-official/dkg-storage';
-import type { ReadGraphSettingsEntry, ReadGraphSettingsStore } from './read-graph-settings-store.js';
+import type { ReadGraphSettingsEntry } from './read-graph-settings-store.js';
 
 /** Cross-agent query access policy for inbound query-remote requests (`queryAccess` in config.json). */
 export interface QueryAccessConfig {
@@ -343,14 +343,20 @@ function settingsOfContextGraphRules(
   }));
 }
 
-/** The node's own modes with its policy applied: all `off` when the policy is off, and `off` on each layer it does not allow. */
+/**
+ * The node's own modes with its policy applied: all `off` when the policy is off, and `off` on each layer it does not allow. Modes that are `off` on
+ * every layer come back as all `off`, so a default that no layer reaches never counts as keeping a read graph.
+ */
 export function nodeReadGraphModes(policy: QueryPolicy): ReadGraphModes {
   const { enabled, layers } = policy.readGraphsPolicy;
   if (!enabled) return READ_GRAPHS_OFF;
   const closed = GET_VIEWS.filter((view) => !layers.includes(view));
-  if (closed.length === 0) return policy.readGraphs;
   const off: Partial<Record<MemoryLayer, ReadGraphMode>> = Object.fromEntries(closed.map((view) => [LAYER_OF_VIEW[view], 'off']));
-  return Object.freeze({ ...policy.readGraphs, layers: Object.freeze({ ...policy.readGraphs.layers, ...off }) });
+  const modes: ReadGraphModes = closed.length === 0
+    ? policy.readGraphs
+    : Object.freeze({ ...policy.readGraphs, layers: Object.freeze({ ...policy.readGraphs.layers, ...off }) });
+  const keeps = GET_VIEWS.some((view) => (modes.layers?.[LAYER_OF_VIEW[view]] ?? modes.default ?? 'off') !== 'off');
+  return keeps ? modes : READ_GRAPHS_OFF;
 }
 
 /** Why the policy does not let a layer keep read graphs, or `undefined` when it does. */
@@ -363,22 +369,15 @@ export function policyRefusalOf(policy: ReadGraphsPolicy, view: GetView): ReadGr
 }
 
 /**
- * The settings in force: config.json's policy over the settings table, as the store configuration carries them. A mode in the table that the policy or
- * the node does not allow resolves to `off`, with one warning for each reason that names the settings. A table that cannot be read gives no setting for
- * any context graph, with a warning: the table never stops a start.
+ * The settings in force: config.json's policy over the settings table's entries, as the store configuration carries them. A mode in the table that the
+ * policy or the node does not allow resolves to `off`, with one warning for each reason that names the settings: the table never stops a start.
  */
 export function resolveEffectiveQueryConfig(
   policy: QueryPolicy,
-  store: Pick<ReadGraphSettingsStore, 'list'>,
+  entries: ReadonlyArray<ReadGraphSettingsEntry>,
   checks: StartChecks,
 ): { config: ResolvedQueryConfig; warnings: string[] } {
   const warnings: string[] = [];
-  let entries: ReadonlyArray<ReadGraphSettingsEntry> = [];
-  try {
-    entries = store.list();
-  } catch (error) {
-    warnings.push(`the read-graph settings table cannot be read, so no context graph has settings of its own: ${messageOf(error)}`);
-  }
   const offBy = new Map<string, string[]>();
   const off = (reason: string, setting: string) => offBy.set(reason, [...offBy.get(reason) ?? [], setting]);
   const modes: Record<string, ReadGraphModeRule> = Object.create(null) as Record<string, ReadGraphModeRule>;
@@ -412,6 +411,15 @@ export function resolveEffectiveQueryConfig(
   };
 }
 
+/**
+ * config.json's `query` section alone, its deprecated rules for single context graphs included: the settings a node kept before its settings table, for
+ * tools that read config.json without a node, such as the devnet scripts. The daemon resolves its own with {@link resolveEffectiveQueryConfig}.
+ */
+export function resolveQueryConfig(input: unknown): ResolvedQueryConfig {
+  const section = resolveQuerySection(input);
+  return resolveEffectiveQueryConfig(section.policy, section.contextGraphSettings, { refusals: [] }).config;
+}
+
 function named(settings: readonly string[]): string {
   const shownSettings = settings.slice(0, NAMED_PER_WARNING).join(', ');
   return settings.length > NAMED_PER_WARNING ? `${shownSettings} and ${settings.length - NAMED_PER_WARNING} more` : shownSettings;
@@ -422,9 +430,6 @@ function ownEntry<V>(record: Readonly<Record<string, V>>, key: string): V | unde
   return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
 }
 
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 /** The read-graph part of a store configuration for these settings, carried by every store object the node builds over its backend. */
 export function readGraphStoreSettings(config: ResolvedQueryConfig): ReadGraphStoreConfig {

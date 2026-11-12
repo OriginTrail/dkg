@@ -159,6 +159,22 @@ describe('the read-graph settings table', () => {
     }
   });
 
+  it('leaves nothing of an import that SQLite stops part way, and records no import time', () => {
+    const store = open();
+    store.set('drafts', { layers: { 'working-memory': 'build' } }, 'cli');
+    // A trigger refuses the second entry's rows, after the first entry's are written.
+    const db = new DatabaseSync(join(dir, READ_GRAPH_SETTINGS_FILE));
+    db.exec(`CREATE TRIGGER refuse_notes BEFORE INSERT ON read_graph_modes WHEN NEW.context_graph_id = 'notes'
+      BEGIN SELECT RAISE(ABORT, 'refused by the test'); END;`);
+    db.close();
+    expect(() => store.importFromConfig([
+      { contextGraphId: CURATED, layers: { 'verifiable-memory': 'serve' }, viewSemantics: 'merged' },
+      { contextGraphId: 'notes', layers: { 'verifiable-memory': 'build' } },
+    ], 8_000)).toThrow(/refused by the test/);
+    expect(store.list()).toEqual([{ contextGraphId: 'drafts', layers: { 'working-memory': 'build' } }]);
+    expect(store.importedFromConfigAt()).toBeUndefined();
+  });
+
   it('keeps its settings across a reopen, and is read by another process without writing', () => {
     const store = open();
     store.set(CURATED, { layers: { 'verifiable-memory': 'serve' } }, 'cli');
