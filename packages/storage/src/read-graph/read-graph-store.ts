@@ -693,8 +693,8 @@ export function wrapReadGraphLayer(adapter: TripleStore, config: TripleStoreConf
   }
   const runtime = readGraphBackendRuntime(readGraphBackendIdentity(config));
   if (workingMemoryIdentity) runtime.workingMemoryIdentity = workingMemoryIdentity;
-  if (modes) runtime.modes = modes;
-  if (viewSemantics) runtime.viewSemantics = viewSemantics;
+  if (modes && !runtime.modesApplied) runtime.modes = modes;
+  if (viewSemantics && !runtime.viewSemanticsApplied) runtime.viewSemantics = viewSemantics;
   return new ReadGraphStore(adapter, runtime, termSiteOf(config.backend));
 }
 

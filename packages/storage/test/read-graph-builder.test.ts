@@ -18,20 +18,19 @@ import {
   unstoredReadGraphMarksText,
   useReadGraphMarkJournal,
 } from '../src/read-graph/mark-journal.js';
-import { matchesGraphNameTest, readGraphMembership, type GraphNameTest } from '../src/read-graph/membership.js';
+import { matchesGraphNameTest, readGraphEnumerationRoots, readGraphMembership, type GraphNameTest } from '../src/read-graph/membership.js';
 import { readGraphLayerOf, wrapReadGraphLayer, type ReadGraphStore } from '../src/read-graph/read-graph-store.js';
 import {
   buildReadGraph,
   refreshReadGraphRegistry,
   markReadGraphDirty,
-  readGraphEnumerationRoots,
   readStoredReadGraphRow,
   removeReadGraph,
   repairReadGraph,
   ReadGraphJobError,
-  withReadGraphBackgroundSlot,
   type ReadGraphJobContext,
 } from '../src/read-graph/rebuild.js';
+import { withReadGraphBackgroundSlot } from '../src/read-graph/background-slot.js';
 import { readReadGraphRegistry } from '../src/read-graph/registry.js';
 import { fenceReadGraphs, liftReadGraphFences } from '../src/read-graph/registry-fences.js';
 import {

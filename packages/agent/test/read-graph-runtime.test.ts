@@ -3,6 +3,7 @@ import { MemoryLayer, createOperationContext, readGraphIri, readScope, type Read
 import {
   CURRENT_READ_GRAPH_VERSIONS,
   OxigraphStore,
+  readGraphDropRequests,
   READ_GRAPH_PLANNED_METHODS,
   ReadGraphBuilder,
   readGraphRuntimeOf,
@@ -11,6 +12,7 @@ import {
   withReadGraphBackgroundSlot,
   wrapReadGraphLayer,
 } from '@origintrail-official/dkg-storage';
+import { ContextGraphPartitionQueryMethods } from '../src/internal/context-graph-partition-query.js';
 import { READ_GRAPHS_OFF, ReadGraphWorkloadOwnerV1, readGraphWorkloadOf, type ReadGraphModesV1 } from '../src/read-graph-runtime.js';
 
 const CG = 'read-graph-runtime';
@@ -201,5 +203,64 @@ describe('the agent read-graph workload', () => {
     await expect(requested).rejects.toThrow('The read-graph checks are stopping');
     await closed;
     expect(owner.readGraphStatus().lastCheck).toBeUndefined();
+  });
+
+  it('starts its builder when a live switch turns a layer on, and removes the layer once it is switched off', async () => {
+    const { view, store } = await agentView({ subscribed: [CG] });
+    const runtime = readGraphRuntimeOf(store)!;
+    const owner = new ReadGraphWorkloadOwnerV1(view, { logger: logger(), intervalMs: 60_000 });
+    owner.start(ctx);
+    expect(owner.status()).toBeUndefined();
+    const vm = readGraphIri({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory });
+    const code = readGraphIri({ scope: readScope(CG, 'code'), layer: MemoryLayer.VerifiableMemory });
+    const on = await owner.applyReadGraphModes({ contextGraphs: { [CG]: { layers: { [MemoryLayer.VerifiableMemory]: 'serve' } } } });
+    expect(on.find((change) => change.layer === 'verifiable-memory')).toMatchObject({ contextGraphId: CG, from: 'off', to: 'serve', outcome: 'applied' });
+    // The subscribed context graph's read graphs have rows at once, and the builder runs.
+    expect(runtime.mirror.get(vm)?.state).toBe('dirty');
+    expect(runtime.mirror.get(code)?.state).toBe('dirty');
+    expect(owner.status()).toBeDefined();
+    await owner.whenIdle();
+    expect(runtime.mirror.get(vm)?.state).toBe('ready');
+    expect(runtime.mirror.get(code)?.state).toBe('ready');
+    expect(owner.readGraphStatus().checking).toBe(true);
+    // Each read graph built carries its size at the build: one asset graph with one triple in the whole graph, none in the sub-graph.
+    expect(owner.readGraphStatus().readGraphs).toEqual([
+      { readGraph: code, state: 'ready', generation: expect.any(Number), triples: 0, members: 0 },
+      { readGraph: vm, state: 'ready', generation: expect.any(Number), triples: 1, members: 1 },
+    ].sort((left, right) => (left.readGraph < right.readGraph ? -1 : 1)));
+
+    const off = await owner.applyReadGraphModes({ contextGraphs: { [CG]: { layers: { [MemoryLayer.VerifiableMemory]: 'off' } } } });
+    expect(off.find((change) => change.layer === 'verifiable-memory')).toMatchObject({ from: 'serve', to: 'off', outcome: 'applied' });
+    expect(runtime.mirror.size).toBe(0);
+    await owner.whenIdle();
+    expect(readGraphDropRequests(runtime)).toEqual([]);
+    expect(owner.readGraphStatus().readGraphs).toEqual([]);
+    const below = readGraphLayerOf(store)!.innerStore;
+    const left = await below.query(`ASK { GRAPH <${vm}> { ?s ?p ?o } }`);
+    expect(left).toMatchObject({ type: 'boolean', value: false });
+    await owner.close();
+  });
+
+  it('switches nothing on before it starts, and the agent reaches the switch through its workload or, without one, through storage', async () => {
+    const { view, store } = await agentView({ subscribed: [CG] });
+    const runtime = readGraphRuntimeOf(store)!;
+    const owner = new ReadGraphWorkloadOwnerV1(view, { logger: logger(), intervalMs: 60_000 });
+    const next = { contextGraphs: { [CG]: { layers: { [MemoryLayer.VerifiableMemory]: 'build' as const } } } };
+    const apply = ContextGraphPartitionQueryMethods.prototype.applyReadGraphModesV1;
+    const changes = await apply.call(view as never, next, { viewSemantics: { contextGraphs: { [CG]: 'merged' } } });
+    expect(runtime.viewSemantics).toEqual({ contextGraphs: { [CG]: 'merged' } });
+    expect(changes.find((change) => change.layer === 'verifiable-memory')?.outcome).toBe('applied');
+    // Not started: the rows are there, and no builder runs until the workload starts.
+    expect(runtime.mirror.get(readGraphIri({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory }))?.state).toBe('dirty');
+    expect(owner.status()).toBeUndefined();
+    owner.start(ctx);
+    await owner.whenIdle();
+    expect(runtime.mirror.get(readGraphIri({ scope: readScope(CG), layer: MemoryLayer.VerifiableMemory }))?.state).toBe('ready');
+    await owner.close();
+    // An agent without the workload switches through storage alone.
+    const bare = await agentView({ subscribed: [CG] });
+    const plain = await apply.call({ store: bare.store, config: {} } as never, next);
+    expect(plain.find((change) => change.layer === 'verifiable-memory')?.outcome).toBe('applied');
+    expect(readGraphRuntimeOf(bare.store)!.modes).toEqual(next);
   });
 });

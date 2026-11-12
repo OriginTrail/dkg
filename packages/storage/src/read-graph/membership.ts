@@ -306,6 +306,32 @@ function sharedLayerPrefix(prefix: string): GraphNameTest {
   return all({ kind: 'prefix', prefix }, ...ROUTE_FILTER, not(equals(`${prefix}staging`)));
 }
 
+/**
+ * The names to list for a membership test: the exact IRIs it can hold and the
+ * prefixes every other member starts with. `undefined` when the test has a
+ * branch that no IRI or prefix bounds. A `not` only filters.
+ */
+export function readGraphEnumerationRoots(test: GraphNameTest): { readonly iris: readonly string[]; readonly prefixes: readonly string[] } | undefined {
+  const iris = new Set<string>();
+  const prefixes = new Set<string>();
+  const walk = (inner: GraphNameTest): boolean => {
+    switch (inner.kind) {
+      case 'equals': iris.add(inner.iri); return true;
+      case 'prefix':
+      case 'one-segment-after':
+      case 'address-after': prefixes.add(inner.prefix); return true;
+      case 'any': return inner.tests.every(walk);
+      // Every branch of `all` must hold, so one bounded branch bounds it.
+      case 'all': return inner.tests.some((branch) => readGraphEnumerationRoots(branch) !== undefined && walk(branch));
+      default: return false;
+    }
+  };
+  if (!walk(test)) return undefined;
+  const sorted = [...prefixes].sort(compareCodePoint);
+  const outer = sorted.filter((prefix, index) => !sorted.slice(0, index).some((shorter) => prefix.startsWith(shorter)));
+  return { iris: [...iris].filter((iri) => !outer.some((prefix) => iri.startsWith(prefix))).sort(compareCodePoint), prefixes: outer };
+}
+
 function equals(iri: string): GraphNameTest {
   return { kind: 'equals', iri };
 }

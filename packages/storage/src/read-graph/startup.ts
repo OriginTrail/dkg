@@ -21,7 +21,8 @@
  * whose agent owns other addresses (`installWorkingMemoryIdentity`). Without
  * a record it is marked dirty. The rows it does not
  * maintain take the rule of a release that does not maintain read graphs:
- * dirty, unless they already are.
+ * dirty, unless they already are; the builder then drops them while their
+ * mode stays `off` (`./drop-requests.ts`).
  *
  * It then reads the rows back, makes the backend's mirror hold exactly the
  * maintained ones, reads the registry of each context graph that has one, so
@@ -40,6 +41,7 @@ import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
 import { noteReadGraphPartitionsOfRuntime } from './data-directories.js';
+import { requestReadGraphDrops } from './drop-requests.js';
 import { clearUnstoredReadGraphMarks, readGraphMarksAtStart, unstoredReadGraphMarksText, useReadGraphMarkJournal } from './mark-journal.js';
 import { syncReadGraphRuntimeWithRecovery } from './recovery.js';
 import type { ReadGraphBackendRuntime } from './runtime.js';
@@ -211,6 +213,8 @@ async function loadReadGraphs(
   if (options.dataDir !== undefined && journaled.size > 0) clearUnstoredReadGraphMarks(options.dataDir);
   const after = await stateRows(target, queryOptions);
   for (const row of after.rows) if (maintained(row.readGraph)) mirror.set(row);
+  requestReadGraphDrops(layer.runtime, after.rows.map((row) => row.readGraph)
+    .filter((readGraph) => !maintained(readGraph) && parseReadGraphIri(readGraph) !== undefined));
   // Before anything writes: the facts go in with the snapshot, so the layer predicts its first registry write from them.
   // Every row that does not follow this registry is dirty now, so it is the one to record.
   for (const contextGraphId of mirror.contextGraphIds()) {
@@ -253,6 +257,16 @@ async function noteRecordOnlyPartitions(store: TripleStore, options: ReadGraphSt
 
 /** Each backend's load by a start-up of this process: whether it succeeded. */
 const LOADS = new WeakMap<ReadGraphBackendRuntime, Promise<boolean>>();
+
+/**
+ * Count a backend's mirror as loaded once a live switch (`./live-modes.ts`)
+ * has given it the rows of the read graphs it switched on, after a start-up
+ * that maintained none. A later start-up of this process then applies only
+ * its own journal, and never clears the mirror the layer maintains writes by.
+ */
+export function noteReadGraphRuntimeLoaded(runtime: ReadGraphBackendRuntime): void {
+  if (!LOADS.has(runtime)) LOADS.set(runtime, Promise.resolve(true));
+}
 
 /**
  * Apply a data directory's journal to a running mirror. Under each journaled
