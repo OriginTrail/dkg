@@ -671,7 +671,7 @@ cleanup() {
   local status=$?
   trap - EXIT
   trap '' INT TERM
-  local n changed w body inherited
+  local n changed w body inherited attempt
   for w in $(cat "$RESULTS/gate/watchers" 2>/dev/null); do kill "$w" 2>/dev/null; done
   # A kill drill or a live phase interrupted mid-run leaves its writer: stop it and its requests before any node is restored.
   w="$(cat "$RESULTS/drill-kill.writer" 2>/dev/null)"
@@ -698,23 +698,30 @@ cleanup() {
       drop_unkept "$n" || note "cleanup: dropping the read graphs node$n's setting does not keep failed (see cli.log)"
     done
   fi
-  # Then the live context graph's own settings as they were before the run, on each node the run switched it on.
+  # Then the live context graph's own settings as they were before the run, on each node the run switched it on. A node
+  # left without them fails the run: its queries no longer behave as before it.
   if [ -s "$RESULTS/rows/live-changed" ] && [ "$KEEP" != 1 ]; then
     for n in $(sort -nu "$RESULTS/rows/live-changed"); do
       [ -s "$RESULTS/rows/settings-original.node$n" ] \
-        || { note "cleanup: node$n's settings from before the run were not saved, so $LIVE_CG stays Off there"; continue; }
-      node_up "$n" || { note "cleanup: node$n was down, so $LIVE_CG's settings were not put back there"; continue; }
+        || { note "cleanup: node$n's settings from before the run were not saved, so $LIVE_CG stays Off there"; status=1; continue; }
+      node_up "$n" || { note "cleanup: node$n was down, so $LIVE_CG's settings were not put back there"; status=1; continue; }
       body="$(settings_read "$RESULTS/rows/settings-original.node$n" restore-body "$LIVE_CG")"
-      api "$n" PUT "$SETTINGS_PATH" "$body" > "$RESULTS/rows/live.restore.node$n"
+      for attempt in 1 2 3; do
+        api "$n" PUT "$SETTINGS_PATH" "$body" > "$RESULTS/rows/live.restore.node$n"
+        [ "$(settings_read "$RESULTS/rows/live.restore.node$n" code)" = 200 ] && break
+        [ "$attempt" = 3 ] || sleep 5
+      done
       if [ "$(settings_read "$RESULTS/rows/live.restore.node$n" code)" != 200 ]; then
-        note "cleanup: putting back $LIVE_CG's settings on node$n was refused ($(settings_read "$RESULTS/rows/live.restore.node$n" refusal)), so it stays Off there"
-        continue
+        note "cleanup: putting back $LIVE_CG's settings on node$n was refused three times, so it stays Off there: $(settings_read "$RESULTS/rows/live.restore.node$n" refusal)"
+        status=1; continue
       fi
       inherited="$(settings_read "$RESULTS/rows/settings-original.node$n" inherited "$LIVE_CG")"
       [ -z "$inherited" ] \
         || note "cleanup: $LIVE_CG's settings on node$n are back as before the run; the API can't remove a layer's own setting, so the layers that had none hold the node's mode from before the run as their own: $inherited"
     done
   fi
+  # The verdict was printed before cleanup: a node cleanup could not put back fails the run, in the report too.
+  [ "$status" != 1 ] || [ "$FAILS" -gt 0 ] || { record cleanup FAIL 0 "a node was not put back as it was before the run (see Notes)"; say "FAIL"; }
   write_report
   exit "$status"
 }
@@ -927,7 +934,8 @@ live_wait_gone() {
   return 1
 }
 # live_query <n> <view> <semantics or ""> <out>: a view query on the live context graph. Prints "<HTTP code> <the
-# semantics that answered, or the refusal's code>".
+# semantics that answered, or the refusal's code>". An answer counts only with its result, one row whose count is a
+# whole number; without one it prints "<HTTP code> <semantics> without a count", which never matches an expectation.
 live_query() {
   local body resp
   body="$(node -e '
@@ -937,9 +945,17 @@ live_query() {
     process.stdout.write(JSON.stringify(body));' "$LIVE_CG" "$2" "$3")"
   resp="$(api "$1" POST /api/query "$body")"
   printf '%s\n' "$resp" > "$4"
-  printf '%s %s' "$(code_of "$resp")" "$(body_of "$resp" | node -e '
+  printf '%s %s' "$(code_of "$resp")" "$(body_of "$resp" | CODE="$(code_of "$resp")" node -e '
     let d = ""; process.stdin.on("data", (c) => d += c).on("end", () => {
-      try { const j = JSON.parse(d); process.stdout.write(String(j.semantics ?? j.result?.semantics ?? j.code ?? "")); } catch { /* not JSON */ }
+      let j; try { j = JSON.parse(d); } catch { return; }
+      const label = String(j.semantics ?? j.result?.semantics ?? j.code ?? "");
+      if (!/^2/.test(process.env.CODE ?? "")) { process.stdout.write(label); return; }
+      // The count however the release renders it: "lexical"^^<datatype>, bare, or as an object.
+      const bindings = Array.isArray(j.result?.bindings) ? j.result.bindings : [];
+      const cell = bindings.length === 1 ? bindings[0]?.n : undefined;
+      const text = String(cell && typeof cell === "object" ? cell.value ?? "" : cell ?? "");
+      const lexical = /^"((?:[^"\\]|\\.)*)"/.exec(text)?.[1] ?? text;
+      process.stdout.write(/^\d+$/.test(lexical) ? label : `${label} without a count`);
     });')"
 }
 # The answers are checked with a join across assets: two working-memory drafts of the node's own agent in the live
