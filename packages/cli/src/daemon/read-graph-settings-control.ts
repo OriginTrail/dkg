@@ -25,6 +25,7 @@ import {
 import { nodeReadGraphModes, policyRefusalOf, resolveEffectiveQueryConfig, type ReadGraphsRefusal } from '../read-graphs-config.js';
 import { CHECKPOINT_NODE_REFUSAL, noteReadGraphStoreSupport, type DaemonReadGraphSettings } from '../read-graph-settings-start.js';
 import {
+  ReadGraphSettingsUnavailableError,
   withSettingsChange,
   type ReadGraphSettingsChange,
   type ReadGraphSettingsEntry,
@@ -125,11 +126,28 @@ export class ReadGraphSettingsControl {
     this.#log = input.log;
   }
 
-  /** The settings of one context graph, or of every context graph with settings of its own or read graphs. */
-  async answer(contextGraphId?: string): Promise<ReadGraphSettingsAnswer> {
+  /** What `GET` answers: the settings, or `503 READ_GRAPH_SETTINGS_UNAVAILABLE` while the table can't be read. Nothing in force changes either way. */
+  async read(contextGraphId?: string): Promise<ReadGraphSettingsOutcome> {
+    try {
+      return { status: 200, body: await this.answer(contextGraphId) };
+    } catch (error) {
+      if (!(error instanceof ReadGraphSettingsUnavailableError)) throw error;
+      return { status: 503, body: { code: error.code, error: `This node's search-across-assets settings can't be read now: ${error.message}.` } };
+    }
+  }
+
+  /**
+   * The settings of one context graph, or of every context graph with settings of its own or read graphs. A table that can't be read throws
+   * `ReadGraphSettingsUnavailableError`.
+   */
+  answer(contextGraphId?: string): Promise<ReadGraphSettingsAnswer> {
+    return this.#answerOf(contextGraphId, () => this.#entries());
+  }
+
+  async #answerOf(contextGraphId: string | undefined, entriesOf: () => ReadonlyArray<ReadGraphSettingsEntry>): Promise<ReadGraphSettingsAnswer> {
     const { policy } = this.#settings;
     const refusals = await this.#nodeRefusals();
-    const entries = new Map(this.#entries().map((entry) => [entry.contextGraphId, entry]));
+    const entries = new Map(entriesOf().map((entry) => [entry.contextGraphId, entry]));
     const runtime = readGraphRuntimeOf(this.#agent.store);
     const status = this.#agent.readGraphStatusV1();
     const rows = status?.readGraphs ?? runtime?.mirror.rows() ?? [];
@@ -177,8 +195,21 @@ export class ReadGraphSettingsControl {
     return this.#serial(async () => {
       const result = await this.#change(request, actor, signal);
       if (!result.ok) return { status: result.status, body: result.refusal };
-      return { status: 200, body: { ...await this.answer(request.contextGraphId), changes: result.changes } };
+      return { status: 200, body: { ...await this.#answerAfter(request.contextGraphId, result.entries), changes: result.changes } };
     });
+  }
+
+  /**
+   * The answer to a change the node applied, which stays applied. The change wrote `written` to the table, and changes run one at a time through this
+   * control, the table's only writer: when the table can't be read back, the answer comes from them.
+   */
+  async #answerAfter(contextGraphId: string, written: ReadonlyArray<ReadGraphSettingsEntry>): Promise<ReadGraphSettingsAnswer> {
+    try {
+      return await this.answer(contextGraphId);
+    } catch (error) {
+      if (!(error instanceof ReadGraphSettingsUnavailableError)) throw error;
+      return this.#answerOf(contextGraphId, () => written);
+    }
   }
 
   /** The `readGraphs` field of a node admin's creation of a context graph, applied after it with the checks of a change. */
@@ -245,16 +276,16 @@ export class ReadGraphSettingsControl {
     const refusedChange = changes.find((entry) => typeof entry.outcome === 'object');
     if (refusedChange !== undefined) return applyRefused(contextGraphId, (refusedChange.outcome as { refused: string }).refused, changes);
     this.#log(`[read-graphs] ${actor} changed the settings of ${contextGraphId}: ${describe(request, changes)}.`);
-    return { ok: true, changes };
+    return { ok: true, changes, entries };
   }
 
-  /** The table's entries for an answer: none on a node that starts from a public checkpoint, or when the table cannot be read. */
+  /** The table's entries for an answer, or none on a node that starts from a public checkpoint, which keeps no settings. */
   #entries(): ReadonlyArray<ReadGraphSettingsEntry> {
     if (this.#checkpoint) return [];
     try {
       return this.#table.list();
-    } catch {
-      return [];
+    } catch (error) {
+      throw error instanceof ReadGraphSettingsUnavailableError ? error : new ReadGraphSettingsUnavailableError(messageOf(error), { cause: error });
     }
   }
 
@@ -320,9 +351,9 @@ function sentenceOf(refusal: ReadGraphsRefusal, view: GetView | undefined): stri
   }
 }
 
-/** What a change did: applied with what it changed, or refused with an HTTP status and why. */
+/** What a change did: applied with what it changed and the table's entries it wrote, or refused with an HTTP status and why. */
 type ChangeResult =
-  | { readonly ok: true; readonly changes: readonly ReadGraphModeChange[] }
+  | { readonly ok: true; readonly changes: readonly ReadGraphModeChange[]; readonly entries: ReadonlyArray<ReadGraphSettingsEntry> }
   | { readonly ok: false; readonly status: number; readonly refusal: ReadGraphSettingsRefusal & { readonly changes?: readonly ReadGraphModeChange[] } };
 
 function refused(status: number, refusal: ReadGraphSettingsRefusal & { readonly changes?: readonly ReadGraphModeChange[] }): ChangeResult {
