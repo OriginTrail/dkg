@@ -7,6 +7,7 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
+import { formatDateTime, formatNumber } from '../src/ui/lib/format.js';
 import { READ_GRAPHS_POLL_MS, ReadGraphsSection, searchAssetsText, searchSizeText, searchState } from '../src/ui/views/project/components/read-graphs.js';
 
 const CG = '0x1111111111111111111111111111111111111111/read-graphs';
@@ -163,8 +164,8 @@ describe('ReadGraphsSection', () => {
     expect(row(container, 'shared-working-memory').querySelector('[data-testid="search-size"]')).toBeNull();
     expect(row(container, 'shared-working-memory').querySelector('[data-testid="search-assets"]')).toBeNull();
     const vm = row(container, 'verifiable-memory');
-    expect(vm.querySelector('[data-testid="search-size"]')?.textContent).toBe(`About ${(1204).toLocaleString()} facts, at its last build`);
-    expect(vm.querySelector('[data-testid="search-assets"]')?.textContent).toBe(`${(12400).toLocaleString()} assets`);
+    expect(vm.querySelector('[data-testid="search-size"]')?.textContent).toBe(`About ${formatNumber(1204)} facts, at its last build`);
+    expect(vm.querySelector('[data-testid="search-assets"]')?.textContent).toBe(`${formatNumber(12400)} assets`);
     expect(vm.querySelector('.v10-po-join-name')?.textContent).toBe('Published assets');
   });
 
@@ -363,7 +364,7 @@ describe('ReadGraphsSection', () => {
   it('shows how results would change, from the node\'s comparison of sampled queries', async () => {
     getAnswers = [[200, settings()]];
     const since = '2026-11-12T06:00:00.000Z';
-    changesAnswer = [200, { contextGraphs: [{ contextGraphId: CG, since, kinds: { 'none': 35, 'rows-added': 3, 'rows-removed-or-changed': 2 } }] }];
+    changesAnswer = [200, { contextGraphs: [{ contextGraphId: CG, since, kinds: { 'none': 1235, 'rows-added': 3, 'rows-removed-or-changed': 2 } }] }];
     const container = await render();
     const link = button(container, 'How results would change');
     expect(link.getAttribute('aria-expanded')).toBe('false');
@@ -373,8 +374,9 @@ describe('ReadGraphsSection', () => {
     expect(link.getAttribute('aria-expanded')).toBe('true');
     expect(requests.filter(request => request.url.startsWith(CHANGES)).map(request => request.url))
       .toEqual([`${CHANGES}?contextGraphId=${encodeURIComponent(CG)}`]);
-    const day = new Date(since).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
-    expect(container.querySelector('.v10-po-rg-changes')?.textContent).toBe(`Since ${day}: 5 of 40 compared queries would give different results.`);
+    // Dates and counts read the way they do on every other screen.
+    expect(container.querySelector('.v10-po-rg-changes')?.textContent)
+      .toBe(`Since ${formatDateTime(since)}: 5 of ${formatNumber(1240)} compared queries would give different results.`);
 
     await click(link);
     expect(container.querySelector('.v10-po-rg-changes')).toBeNull();
@@ -508,7 +510,7 @@ describe('searchSizeText and searchAssetsText', () => {
 
   it('counts assets in a memory that is on or in preview, once the node gives the count', () => {
     expect(searchAssetsText(layer('serve', 1))).toBe('1 asset');
-    expect(searchAssetsText(layer('build', 12400))).toBe(`${(12400).toLocaleString()} assets`);
+    expect(searchAssetsText(layer('build', 12400))).toBe(`${formatNumber(12400)} assets`);
     expect(searchAssetsText(layer('serve'))).toBeUndefined();
     expect(searchAssetsText(layer('off', 40))).toBeUndefined();
   });

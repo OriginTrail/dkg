@@ -5,6 +5,7 @@ import { Badge, LayerGlyph, type BadgeTone } from '../../../components/ds/Badge.
 import { Button } from '../../../components/ds/Button.js';
 import { Loading } from '../../../components/ds/Loading.js';
 import { RetryButton } from '../../../components/ds/RetryButton.js';
+import { formatDateTime, formatNumber } from '../../../lib/format.js';
 import {
   READ_GRAPH_MODES,
   fetchReadGraphSettings,
@@ -70,7 +71,7 @@ export function searchState(layer: ReadGraphLayerSettings): { readonly text: str
 
 /** How many of something, in users' words: "1 asset", "12,400 assets". */
 function counted(count: number, one: string, many: string): string {
-  return `${count.toLocaleString()} ${count === 1 ? one : many}`;
+  return `${formatNumber(count)} ${count === 1 ? one : many}`;
 }
 
 /** How many assets a memory's combined copy held at its last build: "12,400 assets". */
@@ -107,13 +108,13 @@ function ResultChangesLine({ contextGraphId }: { contextGraphId: string }) {
   }
   const since = data.since === undefined || Number.isNaN(Date.parse(data.since))
     ? ''
-    : `Since ${new Date(data.since).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}: `;
+    : `Since ${formatDateTime(data.since)}: `;
   return (
     <p className="v10-po-rg-changes" role="status">
       {data.compared === 0
         ? 'No queries compared yet. The node compares some of the queries people run on this context graph.'
-        : `${since}${data.different} of ${data.compared} compared ${data.compared === 1 ? 'query' : 'queries'} would give different results`
-          + `${data.copiesRemoved > 0 ? `, and ${data.copiesRemoved} would only drop repeated rows` : ''}.`}
+        : `${since}${formatNumber(data.different)} of ${formatNumber(data.compared)} compared ${data.compared === 1 ? 'query' : 'queries'} would give different results`
+          + `${data.copiesRemoved > 0 ? `, and ${formatNumber(data.copiesRemoved)} would only drop repeated rows` : ''}.`}
     </p>
   );
 }
