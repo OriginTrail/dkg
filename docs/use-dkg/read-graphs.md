@@ -11,6 +11,8 @@ A view query (`POST /api/query` with a `view`) matches each pattern inside one a
 
 Search across assets is off by default, for every context graph. You switch it per context graph and memory layer while the node runs, from the CLI, the API, an agent or the node UI. No restart is needed. Queries that don't ask for it are answered per asset, as before.
 
+Search across assets and these settings come with DKG 10.1.2. Earlier releases have neither.
+
 ## The settings
 
 | Setting | The API's value | What the node does |

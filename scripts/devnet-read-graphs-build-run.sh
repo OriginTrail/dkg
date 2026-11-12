@@ -964,7 +964,8 @@ live_join_fixture() {
   case "$(code_of "$resp")" in 2??) ;; *) echo "the second draft of the join was not written (HTTP $(code_of "$resp"))"; return 1 ;; esac
 }
 # live_join_query <n> <semantics or ""> <out>: the join on working memory. Prints "<HTTP code> <the semantics that
-# answered, or the refusal's code>", and with an answer " <rows holding the joined name>".
+# answered, or the refusal's code>", and with an answer " <rows>" when every row holds the joined name, else
+# " <joined> joined and <other> other": the whole binding set counts, so an extra or a wrong row never matches.
 live_join_query() {
   local body resp
   body="$(node -e '
@@ -981,7 +982,10 @@ live_join_query() {
       const bindings = Array.isArray(j.result?.bindings) ? j.result.bindings : null;
       // A literal however the release renders it: "lexical"^^<datatype>, "lexical"@lang, bare, or as an object.
       const value = (v) => { const t = String(v && typeof v === "object" ? v.value ?? "" : v ?? ""); const m = /^"((?:[^"\\]|\\.)*)"/.exec(t); return m ? m[1] : t; };
-      process.stdout.write(label + (bindings === null ? "" : ` ${bindings.filter((b) => value(b.name) === process.env.NAME).length}`));
+      if (bindings === null) { process.stdout.write(label); return; }
+      const joined = bindings.filter((b) => value(b?.name) === process.env.NAME).length;
+      const other = bindings.length - joined;
+      process.stdout.write(`${label} ${other === 0 ? joined : `${joined} joined and ${other} other`}`);
     });')"
 }
 # live_expect <n> <label> <vm|join> <semantics or ""> <expected> [seconds to retry]: prints what the node answered
