@@ -24,6 +24,16 @@ const open = () => {
   return { dashboard, store: new SqliteReadGraphSettingsStore(dashboard) };
 };
 
+/** A context graph's rows as stored, with when and by whom each changed. */
+function rowsOf(dashboard: DashboardDB, contextGraphId: string) {
+  return {
+    modes: dashboard.db.prepare('SELECT layer, mode, updated_at AS updatedAt, updated_by AS updatedBy FROM read_graph_modes WHERE context_graph_id = ? ORDER BY layer')
+      .all(contextGraphId) as Array<{ layer: string; mode: string; updatedAt: number; updatedBy: string }>,
+    semantics: dashboard.db.prepare('SELECT semantics, updated_at AS updatedAt, updated_by AS updatedBy FROM view_semantics_defaults WHERE context_graph_id = ?')
+      .get(contextGraphId),
+  };
+}
+
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'dkg-read-graph-settings-'));
   dashboards = [];
@@ -66,11 +76,11 @@ describe('the read-graph settings in the node\'s database', () => {
 
   it('keeps the time and actor of a mode\'s last change when a change leaves it as it is, and removes a default on null', () => {
     vi.useFakeTimers({ now: 1_000, toFake: ['Date'] });
-    const { store } = open();
+    const { dashboard, store } = open();
     store.set(CURATED, { layers: { 'verifiable-memory': 'build', 'working-memory': 'off' }, viewSemantics: 'merged' }, 'cli');
     vi.setSystemTime(2_000);
     store.set(CURATED, { layers: { 'verifiable-memory': 'serve', 'working-memory': 'off' }, viewSemantics: 'merged' }, 'ui');
-    expect(store.rowsOf(CURATED)).toEqual({
+    expect(rowsOf(dashboard, CURATED)).toEqual({
       modes: [
         { layer: 'verifiable-memory', mode: 'serve', updatedAt: 2_000, updatedBy: 'ui' },
         { layer: 'working-memory', mode: 'off', updatedAt: 1_000, updatedBy: 'cli' },
@@ -81,22 +91,14 @@ describe('the read-graph settings in the node\'s database', () => {
     expect(store.get(CURATED)).toEqual({ layers: { 'verifiable-memory': 'serve', 'working-memory': 'off' } });
   });
 
-  it('removes every setting of a context graph, and puts rows back exactly as they were read', () => {
-    vi.useFakeTimers({ now: 1_000, toFake: ['Date'] });
+  it('removes every setting of a context graph', () => {
     const { store } = open();
     store.set(CURATED, { layers: { 'verifiable-memory': 'serve' }, viewSemantics: 'merged' }, 'ui');
     store.set('notes', { layers: { 'verifiable-memory': 'build' } }, 'api');
-    const before = store.rowsOf(CURATED);
-    vi.setSystemTime(5_000);
     store.remove(CURATED, 'api');
     expect(store.list()).toEqual([{ contextGraphId: 'notes', layers: { 'verifiable-memory': 'build' } }]);
-    store.restore(CURATED, before);
-    expect(store.rowsOf(CURATED)).toEqual(before);
-    store.set(CURATED, { layers: { 'working-memory': 'build' } }, 'cli');
-    store.restore(CURATED, before);
-    expect(store.rowsOf(CURATED)).toEqual(before);
     store.remove('never-set', 'cli');
-    expect(store.list()).toHaveLength(2);
+    expect(store.list()).toHaveLength(1);
   });
 
   it('refuses a change it cannot hold, and writes nothing of it', () => {
@@ -130,7 +132,7 @@ describe('the read-graph settings in the node\'s database', () => {
   });
 
   it('imports config.json\'s rules once, in one transaction, with the time of the import', () => {
-    const { store } = open();
+    const { dashboard, store } = open();
     store.set('notes', { layers: { 'working-memory': 'serve' } }, 'api');
     store.importFromConfig([
       { contextGraphId: CURATED, layers: { 'verifiable-memory': 'serve', 'shared-working-memory': 'serve', 'working-memory': 'serve' }, viewSemantics: 'merged' },
@@ -141,7 +143,7 @@ describe('the read-graph settings in the node\'s database', () => {
       { contextGraphId: CURATED, layers: { 'verifiable-memory': 'serve', 'shared-working-memory': 'serve', 'working-memory': 'serve' }, viewSemantics: 'merged' },
       { contextGraphId: 'notes', layers: { 'working-memory': 'serve', 'verifiable-memory': 'build' } },
     ]);
-    expect(store.rowsOf('notes').modes.map((row) => [row.layer, row.updatedBy])).toEqual([['verifiable-memory', 'import'], ['working-memory', 'api']]);
+    expect(rowsOf(dashboard, 'notes').modes.map((row) => [row.layer, row.updatedBy])).toEqual([['verifiable-memory', 'import'], ['working-memory', 'api']]);
     // A refused entry imports nothing and leaves the recorded time as it was.
     store.remove(CURATED, 'cli');
     store.remove('notes', 'cli');

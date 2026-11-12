@@ -70,7 +70,12 @@ function layeredStore(capable = true): TripleStore {
 }
 
 /** A context graph's rows as stored, with when and by whom each changed. */
-const rowsOf = (contextGraphId: string) => table.rowsOf(contextGraphId);
+const rowsOf = (contextGraphId: string) => ({
+  modes: dashboard.db.prepare('SELECT layer, mode, updated_at AS updatedAt, updated_by AS updatedBy FROM read_graph_modes WHERE context_graph_id = ? ORDER BY layer')
+    .all(contextGraphId) as Array<{ layer: string; mode: string; updatedAt: number; updatedBy: string }>,
+  semantics: dashboard.db.prepare('SELECT semantics, updated_at AS updatedAt, updated_by AS updatedBy FROM view_semantics_defaults WHERE context_graph_id = ?')
+    .all(contextGraphId),
+});
 
 function agentOf(store: TripleStore, overrides: Partial<ReadGraphSettingsAgent> = {}): ReadGraphSettingsAgent {
   return {
@@ -344,17 +349,6 @@ describe('PUT /api/store/read-graphs/settings', () => {
     expect(lines).toEqual([]);
   });
 
-  it('writes the change once the settings are taken by a host that has no commit point', async () => {
-    const store = layeredStore();
-    const apply = vi.fn(async (next: ReadGraphModes, options?: { signal?: AbortSignal; viewSemantics?: ViewSemanticsSettings }) =>
-      applyReadGraphModes(store, next, { ...(options?.signal ? { signal: options.signal } : {}), ...(options?.viewSemantics ? { viewSemantics: options.viewSemantics } : {}) }));
-    const { control } = controlOf({ agent: agentOf(store, { applyReadGraphModesV1: apply }) });
-    expect((await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'serve' } })).status).toBe(200);
-    expect(table.get(CG)).toEqual({ layers: { 'verifiable-memory': 'serve' } });
-    vi.spyOn(table, 'set').mockImplementationOnce(() => { throw new Error('disk I/O error'); });
-    expect((await put(control, { contextGraphId: CG, layers: { 'verifiable-memory': 'build' } })).body).toMatchObject({ code: 'READ_GRAPH_SETTINGS_UNAVAILABLE' });
-  });
-
   it('refuses a change once the node shuts down, and ends a running one before it changes anything', async () => {
     const requests = new ReadGraphRequests();
     let started!: () => void;
@@ -432,10 +426,12 @@ describe('PUT /api/store/read-graphs/settings', () => {
     const seen: string[] = [];
     let release!: () => void;
     const first = new Promise<void>((resolve) => { release = resolve; });
-    const apply = vi.fn(async (next: ReadGraphModes) => {
+    // An apply honors its commit point, as the agent's does.
+    const apply = vi.fn(async (next: ReadGraphModes, options?: { beforeCommit?: () => void }) => {
       seen.push(['verifiable-memory', 'shared-working-memory'].map((view) =>
         readGraphModeOfLayer(next, CG, view === 'verifiable-memory' ? MemoryLayer.VerifiableMemory : MemoryLayer.SharedWorkingMemory)).join('/'));
       if (seen.length === 1) await first;
+      options?.beforeCommit?.();
       return [];
     });
     const { control } = controlOf({ agent: agentOf(store, { applyReadGraphModesV1: apply }) });

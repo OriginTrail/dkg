@@ -71,12 +71,6 @@ export class ReadGraphSettingsUnavailableError extends Error {
   }
 }
 
-/** One context graph's rows as stored, for putting them back after a change the node refuses. */
-export interface ReadGraphSettingsRows {
-  readonly modes: ReadonlyArray<{ readonly layer: string; readonly mode: string; readonly updatedAt: number; readonly updatedBy: string }>;
-  readonly semantics?: { readonly semantics: string; readonly updatedAt: number; readonly updatedBy: string };
-}
-
 /** What another process reads of the settings: their entries, and when config.json's rules were imported. */
 export interface ReadGraphSettingsSnapshot {
   readonly entries: ReadonlyArray<ReadGraphSettingsEntry>;
@@ -156,33 +150,6 @@ export class SqliteReadGraphSettingsStore implements ReadGraphSettingsStore {
     const issues = [...(typeof contextGraphId === 'string' ? [] : ['the context graph ID must be a string']), ...actorIssues(actor)];
     if (issues.length > 0) throw new ReadGraphSettingsError(issues);
     this.#transaction(() => this.#delete(contextGraphId));
-  }
-
-  /** One context graph's rows as stored, with when and by whom each changed: what {@link restore} puts back. */
-  rowsOf(contextGraphId: string): ReadGraphSettingsRows {
-    const db = this.#open();
-    const modes = (db.prepare('SELECT layer, mode, updated_at, updated_by FROM read_graph_modes WHERE context_graph_id = ? ORDER BY layer')
-      .all(contextGraphId) as Array<Record<string, unknown>>)
-      .map((row) => ({ layer: String(row['layer']), mode: String(row['mode']), updatedAt: Number(row['updated_at']), updatedBy: String(row['updated_by']) }));
-    const row = db.prepare('SELECT semantics, updated_at, updated_by FROM view_semantics_defaults WHERE context_graph_id = ?')
-      .get(contextGraphId) as Record<string, unknown> | undefined;
-    const semantics = row === undefined
-      ? undefined
-      : { semantics: String(row['semantics']), updatedAt: Number(row['updated_at']), updatedBy: String(row['updated_by']) };
-    return Object.freeze({ modes: Object.freeze(modes), ...(semantics === undefined ? {} : { semantics }) });
-  }
-
-  /** Put a context graph's rows back exactly as {@link rowsOf} read them, in one transaction. */
-  restore(contextGraphId: string, rows: ReadGraphSettingsRows): void {
-    this.#transaction(() => {
-      this.#delete(contextGraphId);
-      const insert = this.#db.prepare('INSERT INTO read_graph_modes (context_graph_id, layer, mode, updated_at, updated_by) VALUES (?, ?, ?, ?, ?)');
-      for (const mode of rows.modes) insert.run(contextGraphId, mode.layer, mode.mode, mode.updatedAt, mode.updatedBy);
-      if (rows.semantics !== undefined) {
-        this.#db.prepare('INSERT INTO view_semantics_defaults (context_graph_id, semantics, updated_at, updated_by) VALUES (?, ?, ?, ?)')
-          .run(contextGraphId, rows.semantics.semantics, rows.semantics.updatedAt, rows.semantics.updatedBy);
-      }
-    });
   }
 
   /** When config.json's rules for single context graphs were imported (unix milliseconds), or `undefined` before they are. */

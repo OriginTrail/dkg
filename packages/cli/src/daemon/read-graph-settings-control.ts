@@ -44,7 +44,10 @@ const LAYER_OF_VIEW: Readonly<Record<GetView, MemoryLayer>> = {
   'verifiable-memory': MemoryLayer.VerifiableMemory,
 };
 
-/** The agent methods the control uses. */
+/**
+ * The agent methods the control uses. `applyReadGraphModesV1` calls `beforeCommit` once, after everything that can fail and just before the node takes
+ * the settings, unless it refuses or throws: the settings table changes there and nowhere else.
+ */
 export interface ReadGraphSettingsAgent {
   readonly store: TripleStore;
   applyReadGraphModesV1(
@@ -219,12 +222,10 @@ export class ReadGraphSettingsControl {
       return unavailable(error);
     }
     const { config } = resolveEffectiveQueryConfig(policy, entries, { refusals });
-    let written = false;
     let writeError: unknown;
     const write = () => {
       try {
         table.set(contextGraphId, change, actor);
-        written = true;
       } catch (error) {
         writeError = error;
         throw error;
@@ -244,14 +245,6 @@ export class ReadGraphSettingsControl {
     }
     const refusedChange = changes.find((entry) => typeof entry.outcome === 'object');
     if (refusedChange !== undefined) return applyRefused(contextGraphId, (refusedChange.outcome as { refused: string }).refused, changes);
-    // An apply that took the settings always passes its commit point; a host that has none writes the change once the settings are taken.
-    if (!written) {
-      try {
-        write();
-      } catch (error) {
-        return unavailable(error);
-      }
-    }
     this.#log(`[read-graphs] ${actor} changed the settings of ${contextGraphId}: ${describe(request, changes)}.`);
     return { ok: true, changes };
   }
