@@ -137,6 +137,8 @@ import {
 } from '../../context-graph-readiness.js';
 import { settlePrivateEmptyVmAtSubscribe } from '../../context-graph-empty-vm-readiness.js';
 import { canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
+import { READ_GRAPH_SETTINGS_ACTOR_HEADER, parseCreateReadGraphSettings, readGraphSettingsActorOf } from '../../read-graph-settings-wire.js';
+import { readGraphSettingsOnCreate } from '../read-graph-settings-control.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -746,6 +748,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     if (parsedPcaAccountId.value !== undefined && publishPolicy === 1) {
       return jsonResponse(res, 400, { error: 'pcaAccountId is only valid with curated publish policy (publishPolicy=0)' });
     }
+    // The `readGraphs` option takes the node-admin token of its own: without it the option alone is refused, unread.
+    const readGraphLayers = parsed.readGraphs === undefined || !isNodeAdminCaller() ? undefined : parseCreateReadGraphSettings(parsed.readGraphs);
+    if (readGraphLayers !== undefined && 'error' in readGraphLayers) {
+      return jsonResponse(res, 400, { code: 'READ_GRAPH_SETTINGS_INVALID', error: readGraphLayers.error });
+    }
     // OT-RFC-38 / LU-6 Phase B (Codex PR #610 fd5b31f1 fix):
     // pcaAccountId on a create-only request used to be a silent foot-
     // gun because `createContextGraph()` didn't persist it, so a later
@@ -822,6 +829,13 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       }
       throw err;
     }
+    // The `readGraphs` setting applies once the context graph exists, with the checks of a settings change; a refused
+    // setting leaves the creation as it is and says why.
+    const readGraphs = parsed.readGraphs === undefined ? undefined : await readGraphSettingsOnCreate(ctx.readGraphSettings, {
+      contextGraphId: id, layers: readGraphLayers?.layers, canAdminister: isNodeAdminCaller(),
+      actor: readGraphSettingsActorOf(req.headers[READ_GRAPH_SETTINGS_ACTOR_HEADER]) ?? 'api',
+    });
+    const withReadGraphs = readGraphs === undefined ? {} : { readGraphs };
     // Registration is opt-in: callers that want on-chain registration
     // pass `register: true`. Otherwise CG stays local-only and can be
     // registered later via POST /api/context-graph/register.
@@ -838,6 +852,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           uri: `did:dkg:context-graph:${id}`,
           registered: true,
           onChainId: regResult.onChainId,
+          ...withReadGraphs,
         });
       } catch (regErr: any) {
         const regMsg = regErr?.message ?? 'unknown error';
@@ -869,10 +884,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           registerError: regMsg,
           ...(classified ? { registerErrorStatus: classified.status } : {}),
           hint: 'CG created locally. Use POST /api/context-graph/register to retry on-chain registration.',
+          ...withReadGraphs,
         });
       }
     }
-    return jsonResponse(res, 200, { created: id, uri: `did:dkg:context-graph:${id}` });
+    return jsonResponse(res, 200, { created: id, uri: `did:dkg:context-graph:${id}`, ...withReadGraphs });
   }
 
   // POST /api/context-graph/register — on-chain registration (upgrade from free CG)

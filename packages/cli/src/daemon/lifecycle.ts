@@ -483,7 +483,8 @@ import { configureApiQueryPriority } from './api-query-priority.js';
 import { configureWritePreflightCoalescing } from './write-preflight-coalescing.js';
 import { startRetention, type RetentionHandle } from './retention-sweeps.js';
 import { resolveRetentionConfig } from '../retention-config.js';
-import { noteReadGraphStoreSupport, prepareDaemonReadGraphSettings } from '../read-graph-settings-start.js';
+import { prepareDaemonReadGraphSettings } from '../read-graph-settings-start.js';
+import { startReadGraphSettingsControl } from './read-graph-settings-control.js';
 import { applyGraphCatalogConfig } from '../graph-catalog-config.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
@@ -2111,7 +2112,7 @@ async function runDaemonInnerWithStartupOwnership(
       config.apiPort, config.apiHost, writeApiPort);
   }
   const agent = checkpointAgent ?? await DKGAgent.create(agentConfig);
-  noteReadGraphStoreSupport(readGraphSettings, agent.store, log);
+  const readGraphSettingsControl = startReadGraphSettingsControl({ settings: readGraphSettings, agent, role, checkpoint: Boolean(checkpointMode), log });
   agent.configurePromoteQueue(promoteQueuePolicy);
   const publicSnapshotStore = agent.publicSnapshotStore;
 
@@ -3661,6 +3662,7 @@ async function runDaemonInnerWithStartupOwnership(
         marketplace,
         marketplaceGateway,
         marketplaceSeller: marketplaceSeller?.seller,
+        readGraphSettings: readGraphSettingsControl,
         emitMemoryGraphChanged,
         emitNotification,
       });

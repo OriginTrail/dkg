@@ -150,7 +150,7 @@ async function answer(ctx: RequestContext, action: ReadGraphsAction, signal: Abo
     const status = ctx.agent.readGraphStatusV1();
     const rows = selected(withStored(status?.readGraphs ?? layer?.runtime.mirror.rows() ?? [], stored), parsed.request);
     return jsonResponse(res, 200, {
-      readGraphs: rows.map(view),
+      readGraphs: rows.map(readGraphViewOf),
       states: Object.fromEntries(READ_GRAPH_STATES.map((state) => [state, rows.filter((row) => row.state === state).length])),
       ...(status?.builder ? { builder: status.builder } : {}),
       checking: status?.checking ?? false,
@@ -210,7 +210,8 @@ function selected<Row extends ReadGraphRow>(rows: readonly Row[], request: ReadG
   }).sort((left, right) => compareCodePoint(left.readGraph, right.readGraph));
 }
 
-function view(row: ReadGraphRow): ReadGraphView {
+/** One read graph as the read-graph routes list it. */
+export function readGraphViewOf(row: ReadGraphRow): ReadGraphView {
   const key = parseReadGraphIri(row.readGraph)!;
   return {
     readGraph: row.readGraph,
