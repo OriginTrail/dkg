@@ -650,7 +650,7 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
     // `touchedGraphs` hint is inapplicable here — accepted for a uniform
     // update contract, ignored.
     this.writable.update(withReadGraphOperationsAroundCallerUpdate(sparql, options));
-    this.scheduleFlush();
+    if (options?.snapshot !== 'deferred') this.scheduleFlush();
     // A raw UPDATE's write scope is not derivable at the call site
     // (`touchedGraphs` hints only membership changes) — unscoped bump.
     this.writeGen.recordWrite({ kind: 'all' });

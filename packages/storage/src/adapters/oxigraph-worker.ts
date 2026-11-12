@@ -31,7 +31,7 @@ import { raceStoreWorkAgainstAbort } from '../abortable-store-work-lifecycle.js'
 import { configuredStoreGraphCatalogMaxBytes } from '../graph-catalog-internal-limit.js';
 import type { OxigraphStoreOptions } from './oxigraph-read-only.js';
 import { createOxigraphWorkerTimeoutError } from './oxigraph-worker-timeout-error.js';
-import { OXIGRAPH_WORKER_READ_GRAPH_CAPABILITIES, readGraphPlanArgs, type ReadGraphCapableAdapter } from './oxigraph-read-graph-writes.js';
+import { OXIGRAPH_WORKER_READ_GRAPH_CAPABILITIES, readGraphPlanArgs, readGraphUpdateArgs, type ReadGraphCapableAdapter } from './oxigraph-read-graph-writes.js';
 import { refuseReadGraphOperations, withReadGraphs } from './read-graph-request.js';
 export type { OxigraphWorkerTimeoutError } from './oxigraph-worker-timeout-error.js';
 
@@ -758,7 +758,7 @@ export class OxigraphWorkerStore implements TripleStore, ReadGraphCapableAdapter
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
     // A raw UPDATE's write scope is not derivable at the call site
     // (`touchedGraphs` hints only membership changes) — unscoped lifecycle.
-    await runTrackedStoreWrite(this.writeGen, { kind: 'all' }, () => this.call('update', sparql, ...readGraphPlanArgs(options)));
+    await runTrackedStoreWrite(this.writeGen, { kind: 'all' }, () => this.call('update', sparql, ...readGraphUpdateArgs(options)));
   }
   async replaceGraph(graphUri: string, quads: Quad[], options?: TripleStoreQueryOptions): Promise<void> {
     await runTrackedStoreWrite(this.writeGen,
