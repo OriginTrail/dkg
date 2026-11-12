@@ -857,6 +857,12 @@ describe.each(OXIGRAPH_STORES)('scoped reads on an Oxigraph store (%s)', (_kind,
       ...both('urn:count:m', 'urn:p', 'urn:count:mirror'),
       ...both('urn:count:m', 'urn:p', 'urn:count:mid'),
       ...both('urn:count:mid', 'urn:q', 'urn:count:mirror-end'),
+      // Two list heads that look alike, one in each graph.
+      ...([['_:l1', members[0]], ['_:l2', members[1]]] as const).flatMap(([head, graph]) => [
+        { subject: head, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#first', object: '"x"', graph },
+        { subject: head, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#rest', object: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#nil', graph },
+        { subject: head, predicate: 'urn:tag', object: '"hit"', graph },
+      ]),
     ]);
     // The RDF union of the view's graphs, materialized apart from the engine: each triple once. Copied inside the
     // store, so a blank node keeps its identity.
@@ -870,6 +876,7 @@ describe.each(OXIGRAPH_STORES)('scoped reads on an Oxigraph store (%s)', (_kind,
       ['[] <urn:p>/<urn:q>* <urn:count:target>', 2],
       ['[] <urn:p>/<urn:q> <urn:count:end>', 2],
       ['[ <urn:p> <urn:count:target> ]', 2],
+      ['( "x" ) <urn:tag> "hit"', 2],
       ['[ <urn:p> <urn:count:target> ] FILTER(STRLEN("x") = 1)', 2],
       ['[ <urn:p> <urn:count:target> ] <urn:p> [ <urn:q> <urn:count:end> ]', 2],
       ['[ <urn:p> [ <urn:q> <urn:count:end> ] ]', 2],

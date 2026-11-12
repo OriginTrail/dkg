@@ -148,6 +148,34 @@ describe(`graph-set deduplication on ${endpoint ? 'Blazegraph' : 'Oxigraph'}`, {
     expect(integer(row.c)).toBe(0);
   });
 
+  describe.each(['values', 'dataset'])('a pattern without caller variables through %s graph access', (mode) => {
+    const planned = (source: string) => {
+      const result = mode === 'values' ? wrapWithDeduplicatedGraphValues(scope(source), graphs)
+        : rewriteGraphSet(scope(source), graphs, 'deduplicated-values-union', null);
+      if (result.kind !== 'ready') throw new Error(`Unexpected fallback: ${result.reason}`);
+      return materializePreparedSparql(result.value.prepared);
+    };
+    it.each<[string, string, number]>([
+      ['a constant triple both graphs hold', `<urn:s:1> <${A}> "x"`, 1],
+      ['distinct blank subjects', `[] <${BLANK}> "alike"`, 2],
+      ['a blank subject both graphs hold', `[] <${BLANK}> "mirrored"`, 1],
+      ['a property list', `[ <${BLANK}> "alike" ]`, 2],
+      ['a labelled blank node and a FILTER', `_:b <${BLANK}> "alike" FILTER(STRLEN("x") = 1)`, 2],
+      ['a hidden hop', `<urn:s:4> <${LINK}>/<${TO}> "t"`, 2],
+      ['a triple only outside the graph set', `<urn:s:out> <${A}> "x"`, 0],
+    ])('counts %s', async (_name, pattern, expected) => {
+      const result = await store.query(planned(`SELECT (COUNT(*) AS ?c) WHERE { ${pattern} }`));
+      expect(result.type === 'bindings' ? integer(result.bindings[0]?.c) : Number.NaN).toBe(expected);
+    });
+
+    it('returns empty rows under SELECT * and answers ASK', async () => {
+      const rows = await store.query(planned(`SELECT * WHERE { [] <${BLANK}> "alike" }`));
+      expect(rows.type === 'bindings' ? rows.bindings : null).toEqual([{}, {}]);
+      await expect(store.query(planned(`ASK { [] <${BLANK}> "mirrored" }`))).resolves.toMatchObject({ type: 'boolean', value: true });
+      await expect(store.query(planned(`ASK { <urn:s:out> <${A}> "x" }`))).resolves.toMatchObject({ type: 'boolean', value: false });
+    });
+  });
+
   it('aggregates over the deduplicated rows', async () => {
     const counts = await select(`SELECT ?s (COUNT(*) AS ?c) WHERE { ${JOIN} } GROUP BY ?s`);
     expect(Object.fromEntries(counts.map((row) => [row.s, integer(row.c)])))

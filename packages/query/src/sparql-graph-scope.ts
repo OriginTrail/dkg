@@ -215,7 +215,10 @@ function buildDeduplicatedGraphPattern(
   const callerVariables = variablesOutsideHeldGraphGuards(scope).map(variable => variable.source);
   // A mapping is read from one graph. The caller's variables are the mapping; blank nodes, like paths, then
   // repeat as often as the chosen graph holds them. Without caller variables the blank nodes are the mapping:
-  // a mirrored match is read once, and distinct blank matches each.
+  // a mirrored match is read once, and distinct blank matches each. A collection's list nodes have no private
+  // variable, and a path group is not told apart from a collection here: without caller variables, a pattern
+  // that holds either keeps one branch per graph.
+  if (!callerVariables.length && holdsParenthesis(scope, movedFilters)) return null;
   const { pattern: inner, blankVariables } = renderDedupPattern(scope, movedFilters, allocate, callerVariables.length === 0);
   // A pattern without caller variables projects one private variable, so its rows are read through this route too
   // and keep their multiplicity. Blazegraph counts no row that binds no variable, so the variable is bound, except
@@ -251,6 +254,17 @@ function buildDeduplicatedGraphPattern(
     ? `{ SELECT ${keys} (MIN(${matchGraph}) AS ${graph}) WHERE { ${candidate} } GROUP BY ${keys} }`
     : `{ { SELECT (MIN(${matchGraph}) AS ${graph}) WHERE { ${candidate} } } FILTER(BOUND(${graph})) }`;
   return { pattern: `${chosen} ${replay} ${trailing}${bindEmpty}`, emptyProjection };
+}
+
+/** Whether the pattern holds a parenthesis outside its FILTERs: a collection or a path group. */
+function holdsParenthesis(scope: PreparedGraphScope, filters: readonly { readonly start: number; readonly end: number }[]): boolean {
+  const { tokens } = scope.prepared;
+  for (let index = scope.where!.openingTokenIndex + 1; index < scope.where!.closingTokenIndex; index++) {
+    const token = tokens[index];
+    if (token.kind !== 'symbol' || token.logicalValue !== '(') continue;
+    if (!filters.some(range => token.start >= range.start && token.start < range.end)) return true;
+  }
+  return false;
 }
 
 /** Whether the query projects every in-scope variable: `SELECT *` or `DESCRIBE *`, not the `*` of `COUNT(*)`. */

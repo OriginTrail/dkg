@@ -6,6 +6,7 @@ import {
 } from '@origintrail-official/dkg-rdf-utils/sparql';
 import {
   prepareGraphScope,
+  rewriteGraphSet,
   wrapWithDeduplicatedGraphValues,
   wrapWithGraphValues,
 } from '../src/sparql-graph-scope.js';
@@ -492,6 +493,35 @@ describe('graph-set deduplication routes', () => {
       expect((await store.query(materializePreparedSparql(rewrite(query).prepared))).bindings).toEqual(expected);
       await expect(store.query(materializePreparedSparql(rewrite(`ASK { ${query.slice(query.indexOf('{') + 1, query.lastIndexOf('}'))} }`).prepared)))
         .resolves.toMatchObject({ type: 'boolean', value: false });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('keeps one branch per graph for a pattern without caller variables that holds a collection or a path group', async () => {
+    const first = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#first';
+    const rest = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#rest';
+    const nil = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#nil';
+    // Two list heads that look alike, one in each graph.
+    const lists = [['_:l1', graphs[0]], ['_:l2', graphs[1]]].flatMap(([head, graph]) => [
+      quad(head, first, '"x"', graph), quad(head, rest, nil, graph), quad(head, 'urn:p:tag', '"hit"', graph),
+    ]);
+    for (const query of ['SELECT (COUNT(*) AS ?n) WHERE { ( "x" ) <urn:p:tag> "hit" }', 'ASK { <urn:s:1> (<urn:p:value>) "one" }']) {
+      expect(wrapWithDeduplicatedGraphValues(scope(query), graphs), query).toMatchObject({ kind: 'unsupported', reason: 'strategy-rejected' });
+    }
+    const store = new OxigraphStore();
+    try {
+      await store.insert(lists);
+      await store.update(`INSERT { ?s ?p ?o } WHERE { VALUES ?g { ${graphs.map((g) => `<${g}>`).join(' ')} } GRAPH ?g { ?s ?p ?o } }`);
+      const query = 'SELECT (COUNT(*) AS ?n) WHERE { ( "x" ) <urn:p:tag> "hit" }';
+      const routed = rewriteGraphSet(scope(query), graphs, 'deduplicated-values-union', 'oxigraph');
+      if (routed.kind !== 'ready') throw new Error(`Unexpected fallback: ${routed.reason}`);
+      const [actual, reference] = await Promise.all([
+        store.query(materializePreparedSparql(routed.value.prepared)),
+        store.query(materializePreparedSparql(scope(query).prepared)),
+      ]);
+      expect(actual.bindings).toEqual(reference.bindings);
+      expect(actual.bindings).toEqual([{ n: `"2"^^<${integer}>` }]);
     } finally {
       await store.close();
     }
