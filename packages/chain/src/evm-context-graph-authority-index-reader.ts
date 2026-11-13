@@ -16,6 +16,8 @@ import {
   ContextGraphAuthorityIndex,
   ContextGraphAuthorityIndexRetryableError,
   isContextGraphAuthorityIndexRetryableError,
+  type ContextGraphAuthorityIndexDeploymentLookup,
+  type ContextGraphAuthorityIndexScanClass,
   type ContextGraphAuthorityIndexScanInput,
 } from './context-graph-authority-index.js';
 import type { RawContextGraphAuthorityIndexEvent } from
@@ -49,6 +51,7 @@ import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import { resolveEvmFinalityAnchorWithHeadV1 } from './evm-finality-anchor.js';
 import type { ReadOpts } from './rpc-failover-client.js';
 import {
+  activeRpcRequestContext,
   withRpcRequestContext,
 } from './rpc-request-transport.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
@@ -109,6 +112,8 @@ type EvmContextGraphAuthorityIndexReadInputV1 = Readonly<{
   contractAddress: string;
   provider: JsonRpcProvider;
   deploymentBlockNumber: number;
+  deploymentBlockPinned?: boolean;
+  scanClass?: ContextGraphAuthorityIndexScanClass;
   finalized: Readonly<{ number: number; hash: string }>;
   pageSize: number;
   /** Operator depth; bounds how far the DURABLE cursor may ratchet. */
@@ -178,6 +183,8 @@ function authorityIndexScanBoundsV1(
     scope: contextGraphAuthorityIndexScope(input.deploymentId, input.contractAddress),
     readScope: input.provider,
     deploymentBlockNumber: input.deploymentBlockNumber,
+    deploymentBlockPinned: input.deploymentBlockPinned,
+    scanClass: input.scanClass,
     finalized: input.finalized,
     // Preserve invalid values for ContextGraphAuthorityIndex's fail-closed
     // bounds validation; only a valid oversized configured page is clamped.
@@ -312,11 +319,11 @@ interface EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1 {
     read: (provider: JsonRpcProvider) => Promise<T>,
     options?: ReadOpts,
   ) => Promise<T>;
-  readonly resolveContractDeployBlockNumber: (
+  readonly resolveContractDeployBlock: (
     address: string,
     operationLabel: string,
     contractLabel: string,
-  ) => Promise<number>;
+  ) => Promise<ContextGraphAuthorityIndexDeploymentLookup>;
   readonly pageSize: () => number;
   /**
    * `chain.finalityConfirmations` — the node's SINGLE definition of finality.
@@ -415,6 +422,11 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   const assertOpen = (): void => {
     if (closed) throw new DOMException('Context Graph authority index reader is closed', 'AbortError');
   };
+  /** The lookup and the first block a log anchor must cover for it. */
+  const resolveDeployment = async (address: string, scope: string, label: string) => {
+    const lookup = await dependencies.resolveContractDeployBlock(address, label, 'ContextGraphStorage');
+    return { lookup, coverageFrom: await dependencies.index.deploymentCoverageFromBlockNumber(scope, lookup) };
+  };
   const rescanFinalizedProjection = async <T>(
     operationLabel: string,
     options: ContextGraphAuthorityReadOptions,
@@ -510,21 +522,29 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         const contract = base.connect(provider) as Contract;
         const contractAddress = (await contract.getAddress()).toLowerCase();
         ownScope = contextGraphAuthorityIndexScope(dependencies.deploymentId, contractAddress);
-        const deploymentBlockNumber = await dependencies.resolveContractDeployBlockNumber(
-          contractAddress,
-          operationLabel,
-          'ContextGraphStorage',
-        );
+        // One scan per scope and class (the caller's RPC class). Wait for it BEFORE
+        // the head read, which would be stale by the time that scan lets this in.
+        const scanClass = activeRpcRequestContext().requestClass;
+        await dependencies.index.whenScanIdle(ownScope, options.signal === undefined
+          ? projectionSignal : AbortSignal.any([projectionSignal, options.signal]), scanClass);
+        assertOpen();
+        projectionSignal.throwIfAborted();
+        options.signal?.throwIfAborted();
+        const { lookup, coverageFrom } = await resolveDeployment(contractAddress, ownScope, operationLabel);
         const readInput = {
           index: dependencies.index,
           deploymentId: dependencies.deploymentId,
           contract,
           contractAddress,
           provider,
-          deploymentBlockNumber,
+          deploymentBlockNumber: lookup.blockNumber,
+          deploymentBlockPinned: lookup.pinned,
+          scanClass,
           pageSize: dependencies.pageSize(),
           finalityConfirmations: dependencies.finalityConfirmations(),
           stabilizationOperation: operationLabel,
+          // Bounds this caller's wait only; the scan belongs to the index lifecycle.
+          signal: options.signal,
         };
 
         // THE LOG FIRST, and only when it can PROVE every guarantee the live
@@ -544,7 +564,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
           const source = dependencies.chainEventLogAuthority?.();
           if (source === undefined || source.contractAddress !== contractAddress) break;
           const anchor = (await source.resolveAnchor({
-            deploymentBlockNumber,
+            deploymentBlockNumber: coverageFrom,
             finalityConfirmations: dependencies.finalityConfirmations(),
           })).anchor;
           if (anchor === undefined) break;
@@ -598,6 +618,9 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
               if (logAttempt === 0) continue;
               break;
             }
+            // A range the log does not hold, such as a rebuild below the
+            // stored deployment block, is the live scan's to read.
+            if (isContextGraphAuthorityIndexRetryableError(error) && error.reason === 'log-uncovered') break;
             if (!isContextGraphAuthorityIndexRetryableError(error)
               || error.reason !== 'cursor-ahead') throw error;
             if (logAttempt === 0) {
@@ -1122,10 +1145,10 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
             if (source === undefined || source.contractAddress !== contractAddress) {
               return undefined;
             }
-            const deploymentBlockNumber = await dependencies.resolveContractDeployBlockNumber(
+            const { lookup, coverageFrom: deploymentBlockNumber } = await resolveDeployment(
               contractAddress,
+              contextGraphAuthorityIndexScope(dependencies.deploymentId, contractAddress),
               'getContextGraphFinalizedCreation',
-              'ContextGraphStorage',
             );
             const anchor = (await source.resolveAnchor({
               deploymentBlockNumber,
@@ -1146,7 +1169,9 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
                   contract,
                   contractAddress,
                   provider,
-                  deploymentBlockNumber,
+                  deploymentBlockNumber: lookup.blockNumber,
+                  deploymentBlockPinned: lookup.pinned,
+                  scanClass: activeRpcRequestContext().requestClass,
                   pageSize: dependencies.pageSize(),
                   finalityConfirmations: dependencies.finalityConfirmations(),
                   finalized: anchor.finalized,

@@ -368,6 +368,9 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'resolveContractDeployBlock',
   // probe-free accessor over the same immutable deploy-block cache — EVM-only.
   'resolveContractDeployBlockNumber',
+  // the same lookup, saying whether it pinned the block or fell back to genesis
+  // (the authority index reader's lower bound) — EVM-only, same rationale.
+  'resolveContractDeployBlockLookup',
   'resolveLogScanHead',
   // companion retry-wrapper for the deploy-block binary search's historical
   // eth_getCode probes — EVM-only, same rationale as resolveKaStorageDeployBlock.

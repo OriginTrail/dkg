@@ -81,6 +81,7 @@ export function createChainIndexAuthorityPageSource(
       if (state === undefined) {
         throw new ContextGraphAuthorityIndexRetryableError(
           `chain event log has no cursor for ${scope}`,
+          'log-uncovered',
         );
       }
       const coverage = findChainEventLogCoverage(
@@ -92,6 +93,7 @@ export function createChainIndexAuthorityPageSource(
         throw new ContextGraphAuthorityIndexRetryableError(
           `chain event log does not cover blocks ${fromBlockNumber}-${throughBlockNumber} `
           + `for ${contractAddress}`,
+          'log-uncovered',
         );
       }
       const rows = await store.readEvents(scope, {
@@ -117,6 +119,7 @@ export function createChainIndexAuthorityPageSource(
       if (state === undefined) {
         throw new ContextGraphAuthorityIndexRetryableError(
           `chain event log has no cursor for ${scope}`,
+          'log-uncovered',
         );
       }
       const coverage = findChainEventLogCoverage(
@@ -128,6 +131,7 @@ export function createChainIndexAuthorityPageSource(
         throw new ContextGraphAuthorityIndexRetryableError(
           `chain event log does not cover blocks ${fromBlockNumber}-${throughBlockNumber} `
           + `for ${contractAddress}`,
+          'log-uncovered',
         );
       }
       const rows = await store.readEvents(scope, {

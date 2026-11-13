@@ -147,6 +147,8 @@ describe('chain index authority page source', () => {
     expect(failure).toBeDefined();
     expect(isContextGraphAuthorityIndexRetryableError(failure)).toBe(true);
     expect(String((failure as Error).message)).toContain('does not cover');
+    // Typed, so a reader can take the range to a live scan instead of failing.
+    expect(failure).toMatchObject({ reason: 'log-uncovered' });
   });
 
   it('refuses a range ABOVE what the tick has reached', async () => {
@@ -175,6 +177,7 @@ describe('chain index authority page source', () => {
       .then(() => undefined, (error: unknown) => error);
 
     expect(isContextGraphAuthorityIndexRetryableError(failure)).toBe(true);
+    expect(failure).toMatchObject({ reason: 'log-uncovered' });
   });
 
   it('answers a block hash from the log before touching the chain', async () => {

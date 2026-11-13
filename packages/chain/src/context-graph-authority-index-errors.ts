@@ -6,7 +6,12 @@ export class ContextGraphAuthorityIndexRetryableError extends Error {
 
   constructor(
     message: string,
-    readonly reason?: 'cursor-ahead',
+    /**
+     * `cursor-ahead`: the anchor is below the durable cursor; a newer anchor
+     * can serve. `log-uncovered`: the chain event log does not hold the range
+     * a scan needs; a live scan of the chain can read it.
+     */
+    readonly reason?: 'cursor-ahead' | 'log-uncovered',
   ) {
     super(message);
   }
