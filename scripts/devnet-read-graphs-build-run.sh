@@ -63,7 +63,9 @@
 #             the context graphs a suite writes into the store directly). Only a complete pass of the comprehensive run counts
 #             (completeSuccess in its REPORT.json); a filtered run is
 #             INCONCLUSIVE;
-#   drills    a restart during a rebuild; a kill of the daemon worker while it
+#   drills    a restart during a rebuild (of the drill's own context graph,
+#             whose shared memory takes seconds to copy: the read graphs a
+#             devnet holds are rebuilt in milliseconds); a kill of the daemon worker while it
 #             holds a working-memory write, with that agent's read graph
 #             built first (a kill counts only when the write's whole request
 #             was uploaded and dropped unanswered, and its data is there after
@@ -71,8 +73,8 @@
 #             worker gone and a new one in its place; every write the node acknowledged must be there after
 #             it, and the agent's working-memory read graph ready and
 #             consistent); a CLI write with the daemon down (`dkg publisher clear
-#             finalized` on a node that has such jobs, which must stay
-#             cleared; a store opened outside the daemon marks every read
+#             finalized`, after the drill finalized a publish job of its own on
+#             the node; the cleared jobs must stay cleared; a store opened outside the daemon marks every read
 #             graph it finds dirty before it writes, so each shared-layer read
 #             graph, which a plain restart first keeps at its generation, must
 #             get a new one and be rebuilt); a rollback and forward again (the
@@ -84,9 +86,10 @@
 #             agents system graph aside: each daemon rewrites its own
 #             registration there when it starts); the
 #             earlier daemon must answer the node's seeded working-memory
-#             draft and a verifiable-memory asset through /api/query as the
-#             build under test did; and
-#             after the forward start every asset graph again, so the drill
+#             draft and the drill's own verifiable-memory asset, which the node
+#             publishes first, through /api/query as the build under test did; and
+#             after the forward start every asset graph again (the agents
+#             system graph aside, as before), so the drill
 #             node needs a store that stays up with its daemon down:
 #             Blazegraph or an external SPARQL endpoint); and the setting to
 #             `off` and back (with the settings API, the live context graph's
@@ -94,10 +97,10 @@
 #             config.json and a restart). Each must end
 #             as designed (a new generation, or a dropped partition), and then
 #             be `ready` again with a clean full check. A drill whose workload
-#             did not happen is INCONCLUSIVE, never a pass. The drills need the
-#             gate's workload on the nodes, so they run after the gate even
-#             when the gate failed, and the run stays FAIL; a failure in any
-#             other phase stops every later one.
+#             did not happen is INCONCLUSIVE, never a pass. The drills make the
+#             data they need, and they run after the gate even when the gate
+#             failed, so one run reports them all (it stays FAIL); a failure in
+#             any other phase stops every later one.
 #
 # It writes report.md and results.tsv to READ_GRAPHS_RUN_RESULTS (default
 # $DEVNET_DIR/read-graphs-build-run/<UTC timestamp>; no spaces). It saves every
@@ -151,6 +154,11 @@
 #                                              none skips the drill)
 #   READ_GRAPHS_DRILL_{RESTART,KILL,CLI,ROLLBACK,FLAG}_NODE
 #                                              the node of each drill (default 5, 6, 3, 4, 2)
+#   READ_GRAPHS_DRILL_RESTART_TRIPLES          shared-memory triples in the restart drill's own context graph
+#                                              (default 100000), READ_GRAPHS_DRILL_RESTART_ASSET_TRIPLES of them per
+#                                              knowledge asset (default 2000)
+#   READ_GRAPHS_PUBLISH_TIMEOUT                seconds the cli and rollback drills wait for their own publish job to
+#                                              be finalized (default 300)
 #   READ_GRAPHS_RUN_RESULTS, READ_GRAPHS_RUN_KEEP
 set -uo pipefail
 
@@ -183,6 +191,9 @@ KILL_NODE="${READ_GRAPHS_DRILL_KILL_NODE:-6}"
 CLI_NODE="${READ_GRAPHS_DRILL_CLI_NODE:-3}"
 ROLLBACK_NODE="${READ_GRAPHS_DRILL_ROLLBACK_NODE:-4}"
 FLAG_NODE="${READ_GRAPHS_DRILL_FLAG_NODE:-2}"
+RESTART_TRIPLES="${READ_GRAPHS_DRILL_RESTART_TRIPLES:-100000}"
+RESTART_ASSET_TRIPLES="${READ_GRAPHS_DRILL_RESTART_ASSET_TRIPLES:-2000}"
+PUBLISH_TIMEOUT="${READ_GRAPHS_PUBLISH_TIMEOUT:-300}"
 KEEP="${READ_GRAPHS_RUN_KEEP:-0}"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RESULTS="${READ_GRAPHS_RUN_RESULTS:-$DEVNET_DIR/read-graphs-build-run/$RUN_ID}"
@@ -209,6 +220,8 @@ CORE_MODULE="$CORE_MODULE" STORAGE_MODULE="$STORAGE_MODULE" QUERY_CONFIG_MODULE=
   || early_exit "the build lacks the read-graph rules this run uses (core, storage and CLI dist: names, modes, the setting's parser)"
 # shellcheck source=devnet-lib.sh
 . "$REPO_ROOT/scripts/devnet-lib.sh" || early_exit "cannot source scripts/devnet-lib.sh"
+# shellcheck source=devnet-read-graphs-run-lib.sh
+. "$REPO_ROOT/scripts/devnet-read-graphs-run-lib.sh" || early_exit "cannot source scripts/devnet-read-graphs-run-lib.sh"
 mkdir -p "$RESULTS/config" "$RESULTS/rows" "$RESULTS/checks" "$RESULTS/measure" || early_exit "cannot create $RESULTS"
 : > "$RESULTS/results.tsv"
 : > "$RESULTS/notes.md"
@@ -1252,77 +1265,6 @@ gate_verdict() {
   fi
 }
 
-# watch_mismatches <n> <out> <lost> <since> <start>: in the background, append to <out> every read-graph check mismatch
-# line that node <n> logs after <start> ("<size> <identity>" of its daemon.log, from log_position, taken before the gate
-# starts, so a line written before this process opens the file is not missed). The daemon rotates daemon.log by renaming it to daemon.log.1: the watcher keeps each
-# file open, reads it once more when it sees the rename, and goes on reading it until it has stayed unchanged for four
-# polls, so a line written just before (or as) the file was renamed is read. When the daemon cannot rename, it trims
-# the live file in place, and lines written since the last read may be gone: that is noted in <lost>, and the trimmed
-# file is read again from its start (lines stamped before <since>, the log's local "YYYY-MM-DD HH:MM:SS", skipped).
-# Prints the PID.
-watch_mismatches() {
-  LOG="$DEVNET_DIR/node$1/daemon.log" OUT="$2" LOST="$3" SINCE="$4" START="$5" node -e '
-    const fs = require("fs");
-    const { LOG, OUT, LOST, SINCE, START } = process.env;
-    const stamped = /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d/;
-    const keep = (line) => line.includes("[read-graph-check] Read graph <") && !(stamped.test(line) && line.slice(0, 19) < SINCE);
-    const emit = (lines) => { const hits = lines.filter(keep); if (hits.length > 0) fs.appendFileSync(OUT, hits.join("\n") + "\n"); };
-    const identity = (stat) => `${stat.dev}:${stat.ino}`;
-    // A file being read: its descriptor, its identity, how far it was read, the unfinished last line, quiet polls.
-    const openFile = (fromEnd) => {
-      let fd;
-      try { fd = fs.openSync(LOG, "r"); } catch { return null; }
-      const stat = fs.fstatSync(fd);
-      return { fd, id: identity(stat), offset: fromEnd ? stat.size : 0, rest: "", quiet: 0 };
-    };
-    // Read what was appended; whether anything was. A file shorter than what was read was trimmed in place.
-    const drain = (file) => {
-      const size = fs.fstatSync(file.fd).size;
-      if (size < file.offset) {
-        fs.appendFileSync(LOST, `${LOG} was trimmed in place at ${new Date().toISOString()}\n`); file.offset = 0; file.rest = "";
-      }
-      if (size === file.offset) return false;
-      const buffer = Buffer.alloc(size - file.offset);
-      fs.readSync(file.fd, buffer, 0, buffer.length, file.offset); file.offset = size;
-      const lines = (file.rest + buffer.toString("utf8")).split("\n"); file.rest = lines.pop(); emit(lines);
-      return true;
-    };
-    // Start where the log stood when the gate was about to start (START, "<size> <identity>"): what was written since,
-    // also before this process opened the file, is read. If the file was renamed in between, its rest is read too.
-    const [startSize, startId] = (START ?? "0 none").split(" ");
-    let live = openFile(false);
-    let rotated = [];
-    if (live && live.id === startId) live.offset = Math.min(Number(startSize) || 0, fs.fstatSync(live.fd).size);
-    else if (startId !== "none") {
-      try {
-        const fd = fs.openSync(`${LOG}.1`, "r"), stat = fs.fstatSync(fd);
-        if (identity(stat) === startId) rotated.push({ fd, id: startId, offset: Math.min(Number(startSize) || 0, stat.size), rest: "", quiet: 0 });
-        else fs.closeSync(fd);
-      } catch { /* no rotated file */ }
-    }
-    const tick = () => {
-      rotated = rotated.filter((file) => {
-        file.quiet = drain(file) ? 0 : file.quiet + 1;
-        if (file.quiet < 4) return true;
-        emit([file.rest]); fs.closeSync(file.fd); return false;
-      });
-      if (live) drain(live);
-      let stat;
-      try { stat = fs.statSync(LOG); } catch { return; }
-      if (!live) { live = openFile(false); if (live) drain(live); return; }
-      if (identity(stat) !== live.id) {
-        drain(live);
-        rotated.push(live);
-        live = openFile(false); if (live) drain(live);
-      }
-    };
-    setInterval(tick, 500);
-    process.on("SIGTERM", () => {
-      try { tick(); for (const file of [...rotated, live]) if (file) { drain(file); emit([file.rest]); } } finally { process.exit(0); }
-    });
-  ' > /dev/null 2>&1 &
-  echo $!
-}
 # gate_mismatches: the mismatches the nodes logged during the gate, outside the context graphs a suite writes into the
 # store directly, as "<count> on node<N> (e.g. <read graph>)", one node per line; nothing when there were none.
 gate_mismatches() {
@@ -1337,12 +1279,6 @@ gate_mismatches() {
   done
 }
 
-# log_position <n>: "<size> <device:inode>" of node <n>'s daemon.log now, or "0 none" when there is none.
-log_position() {
-  node -e 'try { const s = require("fs").statSync(process.argv[1]); console.log(`${s.size} ${s.dev}:${s.ino}`); } catch { console.log("0 none"); }' \
-    "$DEVNET_DIR/node$1/daemon.log"
-}
-
 phase_gate() {
   local n w watchers="" since
   mkdir -p "$RESULTS/gate"
@@ -1350,8 +1286,9 @@ phase_gate() {
   # can be clean although write maintenance failed during the workload. Every mismatch a check logs is kept.
   since="$(date '+%Y-%m-%d %H:%M:%S')"
   for n in $NODES; do
-    : > "$RESULTS/gate/mismatches.node$n"; : > "$RESULTS/gate/lost.node$n"
-    w="$(watch_mismatches "$n" "$RESULTS/gate/mismatches.node$n" "$RESULTS/gate/lost.node$n" "$since" "$(log_position "$n")")"
+    : > "$RESULTS/gate/mismatches.node$n"; : > "$RESULTS/gate/lost.node$n"; : > "$RESULTS/gate/watcher.node$n.stopped"
+    w="$(watch_mismatches "$n" "$RESULTS/gate/mismatches.node$n" "$RESULTS/gate/lost.node$n" "$since" "$(log_position "$n")" \
+      "$RESULTS/gate/watcher.node$n.stopped")"
     echo "$w" > "$RESULTS/gate/watcher.node$n"; watchers="$watchers $w"
   done
   echo "$watchers" > "$RESULTS/gate/watchers"
@@ -1395,7 +1332,8 @@ gate_run() {
   mismatched="$(gate_mismatches | paste -sd ';' - | sed 's/;/; /g')"
   # A watcher that stopped, or a log trimmed in place, may have lost a mismatch line: the gate cannot pass then.
   for n in $NODES; do
-    kill -0 "$(cat "$RESULTS/gate/watcher.node$n" 2>/dev/null)" 2>/dev/null || unwatched="$unwatched node$n (its log watcher stopped)"
+    kill -0 "$(cat "$RESULTS/gate/watcher.node$n" 2>/dev/null)" 2>/dev/null \
+      || unwatched="$unwatched node$n (its log watcher stopped$(head -1 "$RESULTS/gate/watcher.node$n.stopped" 2>/dev/null | cut -c1-200 | sed 's/^/: /'))"
     [ -s "$RESULTS/gate/lost.node$n" ] && unwatched="$unwatched node$n (its log was trimmed in place)"
   done
   if [ "$checked" = 1 ]; then
@@ -1426,36 +1364,78 @@ drill_end() {
   esac
 }
 
+# shared_read_graph <context graph>: the IRI of its shared-memory read graph, by the build's own rules.
+shared_read_graph() {
+  CORE_MODULE="$CORE_MODULE" CG="$1" node --input-type=module -e '
+    const core = await import(process.env.CORE_MODULE);
+    console.log(core.readGraphIri({ scope: core.readScope(process.env.CG), layer: core.MemoryLayer.SharedWorkingMemory }));'
+}
+# build_ms <n> <read graph>: how long node <n>'s last build of that read graph took, in ms, from its daemon.log.
+build_ms() { grep -F "Built read graph $2 in " "$DEVNET_DIR/node$1/daemon.log" 2>/dev/null | tail -1 | sed -E 's/.* in ([0-9]+) ms.*/\1/'; }
+# shared_ok <response body>: whether a knowledge-asset write answered that it was shared to shared memory.
+shared_ok() {
+  printf '%s' "$1" | node -e '
+    let d = ""; process.stdin.on("data", (c) => d += c); process.stdin.on("end", () => {
+      let j; try { j = JSON.parse(d); } catch { process.exit(1); }
+      process.exit(j?.swmShared === true || ["swm-shared", "vm-confirmed"].includes(j?.status) ? 0 : 1);
+    });'
+}
+# restart_drill_graph <n> <context graph>: node <n> creates the context graph and shares RESTART_TRIPLES triples into
+# its shared memory, RESTART_ASSET_TRIPLES per knowledge asset, so that rebuilding its shared-memory read graph takes
+# seconds. Prints why and fails when the node refuses a step.
+restart_drill_graph() {
+  local n="$1" cg="$2" body resp k=0 assets
+  body="{\"id\":\"$cg\",\"name\":\"Read-graph restart drill\"}"
+  resp="$(api "$n" POST /api/context-graph/create "$body")"
+  case "$(code_of "$resp")" in 200|201|409) ;; *) echo "creating context graph $cg: HTTP $(code_of "$resp")"; return 1 ;; esac
+  assets=$(( (RESTART_TRIPLES + RESTART_ASSET_TRIPLES - 1) / RESTART_ASSET_TRIPLES ))
+  while [ "$k" -lt "$assets" ]; do
+    k=$((k + 1))
+    body="$(node -e '
+      const [contextGraphId, k, count] = process.argv.slice(1);
+      const subject = `urn:read-graphs-run:restart-drill:${contextGraphId}:${k}`;
+      const quads = Array.from({ length: Number(count) }, (_, i) => ({ subject, predicate: "http://schema.org/value", object: `"${k}.${i}"`, graph: "" }));
+      console.log(JSON.stringify({ contextGraphId, name: `restart-drill-${k}`, quads, finalize: true, alsoShareSwm: true }));
+    ' "$cg" "$k" "$RESTART_ASSET_TRIPLES")"
+    resp="$(api "$n" POST /api/knowledge-assets "$body")"
+    case "$(code_of "$resp")" in 2??) ;; *) echo "asset $k of $assets: HTTP $(code_of "$resp") $(body_of "$resp" | head -c 200)"; return 1 ;; esac
+    shared_ok "$(body_of "$resp")" || { echo "asset $k of $assets was not shared: $(body_of "$resp" | head -c 200)"; return 1; }
+  done
+}
+
 drill_restart_during_rebuild() {
-  local n="$RESTART_NODE" started before caught="" i state graph gen_before gen_after renewed=0 finished="" gone=""
-  started="$(now)"; before="$RESULTS/rows/restart.before.node$n"
-  read_graph_rows "$n" > "$before" && all_ready "$before" || { record drill-restart INCONCLUSIVE 0 "node$n had no ready read graph to rebuild"; return; }
-  read_graph_rebuild "$n" || { record drill-restart FAIL "$(( $(now) - started ))" "rebuild refused on node$n (cli.log)"; return; }
-  # `rebuild` marks the read graphs dirty; the builder's next pass rebuilds them. Restart while a shared-layer one is
-  # being rebuilt. Working-memory read graphs are left out: every start renews them, so they prove nothing here.
-  for i in $(seq 1 150); do
+  local n="$RESTART_NODE" started cg graph why built caught="" i gen_before gen_after
+  started="$(now)"
+  # The read graphs a devnet holds are rebuilt in tens of milliseconds, far quicker than a restart takes to stop the
+  # daemon. So the drill builds its own: a context graph on the drill node whose shared memory takes seconds to copy.
+  cg="read-graphs-restart-$RUN_SLUG"
+  graph="$(shared_read_graph "$cg")" && [ -n "$graph" ] \
+    || { record drill-restart INCONCLUSIVE 0 "the shared-memory read graph of $cg could not be named by the build's rules"; return; }
+  why="$(restart_drill_graph "$n" "$cg")" \
+    || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "node$n could not hold the drill's own context graph $cg: $why"; return; }
+  wait_read_graph_ready "$n" "$graph" "$READY_TIMEOUT" "$RESULTS/rows/restart.seeded.node$n" \
+    || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "node$n did not list <$graph> ready after the drill shared $RESTART_TRIPLES triples into it"; return; }
+  built="$(build_ms "$n" "$graph")"
+  read_graph_rebuild "$n" "$cg" || { record drill-restart FAIL "$(( $(now) - started ))" "rebuild refused on node$n (cli.log)"; return; }
+  # `rebuild` marks the read graph dirty; the builder's next pass rebuilds it. Restart while it is being rebuilt.
+  for i in $(seq 1 300); do
     read_graph_rows "$n" > "$RESULTS/rows/restart.caught.node$n" 2>/dev/null || true
-    if grep -E '^(rebuilding|building) ' "$RESULTS/rows/restart.caught.node$n" | grep -qv '/_working_memory/'; then caught=1; break; fi
+    if awk -v g="$graph" '$3 == g && ($1 == "rebuilding" || $1 == "building") { found = 1 } END { exit !found }' "$RESULTS/rows/restart.caught.node$n"; then
+      caught=1; break
+    fi
     sleep 0.2
   done
-  [ -n "$caught" ] || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "no shared-layer read graph on node$n was seen being rebuilt, so no restart could land during one"; return; }
+  [ -n "$caught" ] || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "<$graph> was not seen being rebuilt on node$n (its first build took ${built:-?} ms)"; return; }
+  gen_before="$(generation_of "$RESULTS/rows/restart.caught.node$n" "$graph")"
   restart_node "$n" || { record drill-restart FAIL "$(( $(now) - started ))" "node$n did not come back"; return; }
   if ! wait_all_ready drill-restart "$READY_TIMEOUT" "$n"; then record drill-restart FAIL "$(( $(now) - started ))" "node$n's read graphs not ready after the restart"; return; fi
-  # A read graph the restart caught being built gets a new generation at start. One whose rebuild ended in the
-  # moment before the daemon stopped keeps its generation; that is fine, but proves nothing. Neither does a read
-  # graph caught `dirty`, still queued: its normal rebuild after the start renews it too.
-  while read -r state gen_before graph; do
-    [ "$state" = ready ] && continue
-    case "$graph" in */_working_memory/*) continue ;; esac
-    gen_after="$(generation_of "$RESULTS/rows/drill-restart.node$n" "$graph")"
-    if [ -z "$gen_after" ]; then gone="$gone <$graph>"; continue; fi
-    case "$state" in building|rebuilding) ;; *) continue ;; esac
-    if [ "$gen_after" != "$gen_before" ]; then renewed=$((renewed + 1)); else finished="$finished <$graph>"; fi
-  done < "$RESULTS/rows/restart.caught.node$n"
-  [ -z "$gone" ] || { record drill-restart FAIL "$(( $(now) - started ))" "read graphs gone after the restart:$gone"; return; }
-  [ "$renewed" -gt 0 ] || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "every rebuild seen on node$n ended before the restart stopped the daemon (a read graph still queued dirty proves nothing)"; return; }
-  [ -z "$finished" ] || note "drill-restart: rebuilt before the daemon stopped, so they kept their generation:$finished"
-  drill_end drill-restart "$n" "$started" "$renewed shared-layer read graphs the restart caught unfinished got a new generation and were rebuilt"
+  # A read graph the restart caught being built gets a new generation at start. One whose rebuild ended in the moment
+  # before the daemon stopped keeps its generation: that is fine, but proves nothing.
+  gen_after="$(generation_of "$RESULTS/rows/drill-restart.node$n" "$graph")"
+  [ -n "$gen_after" ] || { record drill-restart FAIL "$(( $(now) - started ))" "<$graph> was gone after the restart"; return; }
+  [ "$gen_after" != "$gen_before" ] \
+    || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "the rebuild of <$graph> ended before the restart stopped the daemon (its first build took ${built:-?} ms; READ_GRAPHS_DRILL_RESTART_TRIPLES makes it longer)"; return; }
+  drill_end drill-restart "$n" "$started" "the restart caught the drill's own shared-memory read graph <$graph> ($RESTART_TRIPLES triples; its first build took ${built:-?} ms) being rebuilt; it got a new generation at the start and was rebuilt"
 }
 
 # kill_tree <pid>: stop a process and every process it started, by PID. The tree is listed before anything is stopped,
@@ -1656,6 +1636,36 @@ finalized_jobs() {
       try { const value = JSON.parse(d).finalized; if (Number.isSafeInteger(value)) process.stdout.write(String(value)); } catch {}
     });'
 }
+# publish_finalized <n> <context graph> <name> <subject> <value>: node <n> writes knowledge asset <name> into the
+# context graph (one triple, <subject> schema:name "<value>"), shares it to shared memory, and publishes it to
+# verifiable memory through the async publisher; it waits up to PUBLISH_TIMEOUT s for the job to be finalized. Prints
+# the job ID; prints why and fails when a step is refused or the job does not finalize.
+publish_finalized() {
+  local n="$1" cg="$2" name="$3" body resp job status="" deadline
+  body="$(node -e '
+    const [contextGraphId, name, subject, value] = process.argv.slice(1);
+    const quads = [{ subject, predicate: "http://schema.org/name", object: JSON.stringify(value), graph: "" }];
+    console.log(JSON.stringify({ contextGraphId, name, quads, finalize: true, alsoShareSwm: true }));
+  ' "$cg" "$name" "$4" "$5")"
+  resp="$(api "$n" POST /api/knowledge-assets "$body")"
+  case "$(code_of "$resp")" in 2??) ;; *) echo "writing $name: HTTP $(code_of "$resp") $(body_of "$resp" | head -c 200)"; return 1 ;; esac
+  shared_ok "$(body_of "$resp")" || { echo "$name was not shared: $(body_of "$resp" | head -c 200)"; return 1; }
+  body="{\"contextGraphId\":\"$cg\"}"
+  resp="$(api "$n" POST "/api/knowledge-assets/$name/vm/publish-async" "$body")"
+  case "$(code_of "$resp")" in 2??) ;; *) echo "publish-async of $name: HTTP $(code_of "$resp") $(body_of "$resp" | head -c 200)"; return 1 ;; esac
+  job="$(field "$(body_of "$resp")" jobId)"
+  [ -n "$job" ] || { echo "publish-async of $name answered no job ID: $(body_of "$resp" | head -c 200)"; return 1; }
+  deadline=$(( $(now) + PUBLISH_TIMEOUT ))
+  while :; do
+    status="$(field "$(body_of "$(api "$n" GET "/api/publisher/job?id=$job")")" job.status)"
+    case "$status" in
+      finalized) echo "$job"; return 0 ;;
+      failed) echo "publish job $job of $name failed"; return 1 ;;
+    esac
+    [ "$(now)" -lt "$deadline" ] || { echo "publish job $job of $name was still ${status:-unreadable} after $PUBLISH_TIMEOUT s"; return 1; }
+    sleep 3
+  done
+}
 
 # generations_compared <before rows> <after rows> <same|new>: the shared-layer read graphs of <before> whose generation
 # in <after> is not as asked (`same`: the one it had; `new`: another one), as " <graph> (generation A, then B)". Working-
@@ -1672,17 +1682,16 @@ generations_compared() {
 }
 
 drill_cli_write_daemon_down() {
-  local n="" candidate jobs started before after output rc cleared renewed kept count dir="$RESULTS/rows"
+  local n="$CLI_NODE" job started before after output rc cleared renewed kept count dir="$RESULTS/rows"
   started="$(now)"
-  # A node with finalized publish jobs, so the offline write has something to change, and with read graphs; the drill
-  # node first.
-  for candidate in "$CLI_NODE" $NODES; do
-    jobs="$(finalized_jobs "$candidate")"
-    [ -n "$jobs" ] && [ "$jobs" -gt 0 ] || continue
-    if read_graph_rows "$candidate" 2>/dev/null | grep -q .; then n="$candidate"; break; fi
-  done
-  [ -n "$n" ] || { record drill-cli INCONCLUSIVE 0 "no node has both a finalized publish job and a read graph"; return; }
+  # The offline write needs a finalized publish job to change. Neither a fresh devnet nor the gate leaves one (the
+  # devnet suites clear theirs), so the drill makes its own on its node.
+  job="$(publish_finalized "$n" "$LIVE_CG" "drill-cli-$RUN_SLUG" "urn:read-graphs-run:drill-cli:$RUN_SLUG" "drill cli $n")" \
+    || { record drill-cli INCONCLUSIVE "$(( $(now) - started ))" "node$n could not make the drill's own finalized publish job: $job"; return; }
   before="$(finalized_jobs "$n")"
+  [ -n "$before" ] && [ "$before" -gt 0 ] \
+    || { record drill-cli INCONCLUSIVE "$(( $(now) - started ))" "\`dkg publisher stats\` on node$n counts ${before:-no} finalized jobs, after its job $job was finalized"; return; }
+  read_graph_rows "$n" 2>/dev/null | grep -q . || { record drill-cli INCONCLUSIVE "$(( $(now) - started ))" "node$n has no read graph"; return; }
   # Nothing maintains read graphs in a CLI process, so a store it opens to write with the daemon down marks every read
   # graph it finds dirty first. Each must then get a new generation at the next start and be rebuilt. A plain restart
   # comes first, as the control: it keeps every ready shared-layer read graph at its generation, so a new one after the
@@ -1760,12 +1769,13 @@ AGENTS_SYSTEM_GRAPH="did:dkg:context-graph:agents"
 # (a field may be empty): an empty outcome means every step held. The caller restores the node whatever it prints.
 # asset_probe_record <n> <probe>: known assets to read through the earlier release, with what the build under test
 # answers for them now. Both are required: node <n>'s seeded working-memory draft, which must hold the value written,
-# and one triple pattern of a verifiable-memory asset. Each probe is a line of <probe> (what, context graph, view,
-# query and variable, \037 between), and its answer is <probe>.<line number>. Prints why and returns 1 when a
-# prerequisite is missing (no seeded draft on the node, no verifiable-memory triple to name), 2 when the build under
-# test cannot read one of them.
+# and the drill's own verifiable-memory asset, which node <n> publishes now (what other verifiable memory a node holds
+# depends on the suites that ran before). Each probe is a line of <probe> (what, context graph, view, query and
+# variable, \037 between), and its answer is <probe>.<line number>. Prints why and returns 1 when a prerequisite is
+# missing (no seeded draft on the node, the drill's asset not published), 2 when the build under test cannot read one
+# of them.
 asset_probe_record() {
-  local n="$1" probe="$2" cg agent graph sp sparql why got i found=""
+  local n="$1" probe="$2" cg agent subject job sparql why got i
   : > "$probe"
   [ -s "$RESULTS/rows/seed-wm.node$n" ] || { echo "node$n has no seeded working-memory draft (the seed phase wrote none there)"; return 1; }
   read -r cg agent < "$RESULTS/rows/seed-wm.node$n"
@@ -1777,27 +1787,21 @@ asset_probe_record() {
     echo "the build under test answered ${got:-nothing} for node$n's seeded working-memory draft, not [\"seed $n\"]"; return 2
   fi
   printf 'the seeded working-memory draft\037%s\037working-memory\037%s\037name\n' "$cg" "$sparql" >> "$probe"
-  # A verifiable-memory triple of one of the node's context graphs, by subject and predicate (IRIs that a query can
-  # name as they are), and every object the build under test answers for that pair.
-  for graph in $(awk '{ print $3 }' "$RESULTS/rows/rollback.before.node$n" | grep '/_~read/cg/_verifiable_memory$' | head -5); do
-    cg="${graph#did:dkg:context-graph:}"; cg="${cg%/_~read/cg/_verifiable_memory}"
-    why="$(query_rows "$probe.sample" "$n" "$cg" verifiable-memory "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 20" s p o)" \
-      || { echo "the build under test could not query the verifiable memory of $cg on node$n ($why)"; return 2; }
-    sp="$(node -e '
-      const named = (v) => /^[A-Za-z][A-Za-z0-9+.-]*:[^\s<>"{}|^`\\]+$/.test(v);
-      const rows = require("fs").readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
-      const row = rows.find(([s, p]) => named(s) && named(p));
-      if (row) console.log(`${row[0]} ${row[1]}`);' "$probe.sample")"
-    [ -n "$sp" ] || continue
-    sparql="SELECT ?o WHERE { <${sp% *}> <${sp#* }> ?o }"
-    why="$(query_rows "$probe.2" "$n" "$cg" verifiable-memory "$sparql" o)" \
-      || { echo "the build under test could not read <${sp% *}> <${sp#* }> in the verifiable memory of $cg on node$n ($why)"; return 2; }
-    [ -s "$probe.2" ] || { echo "the build under test answered nothing for <${sp% *}> <${sp#* }> in the verifiable memory of $cg on node$n, though it had just listed that triple"; return 2; }
-    printf 'verifiable memory <%s> <%s> of %s\037%s\037verifiable-memory\037%s\037o\n' "${sp% *}" "${sp#* }" "$cg" "$cg" "$sparql" >> "$probe"
-    found=1; break
+  # The drill's own verifiable-memory asset: one triple, published on node <n> into the live context graph.
+  subject="urn:read-graphs-run:rollback-probe:$RUN_SLUG"
+  job="$(publish_finalized "$n" "$LIVE_CG" "drill-rollback-$RUN_SLUG" "$subject" "rollback probe $n")" \
+    || { echo "node$n could not publish the drill's own verifiable-memory asset into $LIVE_CG: $job"; return 1; }
+  sparql="SELECT ?o WHERE { <$subject> <http://schema.org/name> ?o }"
+  for i in $(seq 1 15); do
+    why="$(query_rows "$probe.2" "$n" "$LIVE_CG" verifiable-memory "$sparql" o)" && grep -Fxq "[\"rollback probe $n\"]" "$probe.2" && break
+    sleep 2
   done
-  rm -f "$probe.sample"
-  [ -n "$found" ] || { echo "node$n's verifiable memory holds no triple that a query can name, in the first five context graphs with a read graph"; return 1; }
+  [ -z "$why" ] || { echo "the build under test could not read the drill's own asset <$subject> in the verifiable memory of $LIVE_CG on node$n ($why)"; return 2; }
+  if ! grep -Fxq "[\"rollback probe $n\"]" "$probe.2"; then
+    got="$(tr '\n' ' ' < "$probe.2" | sed 's/ $//')"
+    echo "the build under test answered ${got:-nothing} for the drill's own asset <$subject> in the verifiable memory of $LIVE_CG on node$n (publish job $job), not [\"rollback probe $n\"]"; return 2
+  fi
+  printf "the drill's own verifiable-memory asset in %s\037%s\037verifiable-memory\037%s\037o\n" "$LIVE_CG" "$LIVE_CG" "$sparql" >> "$probe"
 }
 # asset_probe_check <n> <probe>: within a minute, node <n> answers every probe of <probe> as the build under test did
 # (the same distinct rows). Prints the first difference and fails.
@@ -1894,10 +1898,11 @@ EOF_RESULT
   start_node "$n" DEVNET_VERSION_LAYOUT="all:current" \
     || { record drill-rollback FAIL "$(( $(now) - started ))" "node$n did not come back on the build under test${detail:+ ($detail)}"; return; }
   [ -z "$outcome" ] || { record drill-rollback "$outcome" "$(( $(now) - started ))" "$detail"; return; }
-  # Forward again: every asset triple from before the rollback still there, then rebuilt read graphs.
+  # Forward again: every asset triple from before the rollback still there, then rebuilt read graphs. The agents
+  # system graph is left out, as on the earlier release: the forward start rewrites the node's own registration there.
   if ! wait_all_ready drill-rollback "$READY_TIMEOUT" "$n"; then record drill-rollback FAIL "$(( $(now) - started ))" "node$n's read graphs not ready after the forward start"; return; fi
   member_graphs "$endpoint" "$RESULTS/rows/rollback.members-forward.node$n.json" \
-    && lost="$(members_lost "$RESULTS/rows/rollback.members-before.node$n.json" "$RESULTS/rows/rollback.members-forward.node$n.json" kept)" \
+    && lost="$(members_lost "$RESULTS/rows/rollback.members-before.node$n.json" "$RESULTS/rows/rollback.members-forward.node$n.json" kept "$AGENTS_SYSTEM_GRAPH")" \
     || { record drill-rollback FAIL "$(( $(now) - started ))" "node$n's asset data after the forward start: ${lost:-unreadable}"; return; }
   drill_end drill-rollback "$n" "$started" "\`dkg rollback --stores-for $target_version\` removed all $dropped read-graph partition graphs and kept every asset triple; ran $version, which answered $read_through as the build under test did; then rebuilt from nothing"
 }
@@ -1981,7 +1986,7 @@ for phase in $PHASES; do
     seed|setup|backfill|measure|live|gate|drills) ;;
     *) record "$phase" INCONCLUSIVE 0 "unknown phase"; continue ;;
   esac
-  # A failed gate still leaves its workload on the nodes, which the drills need: they run after it, and the run stays
+  # The drills make their own data, so they run after a failed gate too, and one run reports them all; the run stays
   # FAIL. A failure in any other phase stops every later one.
   if [ "$FAILS" != 0 ] && { [ "$phase" != drills ] || [ "$FAILS_BEFORE_GATE" != 0 ]; }; then
     record "$phase" INCONCLUSIVE 0 "not run: an earlier step failed"; continue
