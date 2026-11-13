@@ -79,7 +79,10 @@
 #             earlier release is
 #             built first; `dkg rollback --stores-for <its version>` readies the
 #             stopped node's stores, and after it the node's store must hold
-#             no read-graph partition and every asset graph as before; the
+#             no read-graph partition and every asset graph as before, and
+#             still every triple of them once the earlier release runs (the
+#             agents system graph aside: each daemon rewrites its own
+#             registration there when it starts); the
 #             earlier daemon must answer the node's seeded working-memory
 #             draft and a verifiable-memory asset through /api/query as the
 #             build under test did; and
@@ -91,7 +94,10 @@
 #             config.json and a restart). Each must end
 #             as designed (a new generation, or a dropped partition), and then
 #             be `ready` again with a clean full check. A drill whose workload
-#             did not happen is INCONCLUSIVE, never a pass.
+#             did not happen is INCONCLUSIVE, never a pass. The drills need the
+#             gate's workload on the nodes, so they run after the gate even
+#             when the gate failed, and the run stays FAIL; a failure in any
+#             other phase stops every later one.
 #
 # It writes report.md and results.tsv to READ_GRAPHS_RUN_RESULTS (default
 # $DEVNET_DIR/read-graphs-build-run/<UTC timestamp>; no spaces). It saves every
@@ -1138,8 +1144,10 @@ live_under_load() {
 # to wait on.
 shared_memory_wait() {
   local n="$1" since="$2" body answer code deadline
-  # At most one row, so a graph with any amount of shared memory answers within the route's bound of one row.
-  body="$(node -e 'process.stdout.write(JSON.stringify({ version: 1, contextGraphId: process.argv[1], view: "shared-working-memory", sparql: "SELECT ?s WHERE { { SELECT ?s WHERE { ?s ?p ?o } LIMIT 1 } }", maxRows: 1 }))' "$LIVE_CG")"
+  # A pattern that matches nothing: once the node admits the read, the route answers 200 with no row, however many
+  # shared-memory graphs the context graph holds and on any store; the refusal comes before the query runs. A LIMIT
+  # inside the pattern would not do: the view wraps the pattern in its graph scope, where a LIMIT applies per graph.
+  body="$(node -e 'process.stdout.write(JSON.stringify({ version: 1, contextGraphId: process.argv[1], view: "shared-working-memory", sparql: "SELECT ?s WHERE { ?s <urn:read-graphs-run:shared-memory-probe> ?o }", maxRows: 1 }))' "$LIVE_CG")"
   deadline=$(( $(now) + SWM_READY_TIMEOUT ))
   while :; do
     answer="$(api "$n" POST /api/query/bounded "$body")"
@@ -1967,13 +1975,19 @@ phase_drills() {
 }
 
 say "nodes $NODES; setting $SETTING; per-context-graph settings: $SWITCH; results in $RESULTS"
+FAILS_BEFORE_GATE=""
 for phase in $PHASES; do
   case "$phase" in
     seed|setup|backfill|measure|live|gate|drills) ;;
     *) record "$phase" INCONCLUSIVE 0 "unknown phase"; continue ;;
   esac
-  [ "$FAILS" = 0 ] || { record "$phase" INCONCLUSIVE 0 "not run: an earlier step failed"; continue; }
+  # A failed gate still leaves its workload on the nodes, which the drills need: they run after it, and the run stays
+  # FAIL. A failure in any other phase stops every later one.
+  if [ "$FAILS" != 0 ] && { [ "$phase" != drills ] || [ "$FAILS_BEFORE_GATE" != 0 ]; }; then
+    record "$phase" INCONCLUSIVE 0 "not run: an earlier step failed"; continue
+  fi
   [ "$STOPPED" = 0 ] || { record "$phase" INCONCLUSIVE 0 "not run: a precondition of an earlier step was not met"; continue; }
+  [ "$phase" != gate ] || FAILS_BEFORE_GATE="$FAILS"
   "phase_$phase"
 done
 for phase in seed setup backfill measure live gate drills; do
