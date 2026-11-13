@@ -8,6 +8,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
+import { peekStorageAckDemandActivations } from '../src/storage-ack-demand-activation.js';
 import type {
   ContextGraphSub,
   ContextGraphSubscriptionRecord,
@@ -115,21 +116,38 @@ async function seedLedger(state: State) {
 }
 
 describe('automatic Core custody of retained dormant identities', () => {
-  it.each(MODES)('declines native StorageACK admission for a %s retained row', async (mode) => {
-    const f = await fixture(mode);
-    expectDormant(f, mode);
+  it('declines native StorageACK admission for a disabled retained row', async () => {
+    const f = await fixture('disabled');
+    expectDormant(f, 'disabled');
     const verdict = await f.agent.ensureStorageAckVmPromotion({
       contextGraphId: ID, swmGraphId: LOCAL, operation: 'publish',
     });
-    expect(verdict).toMatchObject({
-      ok: false,
-      code: mode === 'disabled'
-        ? STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED
-        : STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE,
-    });
+    expect(verdict).toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED });
     await f.drain();
-    expectDormant(f, mode);
+    expectDormant(f, 'disabled');
     expect(f.policy).not.toHaveBeenCalled();
+    expect(peekStorageAckDemandActivations(f.agent)?.size ?? 0).toBe(0);
+  });
+
+  it('declines a capped retained row once, then activates it for the request and admits the next one', async () => {
+    const f = await fixture('capped');
+    expectDormant(f, 'capped');
+    const request = { contextGraphId: ID, swmGraphId: LOCAL, operation: 'publish' as const };
+    await expect(f.agent.ensureStorageAckVmPromotion(request)).resolves.toMatchObject({
+      ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE,
+    });
+    // The saved row is activated as saved, never replaced by a host-only row.
+    await peekStorageAckDemandActivations(f.agent)!.whenIdle();
+    expect(f.state.contextGraphSubscriptionDormancyById.has(LOCAL)).toBe(false);
+    expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({
+      subscribed: true, onChainId: ID, lastReconciledOrdinal: 7,
+    });
+    expect(f.save).not.toHaveBeenCalled();
+    await expect(f.agent.ensureStorageAckVmPromotion(request)).resolves.toEqual({ ok: true });
+    await f.drain();
+    expect(f.rows().find((row) => row.id === LOCAL)).toMatchObject({
+      ...f.original, coreHosted: true,
+    });
   });
 
   it.each(MODES)('leaves a %s retained row untouched during native promotion backfill', async (mode) => {
