@@ -66,18 +66,21 @@
 #   drills    a restart during a rebuild (of the drill's own context graph,
 #             whose shared memory takes seconds to copy: the read graphs a
 #             devnet holds are rebuilt in milliseconds); a kill of the daemon worker while it
-#             holds a working-memory write, with that agent's read graph
+#             holds a working-memory write (writes of several hundred triples,
+#             heavy enough for the worker to hold one a moment, from a writer
+#             bounded by time), with that agent's read graph
 #             built first (a kill counts only when the write's whole request
 #             was uploaded and dropped unanswered, and its data is there after
 #             the restart, so the worker had begun to store it; the
 #             worker gone and a new one in its place; every write the node acknowledged must be there after
-#             it, and the agent's working-memory read graph ready and
+#             it, whole, and the agent's working-memory read graph ready and
 #             consistent); a CLI write with the daemon down (`dkg publisher clear
 #             finalized`, after the drill finalized a publish job of its own on
-#             the node; the cleared jobs must stay cleared; a store opened outside the daemon marks every read
-#             graph it finds dirty before it writes, so each shared-layer read
-#             graph, which a plain restart first keeps at its generation, must
-#             get a new one and be rebuilt); a rollback and forward again (the
+#             the node; the cleared jobs must stay cleared; a store opened outside the daemon starts read
+#             graphs as the daemon does: each shared-layer read graph the node's
+#             settings keep, which a plain restart first keeps at its generation,
+#             must keep it, maintained by the CLI's own read-graph layer, and
+#             every other one must be marked dirty); a rollback and forward again (the
 #             earlier release is
 #             built first; `dkg rollback --stores-for <its version>` readies the
 #             stopped node's stores, and after it the node's store must hold
@@ -155,8 +158,11 @@
 #   READ_GRAPHS_DRILL_{RESTART,KILL,CLI,ROLLBACK,FLAG}_NODE
 #                                              the node of each drill (default 5, 6, 3, 4, 2)
 #   READ_GRAPHS_DRILL_RESTART_TRIPLES          shared-memory triples in the restart drill's own context graph
-#                                              (default 100000), READ_GRAPHS_DRILL_RESTART_ASSET_TRIPLES of them per
+#                                              (default 500000), READ_GRAPHS_DRILL_RESTART_ASSET_TRIPLES of them per
 #                                              knowledge asset (default 2000)
+#   READ_GRAPHS_DRILL_KILL_WRITE_TRIPLES       triples per working-memory write in the kill drill (default 500)
+#   READ_GRAPHS_DRILL_KILL_WRITER_SECONDS      how long the kill drill's writer goes on at most (default 600; 3,000
+#                                              writes at most)
 #   READ_GRAPHS_PUBLISH_TIMEOUT                seconds the cli and rollback drills wait for their own publish job to
 #                                              be finalized (default 300)
 #   READ_GRAPHS_RUN_RESULTS, READ_GRAPHS_RUN_KEEP
@@ -191,8 +197,10 @@ KILL_NODE="${READ_GRAPHS_DRILL_KILL_NODE:-6}"
 CLI_NODE="${READ_GRAPHS_DRILL_CLI_NODE:-3}"
 ROLLBACK_NODE="${READ_GRAPHS_DRILL_ROLLBACK_NODE:-4}"
 FLAG_NODE="${READ_GRAPHS_DRILL_FLAG_NODE:-2}"
-RESTART_TRIPLES="${READ_GRAPHS_DRILL_RESTART_TRIPLES:-100000}"
+RESTART_TRIPLES="${READ_GRAPHS_DRILL_RESTART_TRIPLES:-500000}"
 RESTART_ASSET_TRIPLES="${READ_GRAPHS_DRILL_RESTART_ASSET_TRIPLES:-2000}"
+KILL_WRITE_TRIPLES="${READ_GRAPHS_DRILL_KILL_WRITE_TRIPLES:-500}"
+KILL_WRITER_SECONDS="${READ_GRAPHS_DRILL_KILL_WRITER_SECONDS:-600}"
 PUBLISH_TIMEOUT="${READ_GRAPHS_PUBLISH_TIMEOUT:-300}"
 KEEP="${READ_GRAPHS_RUN_KEEP:-0}"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -259,11 +267,22 @@ wait_up() {
   while [ "$(now)" -lt "$deadline" ]; do node_up "$n" && return 0; sleep 2; done
   return 1
 }
-# restart_node <n> [VAR=value ...]: bounce one node through devnet.sh and wait for its API.
+# redial <n>: every other node of the run dials node <n> (POST /api/connect with its .devnet/nodeN/multiaddr). A node
+# that did not restart does not dial a restarted one again by itself, and a publish from it needs the Cores' ACKs.
+redial() {
+  local k addr body
+  addr="$(head -1 "$DEVNET_DIR/node$1/multiaddr" 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$addr" ] || return 0
+  body="{\"multiaddr\":\"$addr\"}"
+  for k in $NODES; do
+    [ "$k" = "$1" ] || api "$k" POST /api/connect "$body" > /dev/null 2>&1 || true
+  done
+}
+# restart_node <n> [VAR=value ...]: bounce one node through devnet.sh, wait for its API, and have the others dial it.
 restart_node() {
   local n="$1"; shift
   env "$@" "$DEVNET_SH" restart-node "$n" >> "$RESULTS/devnet-sh.log" 2>&1 || true
-  wait_up "$n" 180
+  wait_up "$n" 180 && redial "$n"
 }
 # The nodes whose config or running state this run changed; cleanup puts them back.
 CHANGED=""
@@ -272,7 +291,7 @@ stop_node() { changed "$1"; "$DEVNET_SH" stop-node "$1" >> "$RESULTS/devnet-sh.l
 start_node() {
   local n="$1"; shift
   env "$@" "$DEVNET_SH" start-node "$n" >> "$RESULTS/devnet-sh.log" 2>&1 || true
-  wait_up "$n" 180
+  wait_up "$n" 180 && redial "$n"
 }
 # set_read_graphs <n> <JSON value | "-">: write query.readGraphs into the node's config.json ("-" removes it).
 set_read_graphs() {
@@ -1370,22 +1389,28 @@ shared_read_graph() {
     const core = await import(process.env.CORE_MODULE);
     console.log(core.readGraphIri({ scope: core.readScope(process.env.CG), layer: core.MemoryLayer.SharedWorkingMemory }));'
 }
-# build_ms <n> <read graph>: how long node <n>'s last build of that read graph took, in ms, from its daemon.log.
-build_ms() { grep -F "Built read graph $2 in " "$DEVNET_DIR/node$1/daemon.log" 2>/dev/null | tail -1 | sed -E 's/.* in ([0-9]+) ms.*/\1/'; }
+# build_ms <n> <read graph> [since]: how long node <n>'s last build of that read graph took, in ms, from its
+# daemon.log; with <since> (the log's local "YYYY-MM-DD HH:MM:SS"), only a build logged from then on.
+build_ms() {
+  grep -F "Built read graph $2 in " "$DEVNET_DIR/node$1/daemon.log" 2>/dev/null | awk -v s="${3:-}" 'substr($0, 1, 19) >= s' \
+    | tail -1 | sed -E 's/.* in ([0-9]+) ms.*/\1/'
+}
 
 drill_restart_during_rebuild() {
-  local n="$RESTART_NODE" started cg graph why built caught="" i gen_before gen_after
+  local n="$RESTART_NODE" started cg graph why seeded since rebuilt caught="" i gen_before gen_after
   started="$(now)"
   # The read graphs a devnet holds are rebuilt in tens of milliseconds, far quicker than a restart takes to stop the
-  # daemon. So the drill builds its own: a context graph on the drill node whose shared memory takes seconds to copy.
+  # daemon. So the drill builds its own: a context graph on the drill node whose shared memory takes seconds to copy
+  # (about 100,000 triples a second: 100,000 took 1,045 ms in 12 batches on the devnet).
   cg="read-graphs-restart-$RUN_SLUG"
   graph="$(shared_read_graph "$cg")" && [ -n "$graph" ] \
     || { record drill-restart INCONCLUSIVE 0 "the shared-memory read graph of $cg could not be named by the build's rules"; return; }
   why="$(restart_drill_graph "$n" "$cg")" \
     || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "node$n could not hold the drill's own context graph $cg: $why"; return; }
+  seeded=$(( $(now) - started ))
   wait_read_graph_ready "$n" "$graph" "$READY_TIMEOUT" "$RESULTS/rows/restart.seeded.node$n" \
     || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "node$n did not list <$graph> ready after the drill shared $RESTART_TRIPLES triples into it"; return; }
-  built="$(build_ms "$n" "$graph")"
+  since="$(date '+%Y-%m-%d %H:%M:%S')"
   read_graph_rebuild "$n" "$cg" || { record drill-restart FAIL "$(( $(now) - started ))" "rebuild refused on node$n (cli.log)"; return; }
   # `rebuild` marks the read graph dirty; the builder's next pass rebuilds it. Restart while it is being rebuilt.
   for i in $(seq 1 300); do
@@ -1395,8 +1420,9 @@ drill_restart_during_rebuild() {
     fi
     sleep 0.2
   done
-  [ -n "$caught" ] || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "<$graph> was not seen being rebuilt on node$n (its first build took ${built:-?} ms)"; return; }
+  [ -n "$caught" ] || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "<$graph> was not seen being rebuilt on node$n (that rebuild took $(build_ms "$n" "$graph" "$since") ms)"; return; }
   gen_before="$(generation_of "$RESULTS/rows/restart.caught.node$n" "$graph")"
+  since="$(date '+%Y-%m-%d %H:%M:%S')"
   restart_node "$n" || { record drill-restart FAIL "$(( $(now) - started ))" "node$n did not come back"; return; }
   if ! wait_all_ready drill-restart "$READY_TIMEOUT" "$n"; then record drill-restart FAIL "$(( $(now) - started ))" "node$n's read graphs not ready after the restart"; return; fi
   # A read graph the restart caught being built gets a new generation at start. One whose rebuild ended in the moment
@@ -1404,8 +1430,10 @@ drill_restart_during_rebuild() {
   gen_after="$(generation_of "$RESULTS/rows/drill-restart.node$n" "$graph")"
   [ -n "$gen_after" ] || { record drill-restart FAIL "$(( $(now) - started ))" "<$graph> was gone after the restart"; return; }
   [ "$gen_after" != "$gen_before" ] \
-    || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "the rebuild of <$graph> ended before the restart stopped the daemon (its first build took ${built:-?} ms; READ_GRAPHS_DRILL_RESTART_TRIPLES makes it longer)"; return; }
-  drill_end drill-restart "$n" "$started" "the restart caught the drill's own shared-memory read graph <$graph> ($RESTART_TRIPLES triples; its first build took ${built:-?} ms) being rebuilt; it got a new generation at the start and was rebuilt"
+    || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "the rebuild of <$graph> ended before the restart stopped the daemon (it took $(build_ms "$n" "$graph") ms; READ_GRAPHS_DRILL_RESTART_TRIPLES makes it longer)"; return; }
+  # The rebuild after the start, as the daemon logs it once the read graph is ready again.
+  for i in $(seq 1 10); do rebuilt="$(build_ms "$n" "$graph" "$since")"; [ -n "$rebuilt" ] && break; sleep 1; done
+  drill_end drill-restart "$n" "$started" "the restart caught the drill's own shared-memory read graph <$graph> ($RESTART_TRIPLES triples, shared in $seeded s) being rebuilt; it got a new generation at the start and was rebuilt after it in ${rebuilt:-?} ms"
 }
 
 # kill_tree <pid>: stop a process and every process it started, by PID. The tree is listed before anything is stopped,
@@ -1440,6 +1468,23 @@ drill_writes_missing() {
     }
     process.stdout.write(problems.join(", "));' "$1" "$2"
 }
+# drill_writes_incomplete <acked> <counts> <values>: the drill writes listed in <acked> whose subject does not hold
+# <values> values in <counts> (query_rows of ?s ?values), comma-separated; nothing when each holds them all.
+drill_writes_incomplete() {
+  node -e '
+    const fs = require("fs");
+    const counts = new Map();
+    for (const line of fs.readFileSync(process.argv[2], "utf8").split("\n").filter(Boolean)) {
+      const [s, values] = JSON.parse(line);
+      counts.set(s, Number(values));
+    }
+    const problems = [];
+    for (const i of fs.readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean)) {
+      const got = counts.get(`urn:read-graphs-drill:${i}`) ?? 0;
+      if (got !== Number(process.argv[3])) problems.push(`${i} holds ${got} of ${process.argv[3]} values`);
+    }
+    process.stdout.write(problems.slice(0, 10).join(", ") + (problems.length > 10 ? `, and ${problems.length - 10} more` : ""));' "$1" "$2" "$3"
+}
 # pid_alive <pid>: the process exists and is not a zombie.
 pid_alive() { local s; s="$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')"; [ -n "$s" ] && [ "${s#Z}" = "$s" ]; }
 # daemon_worker_pid <n>: the PID node <n>'s daemon.pid names, when that process is a live daemon worker; else nothing.
@@ -1452,7 +1497,7 @@ daemon_worker_pid() {
 
 drill_kill_during_write() {
   local n="$KILL_NODE" started cg pid new_pid writer acked i resp missing body agent wm_graph inflight answers inflight_write overlap
-  local attempt last_write kill_line why readback
+  local attempt last_write kill_line why readback template bodyfile incomplete
   started="$(now)"; cg="read-graphs-drill-$(echo "$RUN_ID" | tr 'A-Z' 'a-z')"
   readback="SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }"
   acked="$RESULTS/drill-kill.acked"; : > "$acked"
@@ -1484,18 +1529,32 @@ drill_kill_during_write() {
   # what the daemon had: exit 52 or 56 with the whole body uploaded means the worker took the request and its
   # connection was dropped unanswered; exit 7 means the request never reached it; exit 0 means it was answered.
   # After a write that was not acknowledged it waits a moment, so a restarting node does not use up its writes.
+  # Each write is KILL_WRITE_TRIPLES triples on its own subject: its name, which the readback reads, and values that
+  # make it heavy enough for the worker to hold it a moment (a one-triple write is answered before a kill can land on
+  # an idle node). Its body goes through a file. The writer stops after KILL_WRITER_SECONDS or 3,000 writes.
   inflight="$RESULTS/drill-kill.inflight"; answers="$RESULTS/drill-kill.answers"; : > "$inflight"; : > "$answers"
+  template="$RESULTS/drill-kill.body-template"; bodyfile="$RESULTS/drill-kill.body"
+  node -e '
+    const [contextGraphId, count] = [process.argv[1], Number(process.argv[2])];
+    const subject = "urn:read-graphs-drill:@I@";
+    const quads = [{ subject, predicate: "http://schema.org/name", object: "\"drill @I@\"" },
+      ...Array.from({ length: Math.max(0, count - 1) }, (_, j) => ({ subject, predicate: "http://schema.org/value", object: `"@I@.${j}"` }))];
+    process.stdout.write(JSON.stringify({ contextGraphId, quads }));' "$cg" "$KILL_WRITE_TRIPLES" > "$template" \
+    || { record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "the drill's write body could not be written"; return; }
   (
     export DKG_API_MAXTIME=15
-    for i in $(seq 1 1000); do
+    i=0; until_s=$(( $(now) + KILL_WRITER_SECONDS ))
+    while [ "$i" -lt 3000 ] && [ "$(now)" -lt "$until_s" ]; do
+      i=$((i + 1))
       api "$n" POST /api/knowledge-assets "{\"contextGraphId\":\"$cg\",\"name\":\"drill-$i\"}" > /dev/null 2>&1 || true
-      body="{\"contextGraphId\":\"$cg\",\"quads\":[{\"subject\":\"urn:read-graphs-drill:$i\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"drill $i\\\"\"}]}"
+      sed "s/@I@/$i/g" "$template" > "$bodyfile"
+      size="$(wc -c < "$bodyfile" | tr -d ' ')"
       echo "$i" > "$inflight"
       out="$(curl -sS --max-time 15 --connect-timeout 5 -o /dev/null -w '%{http_code} %{size_upload}' -X POST \
-        -H "Authorization: Bearer $(node_token "$n")" -H 'Content-Type: application/json' --data "$body" \
+        -H "Authorization: Bearer $(node_token "$n")" -H 'Content-Type: application/json' --data-binary "@$bodyfile" \
         "http://127.0.0.1:$(node_port "$n")/api/knowledge-assets/drill-$i/wm/write" 2>/dev/null)"; rc=$?
       code="${out%% *}"
-      echo "write $i rc=$rc code=${code:-000} sent=${out##* } of ${#body}" >> "$answers"
+      echo "write $i rc=$rc code=${code:-000} sent=${out##* } of $size" >> "$answers"
       : > "$inflight"
       case "$code" in 2??) echo "$i" >> "$acked" ;; *) sleep 0.5 ;; esac
     done
@@ -1593,6 +1652,15 @@ drill_kill_during_write() {
     || { record drill-kill FAIL "$(( $(now) - started ))" "the acknowledged writes could not be read back after the kill ($why)"; return; }
   missing="$(drill_writes_missing "$acked" "$RESULTS/rows/drill-kill.after")"
   [ -z "$missing" ] || { record drill-kill FAIL "$(( $(now) - started ))" "acknowledged writes are not there as written after the kill: $missing"; return; }
+  # Their values too: each acknowledged write holds all KILL_WRITE_TRIPLES - 1 of them. (A write held at a crash and
+  # never answered may be there in part; only what was acknowledged must be whole.)
+  if [ "$KILL_WRITE_TRIPLES" -gt 1 ]; then
+    why="$(query_rows "$RESULTS/rows/drill-kill.values" "$n" "$cg" working-memory \
+      "SELECT ?s (COUNT(?v) AS ?values) WHERE { ?s <http://schema.org/value> ?v } GROUP BY ?s" s values)" \
+      || { record drill-kill FAIL "$(( $(now) - started ))" "the values of the acknowledged writes could not be counted after the kill ($why)"; return; }
+    incomplete="$(drill_writes_incomplete "$acked" "$RESULTS/rows/drill-kill.values" "$((KILL_WRITE_TRIPLES - 1))")"
+    [ -z "$incomplete" ] || { record drill-kill FAIL "$(( $(now) - started ))" "acknowledged writes are there only in part after the kill: $incomplete"; return; }
+  fi
   # The read graph those writes maintain must be there and ready; drill_end then checks it with the rest.
   wait_read_graph_ready "$n" "$wm_graph" "$READY_TIMEOUT" "$RESULTS/rows/drill-kill.wm.node$n" \
     || { record drill-kill FAIL "$(( $(now) - started ))" "the working-memory read graph <$wm_graph> was not listed ready after the kill"; return; }
@@ -1606,12 +1674,26 @@ finalized_jobs() {
       try { const value = JSON.parse(d).finalized; if (Number.isSafeInteger(value)) process.stdout.write(String(value)); } catch {}
     });'
 }
+# connect_all <n>: node <n> dials every other node of the run (POST /api/connect with its .devnet/nodeK/multiaddr). A
+# node that did not restart does not dial a restarted node again by itself, and a publish needs the Cores' ACKs.
+connect_all() {
+  local k addr body
+  for k in $NODES; do
+    [ "$k" != "$1" ] || continue
+    addr="$(head -1 "$DEVNET_DIR/node$k/multiaddr" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$addr" ] || continue
+    body="{\"multiaddr\":\"$addr\"}"
+    api "$1" POST /api/connect "$body" > /dev/null 2>&1 || true
+  done
+}
 # publish_finalized <n> <context graph> <name> <subject> <value>: node <n> writes knowledge asset <name> into the
 # context graph (one triple, <subject> schema:name "<value>"), shares it to shared memory, and publishes it to
-# verifiable memory through the async publisher; it waits up to PUBLISH_TIMEOUT s for the job to be finalized. Prints
-# the job ID; prints why and fails when a step is refused or the job does not finalize.
+# verifiable memory through the async publisher; it waits up to PUBLISH_TIMEOUT s for the job to be finalized, also
+# through a failure the publisher retries by itself. The node first dials every other node (connect_all). Prints the
+# job ID; prints why and fails when a step is refused, the job fails for good, or it does not finalize in time.
 publish_finalized() {
-  local n="$1" cg="$2" name="$3" body resp job status="" deadline
+  local n="$1" cg="$2" name="$3" body resp job answer status="" deadline
+  connect_all "$n"
   body="$(node -e '
     const [contextGraphId, name, subject, value] = process.argv.slice(1);
     const quads = [{ subject, predicate: "http://schema.org/name", object: JSON.stringify(value), graph: "" }];
@@ -1627,10 +1709,15 @@ publish_finalized() {
   [ -n "$job" ] || { echo "publish-async of $name answered no job ID: $(body_of "$resp" | head -c 200)"; return 1; }
   deadline=$(( $(now) + PUBLISH_TIMEOUT ))
   while :; do
-    status="$(field "$(body_of "$(api "$n" GET "/api/publisher/job?id=$job")")" job.status)"
+    answer="$(body_of "$(api "$n" GET "/api/publisher/job?id=$job")")"
+    status="$(field "$answer" job.status)"
     case "$status" in
       finalized) echo "$job"; return 0 ;;
-      failed) echo "publish job $job of $name failed"; return 1 ;;
+      failed)
+        # A retryable failure (an ACK quorum not reached yet, say) goes back to the queue after its backoff.
+        [ "$(field "$answer" job.failure.retryable)" = true ] && [ "$(field "$answer" retryState.autoRetryEligible)" = true ] \
+          || { echo "publish job $job of $name failed: $(field "$answer" job.failure.message | head -c 300)"; return 1; }
+        status="failed, to be retried ($(field "$answer" job.failure.code))" ;;
     esac
     [ "$(now)" -lt "$deadline" ] || { echo "publish job $job of $name was still ${status:-unreadable} after $PUBLISH_TIMEOUT s"; return 1; }
     sleep 3
@@ -1652,7 +1739,7 @@ generations_compared() {
 }
 
 drill_cli_write_daemon_down() {
-  local n="$CLI_NODE" job started before after output rc cleared renewed kept count dir="$RESULTS/rows"
+  local n="$CLI_NODE" job started before after output rc cleared renewed count state gen graph gen_after kept=0 unkept=0 moved="" unmarked="" why="" dir="$RESULTS/rows"
   started="$(now)"
   # The offline write needs a finalized publish job to change. Neither a fresh devnet nor the gate leaves one (the
   # devnet suites clear theirs), so the drill makes its own on its node.
@@ -1662,9 +1749,10 @@ drill_cli_write_daemon_down() {
   [ -n "$before" ] && [ "$before" -gt 0 ] \
     || { record drill-cli INCONCLUSIVE "$(( $(now) - started ))" "\`dkg publisher stats\` on node$n counts ${before:-no} finalized jobs, after its job $job was finalized"; return; }
   read_graph_rows "$n" 2>/dev/null | grep -q . || { record drill-cli INCONCLUSIVE "$(( $(now) - started ))" "node$n has no read graph"; return; }
-  # Nothing maintains read graphs in a CLI process, so a store it opens to write with the daemon down marks every read
-  # graph it finds dirty first. Each must then get a new generation at the next start and be rebuilt. A plain restart
-  # comes first, as the control: it keeps every ready shared-layer read graph at its generation, so a new one after the
+  # A store the CLI opens to write with the daemon down starts read graphs as the daemon does (createPublisherStore):
+  # the read graphs the node's settings keep stay ready at their generation, and its read-graph layer maintains its
+  # writes to them; every other read graph is marked dirty, so the next start renews or drops it. A plain restart comes
+  # first, as the control: it keeps every ready shared-layer read graph at its generation, so a change after the
   # offline write comes from that write.
   wait_all_ready drill-cli-before "$READY_TIMEOUT" "$n" \
     || { record drill-cli INCONCLUSIVE "$(( $(now) - started ))" "node$n's read graphs were not ready before the drill"; return; }
@@ -1690,9 +1778,23 @@ drill_cli_write_daemon_down() {
     record drill-cli FAIL "$(( $(now) - started ))" "node$n lists ${after:-?} finalized jobs after the restart; $before before, $cleared cleared offline"; return
   fi
   if ! wait_all_ready drill-cli "$READY_TIMEOUT" "$n"; then record drill-cli FAIL "$(( $(now) - started ))" "node$n's read graphs not ready after the restart"; return; fi
-  kept="$(generations_compared "$dir/drill-cli-control.node$n" "$dir/drill-cli.node$n" new)"
-  [ -z "$kept" ] || { record drill-cli FAIL "$(( $(now) - started ))" "read graphs came through the offline write without a new generation, so nothing marked them dirty:$kept"; return; }
-  drill_end drill-cli "$n" "$started" "with node$n's daemon down, \`dkg publisher clear finalized\` cleared $cleared of $before jobs, which stayed cleared; the $count shared-layer read graphs that a plain restart kept got a new generation and were rebuilt"
+  expected_read_graphs "$n" > "$dir/drill-cli-kept.node$n" \
+    || { record drill-cli INCONCLUSIVE "$(( $(now) - started ))" "the read graphs node$n's settings keep could not be worked out"; return; }
+  while read -r state gen graph; do
+    case "$graph" in */_working_memory/*) continue ;; esac
+    gen_after="$(generation_of "$dir/drill-cli.node$n" "$graph")"
+    if grep -Fxq "$graph" "$dir/drill-cli-kept.node$n"; then
+      kept=$((kept + 1))
+      [ "$gen_after" = "$gen" ] || moved="$moved <$graph> (generation $gen, then ${gen_after:-missing})"
+    else
+      unkept=$((unkept + 1))
+      [ "$gen_after" != "$gen" ] || unmarked="$unmarked <$graph> (generation $gen)"
+    fi
+  done < "$dir/drill-cli-control.node$n"
+  [ -z "$moved" ] || { record drill-cli FAIL "$(( $(now) - started ))" "read graphs node$n's settings keep left their generation through the offline write, though the CLI's read-graph layer maintains them:$moved"; return; }
+  [ -z "$unmarked" ] || { record drill-cli FAIL "$(( $(now) - started ))" "read graphs node$n's settings do not keep came through the offline write at their generation, so nothing marked them dirty:$unmarked"; return; }
+  if [ "$unkept" = 0 ]; then why="its settings keep every one, so none was to be marked dirty"; else why="the $unkept it does not keep were marked dirty (renewed or dropped)"; fi
+  drill_end drill-cli "$n" "$started" "with node$n's daemon down, \`dkg publisher clear finalized\` cleared $cleared of $before jobs, which stayed cleared; the $kept shared-layer read graphs its settings keep stayed at their generation, maintained by the CLI's read-graph layer; $why"
 }
 
 # partition_graphs <endpoint> <out>: every graph the store holds in a read-graph partition (read graphs and
