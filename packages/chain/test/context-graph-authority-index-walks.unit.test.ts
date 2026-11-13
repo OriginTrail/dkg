@@ -21,7 +21,6 @@ import type { ContextGraphAuthorityIndexId } from '../src/chain-adapter.js';
 import type { RawContextGraphAuthorityIndexEvent } from
   '../src/context-graph-authority-index-reducer.js';
 import { RpcRequestGovernor } from '../src/rpc-request-governor.js';
-import { withRpcRequestContext } from '../src/rpc-request-transport.js';
 import { MemoryAuthorityIndexStore } from './helpers/context-graph-authority-index.js';
 
 const OWNER = `0x${'11'.repeat(20)}`;
@@ -362,7 +361,7 @@ describe('durable authority-index walks under a throttled RPC budget', () => {
       .toMatchObject({ deploymentBlockNumber: DEPLOY_BLOCK });
   });
 
-  it('rebuilds from the lookup bound when another writer drops the stored checkpoint mid-scan', async () => {
+  it('ends a scan whose stored checkpoint another writer drops, and the next one rebuilds from the lookup', async () => {
     const store = new MemoryAuthorityIndexStore();
     await new ContextGraphAuthorityIndex(store).view(directRead(1_500));
     // A graph the chain created below the stored deployment block, as after a
@@ -370,10 +369,7 @@ describe('durable authority-index walks under a throttled RPC budget', () => {
     const below = creation(42n, 200);
     let tombstoned = false;
     const pages: Array<readonly [number, number]> = [];
-
-    // This scan adopts the stored block 1000 and admits its checkpoint; then
-    // another writer that saw the reset tombstones it before the first commit.
-    const view = await new ContextGraphAuthorityIndex(store).view({
+    const read = () => ({
       ...directRead(2_000),
       deploymentBlockNumber: 0,
       deploymentBlockPinned: false,
@@ -386,8 +382,17 @@ describe('durable authority-index walks under a throttled RPC budget', () => {
         return below.blockNumber >= fromBlock && below.blockNumber <= toBlock ? [below] : [];
       },
     });
+    const index = new ContextGraphAuthorityIndex(store);
 
-    expect(pages[0]?.[0]).toBe(1_500 - HOLDBACK + 1);
+    // This scan adopted the stored block 1000 and admitted its checkpoint;
+    // another writer that saw the reset tombstones it before the first commit.
+    await expect(index.view(read())).rejects.toMatchObject({
+      name: 'ContextGraphAuthorityIndexRetryableError',
+      message: expect.stringContaining('dropped during this scan'),
+    });
+    expect(pages).toEqual([[1_500 - HOLDBACK + 1, 1_500 - HOLDBACK + PAGE_SIZE]]);
+
+    const view = await index.view(read());
     expect(pages[1]?.[0]).toBe(0);
     expect(view.has('42' as ContextGraphAuthorityIndexId)).toBe(true);
     expect((store.record!.value as { cursor: { deploymentBlockNumber: number } }).cursor)
@@ -426,8 +431,8 @@ describe('durable authority-index walks under a throttled RPC budget', () => {
       const foregroundScope = provider === 'the same' ? backgroundScope : {};
       const backgroundEntered = Promise.withResolvers<void>();
       const releaseBackground = Promise.withResolvers<void>();
-      const background = withRpcRequestContext({ requestClass: 'background' }, () => index.view(
-        directRead(3_000, {
+      const background = index.view({
+        ...directRead(3_000, {
           readScope: backgroundScope,
           readPage: async (fromBlock, toBlock) => {
             backgroundEntered.resolve();
@@ -435,7 +440,8 @@ describe('durable authority-index walks under a throttled RPC budget', () => {
             return EVENTS.filter((entry) => entry.blockNumber >= fromBlock && entry.blockNumber <= toBlock);
           },
         }),
-      ));
+        scanClass: 'background',
+      });
       await backgroundEntered.promise;
 
       await expect(index.view(directRead(3_000, { readScope: foregroundScope }))).resolves.toBeDefined();

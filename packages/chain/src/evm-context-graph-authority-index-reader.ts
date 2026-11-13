@@ -17,6 +17,7 @@ import {
   ContextGraphAuthorityIndexRetryableError,
   isContextGraphAuthorityIndexRetryableError,
   type ContextGraphAuthorityIndexDeploymentLookup,
+  type ContextGraphAuthorityIndexScanClass,
   type ContextGraphAuthorityIndexScanInput,
 } from './context-graph-authority-index.js';
 import type { RawContextGraphAuthorityIndexEvent } from
@@ -50,6 +51,7 @@ import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import { resolveEvmFinalityAnchorWithHeadV1 } from './evm-finality-anchor.js';
 import type { ReadOpts } from './rpc-failover-client.js';
 import {
+  activeRpcRequestContext,
   withRpcRequestContext,
 } from './rpc-request-transport.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
@@ -111,6 +113,7 @@ type EvmContextGraphAuthorityIndexReadInputV1 = Readonly<{
   provider: JsonRpcProvider;
   deploymentBlockNumber: number;
   deploymentBlockPinned?: boolean;
+  scanClass?: ContextGraphAuthorityIndexScanClass;
   finalized: Readonly<{ number: number; hash: string }>;
   pageSize: number;
   /** Operator depth; bounds how far the DURABLE cursor may ratchet. */
@@ -181,6 +184,7 @@ function authorityIndexScanBoundsV1(
     readScope: input.provider,
     deploymentBlockNumber: input.deploymentBlockNumber,
     deploymentBlockPinned: input.deploymentBlockPinned,
+    scanClass: input.scanClass,
     finalized: input.finalized,
     // Preserve invalid values for ContextGraphAuthorityIndex's fail-closed
     // bounds validation; only a valid oversized configured page is clamped.
@@ -518,10 +522,11 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         const contract = base.connect(provider) as Contract;
         const contractAddress = (await contract.getAddress()).toLowerCase();
         ownScope = contextGraphAuthorityIndexScope(dependencies.deploymentId, contractAddress);
-        // The index runs one scan per scope and class. Wait for it BEFORE the head
-        // read, which would be out of date by the time that scan lets this read in.
+        // One scan per scope and class (the caller's RPC class). Wait for it BEFORE
+        // the head read, which would be stale by the time that scan lets this in.
+        const scanClass = activeRpcRequestContext().requestClass;
         await dependencies.index.whenScanIdle(ownScope, options.signal === undefined
-          ? projectionSignal : AbortSignal.any([projectionSignal, options.signal]));
+          ? projectionSignal : AbortSignal.any([projectionSignal, options.signal]), scanClass);
         assertOpen();
         projectionSignal.throwIfAborted();
         options.signal?.throwIfAborted();
@@ -534,6 +539,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
           provider,
           deploymentBlockNumber: lookup.blockNumber,
           deploymentBlockPinned: lookup.pinned,
+          scanClass,
           pageSize: dependencies.pageSize(),
           finalityConfirmations: dependencies.finalityConfirmations(),
           stabilizationOperation: operationLabel,
@@ -1165,6 +1171,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
                   provider,
                   deploymentBlockNumber: lookup.blockNumber,
                   deploymentBlockPinned: lookup.pinned,
+                  scanClass: activeRpcRequestContext().requestClass,
                   pageSize: dependencies.pageSize(),
                   finalityConfirmations: dependencies.finalityConfirmations(),
                   finalized: anchor.finalized,

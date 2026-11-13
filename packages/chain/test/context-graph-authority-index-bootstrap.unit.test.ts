@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it, vi } from 'vitest';
-import { withRpcRequestContext } from '../src/rpc-request-transport.js';
 import { ContextGraphAuthorityIndex as ContextGraphAuthorityIndexBase } from
   '../src/context-graph-authority-index.js';
 import type { ContextGraphAuthorityIndexId } from '../src/context-graph-authority-index-id.js';
@@ -588,14 +587,15 @@ describe('trusted core authority index bootstrap', () => {
     let release!: () => void;
     let entered!: () => void;
     const ready = new Promise<void>((resolve) => { entered = resolve; });
-    const earlier = withRpcRequestContext({ requestClass: 'background' }, () => index.refresh({
+    const earlier = index.refresh({
       ...input(),
+      scanClass: 'background',
       readPage: async () => {
         entered();
         await new Promise<void>((resolve) => { release = resolve; });
         return [];
       },
-    }));
+    });
     await ready;
     await expect(index.refresh({ ...input(), readBlockHash: async () => hash(1), readPage: async () => {
       throw new Error('rebuild unavailable');
@@ -603,6 +603,37 @@ describe('trusted core authority index bootstrap', () => {
     release();
     await earlier;
     expect(index.exportSnapshot(request())).toBeNull();
+  });
+
+  it('ends an unpinned scan that loses its seeded checkpoint mid-scan instead of reseeding the old bound', async () => {
+    const store = new ScopedStore();
+    await new ContextGraphAuthorityIndex(store, bootstrap()).resolve(input());
+    const key = `${SCOPE}:trusted-bootstrap:trusted-core-A`;
+    let tombstoned = false;
+    // The lookup could not pin the block; the index resumes the seeded
+    // checkpoint from its own block 10, and another writer drops it during
+    // the first page read.
+    const scan = {
+      ...input(async () => {
+        if (!tombstoned) {
+          tombstoned = true;
+          await store.invalidate(key, store.records.get(key)!.token);
+        }
+        return [];
+      }),
+      deploymentBlockNumber: 0,
+      deploymentBlockPinned: false,
+      finalized: { number: HEAD + 100, hash: hash(HEAD + 100) },
+    };
+
+    const result = await new ContextGraphAuthorityIndex(store, bootstrap()).resolve(scan)
+      .then(() => undefined, (error: unknown) => error);
+
+    // A retryable end, not the reducer's deployment-block mismatch after
+    // reseeding with the bounds this scan started from.
+    expect(result).toMatchObject({ name: 'ContextGraphAuthorityIndexRetryableError' });
+    expect(String((result as Error).message)).toContain('dropped during this scan');
+    expect(store.records.get(key)?.value).toBeNull();
   });
 
   it('reports an oversized completed table explicitly without retaining its payload for serving', async () => {

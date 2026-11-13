@@ -33,7 +33,6 @@ import { ContextGraphAuthorityIndexBootstrapCoordinator } from
 import { ContextGraphAuthorityIndexActivity } from
   './context-graph-authority-index-activity.js';
 import { waitForSignal } from './wait-for-signal.js';
-import { activeRpcRequestContext } from './rpc-request-transport.js';
 import {
   authorityIndexSnapshotWithinSizeLimit,
   ContextGraphAuthorityIndexSnapshotExportError,
@@ -69,6 +68,9 @@ type ServableCheckpoint = Readonly<{
   /** Oversized checkpoints retain only metadata; cached wire payloads total at most 64 MiB. */
   snapshot?: ContextGraphAuthorityIndexSnapshot;
 }>;
+
+/** The scan lane a caller runs in; the EVM reader passes its RPC request class. */
+export type ContextGraphAuthorityIndexScanClass = 'foreground' | 'background';
 
 /** A contract's deployment block, and whether the lookup could pin it. */
 export type ContextGraphAuthorityIndexDeploymentLookup = Readonly<{
@@ -134,6 +136,13 @@ export interface ContextGraphAuthorityIndexScanInput {
    * block is only as good as the history it was reduced with.
    */
   readonly deploymentBlockPinned?: boolean;
+  /**
+   * Which of the scope's two scan lanes this scan runs in. A scan's requests
+   * keep the RPC class of the caller that started it, so a foreground read
+   * must not wait out, or join, a walk on the smaller background budget.
+   * Defaults to `foreground`.
+   */
+  readonly scanClass?: ContextGraphAuthorityIndexScanClass;
   readonly signal?: AbortSignal;
   readonly readBlockHash: (
     blockNumber: number,
@@ -251,16 +260,20 @@ export class ContextGraphAuthorityIndex {
   }
 
   /**
-   * Resolve once `scope` has no scan in flight in the caller's request class,
-   * or reject with `signal`.
+   * Resolve once `scope` has no scan in flight in `scanClass`, or reject with
+   * `signal`.
    *
    * For a caller about to start one: the anchor it reads before waiting would
    * be out of date by the time the running scan lets it in, and on a node
    * whose walk outlasts its readers every one of them would pay that head
    * read for nothing.
    */
-  async whenScanIdle(scope: string, signal?: AbortSignal): Promise<void> {
-    const lane = this.#scanLane(scope);
+  async whenScanIdle(
+    scope: string,
+    signal?: AbortSignal,
+    scanClass: ContextGraphAuthorityIndexScanClass = 'foreground',
+  ): Promise<void> {
+    const lane = this.#scanLane(scope, scanClass);
     const lifecycleSignal = this.#lifecycleAbort.signal;
     for (let active = this.#activeScans.get(lane); active !== undefined;
       active = this.#activeScans.get(lane)) {
@@ -268,9 +281,9 @@ export class ContextGraphAuthorityIndex {
     }
   }
 
-  /** `scope` in the request class of the caller, whose class a scan it starts keeps. */
-  #scanLane(scope: string): string {
-    return [scope, activeRpcRequestContext().requestClass].join('\u0000');
+  /** One of `scope`'s two scan lanes; see `scanClass`. */
+  #scanLane(scope: string, scanClass: ContextGraphAuthorityIndexScanClass): string {
+    return [scope, scanClass].join('\u0000');
   }
 
   /**
@@ -438,7 +451,7 @@ export class ContextGraphAuthorityIndex {
     }
     // The request class is part of the key: a foreground read must not join a
     // walk the background refresh runs on the smaller background budget.
-    const lane = this.#scanLane(scope);
+    const lane = this.#scanLane(scope, input.scanClass ?? 'foreground');
     const scanKey = [lane, input.finalized.number, finalizedHash].join('\u0000');
     // ONE physical scan per scope and request class. A caller to the same
     // anchor on the same endpoint joins the running scan. A scan to any other
@@ -508,12 +521,9 @@ export class ContextGraphAuthorityIndex {
     const holdback = normalizeNonNegativeSafeInteger(
       input.durableReorgHoldbackBlocks ?? 0,
     ) ?? 0;
+    // Chosen once, with the first admission; see `admit` below.
     let deploymentBlockNumber = requestedDeploymentBlockNumber;
-    let persistThroughBlockNumber = Math.max(deploymentBlockNumber, finalizedNumber - holdback);
-    const setDeploymentBlock = (blockNumber: number): void => {
-      deploymentBlockNumber = blockNumber;
-      persistThroughBlockNumber = Math.max(blockNumber, finalizedNumber - holdback);
-    };
+    let admittedAtStart = false;
 
     let servableEpoch = this.#servableEpochs.get(scope) ?? 0;
     const onRejectedCheckpoint = (): void => {
@@ -563,10 +573,21 @@ export class ContextGraphAuthorityIndex {
       });
       // Admission returns a checkpoint only after matching its cursor hash.
       markReachable(admitted);
-      // No history kept, so none bounds the rebuild: it starts from the lookup,
-      // whether the first admission or a reload after a lost commit found the
-      // checkpoint gone (a chain reset at the same address).
-      if (admitted.kind !== 'checkpoint') setDeploymentBlock(requestedDeploymentBlockNumber);
+      if (admitted.kind !== 'checkpoint' && deploymentBlockNumber !== requestedDeploymentBlockNumber) {
+        // The stored checkpoint's deployment block went with its history. At
+        // the start the rebuild simply begins from the lookup. Later, when a
+        // reload after a lost commit finds it gone (another writer saw a chain
+        // reset at the same address), this scan's bounds and any seed session
+        // are already set for the old block: end it, and let the next scan
+        // start over from the lookup.
+        if (admittedAtStart) {
+          throw new ContextGraphAuthorityIndexRetryableError(
+            `Context Graph authority index checkpoint from block ${deploymentBlockNumber} was `
+            + `dropped during this scan; it is rebuilt from block ${requestedDeploymentBlockNumber}`,
+          );
+        }
+        deploymentBlockNumber = requestedDeploymentBlockNumber;
+      }
       return admitted;
     };
     // An unpinned lookup resumes the stored checkpoint from the block it was
@@ -575,9 +596,11 @@ export class ContextGraphAuthorityIndex {
     const initial = await repository.load();
     if (input.deploymentBlockPinned === false && initial.kind === 'checkpoint') {
       const stored = initial.checkpoint.cursor.deploymentBlockNumber;
-      if (stored > deploymentBlockNumber && stored <= finalizedNumber) setDeploymentBlock(stored);
+      if (stored > deploymentBlockNumber && stored <= finalizedNumber) deploymentBlockNumber = stored;
     }
     let durable = await admit(initial);
+    admittedAtStart = true;
+    const persistThroughBlockNumber = Math.max(deploymentBlockNumber, finalizedNumber - holdback);
 
     const bootstrap = this.bootstrap;
     const minimumSeedBlock = bootstrap === undefined ? deploymentBlockNumber
