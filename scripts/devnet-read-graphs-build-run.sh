@@ -47,9 +47,15 @@
 #             being set again. The context graph stays in serve for working and
 #             verifiable memory and in build for shared memory, so the gate runs
 #             with it. The restart counts only when another daemon worker answers
-#             afterwards. Without the settings API the phase does not apply (N/A)
-#             and the rest of the run can still pass; READ_GRAPHS_SWITCH=api, as
-#             the bar for live settings uses it, stops the run instead;
+#             afterwards. A restarted node refuses reads of a graph's shared
+#             memory until it has accepted the graph's RFC-64 authority again, so
+#             the phase then waits, at most READ_GRAPHS_LIVE_SWM_READY_TIMEOUT,
+#             until the node reads the context graph's shared memory again: the
+#             next phase starts outside that window, and the step's detail says
+#             how long it took. Without the settings API the phase does not
+#             apply (N/A) and the rest of the run can still pass;
+#             READ_GRAPHS_SWITCH=api, as the bar for live settings uses it, stops
+#             the run instead;
 #   gate      run READ_GRAPHS_GATE_CMD (default scripts/devnet-comprehensive.sh)
 #             with read graphs on, wait for `ready`, then run the full check
 #             again. Every mismatch a check logs during the workload fails the
@@ -127,6 +133,8 @@
 #   READ_GRAPHS_LIVE_CG                        the context graph the live phase switches (default devnet-test)
 #   READ_GRAPHS_LIVE_LOAD_NODE                 the node of the live phase's switches under write load and its
 #                                              restart (default 1)
+#   READ_GRAPHS_LIVE_SWM_READY_TIMEOUT         seconds the live phase waits, after its restart's checks, for the
+#                                              node to read the live context graph's shared memory again (default 300)
 #   READ_GRAPHS_SEED_CMD, READ_GRAPHS_GATE_CMD the seed and gate commands
 #   READ_GRAPHS_BACKFILL_TIMEOUT               seconds (default 1800)
 #   READ_GRAPHS_READY_TIMEOUT                  seconds, after the gate and each drill (default 900)
@@ -150,6 +158,7 @@ PHASES="${READ_GRAPHS_RUN_PHASES:-seed setup backfill measure live gate drills}"
 SWITCH="${READ_GRAPHS_SWITCH:-auto}"
 LIVE_CG="${READ_GRAPHS_LIVE_CG:-devnet-test}"
 LOAD_NODE="${READ_GRAPHS_LIVE_LOAD_NODE:-1}"
+SWM_READY_TIMEOUT="${READ_GRAPHS_LIVE_SWM_READY_TIMEOUT:-300}"
 SEED_CMD="${READ_GRAPHS_SEED_CMD:-$REPO_ROOT/scripts/v10-rc-validation.sh}"
 GATE_CMD="${READ_GRAPHS_GATE_CMD:-$REPO_ROOT/scripts/devnet-comprehensive.sh}"
 BACKFILL_TIMEOUT="${READ_GRAPHS_BACKFILL_TIMEOUT:-1800}"
@@ -1120,15 +1129,44 @@ live_under_load() {
   printf '%s %s %s' "$switches" "$(acked_count "$acked")" "$during"
 }
 
+# shared_memory_wait <n> <since>: wait, at most SWM_READY_TIMEOUT seconds, until node <n> reads the live context
+# graph's shared memory, that is until a bounded query of its shared working memory answers 200. A restarted node
+# refuses those reads until it has accepted the graph's RFC-64 authority again, which on a devnet takes from about
+# half a minute to more than a minute after its daemon starts. Prints the seconds since <since> (a now() time), then
+# the last HTTP code and error code when it was not 200. Returns 0 once the node reads it, 1 at the bound or when the
+# route refuses the request itself (400), and 2 when the node has no bounded query route (404), so there is nothing
+# to wait on.
+shared_memory_wait() {
+  local n="$1" since="$2" body answer code deadline
+  # At most one row, so a graph with any amount of shared memory answers within the route's bound of one row.
+  body="$(node -e 'process.stdout.write(JSON.stringify({ version: 1, contextGraphId: process.argv[1], view: "shared-working-memory", sparql: "SELECT ?s WHERE { { SELECT ?s WHERE { ?s ?p ?o } LIMIT 1 } }", maxRows: 1 }))' "$LIVE_CG")"
+  deadline=$(( $(now) + SWM_READY_TIMEOUT ))
+  while :; do
+    answer="$(api "$n" POST /api/query/bounded "$body")"
+    code="$(code_of "$answer")"
+    printf '%s\n' "$answer" > "$RESULTS/rows/live.swm-ready.node$n"
+    case "$code" in
+      200) echo "$(( $(now) - since ))"; return 0 ;;
+      400) echo "$(( $(now) - since )) $code $(field "$(body_of "$answer")" code)"; return 1 ;;
+      404) echo "$(( $(now) - since )) $code"; return 2 ;;
+    esac
+    [ "$(now)" -lt "$deadline" ] || { echo "$(( $(now) - since )) $code $(field "$(body_of "$answer")" code)"; return 1; }
+    sleep 2
+  done
+}
+
 # live_restart: restart LOAD_NODE; its settings for the live context graph must hold, and the merged join and
-# verifiable memory be served again without being set again.
+# verifiable memory be served again without being set again. Then wait until the node reads the context graph's
+# shared memory again, so the next phase does not start inside the restarted node's wait for the graph's authority.
+# On success it prints the seconds from the restart to that, or nothing when the node cannot be asked.
 live_restart() {
-  local n="$LOAD_NODE" before after got worker_before worker_after
+  local n="$LOAD_NODE" before after got worker_before worker_after since waited
   live_get "$n" pre-restart > /dev/null || { echo "reading the settings before the restart: $(settings_read "$RESULTS/rows/live.pre-restart.node$n" refusal)"; return 1; }
   before="$(settings_read "$RESULTS/rows/live.pre-restart.node$n" rows "$LIVE_CG")"
   # The restart counts only when another daemon worker answers afterwards (restart_node only waits for the API).
   worker_before="$(daemon_worker_pid "$n")"
   [ -n "$worker_before" ] || { echo "node$n's daemon.pid names no running daemon worker, so a restart could not be proven"; return 3; }
+  since="$(now)"
   restart_node "$n" || { echo "node$n did not come back after the restart"; return 1; }
   worker_after="$(daemon_worker_pid "$n")"
   [ -n "$worker_after" ] && [ "$worker_after" != "$worker_before" ] \
@@ -1140,10 +1178,18 @@ live_restart() {
   got="$(live_expect "$n" restart join merged "200 merged 1" 60)" || { echo "after the restart, the merged join answered $got, not the joined row (200 merged 1)"; return 1; }
   got="$(live_expect "$n" restart-per-asset join per-asset "200 per-asset 0")" || { echo "after the restart, the per-asset join answered $got, not 200 per-asset 0"; return 1; }
   got="$(live_expect "$n" restart vm merged "200 merged" 60)" || { echo "after the restart, a merged query on verifiable memory answered $got, not 200 merged"; return 1; }
+  waited="$(shared_memory_wait "$n" "$since")"
+  case $? in
+    0) note "live: node$n read $LIVE_CG's shared memory again $waited s after its restart began"; echo "$waited" ;;
+    2) note "live: node$n has no bounded query route, so the phase did not wait for it to read $LIVE_CG's shared memory again after the restart" ;;
+    *) set -- $waited
+       echo "node$n did not read $LIVE_CG's shared memory again within ${SWM_READY_TIMEOUT} s of the checks after its restart ($1 s after the restart began; last answer HTTP ${2:-?}${3:+ $3})"
+       return 3 ;;
+  esac
 }
 
 phase_live() {
-  local started n why outcome rc holders=""
+  local started n why outcome rc holders="" swm_ready=""
   started="$(now)"
   # Without the settings API (READ_GRAPHS_SWITCH=auto on a daemon that has none, or =config) the phase does not apply:
   # N/A, neither a failure nor a gap. READ_GRAPHS_SWITCH=api, as the bar for live settings uses it, stops the run instead.
@@ -1170,8 +1216,9 @@ phase_live() {
     3) record live INCONCLUSIVE "$(( $(now) - started ))" "node$LOAD_NODE, $LIVE_CG across a restart: $why"; return ;;
     *) record live FAIL "$(( $(now) - started ))" "node$LOAD_NODE, $LIVE_CG across a restart: $why"; return ;;
   esac
+  [ -z "$why" ] || swm_ready=", and the node read its shared memory again $why s after the restart began"
   set -- $outcome
-  record live PASS "$(( $(now) - started ))" "$LIVE_CG through the settings API on nodes $holders: off dropped its read graphs; build rebuilt them with a clean full check; serve answered a join across two working-memory drafts with the joined row when merged and none per asset, and merged queries on verifiable memory; the default semantics was followed and removed. On node$LOAD_NODE: $1 switches between build and serve, each taking effect while the writes went on (its modes, and the merged join answered or refused accordingly), with writes acknowledged between every two ($3 of $2 acknowledged drafts between the first and last switch), every draft there afterwards as written and a clean full check; after a restart, with another daemon worker answering, the settings held and the join was answered across assets again"
+  record live PASS "$(( $(now) - started ))" "$LIVE_CG through the settings API on nodes $holders: off dropped its read graphs; build rebuilt them with a clean full check; serve answered a join across two working-memory drafts with the joined row when merged and none per asset, and merged queries on verifiable memory; the default semantics was followed and removed. On node$LOAD_NODE: $1 switches between build and serve, each taking effect while the writes went on (its modes, and the merged join answered or refused accordingly), with writes acknowledged between every two ($3 of $2 acknowledged drafts between the first and last switch), every draft there afterwards as written and a clean full check; after a restart, with another daemon worker answering, the settings held and the join was answered across assets again$swm_ready"
 }
 
 # gate_verdict <exit code>: PASS, INCONCLUSIVE or FAIL for the gate. The comprehensive run writes REPORT.json
