@@ -157,6 +157,7 @@ import {
   type EvmContextGraphAuthorityIndexReaderV1,
 } from
   './evm-context-graph-authority-index-reader.js';
+import type { ContractDeploymentLookupV1 } from './evm-context-graph-authority-deployment.js';
 import { classifyBrowserWalletRead } from './browser-wallet-rpc-policy.js';
 import { EvmReceiptFinalityReader } from './evm-adapter-receipt-finality.js';
 
@@ -1582,8 +1583,8 @@ export class EVMChainAdapterBase {
             options,
           ),
           // The index reader consumes only the deploy block: no head probe on a cache hit.
-          resolveContractDeployBlockNumber: (address, operationLabel, contractLabel) =>
-            this.resolveContractDeployBlockNumber(
+          resolveContractDeployBlock: (address, operationLabel, contractLabel) =>
+            this.resolveContractDeployBlockLookup(
               address,
               operationLabel,
               contractLabel,
@@ -3767,13 +3768,23 @@ export class EVMChainAdapterBase {
     operationLabel: string,
     contractLabel: string,
   ): Promise<number> {
+    return (await this.resolveContractDeployBlockLookup(address, operationLabel, contractLabel))
+      .blockNumber;
+  }
+
+  /** The same lookup, saying whether it pinned the block or fell back to genesis. */
+  protected async resolveContractDeployBlockLookup(
+    address: string,
+    operationLabel: string,
+    contractLabel: string,
+  ): Promise<ContractDeploymentLookupV1> {
     const cached = this.cachedContractDeployBlocks.get(address.toLowerCase());
-    if (cached !== undefined) return cached;
-    return (await this.resolveContractDeployBlock(
-      address,
-      operationLabel,
-      contractLabel,
-    )).fromBlock;
+    if (cached !== undefined) return Object.freeze({ blockNumber: cached, pinned: true });
+    const resolved = await this.resolveContractDeployBlock(address, operationLabel, contractLabel);
+    return Object.freeze({
+      blockNumber: resolved.fromBlock,
+      pinned: resolved.degradedFromGenesis !== true,
+    });
   }
 
   protected async resolveContractDeployBlock(

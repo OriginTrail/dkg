@@ -26,6 +26,7 @@ import type { ContextGraphAuthorityProjectionServedEvidence } from
   '../src/context-graph-authority-index-projection.js';
 import { createEvmContextGraphAuthorityIndexRevisionReaderV1 } from
   '../src/evm-context-graph-authority-index-reader.js';
+import type { ContractDeploymentLookupV1 } from '../src/evm-context-graph-authority-deployment.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
 import { RpcUsageTracker } from '../src/rpc-usage.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
@@ -229,8 +230,8 @@ function makeReader(options: {
    * only thing the projection cache reads as an availability outage.
    */
   exhaustsOnFailover?: boolean;
-  /** What the adapter's deploy-block lookup answers; 0 is its unpinned genesis fallback. */
-  deployBlock?: () => number;
+  /** What the adapter's deploy-block lookup answers. */
+  deployment?: () => ContractDeploymentLookupV1;
 } = {}) {
   const { provider, calls, authorityLogs, usage } = makeProvider(options.latestBlockNumber);
   const indexStore = new MemoryAuthorityIndexStore();
@@ -270,12 +271,13 @@ function makeReader(options: {
         }
       }
     },
-    // The NUMBER the reader declares, which is what the adapter wires in
-    // (`resolveContractDeployBlockNumber`), not the adapter's own
-    // `{ fromBlock, head, scanProviders }` search result. Handing the object
+    // The lookup the reader declares, which is what the adapter wires in
+    // (`resolveContractDeployBlockLookup`), not the adapter's own
+    // `{ fromBlock, head, scanProviders }` search result. Handing that object
     // over made every anchor unresolvable and sent all of these through the
     // live scan they exist to prove is skipped.
-    resolveContractDeployBlockNumber: async () => options.deployBlock?.() ?? DEPLOY_BLOCK,
+    resolveContractDeployBlock: async () => options.deployment?.()
+      ?? { blockNumber: DEPLOY_BLOCK, pinned: true },
     pageSize: () => 2_000,
     finalityConfirmations: () => options.finalityConfirmations ?? 1,
     ...(options.sourceProvider === undefined && options.source === undefined
@@ -627,15 +629,15 @@ describe('Context Graph authority index over the one log', () => {
   });
 
   it('keeps the stored deployment block when the lookup falls back to genesis', async () => {
-    let lookup = DEPLOY_BLOCK;
-    const { reader, indexStore, calls } = makeReader({ deployBlock: () => lookup });
+    let lookup: ContractDeploymentLookupV1 = { blockNumber: DEPLOY_BLOCK, pinned: true };
+    const { reader, indexStore, calls } = makeReader({ deployment: () => lookup });
     await reader.snapshots.refresh();
     const reduced = indexStore.record;
     const scannedLogs = calls.getLogs;
-    // The adapter answers 0 when no endpoint pinned the block this time. The
-    // checkpoint reduced from the pinned block is not a different deployment,
-    // and rebuilding it from block 0 is a walk of the whole chain history.
-    lookup = 0;
+    // No endpoint pinned the block this time. The checkpoint reduced from the
+    // pinned block is not a different deployment, and rebuilding it from
+    // block 0 is a walk of the whole chain history.
+    lookup = { blockNumber: 0, pinned: false };
 
     await reader.snapshots.refresh();
 
@@ -644,6 +646,26 @@ describe('Context Graph authority index over the one log', () => {
       .toMatchObject({ deploymentBlockNumber: DEPLOY_BLOCK });
     expect(indexStore.record).toBe(reduced);
     expect(calls.getLogs).toBe(scannedLogs);
+  });
+
+  it('rebuilds from genesis when the stored deployment block is above a reset chain', async () => {
+    let head = LIVE_HEAD;
+    let lookup: ContractDeploymentLookupV1 = { blockNumber: DEPLOY_BLOCK, pinned: true };
+    const { reader, indexStore } = makeReader({
+      deployment: () => lookup,
+      latestBlockNumber: () => head,
+    });
+    await reader.snapshots.refresh();
+    // The chain was reset at the same address and is now below the block the
+    // stored checkpoint was reduced from; no endpoint can pin the new one.
+    head = DEPLOY_BLOCK - 5;
+    lookup = { blockNumber: 0, pinned: false };
+
+    await reader.snapshots.refresh();
+
+    expect(indexStore.invalidations).toHaveLength(1);
+    expect((indexStore.record!.value as { cursor: Record<string, number> }).cursor)
+      .toMatchObject({ deploymentBlockNumber: 0, throughBlockNumber: DEPLOY_BLOCK - 5 });
   });
 
   it('rechecks a cached tip before exhausting an endpoint whose cursor just advanced', async () => {

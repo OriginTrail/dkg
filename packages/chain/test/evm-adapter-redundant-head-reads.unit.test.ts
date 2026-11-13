@@ -132,6 +132,27 @@ describe('resolveContractDeployBlockNumber: the immutable deploy block needs no 
     expect(pruned.getCode.calls.length).toBeGreaterThan(searches);
   });
 
+  it('the authority lookup says whether it pinned the block, and a cache hit stays request-free', async () => {
+    const primary = archiveProvider();
+    const a = makeAdapter([primary]);
+    expect(await a.resolveContractDeployBlockLookup(CONTRACT, 'unit', 'Contract'))
+      .toEqual({ blockNumber: DEPLOY_BLOCK, pinned: true });
+    const reads = primary.getBlockNumber.calls.length + primary.getCode.calls.length;
+    expect(await a.resolveContractDeployBlockLookup(MIXED_CASE_CONTRACT, 'unit', 'Contract'))
+      .toEqual({ blockNumber: DEPLOY_BLOCK, pinned: true });
+    expect(primary.getBlockNumber.calls.length + primary.getCode.calls.length).toBe(reads);
+
+    const pruned = {
+      getBlockNumber: recorder(async () => HEAD),
+      getCode: recorder(async (_address: string, block?: number) => {
+        if (block !== undefined) throw new Error('missing trie node (pruned node)');
+        return '0x6000';
+      }),
+    };
+    expect(await makeAdapter([pruned]).resolveContractDeployBlockLookup(CONTRACT, 'unit', 'Contract'))
+      .toEqual({ blockNumber: 0, pinned: false });
+  });
+
   it('invalidatePublishPreflightCache drops the cached deploy block, so the next call re-resolves', async () => {
     const primary = archiveProvider();
     const a = makeAdapter([primary]);

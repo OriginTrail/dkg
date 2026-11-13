@@ -244,15 +244,35 @@ export class ContextGraphAuthorityIndex {
    */
   async whenScanIdle(scope: string, signal?: AbortSignal): Promise<void> {
     const lane = this.#scanLane(scope);
+    const lifecycleSignal = this.#lifecycleAbort.signal;
     for (let active = this.#activeScans.get(lane); active !== undefined;
       active = this.#activeScans.get(lane)) {
-      await waitForSignal(active.settled, signal);
+      await this.#waitOut(active, signal, lifecycleSignal);
     }
   }
 
   /** `scope` in the request class of the caller, whose class a scan it starts keeps. */
   #scanLane(scope: string): string {
     return [scope, activeRpcRequestContext().requestClass].join('\u0000');
+  }
+
+  /**
+   * Wait for one running scan to settle. Bounded by the caller's `signal` and
+   * by the lifecycle the caller entered under: a `clear()` while it waits (a
+   * Hub rotation, a chain reconfiguration) rejects it with that lifecycle's
+   * abort, as it rejects the scans it stops, so nothing prepared before the
+   * clear starts after it.
+   */
+  async #waitOut(
+    active: ActiveScan,
+    signal: AbortSignal | undefined,
+    lifecycleSignal: AbortSignal,
+  ): Promise<void> {
+    await waitForSignal(active.settled, signal === undefined
+      ? lifecycleSignal
+      : AbortSignal.any([signal, lifecycleSignal]));
+    lifecycleSignal.throwIfAborted();
+    if (this.#closed) throw new DOMException('Context Graph authority index is closed', 'AbortError');
   }
 
   /**
@@ -401,7 +421,10 @@ export class ContextGraphAuthorityIndex {
     if (finalizedHash === undefined) {
       throw new Error('Context Graph authority index finalized hash is invalid');
     }
-    const scanKey = [scope, input.finalized.number, finalizedHash].join('\u0000');
+    // The request class is part of the key: a foreground read must not join a
+    // walk the background refresh runs on the smaller background budget.
+    const lane = this.#scanLane(scope);
+    const scanKey = [lane, input.finalized.number, finalizedHash].join('\u0000');
     // ONE physical scan per scope and request class. The single flight below
     // only joins a scan to the same anchor on the same endpoint; a scan to any
     // other anchor used to start beside it. From a far-behind cursor each is a walk of
@@ -409,15 +432,15 @@ export class ContextGraphAuthorityIndex {
     // under a throttled RPC budget a walk that takes longer than readers wait
     // was joined by one more walk per reader. Waiting here is bounded by this
     // caller's own signal, and leaves nothing queued if the caller gives up.
-    const lane = this.#scanLane(scope);
+    // The check that ends this loop and the registration below run in one
+    // synchronous step, so two callers cannot both find the lane free.
+    const lifecycleSignal = this.#lifecycleAbort.signal;
     for (let active = this.#activeScans.get(lane); active !== undefined;
       active = this.#activeScans.get(lane)) {
       if (active.key === scanKey && active.readScope === input.readScope) break;
-      await waitForSignal(active.settled, input.signal);
-      if (this.#closed) throw new DOMException('Context Graph authority index is closed', 'AbortError');
+      await this.#waitOut(active, input.signal, lifecycleSignal);
     }
     const pending = this.#singleFlight.run(scanKey, input.readScope, () => {
-      const lifecycleSignal = this.#lifecycleAbort.signal;
       const scan = this.#scan({ ...input, scope, finalized: {
         number: input.finalized.number,
         hash: finalizedHash,

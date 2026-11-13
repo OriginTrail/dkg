@@ -56,6 +56,7 @@ import { withRpcUsageConsumer } from './rpc-usage.js';
 import { readEvmContextGraphAuthorityIndexRpcV1, readOwnedAuthorityIndexRpcV1, retryCachedAuthorityIndexHeadV1 } from './evm-context-graph-authority-index-rpc.js';
 export { readEvmContextGraphAuthorityIndexRpcV1 } from './evm-context-graph-authority-index-rpc.js';
 import { contextGraphAuthorityAnchorUnavailableV1 } from './context-graph-authority-index-errors.js';
+import { resolveAuthorityScanDeploymentV1, type ContractDeploymentLookupV1 } from './evm-context-graph-authority-deployment.js';
 export { contextGraphAuthorityAnchorUnavailableV1 } from './context-graph-authority-index-errors.js';
 
 /** A local log revision moved; this is not evidence of an RPC outage. */
@@ -312,11 +313,11 @@ interface EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1 {
     read: (provider: JsonRpcProvider) => Promise<T>,
     options?: ReadOpts,
   ) => Promise<T>;
-  readonly resolveContractDeployBlockNumber: (
+  readonly resolveContractDeployBlock: (
     address: string,
     operationLabel: string,
     contractLabel: string,
-  ) => Promise<number>;
+  ) => Promise<ContractDeploymentLookupV1>;
   readonly pageSize: () => number;
   /**
    * `chain.finalityConfirmations` — the node's SINGLE definition of finality.
@@ -415,14 +416,11 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   const assertOpen = (): void => {
     if (closed) throw new DOMException('Context Graph authority index reader is closed', 'AbortError');
   };
-  /** 0 is the adapter's unpinned genesis fallback; see `durableDeploymentBlockNumber`. */
-  const resolveDeploymentBlockNumber = async (address: string, scope: string, label: string) => {
-    const resolved = await dependencies.resolveContractDeployBlockNumber(
-      address, label, 'ContextGraphStorage',
-    );
-    return resolved !== 0 ? resolved
-      : (await dependencies.index.durableDeploymentBlockNumber(scope)) ?? 0;
-  };
+  const resolveDeployment = (address: string, scope: string, label: string) => (
+    resolveAuthorityScanDeploymentV1(
+      () => dependencies.resolveContractDeployBlock(address, label, 'ContextGraphStorage'),
+      () => dependencies.index.durableDeploymentBlockNumber(scope),
+    ));
   const rescanFinalizedProjection = async <T>(
     operationLabel: string,
     options: ContextGraphAuthorityReadOptions,
@@ -530,18 +528,13 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         assertOpen();
         projectionSignal.throwIfAborted();
         options.signal?.throwIfAborted();
-        const deploymentBlockNumber = await resolveDeploymentBlockNumber(
-          contractAddress,
-          ownScope,
-          operationLabel,
-        );
+        const deployment = await resolveDeployment(contractAddress, ownScope, operationLabel);
         const readInput = {
           index: dependencies.index,
           deploymentId: dependencies.deploymentId,
           contract,
           contractAddress,
           provider,
-          deploymentBlockNumber,
           pageSize: dependencies.pageSize(),
           finalityConfirmations: dependencies.finalityConfirmations(),
           stabilizationOperation: operationLabel,
@@ -565,14 +558,17 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
           // once before spending an RPC scan on that ordinary local race.
           const source = dependencies.chainEventLogAuthority?.();
           if (source === undefined || source.contractAddress !== contractAddress) break;
+          const deploymentBlockNumber = deployment.coverageFrom;
           const anchor = (await source.resolveAnchor({
             deploymentBlockNumber,
             finalityConfirmations: dependencies.finalityConfirmations(),
           })).anchor;
-          if (anchor === undefined) break;
+          // Below a stored deployment block: a reset chain, for the live scan.
+          if (anchor === undefined
+            || deployment.scanFrom(anchor.finalized.number) !== deploymentBlockNumber) break;
           try {
             const logged = await readEvmContextGraphAuthorityIndexProjectionV1(
-              { ...readInput, finalized: anchor.finalized, logSource: { anchor, source } },
+              { ...readInput, deploymentBlockNumber, finalized: anchor.finalized, logSource: { anchor, source } },
               (scan) => project(scan, {
                 provider,
                 contractAddress,
@@ -663,7 +659,11 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         // tick's binding against and the block coverage has to reach back to.
         const headHash = head.hash;
         const indexed = await readEvmContextGraphAuthorityIndexProjectionV1(
-          { ...readInput, finalized: { number: finalized.number, hash: finalized.hash } },
+          {
+            ...readInput,
+            deploymentBlockNumber: deployment.scanFrom(finalized.number),
+            finalized: { number: finalized.number, hash: finalized.hash },
+          },
           (scan) => project(scan, {
             provider,
             contractAddress,
@@ -1144,16 +1144,18 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
             if (source === undefined || source.contractAddress !== contractAddress) {
               return undefined;
             }
-            const deploymentBlockNumber = await resolveDeploymentBlockNumber(
+            const deployment = await resolveDeployment(
               contractAddress,
               contextGraphAuthorityIndexScope(dependencies.deploymentId, contractAddress),
               'getContextGraphFinalizedCreation',
             );
+            const deploymentBlockNumber = deployment.coverageFrom;
             const anchor = (await source.resolveAnchor({
               deploymentBlockNumber,
               finalityConfirmations: dependencies.finalityConfirmations(),
             })).anchor;
-            if (anchor === undefined) return undefined;
+            if (anchor === undefined
+              || deployment.scanFrom(anchor.finalized.number) !== deploymentBlockNumber) return undefined;
 
             let view: ContextGraphAuthorityIndexView;
             let creation: Extract<

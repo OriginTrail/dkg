@@ -158,7 +158,11 @@ async function driveReaders(store: MemoryAuthorityIndexStore): Promise<WalkCost>
 
 /** One read of the index at `anchor`, against chain data that answers at once. */
 function directRead(anchor: number, overrides: Partial<{
-  readPage: (fromBlock: number, toBlock: number) => Promise<readonly RawContextGraphAuthorityIndexEvent[]>;
+  readPage: (
+    fromBlock: number,
+    toBlock: number,
+    lifecycleSignal: AbortSignal,
+  ) => Promise<readonly RawContextGraphAuthorityIndexEvent[]>;
   signal: AbortSignal;
   readScope: object;
 }> = {}) {
@@ -285,31 +289,74 @@ describe('durable authority-index walks under a throttled RPC budget', () => {
     expect(store.invalidations).toHaveLength(1);
   });
 
-  it('does not hold a foreground read behind a walk the background refresh started', async () => {
-    // A scan's requests keep the class of the caller that started it, and the
-    // background class runs on the smaller share of the budget. The core's
-    // background refresh is the first reader after a restart.
+  for (const provider of ['the same', 'another'] as const) {
+    it(`does not hold a foreground read behind a background-refresh walk on ${provider} endpoint`, async () => {
+      // A scan's requests keep the class of the caller that started it, and
+      // the background class runs on the smaller share of the budget. The
+      // core's background refresh is the first reader after a restart. In
+      // production one endpoint serves both classes, so the foreground read
+      // must not join the background walk at the same anchor either.
+      const store = new MemoryAuthorityIndexStore();
+      const index = new ContextGraphAuthorityIndex(store);
+      const backgroundScope = {};
+      const foregroundScope = provider === 'the same' ? backgroundScope : {};
+      const backgroundEntered = Promise.withResolvers<void>();
+      const releaseBackground = Promise.withResolvers<void>();
+      const background = withRpcRequestContext({ requestClass: 'background' }, () => index.view(
+        directRead(3_000, {
+          readScope: backgroundScope,
+          readPage: async (fromBlock, toBlock) => {
+            backgroundEntered.resolve();
+            await releaseBackground.promise;
+            return EVENTS.filter((entry) => entry.blockNumber >= fromBlock && entry.blockNumber <= toBlock);
+          },
+        }),
+      ));
+      await backgroundEntered.promise;
+
+      await expect(index.view(directRead(3_000, { readScope: foregroundScope }))).resolves.toBeDefined();
+      releaseBackground.resolve();
+      await expect(background).resolves.toBeDefined();
+      expect(store.invalidations).toEqual([]);
+      expect((store.record!.value as { cursor: { throughBlockNumber: number } }).cursor)
+        .toMatchObject({ throughBlockNumber: 3_000 - HOLDBACK });
+    });
+  }
+
+  it('rejects a queued scan when the index is cleared while it waits', async () => {
     const store = new MemoryAuthorityIndexStore();
     const index = new ContextGraphAuthorityIndex(store);
-    const backgroundEntered = Promise.withResolvers<void>();
-    const releaseBackground = Promise.withResolvers<void>();
-    const background = withRpcRequestContext({ requestClass: 'background' }, () => index.view(
-      directRead(3_000, {
-        readPage: async (fromBlock, toBlock) => {
-          backgroundEntered.resolve();
-          await releaseBackground.promise;
-          return EVENTS.filter((entry) => entry.blockNumber >= fromBlock && entry.blockNumber <= toBlock);
-        },
-      }),
-    ));
-    await backgroundEntered.promise;
+    const walkEntered = Promise.withResolvers<void>();
+    const walk = index.view(directRead(3_000, {
+      readPage: async (_fromBlock, _toBlock, lifecycleSignal) => {
+        walkEntered.resolve();
+        // A page that only ends with the lifecycle, as an owned RPC read does.
+        return new Promise<never>((_resolve, reject) => {
+          lifecycleSignal.addEventListener('abort', () => reject(lifecycleSignal.reason), { once: true });
+        });
+      },
+    }));
+    await walkEntered.promise;
+    let queuedPages = 0;
+    const queued = index.view(directRead(3_005, {
+      readPage: async () => {
+        queuedPages += 1;
+        return [];
+      },
+    }));
+    const idle = index.whenScanIdle(SCOPE);
 
-    await expect(index.view(directRead(3_000))).resolves.toBeDefined();
-    releaseBackground.resolve();
-    await expect(background).resolves.toBeDefined();
-    expect(store.invalidations).toEqual([]);
-    expect((store.record!.value as { cursor: { throughBlockNumber: number } }).cursor)
-      .toMatchObject({ throughBlockNumber: 3_000 - HOLDBACK });
+    // A Hub rotation or chain reconfiguration: neither the running scan nor a
+    // read prepared before it may go on into the new lifecycle.
+    index.clear();
+
+    const settled = await Promise.allSettled([walk, queued, idle]);
+    expect(settled.map((result) => result.status)).toEqual(['rejected', 'rejected', 'rejected']);
+    for (const result of settled) {
+      expect((result as PromiseRejectedResult).reason).toMatchObject({ name: 'AbortError' });
+    }
+    expect(queuedPages).toBe(0);
+    expect(store.commits).toEqual([]);
   });
 
   it('lets a caller leave the line without leaving a scan behind', async () => {
