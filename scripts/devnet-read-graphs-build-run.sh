@@ -1719,14 +1719,17 @@ partition_graphs() {
 member_graphs() {
   node "$REPO_ROOT/scripts/read-graph-store-report.mjs" --endpoint "$1" --member-graphs 2>> "$RESULTS/drill-rollback.log" > "$2"
 }
-# members_lost <before> <after> <exact|kept>: prints the first difference and fails, or prints nothing. `exact`: the
-# same graphs with the same triples; `kept`: every graph of <before> still there, holding every triple it held.
+# members_lost <before> <after> <exact|kept> [graph ...]: prints the first difference and fails, or prints nothing.
+# `exact`: the same graphs with the same triples; `kept`: every graph of <before> still there, holding every triple it
+# held. The graphs named after the mode are left out of the comparison.
 members_lost() {
   node -e '
     const fs = require("fs");
     const [before, after] = process.argv.slice(1, 3).map((file) => JSON.parse(fs.readFileSync(file, "utf8")).graphs);
     const exact = process.argv[3] === "exact";
+    const skipped = new Set(process.argv.slice(4));
     for (const [graph, triples] of Object.entries(before)) {
+      if (skipped.has(graph)) continue;
       if (!(graph in after)) { console.log(`<${graph}> is gone`); process.exit(1); }
       const now = new Set(after[graph]);
       const lost = triples.find((triple) => !now.has(triple));
@@ -1736,9 +1739,12 @@ members_lost() {
         console.log(`<${graph}> gained ${after[graph].find((triple) => !had.has(triple))}`); process.exit(1);
       }
     }
-    if (exact) for (const graph of Object.keys(after)) if (!(graph in before)) { console.log(`<${graph}> appeared`); process.exit(1); }
-  ' "$1" "$2" "$3"
+    if (exact) for (const graph of Object.keys(after)) if (!(graph in before) && !skipped.has(graph)) { console.log(`<${graph}> appeared`); process.exit(1); }
+  ' "$@"
 }
+# The agents system graph holds each daemon's own registration and liveness triples, which a daemon rewrites when it
+# starts, on any release. It is not asset data, so the comparison across a daemon start leaves it out.
+AGENTS_SYSTEM_GRAPH="did:dkg:context-graph:agents"
 
 # rollback_steps <n> <endpoint> <version>: the rollback drill's changes, with node <n> stopped, its store at
 # <endpoint>, and <version> the earlier release.
@@ -1836,7 +1842,7 @@ rollback_steps() {
     || { printf 'FAIL\037%s\037%s\037\n' "node$n did not start on $ROLLBACK_FROM (devnet-sh.log)" "$dropped"; return; }
   version="$(node_commit "$n")"
   [ "$version" != "$UNDER_TEST" ] || { printf 'FAIL\037%s\037%s\037%s\n' "node$n still ran the build under test, not $ROLLBACK_FROM" "$dropped" "$version"; return; }
-  member_graphs "$endpoint" "$members_earlier" && lost="$(members_lost "$members_before" "$members_earlier" kept)" \
+  member_graphs "$endpoint" "$members_earlier" && lost="$(members_lost "$members_before" "$members_earlier" kept "$AGENTS_SYSTEM_GRAPH")" \
     || { printf 'FAIL\037%s\037%s\037%s\n' "node$n's asset data on $ROLLBACK_FROM: ${lost:-unreadable}" "$dropped" "$version"; return; }
   # Kept triples are not enough: the earlier daemon must also find and read the assets through its own query route.
   lost="$(asset_probe_check "$n" "$probe")" \
