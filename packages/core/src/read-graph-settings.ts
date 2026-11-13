@@ -208,7 +208,10 @@ function describeContextGraph(contextGraph: Record<string, unknown>, allowed: re
     const choice = modeOf(chosen[layer]);
     const kept = mode === 'build' || mode === 'serve';
     const copies = readGraphs.filter((readGraph) => layerOf(readGraph.layer) === layer);
-    const assets = kept ? countOf(copies, 'members') : undefined;
+    // A sub-graph's copy holds what the context graph's whole copy already holds, so sizes come from the whole copies: one, or one per agent in
+    // working memory, whose drafts don't overlap. States come from every copy.
+    const whole = copies.filter((readGraph) => typeof readGraph.subGraphName !== 'string');
+    const assets = kept ? countOf(whole, 'members') : undefined;
     let line = `- ${LAYER_WORDS[layer]}${assets === undefined ? '' : ` · ${counted(assets, 'asset')}`}: ${mode ? MODE_WORDS[mode] : 'not set'}`;
     if (mode && choice && choice !== mode) {
       const why = allowed && !allowed.includes(layer) ? 'this node does not allow it' : 'this node keeps it ' + MODE_WORDS[mode];
@@ -216,7 +219,7 @@ function describeContextGraph(contextGraph: Record<string, unknown>, allowed: re
     }
     if (kept) {
       line += `: ${progressOf(copies, mode)}`;
-      const facts = countOf(copies, 'triples');
+      const facts = countOf(whole, 'triples');
       if (facts !== undefined) line += `. About ${counted(facts, 'fact')}, at its last build`;
     }
     lines.push(line);
@@ -240,8 +243,8 @@ function progressOf(readGraphs: readonly Record<string, unknown>[], mode: 'build
 }
 
 /**
- * What a memory's copies counted at their last build, `members` (assets) or
- * `triples` (facts), added up; `undefined` unless every copy has the count (a
+ * What a memory's whole copies counted at their last build, `members` (assets)
+ * or `triples` (facts), added up; `undefined` unless every one has the count (a
  * restart clears them until the next build).
  */
 function countOf(readGraphs: readonly Record<string, unknown>[], key: 'members' | 'triples'): number | undefined {

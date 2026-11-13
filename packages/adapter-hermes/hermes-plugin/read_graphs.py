@@ -210,7 +210,11 @@ def _describe_context_graph(context_graph: Dict[str, Any], allowed: Optional[lis
         choice = _mode(chosen.get(layer))
         kept = mode in ("build", "serve")
         copies = [rg for rg in read_graphs if _layer(rg.get("layer")) == layer]
-        assets = _count(copies, "members") if kept else None
+        # A sub-graph's copy holds what the context graph's whole copy already holds, so sizes come from
+        # the whole copies: one, or one per agent in working memory, whose drafts don't overlap. States
+        # come from every copy.
+        whole = [rg for rg in copies if not isinstance(rg.get("subGraphName"), str)]
+        assets = _count(whole, "members") if kept else None
         label = _LAYER_WORDS[layer] if assets is None else f"{_LAYER_WORDS[layer]} · {_counted(assets, 'asset')}"
         line = f"- {label}: {_MODE_WORDS[mode] if mode else 'not set'}"
         if mode and choice and choice != mode:
@@ -218,7 +222,7 @@ def _describe_context_graph(context_graph: Dict[str, Any], allowed: Optional[lis
             line += f" (set to {_MODE_WORDS[choice]}, but {why})"
         if kept:
             line += f": {_progress(copies, mode)}"
-            facts = _count(copies, "triples")
+            facts = _count(whole, "triples")
             if facts is not None:
                 line += f". About {_counted(facts, 'fact')}, at its last build"
         lines.append(line)
@@ -243,8 +247,8 @@ def _progress(read_graphs: List[Dict[str, Any]], mode: str) -> str:
 
 
 def _count(read_graphs: List[Dict[str, Any]], key: str) -> Optional[int]:
-    """What a memory's copies counted at their last build, ``members`` (assets) or
-    ``triples`` (facts), added up; ``None`` unless every copy has the count (a
+    """What a memory's whole copies counted at their last build, ``members`` (assets)
+    or ``triples`` (facts), added up; ``None`` unless every one has the count (a
     restart clears them until the next build)."""
     if not read_graphs:
         return None
