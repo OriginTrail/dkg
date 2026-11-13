@@ -21,7 +21,6 @@ import {
   ContextGraphAuthorityIndexRepository,
   type ContextGraphAuthorityIndexRepositoryRecord,
 } from './context-graph-authority-index-repository.js';
-import { KeyedSingleFlight } from './keyed-ttl-single-flight-cache.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
   ContextGraphAuthorityIndexProjectionCache,
@@ -75,6 +74,8 @@ type ServableCheckpoint = Readonly<{
 type ActiveScan = Readonly<{
   key: string;
   readScope: object;
+  /** What a caller to the same anchor on the same endpoint joins. */
+  checkpoint: Promise<ContextGraphAuthorityIndexCheckpoint>;
   /** Settles with the scan and never rejects. */
   settled: Promise<void>;
 }>;
@@ -136,7 +137,6 @@ export interface ContextGraphAuthorityIndexScanInput {
  */
 export class ContextGraphAuthorityIndex {
   readonly #repository: ContextGraphAuthorityIndexRepository;
-  readonly #singleFlight = new KeyedSingleFlight<string, object>();
   readonly #activity = new ContextGraphAuthorityIndexActivity();
   readonly #bootstrapCoordinator: ContextGraphAuthorityIndexBootstrapCoordinator | undefined;
   readonly #servable = new Map<string, readonly ServableCheckpoint[]>();
@@ -367,7 +367,6 @@ export class ContextGraphAuthorityIndex {
     this.#servableEpochs.clear();
     this.#projections.clear();
     this.#bootstrapCoordinator?.clear();
-    this.#singleFlight.invalidateAll();
   }
 
   /** Wait until every lifecycle-owned physical scan has settled. */
@@ -425,38 +424,41 @@ export class ContextGraphAuthorityIndex {
     // walk the background refresh runs on the smaller background budget.
     const lane = this.#scanLane(scope);
     const scanKey = [lane, input.finalized.number, finalizedHash].join('\u0000');
-    // ONE physical scan per scope and request class. The single flight below
-    // only joins a scan to the same anchor on the same endpoint; a scan to any
-    // other anchor used to start beside it. From a far-behind cursor each is a walk of
-    // the same pages, and every walk outlives the callers that started it, so
-    // under a throttled RPC budget a walk that takes longer than readers wait
-    // was joined by one more walk per reader. Waiting here is bounded by this
-    // caller's own signal, and leaves nothing queued if the caller gives up.
-    // The check that ends this loop and the registration below run in one
-    // synchronous step, so two callers cannot both find the lane free.
+    // ONE physical scan per scope and request class. A caller to the same
+    // anchor on the same endpoint joins the running scan. A scan to any other
+    // anchor used to start beside it; from a far-behind cursor each of those
+    // is a walk of the same pages, and every walk outlives the callers that
+    // started it, so under a throttled RPC budget a walk that takes longer
+    // than readers wait was joined by one more walk per reader. Now it waits,
+    // bounded by its caller's own signal, and leaves nothing queued if the
+    // caller gives up. The check that ends the wait and the registration
+    // below run in one synchronous step, so two callers cannot both find the
+    // lane free.
     const lifecycleSignal = this.#lifecycleAbort.signal;
-    for (let active = this.#activeScans.get(lane); active !== undefined;
-      active = this.#activeScans.get(lane)) {
-      if (active.key === scanKey && active.readScope === input.readScope) break;
+    let active = this.#activeScans.get(lane);
+    while (active !== undefined
+      && (active.key !== scanKey || active.readScope !== input.readScope)) {
       await this.#waitOut(active, input.signal, lifecycleSignal);
+      active = this.#activeScans.get(lane);
     }
-    const pending = this.#singleFlight.run(scanKey, input.readScope, () => {
-      const scan = this.#scan({ ...input, scope, finalized: {
+    if (active === undefined) {
+      const checkpoint = this.#activity.track(this.#scan({ ...input, scope, finalized: {
         number: input.finalized.number,
         hash: finalizedHash,
-      } }, lifecycleSignal);
-      const active: ActiveScan = Object.freeze({
+      } }, lifecycleSignal));
+      const started: ActiveScan = Object.freeze({
         key: scanKey,
         readScope: input.readScope,
-        settled: scan.then(() => undefined, () => undefined),
+        checkpoint,
+        settled: checkpoint.then(() => undefined, () => undefined),
       });
-      this.#activeScans.set(lane, active);
-      void active.settled.then(() => {
-        if (this.#activeScans.get(lane) === active) this.#activeScans.delete(lane);
+      this.#activeScans.set(lane, started);
+      void started.settled.then(() => {
+        if (this.#activeScans.get(lane) === started) this.#activeScans.delete(lane);
       });
-      return this.#activity.track(scan);
-    });
-    return waitForSignal(pending, input.signal);
+      active = started;
+    }
+    return waitForSignal(active.checkpoint, input.signal);
   }
 
   async #scan(
