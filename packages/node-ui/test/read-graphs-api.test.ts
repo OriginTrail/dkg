@@ -90,6 +90,32 @@ describe('decodeReadGraphSettings', () => {
     expect(settings.layers.map(layer => layer.triples)).toEqual([undefined, undefined, undefined]);
   });
 
+  it('counts a layer\'s assets and facts from its whole copies, as a sub-graph\'s copy holds what the whole copy already holds', () => {
+    const settings = decodeReadGraphSettings({
+      contextGraphs: [{
+        contextGraphId: CG,
+        effective: { layers: { 'verifiable-memory': 'serve', 'shared-working-memory': 'serve', 'working-memory': 'serve' } },
+        readGraphs: [
+          // One asset, in the registered sub-graph `code`: the whole copy and the sub-graph's copy both hold it.
+          { layer: 'vm', state: 'ready', members: 1, triples: 20 },
+          { layer: 'vm', state: 'building', subGraphName: 'code', members: 1, triples: 20, progress: 0.5 },
+          // A count stays unknown while the whole copy lacks it.
+          { layer: 'swm', state: 'ready' },
+          { layer: 'swm', state: 'ready', subGraphName: 'code', members: 1, triples: 2 },
+          // Each agent's drafts are its own, so the agents' whole copies add up.
+          { layer: 'wm', state: 'ready', agentAddress: '0xa', members: 2, triples: 6 },
+          { layer: 'wm', state: 'ready', agentAddress: '0xb', members: 3, triples: 9 },
+          { layer: 'wm', state: 'ready', agentAddress: '0xa', subGraphName: 'code', members: 2, triples: 6 },
+        ],
+      }],
+    }, CG);
+    expect(settings.layers.map(layer => layer.members)).toEqual([1, undefined, 5]);
+    expect(settings.layers.map(layer => layer.triples)).toEqual([20, undefined, 15]);
+    // States and progress still come from every copy.
+    expect(settings.layers[0]).toMatchObject({ states: { ready: 1, building: 1 }, progress: 0.5 });
+    expect(settings.layers[2]!.states).toEqual({ ready: 3 });
+  });
+
   it('keeps the node-wide refusal and the kill switch', () => {
     const settings = decodeReadGraphSettings({
       policy: { enabled: false },

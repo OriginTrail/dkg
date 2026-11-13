@@ -150,6 +150,32 @@ def test_settings_add_the_assets_and_facts_only_when_every_copy_reports_them(wor
     ]
 
 
+def test_settings_count_a_memory_from_its_whole_copies(wording):
+    def copy(layer, name, **extra):
+        return {"readGraph": name, "layer": layer, "state": "ready", **extra}
+    answer = {"contextGraphs": [{
+        "contextGraphId": "team",
+        "effective": {"layers": {"verifiable-memory": "serve", "shared-working-memory": "build", "working-memory": "build"}},
+        "readGraphs": [
+            # One asset, in the registered sub-graph `code`: the whole copy and the sub-graph's copy both hold it.
+            copy("vm", "urn:vm", members=1, triples=20),
+            copy("vm", "urn:vm:code", subGraphName="code", members=1, triples=20),
+            # A count stays unknown while the whole copy lacks it, whatever the sub-graph's copy says.
+            copy("swm", "urn:swm"),
+            copy("swm", "urn:swm:code", subGraphName="code", members=1, triples=2),
+            # Each agent's drafts are its own, so the agents' whole copies add up. States still come from every copy.
+            copy("wm", "urn:wm:a", agentAddress="0xa", members=2, triples=6),
+            copy("wm", "urn:wm:b", agentAddress="0xb", members=3, triples=9),
+            copy("wm", "urn:wm:a:code", agentAddress="0xa", subGraphName="code", state="building", members=2, triples=6),
+        ],
+    }]}
+    assert wording.describe_settings(answer).split("\n")[1:] == [
+        "- Published assets · 1 asset: On: In use. About 20 facts, at its last build",
+        "- Shared memory, shared with your team: Preview: Ready to turn on",
+        "- Private drafts · 5 assets: Preview: 2 Ready to turn on, 1 Getting ready. About 15 facts, at its last build",
+    ]
+
+
 def test_changes_in_plain_words(wording):
     def change(layer, frm, to, outcome, cg="my-project"):
         return {"contextGraphId": cg, "layer": layer, "from": frm, "to": to, "outcome": outcome}
