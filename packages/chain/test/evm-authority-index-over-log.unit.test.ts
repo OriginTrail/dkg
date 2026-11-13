@@ -26,7 +26,8 @@ import type { ContextGraphAuthorityProjectionServedEvidence } from
   '../src/context-graph-authority-index-projection.js';
 import { createEvmContextGraphAuthorityIndexRevisionReaderV1 } from
   '../src/evm-context-graph-authority-index-reader.js';
-import type { ContractDeploymentLookupV1 } from '../src/evm-context-graph-authority-deployment.js';
+import type { ContextGraphAuthorityIndexDeploymentLookup as ContractDeploymentLookupV1 } from
+  '../src/context-graph-authority-index.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
 import { RpcUsageTracker } from '../src/rpc-usage.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
@@ -666,6 +667,38 @@ describe('Context Graph authority index over the one log', () => {
     expect(indexStore.invalidations).toHaveLength(1);
     expect((indexStore.record!.value as { cursor: Record<string, number> }).cursor)
       .toMatchObject({ deploymentBlockNumber: 0, throughBlockNumber: DEPLOY_BLOCK - 5 });
+  });
+
+  it('rebuilds rejected history live when the log cannot reach below the stored deployment block', async () => {
+    let lookup: ContractDeploymentLookupV1 = { blockNumber: DEPLOY_BLOCK, pinned: true };
+    let enableLog = false;
+    // The log of a chain reset at the same address: it covers the history from
+    // the stored deployment block only, and its block hashes are the new chain's.
+    const source = logSource(seededStore(), {
+      readBlockHash: async (blockNumber) => `0x${(blockNumber + 0xabcdef).toString(16).padStart(64, '0')}`,
+    });
+    const { reader, indexStore, authorityLogs, attempts } = makeReader({
+      deployment: () => lookup,
+      latestBlockNumber: () => 100,
+      sourceProvider: () => (enableLog ? source : undefined),
+    });
+    await reader.snapshots.refresh();
+    lookup = { blockNumber: 0, pinned: false };
+    enableLog = true;
+    // A graph the reset chain created below the old deployment block.
+    authorityLogs.push(liveCreationLog(5, 9n, ABSENT_NAME_HASH));
+
+    await reader.snapshots.refresh();
+
+    // One endpoint, no failed attempt: the log handed the rebuild to the live scan.
+    expect(attempts).toEqual([]);
+    expect(indexStore.invalidations).toHaveLength(1);
+    const rebuilt = indexStore.record!.value as {
+      cursor: { deploymentBlockNumber: number };
+      states: ReadonlyArray<{ contextGraphId: string }>;
+    };
+    expect(rebuilt.cursor.deploymentBlockNumber).toBe(0);
+    expect(rebuilt.states.map((state) => state.contextGraphId)).toContain('9');
   });
 
   it('rechecks a cached tip before exhausting an endpoint whose cursor just advanced', async () => {

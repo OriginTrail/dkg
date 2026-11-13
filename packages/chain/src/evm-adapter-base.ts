@@ -151,13 +151,15 @@ import {
   type StuckTransactionTarget,
 } from './stuck-transaction-recovery.js';
 import { ContextGraphAuthorityHistoryCache } from './context-graph-authority-history.js';
-import { ContextGraphAuthorityIndex } from './context-graph-authority-index.js';
+import {
+  ContextGraphAuthorityIndex,
+  type ContextGraphAuthorityIndexDeploymentLookup,
+} from './context-graph-authority-index.js';
 import {
   createEvmContextGraphAuthorityIndexRevisionReaderV1,
   type EvmContextGraphAuthorityIndexReaderV1,
 } from
   './evm-context-graph-authority-index-reader.js';
-import type { ContractDeploymentLookupV1 } from './evm-context-graph-authority-deployment.js';
 import { classifyBrowserWalletRead } from './browser-wallet-rpc-policy.js';
 import { EvmReceiptFinalityReader } from './evm-adapter-receipt-finality.js';
 
@@ -3777,7 +3779,7 @@ export class EVMChainAdapterBase {
     address: string,
     operationLabel: string,
     contractLabel: string,
-  ): Promise<ContractDeploymentLookupV1> {
+  ): Promise<ContextGraphAuthorityIndexDeploymentLookup> {
     const cached = this.cachedContractDeployBlocks.get(address.toLowerCase());
     if (cached !== undefined) return Object.freeze({ blockNumber: cached, pinned: true });
     const resolved = await this.resolveContractDeployBlock(address, operationLabel, contractLabel);

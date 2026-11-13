@@ -6,7 +6,12 @@ export class ContextGraphAuthorityIndexRetryableError extends Error {
 
   constructor(
     message: string,
-    readonly reason?: 'cursor-ahead',
+    /**
+     * `cursor-ahead`: the anchor is below the durable cursor; a newer anchor
+     * can serve. `rebuild-required`: the stored checkpoint must be rebuilt
+     * from blocks this page source cannot serve; a live scan can.
+     */
+    readonly reason?: 'cursor-ahead' | 'rebuild-required',
   ) {
     super(message);
   }

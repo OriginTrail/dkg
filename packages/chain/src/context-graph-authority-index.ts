@@ -70,6 +70,17 @@ type ServableCheckpoint = Readonly<{
   snapshot?: ContextGraphAuthorityIndexSnapshot;
 }>;
 
+/** A contract's deployment block, and whether the lookup could pin it. */
+export type ContextGraphAuthorityIndexDeploymentLookup = Readonly<{
+  blockNumber: number;
+  /**
+   * False for the adapter's genesis fallback: no endpoint could pin the block
+   * (pruned or throttled), so `blockNumber` is 0 and the adapter does not
+   * cache it.
+   */
+  pinned: boolean;
+}>;
+
 /** The one physical scan a scope has in flight in one request class; see `#snapshot`. */
 type ActiveScan = Readonly<{
   key: string;
@@ -116,13 +127,19 @@ export interface ContextGraphAuthorityIndexScanInput {
    */
   readonly durableReorgHoldbackBlocks?: number;
   /**
-   * Where a rebuild starts when `deploymentBlockNumber` was taken from the
-   * stored checkpoint and admission does not keep that checkpoint. A
-   * deployment block is only as good as the history it was reduced with:
-   * rejected history (a reset chain at the same address) must not bound the
-   * rebuild that replaces it. At most `deploymentBlockNumber`.
+   * False when `deploymentBlockNumber` comes from a lookup that could not pin
+   * the block (the adapter's uncached genesis fallback). The scan then resumes
+   * a stored checkpoint reduced from a later block, while admission keeps it,
+   * and rebuilds from `deploymentBlockNumber` when it does not: a deployment
+   * block is only as good as the history it was reduced with.
    */
-  readonly rebuildFromBlockNumber?: number;
+  readonly deploymentBlockPinned?: boolean;
+  /**
+   * The first block `readPage` can serve, for a page source that does not
+   * reach back to every deployment block (the chain event log's coverage). A
+   * rebuild that needs blocks below it is refused as `rebuild-required`.
+   */
+  readonly readPageFromBlockNumber?: number;
   readonly signal?: AbortSignal;
   readonly readBlockHash: (
     blockNumber: number,
@@ -219,22 +236,24 @@ export class ContextGraphAuthorityIndex {
   }
 
   /**
-   * The deployment block the durable checkpoint of `scope` was reduced from,
-   * or `undefined` when there is none.
-   *
-   * A scan whose lower bound differs from this rebuilds the whole index. The
-   * reader asks for it when its own lookup could not pin the block (the
-   * adapter's uncached genesis fallback), so an endpoint that briefly cannot
-   * serve historical code does not replace a complete index with a walk.
+   * The first block a scan of `scope` resumes from for this deployment lookup:
+   * the looked-up block, or, for a lookup that could not pin it, the block the
+   * stored checkpoint was reduced from (see `deploymentBlockPinned`). A chain
+   * event log anchor must cover the history from here.
    */
-  async durableDeploymentBlockNumber(scope: string): Promise<number | undefined> {
-    if (this.#closed) return undefined;
+  async deploymentCoverageFromBlockNumber(
+    scope: string,
+    lookup: ContextGraphAuthorityIndexDeploymentLookup,
+  ): Promise<number> {
+    if (lookup.pinned || this.#closed) return lookup.blockNumber;
     for (const key of this.bootstrap === undefined ? [scope]
       : [`${scope}:trusted-bootstrap:${this.bootstrap.trustDomain}`, scope]) {
       const record = await this.#repository.forScope(key).load();
-      if (record.kind === 'checkpoint') return record.checkpoint.cursor.deploymentBlockNumber;
+      if (record.kind === 'checkpoint') {
+        return Math.max(lookup.blockNumber, record.checkpoint.cursor.deploymentBlockNumber);
+      }
     }
-    return undefined;
+    return lookup.blockNumber;
   }
 
   /**
@@ -477,8 +496,8 @@ export class ContextGraphAuthorityIndex {
       : `${scope}:trusted-bootstrap:${this.bootstrap.trustDomain}`;
     let repository = this.#repository.forScope(repositoryKey);
     const requestedDeploymentBlockNumber = normalizeNonNegativeSafeInteger(input.deploymentBlockNumber);
-    const rebuildFromBlockNumber = input.rebuildFromBlockNumber === undefined ? undefined
-      : normalizeNonNegativeSafeInteger(input.rebuildFromBlockNumber) ?? Number.NaN;
+    const readPageFromBlockNumber = input.readPageFromBlockNumber === undefined ? 0
+      : normalizeNonNegativeSafeInteger(input.readPageFromBlockNumber) ?? Number.NaN;
     const finalizedNumber = normalizeNonNegativeSafeInteger(input.finalized.number);
     const finalizedHash = normalizeHash(input.finalized.hash);
     const pageSize = normalizeNonNegativeSafeInteger(input.pageSize);
@@ -489,7 +508,7 @@ export class ContextGraphAuthorityIndex {
       || pageSize === undefined
       || pageSize < 1
       || requestedDeploymentBlockNumber > finalizedNumber
-      || !(rebuildFromBlockNumber === undefined || rebuildFromBlockNumber <= requestedDeploymentBlockNumber)
+      || !(readPageFromBlockNumber <= finalizedNumber)
     ) {
       throw new Error('Context Graph authority index scan bounds are invalid');
     }
@@ -545,12 +564,25 @@ export class ContextGraphAuthorityIndex {
       markReachable(admitted);
       return admitted;
     };
-    let durable = await admit(await repository.load());
-    // A deployment block taken from the stored checkpoint is only as good as
-    // that checkpoint. If admission did not keep it, its history went with it,
-    // and the rebuild starts from the caller's own lower bound instead.
-    if (durable.kind !== 'checkpoint' && rebuildFromBlockNumber !== undefined) {
-      deploymentBlockNumber = rebuildFromBlockNumber;
+    // An unpinned lookup resumes the stored checkpoint from the block it was
+    // reduced from, if that block is on this side of the anchor. Admission
+    // then decides whether that history is still the chain's.
+    const initial = await repository.load();
+    if (input.deploymentBlockPinned === false && initial.kind === 'checkpoint') {
+      const stored = initial.checkpoint.cursor.deploymentBlockNumber;
+      if (stored > deploymentBlockNumber && stored <= finalizedNumber) deploymentBlockNumber = stored;
+    }
+    let durable = await admit(initial);
+    if (durable.kind !== 'checkpoint') {
+      // No history kept, so none bounds the rebuild: it starts from the lookup.
+      deploymentBlockNumber = requestedDeploymentBlockNumber;
+      if (deploymentBlockNumber < readPageFromBlockNumber) {
+        throw new ContextGraphAuthorityIndexRetryableError(
+          `Context Graph authority index rebuild from block ${deploymentBlockNumber} needs `
+          + `blocks below ${readPageFromBlockNumber}, which this page source does not serve`,
+          'rebuild-required',
+        );
+      }
     }
 
     // Highest block this scan may WRITE DOWN. Never below the deployment block:
