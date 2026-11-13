@@ -170,6 +170,32 @@ describe('describeReadGraphSettings', () => {
     ]);
   });
 
+  it('counts a memory\'s assets and facts from its whole copies, as a sub-graph\'s copy holds what the whole copy already holds', () => {
+    const text = describeReadGraphSettings({
+      contextGraphs: [{
+        contextGraphId: 'team',
+        effective: { layers: { 'verifiable-memory': 'serve', 'shared-working-memory': 'build', 'working-memory': 'build' } },
+        readGraphs: [
+          // One asset, in the registered sub-graph `code`: the whole copy and the sub-graph's copy both hold it.
+          { ...view('vm', 'ready', 'urn:vm'), members: 1, triples: 20 },
+          { ...view('vm', 'ready', 'urn:vm:code'), subGraphName: 'code', members: 1, triples: 20 },
+          // A count stays unknown while the whole copy lacks it, whatever the sub-graph's copy says.
+          view('swm', 'ready', 'urn:swm'),
+          { ...view('swm', 'ready', 'urn:swm:code'), subGraphName: 'code', members: 1, triples: 2 },
+          // Each agent's drafts are its own, so the agents' whole copies add up. States still come from every copy.
+          { ...view('wm', 'ready', 'urn:wm:a'), agentAddress: '0xa', members: 2, triples: 6 },
+          { ...view('wm', 'ready', 'urn:wm:b'), agentAddress: '0xb', members: 3, triples: 9 },
+          { ...view('wm', 'building', 'urn:wm:a:code'), agentAddress: '0xa', subGraphName: 'code', members: 2, triples: 6 },
+        ],
+      }],
+    });
+    expect(text.split('\n').slice(1)).toEqual([
+      '- Published assets · 1 asset: On: In use. About 20 facts, at its last build',
+      '- Shared memory, shared with your team: Preview: Ready to turn on',
+      '- Private drafts · 5 assets: Preview: 2 Ready to turn on, 1 Getting ready. About 15 facts, at its last build',
+    ]);
+  });
+
   it('says when a memory is still getting ready, and when nothing is set up', () => {
     expect(describeReadGraphSettings({ contextGraphs: [{ contextGraphId: 'new', effective: { layers: { 'verifiable-memory': 'build' } } }] }))
       .toContain('- Published assets: Preview: Getting ready');

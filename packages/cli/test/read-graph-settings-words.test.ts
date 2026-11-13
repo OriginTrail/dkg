@@ -85,6 +85,21 @@ describe('the words for a memory\'s state', () => {
     expect(sizeWords('verifiable-memory', [])).toBeUndefined();
   });
 
+  it('counts assets and facts from the memory\'s whole copies, as a sub-graph\'s copy holds what the whole copy already holds', () => {
+    // One asset, in the registered sub-graph `code`: the whole copy and the sub-graph's copy both hold it.
+    const code = readGraph('ready', { readGraph: `${VM}/code`, subGraphName: 'code', members: 1, triples: 20 });
+    expect(sizeWords('verifiable-memory', [readGraph('ready', { members: 1, triples: 20 }), code])).toBe('1 asset, holds about 20 facts');
+    // Each agent's drafts are its own, so the agents' whole copies add up.
+    expect(sizeWords('working-memory', [
+      readGraph('ready', { layer: 'wm', agentAddress: '0xa', members: 2, triples: 6 }),
+      readGraph('ready', { layer: 'wm', agentAddress: '0xb', members: 3, triples: 9 }),
+      readGraph('building', { layer: 'wm', agentAddress: '0xa', subGraphName: 'code', members: 2, triples: 6 }),
+    ])).toBe('5 drafts, holds about 15 facts');
+    // A count stays unknown while a whole copy lacks it, and a sub-graph's copy alone gives none.
+    expect(sizeWords('verifiable-memory', [readGraph('ready'), code])).toBeUndefined();
+    expect(sizeWords('verifiable-memory', [code])).toBeUndefined();
+  });
+
   it('says what a change did, in the words of the brief', () => {
     const change = { contextGraphId: 'my-project', layer: 'verifiable-memory', from: 'off', to: 'build', outcome: 'applied' } as const;
     expect(changeLine(change)).toBe('Published assets of my-project: off → preview. Getting ready in the background.');

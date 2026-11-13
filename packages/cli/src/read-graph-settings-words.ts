@@ -115,10 +115,14 @@ export function stateWords(mode: ReadGraphMode, readGraphs: readonly ReadGraphSe
   return 'Getting ready';
 }
 
-/** "1,204 assets, holds about 24,080 facts": each only when every read graph of the memory reports it. */
+/**
+ * "1,204 assets, holds about 24,080 facts", from the memory's whole copies, each only when every one of them reports it. A sub-graph's copy holds what
+ * the context graph's whole copy already holds, and in working memory each agent's whole copy holds its own drafts.
+ */
 export function sizeWords(layer: GetView, readGraphs: readonly ReadGraphSettingsReadGraph[]): string | undefined {
-  const total = (key: 'members' | 'triples') => (readGraphs.length > 0 && readGraphs.every((readGraph) => typeof readGraph[key] === 'number')
-    ? readGraphs.reduce((sum, readGraph) => sum + (readGraph[key] ?? 0), 0) : undefined);
+  const whole = readGraphs.filter((readGraph) => readGraph.subGraphName === undefined);
+  const total = (key: 'members' | 'triples') => (whole.length > 0 && whole.every((readGraph) => typeof readGraph[key] === 'number')
+    ? whole.reduce((sum, readGraph) => sum + (readGraph[key] ?? 0), 0) : undefined);
   const members = total('members');
   const triples = total('triples');
   const unit = layer === 'working-memory' ? 'draft' : 'asset';

@@ -44,9 +44,9 @@ export interface ReadGraphLayerSettings {
    * started. Absent when the node reports it for none.
    */
   readonly progress?: number;
-  /** How many triples the layer's read graphs held at their last build, when the node says for each of them. */
+  /** How many triples the layer's whole copies held at their last build, when the node says for each of them. */
   readonly triples?: number;
-  /** How many asset (or draft) graphs the layer's read graphs held at their last build, when the node says for each of them. */
+  /** How many asset (or draft) graphs the layer's whole copies held at their last build, when the node says for each of them. */
   readonly members?: number;
 }
 
@@ -97,7 +97,14 @@ function entryOf(body: unknown, contextGraphId: string): Record<string, unknown>
   return (Array.isArray(entries) ? entries : []).map(objectOf).find(entry => entry?.contextGraphId === contextGraphId);
 }
 
-interface HeldReadGraph { readonly state: string; readonly progress?: number; readonly triples?: number; readonly members?: number }
+interface HeldReadGraph {
+  readonly state: string;
+  readonly progress?: number;
+  readonly triples?: number;
+  readonly members?: number;
+  /** Set on a sub-graph's copy, which holds what the context graph's whole copy already holds. */
+  readonly subGraphName?: string;
+}
 
 /**
  * A count summed over a layer's read graphs, only when the node gives it for
@@ -110,7 +117,10 @@ function totalOf(held: readonly HeldReadGraph[], count: (readGraph: HeldReadGrap
     : undefined;
 }
 
-/** A layer's read graphs by state, how far those being built have got, and what they held at their last build. */
+/**
+ * A layer's read graphs by state, how far those being built have got, and what its whole copies held at their last build: one, or one per agent in
+ * working memory, whose drafts don't overlap.
+ */
 function heldOf(held: readonly HeldReadGraph[]): Pick<ReadGraphLayerSettings, 'states' | 'progress' | 'triples' | 'members'> {
   const states: Record<string, number> = {};
   for (const { state } of held) states[state] = (states[state] ?? 0) + 1;
@@ -118,8 +128,9 @@ function heldOf(held: readonly HeldReadGraph[]): Pick<ReadGraphLayerSettings, 's
   const progress = building.some(readGraph => readGraph.progress !== undefined)
     ? building.reduce((sum, readGraph) => sum + Math.min(1, readGraph.progress ?? 0), 0) / building.length
     : undefined;
-  const triples = totalOf(held, readGraph => readGraph.triples);
-  const members = totalOf(held, readGraph => readGraph.members);
+  const whole = held.filter(readGraph => readGraph.subGraphName === undefined);
+  const triples = totalOf(whole, readGraph => readGraph.triples);
+  const members = totalOf(whole, readGraph => readGraph.members);
   return {
     states,
     ...(progress === undefined ? {} : { progress }),
@@ -150,11 +161,13 @@ export function decodeReadGraphSettings(body: unknown, contextGraphId: string): 
     const progress = amountOf(row?.progress);
     const triples = amountOf(row?.triples);
     const members = amountOf(row?.members);
+    const subGraphName = typeof row?.subGraphName === 'string' ? row.subGraphName : undefined;
     held.get(view)!.push({
       state,
       ...(progress === undefined ? {} : { progress }),
       ...(triples === undefined ? {} : { triples: Math.floor(triples) }),
       ...(members === undefined ? {} : { members: Math.floor(members) }),
+      ...(subGraphName === undefined ? {} : { subGraphName }),
     });
   }
   return {
