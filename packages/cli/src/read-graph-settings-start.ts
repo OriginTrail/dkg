@@ -1,0 +1,188 @@
+/**
+ * The node's read-graph settings at start (OT-RFC-74): config.json's policy over the settings table, for the daemon and for a store opened outside it.
+ *
+ * The daemon checks config.json's `query` section before anything else of the node starts. Once its database is open, it imports config.json's
+ * deprecated rules for single context graphs into the settings table once, and resolves the settings in force. A bad `query` value in config.json stops
+ * the start, as do node modes that the rollback target would not recognize or that a node starting from a public checkpoint cannot keep. The table never
+ * stops a start: a mode that the policy or the node does not allow resolves to `off`, with a warning, and a table that cannot be read gives no context
+ * graph settings of its own.
+ */
+import {
+  keepsAnyReadGraph,
+  readGraphRuntimeOf,
+  type ReadGraphStoreConfig,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
+import {
+  nodeReadGraphModes,
+  readGraphStoreSettings,
+  resolveEffectiveQueryConfig,
+  resolveQuerySection,
+  type QueryPolicy,
+  type QuerySection,
+  type ReadGraphsRefusal,
+  type ResolvedQueryConfig,
+} from './read-graphs-config.js';
+import {
+  readReadGraphSettings,
+  withSettingsChange,
+  type ReadGraphSettingsEntry,
+  type SqliteReadGraphSettingsStore,
+} from './read-graph-settings-store.js';
+import { assertQueryConfigFitsNode, settingsTableRollbackRefusal } from './update/read-graph-rollback-target.js';
+
+/** A node that starts from a public checkpoint gets its store from the checkpoint, which keeps no read graphs. */
+export const CHECKPOINT_NODE_REFUSAL: ReadGraphsRefusal = Object.freeze({
+  code: 'READ_GRAPHS_CHECKPOINT_NODE',
+  message: 'the node starts from a public checkpoint, whose store the checkpoint builds without read graphs',
+});
+
+export interface DaemonReadGraphSettings {
+  readonly policy: QueryPolicy;
+  /** The settings in force at start. */
+  readonly effective: ResolvedQueryConfig;
+  /** The read-graph part of the agent's store configuration; `undefined` builds the store as for a node without read-graph settings. */
+  readonly storeSettings: ReadGraphStoreConfig | undefined;
+}
+
+/**
+ * The daemon's first check of its `query` section, before anything else of the node starts: throws `QueryConfigError` for a section that stops the
+ * start, including node modes that the rollback target would not recognize or that a public-checkpoint start cannot keep.
+ */
+export async function checkDaemonQuerySection(input: {
+  readonly query: unknown;
+  readonly role: 'core' | 'edge';
+  readonly checkpoint: boolean;
+}): Promise<QuerySection> {
+  const section = resolveQuerySection(input.query);
+  await assertQueryConfigFitsNode(section.policy, input.role, input.checkpoint);
+  return section;
+}
+
+/** The daemon's settings at start, once its database is open: config.json's checked section over the settings table, which it imports into once. */
+export async function prepareDaemonReadGraphSettings(input: {
+  readonly query: unknown;
+  readonly section: QuerySection;
+  readonly table: SqliteReadGraphSettingsStore;
+  readonly role: 'core' | 'edge';
+  readonly checkpoint: boolean;
+  readonly log: (message: string) => void;
+  readonly now?: () => number;
+}): Promise<DaemonReadGraphSettings> {
+  const { log, section } = input;
+  // A node that starts from a public checkpoint keeps no read graphs: its table takes no import and gives no settings.
+  const entries = input.checkpoint ? noTable(section, log) : importAndRead(input.table, section, (input.now ?? Date.now)(), log);
+  const refusals = input.checkpoint ? [CHECKPOINT_NODE_REFUSAL] : await rollbackRefusals(entries, input.role);
+  const { config: effective, warnings } = resolveEffectiveQueryConfig(section.policy, entries, { refusals });
+  for (const warning of warnings) log(`[read-graphs] ${capitalized(warning)}.`);
+  return {
+    policy: section.policy,
+    effective,
+    storeSettings: input.checkpoint || (input.query === undefined && entries.length === 0) ? undefined : storeSettingsOf(section, effective),
+  };
+}
+
+/**
+ * After the agent's store opens: say so when the store keeps none of the read graphs that the table sets. The store decides (`whenUnsupported`), and its
+ * runtime holds the modes it applied, so they are what this reads.
+ */
+export function noteReadGraphStoreSupport(settings: DaemonReadGraphSettings, store: TripleStore, log: (message: string) => void): void {
+  if (settings.storeSettings?.whenUnsupported !== 'off' || !keepsAnyReadGraph(settings.effective.readGraphs)) return;
+  if (keepsAnyReadGraph(readGraphRuntimeOf(store)?.modes)) return;
+  log('[read-graphs] The read graphs set in the node\'s read-graph settings are off: the node\'s store does not support read graphs.');
+}
+
+/**
+ * The read-graph part of the configuration of a store opened outside the daemon (`dkg publisher run`), which keeps what the daemon keeps: config.json's
+ * policy over the table, which it reads without writing. Until the daemon has imported config.json's rules for single context graphs, they hold over the
+ * table, as the import will write them. `undefined` when config.json has no `query` section and the table holds nothing. Throws `QueryConfigError` for a
+ * `query` section that the daemon would not start with.
+ */
+export async function readGraphSettingsOutsideDaemon(
+  dataDir: string,
+  config: { readonly query?: unknown; readonly nodeRole?: 'core' | 'edge' },
+): Promise<ReadGraphStoreConfig | undefined> {
+  const section = resolveQuerySection(config.query);
+  let snapshot: ReturnType<typeof readReadGraphSettings>;
+  let readable = true;
+  try {
+    snapshot = readReadGraphSettings(dataDir);
+  } catch {
+    // As in the daemon, a table that cannot be read gives no context graph settings of its own.
+    readable = false;
+  }
+  const pending = readable && snapshot?.importedFromConfigAt === undefined ? section.contextGraphSettings : [];
+  const entries = overlaid(snapshot?.entries ?? [], pending);
+  if (config.query === undefined && entries.length === 0) return undefined;
+  const refusals = await rollbackRefusals(entries, config.nodeRole ?? 'edge');
+  return storeSettingsOf(section, resolveEffectiveQueryConfig(section.policy, entries, { refusals }).config);
+}
+
+/**
+ * The store settings for the settings in force. An adapter that cannot keep read graphs refuses the node's own modes, as before the table, and keeps none
+ * of the table's.
+ */
+function storeSettingsOf(section: QuerySection, effective: ResolvedQueryConfig): ReadGraphStoreConfig {
+  return { ...readGraphStoreSettings(effective), whenUnsupported: keepsAnyReadGraph(nodeReadGraphModes(section.policy)) ? 'refuse' : 'off' };
+}
+
+/** Import config.json's rules once, then read the table's entries. A table that cannot be read gives no entries, with a warning. */
+function importAndRead(table: SqliteReadGraphSettingsStore, section: QuerySection, now: number, log: (message: string) => void): ReadonlyArray<ReadGraphSettingsEntry> {
+  importOnce(table, section, now, log);
+  try {
+    return table.list();
+  } catch (error) {
+    log(`[read-graphs] The read-graph settings cannot be read, so no context graph has settings of its own: ${messageOf(error)}`);
+    return [];
+  }
+}
+
+/** A node that starts from a public checkpoint has no table: config.json's rules for single context graphs are ignored there too. */
+function noTable(section: QuerySection, log: (message: string) => void): ReadonlyArray<ReadGraphSettingsEntry> {
+  if (section.deprecatedKeys.length > 0) log(`[read-graphs] ${deprecated(section)} deprecated and ignored.`);
+  return [];
+}
+
+/** Import config.json's rules for single context graphs once; from then on, warn at each start that they are ignored. */
+function importOnce(table: SqliteReadGraphSettingsStore, section: QuerySection, now: number, log: (message: string) => void): void {
+  if (section.deprecatedKeys.length === 0) return;
+  try {
+    const importedAt = table.importedFromConfigAt();
+    if (importedAt === undefined) {
+      table.importFromConfig(section.contextGraphSettings, now);
+      log(`[read-graphs] Imported the read-graph settings of ${section.contextGraphSettings.length} context graph(s) from config.json into `
+        + `the node's read-graph settings. ${deprecated(section)} deprecated and ignored from now on. ${CHANGE_THEM}`);
+    } else {
+      log(`[read-graphs] ${deprecated(section)} deprecated and ignored: the settings were imported into the node's read-graph settings at `
+        + `${new Date(importedAt).toISOString()}. ${CHANGE_THEM}`);
+    }
+  } catch (error) {
+    log(`[read-graphs] ${deprecated(section)} deprecated and ignored, and the settings could not be imported into the node's read-graph settings: `
+      + `${messageOf(error)}`);
+  }
+}
+
+const CHANGE_THEM = 'Change read graphs per context graph with `dkg store read-graphs enable|disable` or the node\'s read-graph settings API.';
+
+/** "query.readGraphs.contextGraphs in config.json is" or "… and … in config.json are". */
+function deprecated(section: QuerySection): string {
+  return `${section.deprecatedKeys.join(' and ')} in config.json ${section.deprecatedKeys.length === 1 ? 'is' : 'are'}`;
+}
+
+/** The rollback target's refusal, looked up only when the table keeps a read graph. */
+async function rollbackRefusals(entries: ReadonlyArray<ReadGraphSettingsEntry>, role: 'core' | 'edge'): Promise<ReadGraphsRefusal[]> {
+  if (!entries.some((entry) => Object.values(entry.layers).some((mode) => mode !== 'off'))) return [];
+  const refusal = await settingsTableRollbackRefusal(role);
+  return refusal === undefined ? [] : [refusal];
+}
+
+/** The table's entries with config.json's rules written over them, as the import writes them. */
+function overlaid(table: ReadonlyArray<ReadGraphSettingsEntry>, rules: ReadonlyArray<ReadGraphSettingsEntry>): ReadonlyArray<ReadGraphSettingsEntry> {
+  return rules.reduce((entries, rule) => withSettingsChange(entries, rule.contextGraphId, rule), table);
+}
+
+const capitalized = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}

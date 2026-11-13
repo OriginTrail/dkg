@@ -1,7 +1,7 @@
 // The operator-only read-graph commands of a running node (`dkg store
 // read-graphs`): requests and answers shared by the daemon routes and the CLI.
 
-import { validateContextGraphId } from '@origintrail-official/dkg-core';
+import { MemoryLayer, parseReadGraphIri, validateContextGraphId } from '@origintrail-official/dkg-core';
 
 export const READ_GRAPHS_PATH = '/api/store/read-graphs';
 /** A full check of a large context graph can take minutes; the client waits this long. */
@@ -35,6 +35,27 @@ export interface ReadGraphView {
   readonly agentAddress?: string;
   readonly state: string;
   readonly generation: number;
+}
+
+/** The label of each memory layer in the read-graph answers. */
+export const READ_GRAPH_LAYER_LABEL_OF: Readonly<Record<MemoryLayer, ReadGraphLayerLabel>> = {
+  [MemoryLayer.WorkingMemory]: 'wm',
+  [MemoryLayer.SharedWorkingMemory]: 'swm',
+  [MemoryLayer.VerifiableMemory]: 'vm',
+};
+
+/** One read graph as the read-graph answers list it, from its state row. */
+export function readGraphViewOf(row: { readonly readGraph: string; readonly state: string; readonly generation: number }): ReadGraphView {
+  const key = parseReadGraphIri(row.readGraph)!;
+  return {
+    readGraph: row.readGraph,
+    contextGraphId: key.scope.contextGraphId,
+    ...(key.scope.kind === 'sub-graph' ? { subGraphName: key.scope.subGraphName } : {}),
+    layer: READ_GRAPH_LAYER_LABEL_OF[key.layer],
+    ...(key.layer === MemoryLayer.WorkingMemory ? { agentAddress: key.agentAddress } : {}),
+    state: row.state,
+    generation: row.generation,
+  };
 }
 
 /** A check of every ready read graph, run on request. */

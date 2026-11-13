@@ -4,7 +4,7 @@ import type {
   ReadGraphPlannedMethod,
   ReadGraphWriteOptions,
 } from '../read-graph/adapter-contract.js';
-import type { Quad, QueryOptions } from '../triple-store.js';
+import type { Quad, QueryOptions, UpdateOptions } from '../triple-store.js';
 import { isBlankNodeTerm } from './blank-node-safe-delete.js';
 import { operationsOf, withReadGraphOperations } from './read-graph-request.js';
 import { sparqlStatements } from './sparql-statements.js';
@@ -141,4 +141,10 @@ export function quadsRemoved(engine: Engine, graph: string, options: QueryOption
 export function readGraphPlanArgs(options: QueryOptions | undefined): [] | [ReadGraphWriteOptions] {
   const plan = operationsOf(options);
   return plan ? [{ readGraphPlan: plan }] : [];
+}
+
+/** An update's argument for the worker: its read-graph plan, and a deferred snapshot (`UpdateOptions.snapshot`), each only when set. */
+export function readGraphUpdateArgs(options: UpdateOptions | undefined): [] | [ReadGraphWriteOptions & Pick<UpdateOptions, 'snapshot'>] {
+  const [plan] = readGraphPlanArgs(options);
+  return options?.snapshot === 'deferred' ? [{ ...plan, snapshot: 'deferred' }] : plan ? [plan] : [];
 }

@@ -8,7 +8,7 @@ import { guardReadGraphPartition } from '../src/read-graph-partition-store.js';
 import { missingReadGraphMethods } from '../src/read-graph/adapter-contract.js';
 import { readUnstoredReadGraphMarks, useReadGraphMarkJournal } from '../src/read-graph/mark-journal.js';
 import { workingMemoryIdentityRule } from '../src/read-graph/membership.js';
-import { readStoredReadGraphRow } from '../src/read-graph/rebuild.js';
+import { readStoredReadGraphRow } from '../src/read-graph/stored-states.js';
 import { READ_GRAPH_REGISTRY_PREDICATES as R, readReadGraphRegistry } from '../src/read-graph/registry.js';
 import { readGraphRegistryRecordUpdate } from '../src/read-graph/registry-record.js';
 import { startReadGraphs } from '../src/read-graph/startup.js';

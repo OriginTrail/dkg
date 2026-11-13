@@ -31,6 +31,7 @@ import {
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
 import { formatContextGraphInfo, formatContextGraphListTable } from '../context-graph-list-format.js';
+import { LAYER_OPTION_HELP, createReadGraphsLines, parseCreateReadGraphsOptions } from '../read-graph-settings-words.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
@@ -136,8 +137,12 @@ contextGraphCmd
   .option('--private', 'Create a private local-only context graph')
   .option('--subscribe', 'Also subscribe to the context graph after creation', true)
   .option('--save', 'Persist subscription to config')
+  .option('--read-graphs <mode>', 'Search across assets for the new context graph: preview or on (build or serve), switched after the creation')
+  .option('--read-graph-layer <memory>', `With --read-graphs: ${LAYER_OPTION_HELP}`)
   .action(async (id: string, opts: ActionOpts) => {
     try {
+      const readGraphs = parseCreateReadGraphsOptions(opts.readGraphs, opts.readGraphLayer);
+      if ('error' in readGraphs) throw new Error(readGraphs.error);
       const client = await ApiClient.connect();
 
       // Auto-namespace: bare slug -> {agentAddress}/{slug}
@@ -159,6 +164,7 @@ contextGraphCmd
         private: !!opts.private,
         accessPolicy,
         allowedAgents: allowedAgents.length > 0 ? allowedAgents : undefined,
+        readGraphs: readGraphs.setting,
       }, opts.invite as string[] | undefined);
       console.log(`Context graph created:`);
       console.log(`  ID:   ${result.created}`);
@@ -171,6 +177,10 @@ contextGraphCmd
         console.log(`  Invited ${(opts.invite as string[]).length} peer(s) via allowlist (legacy).`);
       }
       console.log(`  Run 'dkg context-graph register ${id}' to register on-chain (unlocks Verifiable Memory).`);
+      // A refused setting leaves the context graph created; the exit code says the setting is not in force.
+      const switched = createReadGraphsLines(id, readGraphs.setting, result.readGraphs);
+      for (const line of switched.lines) console.log(`  ${line}`);
+      if (!switched.ok) process.exitCode = 1;
 
       if (opts.save) {
         const config = await loadConfig();

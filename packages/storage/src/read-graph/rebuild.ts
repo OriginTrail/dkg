@@ -30,7 +30,6 @@
 
 import { setImmediate as nextTurn, setTimeout as sleep } from 'node:timers/promises';
 import {
-  assertSafeIri,
   compareCodePoint,
   contextGraphDataUri,
   isReadGraphPartitionIri,
@@ -38,7 +37,6 @@ import {
   readGraphIri,
   type ReadGraphKey,
 } from '@origintrail-official/dkg-core';
-import { isReadGraphStateGraph } from '../graph-enumeration-visibility.js';
 import { readGraphInventoryByPrefix } from '../graph-inventory-materialization.js';
 import { assertGraphCatalogWithinInternalLimit, readCompleteGraphCatalog } from '../graph-catalog-internal-limit.js';
 import { noteReadGraphPartitionsOfRuntime } from './data-directories.js';
@@ -46,23 +44,24 @@ import { noteStoreMayHoldReadGraphPartitions, readGraphPartitionMaintenanceStore
 import type { QueryOptions, TripleStore } from '../triple-store.js';
 import { missingReadGraphMethods } from './adapter-contract.js';
 import { memberGraphListingQuery } from './check.js';
-import { matchesGraphNameTest, readGraphMembership, type GraphNameTest } from './membership.js';
+import { matchesGraphNameTest, readGraphEnumerationRoots, readGraphMembership, type GraphNameTest } from './membership.js';
 import { readGraphLayerOf } from './read-graph-store.js';
 import { readReadGraphRegistryFacts, registrySnapshotOfFacts, sameRegistry, type ReadGraphRegistryFact } from './registry-recognition.js';
 import { noteUnstoredReadGraphMark } from './mark-journal.js';
 import { isHeldReadGraph } from './working-memory-hold.js';
 import { invalidateReadGraphRuntime, readGraphRecoveryGeneration, syncReadGraphRuntimeWithRecovery } from './recovery.js';
 import { recordReadGraphRegistry } from './registry-record.js';
-import { ReadGraphLocks, type InMemoryReadGraphStateMirror, type ReadGraphBackendRuntime } from './runtime.js';
+import { withReadGraphBackgroundSlot } from './background-slot.js';
+import { fenceOf, foregroundQueued, isSafeName, nextBatchSize, sameRow, setMirror } from './job-support.js';
+import { readStoredReadGraphRow } from './stored-states.js';
+import type { InMemoryReadGraphStateMirror, ReadGraphBackendRuntime } from './runtime.js';
 import {
   CURRENT_READ_GRAPH_VERSIONS,
   isReadGraphRowAccepted,
   newReadGraphGeneration,
   nextReadGraphState,
-  parseReadGraphStateRows,
   readGraphStateCompareAndSet,
   readGraphStateReset,
-  readGraphStateRowQuery,
   type ReadGraphStateRow,
   type ReadGraphTransition,
   type ReadGraphVersions,
@@ -72,7 +71,6 @@ import {
   readGraphFencedDrop,
   readGraphHoldsTripleAsk,
   readGraphRepairLeave,
-  type ReadGraphFence,
 } from './statements.js';
 
 /** How a job cuts its work. Each batch is one lock hold and one request. */
@@ -112,6 +110,14 @@ export interface ReadGraphJobContext {
   readonly batching?: Partial<ReadGraphBatching>;
   /** The `source` label of the job's store requests. */
   readonly source?: string;
+  /** Told how far a build or repair has copied: member graphs copied, of those it copies; 0 before the first. */
+  readonly progress?: (copied: number, total: number) => void;
+  /**
+   * Whether the job is still wanted, as a builder judges it from the read graph's mode. A build or a removal checks
+   * it under the read graph's lock before it takes the read graph into or out of service, before each batch, and
+   * before it publishes or removes the row, and ends `lost` once it fails. Without it, the job goes on.
+   */
+  readonly relevant?: () => boolean;
 }
 
 /** A build, a scoped repair, a removal, or a dirty mark, which reports its row and no result. */
@@ -130,6 +136,8 @@ export interface ReadGraphJobResult {
   readonly row: ReadGraphStateRow | undefined;
   readonly batches: number;
   readonly durationMs: number;
+  /** For a build, the member graphs it found by listing the store, beside the fixed graphs its membership names. */
+  readonly listed?: number;
 }
 
 /** The input of a scoped repair. */
@@ -185,6 +193,8 @@ function refuseHeld(job: ReadGraphJob, key: ReadGraphKey): void {
 async function build(job: ReadGraphJob, key: ReadGraphKey): Promise<ReadGraphJobResult> {
   await job.refreshRegistry(key.scope.contextGraphId);
   const begun = await job.locked(async (): Promise<Begun<{ readonly membership: GraphNameTest }>> => {
+    // Switched off while the job waited for the slot or the registry: not taken back into the mirror.
+    if (!job.relevant()) return { ended: 'lost', row: (await job.stored()).row };
     const stored = await job.reconcile();
     if (stored?.state === 'ready' && isReadGraphRowAccepted(stored, job.versions)) return { ended: 'current', row: stored };
     let started: ReadGraphStateRow | undefined;
@@ -202,10 +212,12 @@ async function build(job: ReadGraphJob, key: ReadGraphKey): Promise<ReadGraphJob
   });
   if (begun.ended !== undefined) return job.result(begun.ended, begun.row);
   const { started, membership } = begun;
-  const inService = job.mirrorHolds(started);
+  const holds = job.mirrorHolds(started);
+  const inService = () => holds() && job.relevant();
   if (!(await job.settledUnderRegistry(key.scope.contextGraphId, inService))) return job.lost();
   if (!(await job.drop(started, inService))) return job.lost();
   const members = await job.members(membership);
+  job.willCopy(members.constants.length + members.listed.length, members.listed.length);
   if (!(await job.copy(started, members.constants, inService, 1)) || !(await job.copy(started, members.listed, inService))) return job.lost();
   return job.publish(started, inService);
 }
@@ -242,6 +254,7 @@ async function repair(job: ReadGraphJob, input: ReadGraphRepairInput): Promise<R
   const inService = job.mirrorHolds(started);
   if (!(await job.settledUnderRegistry(parseReadGraphIri(job.readGraph)!.scope.contextGraphId, inService))) return job.lost();
   const joined = [...new Set(input.joined)].sort(compareCodePoint);
+  job.willCopy(joined.length);
   if (!(await job.copy(started, joined, inService))) return job.lost();
   const leaving = [...new Set(input.leaving)].sort(compareCodePoint);
   const retractions = leaving.length === 0 ? [] : readGraphRepairLeave({ readGraph: job.readGraph, membership: input.membership }, fenceOf(started), leaving);
@@ -255,7 +268,8 @@ async function repair(job: ReadGraphJob, input: ReadGraphRepairInput): Promise<R
  * Remove a read graph: dirty first, out of the mirror so that writes stop
  * maintaining it, then, once the writes in flight have settled, empty it in
  * fenced batches and remove its row. A read graph without a row that still
- * holds triples gets a dirty row first, so the drop is fenced too.
+ * holds triples gets a dirty row first, so the drop is fenced too. The drop
+ * ends `lost` once the mirror holds the read graph again: its row moved on.
  */
 export async function removeReadGraph(context: ReadGraphJobContext, readGraph: string): Promise<ReadGraphJobResult> {
   if (!parseReadGraphIri(readGraph)) throw new ReadGraphJobError(`Not a read-graph IRI: ${readGraph}`);
@@ -264,55 +278,59 @@ export async function removeReadGraph(context: ReadGraphJobContext, readGraph: s
 }
 
 async function remove(job: ReadGraphJob): Promise<ReadGraphJobResult> {
-  const readGraph = job.readGraph;
-  const begun = await job.locked(async (): Promise<Begun> => {
-    let stored = await job.reconcile(false);
-    if (stored === undefined) {
-      job.runtime.mirror.remove(readGraph);
-      if (!(await job.holdsTriple())) return { ended: 'current', row: undefined };
-      stored = await job.reset();
-    } else if (stored.state !== 'dirty') {
-      stored = await job.transition(stored, { kind: 'mark-dirty' });
-    }
-    job.runtime.mirror.remove(readGraph);
-    return stored?.state === 'dirty' ? { started: stored } : { ended: 'lost', row: stored };
-  });
+  // Switched on again while the removal waited for the slot: the read graph stays in service.
+  const begun = await job.locked(async (): Promise<Begun> => (job.relevant() ? retire(job) : { ended: 'lost', row: (await job.stored()).row }));
   if (begun.ended !== undefined) return job.result(begun.ended, begun.row);
   const dirty = begun.started;
   await job.settled();
-  if (!(await job.drop(dirty, () => true))) return job.lost();
+  if (!(await job.drop(dirty, () => job.runtime.mirror.get(job.readGraph) === undefined && job.relevant()))) return job.lost();
   // A row that reads back after the removal is in the mirror again, and maintained.
-  const removed = await job.locked(() => job.transition(dirty, { kind: 'remove' }));
+  const removed = await job.locked(async () => (job.relevant() ? job.transition(dirty, { kind: 'remove' }) : (await job.stored()).row));
   return job.result(removed === undefined ? 'done' : 'lost', removed);
+}
+
+/**
+ * Take a read graph out of service at once, as a removal begins, without the
+ * background slot: under its lock, its stored row is marked dirty and the
+ * mirror lets it go, so writes stop maintaining it. The drop is left to
+ * {@link removeReadGraph}. Returns the stored row afterwards.
+ */
+export async function retireReadGraph(context: ReadGraphJobContext, readGraph: string): Promise<ReadGraphStateRow | undefined> {
+  if (!parseReadGraphIri(readGraph)) throw new ReadGraphJobError(`Not a read-graph IRI: ${readGraph}`);
+  const job = new ReadGraphJob(context, readGraph, 'remove');
+  const begun = await job.locked(() => retire(job));
+  return begun.ended === undefined ? begun.started : begun.row;
+}
+
+/** A removal's first step, under the lock the caller holds. A read graph without a row that still holds triples gets a dirty row. */
+async function retire(job: ReadGraphJob): Promise<Begun> {
+  let stored = await job.reconcile(false);
+  if (stored === undefined) {
+    job.runtime.mirror.remove(job.readGraph);
+    if (!(await job.holdsTriple())) return { ended: 'current', row: undefined };
+    stored = await job.reset();
+  } else if (stored.state !== 'dirty') {
+    stored = await job.transition(stored, { kind: 'mark-dirty' });
+  }
+  job.runtime.mirror.remove(job.readGraph);
+  return stored?.state === 'dirty' ? { started: stored } : { ended: 'lost', row: stored };
 }
 
 /**
  * Mark a read graph dirty from its stored row, as a checked change under its
  * lock: for a check that finds it wrong, or a change of a rule it was built
  * under. A damaged row is replaced by a dirty one; a read graph without a row
- * stays without one. Returns the stored row afterwards, which the mirror holds.
+ * stays without one, unless `create` gives it a dirty row at a new generation.
+ * Returns the stored row afterwards, which the mirror holds.
  */
-export async function markReadGraphDirty(context: ReadGraphJobContext, readGraph: string): Promise<ReadGraphStateRow | undefined> {
+export async function markReadGraphDirty(
+  context: ReadGraphJobContext,
+  readGraph: string,
+  options: { readonly create?: boolean } = {},
+): Promise<ReadGraphStateRow | undefined> {
   if (!parseReadGraphIri(readGraph)) throw new ReadGraphJobError(`Not a read-graph IRI: ${readGraph}`);
   const job = new ReadGraphJob(context, readGraph, 'mark');
-  return job.locked(() => job.markDirtyHeld());
-}
-
-const SLOTS = new WeakMap<ReadGraphBackendRuntime, ReadGraphLocks>();
-
-/**
- * Run heavy background work on a backend's read graphs one job at a time, in
- * the order asked. Build, repair and removal take this slot themselves, and
- * the scheduled checks and the checks run on request take it for each read
- * graph they check.
- */
-export function withReadGraphBackgroundSlot<T>(runtime: ReadGraphBackendRuntime, work: () => Promise<T>): Promise<T> {
-  let slot = SLOTS.get(runtime);
-  if (!slot) {
-    slot = new ReadGraphLocks();
-    SLOTS.set(runtime, slot);
-  }
-  return slot.withLocks(['background'], work);
+  return job.locked(() => job.markDirtyHeld(options.create === true));
 }
 
 /**
@@ -387,49 +405,6 @@ function sameFacts(left: readonly ReadGraphRegistryFact[], right: readonly ReadG
   return a.size === b.size && [...b].every((key) => a.has(key));
 }
 
-/**
- * The stored row of one read graph, read below the layer. `damaged` when its
- * row is damaged or misplaced.
- */
-export async function readStoredReadGraphRow(
-  store: TripleStore,
-  readGraph: string,
-  options: QueryOptions = {},
-): Promise<{ readonly row: ReadGraphStateRow | undefined; readonly damaged: boolean }> {
-  const result = await store.query(readGraphStateRowQuery(readGraph), options);
-  if (result.type !== 'bindings') throw new Error('A read-graph state read expected bindings');
-  const bindings = result.bindings.filter((binding) => binding.readGraph === readGraph
-    && binding.stateGraph !== undefined && isReadGraphStateGraph(binding.stateGraph));
-  const { rows, damaged } = parseReadGraphStateRows(bindings);
-  return { row: rows[0], damaged: damaged.length > 0 };
-}
-
-/**
- * The names to list for a membership test: the exact IRIs it can hold and the
- * prefixes every other member starts with. `undefined` when the test has a
- * branch that no IRI or prefix bounds. A `not` only filters.
- */
-export function readGraphEnumerationRoots(test: GraphNameTest): { readonly iris: readonly string[]; readonly prefixes: readonly string[] } | undefined {
-  const iris = new Set<string>();
-  const prefixes = new Set<string>();
-  const walk = (inner: GraphNameTest): boolean => {
-    switch (inner.kind) {
-      case 'equals': iris.add(inner.iri); return true;
-      case 'prefix':
-      case 'one-segment-after':
-      case 'address-after': prefixes.add(inner.prefix); return true;
-      case 'any': return inner.tests.every(walk);
-      // Every branch of `all` must hold, so one bounded branch bounds it.
-      case 'all': return inner.tests.some((branch) => readGraphEnumerationRoots(branch) !== undefined && walk(branch));
-      default: return false;
-    }
-  };
-  if (!walk(test)) return undefined;
-  const sorted = [...prefixes].sort(compareCodePoint);
-  const outer = sorted.filter((prefix, index) => !sorted.slice(0, index).some((shorter) => prefix.startsWith(shorter)));
-  return { iris: [...iris].filter((iri) => !outer.some((prefix) => iri.startsWith(prefix))).sort(compareCodePoint), prefixes: outer };
-}
-
 /** One job on one read graph. */
 class ReadGraphJob {
   readonly runtime: ReadGraphBackendRuntime;
@@ -439,8 +414,14 @@ class ReadGraphJob {
   private readonly options: QueryOptions;
   private readonly started = performance.now();
   private batches = 0;
+  /** Member graphs copied, how many the job copies, and how many of those a listing found. */
+  private copied = 0;
+  private toCopy = 0;
+  private listed: number | undefined;
   /** Whether this job replaced a damaged row. */
   replacedRow = false;
+  /** While a batch runs: its writes are the read graph's own contents, which skip the store's whole-store snapshot. */
+  private inBatch = false;
   /** The runtime's recovery generation when the job began (`./recovery.ts`). */
   private readonly recovery: number | undefined;
 
@@ -468,7 +449,7 @@ class ReadGraphJob {
 
   async send(update: string): Promise<void> {
     this.context.signal?.throwIfAborted();
-    await this.maintenance.update!(update, this.options);
+    await this.maintenance.update!(update, this.inBatch ? { ...this.options, snapshot: 'deferred' as const } : this.options);
   }
 
   stored() {
@@ -546,10 +527,10 @@ class ReadGraphJob {
     return stored.row;
   }
 
-  /** Mark the read graph dirty from its stored row, under the lock the caller holds. */
-  async markDirtyHeld(): Promise<ReadGraphStateRow | undefined> {
+  /** Mark the read graph dirty from its stored row, under the lock the caller holds; `create` gives one without a row a dirty row. */
+  async markDirtyHeld(create = false): Promise<ReadGraphStateRow | undefined> {
     const stored = await this.stored();
-    if (stored.damaged) return this.reset();
+    if (stored.damaged || (create && stored.row === undefined)) return this.reset();
     if (stored.row === undefined) {
       this.runtime.mirror.remove(this.readGraph);
       return undefined;
@@ -579,6 +560,11 @@ class ReadGraphJob {
     if (!this.runtime.registries.get(contextGraphId)) await refreshReadGraphRegistry(this.context, contextGraphId);
     const registry = this.runtime.registries.get(contextGraphId)!;
     return readGraphMembership(key, registry, this.runtime.workingMemoryIdentity);
+  }
+
+  /** Whether the job is still wanted (`ReadGraphJobContext.relevant`). */
+  relevant(): boolean {
+    return this.context.relevant?.() ?? true;
   }
 
   /** Whether the mirror still holds the row a job started with. */
@@ -661,6 +647,13 @@ class ReadGraphJob {
     return { constants, listed: [...listed].sort(compareCodePoint) };
   }
 
+  /** Count the member graphs the job copies, none copied yet, and tell the caller. */
+  willCopy(total: number, listed?: number): void {
+    this.toCopy = total;
+    this.listed = listed;
+    this.context.progress?.(0, total);
+  }
+
   /** Copy member graphs in fenced batches, `size` graphs at a time or sized by time. `false` when the row moved on. */
   async copy(row: ReadGraphStateRow, graphs: readonly string[], inService: () => boolean, size?: number): Promise<boolean> {
     const fence = fenceOf(row);
@@ -670,6 +663,8 @@ class ReadGraphJob {
       const began = performance.now();
       if (!(await this.batch(inService, () => this.send(readGraphBackfillBatch(this.readGraph, fence, chunk)), false))) return false;
       at += chunk.length;
+      this.copied += chunk.length;
+      this.context.progress?.(this.copied, this.toCopy);
       const elapsed = performance.now() - began;
       if (size === undefined) next = nextBatchSize(next, elapsed, this.batching);
       await this.pause(elapsed);
@@ -688,7 +683,8 @@ class ReadGraphJob {
     const began = performance.now();
     const sent = await this.locked(async () => {
       if (this.restarted() || !inService()) return false;
-      await send();
+      this.inBatch = true;
+      try { await send(); } finally { this.inBatch = false; }
       return true;
     });
     if (sent) {
@@ -726,7 +722,8 @@ class ReadGraphJob {
   }
 
   result(outcome: ReadGraphJobResult['outcome'], row: ReadGraphStateRow | undefined): ReadGraphJobResult {
-    return { readGraph: this.readGraph, kind: this.kind, outcome, row, batches: this.batches, durationMs: Math.round(performance.now() - this.started) };
+    const durationMs = Math.round(performance.now() - this.started);
+    return { readGraph: this.readGraph, kind: this.kind, outcome, row, batches: this.batches, durationMs, ...(this.listed !== undefined ? { listed: this.listed } : {}) };
   }
 
   /** A turn for the event loop, then this batch's share of time, and longer while foreground work waits on the store. */
@@ -743,39 +740,4 @@ class ReadGraphJob {
 
 function jobOptions(context: ReadGraphJobContext): QueryOptions {
   return { priority: 'background', source: context.source ?? SOURCE, ...(context.signal ? { signal: context.signal } : {}) };
-}
-
-function fenceOf(row: ReadGraphStateRow): ReadGraphFence {
-  return { state: row.state, generation: row.generation };
-}
-
-function setMirror(mirror: InMemoryReadGraphStateMirror, readGraph: string, row: ReadGraphStateRow | undefined): void {
-  if (row) mirror.set(row);
-  else mirror.remove(readGraph);
-}
-
-function sameRow(left: ReadGraphStateRow | undefined, right: ReadGraphStateRow | undefined): boolean {
-  if (left === undefined || right === undefined) return left === right;
-  return left.readGraph === right.readGraph && left.state === right.state && left.generation === right.generation
-    && left.ruleVersion === right.ruleVersion && left.builderVersion === right.builderVersion;
-}
-
-/** Halve a batch that took more than its target time; double one that took under a quarter of it. */
-function nextBatchSize(size: number, elapsedMs: number, batching: ReadGraphBatching): number {
-  if (elapsedMs > batching.targetBatchMs) return Math.max(1, Math.floor(size / 2));
-  return elapsedMs < batching.targetBatchMs / 4 ? Math.min(batching.maxGraphsPerBatch, size * 2) : size;
-}
-
-function foregroundQueued(store: TripleStore): boolean {
-  const pressure = store.getPressureSnapshot?.();
-  return pressure !== undefined && pressure.normalQueued + pressure.ackQueued + (pressure.healthQueued ?? 0) > 0;
-}
-
-function isSafeName(graph: string): boolean {
-  try {
-    assertSafeIri(graph);
-    return true;
-  } catch {
-    return false;
-  }
 }

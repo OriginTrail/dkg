@@ -103,6 +103,7 @@ import { buildQueryTools } from './tools/query-tools.js';
 import {  buildMessagingTools } from './tools/messaging-tools.js';
 import { buildAssertionTools } from './tools/assertion-tools.js';
 import { buildMemoryTools } from './tools/memory-tools.js';
+import { buildReadGraphTools, readGraphsCreateOption, withReadGraphsOutcome } from './tools/read-graph-tools.js';
 
 // #1116 share-outcome warnings. These three constants + classifyShareWarning are
 // duplicated byte-identical across the MCP, OpenClaw, and Hermes adapters. There
@@ -2542,6 +2543,7 @@ export class DkgNodePlugin {
       ...buildMessagingTools(host),
       ...buildAssertionTools(host),
       ...buildMemoryTools(host),
+      ...buildReadGraphTools(this.client),
     ];
   }
 
@@ -3208,15 +3210,13 @@ export class DkgNodePlugin {
           allowedAgents = cleaned;
         }
       }
+      const readGraphs = readGraphsCreateOption(args);
+      if ('error' in readGraphs) return this.error(readGraphs.error);
       const opts: { accessPolicy?: number; allowedAgents?: string[] } = {};
-      if (!isPublic) {
-        opts.accessPolicy = 1;
-      }
-      if (allowedAgents && allowedAgents.length > 0) {
-        opts.allowedAgents = allowedAgents;
-      }
-      const result = await this.client.createContextGraph(id, name, description, opts);
-      return this.json(result);
+      if (!isPublic) opts.accessPolicy = 1;
+      if (allowedAgents && allowedAgents.length > 0) opts.allowedAgents = allowedAgents;
+      const result = await this.client.createContextGraph(id, name, description, { ...opts, ...readGraphs });
+      return this.json(withReadGraphsOutcome(result, readGraphs.readGraphs, id));
     } catch (err: any) {
       return this.daemonError(err);
     }

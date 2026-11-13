@@ -172,6 +172,9 @@ export default defineConfig({
           // Node-admin read-graph commands: routes on a real read-graph layer, command and client.
           'test/read-graphs-route.test.ts',
           'test/read-graphs-command.test.ts',
+          // Search across assets per context graph: the settings commands, the create and query flags, and their words.
+          'test/read-graph-settings-command.test.ts',
+          'test/read-graph-settings-words.test.ts',
           'test/private-access-route.test.ts',
           // R8 — #1085 /register policy-matrix route tests, extracted from
           // daemon-http-behavior-extra so they run here (pure route handler,

@@ -456,6 +456,19 @@ DKG_SUBSCRIBE_SCHEMA = {
     },
 }
 
+_CONTEXT_GRAPH_ADMIN_TOOLS_DISABLED = (
+    "Context graph admin tools are disabled by the adapter guard. "
+    "Enable DKG_ALLOW_CONTEXT_GRAPH_ADMIN_TOOLS explicitly."
+)
+# The create tool's search-across-assets options, offered only with the admin tools.
+_READ_GRAPH_CREATE_OPTIONS = ("read_graphs", "read_graph_layer")
+
+_READ_GRAPH_LAYER_DESCRIPTION = (
+    "Which memory: 'verifiable-memory' (published assets, the default), "
+    "'shared-working-memory' (shared memory, shared with your team), "
+    "'working-memory' (private drafts), or 'all'."
+)
+
 DKG_CREATE_CONTEXT_GRAPH_SCHEMA = {
     "name": "dkg_context_graph_create",
     "description": (
@@ -507,8 +520,98 @@ DKG_CREATE_CONTEXT_GRAPH_SCHEMA = {
                     "auto-added regardless. Ignored when public is true."
                 ),
             },
+            "read_graphs": {
+                "type": "string",
+                "enum": ["preview", "on"],
+                "description": (
+                    "Optionally let queries search across this context graph's "
+                    "assets: 'preview' prepares a combined copy and shows how "
+                    "results would change, without changing any results yet; "
+                    "'on' lets queries that ask for it search across assets once "
+                    "the copy is ready. Needs the node admin token: without it "
+                    "the context graph is still created, without this setting."
+                ),
+            },
+            "read_graph_layer": {
+                "type": "string",
+                "enum": ["verifiable-memory", "shared-working-memory", "working-memory", "all"],
+                "description": _READ_GRAPH_LAYER_DESCRIPTION + " Needs read_graphs.",
+            },
         },
         "required": ["name"],
+    },
+}
+
+DKG_READ_GRAPHS_STATUS_SCHEMA = {
+    "name": "dkg_read_graphs_status",
+    "description": (
+        "Show where this node lets queries search across assets: for each "
+        "context graph and memory (published assets, shared memory, private "
+        "drafts), whether it is Off, in Preview (a combined copy is prepared "
+        "without changing any results) or On (queries that ask for it search "
+        "across assets), and how far that copy is. `summary` says it in plain "
+        "words. Needs the node admin token: with any other token the node "
+        "refuses and shows nothing."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {
+                "type": "string",
+                "description": "Show this context graph only. " + EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION,
+            },
+        },
+        "required": [],
+    },
+}
+
+DKG_READ_GRAPHS_SET_SCHEMA = {
+    "name": "dkg_read_graphs_set",
+    "description": (
+        "Turn search across assets Off, to Preview, or On for one context "
+        "graph, in one memory or all three, and choose whether its queries "
+        "search across assets by default. Off removes the combined copy. "
+        "Preview prepares it and shows how results would change, without "
+        "changing any results yet. On lets queries that ask for it search "
+        "across assets once the copy is ready. Needs the node admin token: "
+        "with any other token the node refuses and nothing changes. Returns "
+        "what changed and the settings in force afterwards; `summary` says it "
+        "in plain words."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {
+                "type": "string",
+                "description": "Context graph to change. " + EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION,
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["off", "preview", "on"],
+                "description": (
+                    "'off' removes the combined copy; 'preview' prepares it and "
+                    "shows how results would change, without changing any results "
+                    "yet; 'on' lets queries that ask for it search across assets "
+                    "once the copy is ready."
+                ),
+            },
+            "layer": {
+                "type": "string",
+                "enum": ["verifiable-memory", "shared-working-memory", "working-memory", "all"],
+                "description": _READ_GRAPH_LAYER_DESCRIPTION + " Needs mode.",
+            },
+            "default_semantics": {
+                "type": "string",
+                "enum": ["merged", "per-asset", "none"],
+                "description": (
+                    "Whether this context graph's queries search across assets "
+                    "by default: 'merged' (one query can link facts from "
+                    "different assets), 'per-asset' (each asset is searched on "
+                    "its own), or 'none' (the node's default)."
+                ),
+            },
+        },
+        "required": ["context_graph_id"],
     },
 }
 
@@ -1151,6 +1254,11 @@ class DKGMemoryProvider(MemoryProvider):
             if self._context_graph_admin_tools_allowed()
             else "  dkg_participant_list / dkg_join_request_list — Review project access state\n"
         )
+        read_graphs_guidance = (
+            "  dkg_read_graphs_status/set — See or change where queries search across assets (node admin token only)\n"
+            if self._context_graph_admin_tools_allowed()
+            else "  dkg_read_graphs_status — See where queries search across assets (node admin token only)\n"
+        )
 
         blocks.append(
             "DKG TOOLS — Your node is connected to a Decentralized Knowledge Graph.\n"
@@ -1181,6 +1289,7 @@ class DKGMemoryProvider(MemoryProvider):
             "  dkg_context_graph_create — Create a new project/knowledge space\n"
             "  dkg_subscribe — Join an existing project on the network\n"
             "  dkg_sub_graph_create/list — Manage project sub-graphs\n"
+            f"{read_graphs_guidance}"
             f"{admin_guidance}"
             "  dkg_status — Node health, peers, context graphs\n"
             "\n"
@@ -1231,6 +1340,7 @@ class DKGMemoryProvider(MemoryProvider):
             DKG_ASSERTION_HISTORY_SCHEMA,
             DKG_SUB_GRAPH_CREATE_SCHEMA,
             DKG_SUB_GRAPH_LIST_SCHEMA,
+            DKG_READ_GRAPHS_STATUS_SCHEMA,
         ]
         if self._direct_publish_allowed():
             publish_index = schemas.index(DKG_STATUS_SCHEMA)
@@ -1246,6 +1356,12 @@ class DKGMemoryProvider(MemoryProvider):
                 DKG_JOIN_REQUEST_APPROVE_SCHEMA,
                 DKG_JOIN_REQUEST_REJECT_SCHEMA,
             ]
+            schemas.append(DKG_READ_GRAPHS_SET_SCHEMA)
+        else:
+            create_index = schemas.index(DKG_CREATE_CONTEXT_GRAPH_SCHEMA)
+            parameters = DKG_CREATE_CONTEXT_GRAPH_SCHEMA["parameters"]
+            properties = {key: value for key, value in parameters["properties"].items() if key not in _READ_GRAPH_CREATE_OPTIONS}
+            schemas[create_index] = {**DKG_CREATE_CONTEXT_GRAPH_SCHEMA, "parameters": {**parameters, "properties": properties}}
         return schemas
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
@@ -1284,6 +1400,8 @@ class DKGMemoryProvider(MemoryProvider):
             "dkg_knowledge_asset_history": self._handle_assertion_history,
             "dkg_sub_graph_create": self._handle_sub_graph_create,
             "dkg_sub_graph_list": self._handle_sub_graph_list,
+            "dkg_read_graphs_status": self._handle_read_graphs_status,
+            "dkg_read_graphs_set": self._handle_read_graphs_set,
         }
         handler = handlers.get(tool_name)
         if handler:
@@ -1832,14 +1950,53 @@ class DKGMemoryProvider(MemoryProvider):
                 cleaned.append(trimmed)
             if cleaned:
                 allowed_agents = cleaned
+        if any(args.get(key) is not None for key in _READ_GRAPH_CREATE_OPTIONS) and not self._context_graph_admin_tools_allowed():
+            return tool_error(_CONTEXT_GRAPH_ADMIN_TOOLS_DISABLED)
+        from .read_graphs import create_option, describe_create_outcome
+        read_graphs, read_graphs_error = create_option(args)
+        if read_graphs_error:
+            return tool_error(read_graphs_error)
+        # The setting is passed only when asked for, so the plain create call stays as it was.
         result = self._client.create_context_graph(
             name,
             description,
             cg_id=_first_text(args, "id"),
             access_policy=access_policy,
             allowed_agents=allowed_agents,
+            **({"read_graphs": read_graphs} if read_graphs else {}),
         )
+        if read_graphs and isinstance(result, dict) and result.get("success") is not False:
+            created = str(result.get("created") or _first_text(args, "id") or name)
+            result = {**result, "searchAcrossAssets": describe_create_outcome(created, read_graphs, result.get("readGraphs"))}
         return json.dumps(result)
+
+    def _handle_read_graphs_status(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        from .read_graphs import describe_refusal, describe_settings, is_context_graph_id
+        cg = args.get("context_graph_id")
+        if cg is not None and not is_context_graph_id(cg):
+            return tool_error('"context_graph_id" must be a context graph id.')
+        answer = self._client.read_graph_settings(cg)
+        if answer.get("success") is False:
+            return tool_error(describe_refusal(answer, "this Hermes provider"))
+        return json.dumps({"summary": describe_settings(answer), **answer})
+
+    def _handle_read_graphs_set(self, args: Dict[str, Any]) -> str:
+        if not self._context_graph_admin_tools_allowed():
+            return tool_error(_CONTEXT_GRAPH_ADMIN_TOOLS_DISABLED)
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        from .read_graphs import change_of, describe_changes, describe_refusal, describe_settings
+        change, error = change_of(args)
+        if error:
+            return tool_error(error)
+        answer = self._client.set_read_graph_settings(change)
+        if answer.get("success") is False:
+            return tool_error(describe_refusal(answer, "this Hermes provider", change))
+        changed = describe_changes(answer, change)
+        settings = describe_settings(answer)
+        return json.dumps({"summary": settings if changed is None else f"{changed}\n\n{settings}", **answer})
 
     def _handle_context_graph_invite(self, args: Dict[str, Any]) -> str:
         if not self._context_graph_admin_tools_allowed():

@@ -44,10 +44,17 @@ are in-memory stores and provide no restart durability.
 
 - Mutations update the in-memory store immediately and schedule a full N-Quads
   snapshot after a 50 ms debounce. A successful mutation does not by itself
-  mean the snapshot has reached disk.
+  mean the snapshot has reached disk. A snapshot that falls due while another
+  is being written waits for it, and is then written.
 - Callers that require an operation to survive an immediate restart must await
   `flush()`. It cancels a pending debounce, waits for an in-flight snapshot,
   and then writes the current state.
+- An `update()` with `snapshot: 'deferred'` schedules no snapshot; the next
+  one, after any other mutation, `flush()` or `close()`, holds its change. The
+  read-graph builder sends its copy and drop batches this way, so a build does
+  not rewrite the whole file once per batch. Each change of the read graph's
+  state row still schedules a snapshot, and start-up rebuilds a read graph whose
+  build a crash cut short.
 - A snapshot is written to a sibling temporary file, the file is synced, and
   then atomically renamed over the persistence file. The containing directory
   is synced when the platform supports it. A crash before the rename retains

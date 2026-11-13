@@ -18,6 +18,7 @@ import { useProjectProfileContext, type QueryCatalog } from '../../../hooks/useP
 import { EmptyState } from '../../../components/ContextGraphPrimitives.js';
 import { Badge } from '../../../components/ds/Badge.js';
 import { truncateAddress } from '../../../lib/format.js';
+import { AnsweredSemantics, QueryViewControls, explainMergedRefusal, sameQueryRun, withSemantics, type QueryRunIdentity, type QueryViewOptions } from './query-semantics.js';
 function contextGraphQueryTemplate(contextGraphId: string): string {
   return `SELECT ?g ?s ?p ?o WHERE {
   GRAPH ?g { ?s ?p ?o }
@@ -37,12 +38,7 @@ type QueryEditorSession =
       values: Record<string, string>;
       draft: string;
     };
-type ActiveQueryExecution = {
-  sparql: string;
-  view?: QueryExecutionView;
-  subGraphName?: string;
-  sourceKey?: string;
-};
+type ActiveQueryExecution = QueryRunIdentity & { sourceKey?: string };
 
 function sparqlString(value: string): string {
   return JSON.stringify(value);
@@ -301,6 +297,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [parameterError, setParameterError] = useState<string | null>(null);
+  const [options, setOptions] = useState<QueryViewOptions>({ merged: false });
   const builtInCatalog = useMemo(() => contextGraphBuiltInCatalog(contextGraphId), [contextGraphId]);
   const queryCatalogs = useMemo(
     () => mergeQueryCatalogs([builtInCatalog, ...localSavedCatalogs, ...(profile?.queryCatalogs ?? [])]),
@@ -320,6 +317,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
   useEffect(() => {
     setSession({ kind: 'ad-hoc', draft: defaultQuery });
     setActiveExecution({ sparql: defaultQuery });
+    setOptions({ merged: false });
     setLocalSavedCatalogs([]);
     setSaveOpen(false);
     setSaveName('');
@@ -334,9 +332,10 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
       contextGraphId,
       view: activeExecution.view,
       subGraphName: activeExecution.subGraphName,
+      semantics: activeExecution.semantics,
       ...(activeExecution.view === 'working-memory' ? { includeContextGraphPartitions: true } : {}),
-    }, { timeoutMs: null, maxResponseBytes: null }),
-    [activeExecution.sparql, activeExecution.subGraphName, activeExecution.view, contextGraphId],
+    }, { timeoutMs: null, maxResponseBytes: null }).catch(error => { throw explainMergedRefusal(error); }),
+    [activeExecution.sparql, activeExecution.subGraphName, activeExecution.view, activeExecution.semantics, contextGraphId],
     0,
   );
 
@@ -387,44 +386,37 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     let execution: ActiveQueryExecution;
     if (session.kind === 'catalog' && draft === session.query.sparql.trim()) {
       try {
-        execution = {
+        execution = withSemantics({
           ...prepareQueryCatalogExecution(session.query, session.values),
           sourceKey: session.key,
-        };
+        }, options.merged);
         setParameterError(null);
       } catch (err: any) {
         setParameterError(err?.message ?? String(err));
         return;
       }
     } else {
-      execution = { sparql: draft };
+      execution = withSemantics({ sparql: draft, view: options.view }, options.merged);
       if (session.kind === 'catalog') setSession({ kind: 'ad-hoc', draft });
       setParameterError(null);
     }
     setSaveMessage(null);
     setSaveError(null);
-    if (
-      execution.sparql === activeExecution.sparql
-      && execution.view === activeExecution.view
-      && execution.subGraphName === activeExecution.subGraphName
-    ) {
+    if (sameQueryRun(execution, activeExecution)) {
       setActiveExecution(execution);
       refresh();
       return;
     }
     setActiveExecution(execution);
-  }, [activeExecution, refresh, session]);
+  }, [activeExecution, options, refresh, session]);
 
   const resetQuery = useCallback(() => {
     setSession({ kind: 'ad-hoc', draft: defaultQuery });
     setSaveMessage(null);
     setSaveError(null);
     setParameterError(null);
-    if (
-      activeExecution.sparql === defaultQuery
-      && activeExecution.view === undefined
-      && activeExecution.subGraphName === undefined
-    ) {
+    setOptions(previous => ({ ...previous, view: undefined }));
+    if (sameQueryRun(activeExecution, { sparql: defaultQuery })) {
       refresh();
       return;
     }
@@ -442,22 +434,16 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
       .filter(parameter => parameter.defaultValue !== undefined)
       .map(parameter => [parameter.name, String(parameter.defaultValue)]));
     setSession({ kind: 'catalog', key, query, values, draft: next });
+    setOptions(previous => ({ ...previous, view: query.view }));
     if (parameters.length > 0) return;
-    const execution: ActiveQueryExecution = {
-      ...prepareQueryCatalogExecution(query, values),
-      sourceKey: key,
-    };
-    if (
-      activeExecution.sparql === execution.sparql
-      && activeExecution.view === execution.view
-      && activeExecution.subGraphName === execution.subGraphName
-    ) {
+    const execution: ActiveQueryExecution = withSemantics({ ...prepareQueryCatalogExecution(query, values), sourceKey: key }, options.merged);
+    if (sameQueryRun(activeExecution, execution)) {
       setActiveExecution(execution);
       refresh();
       return;
     }
     setActiveExecution(execution);
-  }, [activeExecution, refresh]);
+  }, [activeExecution, options.merged, refresh]);
 
   const openSaveForm = useCallback(() => {
     const firstLine = draftQuery.trim().split('\n').find(line => line.trim());
@@ -495,7 +481,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
         description,
         sparql,
         selectedTemplate?.parameters ?? [],
-        selectedTemplate?.view,
+        options.view,
         selectedTemplate?.subGraph ?? CONTEXT_GRAPH_QUERY_SUBGRAPH,
       );
       await writeProfileQueryCatalog(contextGraphId, quads);
@@ -525,7 +511,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     } finally {
       setSaving(false);
     }
-  }, [contextGraphId, draftQuery, saveDescription, saveName, selectedCatalogQuery, session]);
+  }, [contextGraphId, draftQuery, options.view, saveDescription, saveName, selectedCatalogQuery, session]);
 
   return (
     <div className="v10-memory-layer-view v10-cg-query-view">
@@ -690,6 +676,8 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
           aria-label="SPARQL editor"
           value={draftQuery}
           onChange={(e) => {
+            // An edited saved query runs as ad-hoc SPARQL, without the saved query's memory.
+            if (session.kind === 'catalog') setOptions(previous => ({ ...previous, view: undefined }));
             setSession({ kind: 'ad-hoc', draft: e.target.value });
             setParameterError(null);
           }}
@@ -700,6 +688,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
           <button className="v10-mlv-save-btn ds-btn" type="button" onClick={openSaveForm}>Save</button>
           <button className="v10-mlv-clear-btn ds-btn ds-ghost" type="button" onClick={resetQuery}>Reset</button>
         </div>
+        <QueryViewControls options={options} locked={session.kind === 'catalog'} onChange={setOptions} />
       </div>
 
       {saveOpen && (
@@ -783,6 +772,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
           <div className="v10-mlv-table-wrap ds-card-nested">
             <div className="v10-mlv-result-count">
               {rows.length} {resultType === 'quads' ? `quad${rows.length === 1 ? '' : 's'}` : `result${rows.length === 1 ? '' : 's'}`}
+              <AnsweredSemantics view={activeExecution.view} semantics={data?.semantics} />
             </div>
             <div className="ds-table-scroll"><table className="v10-mlv-table">
               <thead>

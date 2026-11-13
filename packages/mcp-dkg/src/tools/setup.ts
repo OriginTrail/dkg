@@ -16,9 +16,17 @@
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import {
+  READ_GRAPH_CREATE_MODE_INPUTS,
+  READ_GRAPH_LAYER_INPUTS,
+  describeReadGraphsCreateOutcome,
+  readGraphModeOf,
+  readGraphModes,
+} from '@origintrail-official/dkg-core/read-graph-settings';
 import type { DkgClient } from '../client.js';
 import type { DkgConfig } from '../config.js';
 import { EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION } from './context-graph-description.js';
+import { READ_GRAPH_LAYER_DESCRIPTION } from './read-graphs.js';
 
 type ToolResult = {
   content: Array<{ type: 'text'; text: string }>;
@@ -112,11 +120,28 @@ export function registerSetupTools(
               '"curators-only" = only the curator may publish (default). ' +
               'Maps to on-chain publishPolicy.',
           ),
+        readGraphs: z
+          .enum(READ_GRAPH_CREATE_MODE_INPUTS)
+          .optional()
+          .describe(
+            'Optionally let queries search across this context graph\'s assets: "preview" prepares a combined copy ' +
+              'and shows how results would change, without changing any results yet; "on" lets queries that ask ' +
+              'for it search across assets once the copy is ready. Needs the node admin token: without it the ' +
+              'context graph is still created, without this setting.',
+          ),
+        readGraphLayer: z
+          .enum(READ_GRAPH_LAYER_INPUTS)
+          .optional()
+          .describe(`${READ_GRAPH_LAYER_DESCRIPTION} Needs \`readGraphs\`.`),
       },
     },
-    async ({ name, description, id, sharing, contribution }): Promise<ToolResult> => {
+    async ({ name, description, id, sharing, contribution, readGraphs, readGraphLayer }): Promise<ToolResult> => {
       const trimmedName = name.trim();
       if (!trimmedName) return errResult('"name" is required.');
+      if (readGraphs === undefined && readGraphLayer !== undefined) return errResult('"readGraphLayer" needs "readGraphs".');
+      const readGraphSetting = readGraphs === undefined
+        ? undefined
+        : { layers: readGraphModes(readGraphLayer ?? 'verifiable-memory', readGraphModeOf(readGraphs)) };
       const explicitId = id?.trim();
       const cgId = explicitId || slugify(trimmedName);
       if (!cgId) {
@@ -140,6 +165,7 @@ export function registerSetupTools(
           description: description?.trim() || undefined,
           accessPolicy,
           publishPolicy,
+          ...(readGraphSetting === undefined ? {} : { readGraphs: readGraphSetting }),
         });
         // Mirror dkg_knowledge_asset_create's idempotency surfacing: distinct
         // success messages for "newly created" vs "already existed" so
@@ -148,14 +174,16 @@ export function registerSetupTools(
         if (result.alreadyExists) {
           return ok(
             `Context graph '${cgId}' already exists.\n` +
-              `URI: ${result.uri}`,
+              `URI: ${result.uri}` +
+              (readGraphSetting ? '\nSearch across assets was not changed; use dkg_read_graphs_set for that.' : ''),
           );
         }
         return ok(
           `Created context graph '${cgId}'.\n` +
             `URI: ${result.uri}\n` +
             `Name: ${trimmedName}` +
-            (description ? `\nDescription: ${description}` : ''),
+            (description ? `\nDescription: ${description}` : '') +
+            (readGraphSetting ? `\n${describeReadGraphsCreateOutcome(cgId, readGraphSetting, result.readGraphs)}` : ''),
         );
       } catch (e) {
         return errResult(`Failed to create context graph: ${formatError(e)}`);

@@ -30,7 +30,7 @@
  *    and confirming the schema does NOT reject it.
  *
  * The drop-sweep + tool-count test registers every production-side tool
- * module (all 8 register functions, mirroring `src/index.ts`) so the
+ * module (all 9 register functions, mirroring `src/index.ts`) so the
  * assertions run against the full surface. Adding a new register function in
  * production without adding it here means this file silently under-covers — an
  * explicit regression in the next wave's W?-Q audit.
@@ -43,6 +43,7 @@ import { registerSetupTools } from '../src/tools/setup.js';
 import { registerHealthTools } from '../src/tools/health.js';
 import { registerChatTools } from '../src/tools/chat.js';
 import { registerQueryCatalogTools } from '../src/tools/query-catalog.js';
+import { registerReadGraphTools } from '../src/tools/read-graphs.js';
 import { FakeServer, FakeClient, makeConfig } from './harness.js';
 
 /**
@@ -81,7 +82,7 @@ describe('drop-sweep — none of the 10 W2-dropped tools reappear in tools/list'
     server = new FakeServer();
     const client = new FakeClient();
     const config = makeConfig();
-    // Mirror src/index.ts (all 8 register* calls). If a new register* call lands
+    // Mirror src/index.ts (all 9 register* calls). If a new register* call lands
     // in production, add it here too.
     registerReadTools(server.asMcpServer(), client.asDkgClient(), config);
     registerAssertionTools(server.asMcpServer(), client.asDkgClient(), config);
@@ -90,6 +91,7 @@ describe('drop-sweep — none of the 10 W2-dropped tools reappear in tools/list'
     registerHealthTools(server.asMcpServer(), client.asDkgClient(), config);
     registerChatTools(server.asMcpServer(), client.asDkgClient(), config);
     registerQueryCatalogTools(server.asMcpServer(), client.asDkgClient(), config);
+    registerReadGraphTools(server.asMcpServer(), client.asDkgClient(), config);
   });
 
   it.each(DROPPED_TOOLS)('does not register %s', (name) => {
@@ -131,8 +133,11 @@ describe('drop-sweep — none of the 10 W2-dropped tools reappear in tools/list'
   // Cross-graph query-catalog discovery: +1 read-only tool, taking the full
   // surface from 33 → 34. It verifies catalog presence instead of inferring it
   // from context-graph names or descriptions.
-  it('registered surface contains exactly 34 tools (full production surface, post-PR locked count)', () => {
-    expect(server.tools.size).toBe(34);
+  // Read-graph settings ("search across assets"): +2 node-admin tools
+  // (dkg_read_graphs_status, read-only; dkg_read_graphs_set), taking the
+  // full surface from 34 → 36.
+  it('registered surface contains exactly 36 tools (full production surface, post-PR locked count)', () => {
+    expect(server.tools.size).toBe(36);
   });
 });
 

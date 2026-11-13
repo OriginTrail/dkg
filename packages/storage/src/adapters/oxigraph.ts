@@ -187,6 +187,8 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
     if (!this.persistPath || this.flushTimer || this.readOnly) return;
     this.flushTimer = setTimeout(() => {
       this.flushTimer = null;
+      // A snapshot being written holds the store as it was when it began: write this one after it, never drop it.
+      if (this.flushing) return this.scheduleFlush();
       // Background flush has no caller to receive errors; log them.
       // Explicit `flush()`/`close()` callers DO `await` flushNow() and
       // get the original throw, which is what we want for shutdown
@@ -650,7 +652,7 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
     // `touchedGraphs` hint is inapplicable here — accepted for a uniform
     // update contract, ignored.
     this.writable.update(withReadGraphOperationsAroundCallerUpdate(sparql, options));
-    this.scheduleFlush();
+    if (options?.snapshot !== 'deferred') this.scheduleFlush();
     // A raw UPDATE's write scope is not derivable at the call site
     // (`touchedGraphs` hints only membership changes) — unscoped bump.
     this.writeGen.recordWrite({ kind: 'all' });

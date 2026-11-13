@@ -15,11 +15,18 @@
  * store's read-graph runtime. With every read graph `off`, or a store without
  * a read-graph layer ({@link READ_GRAPHS_OFF}), the builder does not start,
  * and the start-up before the first write (`startReadGraphs`) marks every
- * read graph it finds dirty, as before.
+ * read graph it finds dirty, as before. The builder removes the read graphs
+ * whose mode is `off`, and starts for them alone when the start-up found
+ * some.
+ *
+ * The modes can be switched while the node runs ({@link
+ * ReadGraphWorkloadOwnerV1.applyReadGraphModes}): the builder starts once a
+ * switch leaves something to build or to remove, and runs a pass at once.
  */
 
 import {
   MemoryLayer,
+  createOperationContext,
   isReadGraphEligibleContextGraphId,
   readScope,
   type OperationContext,
@@ -28,10 +35,12 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   ReadGraphBuilder,
+  applyReadGraphModes,
   checkReadGraph,
   installWorkingMemoryIdentity,
   keepsAnyReadGraph,
   readGraphLayerOf,
+  readGraphWork,
   readGraphModeOf,
   readGraphRuntimeOf,
   readReadGraphRegistry,
@@ -43,8 +52,12 @@ import {
   type ReadGraphCheckResult,
   type ReadGraphCheckSchedule,
   type ReadGraphMode,
+  type ReadGraphModeChange,
+  type ReadGraphModeDeferral,
+  type ReadGraphModes,
   type ReadGraphState,
   type TripleStore,
+  type ViewSemanticsSettings,
 } from '@origintrail-official/dkg-storage';
 
 export type { ReadGraphMode };
@@ -78,7 +91,6 @@ export interface ReadGraphAgentViewV1 {
 export interface ReadGraphWorkloadOptionsV1 {
   readonly dataDir?: string;
   readonly logger: { info(ctx: OperationContext, message: string): void; warn(ctx: OperationContext, message: string): void };
-  readonly modes?: ReadGraphModesV1;
   /** The time between the builder's passes. */
   readonly intervalMs?: number;
 }
@@ -95,7 +107,19 @@ export interface ReadGraphCheckReportV1 {
 
 /** The node's read graphs, for `dkg store read-graphs status`. */
 export interface ReadGraphStatusV1 {
-  readonly readGraphs: ReadonlyArray<{ readonly readGraph: string; readonly state: ReadGraphState; readonly generation: number }>;
+  /**
+   * Each read graph, once this process has built it with the triples it held
+   * then and its member graphs that the build found by listing the store (the
+   * asset or draft graphs, not the fixed graphs its membership names). Writes
+   * since then make both drift.
+   */
+  readonly readGraphs: ReadonlyArray<{
+    readonly readGraph: string;
+    readonly state: ReadGraphState;
+    readonly generation: number;
+    readonly triples?: number;
+    readonly members?: number;
+  }>;
   /** What the builder does; `undefined` while it does not run. */
   readonly builder: ReadGraphBuilderStatus | undefined;
   /** Whether the background checks run. */
@@ -123,22 +147,27 @@ export class ReadGraphWorkloadOwnerV1 {
   /** The checks run on request, each with the controller that ends it when the workload stops. */
   readonly #requested = new Map<AbortController, Promise<unknown>>();
   #closing = 0;
+  /** The context the workload was started in, until it stops: a live switch starts the builder in it. */
+  #started: OperationContext | undefined;
 
   constructor(agent: ReadGraphAgentViewV1, options: ReadGraphWorkloadOptionsV1) {
     this.#agent = agent;
     this.#options = options;
-    this.#modes = options.modes ?? readGraphModesOfStore(agent.store);
+    // The runtime's settings, which a live switch changes: the workload decides from what it applies.
+    this.#modes = readGraphModesOfStore(agent.store);
     OWNERS.set(agent, this);
   }
 
-  /** Start the builder, when any read graph may be kept. */
+  /** Start the builder, when any read graph may be kept or work a switch or the start-up left waits for it. */
   start(ctx: OperationContext): void {
-    if (this.#builder || !this.#modes.keepsAny()) return;
+    this.#started = ctx;
+    if (this.#builder || !(this.#modes.keepsAny() || this.#workAsked())) return;
     const { logger } = this.#options;
     this.#builder = new ReadGraphBuilder({
       store: this.#agent.store,
       dataDir: this.#options.dataDir,
       wanted: (signal) => this.wanted(signal),
+      off: (key) => this.#modes.modeOf(key) === 'off',
       intervalMs: this.#options.intervalMs,
       log: (line) => logger.info(ctx, line),
       warn: (line) => logger.warn(ctx, line),
@@ -169,6 +198,7 @@ export class ReadGraphWorkloadOwnerV1 {
     const checks = this.#checks;
     this.#builder = undefined;
     this.#checks = undefined;
+    this.#started = undefined;
     this.#closing += 1;
     try {
       const requested = [...this.#requested];
@@ -226,11 +256,47 @@ export class ReadGraphWorkloadOwnerV1 {
     return report;
   }
 
+  /**
+   * Switch the node's read graphs to `next`, the whole settings, while it
+   * runs (`applyReadGraphModes`): for the node-admin settings API. A layer
+   * switched on gets its rows at once, for the node's subscribed context
+   * graphs and local agents, and the builder backfills them; a layer switched
+   * off leaves service at once, and the builder removes it. Once the workload
+   * runs, a switch that leaves anything to build or remove starts the builder
+   * or runs its next pass at once.
+   */
+  async applyReadGraphModes(
+    next: ReadGraphModes,
+    options: { readonly signal?: AbortSignal; readonly viewSemantics?: ViewSemanticsSettings; readonly beforeCommit?: () => void } = {},
+  ): Promise<readonly ReadGraphModeChange[]> {
+    const changes = await applyReadGraphModes(this.#agent.store, next, {
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.viewSemantics ? { viewSemantics: options.viewSemantics } : {}),
+      ...(options.beforeCommit ? { beforeCommit: options.beforeCommit } : {}),
+      ...(this.#options.dataDir !== undefined ? { dataDir: this.#options.dataDir } : {}),
+      contextGraphIds: [...this.#agent.getSubscribedContextGraphs().keys()],
+      wanted: () => this.wanted(),
+      source: 'agent.readGraphModes',
+      onDeferred: (deferral) => this.#options.logger.warn(this.#started ?? createOperationContext('system'), deferredMessage(deferral)),
+    });
+    // From the settings now in force, not from the changes listed: a node default switched on lists no context graph
+    // before the first subscription, and the builder must run for the ones that come.
+    if (this.#builder) this.#builder.request();
+    else if (this.#started) this.start(this.#started);
+    return changes;
+  }
+
+  /** Whether work a switch or the start-up left waits for the builder (`readGraphWork`). */
+  #workAsked(): boolean {
+    const runtime = readGraphRuntimeOf(this.#agent.store);
+    return runtime !== undefined && readGraphWork(runtime).length > 0;
+  }
+
   /** The node's read graphs, what the builder does, and the last check run on request: for `dkg store read-graphs status`. */
   readGraphStatus(): ReadGraphStatusV1 {
     const rows = readGraphLayerOf(this.#agent.store)?.runtime.mirror.rows() ?? [];
     return {
-      readGraphs: rows.map(({ readGraph, state, generation }) => ({ readGraph, state, generation }))
+      readGraphs: rows.map(({ readGraph, state, generation }) => ({ readGraph, state, generation, ...this.#builder?.atLastBuild(readGraph) }))
         .sort((left, right) => (left.readGraph < right.readGraph ? -1 : left.readGraph > right.readGraph ? 1 : 0)),
       builder: this.#builder?.status(),
       checking: this.#checks !== undefined,
@@ -279,4 +345,17 @@ export class ReadGraphWorkloadOwnerV1 {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+const DEFERRED_STEPS: Readonly<Record<ReadGraphModeDeferral['step'], string>> = {
+  retire: 'take out of service',
+  admit: 'take into service',
+  wanted: 'list the read graphs it keeps for',
+  registry: 'read the registry of',
+};
+
+/** The warning for a step of a switch that the builder takes over. */
+function deferredMessage(deferral: ReadGraphModeDeferral): string {
+  const what = deferral.readGraph ?? deferral.contextGraphId ?? 'the switched layers';
+  return `A read-graph switch could not ${DEFERRED_STEPS[deferral.step]} ${what} at once, and leaves it to the builder: ${messageOf(deferral.error)}`;
 }

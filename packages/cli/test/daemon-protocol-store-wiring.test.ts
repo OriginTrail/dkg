@@ -19,6 +19,9 @@ import {
   SqliteSyncCheckpointStore,
 } from '@origintrail-official/dkg-node-store';
 import { DashboardDB, SCHEMA_VERSION } from '@origintrail-official/dkg-node-ui';
+import { MemoryLayer, readScope } from '@origintrail-official/dkg-core';
+import { readGraphModeOf, viewSemanticsOf } from '@origintrail-official/dkg-storage';
+import { SqliteReadGraphSettingsStore } from '../src/read-graph-settings-store.js';
 import type { DkgConfig } from '../src/config.js';
 import type { CorePrereqResult } from '../src/daemon/core-prereq-check.js';
 import type { ProtocolStoreOptions, ProtocolStores } from '../src/daemon/protocol-persistence.js';
@@ -426,6 +429,31 @@ describe('daemon composition of the protocol persistence stores', () => {
     shutdownHandler = installed[0] as unknown as () => Promise<void>;
     return shutdownHandler;
   }
+
+  it('carries the read-graph settings its database holds into the agent\'s store, for a node without a query section', async () => {
+    seedLegacyHome();
+    // Settings an operator changed before this start, in the node's one database.
+    const before = new DashboardDB({ dataDir: tempHome });
+    new SqliteReadGraphSettingsStore(before).set('notes', { layers: { 'verifiable-memory': 'serve' }, viewSemantics: 'merged' }, 'api');
+    before.close();
+    mocks.dashboardDbs.constructed.length = 0;
+    mocks.dashboardDbs.closed.length = 0;
+    mocks.events.length = 0;
+    mocks.agentCreate.mockResolvedValue(createFakeDaemonAgent({ onStop: recordAgentStop }));
+
+    await boot(BASE_CONFIG);
+
+    expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
+    const createArg = mocks.agentCreate.mock.calls[0]?.[0] as DKGAgentConfig | undefined;
+    const readGraphs = createArg?.storeConfig?.readGraphs;
+    expect(readGraphModeOf(readGraphs?.modes, { scope: readScope('notes'), layer: MemoryLayer.VerifiableMemory })).toBe('serve');
+    expect(readGraphModeOf(readGraphs?.modes, { scope: readScope('other'), layer: MemoryLayer.VerifiableMemory })).toBe('off');
+    expect(viewSemanticsOf(readGraphs?.viewSemantics, 'notes')).toBe('merged');
+    // Only the table keeps read graphs, so a store that cannot keep them keeps none, and the start goes on.
+    expect(readGraphs?.whenUnsupported).toBe('off');
+    await installedShutdown()();
+    expect(mocks.events).toEqual(['agent.stop', 'dashboard.close']);
+  });
 
   it('boots against a legacy node-ui.db on ONE DashboardDB, hands the agent its stores, and closes it once at shutdown', async () => {
     const { rowsBefore, schemaBefore, versionBefore } = seedLegacyHome();

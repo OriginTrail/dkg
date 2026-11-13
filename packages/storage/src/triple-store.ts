@@ -180,6 +180,12 @@ export interface UpdateOptions extends QueryOptions {
    * only the graphs whose existence changes, this names every graph written.
    */
   writtenGraphs?: readonly string[];
+  /**
+   * `deferred`: a store that writes a whole-store snapshot after each change (embedded Oxigraph with a file)
+   * schedules none for this update; the next snapshot, after another change, `flush()` or `close()`, holds it.
+   * Only for writes that start-up rebuilds when a crash loses them: the copy and drop batches of a read-graph job.
+   */
+  snapshot?: 'deferred';
 }
 
 export interface TripleStore {

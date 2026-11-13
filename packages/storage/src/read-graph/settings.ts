@@ -47,10 +47,15 @@ export interface ReadGraphModes extends ReadGraphModeRule {
  * touches its members keeps paying for it.
  */
 export function readGraphModeOf(modes: ReadGraphModes | undefined, key: ReadGraphKey): ReadGraphMode {
-  const contextGraph = ownValue(modes?.contextGraphs, key.scope.contextGraphId);
-  return ownValue(contextGraph?.layers, key.layer)
+  return readGraphModeOfLayer(modes, key.scope.contextGraphId, key.layer);
+}
+
+/** The mode of a context graph's read graphs in one memory layer, as {@link readGraphModeOf} gives it. */
+export function readGraphModeOfLayer(modes: ReadGraphModes | undefined, contextGraphId: string, layer: MemoryLayer): ReadGraphMode {
+  const contextGraph = ownValue(modes?.contextGraphs, contextGraphId);
+  return ownValue(contextGraph?.layers, layer)
     ?? contextGraph?.default
-    ?? ownValue(modes?.layers, key.layer)
+    ?? ownValue(modes?.layers, layer)
     ?? modes?.default
     ?? 'off';
 }

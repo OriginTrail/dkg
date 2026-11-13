@@ -22,6 +22,7 @@ import { registerSetupTools } from './tools/setup.js';
 import { registerHealthTools } from './tools/health.js';
 import { registerChatTools } from './tools/chat.js';
 import { registerQueryCatalogTools } from './tools/query-catalog.js';
+import { registerReadGraphTools } from './tools/read-graphs.js';
 import { runCli, isKnownCliSubcommand } from './cli/index.js';
 import { loadAdapters } from './adapters.js';
 
@@ -60,6 +61,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
   registerHealthTools(server, client, config);
   registerChatTools(server, client, config);
   registerQueryCatalogTools(server, client, config);
+  registerReadGraphTools(server, client, config);
 
   await loadAdapters(server, client, config);
 

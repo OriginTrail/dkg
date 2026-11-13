@@ -233,7 +233,8 @@ describe('dkg store read-graphs, failing', () => {
     registerReadGraphsCommand(program);
     expect(program.commands.filter((command) => command.name() === 'store')).toEqual([store]);
     expect(store.commands.map((command) => command.name())).toEqual(['read-graphs']);
-    expect(store.commands[0]!.commands.map((command) => command.name())).toEqual(['status', 'check', 'rebuild', 'drop']);
+    expect(store.commands[0]!.commands.map((command) => command.name()))
+      .toEqual(['status', 'check', 'rebuild', 'drop', 'enable', 'disable', 'default-semantics', 'settings']);
   });
 });
 

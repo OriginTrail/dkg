@@ -19,6 +19,7 @@ import { readGraphPartitionMaintenanceStore } from '@origintrail-official/dkg-st
 import { readGraphRegistryRecordUpdate } from '@origintrail-official/dkg-storage/dist/read-graph/registry-record.js';
 import type { DkgConfig } from '../src/config.js';
 import { createPublisherStore, publisherStoreConfig } from '../src/publisher-store.js';
+import { readGraphSettingsOutsideDaemon } from '../src/read-graph-settings-start.js';
 import { QueryConfigError } from '../src/read-graphs-config.js';
 
 const DATA_DIR = '/tmp/dkg-publisher-store-test';
@@ -27,37 +28,42 @@ function config(overrides: Partial<DkgConfig>): DkgConfig {
   return { name: 'test', apiPort: 0, listenPort: 0, nodeRole: 'edge', ...overrides } as DkgConfig;
 }
 
+/** The store configuration that `createPublisherStore` builds. */
+async function built(dkgConfig: DkgConfig, readOnly = false) {
+  return publisherStoreConfig(DATA_DIR, dkgConfig, readOnly, await readGraphSettingsOutsideDaemon(DATA_DIR, dkgConfig));
+}
+
 describe('the store of a publisher runtime outside the daemon', () => {
-  it('carries the read-graph settings and keeps the change log off for a configured store', () => {
-    const built = publisherStoreConfig(DATA_DIR, config({
+  it('carries the read-graph settings and keeps the change log off for a configured store', async () => {
+    const store = await built(config({
       store: { backend: 'sparql-http', options: { queryEndpoint: 'http://127.0.0.1:7878/query' }, changelog: true },
       query: { readGraphs: { layers: { 'verifiable-memory': 'build' } }, viewSemantics: 'merged' },
     }));
-    expect(built.backend).toBe('sparql-http');
-    expect(built.changelog).toBe(false);
-    expect(built.largeLiteralStorage).toBeUndefined();
-    expect(built.readGraphs).toEqual({
+    expect(store.backend).toBe('sparql-http');
+    expect(store.changelog).toBe(false);
+    expect(store.largeLiteralStorage).toBeUndefined();
+    expect(store.readGraphs).toEqual({
       modes: { layers: { VM: 'build' } },
       viewSemantics: { default: 'merged' },
+      whenUnsupported: 'refuse',
     });
   });
 
-  it('carries them for the default embedded store too, read-only when asked', () => {
-    const built = publisherStoreConfig(DATA_DIR, config({ query: { viewSemantics: 'merged' } }), true);
-    expect(built).toMatchObject({
+  it('carries them for the default embedded store too, read-only when asked', async () => {
+    expect(await built(config({ query: { viewSemantics: 'merged' } }), true)).toMatchObject({
       backend: 'oxigraph-worker',
       options: { path: join(DATA_DIR, 'store.nq'), readOnly: true },
-      readGraphs: { modes: { default: 'off' }, viewSemantics: { default: 'merged' } },
+      readGraphs: { modes: { default: 'off' }, viewSemantics: { default: 'merged' }, whenUnsupported: 'off' },
     });
   });
 
-  it('carries no settings without a query section, so it never resets those of the backend', () => {
-    expect(publisherStoreConfig(DATA_DIR, config({})).readGraphs).toBeUndefined();
-    expect(publisherStoreConfig(DATA_DIR, config({ store: { backend: 'sparql-http' } })).readGraphs).toBeUndefined();
+  it('carries no settings without a query section or a settings table, so it never resets those of the backend', async () => {
+    expect((await built(config({}))).readGraphs).toBeUndefined();
+    expect((await built(config({ store: { backend: 'sparql-http' } }))).readGraphs).toBeUndefined();
   });
 
-  it('refuses a query section with an offending key', () => {
-    expect(() => publisherStoreConfig(DATA_DIR, config({ query: { readGraphs: 'on' as never } }))).toThrow(QueryConfigError);
+  it('refuses a query section with an offending key', async () => {
+    await expect(built(config({ query: { readGraphs: 'on' as never } }))).rejects.toThrow(QueryConfigError);
   });
 });
 

@@ -26,6 +26,36 @@
 #   measure   record read graphs by state, triples per read graph and copies
 #             per triple (scripts/read-graph-store-report.mjs), and the size of
 #             each node's directory before and after;
+#   live      switch READ_GRAPHS_LIVE_CG (default devnet-test) live through the
+#             settings API (PUT /api/store/read-graphs/settings), no restart, on
+#             every node that holds it. Answers are checked with a join across
+#             two working-memory drafts the node's agent writes first (<x> knows
+#             <y> in one, <y> name in the other): off, where its read graphs go
+#             and a merged request is refused as for a layer the node does not
+#             serve; build, where they are rebuilt from nothing, ready, and the
+#             full check is clean; serve for working and verifiable memory, where
+#             the merged join returns the joined row and the per-asset one none;
+#             and a default view semantics, followed by a request that names
+#             none. Then, on READ_GRAPHS_LIVE_LOAD_NODE, switch its layers between
+#             build and serve while the node's own agent writes drafts into it
+#             (each switch must take effect while the writes go on: the modes it
+#             asked for, and the merged join answered or refused accordingly;
+#             writes must be acknowledged between every two switches, or the
+#             phase is INCONCLUSIVE; every acknowledged write must be there after
+#             it, and the full check clean), and restart the node: the settings
+#             must hold and the join be answered across assets again without
+#             being set again. The context graph stays in serve for working and
+#             verifiable memory and in build for shared memory, so the gate runs
+#             with it. The restart counts only when another daemon worker answers
+#             afterwards. A restarted node refuses reads of a graph's shared
+#             memory until it has accepted the graph's RFC-64 authority again, so
+#             the phase then waits, at most READ_GRAPHS_LIVE_SWM_READY_TIMEOUT,
+#             until the node reads the context graph's shared memory again: the
+#             next phase starts outside that window, and the step's detail says
+#             how long it took. Without the settings API the phase does not
+#             apply (N/A) and the rest of the run can still pass;
+#             READ_GRAPHS_SWITCH=api, as the bar for live settings uses it, stops
+#             the run instead;
 #   gate      run READ_GRAPHS_GATE_CMD (default scripts/devnet-comprehensive.sh)
 #             with read graphs on, wait for `ready`, then run the full check
 #             again. Every mismatch a check logs during the workload fails the
@@ -33,40 +63,70 @@
 #             the context graphs a suite writes into the store directly). Only a complete pass of the comprehensive run counts
 #             (completeSuccess in its REPORT.json); a filtered run is
 #             INCONCLUSIVE;
-#   drills    a restart during a rebuild; a kill of the daemon worker while it
-#             holds a working-memory write, with that agent's read graph
+#   drills    a restart during a rebuild (of the drill's own context graph,
+#             whose shared memory takes seconds to copy: the read graphs a
+#             devnet holds are rebuilt in milliseconds); a kill of the daemon worker while it
+#             holds a working-memory write (writes of several thousand triples
+#             from a writer bounded by time, while a second writer loads the
+#             node; each kill aimed at the end of a write, at a share of the
+#             median time of the current worker's writes; up to two rounds of
+#             five crashes), with that agent's read graph
 #             built first (a kill counts only when the write's whole request
 #             was uploaded and dropped unanswered, and its data is there after
 #             the restart, so the worker had begun to store it; the
 #             worker gone and a new one in its place; every write the node acknowledged must be there after
-#             it, and the agent's working-memory read graph ready and
+#             it, whole, and the agent's working-memory read graph ready and
 #             consistent); a CLI write with the daemon down (`dkg publisher clear
-#             finalized` on a node that has such jobs, which must stay
-#             cleared; a store opened outside the daemon marks every read
-#             graph it finds dirty before it writes, so each shared-layer read
-#             graph, which a plain restart first keeps at its generation, must
-#             get a new one and be rebuilt); a rollback and forward again (the
+#             finalized`, after the drill finalized a publish job of its own on
+#             the node; the cleared jobs must stay cleared; a store opened outside the daemon starts read
+#             graphs as the daemon does, with the same settings: each shared-layer
+#             read graph, which a plain restart first keeps at its generation,
+#             must keep it; the write touches only the publisher's own graphs, so
+#             the drill shows that start, not maintenance, which
+#             publisher-store.test.ts covers, and with the settings unchanged it
+#             cannot show a read graph marked dirty, which #3900 adds); a rollback and forward again (the
 #             earlier release is
 #             built first; `dkg rollback --stores-for <its version>` readies the
 #             stopped node's stores, and after it the node's store must hold
-#             no read-graph partition and every asset graph as before; the
+#             no read-graph partition and every asset graph as before, and
+#             still every triple of them once the earlier release runs (the
+#             agents system graph aside: each daemon rewrites its own
+#             registration there when it starts); the
 #             earlier daemon must answer the node's seeded working-memory
-#             draft and a verifiable-memory asset through /api/query as the
-#             build under test did; and
-#             after the forward start every asset graph again, so the drill
+#             draft and the drill's own verifiable-memory asset, which the node
+#             publishes first, through /api/query as the build under test did; and
+#             after the forward start every asset graph again (the agents
+#             system graph aside, as before), so the drill
 #             node needs a store that stays up with its daemon down:
 #             Blazegraph or an external SPARQL endpoint); and the setting to
-#             `off` and back. Each must end
+#             `off` and back (with the settings API, the live context graph's
+#             layers through the API with no restart; otherwise the node's
+#             config.json and a restart). Each must end
 #             as designed (a new generation, or a dropped partition), and then
 #             be `ready` again with a clean full check. A drill whose workload
-#             did not happen is INCONCLUSIVE, never a pass.
+#             did not happen is INCONCLUSIVE, never a pass. The drills make the
+#             data they need, and they run after the gate even when the gate
+#             failed, so one run reports them all (it stays FAIL); a failure in
+#             any other phase stops every later one.
 #
 # It writes report.md and results.tsv to READ_GRAPHS_RUN_RESULTS (default
 # $DEVNET_DIR/read-graphs-build-run/<UTC timestamp>; no spaces). It saves every
-# node's config.json before any phase runs. At the end, also after a failure or
-# an interruption, it puts back the config.json of each node it changed,
-# restarts those nodes in ascending order, and drops the read graphs that their
-# own settings do not keep, unless READ_GRAPHS_RUN_KEEP=1.
+# node's config.json, and with the settings API every node's settings, before
+# any phase runs. At the end, also after a failure or an interruption, unless
+# READ_GRAPHS_RUN_KEEP=1, it:
+#   - switches the live context graph off through the settings API on each node
+#     it switched;
+#   - puts back the config.json of each node it changed, restarts those nodes in
+#     ascending order, and drops the read graphs their own settings do not keep;
+#   - puts back the live context graph's own settings on each node it switched:
+#     its own modes and its own view-semantics default, or none. The API can't
+#     remove a layer's own setting, so a layer that had none gets the node's mode
+#     from before the run as its own, and the report's Notes name those layers.
+#
+# The node-wide setting (READ_GRAPHS_SETTING) is always written to config.json,
+# as node-wide policy stays there. Per-context-graph settings are switched
+# through the settings API, and the read graphs a node must keep are worked out
+# from its effective modes there for every context graph it has a setting for.
 #
 # It reads read-graph state only through `dkg store read-graphs` (status, check,
 # rebuild and drop, each with --json), which ask the running daemon; the
@@ -81,7 +141,16 @@
 # Env knobs:
 #   DEVNET_DIR, API_PORT_BASE                  as for every devnet script
 #   READ_GRAPHS_SETTING                        JSON value of query.readGraphs (default "build")
-#   READ_GRAPHS_RUN_PHASES                     default "seed setup backfill measure gate drills"
+#   READ_GRAPHS_RUN_PHASES                     default "seed setup backfill measure live gate drills"
+#   READ_GRAPHS_SWITCH                         auto (default: the settings API when the daemon answers it; on a
+#                                              build without it, a plain 404, config.json only and the live phase
+#                                              N/A; any other answer stops the run), api (stop unless it answers:
+#                                              the bar for live settings), or config
+#   READ_GRAPHS_LIVE_CG                        the context graph the live phase switches (default devnet-test)
+#   READ_GRAPHS_LIVE_LOAD_NODE                 the node of the live phase's switches under write load and its
+#                                              restart (default 1)
+#   READ_GRAPHS_LIVE_SWM_READY_TIMEOUT         seconds the live phase waits, after its restart's checks, for the
+#                                              node to read the live context graph's shared memory again (default 300)
 #   READ_GRAPHS_SEED_CMD, READ_GRAPHS_GATE_CMD the seed and gate commands
 #   READ_GRAPHS_BACKFILL_TIMEOUT               seconds (default 1800)
 #   READ_GRAPHS_READY_TIMEOUT                  seconds, after the gate and each drill (default 900)
@@ -92,6 +161,16 @@
 #                                              none skips the drill)
 #   READ_GRAPHS_DRILL_{RESTART,KILL,CLI,ROLLBACK,FLAG}_NODE
 #                                              the node of each drill (default 5, 6, 3, 4, 2)
+#   READ_GRAPHS_DRILL_RESTART_TRIPLES          shared-memory triples in the restart drill's own context graph
+#                                              (default 500000), READ_GRAPHS_DRILL_RESTART_ASSET_TRIPLES of them per
+#                                              knowledge asset (default 2000)
+#   READ_GRAPHS_DRILLS                         the drills the drills phase runs (default "restart kill cli rollback
+#                                              flag"); one left out is INCONCLUSIVE, so the run cannot pass
+#   READ_GRAPHS_DRILL_KILL_WRITE_TRIPLES       triples per working-memory write in the kill drill (default 5000)
+#   READ_GRAPHS_DRILL_KILL_WRITER_SECONDS      how long the kill drill's writers go on at most (default 600; 500
+#                                              writes each at most)
+#   READ_GRAPHS_PUBLISH_TIMEOUT                seconds the cli and rollback drills wait for their own publish job to
+#                                              be finalized (default 300)
 #   READ_GRAPHS_RUN_RESULTS, READ_GRAPHS_RUN_KEEP
 set -uo pipefail
 
@@ -101,7 +180,11 @@ API_PORT_BASE="${API_PORT_BASE:-9201}"
 DEVNET_SH="${DEVNET_SH:-$REPO_ROOT/scripts/devnet.sh}"
 DKG_CLI_ENTRY="${DKG_CLI_ENTRY:-$REPO_ROOT/packages/cli/dist/cli.js}"
 SETTING="${READ_GRAPHS_SETTING:-\"build\"}"
-PHASES="${READ_GRAPHS_RUN_PHASES:-seed setup backfill measure gate drills}"
+PHASES="${READ_GRAPHS_RUN_PHASES:-seed setup backfill measure live gate drills}"
+SWITCH="${READ_GRAPHS_SWITCH:-auto}"
+LIVE_CG="${READ_GRAPHS_LIVE_CG:-devnet-test}"
+LOAD_NODE="${READ_GRAPHS_LIVE_LOAD_NODE:-1}"
+SWM_READY_TIMEOUT="${READ_GRAPHS_LIVE_SWM_READY_TIMEOUT:-300}"
 SEED_CMD="${READ_GRAPHS_SEED_CMD:-$REPO_ROOT/scripts/v10-rc-validation.sh}"
 GATE_CMD="${READ_GRAPHS_GATE_CMD:-$REPO_ROOT/scripts/devnet-comprehensive.sh}"
 BACKFILL_TIMEOUT="${READ_GRAPHS_BACKFILL_TIMEOUT:-1800}"
@@ -120,6 +203,12 @@ KILL_NODE="${READ_GRAPHS_DRILL_KILL_NODE:-6}"
 CLI_NODE="${READ_GRAPHS_DRILL_CLI_NODE:-3}"
 ROLLBACK_NODE="${READ_GRAPHS_DRILL_ROLLBACK_NODE:-4}"
 FLAG_NODE="${READ_GRAPHS_DRILL_FLAG_NODE:-2}"
+RESTART_TRIPLES="${READ_GRAPHS_DRILL_RESTART_TRIPLES:-500000}"
+RESTART_ASSET_TRIPLES="${READ_GRAPHS_DRILL_RESTART_ASSET_TRIPLES:-2000}"
+KILL_WRITE_TRIPLES="${READ_GRAPHS_DRILL_KILL_WRITE_TRIPLES:-5000}"
+KILL_WRITER_SECONDS="${READ_GRAPHS_DRILL_KILL_WRITER_SECONDS:-600}"
+DRILLS="${READ_GRAPHS_DRILLS:-restart kill cli rollback flag}"
+PUBLISH_TIMEOUT="${READ_GRAPHS_PUBLISH_TIMEOUT:-300}"
 KEEP="${READ_GRAPHS_RUN_KEEP:-0}"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RESULTS="${READ_GRAPHS_RUN_RESULTS:-$DEVNET_DIR/read-graphs-build-run/$RUN_ID}"
@@ -146,6 +235,8 @@ CORE_MODULE="$CORE_MODULE" STORAGE_MODULE="$STORAGE_MODULE" QUERY_CONFIG_MODULE=
   || early_exit "the build lacks the read-graph rules this run uses (core, storage and CLI dist: names, modes, the setting's parser)"
 # shellcheck source=devnet-lib.sh
 . "$REPO_ROOT/scripts/devnet-lib.sh" || early_exit "cannot source scripts/devnet-lib.sh"
+# shellcheck source=devnet-read-graphs-run-lib.sh
+. "$REPO_ROOT/scripts/devnet-read-graphs-run-lib.sh" || early_exit "cannot source scripts/devnet-read-graphs-run-lib.sh"
 mkdir -p "$RESULTS/config" "$RESULTS/rows" "$RESULTS/checks" "$RESULTS/measure" || early_exit "cannot create $RESULTS"
 : > "$RESULTS/results.tsv"
 : > "$RESULTS/notes.md"
@@ -183,11 +274,22 @@ wait_up() {
   while [ "$(now)" -lt "$deadline" ]; do node_up "$n" && return 0; sleep 2; done
   return 1
 }
-# restart_node <n> [VAR=value ...]: bounce one node through devnet.sh and wait for its API.
+# redial <n>: every other node of the run dials node <n> (POST /api/connect with its .devnet/nodeN/multiaddr). A node
+# that did not restart does not dial a restarted one again by itself, and a publish from it needs the Cores' ACKs.
+redial() {
+  local k addr body
+  addr="$(head -1 "$DEVNET_DIR/node$1/multiaddr" 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$addr" ] || return 0
+  body="{\"multiaddr\":\"$addr\"}"
+  for k in $NODES; do
+    [ "$k" = "$1" ] || api "$k" POST /api/connect "$body" > /dev/null 2>&1 || true
+  done
+}
+# restart_node <n> [VAR=value ...]: bounce one node through devnet.sh, wait for its API, and have the others dial it.
 restart_node() {
   local n="$1"; shift
   env "$@" "$DEVNET_SH" restart-node "$n" >> "$RESULTS/devnet-sh.log" 2>&1 || true
-  wait_up "$n" 180
+  wait_up "$n" 180 && redial "$n"
 }
 # The nodes whose config or running state this run changed; cleanup puts them back.
 CHANGED=""
@@ -196,7 +298,7 @@ stop_node() { changed "$1"; "$DEVNET_SH" stop-node "$1" >> "$RESULTS/devnet-sh.l
 start_node() {
   local n="$1"; shift
   env "$@" "$DEVNET_SH" start-node "$n" >> "$RESULTS/devnet-sh.log" 2>&1 || true
-  wait_up "$n" 180
+  wait_up "$n" 180 && redial "$n"
 }
 # set_read_graphs <n> <JSON value | "-">: write query.readGraphs into the node's config.json ("-" removes it).
 set_read_graphs() {
@@ -239,8 +341,10 @@ context_graph_count() {
 # phase wrote, by the build's own rules. Other working-memory read graphs are required as status lists them (the kill
 # drill requires its own).
 expected_read_graphs() {
-  local setting frames cg agent i=0
+  local setting frames cg agent effective i=0
   setting="$(read_graphs_setting "$1")"
+  # With the settings API, a context graph it lists takes its effective modes from there.
+  effective="$(effective_map "$1")" || return 1
   frames="$RESULTS/rows/expected-input.node$1"
   # The node's listing, then one sub-graph listing per context graph it subscribes to (frame <i>, named in the index).
   api "$1" GET /api/context-graph/list > "$frames.listing" || return 1
@@ -259,13 +363,14 @@ expected_read_graphs() {
     api "$1" GET "/api/sub-graph/list?contextGraphId=$cg" > "$frames.sub.$i" || return 1
     printf '%s %s\n' "$i" "$cg" >> "$frames.index"
   done
-  SETTING_JSON="${setting:-\"off\"}" LISTING_MODULE="$LISTING_MODULE" CORE_MODULE="$CORE_MODULE" \
+  SETTING_JSON="${setting:-\"off\"}" EFFECTIVE_JSON="$effective" LISTING_MODULE="$LISTING_MODULE" CORE_MODULE="$CORE_MODULE" \
     STORAGE_MODULE="$STORAGE_MODULE" QUERY_CONFIG_MODULE="$QUERY_CONFIG_MODULE" node --input-type=module -e '
     const fs = await import("node:fs");
     const { readListing } = await import(process.env.LISTING_MODULE);
     const core = await import(process.env.CORE_MODULE);
     const { readGraphModeOf } = await import(process.env.STORAGE_MODULE);
     const { resolveQueryConfig } = await import(process.env.QUERY_CONFIG_MODULE);
+    const effective = JSON.parse(process.env.EFFECTIVE_JSON || "{}");
     const frame = fs.readFileSync(process.argv[1], "utf8"); const newline = frame.indexOf("\n");
     const listing = readListing(Number(frame.slice(0, newline)), frame.slice(newline + 1));
     if (!listing.ok) { console.error(listing.reason); process.exit(1); }
@@ -281,12 +386,13 @@ expected_read_graphs() {
       subGraphs.set(id, [...new Set(names)]);
     }
     const modes = resolveQueryConfig({ readGraphs: JSON.parse(process.env.SETTING_JSON) }).readGraphs;
+    const modeOf = (key) => effective.__policyDisabled ? "off" : effective[key.scope.contextGraphId]?.[key.layer] ?? readGraphModeOf(modes, key);
     for (const graph of listing.graphs) {
       if (graph.subscribed !== true || !core.isReadGraphEligibleContextGraphId(graph.id)) continue;
       const scopes = [core.readScope(graph.id), ...(subGraphs.get(graph.id) ?? []).map((name) => core.readScope(graph.id, name))];
       for (const scope of scopes) for (const layer of [core.MemoryLayer.VerifiableMemory, core.MemoryLayer.SharedWorkingMemory]) {
         const key = { scope, layer };
-        if (readGraphModeOf(modes, key) === "off") continue;
+        if (modeOf(key) === "off") continue;
         console.log(core.readGraphIri(key));
       }
     }
@@ -300,16 +406,19 @@ expected_read_graphs() {
 # wm_read_graph <n> <context graph> <agent address>: the IRI of that agent's working-memory read graph in the context
 # graph, by the build's own rules, when node <n>'s setting keeps it; nothing when the setting does not.
 wm_read_graph() {
-  local setting
+  local setting effective
   setting="$(read_graphs_setting "$1")"
-  SETTING_JSON="${setting:-\"off\"}" CORE_MODULE="$CORE_MODULE" STORAGE_MODULE="$STORAGE_MODULE" QUERY_CONFIG_MODULE="$QUERY_CONFIG_MODULE" \
-    CG="$2" AGENT="$3" node --input-type=module -e '
+  effective="$(effective_map "$1")" || return 1
+  SETTING_JSON="${setting:-\"off\"}" EFFECTIVE_JSON="$effective" CORE_MODULE="$CORE_MODULE" STORAGE_MODULE="$STORAGE_MODULE" \
+    QUERY_CONFIG_MODULE="$QUERY_CONFIG_MODULE" CG="$2" AGENT="$3" node --input-type=module -e '
     const core = await import(process.env.CORE_MODULE);
     const { readGraphModeOf } = await import(process.env.STORAGE_MODULE);
     const { resolveQueryConfig } = await import(process.env.QUERY_CONFIG_MODULE);
     const modes = resolveQueryConfig({ readGraphs: JSON.parse(process.env.SETTING_JSON) }).readGraphs;
+    const effective = JSON.parse(process.env.EFFECTIVE_JSON || "{}");
     const key = { scope: core.readScope(process.env.CG), layer: core.MemoryLayer.WorkingMemory, agentAddress: process.env.AGENT };
-    if (readGraphModeOf(modes, key) !== "off") console.log(core.readGraphIri(key));
+    const mode = effective.__policyDisabled ? "off" : effective[process.env.CG]?.[key.layer] ?? readGraphModeOf(modes, key);
+    if (mode !== "off") console.log(core.readGraphIri(key));
   '
 }
 # wait_read_graph_ready <n> <read graph> <timeout> <rows file>: until node <n>'s status lists that read graph as ready.
@@ -416,8 +525,107 @@ EOF_PAIRS
   return "$failed"
 }
 
+# ── the settings API: the one place that parses its answers ─────────────────
+SETTINGS_PATH=/api/store/read-graphs/settings
+urlencode() { node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$1"; }
+# settings_read <answer file> <what> [context graph] [layer]: one value from a settings answer ("<code>\n<body>", as
+# api writes it):
+#   code                    the HTTP code
+#   effective <cg> <layer>  the effective mode of the layer (API name), "" when the answer does not list the context graph
+#   rows <cg>               the context graph's stored modes as JSON with sorted keys, {} when it has none
+#   default <cg>            its effective view semantics
+#   refusal                 "HTTP <code> <code field>: <error>"
+#   error-code              the body's code field, "" when it has none
+#   effective-map           {"<cg>": {"WM": mode, "SWM": mode, "VM": mode}} for every context graph the answer lists,
+#                           with "__policyDisabled": true when the node's policy switches read graphs off
+#   restore-body <cg>       the PUT that sets the context graph's own settings as the answer lists them: each layer's own
+#                           mode, else the node's (the API can't remove a layer's own setting); its own default, else null
+#   inherited <cg>          the layers without an own mode, as "<layer>=<the node's mode>" separated by spaces
+settings_read() {
+  node -e '
+    const fs = require("fs");
+    const VIEWS = ["working-memory", "shared-working-memory", "verifiable-memory"];
+    const [file, what, cg, layer] = process.argv.slice(1);
+    const frame = fs.readFileSync(file, "utf8"); const at = frame.indexOf("\n");
+    const code = (at === -1 ? frame : frame.slice(0, at)).trim();
+    let body = null; try { body = JSON.parse(at === -1 ? "" : frame.slice(at + 1)); } catch { body = null; }
+    const graphs = Array.isArray(body?.contextGraphs) ? body.contextGraphs : [];
+    const one = (id) => graphs.find((graph) => graph?.contextGraphId === id);
+    const out = (value) => process.stdout.write(value === undefined || value === null ? "" : String(value));
+    const sorted = (object) => Object.fromEntries(Object.entries(object ?? {}).sort(([a], [b]) => a.localeCompare(b)));
+    switch (what) {
+      case "code": out(code); break;
+      case "effective": out(one(cg)?.effective?.layers?.[layer]); break;
+      case "rows": out(JSON.stringify(sorted(one(cg)?.layers))); break;
+      case "default": out(one(cg)?.effective?.viewSemantics); break;
+      case "refusal": out(`HTTP ${code}${body?.code ? ` ${body.code}` : ""}: ${body?.error ?? "no error text"}`); break;
+      case "error-code": out(body?.code); break;
+      case "restore-body": case "inherited": {
+        // A layer without an own mode has the node mode, which the answer gives as node.layers (and in effective).
+        const own = one(cg);
+        const nodeMode = (view) => body?.node?.layers?.[view] ?? own?.effective?.layers?.[view] ?? "off";
+        if (what === "inherited") {
+          out(VIEWS.filter((view) => own?.layers?.[view] === undefined).map((view) => `${view}=${nodeMode(view)}`).join(" "));
+          break;
+        }
+        const layers = Object.fromEntries(VIEWS.map((view) => [view, own?.layers?.[view] ?? nodeMode(view)]));
+        out(JSON.stringify({ contextGraphId: cg, layers, viewSemantics: own?.viewSemantics ?? null }));
+        break;
+      }
+      case "effective-map": {
+        const map = {};
+        if (body?.policy?.enabled === false) map.__policyDisabled = true;
+        for (const graph of graphs) {
+          const layers = graph?.effective?.layers;
+          if (typeof graph?.contextGraphId !== "string" || !layers) continue;
+          map[graph.contextGraphId] = { WM: layers["working-memory"], SWM: layers["shared-working-memory"], VM: layers["verifiable-memory"] };
+        }
+        out(JSON.stringify(map));
+        break;
+      }
+      default: process.exit(2);
+    }
+  ' "$@"
+}
+# effective_map <n>: with the settings API, settings_read effective-map of node <n>'s settings; "{}" without it.
+# Fails when the API answers something else than 200.
+effective_map() {
+  [ "$SWITCH" = api ] || { printf '{}'; return 0; }
+  api "$1" GET "$SETTINGS_PATH" > "$RESULTS/rows/settings.node$1"
+  [ "$(settings_read "$RESULTS/rows/settings.node$1" code)" = 200 ] \
+    || { echo "settings of node$1: $(settings_read "$RESULTS/rows/settings.node$1" refusal)" >&2; return 1; }
+  settings_read "$RESULTS/rows/settings.node$1" effective-map
+}
+
 dkg_cli "${NODES%% *}" store read-graphs --help > /dev/null 2>&1 \
   || early_exit "this build has no \`dkg store read-graphs\` commands"
+# How per-context-graph modes are switched: through the settings API when the daemon answers it, else not at all
+# (config: the node-wide setting in config.json only, and the live phase cannot run).
+case "$SWITCH" in auto|api|config) ;; *) early_exit "READ_GRAPHS_SWITCH must be auto, api or config: $SWITCH" ;; esac
+if [ "$SWITCH" != config ]; then
+  api "${NODES%% *}" GET "$SETTINGS_PATH" > "$RESULTS/rows/settings-probe"
+  settings_probe="$(settings_read "$RESULTS/rows/settings-probe" code)"
+  if [ "$settings_probe" = 200 ]; then
+    SWITCH=api
+  elif [ "$SWITCH" = api ]; then
+    early_exit "READ_GRAPHS_SWITCH=api, but node${NODES%% *} answers the settings API with $(settings_read "$RESULTS/rows/settings-probe" refusal)"
+  elif [ "$settings_probe" = 404 ] && [ -z "$(settings_read "$RESULTS/rows/settings-probe" error-code)" ]; then
+    # Only the daemon's plain 404 for a route it doesn't have (no code field) means a build without the settings API.
+    note "node${NODES%% *} has no settings API (HTTP 404 for $SETTINGS_PATH), so modes are switched through config.json only and the live phase does not apply (READ_GRAPHS_SWITCH=api requires the API)"
+    SWITCH=config
+  else
+    # A refusal, a server error or no answer is a settings API that doesn't work: the run stops, never a pass.
+    early_exit "node${NODES%% *}'s settings API answered neither its settings nor a plain 404 (a build without it), so the live settings can't be checked (READ_GRAPHS_SWITCH=config runs without them): $(settings_read "$RESULTS/rows/settings-probe" refusal)"
+  fi
+fi
+# With the settings API, every node's settings before any phase runs: cleanup puts back the live context graph's own.
+if [ "$SWITCH" = api ]; then
+  for n in $NODES; do
+    api "$n" GET "$SETTINGS_PATH" > "$RESULTS/rows/settings-original.node$n"
+    [ "$(settings_read "$RESULTS/rows/settings-original.node$n" code)" = 200 ] \
+      || early_exit "node$n's settings could not be saved to be put back after the run: its settings API answered $(settings_read "$RESULTS/rows/settings-original.node$n" refusal)"
+  done
+fi
 # The build under test, as the first node reports it: "<version> <commit>".
 UNDER_TEST="$(node_commit "${NODES%% *}")"
 
@@ -517,11 +725,25 @@ cleanup() {
   local status=$?
   trap - EXIT
   trap '' INT TERM
-  local n changed w
+  local n changed w body inherited attempt
   for w in $(cat "$RESULTS/gate/watchers" 2>/dev/null); do kill "$w" 2>/dev/null; done
-  # A kill drill interrupted mid-run leaves its writer: stop it and its requests before any node is restored.
+  # A kill drill or a live phase interrupted mid-run leaves its writer: stop it and its requests before any node is restored.
   w="$(cat "$RESULTS/drill-kill.writer" 2>/dev/null)"
   [ -n "$w" ] && stop_writer "$w"
+  stop_load
+  w="$(cat "$RESULTS/live-load.writer" 2>/dev/null)"
+  [ -n "$w" ] && { kill_tree "$w"; wait "$w" 2>/dev/null; rm -f "$RESULTS/live-load.writer"; }
+  # The live context graph off first, through the settings API, on each node the run switched it on, so the restarts
+  # below and the drop of what a node does not keep find none of its read graphs in use (its settings come back last).
+  if [ -s "$RESULTS/rows/live-changed" ] && [ "$KEEP" != 1 ]; then
+    body="$(live_body off off off null)"
+    for n in $(sort -nu "$RESULTS/rows/live-changed"); do
+      node_up "$n" || { note "cleanup: node$n was down, so $LIVE_CG was not switched off there"; continue; }
+      api "$n" PUT "$SETTINGS_PATH" "$body" > "$RESULTS/rows/live.cleanup.node$n"
+      [ "$(settings_read "$RESULTS/rows/live.cleanup.node$n" code)" = 200 ] \
+        || note "cleanup: switching $LIVE_CG off on node$n failed: $(settings_read "$RESULTS/rows/live.cleanup.node$n" refusal)"
+    done
+  fi
   changed="$(printf '%s\n' $CHANGED | sort -nu | tr '\n' ' ')"
   if [ -n "${changed// /}" ] && [ "$KEEP" != 1 ]; then
     say "putting back the config.json of nodes ${changed% }, restarting them, and dropping read graphs their settings do not keep"
@@ -531,6 +753,30 @@ cleanup() {
       drop_unkept "$n" || note "cleanup: dropping the read graphs node$n's setting does not keep failed (see cli.log)"
     done
   fi
+  # Then the live context graph's own settings as they were before the run, on each node the run switched it on. A node
+  # left without them fails the run: its queries no longer behave as before it.
+  if [ -s "$RESULTS/rows/live-changed" ] && [ "$KEEP" != 1 ]; then
+    for n in $(sort -nu "$RESULTS/rows/live-changed"); do
+      [ -s "$RESULTS/rows/settings-original.node$n" ] \
+        || { note "cleanup: node$n's settings from before the run were not saved, so $LIVE_CG stays Off there"; status=1; continue; }
+      node_up "$n" || { note "cleanup: node$n was down, so $LIVE_CG's settings were not put back there"; status=1; continue; }
+      body="$(settings_read "$RESULTS/rows/settings-original.node$n" restore-body "$LIVE_CG")"
+      for attempt in 1 2 3; do
+        api "$n" PUT "$SETTINGS_PATH" "$body" > "$RESULTS/rows/live.restore.node$n"
+        [ "$(settings_read "$RESULTS/rows/live.restore.node$n" code)" = 200 ] && break
+        [ "$attempt" = 3 ] || sleep 5
+      done
+      if [ "$(settings_read "$RESULTS/rows/live.restore.node$n" code)" != 200 ]; then
+        note "cleanup: putting back $LIVE_CG's settings on node$n was refused three times, so it stays Off there: $(settings_read "$RESULTS/rows/live.restore.node$n" refusal)"
+        status=1; continue
+      fi
+      inherited="$(settings_read "$RESULTS/rows/settings-original.node$n" inherited "$LIVE_CG")"
+      [ -z "$inherited" ] \
+        || note "cleanup: $LIVE_CG's settings on node$n are back as before the run; the API can't remove a layer's own setting, so the layers that had none hold the node's mode from before the run as their own: $inherited"
+    done
+  fi
+  # The verdict was printed before cleanup: a node cleanup could not put back fails the run, in the report too.
+  [ "$status" != 1 ] || [ "$FAILS" -gt 0 ] || { record cleanup FAIL 0 "a node was not put back as it was before the run (see Notes)"; say "FAIL"; }
   write_report
   exit "$status"
 }
@@ -539,6 +785,8 @@ write_report() {
     echo "# Read-graph build run $RUN_ID"
     echo
     echo "- Setting: \`query.readGraphs = $SETTING\` on nodes $NODES"
+    if [ "$SWITCH" = api ]; then echo "- Per-context-graph settings: through the settings API; the live phase switched \`$LIVE_CG\`"
+    else echo "- Per-context-graph settings: none (the daemon offers no settings API, or READ_GRAPHS_SWITCH=config)"; fi
     for n in $NODES; do echo "- node$n: $(node_commit "$n" 2>/dev/null)"; done
     echo
     echo "| Step | Result | Seconds | Detail |"
@@ -671,6 +919,356 @@ phase_measure() {
   else record measure INCONCLUSIVE "$(( $(now) - started ))" "a store report failed (measure/errors.log)"; fi
 }
 
+# ── live: one context graph switched through the settings API ──────────────
+# rows/live-changed names the nodes whose settings for the live context graph the run changed (a file, as the calls
+# run in command substitutions); cleanup puts back the context graph's own settings there (rows/settings-original.*).
+RUN_SLUG="$(echo "$RUN_ID" | tr 'A-Z' 'a-z')"
+# live_body <wm> <swm> <vm> [view semantics]: a PUT body for the live context graph, with the layers' modes ("-" leaves
+# a layer out) and the view semantics ("merged", "per-asset", "null" to remove it, or "" to leave it out).
+live_body() {
+  node -e '
+    const [contextGraphId, wm, swm, vm, semantics] = process.argv.slice(1);
+    const layers = {};
+    if (wm !== "-") layers["working-memory"] = wm;
+    if (swm !== "-") layers["shared-working-memory"] = swm;
+    if (vm !== "-") layers["verifiable-memory"] = vm;
+    const body = { contextGraphId };
+    if (Object.keys(layers).length) body.layers = layers;
+    if (semantics) body.viewSemantics = semantics === "null" ? null : semantics;
+    process.stdout.write(JSON.stringify(body));
+  ' "$LIVE_CG" "$1" "$2" "$3" "${4:-}"
+}
+# live_put <n> <label> <body>: PUT node <n>'s settings; the answer goes to rows/live.<label>.node<n>. Prints the
+# refusal and fails unless the node answers 200.
+live_put() {
+  local out="$RESULTS/rows/live.$2.node$1"
+  echo "$1" >> "$RESULTS/rows/live-changed"
+  api "$1" PUT "$SETTINGS_PATH" "$3" > "$out"
+  [ "$(settings_read "$out" code)" = 200 ] || { settings_read "$out" refusal; return 1; }
+}
+# live_get <n> <label>: GET node <n>'s settings for the live context graph into rows/live.<label>.node<n>; fails unless 200.
+live_get() {
+  local out="$RESULTS/rows/live.$2.node$1"
+  api "$1" GET "$SETTINGS_PATH?contextGraphId=$(urlencode "$LIVE_CG")" > "$out"
+  [ "$(settings_read "$out" code)" = 200 ] || { settings_read "$out" refusal; return 1; }
+}
+# live_layers <n> <label>: the effective modes in rows/live.<label>.node<n>, as "wm=<mode> swm=<mode> vm=<mode>".
+live_layers() {
+  local f="$RESULTS/rows/live.$2.node$1"
+  printf 'wm=%s swm=%s vm=%s' "$(settings_read "$f" effective "$LIVE_CG" working-memory)" \
+    "$(settings_read "$f" effective "$LIVE_CG" shared-working-memory)" "$(settings_read "$f" effective "$LIVE_CG" verifiable-memory)"
+}
+# live_graphs <rows file>: the lines of a status listing that are read graphs of the live context graph.
+live_graphs() {
+  CORE_MODULE="$CORE_MODULE" CG="$LIVE_CG" ROWS="$1" node --input-type=module -e '
+    const fs = await import("node:fs");
+    const core = await import(process.env.CORE_MODULE);
+    for (const line of fs.readFileSync(process.env.ROWS, "utf8").split("\n").filter(Boolean)) {
+      const key = core.parseReadGraphIri(line.split(" ")[2]);
+      if (key?.scope.contextGraphId === process.env.CG) console.log(line);
+    }'
+}
+# holds_live_cg <n>: node <n> subscribes to the live context graph (its listing, read as context_graph_count reads it).
+holds_live_cg() {
+  api "$1" GET /api/context-graph/list | LISTING_MODULE="$LISTING_MODULE" CG="$LIVE_CG" node --input-type=module -e '
+    const { readListing } = await import(process.env.LISTING_MODULE);
+    let frame = ""; for await (const chunk of process.stdin) frame += chunk;
+    const newline = frame.indexOf("\n");
+    const listing = readListing(Number(newline === -1 ? frame : frame.slice(0, newline)), newline === -1 ? "" : frame.slice(newline + 1));
+    process.exit(listing.ok && listing.graphs.some((graph) => graph.subscribed === true && graph.id === process.env.CG) ? 0 : 1);
+  '
+}
+# live_wait_gone <n> <label>: until node <n>'s status lists no read graph of the live context graph; fails after
+# READ_GRAPHS_READY_TIMEOUT, leaving the last listing in rows/live.<label>.node<n>.
+live_wait_gone() {
+  local rows="$RESULTS/rows/live.$2.node$1" deadline=$(( $(now) + READY_TIMEOUT ))
+  while [ "$(now)" -lt "$deadline" ]; do
+    if read_graph_rows "$1" > "$rows.all" 2>/dev/null && live_graphs "$rows.all" > "$rows" && [ ! -s "$rows" ]; then return 0; fi
+    sleep 5
+  done
+  return 1
+}
+# live_query <n> <view> <semantics or ""> <out>: a view query on the live context graph. Prints "<HTTP code> <the
+# semantics that answered, or the refusal's code>". An answer counts only with its result, one row whose count is a
+# whole number; without one it prints "<HTTP code> <semantics> without a count", which never matches an expectation.
+live_query() {
+  local body resp
+  body="$(node -e '
+    const [contextGraphId, view, semantics] = process.argv.slice(1);
+    const body = { contextGraphId, view, sparql: "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }" };
+    if (semantics) body.semantics = semantics;
+    process.stdout.write(JSON.stringify(body));' "$LIVE_CG" "$2" "$3")"
+  resp="$(api "$1" POST /api/query "$body")"
+  printf '%s\n' "$resp" > "$4"
+  printf '%s %s' "$(code_of "$resp")" "$(body_of "$resp" | CODE="$(code_of "$resp")" node -e '
+    let d = ""; process.stdin.on("data", (c) => d += c).on("end", () => {
+      let j; try { j = JSON.parse(d); } catch { return; }
+      const label = String(j.semantics ?? j.result?.semantics ?? j.code ?? "");
+      if (!/^2/.test(process.env.CODE ?? "")) { process.stdout.write(label); return; }
+      // The count however the release renders it: "lexical"^^<datatype>, bare, or as an object.
+      const bindings = Array.isArray(j.result?.bindings) ? j.result.bindings : [];
+      const cell = bindings.length === 1 ? bindings[0]?.n : undefined;
+      const text = String(cell && typeof cell === "object" ? cell.value ?? "" : cell ?? "");
+      const lexical = /^"((?:[^"\\]|\\.)*)"/.exec(text)?.[1] ?? text;
+      process.stdout.write(/^\d+$/.test(lexical) ? label : `${label} without a count`);
+    });')"
+}
+# The answers are checked with a join across assets: two working-memory drafts of the node's own agent in the live
+# context graph, one holding <x> knows <y> and the other <y> name "joined ...". Only an answer across assets joins them:
+# a merged query must return the joined row, and a per-asset one must not.
+JOIN_X="urn:read-graphs-live:$RUN_SLUG:x"
+JOIN_Y="urn:read-graphs-live:$RUN_SLUG:y"
+JOIN_NAME="joined $RUN_SLUG"
+JOIN_SPARQL="SELECT ?name WHERE { <$JOIN_X> <http://schema.org/knows> ?y . ?y <http://schema.org/name> ?name }"
+# live_join_fixture <n>: node <n>'s agent writes the two drafts. Prints why, and fails, unless both are acknowledged.
+live_join_fixture() {
+  local n="$1" body resp
+  body="{\"contextGraphId\":\"$LIVE_CG\",\"name\":\"live-join-a-$RUN_SLUG\"}"
+  api "$n" POST /api/knowledge-assets "$body" > /dev/null
+  body="{\"contextGraphId\":\"$LIVE_CG\",\"quads\":[{\"subject\":\"$JOIN_X\",\"predicate\":\"http://schema.org/knows\",\"object\":\"$JOIN_Y\"}]}"
+  resp="$(api "$n" POST "/api/knowledge-assets/live-join-a-$RUN_SLUG/wm/write" "$body")"
+  case "$(code_of "$resp")" in 2??) ;; *) echo "the first draft of the join was not written (HTTP $(code_of "$resp"))"; return 1 ;; esac
+  body="{\"contextGraphId\":\"$LIVE_CG\",\"name\":\"live-join-b-$RUN_SLUG\"}"
+  api "$n" POST /api/knowledge-assets "$body" > /dev/null
+  body="{\"contextGraphId\":\"$LIVE_CG\",\"quads\":[{\"subject\":\"$JOIN_Y\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"$JOIN_NAME\\\"\"}]}"
+  resp="$(api "$n" POST "/api/knowledge-assets/live-join-b-$RUN_SLUG/wm/write" "$body")"
+  case "$(code_of "$resp")" in 2??) ;; *) echo "the second draft of the join was not written (HTTP $(code_of "$resp"))"; return 1 ;; esac
+}
+# live_join_query <n> <semantics or ""> <out>: the join on working memory. Prints "<HTTP code> <the semantics that
+# answered, or the refusal's code>", and with an answer " <rows>" when every row holds the joined name, else
+# " <joined> joined and <other> other": the whole binding set counts, so an extra or a wrong row never matches.
+live_join_query() {
+  local body resp
+  body="$(node -e '
+    const [contextGraphId, semantics, sparql] = process.argv.slice(1);
+    const body = { contextGraphId, view: "working-memory", sparql };
+    if (semantics) body.semantics = semantics;
+    process.stdout.write(JSON.stringify(body));' "$LIVE_CG" "$2" "$JOIN_SPARQL")"
+  resp="$(api "$1" POST /api/query "$body")"
+  printf '%s\n' "$resp" > "$3"
+  printf '%s %s' "$(code_of "$resp")" "$(body_of "$resp" | NAME="$JOIN_NAME" node -e '
+    let d = ""; process.stdin.on("data", (c) => d += c).on("end", () => {
+      let j; try { j = JSON.parse(d); } catch { return; }
+      const label = String(j.semantics ?? j.result?.semantics ?? j.code ?? "");
+      const bindings = Array.isArray(j.result?.bindings) ? j.result.bindings : null;
+      // A literal however the release renders it: "lexical"^^<datatype>, "lexical"@lang, bare, or as an object.
+      const value = (v) => { const t = String(v && typeof v === "object" ? v.value ?? "" : v ?? ""); const m = /^"((?:[^"\\]|\\.)*)"/.exec(t); return m ? m[1] : t; };
+      if (bindings === null) { process.stdout.write(label); return; }
+      const joined = bindings.filter((b) => value(b?.name) === process.env.NAME).length;
+      const other = bindings.length - joined;
+      process.stdout.write(`${label} ${other === 0 ? joined : `${joined} joined and ${other} other`}`);
+    });')"
+}
+# live_expect <n> <label> <vm|join> <semantics or ""> <expected> [seconds to retry]: prints what the node answered
+# instead, and fails, unless it answers as expected within the time given. vm: live_query on verifiable memory,
+# "<code> <semantics or code>"; join: live_join_query, "<code> <semantics> <rows>" ("<code> <code>" for a refusal).
+live_expect() {
+  local got deadline=$(( $(now) + ${6:-0} ))
+  while :; do
+    if [ "$3" = join ]; then got="$(live_join_query "$1" "$4" "$RESULTS/rows/live.join-$2.node$1")"
+    else got="$(live_query "$1" verifiable-memory "$4" "$RESULTS/rows/live.query-$2.node$1")"; fi
+    [ "$got" = "$5" ] && return 0
+    [ "$(now)" -lt "$deadline" ] || { echo "$got"; return 1; }
+    sleep 5
+  done
+}
+
+# live_node <n>: the live steps on one node. Prints why, and fails, at the first step that does not end as designed.
+live_node() {
+  local n="$1" body why got
+  live_get "$n" before > /dev/null || { echo "reading the settings of $LIVE_CG: $(settings_read "$RESULTS/rows/live.before.node$n" refusal)"; return 1; }
+  why="$(live_join_fixture "$n")" || { echo "$why"; return 1; }
+  # Off: the context graph's read graphs go, and a merged request is refused as for a layer the node does not serve.
+  body="$(live_body off off off)"
+  why="$(live_put "$n" off "$body")" || { echo "switching it off was refused: $why"; return 1; }
+  [ "$(live_layers "$n" off)" = "wm=off swm=off vm=off" ] || { echo "after off, the effective modes are $(live_layers "$n" off)"; return 1; }
+  live_wait_gone "$n" gone || { echo "after off, read graphs of it were still listed after ${READY_TIMEOUT} s: $(awk '{ print "<" $3 "> (" $1 ")" }' "$RESULTS/rows/live.gone.node$n" | head -3 | paste -sd ',' -)"; return 1; }
+  got="$(live_expect "$n" off vm merged "400 SEMANTICS_UNSUPPORTED")" || { echo "after off, a merged query answered $got, not 400 SEMANTICS_UNSUPPORTED"; return 1; }
+  got="$(live_expect "$n" off join merged "400 SEMANTICS_UNSUPPORTED")" || { echo "after off, the merged join answered $got, not 400 SEMANTICS_UNSUPPORTED"; return 1; }
+  # build: rebuilt from nothing, ready, and the full check clean.
+  body="$(live_body build build build)"
+  why="$(live_put "$n" build "$body")" || { echo "switching it to build was refused: $why"; return 1; }
+  [ "$(live_layers "$n" build)" = "wm=build swm=build vm=build" ] || { echo "after build, the effective modes are $(live_layers "$n" build)"; return 1; }
+  wait_all_ready "live-build" "$READY_TIMEOUT" "$n" || { echo "after build, not ready after ${READY_TIMEOUT} s$(unsettled "$RESULTS/rows/live-build.node$n")"; return 1; }
+  [ -n "$(live_graphs "$RESULTS/rows/live-build.node$n")" ] || { echo "after build, status lists no read graph of it"; return 1; }
+  full_checks "live-build" "$n" || { echo "after build, the full check is not clean: $(cat "$RESULTS/checks/live-build.failed")"; return 1; }
+  got="$(live_expect "$n" build join merged "400 SEMANTICS_UNSUPPORTED")" || { echo "in build, the merged join answered $got, not 400 SEMANTICS_UNSUPPORTED"; return 1; }
+  # serve for working memory and verifiable memory: the merged join returns the joined row, the per-asset one none.
+  body="$(live_body serve - serve)"
+  why="$(live_put "$n" serve "$body")" || { echo "switching working and verifiable memory to serve was refused: $why"; return 1; }
+  [ "$(live_layers "$n" serve)" = "wm=serve swm=build vm=serve" ] || { echo "after serve, the effective modes are $(live_layers "$n" serve)"; return 1; }
+  got="$(live_expect "$n" serve join merged "200 merged 1" 60)" || { echo "in serve, the merged join answered $got, not the joined row (200 merged 1)"; return 1; }
+  got="$(live_expect "$n" serve-per-asset join per-asset "200 per-asset 0")" || { echo "in serve, the per-asset join answered $got, not 200 per-asset 0"; return 1; }
+  got="$(live_expect "$n" serve vm merged "200 merged" 60)" || { echo "in serve, a merged query on verifiable memory answered $got, not 200 merged"; return 1; }
+  # The context graph's default view semantics: followed by a request that names none, and removed again.
+  body="$(live_body - - - merged)"
+  why="$(live_put "$n" default "$body")" || { echo "setting the default semantics was refused: $why"; return 1; }
+  got="$(live_expect "$n" default join "" "200 merged 1")" || { echo "with the default merged, the join naming no semantics answered $got, not the joined row"; return 1; }
+  body="$(live_body - - - null)"
+  why="$(live_put "$n" no-default "$body")" || { echo "removing the default semantics was refused: $why"; return 1; }
+  got="$(live_expect "$n" no-default join "" "200 per-asset 0")" || { echo "with the default removed, the join naming no semantics answered $got, not 200 per-asset 0"; return 1; }
+  return 0
+}
+
+# live_under_load: on LOAD_NODE, switch the live context graph's layers between build and serve while the node's own
+# agent writes drafts into it; every acknowledged write must be there after it, its read graphs ready, and the full
+# check clean. The switches count as under load only when writes were acknowledged between every two of them (each
+# write and each switch is timed): otherwise INCONCLUSIVE (exit 3). Prints the outcome ("<n switches> <m acknowledged
+# writes, k of them between the first and last switch>") or why, and fails.
+live_under_load() {
+  local n="$LOAD_NODE" acked="$RESULTS/live-load.acked" switched="$RESULTS/live-load.switched" writer step switches=0
+  local i t body why refused="" wrong="" missing="" id gaps during want got expect
+  # The modes the switches start from, as live_node leaves them.
+  local wm=serve swm=build vm=serve
+  : > "$acked"; : > "$switched"
+  (
+    export DKG_API_MAXTIME=15
+    for i in $(seq 1 60); do
+      id="live-$RUN_SLUG-$i"
+      body="{\"contextGraphId\":\"$LIVE_CG\",\"name\":\"$id\"}"
+      api "$n" POST /api/knowledge-assets "$body" > /dev/null 2>&1 || true
+      body="{\"contextGraphId\":\"$LIVE_CG\",\"quads\":[{\"subject\":\"urn:read-graphs-live:$RUN_SLUG:$i\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"live $i\\\"\"}]}"
+      # Each acknowledged write with the second it was acknowledged in.
+      case "$(code_of "$(api "$n" POST "/api/knowledge-assets/$id/wm/write" "$body")")" in 2??) echo "$i $(date +%s)" >> "$acked" ;; esac
+      sleep 0.3
+    done
+  ) &
+  writer=$!
+  echo "$writer" > "$RESULTS/live-load.writer"
+  # Each step: wm, swm, vm ("-" keeps a layer as it is). The last leaves working memory in serve for the restart.
+  for step in "serve serve -" "build build -" "serve - -" "build - -" "serve serve -" "serve build -"; do
+    sleep 3
+    switches=$((switches + 1))
+    # shellcheck disable=SC2086 # the step is three words
+    set -- $step
+    [ "$1" = - ] || wm="$1"; [ "$2" = - ] || swm="$2"; [ "$3" = - ] || vm="$3"
+    # shellcheck disable=SC2086
+    body="$(live_body $step)"
+    if ! why="$(live_put "$n" "load-$switches" "$body")"; then
+      refused="$refused; switch $switches ($step): $why"; echo "$switches $(date +%s)" >> "$switched"; continue
+    fi
+    echo "$switches $(date +%s)" >> "$switched"
+    # The switch must have taken effect while the writes go on: the modes it asked for, and the merged join answered
+    # where working memory is served and refused where it is not.
+    want="wm=$wm swm=$swm vm=$vm"; got="$(live_layers "$n" "load-$switches")"
+    [ "$got" = "$want" ] || { wrong="$wrong; switch $switches ($step): the effective modes are $got, not $want"; continue; }
+    if [ "$wm" = serve ]; then expect="200 merged 1"; else expect="400 SEMANTICS_UNSUPPORTED"; fi
+    got="$(live_expect "$n" "load-$switches" join merged "$expect" 30)" || wrong="$wrong; switch $switches ($step): the merged join answered $got, not $expect"
+  done
+  wait "$writer" 2>/dev/null; rm -f "$RESULTS/live-load.writer"
+  [ -z "$refused" ] || { echo "switches under write load were refused${refused}"; return 1; }
+  [ -z "$wrong" ] || { echo "switches under write load did not take effect${wrong}"; return 1; }
+  # Writes acknowledged between every two switches, or the switches were not under load.
+  gaps="$(awk 'NR == FNR { at[$1] = $2; last = $1; next } { done_at[++w] = $2 }
+    END { for (k = 1; k < last; k++) { c = 0; for (j = 1; j <= w; j++) if (done_at[j] >= at[k] && done_at[j] <= at[k + 1]) c++; if (c == 0) printf " %d-%d", k, k + 1 } }' "$switched" "$acked")"
+  during="$(awk 'NR == FNR { if (FNR == 1) first = $2; final = $2; next } $2 >= first && $2 <= final { c++ } END { print c + 0 }' "$switched" "$acked")"
+  [ -z "$gaps" ] || { echo "no write was acknowledged between switches$gaps ($(acked_count "$acked") acknowledged in all), so those switches were not under load"; return 3; }
+  wait_all_ready "live-load" "$READY_TIMEOUT" "$n" || { echo "after the switches, not ready after ${READY_TIMEOUT} s$(unsettled "$RESULTS/rows/live-load.node$n")"; return 1; }
+  full_checks "live-load" "$n" || { echo "after the switches, the full check is not clean: $(cat "$RESULTS/checks/live-load.failed")"; return 1; }
+  why="$(query_rows "$RESULTS/rows/live-load.readback" "$n" "$LIVE_CG" working-memory "SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }" s name)" \
+    || { echo "the drafts could not be read back: $why"; return 1; }
+  # Each acknowledged draft as written: its subject with its name, one row of the readback (as query_rows prints it).
+  while read -r i t; do
+    grep -qxF "[\"urn:read-graphs-live:$RUN_SLUG:$i\",\"live $i\"]" "$RESULTS/rows/live-load.readback" || missing="$missing $i"
+  done < "$acked"
+  [ -z "$missing" ] || { echo "acknowledged writes missing or changed after the switches (subject and name compared):$(echo "$missing" | cut -c1-120)"; return 1; }
+  printf '%s %s %s' "$switches" "$(acked_count "$acked")" "$during"
+}
+
+# shared_memory_wait <n> <since>: wait, at most SWM_READY_TIMEOUT seconds, until node <n> reads the live context
+# graph's shared memory, that is until a bounded query of its shared working memory answers 200. A restarted node
+# refuses those reads until it has accepted the graph's RFC-64 authority again, which on a devnet takes from about
+# half a minute to more than a minute after its daemon starts. Prints the seconds since <since> (a now() time), then
+# the last HTTP code and error code when it was not 200. Returns 0 once the node reads it, 1 at the bound or when the
+# route refuses the request itself (400), and 2 when the node has no bounded query route (404), so there is nothing
+# to wait on.
+shared_memory_wait() {
+  local n="$1" since="$2" body answer code deadline
+  # A pattern that matches nothing: once the node admits the read, the route answers 200 with no row, however many
+  # shared-memory graphs the context graph holds and on any store; the refusal comes before the query runs. A LIMIT
+  # inside the pattern would not do: the view wraps the pattern in its graph scope, where a LIMIT applies per graph.
+  body="$(node -e 'process.stdout.write(JSON.stringify({ version: 1, contextGraphId: process.argv[1], view: "shared-working-memory", sparql: "SELECT ?s WHERE { ?s <urn:read-graphs-run:shared-memory-probe> ?o }", maxRows: 1 }))' "$LIVE_CG")"
+  deadline=$(( $(now) + SWM_READY_TIMEOUT ))
+  while :; do
+    answer="$(api "$n" POST /api/query/bounded "$body")"
+    code="$(code_of "$answer")"
+    printf '%s\n' "$answer" > "$RESULTS/rows/live.swm-ready.node$n"
+    case "$code" in
+      200) echo "$(( $(now) - since ))"; return 0 ;;
+      400) echo "$(( $(now) - since )) $code $(field "$(body_of "$answer")" code)"; return 1 ;;
+      404) echo "$(( $(now) - since )) $code"; return 2 ;;
+    esac
+    [ "$(now)" -lt "$deadline" ] || { echo "$(( $(now) - since )) $code $(field "$(body_of "$answer")" code)"; return 1; }
+    sleep 2
+  done
+}
+
+# live_restart: restart LOAD_NODE; its settings for the live context graph must hold, and the merged join and
+# verifiable memory be served again without being set again. Then wait until the node reads the context graph's
+# shared memory again, so the next phase does not start inside the restarted node's wait for the graph's authority.
+# On success it prints the seconds from the restart to that, or nothing when the node cannot be asked.
+live_restart() {
+  local n="$LOAD_NODE" before after got worker_before worker_after since waited
+  live_get "$n" pre-restart > /dev/null || { echo "reading the settings before the restart: $(settings_read "$RESULTS/rows/live.pre-restart.node$n" refusal)"; return 1; }
+  before="$(settings_read "$RESULTS/rows/live.pre-restart.node$n" rows "$LIVE_CG")"
+  # The restart counts only when another daemon worker answers afterwards (restart_node only waits for the API).
+  worker_before="$(daemon_worker_pid "$n")"
+  [ -n "$worker_before" ] || { echo "node$n's daemon.pid names no running daemon worker, so a restart could not be proven"; return 3; }
+  since="$(now)"
+  restart_node "$n" || { echo "node$n did not come back after the restart"; return 1; }
+  worker_after="$(daemon_worker_pid "$n")"
+  [ -n "$worker_after" ] && [ "$worker_after" != "$worker_before" ] \
+    || { echo "the daemon was not replaced: its worker was PID $worker_before before the restart and ${worker_after:-none} after"; return 1; }
+  live_get "$n" post-restart > /dev/null || { echo "reading the settings after the restart: $(settings_read "$RESULTS/rows/live.post-restart.node$n" refusal)"; return 1; }
+  after="$(settings_read "$RESULTS/rows/live.post-restart.node$n" rows "$LIVE_CG")"
+  [ "$after" = "$before" ] || { echo "the settings changed across the restart: $before before, $after after"; return 1; }
+  wait_all_ready "live-restart" "$READY_TIMEOUT" "$n" || { echo "after the restart, not ready after ${READY_TIMEOUT} s$(unsettled "$RESULTS/rows/live-restart.node$n")"; return 1; }
+  got="$(live_expect "$n" restart join merged "200 merged 1" 60)" || { echo "after the restart, the merged join answered $got, not the joined row (200 merged 1)"; return 1; }
+  got="$(live_expect "$n" restart-per-asset join per-asset "200 per-asset 0")" || { echo "after the restart, the per-asset join answered $got, not 200 per-asset 0"; return 1; }
+  got="$(live_expect "$n" restart vm merged "200 merged" 60)" || { echo "after the restart, a merged query on verifiable memory answered $got, not 200 merged"; return 1; }
+  waited="$(shared_memory_wait "$n" "$since")"
+  case $? in
+    0) note "live: node$n read $LIVE_CG's shared memory again $waited s after its restart began"; echo "$waited" ;;
+    2) note "live: node$n has no bounded query route, so the phase did not wait for it to read $LIVE_CG's shared memory again after the restart" ;;
+    *) set -- $waited
+       echo "node$n did not read $LIVE_CG's shared memory again within ${SWM_READY_TIMEOUT} s of the checks after its restart ($1 s after the restart began; last answer HTTP ${2:-?}${3:+ $3})"
+       return 3 ;;
+  esac
+}
+
+phase_live() {
+  local started n why outcome rc holders="" swm_ready=""
+  started="$(now)"
+  # Without the settings API (READ_GRAPHS_SWITCH=auto on a daemon that has none, or =config) the phase does not apply:
+  # N/A, neither a failure nor a gap. READ_GRAPHS_SWITCH=api, as the bar for live settings uses it, stops the run instead.
+  [ "$SWITCH" = api ] || { record live N/A 0 "not run: no per-context-graph settings API in use (see Notes); READ_GRAPHS_SWITCH=api requires it"; return; }
+  # The nodes that hold the live context graph; the others have nothing of it to switch.
+  for n in $NODES; do
+    if holds_live_cg "$n"; then holders="$holders $n"; else note "live: node$n does not subscribe to $LIVE_CG, so it is not switched there"; fi
+  done
+  holders="${holders# }"
+  [ -n "$holders" ] || { record live INCONCLUSIVE 0 "no node subscribes to $LIVE_CG (READ_GRAPHS_LIVE_CG)"; return; }
+  case " $holders " in *" $LOAD_NODE "*) ;; *) record live INCONCLUSIVE 0 "the write-load node node$LOAD_NODE does not hold $LIVE_CG or is not part of the run"; return ;; esac
+  for n in $holders; do
+    why="$(live_node "$n")" || { record live FAIL "$(( $(now) - started ))" "node$n, $LIVE_CG: $why"; return; }
+  done
+  outcome="$(live_under_load)"; rc=$?
+  case "$rc" in
+    0) ;;
+    3) record live INCONCLUSIVE "$(( $(now) - started ))" "node$LOAD_NODE, $LIVE_CG under write load: $outcome"; return ;;
+    *) record live FAIL "$(( $(now) - started ))" "node$LOAD_NODE, $LIVE_CG under write load: $outcome"; return ;;
+  esac
+  why="$(live_restart)"; rc=$?
+  case "$rc" in
+    0) ;;
+    3) record live INCONCLUSIVE "$(( $(now) - started ))" "node$LOAD_NODE, $LIVE_CG across a restart: $why"; return ;;
+    *) record live FAIL "$(( $(now) - started ))" "node$LOAD_NODE, $LIVE_CG across a restart: $why"; return ;;
+  esac
+  [ -z "$why" ] || swm_ready=", and the node read its shared memory again $why s after the restart began"
+  set -- $outcome
+  record live PASS "$(( $(now) - started ))" "$LIVE_CG through the settings API on nodes $holders: off dropped its read graphs; build rebuilt them with a clean full check; serve answered a join across two working-memory drafts with the joined row when merged and none per asset, and merged queries on verifiable memory; the default semantics was followed and removed. On node$LOAD_NODE: $1 switches between build and serve, each taking effect while the writes went on (its modes, and the merged join answered or refused accordingly), with writes acknowledged between every two ($3 of $2 acknowledged drafts between the first and last switch), every draft there afterwards as written and a clean full check; after a restart, with another daemon worker answering, the settings held and the join was answered across assets again$swm_ready"
+}
+
 # gate_verdict <exit code>: PASS, INCONCLUSIVE or FAIL for the gate. The comprehensive run writes REPORT.json
 # into RESULTS_DIR, and only its completeSuccess, written by this run's gate command and with that command
 # exiting 0, is a pass: a filtered run exits 0 without being one. A gate command that writes no report is judged
@@ -694,77 +1292,6 @@ gate_verdict() {
   fi
 }
 
-# watch_mismatches <n> <out> <lost> <since> <start>: in the background, append to <out> every read-graph check mismatch
-# line that node <n> logs after <start> ("<size> <identity>" of its daemon.log, from log_position, taken before the gate
-# starts, so a line written before this process opens the file is not missed). The daemon rotates daemon.log by renaming it to daemon.log.1: the watcher keeps each
-# file open, reads it once more when it sees the rename, and goes on reading it until it has stayed unchanged for four
-# polls, so a line written just before (or as) the file was renamed is read. When the daemon cannot rename, it trims
-# the live file in place, and lines written since the last read may be gone: that is noted in <lost>, and the trimmed
-# file is read again from its start (lines stamped before <since>, the log's local "YYYY-MM-DD HH:MM:SS", skipped).
-# Prints the PID.
-watch_mismatches() {
-  LOG="$DEVNET_DIR/node$1/daemon.log" OUT="$2" LOST="$3" SINCE="$4" START="$5" node -e '
-    const fs = require("fs");
-    const { LOG, OUT, LOST, SINCE, START } = process.env;
-    const stamped = /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d/;
-    const keep = (line) => line.includes("[read-graph-check] Read graph <") && !(stamped.test(line) && line.slice(0, 19) < SINCE);
-    const emit = (lines) => { const hits = lines.filter(keep); if (hits.length > 0) fs.appendFileSync(OUT, hits.join("\n") + "\n"); };
-    const identity = (stat) => `${stat.dev}:${stat.ino}`;
-    // A file being read: its descriptor, its identity, how far it was read, the unfinished last line, quiet polls.
-    const openFile = (fromEnd) => {
-      let fd;
-      try { fd = fs.openSync(LOG, "r"); } catch { return null; }
-      const stat = fs.fstatSync(fd);
-      return { fd, id: identity(stat), offset: fromEnd ? stat.size : 0, rest: "", quiet: 0 };
-    };
-    // Read what was appended; whether anything was. A file shorter than what was read was trimmed in place.
-    const drain = (file) => {
-      const size = fs.fstatSync(file.fd).size;
-      if (size < file.offset) {
-        fs.appendFileSync(LOST, `${LOG} was trimmed in place at ${new Date().toISOString()}\n`); file.offset = 0; file.rest = "";
-      }
-      if (size === file.offset) return false;
-      const buffer = Buffer.alloc(size - file.offset);
-      fs.readSync(file.fd, buffer, 0, buffer.length, file.offset); file.offset = size;
-      const lines = (file.rest + buffer.toString("utf8")).split("\n"); file.rest = lines.pop(); emit(lines);
-      return true;
-    };
-    // Start where the log stood when the gate was about to start (START, "<size> <identity>"): what was written since,
-    // also before this process opened the file, is read. If the file was renamed in between, its rest is read too.
-    const [startSize, startId] = (START ?? "0 none").split(" ");
-    let live = openFile(false);
-    let rotated = [];
-    if (live && live.id === startId) live.offset = Math.min(Number(startSize) || 0, fs.fstatSync(live.fd).size);
-    else if (startId !== "none") {
-      try {
-        const fd = fs.openSync(`${LOG}.1`, "r"), stat = fs.fstatSync(fd);
-        if (identity(stat) === startId) rotated.push({ fd, id: startId, offset: Math.min(Number(startSize) || 0, stat.size), rest: "", quiet: 0 });
-        else fs.closeSync(fd);
-      } catch { /* no rotated file */ }
-    }
-    const tick = () => {
-      rotated = rotated.filter((file) => {
-        file.quiet = drain(file) ? 0 : file.quiet + 1;
-        if (file.quiet < 4) return true;
-        emit([file.rest]); fs.closeSync(file.fd); return false;
-      });
-      if (live) drain(live);
-      let stat;
-      try { stat = fs.statSync(LOG); } catch { return; }
-      if (!live) { live = openFile(false); if (live) drain(live); return; }
-      if (identity(stat) !== live.id) {
-        drain(live);
-        rotated.push(live);
-        live = openFile(false); if (live) drain(live);
-      }
-    };
-    setInterval(tick, 500);
-    process.on("SIGTERM", () => {
-      try { tick(); for (const file of [...rotated, live]) if (file) { drain(file); emit([file.rest]); } } finally { process.exit(0); }
-    });
-  ' > /dev/null 2>&1 &
-  echo $!
-}
 # gate_mismatches: the mismatches the nodes logged during the gate, outside the context graphs a suite writes into the
 # store directly, as "<count> on node<N> (e.g. <read graph>)", one node per line; nothing when there were none.
 gate_mismatches() {
@@ -779,12 +1306,6 @@ gate_mismatches() {
   done
 }
 
-# log_position <n>: "<size> <device:inode>" of node <n>'s daemon.log now, or "0 none" when there is none.
-log_position() {
-  node -e 'try { const s = require("fs").statSync(process.argv[1]); console.log(`${s.size} ${s.dev}:${s.ino}`); } catch { console.log("0 none"); }' \
-    "$DEVNET_DIR/node$1/daemon.log"
-}
-
 phase_gate() {
   local n w watchers="" since
   mkdir -p "$RESULTS/gate"
@@ -792,8 +1313,9 @@ phase_gate() {
   # can be clean although write maintenance failed during the workload. Every mismatch a check logs is kept.
   since="$(date '+%Y-%m-%d %H:%M:%S')"
   for n in $NODES; do
-    : > "$RESULTS/gate/mismatches.node$n"; : > "$RESULTS/gate/lost.node$n"
-    w="$(watch_mismatches "$n" "$RESULTS/gate/mismatches.node$n" "$RESULTS/gate/lost.node$n" "$since" "$(log_position "$n")")"
+    : > "$RESULTS/gate/mismatches.node$n"; : > "$RESULTS/gate/lost.node$n"; : > "$RESULTS/gate/watcher.node$n.stopped"
+    w="$(watch_mismatches "$n" "$RESULTS/gate/mismatches.node$n" "$RESULTS/gate/lost.node$n" "$since" "$(log_position "$n")" \
+      "$RESULTS/gate/watcher.node$n.stopped")"
     echo "$w" > "$RESULTS/gate/watcher.node$n"; watchers="$watchers $w"
   done
   echo "$watchers" > "$RESULTS/gate/watchers"
@@ -837,7 +1359,8 @@ gate_run() {
   mismatched="$(gate_mismatches | paste -sd ';' - | sed 's/;/; /g')"
   # A watcher that stopped, or a log trimmed in place, may have lost a mismatch line: the gate cannot pass then.
   for n in $NODES; do
-    kill -0 "$(cat "$RESULTS/gate/watcher.node$n" 2>/dev/null)" 2>/dev/null || unwatched="$unwatched node$n (its log watcher stopped)"
+    kill -0 "$(cat "$RESULTS/gate/watcher.node$n" 2>/dev/null)" 2>/dev/null \
+      || unwatched="$unwatched node$n (its log watcher stopped$(head -1 "$RESULTS/gate/watcher.node$n.stopped" 2>/dev/null | cut -c1-200 | sed 's/^/: /'))"
     [ -s "$RESULTS/gate/lost.node$n" ] && unwatched="$unwatched node$n (its log was trimmed in place)"
   done
   if [ "$checked" = 1 ]; then
@@ -868,36 +1391,57 @@ drill_end() {
   esac
 }
 
+# shared_read_graph <context graph>: the IRI of its shared-memory read graph, by the build's own rules.
+shared_read_graph() {
+  CORE_MODULE="$CORE_MODULE" CG="$1" node --input-type=module -e '
+    const core = await import(process.env.CORE_MODULE);
+    console.log(core.readGraphIri({ scope: core.readScope(process.env.CG), layer: core.MemoryLayer.SharedWorkingMemory }));'
+}
+# build_ms <n> <read graph> [since]: how long node <n>'s last build of that read graph took, in ms, from its
+# daemon.log; with <since> (the log's local "YYYY-MM-DD HH:MM:SS"), only a build logged from then on.
+build_ms() {
+  grep -F "Built read graph $2 in " "$DEVNET_DIR/node$1/daemon.log" 2>/dev/null | awk -v s="${3:-}" 'substr($0, 1, 19) >= s' \
+    | tail -1 | sed -E 's/.* in ([0-9]+) ms.*/\1/'
+}
+
 drill_restart_during_rebuild() {
-  local n="$RESTART_NODE" started before caught="" i state graph gen_before gen_after renewed=0 finished="" gone=""
-  started="$(now)"; before="$RESULTS/rows/restart.before.node$n"
-  read_graph_rows "$n" > "$before" && all_ready "$before" || { record drill-restart INCONCLUSIVE 0 "node$n had no ready read graph to rebuild"; return; }
-  read_graph_rebuild "$n" || { record drill-restart FAIL "$(( $(now) - started ))" "rebuild refused on node$n (cli.log)"; return; }
-  # `rebuild` marks the read graphs dirty; the builder's next pass rebuilds them. Restart while a shared-layer one is
-  # being rebuilt. Working-memory read graphs are left out: every start renews them, so they prove nothing here.
-  for i in $(seq 1 150); do
+  local n="$RESTART_NODE" started cg graph why seeded since rebuilt caught="" i gen_before gen_after
+  started="$(now)"
+  # The read graphs a devnet holds are rebuilt in tens of milliseconds, far quicker than a restart takes to stop the
+  # daemon. So the drill builds its own: a context graph on the drill node whose shared memory takes seconds to copy
+  # (about 100,000 triples a second: 100,000 took 1,045 ms in 12 batches on the devnet).
+  cg="read-graphs-restart-$RUN_SLUG"
+  graph="$(shared_read_graph "$cg")" && [ -n "$graph" ] \
+    || { record drill-restart INCONCLUSIVE 0 "the shared-memory read graph of $cg could not be named by the build's rules"; return; }
+  why="$(restart_drill_graph "$n" "$cg")" \
+    || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "node$n could not hold the drill's own context graph $cg: $why"; return; }
+  seeded=$(( $(now) - started ))
+  wait_read_graph_ready "$n" "$graph" "$READY_TIMEOUT" "$RESULTS/rows/restart.seeded.node$n" \
+    || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "node$n did not list <$graph> ready after the drill shared $RESTART_TRIPLES triples into it"; return; }
+  since="$(date '+%Y-%m-%d %H:%M:%S')"
+  read_graph_rebuild "$n" "$cg" || { record drill-restart FAIL "$(( $(now) - started ))" "rebuild refused on node$n (cli.log)"; return; }
+  # `rebuild` marks the read graph dirty; the builder's next pass rebuilds it. Restart while it is being rebuilt.
+  for i in $(seq 1 300); do
     read_graph_rows "$n" > "$RESULTS/rows/restart.caught.node$n" 2>/dev/null || true
-    if grep -E '^(rebuilding|building) ' "$RESULTS/rows/restart.caught.node$n" | grep -qv '/_working_memory/'; then caught=1; break; fi
+    if awk -v g="$graph" '$3 == g && ($1 == "rebuilding" || $1 == "building") { found = 1 } END { exit !found }' "$RESULTS/rows/restart.caught.node$n"; then
+      caught=1; break
+    fi
     sleep 0.2
   done
-  [ -n "$caught" ] || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "no shared-layer read graph on node$n was seen being rebuilt, so no restart could land during one"; return; }
+  [ -n "$caught" ] || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "<$graph> was not seen being rebuilt on node$n (that rebuild took $(build_ms "$n" "$graph" "$since") ms)"; return; }
+  gen_before="$(generation_of "$RESULTS/rows/restart.caught.node$n" "$graph")"
+  since="$(date '+%Y-%m-%d %H:%M:%S')"
   restart_node "$n" || { record drill-restart FAIL "$(( $(now) - started ))" "node$n did not come back"; return; }
   if ! wait_all_ready drill-restart "$READY_TIMEOUT" "$n"; then record drill-restart FAIL "$(( $(now) - started ))" "node$n's read graphs not ready after the restart"; return; fi
-  # A read graph the restart caught being built gets a new generation at start. One whose rebuild ended in the
-  # moment before the daemon stopped keeps its generation; that is fine, but proves nothing. Neither does a read
-  # graph caught `dirty`, still queued: its normal rebuild after the start renews it too.
-  while read -r state gen_before graph; do
-    [ "$state" = ready ] && continue
-    case "$graph" in */_working_memory/*) continue ;; esac
-    gen_after="$(generation_of "$RESULTS/rows/drill-restart.node$n" "$graph")"
-    if [ -z "$gen_after" ]; then gone="$gone <$graph>"; continue; fi
-    case "$state" in building|rebuilding) ;; *) continue ;; esac
-    if [ "$gen_after" != "$gen_before" ]; then renewed=$((renewed + 1)); else finished="$finished <$graph>"; fi
-  done < "$RESULTS/rows/restart.caught.node$n"
-  [ -z "$gone" ] || { record drill-restart FAIL "$(( $(now) - started ))" "read graphs gone after the restart:$gone"; return; }
-  [ "$renewed" -gt 0 ] || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "every rebuild seen on node$n ended before the restart stopped the daemon (a read graph still queued dirty proves nothing)"; return; }
-  [ -z "$finished" ] || note "drill-restart: rebuilt before the daemon stopped, so they kept their generation:$finished"
-  drill_end drill-restart "$n" "$started" "$renewed shared-layer read graphs the restart caught unfinished got a new generation and were rebuilt"
+  # A read graph the restart caught being built gets a new generation at start. One whose rebuild ended in the moment
+  # before the daemon stopped keeps its generation: that is fine, but proves nothing.
+  gen_after="$(generation_of "$RESULTS/rows/drill-restart.node$n" "$graph")"
+  [ -n "$gen_after" ] || { record drill-restart FAIL "$(( $(now) - started ))" "<$graph> was gone after the restart"; return; }
+  [ "$gen_after" != "$gen_before" ] \
+    || { record drill-restart INCONCLUSIVE "$(( $(now) - started ))" "the rebuild of <$graph> ended before the restart stopped the daemon (it took $(build_ms "$n" "$graph") ms; READ_GRAPHS_DRILL_RESTART_TRIPLES makes it longer)"; return; }
+  # The rebuild after the start, as the daemon logs it once the read graph is ready again.
+  for i in $(seq 1 10); do rebuilt="$(build_ms "$n" "$graph" "$since")"; [ -n "$rebuilt" ] && break; sleep 1; done
+  drill_end drill-restart "$n" "$started" "the restart caught the drill's own shared-memory read graph <$graph> ($RESTART_TRIPLES triples, shared in $seeded s) being rebuilt; it got a new generation at the start and was rebuilt after it in ${rebuilt:-?} ms"
 }
 
 # kill_tree <pid>: stop a process and every process it started, by PID. The tree is listed before anything is stopped,
@@ -911,7 +1455,69 @@ kill_tree() {
   for p in $all; do kill "$p" 2>/dev/null; done
 }
 # stop_writer <pid>: stop the kill drill's writer and the requests it has in flight, and reap it.
-stop_writer() { kill_tree "$1"; wait "$1" 2>/dev/null; rm -f "$RESULTS/drill-kill.writer"; }
+stop_writer() { kill_tree "$1"; wait "$1" 2>/dev/null; rm -f "$RESULTS/drill-kill.writer"; stop_load; }
+# stop_load: stop the kill drill's load writer, by its PID, when it runs.
+stop_load() {
+  local l
+  l="$(cat "$RESULTS/drill-kill.load" 2>/dev/null)"
+  [ -n "$l" ] || return 0
+  kill_tree "$l"; wait "$l" 2>/dev/null; rm -f "$RESULTS/drill-kill.load"
+}
+# drill_write_template <context graph> <subject prefix>: the JSON body of a kill-drill write, KILL_WRITE_TRIPLES triples
+# on the subject <prefix>:@I@ (its name "drill @I@", then values), @I@ standing for the write's number.
+drill_write_template() {
+  node -e '
+    const [contextGraphId, prefix, count] = [process.argv[1], process.argv[2], Number(process.argv[3])];
+    const subject = `${prefix}:@I@`;
+    const quads = [{ subject, predicate: "http://schema.org/name", object: "\"drill @I@\"" },
+      ...Array.from({ length: Math.max(0, count - 1) }, (_, j) => ({ subject, predicate: "http://schema.org/value", object: `"@I@.${j}"` }))];
+    process.stdout.write(JSON.stringify({ contextGraphId, quads }));' "$1" "$2" "$KILL_WRITE_TRIPLES"
+}
+# aim_kill <inflight> <answers> <acked> <acked copy> <pid> <fraction> <after> <timeout s>: wait for a kill-drill write
+# after write <after> to start (its number appears in <inflight>); once it has run <fraction> of the median time of the
+# writes acknowledged after write <after> (curl's time_total in <answers>: the current worker's, at least three), and
+# while it is still in flight, copy <acked> to <acked copy> and send SIGKILL to <pid>. A write answered before its aim
+# is passed over for the next one. Prints "<write> <answers lines before the kill> <median ms>"; prints nothing when no
+# write could be aimed at in time.
+aim_kill() {
+  node -e '
+    const fs = require("fs");
+    const [inflight, answers, acked, ackedCopy, pid, fraction, after, timeout] = process.argv.slice(1);
+    const current = () => { try { return fs.readFileSync(inflight, "utf8").trim(); } catch { return ""; } };
+    const median = () => {
+      const times = [];
+      for (const line of fs.readFileSync(answers, "utf8").split("\n")) {
+        const m = /^write (\d+) rc=0 code=2\d\d .* time=(\d+(?:\.\d+)?)$/.exec(line);
+        if (m && Number(m[1]) > Number(after)) times.push(Number(m[2]) * 1000);
+      }
+      times.sort((a, b) => a - b);
+      return times.length >= 3 ? times[Math.floor(times.length / 2)] : undefined;
+    };
+    const deadline = Date.now() + Number(timeout) * 1000;
+    let seen = current(), aim;
+    const tick = () => {
+      if (Date.now() > deadline) process.exit(0);
+      const now = current();
+      if (now !== seen) {
+        seen = now;
+        const m = /^\d+$/.test(now) && Number(now) > Number(after) ? median() : undefined;
+        aim = m === undefined ? undefined : { at: Date.now() + Number(fraction) * m, median: m };
+      }
+      if (aim && Date.now() >= aim.at) {
+        if (current() === seen) {
+          const lines = fs.readFileSync(answers, "utf8").split("\n").filter(Boolean).length;
+          fs.copyFileSync(acked, ackedCopy);
+          try { process.kill(Number(pid), "SIGKILL"); } catch { process.exit(0); }
+          console.log(`${seen} ${lines} ${Math.round(aim.median)}`);
+          process.exit(0);
+        }
+        aim = undefined;
+      }
+      setTimeout(tick, 1);
+    };
+    tick();
+  ' "$@"
+}
 # acked_count <file>: lines in a file of acknowledged writes.
 acked_count() { wc -l < "$1" | tr -d ' '; }
 # drill_writes_missing <acked> <rows>: the drill writes listed in <acked> that the readback <rows> (query_rows of
@@ -932,6 +1538,23 @@ drill_writes_missing() {
     }
     process.stdout.write(problems.join(", "));' "$1" "$2"
 }
+# drill_writes_incomplete <acked> <counts> <values>: the drill writes listed in <acked> whose subject does not hold
+# <values> values in <counts> (query_rows of ?s ?values), comma-separated; nothing when each holds them all.
+drill_writes_incomplete() {
+  node -e '
+    const fs = require("fs");
+    const counts = new Map();
+    for (const line of fs.readFileSync(process.argv[2], "utf8").split("\n").filter(Boolean)) {
+      const [s, values] = JSON.parse(line);
+      counts.set(s, Number(values));
+    }
+    const problems = [];
+    for (const i of fs.readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean)) {
+      const got = counts.get(`urn:read-graphs-drill:${i}`) ?? 0;
+      if (got !== Number(process.argv[3])) problems.push(`${i} holds ${got} of ${process.argv[3]} values`);
+    }
+    process.stdout.write(problems.slice(0, 10).join(", ") + (problems.length > 10 ? `, and ${problems.length - 10} more` : ""));' "$1" "$2" "$3"
+}
 # pid_alive <pid>: the process exists and is not a zombie.
 pid_alive() { local s; s="$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')"; [ -n "$s" ] && [ "${s#Z}" = "$s" ]; }
 # daemon_worker_pid <n>: the PID node <n>'s daemon.pid names, when that process is a live daemon worker; else nothing.
@@ -944,7 +1567,8 @@ daemon_worker_pid() {
 
 drill_kill_during_write() {
   local n="$KILL_NODE" started cg pid new_pid writer acked i resp missing body agent wm_graph inflight answers inflight_write overlap
-  local attempt last_write kill_line why readback
+  local attempt last_write kill_line why readback template bodyfile incomplete load load_cg load_template load_body
+  local fraction fractions aimed median
   started="$(now)"; cg="read-graphs-drill-$(echo "$RUN_ID" | tr 'A-Z' 'a-z')"
   readback="SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }"
   acked="$RESULTS/drill-kill.acked"; : > "$acked"
@@ -971,25 +1595,63 @@ drill_kill_during_write() {
     || { record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "the working-memory read graph <$wm_graph> was not ready before the kill"; return; }
   pid="$(daemon_worker_pid "$n")"
   [ -n "$pid" ] || { record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "node$n's daemon.pid does not name a running daemon worker"; return; }
-  # The writer marks each working-memory write in flight in $inflight, logs every outcome in $answers in order, and
-  # records each acknowledged (HTTP 2xx) write in $acked. It sends the write with curl itself, so the outcome says
-  # what the daemon had: exit 52 or 56 with the whole body uploaded means the worker took the request and its
-  # connection was dropped unanswered; exit 7 means the request never reached it; exit 0 means it was answered.
-  # After a write that was not acknowledged it waits a moment, so a restarting node does not use up its writes.
+  # The writer marks each working-memory write in flight in $inflight, logs every outcome in $answers in order, with
+  # curl's time for it, and records each acknowledged (HTTP 2xx) write in $acked. It sends the write with curl itself,
+  # so the outcome says what the daemon had: exit 52 or 56 with the whole body uploaded means the worker took the
+  # request and its connection was dropped unanswered; exit 7 means the request never reached it; exit 0 means it was
+  # answered. After a write that was not acknowledged it waits a moment, so a restarting node does not use up its
+  # writes. Each write is KILL_WRITE_TRIPLES triples on its own subject: its name, which the readback reads, and values
+  # that make it heavier to store, so the worker's request to the store at its end lasts longer. Its body goes through
+  # a file. It stops after KILL_WRITER_SECONDS or 500 writes.
   inflight="$RESULTS/drill-kill.inflight"; answers="$RESULTS/drill-kill.answers"; : > "$inflight"; : > "$answers"
+  template="$RESULTS/drill-kill.body-template"; bodyfile="$RESULTS/drill-kill.body"
+  load_cg="$cg-load"; load_template="$RESULTS/drill-kill.load-template"; load_body="$RESULTS/drill-kill.load-body"
+  drill_write_template "$cg" "urn:read-graphs-drill" > "$template" \
+    && drill_write_template "$load_cg" "urn:read-graphs-drill-load" > "$load_template" \
+    || { record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "the drill's write bodies could not be written"; return; }
+  body="{\"id\":\"$load_cg\",\"name\":\"Read-graph drill load\"}"
+  resp="$(api "$n" POST /api/context-graph/create "$body")"
+  case "$(code_of "$resp")" in
+    200|201|409) ;;
+    *) record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "could not create the load's context graph $load_cg on node$n (HTTP $(code_of "$resp"))"; return ;;
+  esac
+  # The load: a second writer on a context graph of its own, as the gate's suites load a node, so the worker is busy and
+  # a write's answer can lag its store write (on an idle node a write is answered within milliseconds of it). It starts
+  # before the drill's writer and is stopped with it, by PID, whatever the outcome (stop_writer); the checks read only
+  # the drill's own context graph.
+  : > "$RESULTS/drill-kill.load-writes"
   (
     export DKG_API_MAXTIME=15
-    for i in $(seq 1 1000); do
+    j=0; until_s=$(( $(now) + KILL_WRITER_SECONDS ))
+    while [ "$j" -lt 500 ] && [ "$(now)" -lt "$until_s" ]; do
+      j=$((j + 1))
+      api "$n" POST /api/knowledge-assets "{\"contextGraphId\":\"$load_cg\",\"name\":\"load-$j\"}" > /dev/null 2>&1 || true
+      sed "s/@I@/$j/g" "$load_template" > "$load_body"
+      code="$(curl -sS --max-time 15 --connect-timeout 5 -o /dev/null -w '%{http_code}' -X POST \
+        -H "Authorization: Bearer $(node_token "$n")" -H 'Content-Type: application/json' --data-binary "@$load_body" \
+        "http://127.0.0.1:$(node_port "$n")/api/knowledge-assets/load-$j/wm/write" 2>/dev/null)"
+      echo "$j ${code:-000}" >> "$RESULTS/drill-kill.load-writes"
+      case "$code" in 2??) ;; *) sleep 0.5 ;; esac
+    done
+  ) &
+  load=$!
+  echo "$load" > "$RESULTS/drill-kill.load"
+  (
+    export DKG_API_MAXTIME=15
+    i=0; until_s=$(( $(now) + KILL_WRITER_SECONDS ))
+    while [ "$i" -lt 500 ] && [ "$(now)" -lt "$until_s" ]; do
+      i=$((i + 1))
       api "$n" POST /api/knowledge-assets "{\"contextGraphId\":\"$cg\",\"name\":\"drill-$i\"}" > /dev/null 2>&1 || true
-      body="{\"contextGraphId\":\"$cg\",\"quads\":[{\"subject\":\"urn:read-graphs-drill:$i\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"drill $i\\\"\"}]}"
+      sed "s/@I@/$i/g" "$template" > "$bodyfile"
+      size="$(wc -c < "$bodyfile" | tr -d ' ')"
       echo "$i" > "$inflight"
-      out="$(curl -sS --max-time 15 --connect-timeout 5 -o /dev/null -w '%{http_code} %{size_upload}' -X POST \
-        -H "Authorization: Bearer $(node_token "$n")" -H 'Content-Type: application/json' --data "$body" \
+      out="$(curl -sS --max-time 15 --connect-timeout 5 -o /dev/null -w '%{http_code} %{size_upload} %{time_total}' -X POST \
+        -H "Authorization: Bearer $(node_token "$n")" -H 'Content-Type: application/json' --data-binary "@$bodyfile" \
         "http://127.0.0.1:$(node_port "$n")/api/knowledge-assets/drill-$i/wm/write" 2>/dev/null)"; rc=$?
-      code="${out%% *}"
-      echo "write $i rc=$rc code=${code:-000} sent=${out##* } of ${#body}" >> "$answers"
+      set -- $out
+      echo "write $i rc=$rc code=${1:-000} sent=${2:-0} of $size time=${3:-0}" >> "$answers"
       : > "$inflight"
-      case "$code" in 2??) echo "$i" >> "$acked" ;; *) sleep 0.5 ;; esac
+      case "${1:-000}" in 2??) echo "$i" >> "$acked" ;; *) sleep 0.5 ;; esac
     done
   ) &
   writer=$!
@@ -1004,39 +1666,38 @@ drill_kill_during_write() {
   # inside the read-graph update itself, rather than after it, cannot be seen from outside the daemon; a pause hook at
   # the store-write boundary is a follow-up, and a kill in the middle of an engine write is covered by the storage
   # tests (oxigraph-worker-respawn.test.ts).
-  overlap=""; attempt=0; last_write=0
-  while [ -z "$overlap" ] && [ "$attempt" -lt 5 ]; do
+  overlap=""; attempt=0; last_write=0; fractions="0.90 0.95 0.98 1.00 1.03"
+  while [ -z "$overlap" ] && [ "$attempt" -lt 10 ]; do
     attempt=$((attempt + 1))
-    inflight_write=""
+    # Aim the kill at the end of a write, where its store write is: once three writes were acknowledged by the current
+    # worker (after the last crash; a fresh worker's first writes are slower), at a share of the median time those took
+    # (curl's time_total), swept from 90 % to 103 % over the five crashes of a round. The worker is resolved first, so
+    # the kill follows the aim at once.
+    fraction="$(echo "$fractions" | cut -d' ' -f$(( (attempt - 1) % 5 + 1 )))"
     for i in $(seq 1 600); do
+      [ "$(awk -v a="$last_write" '$1 > a' "$acked" | wc -l | tr -d ' ')" -ge 3 ] && break
       kill -0 "$writer" 2>/dev/null || break
-      if [ "$(acked_count "$acked")" -ge 3 ]; then
-        inflight_write="$(tr -d '[:space:]' < "$inflight" 2>/dev/null)"
-        # A moment for the request to reach the worker, and still the same write in flight.
-        if [ -n "$inflight_write" ] && [ "$inflight_write" -gt "$last_write" ]; then
-          sleep 0.05
-          [ "$(tr -d '[:space:]' < "$inflight" 2>/dev/null)" = "$inflight_write" ] && break
-        fi
-        inflight_write=""
-      fi
       sleep 0.1
     done
-    if [ -z "$inflight_write" ]; then
+    pid="$(daemon_worker_pid "$n")"
+    if [ -z "$pid" ]; then
       stop_writer "$writer"
-      record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "no working-memory write was seen in flight after three were acknowledged ($(acked_count "$acked") acknowledged; crash $attempt), so no kill landed during one"
+      record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "node$n's daemon.pid named no running daemon worker before crash $attempt"; return
+    fi
+    aimed="$(aim_kill "$inflight" "$answers" "$acked" "$RESULTS/drill-kill.acked-crash$attempt" "$pid" "$fraction" "$last_write" 60)"
+    if [ -z "$aimed" ]; then
+      stop_writer "$writer"
+      record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "no working-memory write could be aimed at within a minute after three were acknowledged by the current worker ($(acked_count "$acked") acknowledged in all; crash $attempt), so no kill landed during one"
       return
     fi
-    last_write="$inflight_write"
     # The crash must happen: SIGKILL delivered to the daemon worker, that worker gone, and a new worker in its place
-    # before anything is checked. A daemon that answered throughout would prove nothing.
-    pid="$(daemon_worker_pid "$n")"
-    # The evidence must come after this line, taken before the kill: an outcome the kill caused can be logged at once.
-    # The writes acknowledged so far must all be there after this crash.
-    kill_line="$(wc -l < "$answers" | tr -d ' ')"; cp "$acked" "$RESULTS/drill-kill.acked-crash$attempt"
-    if [ -z "$pid" ] || ! kill -9 "$pid" 2>/dev/null; then
-      stop_writer "$writer"
-      record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "SIGKILL could not be sent to node$n's daemon worker (PID ${pid:-none}), so no crash happened"; return
-    fi
+    # before anything is checked. A daemon that answered throughout would prove nothing. The evidence must come after
+    # the answers line taken before the kill: an outcome the kill caused can be logged at once; the writes acknowledged
+    # so far must all be there after this crash.
+    read -r inflight_write kill_line median <<EOF_AIMED
+$aimed
+EOF_AIMED
+    last_write="$inflight_write"
     echo "killed during write $inflight_write" >> "$answers"
     # Evidence that the worker died holding that write: its whole request was uploaded, and its connection was dropped
     # unanswered (curl exit 52 or 56), logged after the kill. A write that never connected (it was not sent yet), or
@@ -1054,8 +1715,14 @@ drill_kill_during_write() {
       stop_writer "$writer"
       record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "node$n's daemon worker (PID $pid) was still running 20 s after SIGKILL"; return
     fi
-    # The supervisor starts a new worker; restart the node if it does not.
-    wait_up "$n" 120 || restart_node "$n" || { stop_writer "$writer"; record drill-kill FAIL "$(( $(now) - started ))" "node$n did not come back after the kill"; return; }
+    # The supervisor starts a new worker, but not after its fifth crash in a run: then a full stop and start of the
+    # node, which also begins a second round of five crashes. Otherwise the node is restarted if no worker comes.
+    if [ $(( attempt % 5 )) = 0 ]; then
+      note "drill-kill: crash $attempt is the supervisor's fifth in this run; node$n restarted${overlap:+ }"
+      restart_node "$n"
+    else
+      wait_up "$n" 120 || restart_node "$n"
+    fi || { stop_writer "$writer"; record drill-kill FAIL "$(( $(now) - started ))" "node$n did not come back after the kill"; return; }
     new_pid="$(daemon_worker_pid "$n")"
     if [ -z "$new_pid" ] || [ "$new_pid" = "$pid" ]; then
       stop_writer "$writer"
@@ -1078,17 +1745,26 @@ drill_kill_during_write() {
   done
   stop_writer "$writer"
   if [ -z "$overlap" ]; then
-    record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "none of $attempt crashes landed on a working-memory write the worker had begun to store (drill-kill.answers, notes.md), so no kill is known to have interrupted a write"; return
+    record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "none of $attempt crashes landed on a working-memory write the worker had begun to store, though each was aimed late in a write, with a second writer loading the node (drill-kill.answers, notes.md), so no kill is known to have interrupted a write"; return
   fi
   # Every write the node acknowledged, before the crashes and after them, must be there with the value it wrote.
   why="$(query_rows "$RESULTS/rows/drill-kill.after" "$n" "$cg" working-memory "$readback" s name)" \
     || { record drill-kill FAIL "$(( $(now) - started ))" "the acknowledged writes could not be read back after the kill ($why)"; return; }
   missing="$(drill_writes_missing "$acked" "$RESULTS/rows/drill-kill.after")"
   [ -z "$missing" ] || { record drill-kill FAIL "$(( $(now) - started ))" "acknowledged writes are not there as written after the kill: $missing"; return; }
+  # Their values too: each acknowledged write holds all KILL_WRITE_TRIPLES - 1 of them. (A write held at a crash and
+  # never answered may be there in part; only what was acknowledged must be whole.)
+  if [ "$KILL_WRITE_TRIPLES" -gt 1 ]; then
+    why="$(query_rows "$RESULTS/rows/drill-kill.values" "$n" "$cg" working-memory \
+      "SELECT ?s (COUNT(?v) AS ?values) WHERE { ?s <http://schema.org/value> ?v } GROUP BY ?s" s values)" \
+      || { record drill-kill FAIL "$(( $(now) - started ))" "the values of the acknowledged writes could not be counted after the kill ($why)"; return; }
+    incomplete="$(drill_writes_incomplete "$acked" "$RESULTS/rows/drill-kill.values" "$((KILL_WRITE_TRIPLES - 1))")"
+    [ -z "$incomplete" ] || { record drill-kill FAIL "$(( $(now) - started ))" "acknowledged writes are there only in part after the kill: $incomplete"; return; }
+  fi
   # The read graph those writes maintain must be there and ready; drill_end then checks it with the rest.
   wait_read_graph_ready "$n" "$wm_graph" "$READY_TIMEOUT" "$RESULTS/rows/drill-kill.wm.node$n" \
     || { record drill-kill FAIL "$(( $(now) - started ))" "the working-memory read graph <$wm_graph> was not listed ready after the kill"; return; }
-  drill_end drill-kill "$n" "$started" "killed node$n's daemon worker while it held working-memory write $inflight_write: its whole request was uploaded and its connection dropped unanswered ($overlap), and its data was there after the restart, so the worker had begun to store it (crash $attempt of at most 5); a new worker took over; all $(acked_count "$acked") acknowledged writes were there after it with the values written, and their read graph was rebuilt and consistent"
+  drill_end drill-kill "$n" "$started" "killed node$n's daemon worker while it held working-memory write $inflight_write: its whole request was uploaded and its connection dropped unanswered ($overlap), and its data was there after the restart, so the worker had begun to store it (crash $attempt of at most 10, in two rounds of five; aimed at ${fraction} of the median write time, ${median} ms, with a second writer loading the node: $(wc -l < "$RESULTS/drill-kill.load-writes" | tr -d ' ') writes into $load_cg); a new worker took over; all $(acked_count "$acked") acknowledged writes were there after it with the values written, and their read graph was rebuilt and consistent"
 }
 
 # finalized_jobs <n>: the node's count of finalized publish jobs, or "" when it cannot be read.
@@ -1097,6 +1773,55 @@ finalized_jobs() {
     let d = ""; process.stdin.on("data", (c) => d += c); process.stdin.on("end", () => {
       try { const value = JSON.parse(d).finalized; if (Number.isSafeInteger(value)) process.stdout.write(String(value)); } catch {}
     });'
+}
+# connect_all <n>: node <n> dials every other node of the run (POST /api/connect with its .devnet/nodeK/multiaddr). A
+# node that did not restart does not dial a restarted node again by itself, and a publish needs the Cores' ACKs.
+connect_all() {
+  local k addr body
+  for k in $NODES; do
+    [ "$k" != "$1" ] || continue
+    addr="$(head -1 "$DEVNET_DIR/node$k/multiaddr" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$addr" ] || continue
+    body="{\"multiaddr\":\"$addr\"}"
+    api "$1" POST /api/connect "$body" > /dev/null 2>&1 || true
+  done
+}
+# publish_finalized <n> <context graph> <name> <subject> <value>: node <n> writes knowledge asset <name> into the
+# context graph (one triple, <subject> schema:name "<value>"), shares it to shared memory, and publishes it to
+# verifiable memory through the async publisher; it waits up to PUBLISH_TIMEOUT s for the job to be finalized, also
+# through a failure the publisher retries by itself. The node first dials every other node (connect_all). Prints the
+# job ID; prints why and fails when a step is refused, the job fails for good, or it does not finalize in time.
+publish_finalized() {
+  local n="$1" cg="$2" name="$3" body resp job answer status="" deadline
+  connect_all "$n"
+  body="$(node -e '
+    const [contextGraphId, name, subject, value] = process.argv.slice(1);
+    const quads = [{ subject, predicate: "http://schema.org/name", object: JSON.stringify(value), graph: "" }];
+    console.log(JSON.stringify({ contextGraphId, name, quads, finalize: true, alsoShareSwm: true }));
+  ' "$cg" "$name" "$4" "$5")"
+  resp="$(api "$n" POST /api/knowledge-assets "$body")"
+  case "$(code_of "$resp")" in 2??) ;; *) echo "writing $name: HTTP $(code_of "$resp") $(body_of "$resp" | head -c 200)"; return 1 ;; esac
+  shared_ok "$(body_of "$resp")" || { echo "$name was not shared: $(body_of "$resp" | head -c 200)"; return 1; }
+  body="{\"contextGraphId\":\"$cg\"}"
+  resp="$(api "$n" POST "/api/knowledge-assets/$name/vm/publish-async" "$body")"
+  case "$(code_of "$resp")" in 2??) ;; *) echo "publish-async of $name: HTTP $(code_of "$resp") $(body_of "$resp" | head -c 200)"; return 1 ;; esac
+  job="$(field "$(body_of "$resp")" jobId)"
+  [ -n "$job" ] || { echo "publish-async of $name answered no job ID: $(body_of "$resp" | head -c 200)"; return 1; }
+  deadline=$(( $(now) + PUBLISH_TIMEOUT ))
+  while :; do
+    answer="$(body_of "$(api "$n" GET "/api/publisher/job?id=$job")")"
+    status="$(field "$answer" job.status)"
+    case "$status" in
+      finalized) echo "$job"; return 0 ;;
+      failed)
+        # A retryable failure (an ACK quorum not reached yet, say) goes back to the queue after its backoff.
+        [ "$(field "$answer" job.failure.retryable)" = true ] && [ "$(field "$answer" retryState.autoRetryEligible)" = true ] \
+          || { echo "publish job $job of $name failed: $(field "$answer" job.failure.message | head -c 300)"; return 1; }
+        status="failed, to be retried ($(field "$answer" job.failure.code))" ;;
+    esac
+    [ "$(now)" -lt "$deadline" ] || { echo "publish job $job of $name was still ${status:-unreadable} after $PUBLISH_TIMEOUT s"; return 1; }
+    sleep 3
+  done
 }
 
 # generations_compared <before rows> <after rows> <same|new>: the shared-layer read graphs of <before> whose generation
@@ -1114,21 +1839,22 @@ generations_compared() {
 }
 
 drill_cli_write_daemon_down() {
-  local n="" candidate jobs started before after output rc cleared renewed kept count dir="$RESULTS/rows"
+  local n="$CLI_NODE" job started before after output rc cleared renewed count state gen graph gen_after kept=0 moved="" dir="$RESULTS/rows"
   started="$(now)"
-  # A node with finalized publish jobs, so the offline write has something to change, and with read graphs; the drill
-  # node first.
-  for candidate in "$CLI_NODE" $NODES; do
-    jobs="$(finalized_jobs "$candidate")"
-    [ -n "$jobs" ] && [ "$jobs" -gt 0 ] || continue
-    if read_graph_rows "$candidate" 2>/dev/null | grep -q .; then n="$candidate"; break; fi
-  done
-  [ -n "$n" ] || { record drill-cli INCONCLUSIVE 0 "no node has both a finalized publish job and a read graph"; return; }
+  # The offline write needs a finalized publish job to change. Neither a fresh devnet nor the gate leaves one (the
+  # devnet suites clear theirs), so the drill makes its own on its node.
+  job="$(publish_finalized "$n" "$LIVE_CG" "drill-cli-$RUN_SLUG" "urn:read-graphs-run:drill-cli:$RUN_SLUG" "drill cli $n")" \
+    || { record drill-cli INCONCLUSIVE "$(( $(now) - started ))" "node$n could not make the drill's own finalized publish job: $job"; return; }
   before="$(finalized_jobs "$n")"
-  # Nothing maintains read graphs in a CLI process, so a store it opens to write with the daemon down marks every read
-  # graph it finds dirty first. Each must then get a new generation at the next start and be rebuilt. A plain restart
-  # comes first, as the control: it keeps every ready shared-layer read graph at its generation, so a new one after the
-  # offline write comes from that write.
+  [ -n "$before" ] && [ "$before" -gt 0 ] \
+    || { record drill-cli INCONCLUSIVE "$(( $(now) - started ))" "\`dkg publisher stats\` on node$n counts ${before:-no} finalized jobs, after its job $job was finalized"; return; }
+  read_graph_rows "$n" 2>/dev/null | grep -q . || { record drill-cli INCONCLUSIVE "$(( $(now) - started ))" "node$n has no read graph"; return; }
+  # A store the CLI opens to write with the daemon down starts read graphs as the daemon does (createPublisherStore):
+  # the read graphs the node's settings keep stay ready at their generation; every other read graph is marked dirty,
+  # so the next start renews or drops it. The write here touches only the publisher's own graphs, outside every read
+  # graph, so the drill shows that start, not maintenance (packages/cli/test/publisher-store.test.ts covers a write into
+  # a kept read graph). A plain restart comes first, as the control: it keeps every ready shared-layer read graph at
+  # its generation, so a change after the offline write comes from that write.
   wait_all_ready drill-cli-before "$READY_TIMEOUT" "$n" \
     || { record drill-cli INCONCLUSIVE "$(( $(now) - started ))" "node$n's read graphs were not ready before the drill"; return; }
   restart_node "$n" || { record drill-cli FAIL "$(( $(now) - started ))" "node$n did not come back from a plain restart"; return; }
@@ -1153,9 +1879,17 @@ drill_cli_write_daemon_down() {
     record drill-cli FAIL "$(( $(now) - started ))" "node$n lists ${after:-?} finalized jobs after the restart; $before before, $cleared cleared offline"; return
   fi
   if ! wait_all_ready drill-cli "$READY_TIMEOUT" "$n"; then record drill-cli FAIL "$(( $(now) - started ))" "node$n's read graphs not ready after the restart"; return; fi
-  kept="$(generations_compared "$dir/drill-cli-control.node$n" "$dir/drill-cli.node$n" new)"
-  [ -z "$kept" ] || { record drill-cli FAIL "$(( $(now) - started ))" "read graphs came through the offline write without a new generation, so nothing marked them dirty:$kept"; return; }
-  drill_end drill-cli "$n" "$started" "with node$n's daemon down, \`dkg publisher clear finalized\` cleared $cleared of $before jobs, which stayed cleared; the $count shared-layer read graphs that a plain restart kept got a new generation and were rebuilt"
+  # The node's settings do not change during the drill, so the CLI read the settings the daemon read: every read graph
+  # the control kept is one they keep, and must keep its generation through the offline write. (The other half of the
+  # rule, a read graph the settings do not keep being marked dirty, needs a settings change to show; that is #3900.)
+  while read -r state gen graph; do
+    case "$graph" in */_working_memory/*) continue ;; esac
+    kept=$((kept + 1))
+    gen_after="$(generation_of "$dir/drill-cli.node$n" "$graph")"
+    [ "$gen_after" = "$gen" ] || moved="$moved <$graph> (generation $gen, then ${gen_after:-missing})"
+  done < "$dir/drill-cli-control.node$n"
+  [ -z "$moved" ] || { record drill-cli FAIL "$(( $(now) - started ))" "read graphs node$n's settings keep left their generation through the offline write, though the offline store starts them as kept:$moved"; return; }
+  drill_end drill-cli "$n" "$started" "with node$n's daemon down, \`dkg publisher clear finalized\` cleared $cleared of $before jobs, which stayed cleared; the offline writable store started read graphs and left all $kept shared-layer ones, which its settings keep, at their generation; the write touches only the publisher's own graphs, so this drill does not show maintenance (covered by publisher-store.test.ts), and with the settings unchanged it cannot show a read graph marked dirty (#3900)"
 }
 
 # partition_graphs <endpoint> <out>: every graph the store holds in a read-graph partition (read graphs and
@@ -1169,14 +1903,17 @@ partition_graphs() {
 member_graphs() {
   node "$REPO_ROOT/scripts/read-graph-store-report.mjs" --endpoint "$1" --member-graphs 2>> "$RESULTS/drill-rollback.log" > "$2"
 }
-# members_lost <before> <after> <exact|kept>: prints the first difference and fails, or prints nothing. `exact`: the
-# same graphs with the same triples; `kept`: every graph of <before> still there, holding every triple it held.
+# members_lost <before> <after> <exact|kept> [graph ...]: prints the first difference and fails, or prints nothing.
+# `exact`: the same graphs with the same triples; `kept`: every graph of <before> still there, holding every triple it
+# held. The graphs named after the mode are left out of the comparison.
 members_lost() {
   node -e '
     const fs = require("fs");
     const [before, after] = process.argv.slice(1, 3).map((file) => JSON.parse(fs.readFileSync(file, "utf8")).graphs);
     const exact = process.argv[3] === "exact";
+    const skipped = new Set(process.argv.slice(4));
     for (const [graph, triples] of Object.entries(before)) {
+      if (skipped.has(graph)) continue;
       if (!(graph in after)) { console.log(`<${graph}> is gone`); process.exit(1); }
       const now = new Set(after[graph]);
       const lost = triples.find((triple) => !now.has(triple));
@@ -1186,9 +1923,12 @@ members_lost() {
         console.log(`<${graph}> gained ${after[graph].find((triple) => !had.has(triple))}`); process.exit(1);
       }
     }
-    if (exact) for (const graph of Object.keys(after)) if (!(graph in before)) { console.log(`<${graph}> appeared`); process.exit(1); }
-  ' "$1" "$2" "$3"
+    if (exact) for (const graph of Object.keys(after)) if (!(graph in before) && !skipped.has(graph)) { console.log(`<${graph}> appeared`); process.exit(1); }
+  ' "$@"
 }
+# The agents system graph holds each daemon's own registration and liveness triples, which a daemon rewrites when it
+# starts, on any release. It is not asset data, so the comparison across a daemon start leaves it out.
+AGENTS_SYSTEM_GRAPH="did:dkg:context-graph:agents"
 
 # rollback_steps <n> <endpoint> <version>: the rollback drill's changes, with node <n> stopped, its store at
 # <endpoint>, and <version> the earlier release.
@@ -1196,12 +1936,13 @@ members_lost() {
 # (a field may be empty): an empty outcome means every step held. The caller restores the node whatever it prints.
 # asset_probe_record <n> <probe>: known assets to read through the earlier release, with what the build under test
 # answers for them now. Both are required: node <n>'s seeded working-memory draft, which must hold the value written,
-# and one triple pattern of a verifiable-memory asset. Each probe is a line of <probe> (what, context graph, view,
-# query and variable, \037 between), and its answer is <probe>.<line number>. Prints why and returns 1 when a
-# prerequisite is missing (no seeded draft on the node, no verifiable-memory triple to name), 2 when the build under
-# test cannot read one of them.
+# and the drill's own verifiable-memory asset, which node <n> publishes now (what other verifiable memory a node holds
+# depends on the suites that ran before). Each probe is a line of <probe> (what, context graph, view, query and
+# variable, \037 between), and its answer is <probe>.<line number>. Prints why and returns 1 when a prerequisite is
+# missing (no seeded draft on the node, the drill's asset not published), 2 when the build under test cannot read one
+# of them.
 asset_probe_record() {
-  local n="$1" probe="$2" cg agent graph sp sparql why got i found=""
+  local n="$1" probe="$2" cg agent subject job sparql why got i
   : > "$probe"
   [ -s "$RESULTS/rows/seed-wm.node$n" ] || { echo "node$n has no seeded working-memory draft (the seed phase wrote none there)"; return 1; }
   read -r cg agent < "$RESULTS/rows/seed-wm.node$n"
@@ -1213,27 +1954,21 @@ asset_probe_record() {
     echo "the build under test answered ${got:-nothing} for node$n's seeded working-memory draft, not [\"seed $n\"]"; return 2
   fi
   printf 'the seeded working-memory draft\037%s\037working-memory\037%s\037name\n' "$cg" "$sparql" >> "$probe"
-  # A verifiable-memory triple of one of the node's context graphs, by subject and predicate (IRIs that a query can
-  # name as they are), and every object the build under test answers for that pair.
-  for graph in $(awk '{ print $3 }' "$RESULTS/rows/rollback.before.node$n" | grep '/_~read/cg/_verifiable_memory$' | head -5); do
-    cg="${graph#did:dkg:context-graph:}"; cg="${cg%/_~read/cg/_verifiable_memory}"
-    why="$(query_rows "$probe.sample" "$n" "$cg" verifiable-memory "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 20" s p o)" \
-      || { echo "the build under test could not query the verifiable memory of $cg on node$n ($why)"; return 2; }
-    sp="$(node -e '
-      const named = (v) => /^[A-Za-z][A-Za-z0-9+.-]*:[^\s<>"{}|^`\\]+$/.test(v);
-      const rows = require("fs").readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
-      const row = rows.find(([s, p]) => named(s) && named(p));
-      if (row) console.log(`${row[0]} ${row[1]}`);' "$probe.sample")"
-    [ -n "$sp" ] || continue
-    sparql="SELECT ?o WHERE { <${sp% *}> <${sp#* }> ?o }"
-    why="$(query_rows "$probe.2" "$n" "$cg" verifiable-memory "$sparql" o)" \
-      || { echo "the build under test could not read <${sp% *}> <${sp#* }> in the verifiable memory of $cg on node$n ($why)"; return 2; }
-    [ -s "$probe.2" ] || { echo "the build under test answered nothing for <${sp% *}> <${sp#* }> in the verifiable memory of $cg on node$n, though it had just listed that triple"; return 2; }
-    printf 'verifiable memory <%s> <%s> of %s\037%s\037verifiable-memory\037%s\037o\n' "${sp% *}" "${sp#* }" "$cg" "$cg" "$sparql" >> "$probe"
-    found=1; break
+  # The drill's own verifiable-memory asset: one triple, published on node <n> into the live context graph.
+  subject="urn:read-graphs-run:rollback-probe:$RUN_SLUG"
+  job="$(publish_finalized "$n" "$LIVE_CG" "drill-rollback-$RUN_SLUG" "$subject" "rollback probe $n")" \
+    || { echo "node$n could not publish the drill's own verifiable-memory asset into $LIVE_CG: $job"; return 1; }
+  sparql="SELECT ?o WHERE { <$subject> <http://schema.org/name> ?o }"
+  for i in $(seq 1 15); do
+    why="$(query_rows "$probe.2" "$n" "$LIVE_CG" verifiable-memory "$sparql" o)" && grep -Fxq "[\"rollback probe $n\"]" "$probe.2" && break
+    sleep 2
   done
-  rm -f "$probe.sample"
-  [ -n "$found" ] || { echo "node$n's verifiable memory holds no triple that a query can name, in the first five context graphs with a read graph"; return 1; }
+  [ -z "$why" ] || { echo "the build under test could not read the drill's own asset <$subject> in the verifiable memory of $LIVE_CG on node$n ($why)"; return 2; }
+  if ! grep -Fxq "[\"rollback probe $n\"]" "$probe.2"; then
+    got="$(tr '\n' ' ' < "$probe.2" | sed 's/ $//')"
+    echo "the build under test answered ${got:-nothing} for the drill's own asset <$subject> in the verifiable memory of $LIVE_CG on node$n (publish job $job), not [\"rollback probe $n\"]"; return 2
+  fi
+  printf "the drill's own verifiable-memory asset in %s\037%s\037verifiable-memory\037%s\037o\n" "$LIVE_CG" "$LIVE_CG" "$sparql" >> "$probe"
 }
 # asset_probe_check <n> <probe>: within a minute, node <n> answers every probe of <probe> as the build under test did
 # (the same distinct rows). Prints the first difference and fails.
@@ -1286,7 +2021,7 @@ rollback_steps() {
     || { printf 'FAIL\037%s\037%s\037\n' "node$n did not start on $ROLLBACK_FROM (devnet-sh.log)" "$dropped"; return; }
   version="$(node_commit "$n")"
   [ "$version" != "$UNDER_TEST" ] || { printf 'FAIL\037%s\037%s\037%s\n' "node$n still ran the build under test, not $ROLLBACK_FROM" "$dropped" "$version"; return; }
-  member_graphs "$endpoint" "$members_earlier" && lost="$(members_lost "$members_before" "$members_earlier" kept)" \
+  member_graphs "$endpoint" "$members_earlier" && lost="$(members_lost "$members_before" "$members_earlier" kept "$AGENTS_SYSTEM_GRAPH")" \
     || { printf 'FAIL\037%s\037%s\037%s\n' "node$n's asset data on $ROLLBACK_FROM: ${lost:-unreadable}" "$dropped" "$version"; return; }
   # Kept triples are not enough: the earlier daemon must also find and read the assets through its own query route.
   lost="$(asset_probe_check "$n" "$probe")" \
@@ -1330,15 +2065,49 @@ EOF_RESULT
   start_node "$n" DEVNET_VERSION_LAYOUT="all:current" \
     || { record drill-rollback FAIL "$(( $(now) - started ))" "node$n did not come back on the build under test${detail:+ ($detail)}"; return; }
   [ -z "$outcome" ] || { record drill-rollback "$outcome" "$(( $(now) - started ))" "$detail"; return; }
-  # Forward again: every asset triple from before the rollback still there, then rebuilt read graphs.
+  # Forward again: every asset triple from before the rollback still there, then rebuilt read graphs. The agents
+  # system graph is left out, as on the earlier release: the forward start rewrites the node's own registration there.
   if ! wait_all_ready drill-rollback "$READY_TIMEOUT" "$n"; then record drill-rollback FAIL "$(( $(now) - started ))" "node$n's read graphs not ready after the forward start"; return; fi
   member_graphs "$endpoint" "$RESULTS/rows/rollback.members-forward.node$n.json" \
-    && lost="$(members_lost "$RESULTS/rows/rollback.members-before.node$n.json" "$RESULTS/rows/rollback.members-forward.node$n.json" kept)" \
+    && lost="$(members_lost "$RESULTS/rows/rollback.members-before.node$n.json" "$RESULTS/rows/rollback.members-forward.node$n.json" kept "$AGENTS_SYSTEM_GRAPH")" \
     || { record drill-rollback FAIL "$(( $(now) - started ))" "node$n's asset data after the forward start: ${lost:-unreadable}"; return; }
   drill_end drill-rollback "$n" "$started" "\`dkg rollback --stores-for $target_version\` removed all $dropped read-graph partition graphs and kept every asset triple; ran $version, which answered $read_through as the build under test did; then rebuilt from nothing"
 }
 
 drill_flag_off_and_back() {
+  if [ "$SWITCH" = api ]; then drill_flag_api; else drill_flag_config; fi
+}
+
+# drill_flag_api: on FLAG_NODE, the live context graph's layers off through the settings API and back to what they
+# were, with no restart: with off its read graphs go; back on, each gets a new generation and is rebuilt.
+drill_flag_api() {
+  local n="$FLAG_NODE" started body why wm swm vm state gen graph older=""
+  started="$(now)"
+  read_graph_rows "$n" > "$RESULTS/rows/flag.all.node$n" && live_graphs "$RESULTS/rows/flag.all.node$n" > "$RESULTS/rows/flag.before.node$n" \
+    && all_ready "$RESULTS/rows/flag.before.node$n" \
+    || { record drill-flag INCONCLUSIVE 0 "node$n had no ready read graph of $LIVE_CG (the live phase switches it on)"; return; }
+  live_get "$n" flag-before > /dev/null || { record drill-flag INCONCLUSIVE 0 "node$n's settings could not be read: $(settings_read "$RESULTS/rows/live.flag-before.node$n" refusal)"; return; }
+  wm="$(settings_read "$RESULTS/rows/live.flag-before.node$n" effective "$LIVE_CG" working-memory)"
+  swm="$(settings_read "$RESULTS/rows/live.flag-before.node$n" effective "$LIVE_CG" shared-working-memory)"
+  vm="$(settings_read "$RESULTS/rows/live.flag-before.node$n" effective "$LIVE_CG" verifiable-memory)"
+  [ -n "$wm" ] && [ -n "$swm" ] && [ -n "$vm" ] || { record drill-flag INCONCLUSIVE 0 "node$n's settings answer has no effective modes for $LIVE_CG"; return; }
+  body="$(live_body off off off)"
+  why="$(live_put "$n" flag-off "$body")" || { record drill-flag FAIL "$(( $(now) - started ))" "switching $LIVE_CG off on node$n was refused: $why"; return; }
+  # The off state counts only as observed: with off, the node lists no read graph of the context graph.
+  live_wait_gone "$n" flag-off || { record drill-flag FAIL "$(( $(now) - started ))" "with off, read graphs of $LIVE_CG were still listed on node$n after ${READY_TIMEOUT} s"; return; }
+  body="$(live_body "$wm" "$swm" "$vm")"
+  why="$(live_put "$n" flag-back "$body")" || { record drill-flag FAIL "$(( $(now) - started ))" "switching $LIVE_CG back (wm=$wm swm=$swm vm=$vm) on node$n was refused: $why"; return; }
+  if ! wait_all_ready drill-flag "$READY_TIMEOUT" "$n"; then record drill-flag FAIL "$(( $(now) - started ))" "node$n's read graphs not ready after $LIVE_CG was switched back"; return; fi
+  # Off dropped them with their state, so each must be listed and ready again: rebuilt from nothing (a generation
+  # number may start over, so it proves nothing here).
+  while read -r state gen graph; do
+    awk -v g="$graph" '$3 == g && $1 == "ready" { found = 1 } END { exit !found }' "$RESULTS/rows/drill-flag.node$n" || older="$older <$graph>"
+  done < "$RESULTS/rows/flag.before.node$n"
+  [ -z "$older" ] || { record drill-flag FAIL "$(( $(now) - started ))" "not ready again after $LIVE_CG was switched back:$older"; return; }
+  drill_end drill-flag "$n" "$started" "$LIVE_CG off through the settings API, no restart: its read graphs went; back to wm=$wm swm=$swm vm=$vm, each was rebuilt from nothing"
+}
+
+drill_flag_config() {
   local n="$FLAG_NODE" started restore undirty="" state gen graph gen_after older=""
   started="$(now)"; restore="$(read_graphs_setting "$n")"
   read_graph_rows "$n" > "$RESULTS/rows/flag.before.node$n" && all_ready "$RESULTS/rows/flag.before.node$n" \
@@ -1366,28 +2135,40 @@ drill_flag_off_and_back() {
 }
 
 phase_drills() {
-  local n
+  local n drill
   for n in "$RESTART_NODE" "$KILL_NODE" "$CLI_NODE" "$ROLLBACK_NODE" "$FLAG_NODE"; do
     case " $NODES " in *" $n "*) ;; *) record drills INCONCLUSIVE 0 "drill node node$n is not part of the run"; return ;; esac
   done
-  drill_restart_during_rebuild
-  drill_kill_during_write
-  drill_cli_write_daemon_down
-  drill_rollback_and_forward
-  drill_flag_off_and_back
+  # A drill left out of READ_GRAPHS_DRILLS did not run, so the run cannot pass.
+  for drill in restart kill cli rollback flag; do
+    case " $DRILLS " in *" $drill "*) ;; *) record "drill-$drill" INCONCLUSIVE 0 "not run (left out of READ_GRAPHS_DRILLS)"; continue ;; esac
+    case "$drill" in
+      restart) drill_restart_during_rebuild ;;
+      kill) drill_kill_during_write ;;
+      cli) drill_cli_write_daemon_down ;;
+      rollback) drill_rollback_and_forward ;;
+      flag) drill_flag_off_and_back ;;
+    esac
+  done
 }
 
-say "nodes $NODES; setting $SETTING; results in $RESULTS"
+say "nodes $NODES; setting $SETTING; per-context-graph settings: $SWITCH; results in $RESULTS"
+FAILS_BEFORE_GATE=""
 for phase in $PHASES; do
   case "$phase" in
-    seed|setup|backfill|measure|gate|drills) ;;
+    seed|setup|backfill|measure|live|gate|drills) ;;
     *) record "$phase" INCONCLUSIVE 0 "unknown phase"; continue ;;
   esac
-  [ "$FAILS" = 0 ] || { record "$phase" INCONCLUSIVE 0 "not run: an earlier step failed"; continue; }
+  # The drills make their own data, so they run after a failed gate too, and one run reports them all; the run stays
+  # FAIL. A failure in any other phase stops every later one.
+  if [ "$FAILS" != 0 ] && { [ "$phase" != drills ] || [ "$FAILS_BEFORE_GATE" != 0 ]; }; then
+    record "$phase" INCONCLUSIVE 0 "not run: an earlier step failed"; continue
+  fi
   [ "$STOPPED" = 0 ] || { record "$phase" INCONCLUSIVE 0 "not run: a precondition of an earlier step was not met"; continue; }
+  [ "$phase" != gate ] || FAILS_BEFORE_GATE="$FAILS"
   "phase_$phase"
 done
-for phase in seed setup backfill measure gate drills; do
+for phase in seed setup backfill measure live gate drills; do
   case " $PHASES " in *" $phase "*) ;; *) note "$phase was not run (READ_GRAPHS_RUN_PHASES)"; GAPS=$((GAPS + 1)) ;; esac
 done
 

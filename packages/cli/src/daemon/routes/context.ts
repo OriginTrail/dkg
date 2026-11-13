@@ -7,6 +7,7 @@
 // bodies can keep referring to bare names — identical to how they
 // looked inside the monolithic `handleRequest`.
 
+import type { ReadGraphSettingsControl } from '../read-graph-settings-control.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import type { OperationalWalletAddresses } from '../evm-signing.js';
@@ -175,6 +176,8 @@ export interface RequestContext {
   marketplaceGateway?: Gateway;
   /** The marketplace seller, whose job the daemon runs; absent while selling is off. */
   marketplaceSeller?: Seller;
+  /** The node-admin settings of read graphs per context graph, which the daemon builds before it serves a request. */
+  readGraphSettings: ReadGraphSettingsControl;
   // Derived per-request. The correlated authentication decision is carried unchanged; identity
   // and capabilities are pure projections from it rather than separately mutable context fields.
   url: URL;
