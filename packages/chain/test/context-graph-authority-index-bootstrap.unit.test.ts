@@ -556,7 +556,7 @@ describe('trusted core authority index bootstrap', () => {
     expect(index.exportSnapshot(request())).toBeNull();
   });
 
-  it('does not republish an older in-flight completion after a concurrent reorg rejection', async () => {
+  it('does not leave an in-flight completion servable once a reorg rejection behind it runs', async () => {
     const index = new ContextGraphAuthorityIndex(new ScopedStore());
     await index.refresh(input());
     let release!: () => void;
@@ -568,11 +568,14 @@ describe('trusted core authority index bootstrap', () => {
       return [];
     } });
     await ready;
-    await expect(index.refresh({ ...input(), readBlockHash: async () => hash(1), readPage: async () => {
+    // One scan per scope: the rejecting scan runs after the in-flight one,
+    // never beside it, and evicts what that one published.
+    const rejecting = index.refresh({ ...input(), readBlockHash: async () => hash(1), readPage: async () => {
       throw new Error('rebuild unavailable');
-    } })).rejects.toThrow('rebuild unavailable');
+    } });
     release();
     await earlier;
+    await expect(rejecting).rejects.toThrow('rebuild unavailable');
     expect(index.exportSnapshot(request())).toBeNull();
   });
 

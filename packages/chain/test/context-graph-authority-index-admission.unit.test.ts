@@ -29,6 +29,7 @@ async function admit(
     deploymentBlockNumber?: number;
     finalized?: Readonly<{ number: number; hash: string }>;
     readBlockHash?: () => Promise<string | null>;
+    provenTokens?: readonly number[];
   }> = {},
 ) {
   const scoped = repository.forScope(SCOPE);
@@ -39,6 +40,10 @@ async function admit(
     finalized: overrides.finalized ?? { number: 25, hash: HASH_25 },
     lifecycleSignal: new AbortController().signal,
     readBlockHash: overrides.readBlockHash ?? (async () => HASH_20),
+    ...(overrides.provenTokens === undefined ? {} : {
+      provenLocally: (record) => record.token !== undefined
+        && overrides.provenTokens!.includes(record.token),
+    }),
   });
 }
 
@@ -108,6 +113,27 @@ describe('Context Graph authority index checkpoint admission and recovery', () =
     // Beyond the skew bound no endpoint will ever catch up, so rebuild.
     await expect(admit(new ContextGraphAuthorityIndexRepository(store), {
       finalized: { number: 20 - 51, hash: HASH_25 },
+    })).resolves.toMatchObject({ kind: 'tombstone' });
+    expect(store.invalidations).toHaveLength(1);
+  });
+
+  it('retries instead of rebuilding a cursor this lifecycle proved, however far behind the anchor', async () => {
+    // A scan anchored 51+ blocks below a cursor this index committed or
+    // admitted moments ago has a stale anchor (it waited behind another scan,
+    // or its endpoint lags). Rebuilding would discard the whole history for it.
+    const store = new MemoryAuthorityIndexStore();
+    store.record = { token: 7, value: checkpoint };
+
+    await expect(admit(new ContextGraphAuthorityIndexRepository(store), {
+      finalized: { number: 20 - 51, hash: HASH_25 },
+      provenTokens: [7],
+    })).rejects.toMatchObject({ reason: 'cursor-ahead' });
+    expect(store.invalidations).toEqual([]);
+
+    // Proof is per row: another writer's newer row is not covered by it.
+    await expect(admit(new ContextGraphAuthorityIndexRepository(store), {
+      finalized: { number: 20 - 51, hash: HASH_25 },
+      provenTokens: [6],
     })).resolves.toMatchObject({ kind: 'tombstone' });
     expect(store.invalidations).toHaveLength(1);
   });

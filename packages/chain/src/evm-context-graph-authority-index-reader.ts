@@ -415,6 +415,14 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   const assertOpen = (): void => {
     if (closed) throw new DOMException('Context Graph authority index reader is closed', 'AbortError');
   };
+  /** 0 is the adapter's unpinned genesis fallback; see `durableDeploymentBlockNumber`. */
+  const resolveDeploymentBlockNumber = async (address: string, scope: string, label: string) => {
+    const resolved = await dependencies.resolveContractDeployBlockNumber(
+      address, label, 'ContextGraphStorage',
+    );
+    return resolved !== 0 ? resolved
+      : (await dependencies.index.durableDeploymentBlockNumber(scope)) ?? 0;
+  };
   const rescanFinalizedProjection = async <T>(
     operationLabel: string,
     options: ContextGraphAuthorityReadOptions,
@@ -510,10 +518,22 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         const contract = base.connect(provider) as Contract;
         const contractAddress = (await contract.getAddress()).toLowerCase();
         ownScope = contextGraphAuthorityIndexScope(dependencies.deploymentId, contractAddress);
-        const deploymentBlockNumber = await dependencies.resolveContractDeployBlockNumber(
+        // The index runs one scan per scope. Wait for a running one BEFORE the
+        // head read: an anchor read now is out of date once that scan lets
+        // this read in, and a walk that outlasts its readers cost one per reader.
+        await dependencies.index.whenScanIdle(
+          ownScope,
+          options.signal === undefined
+            ? projectionSignal
+            : AbortSignal.any([projectionSignal, options.signal]),
+        );
+        assertOpen();
+        projectionSignal.throwIfAborted();
+        options.signal?.throwIfAborted();
+        const deploymentBlockNumber = await resolveDeploymentBlockNumber(
           contractAddress,
+          ownScope,
           operationLabel,
-          'ContextGraphStorage',
         );
         const readInput = {
           index: dependencies.index,
@@ -525,6 +545,8 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
           pageSize: dependencies.pageSize(),
           finalityConfirmations: dependencies.finalityConfirmations(),
           stabilizationOperation: operationLabel,
+          // Bounds this caller's wait only; the scan belongs to the index lifecycle.
+          signal: options.signal,
         };
 
         // THE LOG FIRST, and only when it can PROVE every guarantee the live
@@ -1122,10 +1144,10 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
             if (source === undefined || source.contractAddress !== contractAddress) {
               return undefined;
             }
-            const deploymentBlockNumber = await dependencies.resolveContractDeployBlockNumber(
+            const deploymentBlockNumber = await resolveDeploymentBlockNumber(
               contractAddress,
+              contextGraphAuthorityIndexScope(dependencies.deploymentId, contractAddress),
               'getContextGraphFinalizedCreation',
-              'ContextGraphStorage',
             );
             const anchor = (await source.resolveAnchor({
               deploymentBlockNumber,

@@ -37,6 +37,18 @@ export interface ContextGraphAuthorityIndexAdmissionInput {
   readonly lifecycleSignal: AbortSignal;
   /** Evict remotely servable observations as soon as a durable row is rejected. */
   readonly onRejectedCheckpoint?: () => void;
+  /**
+   * Whether this index committed this exact record, or admitted it against a
+   * chain view, within the last few minutes of its current lifecycle.
+   *
+   * Such a cursor was on a live chain view moments ago, so a scan anchored
+   * below it, however far, has an anchor that is out of date: it waited behind
+   * another scan, or its endpoint lags. That is a retry against a newer anchor,
+   * never evidence for a rebuild. Only a record this index has not proven yet
+   * (a restored or copied store, or a chain reset between runs) may still be
+   * rebuilt for being out of reach.
+   */
+  readonly provenLocally?: (record: ContextGraphAuthorityIndexRepositoryRecord) => boolean;
   readonly readBlockHash: (
     blockNumber: number,
     lifecycleSignal: AbortSignal,
@@ -65,11 +77,20 @@ export async function admitContextGraphAuthorityIndexCheckpoint(
       const checkpoint = record.checkpoint;
       if (checkpoint.cursor.deploymentBlockNumber === input.deploymentBlockNumber) {
         const cursorSkew = checkpoint.cursor.throughBlockNumber - input.finalized.number;
-        if (cursorSkew > MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_CURSOR_SKEW_BLOCKS) {
+        if (
+          cursorSkew > MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_CURSOR_SKEW_BLOCKS
+          && input.provenLocally?.(record) !== true
+        ) {
           // Unreachable by skew: fall through to invalidation and rebuild
           // rather than retrying a cursor no endpoint will ever catch up to.
           // The cursor only ever moves FORWARD (`commitOrReloadWinner` has no
           // lowering path), so without this the wedge is permanent.
+          //
+          // Not for a record this index proved itself (see `provenLocally`).
+          // Throwing that one away costs a walk from the deployment block,
+          // which on a long history outlasts every reader that waits for it,
+          // and a scan that outlasts its readers is exactly the one whose
+          // anchor falls this far behind the next scan's commit.
         } else if (cursorSkew > 0) {
           throw new ContextGraphAuthorityIndexRetryableError(
             `Context Graph authority index finalized head ${input.finalized.number} is behind `

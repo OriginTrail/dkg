@@ -1583,9 +1583,10 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     await expect(first).rejects.toThrow('initiating snapshot waiter left');
     expect(sharedPageSignal.aborted).toBe(false);
     // It inherits nothing from the initiator's abort: it runs its OWN read,
-    // which joins the physical page scan the index still owns.
+    // which waits for the physical page scan the index still owns before it
+    // reads a head of its own, instead of starting a second walk beside it.
     for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
-    expect(harness.evidence.headReads).toHaveLength(2);
+    expect(harness.evidence.headReads).toHaveLength(1);
 
     let idle = false;
     const drain = reader.whenIdle().then(() => { idle = true; });
@@ -1595,6 +1596,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     await expect(survivor).resolves.toMatchObject({ contextGraphId: '9' });
     await drain;
     expect(idle).toBe(true);
+    expect(harness.evidence.headReads).toHaveLength(2);
     expect(harness.evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
   });
 

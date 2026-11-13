@@ -229,10 +229,13 @@ function makeReader(options: {
    * only thing the projection cache reads as an availability outage.
    */
   exhaustsOnFailover?: boolean;
+  /** What the adapter's deploy-block lookup answers; 0 is its unpinned genesis fallback. */
+  deployBlock?: () => number;
 } = {}) {
   const { provider, calls, authorityLogs, usage } = makeProvider(options.latestBlockNumber);
+  const indexStore = new MemoryAuthorityIndexStore();
   const index = new ContextGraphAuthorityIndex(
-    new MemoryAuthorityIndexStore(),
+    indexStore,
     undefined,
     { tickMs: TICK_MS, now: options.now ?? (() => NOW_MS) },
   );
@@ -272,7 +275,7 @@ function makeReader(options: {
     // `{ fromBlock, head, scanProviders }` search result. Handing the object
     // over made every anchor unresolvable and sent all of these through the
     // live scan they exist to prove is skipped.
-    resolveContractDeployBlockNumber: async () => DEPLOY_BLOCK,
+    resolveContractDeployBlockNumber: async () => options.deployBlock?.() ?? DEPLOY_BLOCK,
     pageSize: () => 2_000,
     finalityConfirmations: () => options.finalityConfirmations ?? 1,
     ...(options.sourceProvider === undefined && options.source === undefined
@@ -283,7 +286,7 @@ function makeReader(options: {
         }),
   });
   reader.snapshots.open();
-  return { reader, index, provider, calls, authorityLogs, attempts, usage };
+  return { reader, index, indexStore, provider, calls, authorityLogs, attempts, usage };
 }
 
 /** The same `ContextGraphCreated`, as the LIVE scan would deliver it. */
@@ -621,6 +624,26 @@ describe('Context Graph authority index over the one log', () => {
       .map((entry) => entry.consumer);
     expect(headerConsumers).toContain('authorityIndex.head');
     expect(headerConsumers).toContain('authorityIndex.stabilize');
+  });
+
+  it('keeps the stored deployment block when the lookup falls back to genesis', async () => {
+    let lookup = DEPLOY_BLOCK;
+    const { reader, indexStore, calls } = makeReader({ deployBlock: () => lookup });
+    await reader.snapshots.refresh();
+    const reduced = indexStore.record;
+    const scannedLogs = calls.getLogs;
+    // The adapter answers 0 when no endpoint pinned the block this time. The
+    // checkpoint reduced from the pinned block is not a different deployment,
+    // and rebuilding it from block 0 is a walk of the whole chain history.
+    lookup = 0;
+
+    await reader.snapshots.refresh();
+
+    expect(indexStore.invalidations).toEqual([]);
+    expect((indexStore.record!.value as { cursor: { deploymentBlockNumber: number } }).cursor)
+      .toMatchObject({ deploymentBlockNumber: DEPLOY_BLOCK });
+    expect(indexStore.record).toBe(reduced);
+    expect(calls.getLogs).toBe(scannedLogs);
   });
 
   it('rechecks a cached tip before exhausting an endpoint whose cursor just advanced', async () => {

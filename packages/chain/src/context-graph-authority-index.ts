@@ -23,6 +23,7 @@ import {
 } from './context-graph-authority-index-repository.js';
 import { KeyedSingleFlight } from './keyed-ttl-single-flight-cache.js';
 import {
+  CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
   ContextGraphAuthorityIndexProjectionCache,
   ContextGraphAuthorityIndexView,
   type ContextGraphAuthorityIndexProjectionOptions,
@@ -33,6 +34,7 @@ import { ContextGraphAuthorityIndexBootstrapCoordinator } from
 import { ContextGraphAuthorityIndexActivity } from
   './context-graph-authority-index-activity.js';
 import { waitForSignal } from './wait-for-signal.js';
+import { activeRpcRequestContext } from './rpc-request-transport.js';
 import {
   authorityIndexSnapshotWithinSizeLimit,
   ContextGraphAuthorityIndexSnapshotExportError,
@@ -67,6 +69,14 @@ type ServableCheckpoint = Readonly<{
   throughBlockNumber: number;
   /** Oversized checkpoints retain only metadata; cached wire payloads total at most 64 MiB. */
   snapshot?: ContextGraphAuthorityIndexSnapshot;
+}>;
+
+/** The one physical scan a scope has in flight in one request class; see `#snapshot`. */
+type ActiveScan = Readonly<{
+  key: string;
+  readScope: object;
+  /** Settles with the scan and never rejects. */
+  settled: Promise<void>;
 }>;
 
 export {
@@ -137,6 +147,27 @@ export class ContextGraphAuthorityIndex {
    * tail a cached projection carries can never be served to an edge.
    */
   readonly #projections: ContextGraphAuthorityIndexProjectionCache;
+  /**
+   * The scan each scope has in flight, per request class. A scope runs ONE
+   * physical scan per class at a time: a scan from a far-behind cursor is a
+   * walk of many pages, and two walks to different anchors read the same
+   * pages twice while they race each other's commits. A later scan waits for
+   * the running one and resumes from the cursor it left, a page or two.
+   *
+   * Per class, because a scan's requests keep the class of the caller that
+   * started it: a foreground read must not wait out a walk that the core's
+   * background refresh started on the smaller background budget.
+   */
+  readonly #activeScans = new Map<string, ActiveScan>();
+  /**
+   * Per durable key, the token of the record this index last committed or
+   * admitted against a chain view in this lifecycle, and when. Tokens never
+   * repeat, so a loaded record with this token is the row that was proven.
+   * The proof lapses after the head tolerance, the age past which no cached
+   * answer is served either, so a chain reset under a running node is still
+   * rebuilt, a few minutes later.
+   */
+  readonly #provenTokens = new Map<string, Readonly<{ token: number; atMs: number }>>();
   #closed = false;
   #lifecycleAbort = new AbortController();
 
@@ -175,6 +206,47 @@ export class ContextGraphAuthorityIndex {
       return undefined;
     }
     return record.checkpoint.cursor.throughBlockNumber;
+  }
+
+  /**
+   * The deployment block the durable checkpoint of `scope` was reduced from,
+   * or `undefined` when there is none.
+   *
+   * A scan whose lower bound differs from this rebuilds the whole index. The
+   * reader asks for it when its own lookup could not pin the block (the
+   * adapter's uncached genesis fallback), so an endpoint that briefly cannot
+   * serve historical code does not replace a complete index with a walk.
+   */
+  async durableDeploymentBlockNumber(scope: string): Promise<number | undefined> {
+    if (this.#closed) return undefined;
+    for (const key of this.bootstrap === undefined ? [scope]
+      : [`${scope}:trusted-bootstrap:${this.bootstrap.trustDomain}`, scope]) {
+      const record = await this.#repository.forScope(key).load();
+      if (record.kind === 'checkpoint') return record.checkpoint.cursor.deploymentBlockNumber;
+    }
+    return undefined;
+  }
+
+  /**
+   * Resolve once `scope` has no scan in flight in the caller's request class,
+   * or reject with `signal`.
+   *
+   * For a caller about to start one: the anchor it reads before waiting would
+   * be out of date by the time the running scan lets it in, and on a node
+   * whose walk outlasts its readers every one of them would pay that head
+   * read for nothing.
+   */
+  async whenScanIdle(scope: string, signal?: AbortSignal): Promise<void> {
+    const lane = this.#scanLane(scope);
+    for (let active = this.#activeScans.get(lane); active !== undefined;
+      active = this.#activeScans.get(lane)) {
+      await waitForSignal(active.settled, signal);
+    }
+  }
+
+  /** `scope` in the request class of the caller, whose class a scan it starts keeps. */
+  #scanLane(scope: string): string {
+    return [scope, activeRpcRequestContext().requestClass].join('\u0000');
   }
 
   /**
@@ -260,6 +332,10 @@ export class ContextGraphAuthorityIndex {
     ));
     this.#lifecycleAbort = new AbortController();
     this.#repository.clear();
+    // The aborted scans settle on their own; a scan of the new lifecycle does
+    // not wait behind them, and nothing proven before the clear stays proven.
+    this.#activeScans.clear();
+    this.#provenTokens.clear();
     this.#servable.clear();
     this.#servableEpochs.clear();
     this.#projections.clear();
@@ -319,12 +395,35 @@ export class ContextGraphAuthorityIndex {
       throw new Error('Context Graph authority index finalized hash is invalid');
     }
     const scanKey = [scope, input.finalized.number, finalizedHash].join('\u0000');
+    // ONE physical scan per scope and request class. The single flight below
+    // only joins a scan to the same anchor on the same endpoint; a scan to any
+    // other anchor used to start beside it. From a far-behind cursor each is a walk of
+    // the same pages, and every walk outlives the callers that started it, so
+    // under a throttled RPC budget a walk that takes longer than readers wait
+    // was joined by one more walk per reader. Waiting here is bounded by this
+    // caller's own signal, and leaves nothing queued if the caller gives up.
+    const lane = this.#scanLane(scope);
+    for (let active = this.#activeScans.get(lane); active !== undefined;
+      active = this.#activeScans.get(lane)) {
+      if (active.key === scanKey && active.readScope === input.readScope) break;
+      await waitForSignal(active.settled, input.signal);
+      if (this.#closed) throw new DOMException('Context Graph authority index is closed', 'AbortError');
+    }
     const pending = this.#singleFlight.run(scanKey, input.readScope, () => {
       const lifecycleSignal = this.#lifecycleAbort.signal;
       const scan = this.#scan({ ...input, scope, finalized: {
         number: input.finalized.number,
         hash: finalizedHash,
       } }, lifecycleSignal);
+      const active: ActiveScan = Object.freeze({
+        key: scanKey,
+        readScope: input.readScope,
+        settled: scan.then(() => undefined, () => undefined),
+      });
+      this.#activeScans.set(lane, active);
+      void active.settled.then(() => {
+        if (this.#activeScans.get(lane) === active) this.#activeScans.delete(lane);
+      });
       return this.#activity.track(scan);
     });
     return waitForSignal(pending, input.signal);
@@ -339,8 +438,9 @@ export class ContextGraphAuthorityIndex {
     // after a trust-policy change or when snapshot bootstrap is disabled. The
     // plain scope IS that independent index: a seeded scan keeps to its
     // trust-domain key, and only the local-history fallback below moves here.
-    let repository = this.#repository.forScope(this.bootstrap === undefined ? scope
-      : `${scope}:trusted-bootstrap:${this.bootstrap.trustDomain}`);
+    let repositoryKey = this.bootstrap === undefined ? scope
+      : `${scope}:trusted-bootstrap:${this.bootstrap.trustDomain}`;
+    let repository = this.#repository.forScope(repositoryKey);
     const deploymentBlockNumber = normalizeNonNegativeSafeInteger(input.deploymentBlockNumber);
     const finalizedNumber = normalizeNonNegativeSafeInteger(input.finalized.number);
     const finalizedHash = normalizeHash(input.finalized.hash);
@@ -365,13 +465,28 @@ export class ContextGraphAuthorityIndex {
       servableEpoch = (this.#servableEpochs.get(scope) ?? 0) + 1;
       this.#servableEpochs.set(scope, servableEpoch);
     };
+    // A record this lifecycle committed, or admitted against a chain view.
+    const markProven = (record: ContextGraphAuthorityIndexRepositoryRecord): void => {
+      if (record.kind === 'checkpoint' && !lifecycleSignal.aborted) {
+        this.#provenTokens.set(repositoryKey, Object.freeze({
+          token: record.token,
+          atMs: Date.now(),
+        }));
+      }
+    };
+    const provenLocally = (record: ContextGraphAuthorityIndexRepositoryRecord): boolean => {
+      const proven = this.#provenTokens.get(repositoryKey);
+      const ageMs = proven === undefined ? Number.NaN : Date.now() - proven.atMs;
+      return record.kind === 'checkpoint' && proven?.token === record.token
+        && ageMs >= 0 && ageMs <= CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS;
+    };
     // The one admission path for every durable record this scan adopts: the
     // one it starts from, a CAS winner, and the plain-scope checkpoint the
     // fallback resumes from. Reads `repository` at call time on purpose.
-    const admit = (
+    const admit = async (
       initial: ContextGraphAuthorityIndexRepositoryRecord,
-    ): Promise<ContextGraphAuthorityIndexRepositoryRecord> => (
-      admitContextGraphAuthorityIndexCheckpoint({
+    ): Promise<ContextGraphAuthorityIndexRepositoryRecord> => {
+      const admitted = await admitContextGraphAuthorityIndexCheckpoint({
         repository,
         initial,
         deploymentBlockNumber,
@@ -379,8 +494,12 @@ export class ContextGraphAuthorityIndex {
         readBlockHash: input.readBlockHash,
         lifecycleSignal,
         onRejectedCheckpoint,
-      })
-    );
+        provenLocally,
+      });
+      // Admission returns a checkpoint only after matching its cursor hash.
+      markProven(admitted);
+      return admitted;
+    };
     let durable = await admit(await repository.load());
 
     // Highest block this scan may WRITE DOWN. Never below the deployment block:
@@ -442,7 +561,8 @@ export class ContextGraphAuthorityIndex {
             // the deployment block, committing there. The trust-domain key is
             // left alone: its imported prefix is not this scan's to build on,
             // and nothing scanned here is written under it.
-            repository = this.#repository.forScope(scope);
+            repositoryKey = scope;
+            repository = this.#repository.forScope(repositoryKey);
             durable = await admit(await repository.load());
           }
           continue;
@@ -529,6 +649,7 @@ export class ContextGraphAuthorityIndex {
         // if another token wins the next CAS, that value is reloaded through
         // admission before it can influence this attempt.
         durable = commit.record;
+        markProven(durable);
       }
     } finally {
       seedSession?.close();

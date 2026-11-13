@@ -403,8 +403,11 @@ describe('durable contract-wide Context Graph authority scanner', () => {
   });
 
   it('reloads the CAS winner and resumes from its suffix with concurrent providers', async () => {
+    // One index runs one scan per scope at a time, so the race needs two
+    // writers on one store, as two processes on one node home would be.
     const store = new MemoryAuthorityIndexStore();
     const index = new ContextGraphAuthorityIndex(store);
+    const sibling = new ContextGraphAuthorityIndex(store);
     const firstPageEntered = Promise.withResolvers<void>();
     const releaseFirstPage = Promise.withResolvers<void>();
     let gatedReads = 0;
@@ -423,7 +426,7 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     const first = index.resolve(
       makeInput(9n, {}, reader(rangesA)),
     );
-    const second = index.resolve(
+    const second = sibling.resolve(
       makeInput(10n, {}, reader(rangesB)),
     );
     await firstPageEntered.promise;
@@ -483,14 +486,15 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     const providerA = index.resolve(makeInput(9n, {}, readFork(forkAEvents)));
     await finalCommitStored.promise;
 
+    // Provider B's scan waits for A's, then admits the checkpoint A left in
+    // the index's cache against its own fork and rebuilds.
     const providerB = index.resolve({
       ...makeInput(9n, {}, readFork(forkBEvents)),
       finalized: { number: 25, hash: `0x${'bb'.repeat(32)}` },
     });
-    await expect(providerB).resolves.toMatchObject({ nameHash: NAME_10 });
-
     releaseFinalCommit.resolve();
     await expect(providerA).resolves.toMatchObject({ nameHash: NAME_9 });
+    await expect(providerB).resolves.toMatchObject({ nameHash: NAME_10 });
     expect(store.invalidations).toEqual([5]);
     expect((store.record!.value as { states: Array<{ nameHash: string }> }).states[0])
       .toMatchObject({ nameHash: NAME_10 });
