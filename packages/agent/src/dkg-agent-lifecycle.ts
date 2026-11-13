@@ -549,6 +549,7 @@ import {
   wakeDeferredContextGraphSubscriptionAuthorityRecovery,
 } from './context-graph-subscription-authority-recovery.js';
 import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
+import { recentStorageAckGraphRanks } from './storage-ack-recent-graphs.js';
 import {
   isRfc64PrivateRecoveryOwnerV1,
   resolveRfc64PrivateRecoveryContextGraphIdsV1,
@@ -9094,11 +9095,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // operator diagnostics identify the same IDs across restarts.
       const byId = (a: ContextGraphSubscriptionRecord, b: ContextGraphSubscriptionRecord): number =>
         a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-      const hostedRows = rows.filter((r) => r.coreHosted).sort(byId);
-      const userRows = rows.filter((r) => !r.coreHosted).sort(
+      // Rows of the graphs StorageACK requests reached shortly before this
+      // start go first, hosted or not, and outside the cap: publishers are
+      // writing to them now (at most STORAGE_ACK_RECENT_GRAPHS_MAX rows).
+      const recent = await recentStorageAckGraphRanks(this);
+      const recentRows = rows.filter((r) => recent.has(r.id))
+        .sort((a, b) => recent.get(a.id)! - recent.get(b.id)!);
+      const hostedRows = rows.filter((r) => r.coreHosted && !recent.has(r.id)).sort(byId);
+      const userRows = rows.filter((r) => !r.coreHosted && !recent.has(r.id)).sort(
         (a, b) => (b.subscribed ? 1 : 0) - (a.subscribed ? 1 : 0) || byId(a, b),
       );
-      const toActivate = [...hostedRows, ...userRows];
+      const toActivate = [...recentRows, ...hostedRows, ...userRows];
+      const countsAgainstCap = (row: ContextGraphSubscriptionRecord): boolean => !row.coreHosted && !recent.has(row.id);
+      if (recentRows.length > 0) {
+        this.log.info(
+          ctx,
+          `Restoring ${recentRows.length} recently ACK-requested context-graph subscription(s) first: ` +
+            recentRows.map((row) => `"${row.id}"`).join(', '),
+        );
+      }
       const dormancyById = this.contextGraphSubscriptionDormancyById;
       let activatedUserRows = 0;
       // #2815: every row's authority may need a chain read, and start() (with
@@ -9129,13 +9144,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // Past the budget, a user row goes to background authority recovery only
       // while the activation cap still has room for it; beyond that it waits
       // for rolling activation unread, as a row beyond the cap always has.
-      // Hosted rows are exempt from the cap and always go to recovery.
+      // Hosted and recently ACK-requested rows are exempt from the cap and
+      // always go to recovery.
       const leaveUnresolved = (row: ContextGraphSubscriptionRecord): void => {
-        if (!row.coreHosted && cap > 0 && activatedUserRows + deferredUserRows >= cap) {
+        if (countsAgainstCap(row) && cap > 0 && activatedUserRows + deferredUserRows >= cap) {
           this.transitionContextGraphSubscriptionDormancy(row.id, 'activationCap');
           return;
         }
-        if (!row.coreHosted) deferredUserRows += 1;
+        if (countsAgainstCap(row)) deferredUserRows += 1;
         this.transitionContextGraphSubscriptionDormancy(row.id, 'authorityUnavailable');
         deferredIds.push(row.id);
       };
@@ -9146,7 +9162,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // A denied/unavailable row therefore cannot consume capacity that a
         // later authorized subscription could use.
         if (
-          !row.coreHosted
+          countsAgainstCap(row)
           && cap > 0
           && activatedUserRows >= cap
         ) {
@@ -9247,7 +9263,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           );
           continue;
         }
-        if (!row.coreHosted) activatedUserRows += 1;
+        if (countsAgainstCap(row)) activatedUserRows += 1;
         const restorePendingMeta = restrictedApprovalBootstrap;
         const healedOnChainId = readAuthority.outcome === 'allowed'
           ? readAuthority.onChainId?.toString()
