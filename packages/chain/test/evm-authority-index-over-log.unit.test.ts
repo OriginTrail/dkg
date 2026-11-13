@@ -29,6 +29,7 @@ import { createEvmContextGraphAuthorityIndexRevisionReaderV1 } from
 import type { ContextGraphAuthorityIndexDeploymentLookup as ContractDeploymentLookupV1 } from
   '../src/context-graph-authority-index.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
+import { withRpcRequestContext } from '../src/rpc-request-transport.js';
 import { RpcUsageTracker } from '../src/rpc-usage.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
 import { MemoryAuthorityIndexStore } from './helpers/context-graph-authority-index.js';
@@ -699,6 +700,46 @@ describe('Context Graph authority index over the one log', () => {
     };
     expect(rebuilt.cursor.deploymentBlockNumber).toBe(0);
     expect(rebuilt.states.map((state) => state.contextGraphId)).toContain('9');
+  });
+
+  it.each([
+    { held: 'background', other: 'foreground' },
+    { held: 'foreground', other: 'background' },
+  ] as const)('answers a $other read while a $held walk on the same provider is held', async ({ held, other }) => {
+    const { reader, provider, authorityLogs } = makeReader();
+    authorityLogs.push(liveCreationLog(20, 7n, NAME_HASH));
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const getLogs = provider.getLogs.bind(provider);
+    let pages = 0;
+    // Hold the walk's first page read; every later page read passes.
+    provider.getLogs = async (filter) => {
+      pages += 1;
+      if (pages === 1) {
+        entered.resolve();
+        await release.promise;
+      }
+      return getLogs(filter);
+    };
+    const walk = withRpcRequestContext({ requestClass: held }, () => reader.snapshots.refresh());
+    await entered.promise;
+
+    // The reader takes the class from the caller's RPC context, for the scan
+    // wait and for the scan itself, so this read neither waits for that walk
+    // nor queues behind it.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      withRpcRequestContext(
+        { requestClass: other },
+        () => reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH),
+      ),
+      new Promise<'held'>((resolve) => { timer = setTimeout(() => resolve('held'), 2_000); }),
+    ]);
+    clearTimeout(timer);
+    release.resolve();
+    await walk;
+
+    expect(outcome).toBe(7n);
   });
 
   it('rechecks a cached tip before exhausting an endpoint whose cursor just advanced', async () => {

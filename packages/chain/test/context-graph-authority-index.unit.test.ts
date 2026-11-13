@@ -759,6 +759,44 @@ describe('durable contract-wide Context Graph authority scanner', () => {
       expect(store.records.get(TRUST_DOMAIN_SCOPE)).toBe(imported);
     });
 
+    it('falls back from the lookup block when an unpinned lookup resumed the trust-domain checkpoint', async () => {
+      // As above, but no endpoint pinned the deployment block (the lookup says
+      // 0), so the seeded scan resumes the imported prefix from its own block
+      // 10. The fallback sets its own bounds on the plain scope, which is
+      // empty: it starts from the lookup's block.
+      const store = new ScopedAuthorityIndexStore();
+      const imported = { token: 3, value: reduceContextGraphAuthorityIndexPage({
+        deploymentBlockNumber: 10,
+        throughBlockNumber: 40,
+        throughBlockHash: blockHash(40),
+        events: allEvents.filter((entry) => entry.blockNumber <= 40),
+      }).checkpoint };
+      store.records.set(TRUST_DOMAIN_SCOPE, imported);
+      const unpinned = (
+        readPage: (from: number, to: number) => Promise<readonly ContextGraphAuthorityIndexEvent[]>,
+      ) => ({ ...scan(readPage), deploymentBlockNumber: 0, deploymentBlockPinned: false });
+      const expected = await new ContextGraphAuthorityIndex(new ScopedAuthorityIndexStore())
+        .resolve(unpinned(readEvents));
+
+      const fallbacks: unknown[] = [];
+      const ranges: Array<readonly [number, number]> = [];
+      const state = await new ContextGraphAuthorityIndex(store, unavailableBootstrap({
+        localHistoryFallback: true,
+        onLocalHistoryFallback: (info) => { fallbacks.push(info); },
+      })).resolve(unpinned(async (from, to) => {
+        ranges.push([from, to]);
+        return readEvents(from, to);
+      }));
+
+      expect(fallbacks).toHaveLength(1);
+      expect(ranges[0]).toEqual([0, 49]);
+      expect(state).toEqual(expected);
+      expect(store.records.get(SCOPE)?.value).toMatchObject({
+        cursor: { deploymentBlockNumber: 0, throughBlockNumber: FINALIZED },
+      });
+      expect(store.records.get(TRUST_DOMAIN_SCOPE)).toBe(imported);
+    });
+
     it('seeds the trust-domain key on a later scan without touching the fallback checkpoint', async () => {
       const store = new ScopedAuthorityIndexStore();
       await new ContextGraphAuthorityIndex(store, unavailableBootstrap({ localHistoryFallback: true }))

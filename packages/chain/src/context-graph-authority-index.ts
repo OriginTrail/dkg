@@ -521,9 +521,9 @@ export class ContextGraphAuthorityIndex {
     const holdback = normalizeNonNegativeSafeInteger(
       input.durableReorgHoldbackBlocks ?? 0,
     ) ?? 0;
-    // Chosen once, with the first admission; see `admit` below.
+    // Set when the scan starts on a repository; see `startFromRepository`.
     let deploymentBlockNumber = requestedDeploymentBlockNumber;
-    let admittedAtStart = false;
+    let persistThroughBlockNumber = Math.max(deploymentBlockNumber, finalizedNumber - holdback);
 
     let servableEpoch = this.#servableEpochs.get(scope) ?? 0;
     const onRejectedCheckpoint = (): void => {
@@ -555,16 +555,16 @@ export class ContextGraphAuthorityIndex {
       }
       return now - seen.sinceMs >= CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS;
     };
-    // The one admission path for every durable record this scan adopts: the
-    // one it starts from, a CAS winner, and the plain-scope checkpoint the
-    // fallback resumes from. Reads `repository` at call time on purpose.
+    // Admits a durable record against a lower bound. Reads `repository` at
+    // call time on purpose.
     const admit = async (
-      initial: ContextGraphAuthorityIndexRepositoryRecord,
+      record: ContextGraphAuthorityIndexRepositoryRecord,
+      bound: number,
     ): Promise<ContextGraphAuthorityIndexRepositoryRecord> => {
       const admitted = await admitContextGraphAuthorityIndexCheckpoint({
         repository,
-        initial,
-        deploymentBlockNumber,
+        initial: record,
+        deploymentBlockNumber: bound,
         finalized: { number: finalizedNumber, hash: finalizedHash },
         readBlockHash: input.readBlockHash,
         lifecycleSignal,
@@ -573,34 +573,43 @@ export class ContextGraphAuthorityIndex {
       });
       // Admission returns a checkpoint only after matching its cursor hash.
       markReachable(admitted);
+      return admitted;
+    };
+    // Sets the scan's bounds from the repository it starts on: at the start,
+    // and again when the bootstrap fallback moves to the plain scope. An
+    // unpinned lookup resumes the stored checkpoint from the block it was
+    // reduced from, if that block is on this side of the anchor and admission
+    // keeps the history; otherwise the scan starts from the lookup's block.
+    const startFromRepository = async (): Promise<ContextGraphAuthorityIndexRepositoryRecord> => {
+      const initial = await repository.load();
+      let bound = requestedDeploymentBlockNumber;
+      if (input.deploymentBlockPinned === false && initial.kind === 'checkpoint') {
+        const stored = initial.checkpoint.cursor.deploymentBlockNumber;
+        if (stored > bound && stored <= finalizedNumber) bound = stored;
+      }
+      const admitted = await admit(initial, bound);
+      deploymentBlockNumber = admitted.kind === 'checkpoint' ? bound : requestedDeploymentBlockNumber;
+      persistThroughBlockNumber = Math.max(deploymentBlockNumber, finalizedNumber - holdback);
+      return admitted;
+    };
+    // A record adopted mid-scan (a CAS winner) is checked against the bounds
+    // already set. If the stored checkpoint they came from is gone (another
+    // writer saw a chain reset at the same address), this scan's bounds and
+    // any seed session are set for the old block: end it, and let the next
+    // scan start over from the lookup.
+    const readmit = async (
+      record: ContextGraphAuthorityIndexRepositoryRecord,
+    ): Promise<ContextGraphAuthorityIndexRepositoryRecord> => {
+      const admitted = await admit(record, deploymentBlockNumber);
       if (admitted.kind !== 'checkpoint' && deploymentBlockNumber !== requestedDeploymentBlockNumber) {
-        // The stored checkpoint's deployment block went with its history. At
-        // the start the rebuild simply begins from the lookup. Later, when a
-        // reload after a lost commit finds it gone (another writer saw a chain
-        // reset at the same address), this scan's bounds and any seed session
-        // are already set for the old block: end it, and let the next scan
-        // start over from the lookup.
-        if (admittedAtStart) {
-          throw new ContextGraphAuthorityIndexRetryableError(
-            `Context Graph authority index checkpoint from block ${deploymentBlockNumber} was `
-            + `dropped during this scan; it is rebuilt from block ${requestedDeploymentBlockNumber}`,
-          );
-        }
-        deploymentBlockNumber = requestedDeploymentBlockNumber;
+        throw new ContextGraphAuthorityIndexRetryableError(
+          `Context Graph authority index checkpoint from block ${deploymentBlockNumber} was `
+          + `dropped during this scan; it is rebuilt from block ${requestedDeploymentBlockNumber}`,
+        );
       }
       return admitted;
     };
-    // An unpinned lookup resumes the stored checkpoint from the block it was
-    // reduced from, if that block is on this side of the anchor. Admission
-    // then decides whether that history is still the chain's.
-    const initial = await repository.load();
-    if (input.deploymentBlockPinned === false && initial.kind === 'checkpoint') {
-      const stored = initial.checkpoint.cursor.deploymentBlockNumber;
-      if (stored > deploymentBlockNumber && stored <= finalizedNumber) deploymentBlockNumber = stored;
-    }
-    let durable = await admit(initial);
-    admittedAtStart = true;
-    const persistThroughBlockNumber = Math.max(deploymentBlockNumber, finalizedNumber - holdback);
+    let durable = await startFromRepository();
 
     const bootstrap = this.bootstrap;
     const minimumSeedBlock = bootstrap === undefined ? deploymentBlockNumber
@@ -654,7 +663,7 @@ export class ContextGraphAuthorityIndex {
             // and nothing scanned here is written under it.
             repositoryKey = scope;
             repository = this.#repository.forScope(repositoryKey);
-            durable = await admit(await repository.load());
+            durable = await startFromRepository();
           }
           continue;
         }
@@ -732,7 +741,7 @@ export class ContextGraphAuthorityIndex {
         if (commit.kind === 'winner') {
           // Another valid provider completion won the page. Reload its result
           // and continue from that cursor rather than overwriting or rescanning.
-          durable = await admit(commit.record);
+          durable = await readmit(commit.record);
           continue;
         }
         // A newer cache entry can belong to a concurrently scanned provider
