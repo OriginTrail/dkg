@@ -110,6 +110,7 @@ type EvmContextGraphAuthorityIndexReadInputV1 = Readonly<{
   contractAddress: string;
   provider: JsonRpcProvider;
   deploymentBlockNumber: number;
+  rebuildFromBlockNumber?: number;
   finalized: Readonly<{ number: number; hash: string }>;
   pageSize: number;
   /** Operator depth; bounds how far the DURABLE cursor may ratchet. */
@@ -179,6 +180,7 @@ function authorityIndexScanBoundsV1(
     scope: contextGraphAuthorityIndexScope(input.deploymentId, input.contractAddress),
     readScope: input.provider,
     deploymentBlockNumber: input.deploymentBlockNumber,
+    rebuildFromBlockNumber: input.rebuildFromBlockNumber,
     finalized: input.finalized,
     // Preserve invalid values for ContextGraphAuthorityIndex's fail-closed
     // bounds validation; only a valid oversized configured page is clamped.
@@ -516,15 +518,10 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         const contract = base.connect(provider) as Contract;
         const contractAddress = (await contract.getAddress()).toLowerCase();
         ownScope = contextGraphAuthorityIndexScope(dependencies.deploymentId, contractAddress);
-        // The index runs one scan per scope. Wait for a running one BEFORE the
-        // head read: an anchor read now is out of date once that scan lets
-        // this read in, and a walk that outlasts its readers cost one per reader.
-        await dependencies.index.whenScanIdle(
-          ownScope,
-          options.signal === undefined
-            ? projectionSignal
-            : AbortSignal.any([projectionSignal, options.signal]),
-        );
+        // The index runs one scan per scope and class. Wait for it BEFORE the head
+        // read, which would be out of date by the time that scan lets this read in.
+        await dependencies.index.whenScanIdle(ownScope, options.signal === undefined
+          ? projectionSignal : AbortSignal.any([projectionSignal, options.signal]));
         assertOpen();
         projectionSignal.throwIfAborted();
         options.signal?.throwIfAborted();
@@ -563,12 +560,13 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
             deploymentBlockNumber,
             finalityConfirmations: dependencies.finalityConfirmations(),
           })).anchor;
+          if (anchor === undefined) break;
+          const bounds = deployment.scanBounds(anchor.finalized.number);
           // Below a stored deployment block: a reset chain, for the live scan.
-          if (anchor === undefined
-            || deployment.scanFrom(anchor.finalized.number) !== deploymentBlockNumber) break;
+          if (bounds.deploymentBlockNumber !== deploymentBlockNumber) break;
           try {
             const logged = await readEvmContextGraphAuthorityIndexProjectionV1(
-              { ...readInput, deploymentBlockNumber, finalized: anchor.finalized, logSource: { anchor, source } },
+              { ...readInput, ...bounds, finalized: anchor.finalized, logSource: { anchor, source } },
               (scan) => project(scan, {
                 provider,
                 contractAddress,
@@ -661,7 +659,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         const indexed = await readEvmContextGraphAuthorityIndexProjectionV1(
           {
             ...readInput,
-            deploymentBlockNumber: deployment.scanFrom(finalized.number),
+            ...deployment.scanBounds(finalized.number),
             finalized: { number: finalized.number, hash: finalized.hash },
           },
           (scan) => project(scan, {
@@ -1154,8 +1152,9 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
               deploymentBlockNumber,
               finalityConfirmations: dependencies.finalityConfirmations(),
             })).anchor;
-            if (anchor === undefined
-              || deployment.scanFrom(anchor.finalized.number) !== deploymentBlockNumber) return undefined;
+            if (anchor === undefined) return undefined;
+            const bounds = deployment.scanBounds(anchor.finalized.number);
+            if (bounds.deploymentBlockNumber !== deploymentBlockNumber) return undefined;
 
             let view: ContextGraphAuthorityIndexView;
             let creation: Extract<
@@ -1170,7 +1169,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
                   contract,
                   contractAddress,
                   provider,
-                  deploymentBlockNumber,
+                  ...bounds,
                   pageSize: dependencies.pageSize(),
                   finalityConfirmations: dependencies.finalityConfirmations(),
                   finalized: anchor.finalized,

@@ -115,6 +115,14 @@ export interface ContextGraphAuthorityIndexScanInput {
    * not newly exposed.
    */
   readonly durableReorgHoldbackBlocks?: number;
+  /**
+   * Where a rebuild starts when `deploymentBlockNumber` was taken from the
+   * stored checkpoint and admission does not keep that checkpoint. A
+   * deployment block is only as good as the history it was reduced with:
+   * rejected history (a reset chain at the same address) must not bound the
+   * rebuild that replaces it. At most `deploymentBlockNumber`.
+   */
+  readonly rebuildFromBlockNumber?: number;
   readonly signal?: AbortSignal;
   readonly readBlockHash: (
     blockNumber: number,
@@ -160,18 +168,14 @@ export class ContextGraphAuthorityIndex {
    */
   readonly #activeScans = new Map<string, ActiveScan>();
   /**
-   * Per durable key, the token of the record this index last committed or
-   * admitted against a chain view in this lifecycle, and when. Tokens never
-   * repeat, so a loaded record with this token is the row that was proven.
-   */
-  readonly #provenTokens = new Map<string, Readonly<{ token: number; atMs: number }>>();
-  /**
    * Per durable key, the record a scan first found out of reach of its
-   * anchor, and when. It is rebuilt only once it has stayed out of reach for
+   * anchor, and when. Any commit, or any admission against a chain view,
+   * clears it. The record is rebuilt only once it has stayed out of reach for
    * the head tolerance (the age past which no cached answer is served either)
-   * with no proof in that time: a restored or copied store, or a chain reset
-   * at the same address. A lagging endpoint, or a scan that waited behind
+   * with nothing clearing it: a restored or copied store, or a chain reset at
+   * the same address. A lagging endpoint, or a scan that waited behind
    * another, is one anchor; the next read at a current one admits the record.
+   * Tokens never repeat, so a new token is a new record and a new clock.
    */
   readonly #outOfReachSince = new Map<string, Readonly<{ token: number; sinceMs: number }>>();
   #closed = false;
@@ -361,7 +365,6 @@ export class ContextGraphAuthorityIndex {
     // The aborted scans settle on their own; a scan of the new lifecycle does
     // not wait behind them, and nothing proven before the clear stays proven.
     this.#activeScans.clear();
-    this.#provenTokens.clear();
     this.#outOfReachSince.clear();
     this.#servable.clear();
     this.#servableEpochs.clear();
@@ -473,20 +476,24 @@ export class ContextGraphAuthorityIndex {
     let repositoryKey = this.bootstrap === undefined ? scope
       : `${scope}:trusted-bootstrap:${this.bootstrap.trustDomain}`;
     let repository = this.#repository.forScope(repositoryKey);
-    const deploymentBlockNumber = normalizeNonNegativeSafeInteger(input.deploymentBlockNumber);
+    const requestedDeploymentBlockNumber = normalizeNonNegativeSafeInteger(input.deploymentBlockNumber);
+    const rebuildFromBlockNumber = input.rebuildFromBlockNumber === undefined ? undefined
+      : normalizeNonNegativeSafeInteger(input.rebuildFromBlockNumber) ?? Number.NaN;
     const finalizedNumber = normalizeNonNegativeSafeInteger(input.finalized.number);
     const finalizedHash = normalizeHash(input.finalized.hash);
     const pageSize = normalizeNonNegativeSafeInteger(input.pageSize);
     if (
-      deploymentBlockNumber === undefined
+      requestedDeploymentBlockNumber === undefined
       || finalizedNumber === undefined
       || finalizedHash === undefined
       || pageSize === undefined
       || pageSize < 1
-      || deploymentBlockNumber > finalizedNumber
+      || requestedDeploymentBlockNumber > finalizedNumber
+      || !(rebuildFromBlockNumber === undefined || rebuildFromBlockNumber <= requestedDeploymentBlockNumber)
     ) {
       throw new Error('Context Graph authority index scan bounds are invalid');
     }
+    let deploymentBlockNumber = requestedDeploymentBlockNumber;
 
     let servableEpoch = this.#servableEpochs.get(scope) ?? 0;
     const onRejectedCheckpoint = (): void => {
@@ -499,16 +506,12 @@ export class ContextGraphAuthorityIndex {
     };
     // A record this lifecycle committed, or admitted against a chain view, is
     // within reach of a current anchor.
-    const markProven = (record: ContextGraphAuthorityIndexRepositoryRecord): void => {
+    const markReachable = (record: ContextGraphAuthorityIndexRepositoryRecord): void => {
       if (record.kind === 'checkpoint' && !lifecycleSignal.aborted) {
-        this.#provenTokens.set(repositoryKey, Object.freeze({
-          token: record.token,
-          atMs: Date.now(),
-        }));
         this.#outOfReachSince.delete(repositoryKey);
       }
     };
-    // See `#outOfReachSince`.
+    // See `#outOfReachSince`. A clock that stepped back starts it again.
     const rebuildOutOfReach = (record: ContextGraphAuthorityIndexRepositoryRecord): boolean => {
       if (record.kind !== 'checkpoint') return true;
       const now = Date.now();
@@ -520,11 +523,7 @@ export class ContextGraphAuthorityIndex {
         }));
         return false;
       }
-      const proven = this.#provenTokens.get(repositoryKey);
-      const provenRecently = proven?.token === record.token
-        && now - proven.atMs <= CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS;
-      return !provenRecently
-        && now - seen.sinceMs >= CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS;
+      return now - seen.sinceMs >= CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS;
     };
     // The one admission path for every durable record this scan adopts: the
     // one it starts from, a CAS winner, and the plain-scope checkpoint the
@@ -543,10 +542,16 @@ export class ContextGraphAuthorityIndex {
         rebuildOutOfReach,
       });
       // Admission returns a checkpoint only after matching its cursor hash.
-      markProven(admitted);
+      markReachable(admitted);
       return admitted;
     };
     let durable = await admit(await repository.load());
+    // A deployment block taken from the stored checkpoint is only as good as
+    // that checkpoint. If admission did not keep it, its history went with it,
+    // and the rebuild starts from the caller's own lower bound instead.
+    if (durable.kind !== 'checkpoint' && rebuildFromBlockNumber !== undefined) {
+      deploymentBlockNumber = rebuildFromBlockNumber;
+    }
 
     // Highest block this scan may WRITE DOWN. Never below the deployment block:
     // holding the cursor back past the start of history would persist nothing.
@@ -695,7 +700,7 @@ export class ContextGraphAuthorityIndex {
         // if another token wins the next CAS, that value is reloaded through
         // admission before it can influence this attempt.
         durable = commit.record;
-        markProven(durable);
+        markReachable(durable);
       }
     } finally {
       seedSession?.close();

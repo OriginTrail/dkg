@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it, vi } from 'vitest';
+import { withRpcRequestContext } from '../src/rpc-request-transport.js';
 import { ContextGraphAuthorityIndex as ContextGraphAuthorityIndexBase } from
   '../src/context-graph-authority-index.js';
 import type { ContextGraphAuthorityIndexId } from '../src/context-graph-authority-index-id.js';
@@ -576,6 +577,31 @@ describe('trusted core authority index bootstrap', () => {
     release();
     await earlier;
     await expect(rejecting).rejects.toThrow('rebuild unavailable');
+    expect(index.exportSnapshot(request())).toBeNull();
+  });
+
+  it('does not republish an older in-flight completion after a reorg rejection in another request class', async () => {
+    // One scan per scope runs per request class, so a background scan can
+    // still be in flight when a foreground scan rejects the durable checkpoint.
+    const index = new ContextGraphAuthorityIndex(new ScopedStore());
+    await index.refresh(input());
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>((resolve) => { entered = resolve; });
+    const earlier = withRpcRequestContext({ requestClass: 'background' }, () => index.refresh({
+      ...input(),
+      readPage: async () => {
+        entered();
+        await new Promise<void>((resolve) => { release = resolve; });
+        return [];
+      },
+    }));
+    await ready;
+    await expect(index.refresh({ ...input(), readBlockHash: async () => hash(1), readPage: async () => {
+      throw new Error('rebuild unavailable');
+    } })).rejects.toThrow('rebuild unavailable');
+    release();
+    await earlier;
     expect(index.exportSnapshot(request())).toBeNull();
   });
 

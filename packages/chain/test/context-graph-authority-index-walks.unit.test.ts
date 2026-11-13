@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ContextGraphAuthorityIndex } from '../src/context-graph-authority-index.js';
 import { CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS } from
   '../src/context-graph-authority-index-projection.js';
+import type { ContextGraphAuthorityIndexId } from '../src/chain-adapter.js';
 import type { RawContextGraphAuthorityIndexEvent } from
   '../src/context-graph-authority-index-reducer.js';
 import { RpcRequestGovernor } from '../src/rpc-request-governor.js';
@@ -272,13 +273,13 @@ describe('durable authority-index walks under a throttled RPC budget', () => {
     expect(store.invalidations).toHaveLength(1);
   });
 
-  it('rebuilds a chain reset under a running node once its proof has lapsed', async () => {
+  it('rebuilds a chain reset under a running node once no read has reached its cursor for five minutes', async () => {
     vi.useFakeTimers();
     const store = new MemoryAuthorityIndexStore();
     const index = new ContextGraphAuthorityIndex(store);
     await index.view(directRead(3_000));
 
-    // Every anchor after the reset is far below the cursor proved just before it.
+    // Every anchor after the reset is far below the cursor committed just before it.
     await expect(index.view(directRead(2_790))).rejects.toMatchObject({ reason: 'cursor-ahead' });
     await vi.advanceTimersByTimeAsync(CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS - 1_000);
     await expect(index.view(directRead(2_790))).rejects.toMatchObject({ reason: 'cursor-ahead' });
@@ -287,6 +288,77 @@ describe('durable authority-index walks under a throttled RPC budget', () => {
     await vi.advanceTimersByTimeAsync(1_001);
     await index.view(directRead(2_790));
     expect(store.invalidations).toHaveLength(1);
+  });
+
+  it('starts the out-of-reach clock again when the wall clock steps back', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10 * CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS);
+    const store = new MemoryAuthorityIndexStore();
+    await new ContextGraphAuthorityIndex(store).view(directRead(3_000));
+    const copied = new ContextGraphAuthorityIndex(store);
+    await expect(copied.view(directRead(2_000))).rejects.toMatchObject({ reason: 'cursor-ahead' });
+
+    // Stepping back by more than the tolerance proves no elapsed time at all.
+    vi.setSystemTime(Date.now() - 2 * CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS);
+    await expect(copied.view(directRead(2_000))).rejects.toMatchObject({ reason: 'cursor-ahead' });
+    await vi.advanceTimersByTimeAsync(CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS - 1);
+    await expect(copied.view(directRead(2_000))).rejects.toMatchObject({ reason: 'cursor-ahead' });
+    expect(store.invalidations).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await copied.view(directRead(2_000));
+    expect(store.invalidations).toHaveLength(1);
+  });
+
+  it('rebuilds from the lookup bound when admission rejects the history a stored deployment block came from', async () => {
+    const store = new MemoryAuthorityIndexStore();
+    await new ContextGraphAuthorityIndex(store).view(directRead(1_500));
+    // A reset chain at the same address: the contract now dates from block
+    // 100, a graph was created at block 200, and every block hash differs.
+    const resetHash = (block: number): string => `0x${(block + 0xabcdef).toString(16).padStart(64, '0')}`;
+    const resetCreation = { ...creation(42n, 200), blockHash: resetHash(200) };
+    const pages: Array<readonly [number, number]> = [];
+
+    // The reader's bounds for an unpinned lookup whose stored block is below the anchor.
+    const view = await new ContextGraphAuthorityIndex(store).view({
+      ...directRead(2_000),
+      finalized: { number: 2_000, hash: resetHash(2_000) },
+      deploymentBlockNumber: DEPLOY_BLOCK,
+      rebuildFromBlockNumber: 0,
+      readBlockHash: async (blockNumber: number) => resetHash(blockNumber),
+      readPage: async (fromBlock: number, toBlock: number) => {
+        pages.push([fromBlock, toBlock]);
+        return resetCreation.blockNumber >= fromBlock && resetCreation.blockNumber <= toBlock
+          ? [resetCreation]
+          : [];
+      },
+    });
+
+    expect(store.invalidations).toHaveLength(1);
+    expect(pages[0]).toEqual([0, PAGE_SIZE - 1]);
+    expect(view.has('42' as ContextGraphAuthorityIndexId)).toBe(true);
+    expect((store.record!.value as { cursor: { deploymentBlockNumber: number } }).cursor)
+      .toMatchObject({ deploymentBlockNumber: 0 });
+  });
+
+  it('resumes from the stored deployment block while admission keeps its checkpoint', async () => {
+    const store = new MemoryAuthorityIndexStore();
+    await new ContextGraphAuthorityIndex(store).view(directRead(1_500));
+    const pages: Array<readonly [number, number]> = [];
+
+    await new ContextGraphAuthorityIndex(store).view({
+      ...directRead(1_600),
+      rebuildFromBlockNumber: 0,
+      readPage: async (fromBlock: number, toBlock: number) => {
+        pages.push([fromBlock, toBlock]);
+        return [];
+      },
+    });
+
+    expect(store.invalidations).toEqual([]);
+    expect(pages[0]?.[0]).toBe(1_500 - HOLDBACK + 1);
+    expect((store.record!.value as { cursor: { deploymentBlockNumber: number } }).cursor)
+      .toMatchObject({ deploymentBlockNumber: DEPLOY_BLOCK });
   });
 
   for (const provider of ['the same', 'another'] as const) {

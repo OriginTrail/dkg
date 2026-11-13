@@ -11,12 +11,19 @@ export type ContractDeploymentLookupV1 = Readonly<{
   pinned: boolean;
 }>;
 
+/** The lower bounds of one scan, as `ContextGraphAuthorityIndexScanInput` takes them. */
+export type AuthorityScanBoundsV1 = Readonly<{
+  deploymentBlockNumber: number;
+  /** Set when `deploymentBlockNumber` is the stored checkpoint's own. */
+  rebuildFromBlockNumber?: number;
+}>;
+
 /** The lower bounds one authority read scans from. */
 export interface AuthorityScanDeploymentV1 {
   /** For a chain event log anchor's coverage proof. */
   readonly coverageFrom: number;
   /** For a scan to `anchorBlockNumber`. */
-  scanFrom(anchorBlockNumber: number): number;
+  scanBounds(anchorBlockNumber: number): AuthorityScanBoundsV1;
 }
 
 /**
@@ -24,11 +31,13 @@ export interface AuthorityScanDeploymentV1 {
  *
  * The index rebuilds a durable checkpoint reduced from a different deployment
  * block, so an unpinned lookup used to replace the whole history with a walk
- * from block 0 whenever it met pruned or throttled endpoints. It now starts
+ * from block 0 whenever it met pruned or throttled endpoints. It now resumes
  * from the block the stored checkpoint was reduced from, but only for an anchor
- * at or above that block. A stored block above the anchor belongs to a chain
- * view that is gone (a reset at the same address); the genesis fallback then
- * lets admission discard that checkpoint and rebuild, as before.
+ * at or above that block, and only while admission keeps that checkpoint: a
+ * rebuild starts from the lookup's own bound (`rebuildFromBlockNumber`). A
+ * stored block above the anchor, or history admission rejects, belongs to a
+ * chain view that is gone (a reset at the same address), and its deployment
+ * block must not bound the rebuild that replaces it.
  */
 export async function resolveAuthorityScanDeploymentV1(
   lookup: () => Promise<ContractDeploymentLookupV1>,
@@ -38,8 +47,10 @@ export async function resolveAuthorityScanDeploymentV1(
   const stored = found.pinned ? undefined : await storedDeploymentBlock();
   return Object.freeze({
     coverageFrom: stored ?? found.blockNumber,
-    scanFrom: (anchorBlockNumber: number) => (
-      stored === undefined || stored > anchorBlockNumber ? found.blockNumber : stored
+    scanBounds: (anchorBlockNumber: number): AuthorityScanBoundsV1 => (
+      stored === undefined || stored > anchorBlockNumber
+        ? Object.freeze({ deploymentBlockNumber: found.blockNumber })
+        : Object.freeze({ deploymentBlockNumber: stored, rebuildFromBlockNumber: found.blockNumber })
     ),
   });
 }
