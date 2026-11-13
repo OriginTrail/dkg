@@ -163,11 +163,17 @@ export class ContextGraphAuthorityIndex {
    * Per durable key, the token of the record this index last committed or
    * admitted against a chain view in this lifecycle, and when. Tokens never
    * repeat, so a loaded record with this token is the row that was proven.
-   * The proof lapses after the head tolerance, the age past which no cached
-   * answer is served either, so a chain reset under a running node is still
-   * rebuilt, a few minutes later.
    */
   readonly #provenTokens = new Map<string, Readonly<{ token: number; atMs: number }>>();
+  /**
+   * Per durable key, the record a scan first found out of reach of its
+   * anchor, and when. It is rebuilt only once it has stayed out of reach for
+   * the head tolerance (the age past which no cached answer is served either)
+   * with no proof in that time: a restored or copied store, or a chain reset
+   * at the same address. A lagging endpoint, or a scan that waited behind
+   * another, is one anchor; the next read at a current one admits the record.
+   */
+  readonly #outOfReachSince = new Map<string, Readonly<{ token: number; sinceMs: number }>>();
   #closed = false;
   #lifecycleAbort = new AbortController();
 
@@ -336,6 +342,7 @@ export class ContextGraphAuthorityIndex {
     // not wait behind them, and nothing proven before the clear stays proven.
     this.#activeScans.clear();
     this.#provenTokens.clear();
+    this.#outOfReachSince.clear();
     this.#servable.clear();
     this.#servableEpochs.clear();
     this.#projections.clear();
@@ -465,20 +472,34 @@ export class ContextGraphAuthorityIndex {
       servableEpoch = (this.#servableEpochs.get(scope) ?? 0) + 1;
       this.#servableEpochs.set(scope, servableEpoch);
     };
-    // A record this lifecycle committed, or admitted against a chain view.
+    // A record this lifecycle committed, or admitted against a chain view, is
+    // within reach of a current anchor.
     const markProven = (record: ContextGraphAuthorityIndexRepositoryRecord): void => {
       if (record.kind === 'checkpoint' && !lifecycleSignal.aborted) {
         this.#provenTokens.set(repositoryKey, Object.freeze({
           token: record.token,
           atMs: Date.now(),
         }));
+        this.#outOfReachSince.delete(repositoryKey);
       }
     };
-    const provenLocally = (record: ContextGraphAuthorityIndexRepositoryRecord): boolean => {
+    // See `#outOfReachSince`.
+    const rebuildOutOfReach = (record: ContextGraphAuthorityIndexRepositoryRecord): boolean => {
+      if (record.kind !== 'checkpoint') return true;
+      const now = Date.now();
+      const seen = this.#outOfReachSince.get(repositoryKey);
+      if (seen === undefined || seen.token !== record.token || now < seen.sinceMs) {
+        this.#outOfReachSince.set(repositoryKey, Object.freeze({
+          token: record.token,
+          sinceMs: now,
+        }));
+        return false;
+      }
       const proven = this.#provenTokens.get(repositoryKey);
-      const ageMs = proven === undefined ? Number.NaN : Date.now() - proven.atMs;
-      return record.kind === 'checkpoint' && proven?.token === record.token
-        && ageMs >= 0 && ageMs <= CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS;
+      const provenRecently = proven?.token === record.token
+        && now - proven.atMs <= CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS;
+      return !provenRecently
+        && now - seen.sinceMs >= CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS;
     };
     // The one admission path for every durable record this scan adopts: the
     // one it starts from, a CAS winner, and the plain-scope checkpoint the
@@ -494,7 +515,7 @@ export class ContextGraphAuthorityIndex {
         readBlockHash: input.readBlockHash,
         lifecycleSignal,
         onRejectedCheckpoint,
-        provenLocally,
+        rebuildOutOfReach,
       });
       // Admission returns a checkpoint only after matching its cursor hash.
       markProven(admitted);

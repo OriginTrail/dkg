@@ -38,17 +38,16 @@ export interface ContextGraphAuthorityIndexAdmissionInput {
   /** Evict remotely servable observations as soon as a durable row is rejected. */
   readonly onRejectedCheckpoint?: () => void;
   /**
-   * Whether this index committed this exact record, or admitted it against a
-   * chain view, within the last few minutes of its current lifecycle.
+   * Whether a checkpoint whose cursor sits out of reach of this scan's anchor
+   * may be rebuilt now. Asked only in that case; absent means yes.
    *
-   * Such a cursor was on a live chain view moments ago, so a scan anchored
-   * below it, however far, has an anchor that is out of date: it waited behind
-   * another scan, or its endpoint lags. That is a retry against a newer anchor,
-   * never evidence for a rebuild. Only a record this index has not proven yet
-   * (a restored or copied store, or a chain reset between runs) may still be
-   * rebuilt for being out of reach.
+   * One anchor below the cursor proves little. It may come from an endpoint
+   * that lags, or from a scan that waited behind another one, and a bound in
+   * BLOCKS is a few seconds of lag on a fast chain. A rebuild walks the whole
+   * history again from the deployment block, so the owner can answer no and
+   * the scan is refused for retry against another anchor instead.
    */
-  readonly provenLocally?: (record: ContextGraphAuthorityIndexRepositoryRecord) => boolean;
+  readonly rebuildOutOfReach?: (record: ContextGraphAuthorityIndexRepositoryRecord) => boolean;
   readonly readBlockHash: (
     blockNumber: number,
     lifecycleSignal: AbortSignal,
@@ -79,18 +78,13 @@ export async function admitContextGraphAuthorityIndexCheckpoint(
         const cursorSkew = checkpoint.cursor.throughBlockNumber - input.finalized.number;
         if (
           cursorSkew > MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_CURSOR_SKEW_BLOCKS
-          && input.provenLocally?.(record) !== true
+          && input.rebuildOutOfReach?.(record) !== false
         ) {
           // Unreachable by skew: fall through to invalidation and rebuild
           // rather than retrying a cursor no endpoint will ever catch up to.
           // The cursor only ever moves FORWARD (`commitOrReloadWinner` has no
-          // lowering path), so without this the wedge is permanent.
-          //
-          // Not for a record this index proved itself (see `provenLocally`).
-          // Throwing that one away costs a walk from the deployment block,
-          // which on a long history outlasts every reader that waits for it,
-          // and a scan that outlasts its readers is exactly the one whose
-          // anchor falls this far behind the next scan's commit.
+          // lowering path), so without this the wedge is permanent. The owner
+          // decides when one out-of-reach anchor is enough (`rebuildOutOfReach`).
         } else if (cursorSkew > 0) {
           throw new ContextGraphAuthorityIndexRetryableError(
             `Context Graph authority index finalized head ${input.finalized.number} is behind `

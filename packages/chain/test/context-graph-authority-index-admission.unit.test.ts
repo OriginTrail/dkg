@@ -29,7 +29,7 @@ async function admit(
     deploymentBlockNumber?: number;
     finalized?: Readonly<{ number: number; hash: string }>;
     readBlockHash?: () => Promise<string | null>;
-    provenTokens?: readonly number[];
+    rebuildOutOfReach?: () => boolean;
   }> = {},
 ) {
   const scoped = repository.forScope(SCOPE);
@@ -40,9 +40,8 @@ async function admit(
     finalized: overrides.finalized ?? { number: 25, hash: HASH_25 },
     lifecycleSignal: new AbortController().signal,
     readBlockHash: overrides.readBlockHash ?? (async () => HASH_20),
-    ...(overrides.provenTokens === undefined ? {} : {
-      provenLocally: (record) => record.token !== undefined
-        && overrides.provenTokens!.includes(record.token),
+    ...(overrides.rebuildOutOfReach === undefined ? {} : {
+      rebuildOutOfReach: overrides.rebuildOutOfReach,
     }),
   });
 }
@@ -117,23 +116,35 @@ describe('Context Graph authority index checkpoint admission and recovery', () =
     expect(store.invalidations).toHaveLength(1);
   });
 
-  it('retries instead of rebuilding a cursor this lifecycle proved, however far behind the anchor', async () => {
-    // A scan anchored 51+ blocks below a cursor this index committed or
-    // admitted moments ago has a stale anchor (it waited behind another scan,
-    // or its endpoint lags). Rebuilding would discard the whole history for it.
+  it('lets the owner hold an out-of-reach cursor for retry instead of rebuilding it', async () => {
+    // One anchor 51+ blocks below the cursor may be a lagging endpoint or a
+    // scan that waited behind another; on a fast chain that is seconds of lag.
     const store = new MemoryAuthorityIndexStore();
     store.record = { token: 7, value: checkpoint };
+    const asked: number[] = [];
 
     await expect(admit(new ContextGraphAuthorityIndexRepository(store), {
       finalized: { number: 20 - 51, hash: HASH_25 },
-      provenTokens: [7],
+      rebuildOutOfReach: () => {
+        asked.push(20 - 51);
+        return false;
+      },
     })).rejects.toMatchObject({ reason: 'cursor-ahead' });
     expect(store.invalidations).toEqual([]);
 
-    // Proof is per row: another writer's newer row is not covered by it.
+    // Within the ordinary skew bound the owner is not asked at all.
+    await expect(admit(new ContextGraphAuthorityIndexRepository(store), {
+      finalized: { number: 19, hash: HASH_25 },
+      rebuildOutOfReach: () => {
+        asked.push(19);
+        return false;
+      },
+    })).rejects.toMatchObject({ reason: 'cursor-ahead' });
+    expect(asked).toEqual([20 - 51]);
+
     await expect(admit(new ContextGraphAuthorityIndexRepository(store), {
       finalized: { number: 20 - 51, hash: HASH_25 },
-      provenTokens: [6],
+      rebuildOutOfReach: () => true,
     })).resolves.toMatchObject({ kind: 'tombstone' });
     expect(store.invalidations).toHaveLength(1);
   });

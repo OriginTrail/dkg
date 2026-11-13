@@ -233,22 +233,55 @@ describe('durable authority-index walks under a throttled RPC budget', () => {
     await expect(index.view(directRead(2_790))).rejects.toMatchObject({ reason: 'cursor-ahead' });
     expect(store.invalidations).toEqual([]);
     expect(store.record).toBe(proven);
+  });
 
-    // A process that never proved the row (a restored or copied store) still
-    // rebuilds a cursor no endpoint reaches, exactly as before.
-    await new ContextGraphAuthorityIndex(store).view(directRead(2_790));
+  it('gives a cursor it has not proven yet a current anchor before any rebuild, as after a restart', async () => {
+    vi.useFakeTimers();
+    const store = new MemoryAuthorityIndexStore();
+    await new ContextGraphAuthorityIndex(store).view(directRead(3_000));
+    const reduced = store.record;
+    const restarted = new ContextGraphAuthorityIndex(store);
+
+    // The first read after a restart meets an endpoint 200 blocks behind: a
+    // few tens of seconds of lag on a chain that makes five blocks a second.
+    await expect(restarted.view(directRead(2_790))).rejects.toMatchObject({ reason: 'cursor-ahead' });
+    // The next read, at a current anchor, admits the history as it stands.
+    let pages = 0;
+    await restarted.view(directRead(3_005, {
+      readPage: async () => {
+        pages += 1;
+        return [];
+      },
+    }));
+    expect(store.invalidations).toEqual([]);
+    expect(pages).toBe(2);
+    expect((store.record!.value as { cursor: { deploymentBlockNumber: number } }).cursor)
+      .toMatchObject({ deploymentBlockNumber: DEPLOY_BLOCK });
+    expect(store.record!.token).toBe(reduced!.token + 1);
+
+    // A cursor that no anchor reaches for the whole head tolerance belongs to
+    // a chain view that is gone (a copied store, a reset at the same address).
+    const copied = new ContextGraphAuthorityIndex(store);
+    await expect(copied.view(directRead(2_000))).rejects.toMatchObject({ reason: 'cursor-ahead' });
+    await vi.advanceTimersByTimeAsync(CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS);
+    await copied.view(directRead(2_000));
     expect(store.invalidations).toHaveLength(1);
   });
 
-  it('lets that proof lapse, so a chain reset under a running node is still rebuilt', async () => {
+  it('rebuilds a chain reset under a running node once its proof has lapsed', async () => {
     vi.useFakeTimers();
     const store = new MemoryAuthorityIndexStore();
     const index = new ContextGraphAuthorityIndex(store);
     await index.view(directRead(3_000));
 
-    await vi.advanceTimersByTimeAsync(CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS + 1);
-    await index.view(directRead(2_790));
+    // Every anchor after the reset is far below the cursor proved just before it.
+    await expect(index.view(directRead(2_790))).rejects.toMatchObject({ reason: 'cursor-ahead' });
+    await vi.advanceTimersByTimeAsync(CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS - 1_000);
+    await expect(index.view(directRead(2_790))).rejects.toMatchObject({ reason: 'cursor-ahead' });
+    expect(store.invalidations).toEqual([]);
 
+    await vi.advanceTimersByTimeAsync(1_001);
+    await index.view(directRead(2_790));
     expect(store.invalidations).toHaveLength(1);
   });
 
