@@ -134,12 +134,6 @@ export interface ContextGraphAuthorityIndexScanInput {
    * block is only as good as the history it was reduced with.
    */
   readonly deploymentBlockPinned?: boolean;
-  /**
-   * The first block `readPage` can serve, for a page source that does not
-   * reach back to every deployment block (the chain event log's coverage). A
-   * rebuild that needs blocks below it is refused as `rebuild-required`.
-   */
-  readonly readPageFromBlockNumber?: number;
   readonly signal?: AbortSignal;
   readonly readBlockHash: (
     blockNumber: number,
@@ -496,8 +490,6 @@ export class ContextGraphAuthorityIndex {
       : `${scope}:trusted-bootstrap:${this.bootstrap.trustDomain}`;
     let repository = this.#repository.forScope(repositoryKey);
     const requestedDeploymentBlockNumber = normalizeNonNegativeSafeInteger(input.deploymentBlockNumber);
-    const readPageFromBlockNumber = input.readPageFromBlockNumber === undefined ? 0
-      : normalizeNonNegativeSafeInteger(input.readPageFromBlockNumber) ?? Number.NaN;
     const finalizedNumber = normalizeNonNegativeSafeInteger(input.finalized.number);
     const finalizedHash = normalizeHash(input.finalized.hash);
     const pageSize = normalizeNonNegativeSafeInteger(input.pageSize);
@@ -508,11 +500,20 @@ export class ContextGraphAuthorityIndex {
       || pageSize === undefined
       || pageSize < 1
       || requestedDeploymentBlockNumber > finalizedNumber
-      || !(readPageFromBlockNumber <= finalizedNumber)
     ) {
       throw new Error('Context Graph authority index scan bounds are invalid');
     }
+    // Highest block this scan may WRITE DOWN. Never below the deployment block:
+    // holding the cursor back past the start of history would persist nothing.
+    const holdback = normalizeNonNegativeSafeInteger(
+      input.durableReorgHoldbackBlocks ?? 0,
+    ) ?? 0;
     let deploymentBlockNumber = requestedDeploymentBlockNumber;
+    let persistThroughBlockNumber = Math.max(deploymentBlockNumber, finalizedNumber - holdback);
+    const setDeploymentBlock = (blockNumber: number): void => {
+      deploymentBlockNumber = blockNumber;
+      persistThroughBlockNumber = Math.max(blockNumber, finalizedNumber - holdback);
+    };
 
     let servableEpoch = this.#servableEpochs.get(scope) ?? 0;
     const onRejectedCheckpoint = (): void => {
@@ -562,6 +563,10 @@ export class ContextGraphAuthorityIndex {
       });
       // Admission returns a checkpoint only after matching its cursor hash.
       markReachable(admitted);
+      // No history kept, so none bounds the rebuild: it starts from the lookup,
+      // whether the first admission or a reload after a lost commit found the
+      // checkpoint gone (a chain reset at the same address).
+      if (admitted.kind !== 'checkpoint') setDeploymentBlock(requestedDeploymentBlockNumber);
       return admitted;
     };
     // An unpinned lookup resumes the stored checkpoint from the block it was
@@ -570,30 +575,10 @@ export class ContextGraphAuthorityIndex {
     const initial = await repository.load();
     if (input.deploymentBlockPinned === false && initial.kind === 'checkpoint') {
       const stored = initial.checkpoint.cursor.deploymentBlockNumber;
-      if (stored > deploymentBlockNumber && stored <= finalizedNumber) deploymentBlockNumber = stored;
+      if (stored > deploymentBlockNumber && stored <= finalizedNumber) setDeploymentBlock(stored);
     }
     let durable = await admit(initial);
-    if (durable.kind !== 'checkpoint') {
-      // No history kept, so none bounds the rebuild: it starts from the lookup.
-      deploymentBlockNumber = requestedDeploymentBlockNumber;
-      if (deploymentBlockNumber < readPageFromBlockNumber) {
-        throw new ContextGraphAuthorityIndexRetryableError(
-          `Context Graph authority index rebuild from block ${deploymentBlockNumber} needs `
-          + `blocks below ${readPageFromBlockNumber}, which this page source does not serve`,
-          'rebuild-required',
-        );
-      }
-    }
 
-    // Highest block this scan may WRITE DOWN. Never below the deployment block:
-    // holding the cursor back past the start of history would persist nothing.
-    const holdback = normalizeNonNegativeSafeInteger(
-      input.durableReorgHoldbackBlocks ?? 0,
-    ) ?? 0;
-    const persistThroughBlockNumber = Math.max(
-      deploymentBlockNumber,
-      finalizedNumber - holdback,
-    );
     const bootstrap = this.bootstrap;
     const minimumSeedBlock = bootstrap === undefined ? deploymentBlockNumber
       : Math.max(deploymentBlockNumber, finalizedNumber - bootstrap.maxTailBlocks);

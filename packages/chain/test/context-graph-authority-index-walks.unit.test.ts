@@ -362,28 +362,36 @@ describe('durable authority-index walks under a throttled RPC budget', () => {
       .toMatchObject({ deploymentBlockNumber: DEPLOY_BLOCK });
   });
 
-  it('refuses a rebuild that needs blocks below the first one its page source serves', async () => {
+  it('rebuilds from the lookup bound when another writer drops the stored checkpoint mid-scan', async () => {
     const store = new MemoryAuthorityIndexStore();
     await new ContextGraphAuthorityIndex(store).view(directRead(1_500));
-    const resetHash = (block: number): string => `0x${(block + 0xabcdef).toString(16).padStart(64, '0')}`;
-    let pages = 0;
+    // A graph the chain created below the stored deployment block, as after a
+    // reset at the same address.
+    const below = creation(42n, 200);
+    let tombstoned = false;
+    const pages: Array<readonly [number, number]> = [];
 
-    // A log that covers the history from the stored deployment block only.
-    await expect(new ContextGraphAuthorityIndex(store).view({
+    // This scan adopts the stored block 1000 and admits its checkpoint; then
+    // another writer that saw the reset tombstones it before the first commit.
+    const view = await new ContextGraphAuthorityIndex(store).view({
       ...directRead(2_000),
-      finalized: { number: 2_000, hash: resetHash(2_000) },
       deploymentBlockNumber: 0,
       deploymentBlockPinned: false,
-      readPageFromBlockNumber: DEPLOY_BLOCK,
-      readBlockHash: async (blockNumber: number) => resetHash(blockNumber),
-      readPage: async () => {
-        pages += 1;
-        return [];
+      readPage: async (fromBlock: number, toBlock: number) => {
+        pages.push([fromBlock, toBlock]);
+        if (!tombstoned) {
+          tombstoned = true;
+          await store.invalidate(SCOPE, store.record!.token);
+        }
+        return below.blockNumber >= fromBlock && below.blockNumber <= toBlock ? [below] : [];
       },
-    })).rejects.toMatchObject({ reason: 'rebuild-required' });
-    // The rejected history stays rejected, for the live scan to rebuild.
-    expect(store.invalidations).toHaveLength(1);
-    expect(pages).toBe(0);
+    });
+
+    expect(pages[0]?.[0]).toBe(1_500 - HOLDBACK + 1);
+    expect(pages[1]?.[0]).toBe(0);
+    expect(view.has('42' as ContextGraphAuthorityIndexId)).toBe(true);
+    expect((store.record!.value as { cursor: { deploymentBlockNumber: number } }).cursor)
+      .toMatchObject({ deploymentBlockNumber: 0 });
   });
 
   it('resets the rebuild clock when a read at a current anchor admits the cursor', async () => {

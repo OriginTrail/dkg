@@ -111,7 +111,6 @@ type EvmContextGraphAuthorityIndexReadInputV1 = Readonly<{
   provider: JsonRpcProvider;
   deploymentBlockNumber: number;
   deploymentBlockPinned?: boolean;
-  readPageFromBlockNumber?: number;
   finalized: Readonly<{ number: number; hash: string }>;
   pageSize: number;
   /** Operator depth; bounds how far the DURABLE cursor may ratchet. */
@@ -182,7 +181,6 @@ function authorityIndexScanBoundsV1(
     readScope: input.provider,
     deploymentBlockNumber: input.deploymentBlockNumber,
     deploymentBlockPinned: input.deploymentBlockPinned,
-    readPageFromBlockNumber: input.readPageFromBlockNumber,
     finalized: input.finalized,
     // Preserve invalid values for ContextGraphAuthorityIndex's fail-closed
     // bounds validation; only a valid oversized configured page is clamped.
@@ -566,12 +564,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
           if (anchor === undefined) break;
           try {
             const logged = await readEvmContextGraphAuthorityIndexProjectionV1(
-              {
-                ...readInput,
-                readPageFromBlockNumber: coverageFrom,
-                finalized: anchor.finalized,
-                logSource: { anchor, source },
-              },
+              { ...readInput, finalized: anchor.finalized, logSource: { anchor, source } },
               (scan) => project(scan, {
                 provider,
                 contractAddress,
@@ -619,8 +612,9 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
               if (logAttempt === 0) continue;
               break;
             }
-            // A rebuild below what the log covers is the live scan's to do.
-            if (isContextGraphAuthorityIndexRetryableError(error) && error.reason === 'rebuild-required') break;
+            // A range the log does not hold, such as a rebuild below the
+            // stored deployment block, is the live scan's to read.
+            if (isContextGraphAuthorityIndexRetryableError(error) && error.reason === 'log-uncovered') break;
             if (!isContextGraphAuthorityIndexRetryableError(error)
               || error.reason !== 'cursor-ahead') throw error;
             if (logAttempt === 0) {
@@ -1171,7 +1165,6 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
                   provider,
                   deploymentBlockNumber: lookup.blockNumber,
                   deploymentBlockPinned: lookup.pinned,
-                  readPageFromBlockNumber: deploymentBlockNumber,
                   pageSize: dependencies.pageSize(),
                   finalityConfirmations: dependencies.finalityConfirmations(),
                   finalized: anchor.finalized,

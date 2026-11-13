@@ -8,10 +8,10 @@ export class ContextGraphAuthorityIndexRetryableError extends Error {
     message: string,
     /**
      * `cursor-ahead`: the anchor is below the durable cursor; a newer anchor
-     * can serve. `rebuild-required`: the stored checkpoint must be rebuilt
-     * from blocks this page source cannot serve; a live scan can.
+     * can serve. `log-uncovered`: the chain event log does not hold the range
+     * a scan needs; a live scan of the chain can read it.
      */
-    readonly reason?: 'cursor-ahead' | 'rebuild-required',
+    readonly reason?: 'cursor-ahead' | 'log-uncovered',
   ) {
     super(message);
   }
