@@ -79,8 +79,9 @@
 #             the node; the cleared jobs must stay cleared; a store opened outside the daemon starts read
 #             graphs as the daemon does: each shared-layer read graph the node's
 #             settings keep, which a plain restart first keeps at its generation,
-#             must keep it, maintained by the CLI's own read-graph layer, and
-#             every other one must be marked dirty); a rollback and forward again (the
+#             must keep it, and every other one must be marked dirty; the write
+#             touches only the publisher's own graphs, so the drill shows that
+#             start, not maintenance, which publisher-store.test.ts covers); a rollback and forward again (the
 #             earlier release is
 #             built first; `dkg rollback --stores-for <its version>` readies the
 #             stopped node's stores, and after it the node's store must hold
@@ -1750,10 +1751,11 @@ drill_cli_write_daemon_down() {
     || { record drill-cli INCONCLUSIVE "$(( $(now) - started ))" "\`dkg publisher stats\` on node$n counts ${before:-no} finalized jobs, after its job $job was finalized"; return; }
   read_graph_rows "$n" 2>/dev/null | grep -q . || { record drill-cli INCONCLUSIVE "$(( $(now) - started ))" "node$n has no read graph"; return; }
   # A store the CLI opens to write with the daemon down starts read graphs as the daemon does (createPublisherStore):
-  # the read graphs the node's settings keep stay ready at their generation, and its read-graph layer maintains its
-  # writes to them; every other read graph is marked dirty, so the next start renews or drops it. A plain restart comes
-  # first, as the control: it keeps every ready shared-layer read graph at its generation, so a change after the
-  # offline write comes from that write.
+  # the read graphs the node's settings keep stay ready at their generation; every other read graph is marked dirty,
+  # so the next start renews or drops it. The write here touches only the publisher's own graphs, outside every read
+  # graph, so the drill shows that start, not maintenance (packages/cli/test/publisher-store.test.ts covers a write into
+  # a kept read graph). A plain restart comes first, as the control: it keeps every ready shared-layer read graph at
+  # its generation, so a change after the offline write comes from that write.
   wait_all_ready drill-cli-before "$READY_TIMEOUT" "$n" \
     || { record drill-cli INCONCLUSIVE "$(( $(now) - started ))" "node$n's read graphs were not ready before the drill"; return; }
   restart_node "$n" || { record drill-cli FAIL "$(( $(now) - started ))" "node$n did not come back from a plain restart"; return; }
@@ -1791,10 +1793,10 @@ drill_cli_write_daemon_down() {
       [ "$gen_after" != "$gen" ] || unmarked="$unmarked <$graph> (generation $gen)"
     fi
   done < "$dir/drill-cli-control.node$n"
-  [ -z "$moved" ] || { record drill-cli FAIL "$(( $(now) - started ))" "read graphs node$n's settings keep left their generation through the offline write, though the CLI's read-graph layer maintains them:$moved"; return; }
+  [ -z "$moved" ] || { record drill-cli FAIL "$(( $(now) - started ))" "read graphs node$n's settings keep left their generation through the offline write, though the offline store starts them as kept:$moved"; return; }
   [ -z "$unmarked" ] || { record drill-cli FAIL "$(( $(now) - started ))" "read graphs node$n's settings do not keep came through the offline write at their generation, so nothing marked them dirty:$unmarked"; return; }
   if [ "$unkept" = 0 ]; then why="its settings keep every one, so none was to be marked dirty"; else why="the $unkept it does not keep were marked dirty (renewed or dropped)"; fi
-  drill_end drill-cli "$n" "$started" "with node$n's daemon down, \`dkg publisher clear finalized\` cleared $cleared of $before jobs, which stayed cleared; the $kept shared-layer read graphs its settings keep stayed at their generation, maintained by the CLI's read-graph layer; $why"
+  drill_end drill-cli "$n" "$started" "with node$n's daemon down, \`dkg publisher clear finalized\` cleared $cleared of $before jobs, which stayed cleared; the offline writable store started read graphs and left the $kept shared-layer ones its settings keep at their generation; $why; the write touches only the publisher's own graphs, so this drill does not show maintenance (covered by publisher-store.test.ts)"
 }
 
 # partition_graphs <endpoint> <out>: every graph the store holds in a read-graph partition (read graphs and
