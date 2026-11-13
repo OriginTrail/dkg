@@ -1372,36 +1372,6 @@ shared_read_graph() {
 }
 # build_ms <n> <read graph>: how long node <n>'s last build of that read graph took, in ms, from its daemon.log.
 build_ms() { grep -F "Built read graph $2 in " "$DEVNET_DIR/node$1/daemon.log" 2>/dev/null | tail -1 | sed -E 's/.* in ([0-9]+) ms.*/\1/'; }
-# shared_ok <response body>: whether a knowledge-asset write answered that it was shared to shared memory.
-shared_ok() {
-  printf '%s' "$1" | node -e '
-    let d = ""; process.stdin.on("data", (c) => d += c); process.stdin.on("end", () => {
-      let j; try { j = JSON.parse(d); } catch { process.exit(1); }
-      process.exit(j?.swmShared === true || ["swm-shared", "vm-confirmed"].includes(j?.status) ? 0 : 1);
-    });'
-}
-# restart_drill_graph <n> <context graph>: node <n> creates the context graph and shares RESTART_TRIPLES triples into
-# its shared memory, RESTART_ASSET_TRIPLES per knowledge asset, so that rebuilding its shared-memory read graph takes
-# seconds. Prints why and fails when the node refuses a step.
-restart_drill_graph() {
-  local n="$1" cg="$2" body resp k=0 assets
-  body="{\"id\":\"$cg\",\"name\":\"Read-graph restart drill\"}"
-  resp="$(api "$n" POST /api/context-graph/create "$body")"
-  case "$(code_of "$resp")" in 200|201|409) ;; *) echo "creating context graph $cg: HTTP $(code_of "$resp")"; return 1 ;; esac
-  assets=$(( (RESTART_TRIPLES + RESTART_ASSET_TRIPLES - 1) / RESTART_ASSET_TRIPLES ))
-  while [ "$k" -lt "$assets" ]; do
-    k=$((k + 1))
-    body="$(node -e '
-      const [contextGraphId, k, count] = process.argv.slice(1);
-      const subject = `urn:read-graphs-run:restart-drill:${contextGraphId}:${k}`;
-      const quads = Array.from({ length: Number(count) }, (_, i) => ({ subject, predicate: "http://schema.org/value", object: `"${k}.${i}"`, graph: "" }));
-      console.log(JSON.stringify({ contextGraphId, name: `restart-drill-${k}`, quads, finalize: true, alsoShareSwm: true }));
-    ' "$cg" "$k" "$RESTART_ASSET_TRIPLES")"
-    resp="$(api "$n" POST /api/knowledge-assets "$body")"
-    case "$(code_of "$resp")" in 2??) ;; *) echo "asset $k of $assets: HTTP $(code_of "$resp") $(body_of "$resp" | head -c 200)"; return 1 ;; esac
-    shared_ok "$(body_of "$resp")" || { echo "asset $k of $assets was not shared: $(body_of "$resp" | head -c 200)"; return 1; }
-  done
-}
 
 drill_restart_during_rebuild() {
   local n="$RESTART_NODE" started cg graph why built caught="" i gen_before gen_after

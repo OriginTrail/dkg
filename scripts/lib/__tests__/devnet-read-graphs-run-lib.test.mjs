@@ -1,15 +1,23 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-// The D1 runner's gate log watchers (scripts/devnet-read-graphs-run-lib.sh) run in the background while the devnet's
-// own scripts stop and restart nodes. Devnet process control stops every process it counts as a node's own.
+// The D1 runner's helpers in scripts/devnet-read-graphs-run-lib.sh. Its gate log watchers run in the background while
+// the devnet's own scripts stop and restart nodes, and devnet process control stops every process it counts as a
+// node's own. Its restart drill uploads bodies larger than one command-line argument may be on Linux.
 const LIB = fileURLToPath(new URL('../../devnet-read-graphs-run-lib.sh', import.meta.url));
+const DEVNET_LIB = fileURLToPath(new URL('../../devnet-lib.sh', import.meta.url));
+const RUNNER = fileURLToPath(new URL('../../devnet-read-graphs-build-run.sh', import.meta.url));
 const PROCESS_CONTROL = fileURLToPath(new URL('../../devnet-node-process-control.mjs', import.meta.url));
+// The runner's default number of shared-memory triples per knowledge asset in the restart drill.
+const DEFAULT_ASSET_TRIPLES = Number(/READ_GRAPHS_DRILL_RESTART_ASSET_TRIPLES:-(\d+)\}/.exec(readFileSync(RUNNER, 'utf8'))?.[1]);
+// Linux's limit on one command-line argument (MAX_ARG_STRLEN).
+const LINUX_ARGUMENT_BYTES = 128 * 1024;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -105,4 +113,81 @@ test('a gate log watcher reads mismatch lines across a rotation, outlives SIGHUP
   await until('the watcher to stop', () => !alive(watcher));
   assert.match(readFileSync(f.stopped, 'utf8'), /SIGTERM/);
   watcher = undefined;
+});
+
+// A child process the test's own HTTP server can answer while it runs (spawnSync would block the server).
+function run(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
+// A local stand-in for node1's API that keeps every request it receives, whole.
+async function fakeNode(t) {
+  const received = [];
+  const server = createServer((req, res) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      received.push({ url: req.url, auth: req.headers.authorization, body });
+      res.setHeader('Content-Type', 'application/json');
+      if (req.method === 'POST' && req.url === '/api/context-graph/create') { res.writeHead(201); res.end('{"created":true}'); return; }
+      if (req.method === 'POST' && req.url === '/api/knowledge-assets') { res.writeHead(200); res.end('{"status":"swm-shared","swmShared":true}'); return; }
+      res.writeHead(404); res.end('{}');
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const devnet = mkdtempSync(join(tmpdir(), 'read-graphs-upload-'));
+  mkdirSync(join(devnet, 'node1'), { recursive: true });
+  writeFileSync(join(devnet, 'node1', 'auth.token'), '# devnet node token\ntest-token\n');
+  t.after(() => { server.close(); rmSync(devnet, { recursive: true, force: true }); });
+  return { received, devnet, port: String(server.address().port) };
+}
+
+// The restart drill's upload of two default-size assets to node1, after <setup> (shell code run before it).
+function uploadTwoAssets(node, setup = '') {
+  return run('bash', ['-c', `
+    set -eu
+    source "$1"
+    source "$2"
+    DEVNET_DIR="$3"; API_PORT_BASE="$4"; RESTART_ASSET_TRIPLES="$5"; RESTART_TRIPLES=$(( 2 * $5 ))
+    ${setup}
+    restart_drill_graph 1 read-graphs-restart-test
+  `, 'bash', DEVNET_LIB, LIB, node.devnet, node.port, String(DEFAULT_ASSET_TRIPLES)]);
+}
+
+test("the restart drill's default-size assets reach the node whole, through curl", async (t) => {
+  assert.ok(DEFAULT_ASSET_TRIPLES > 0, "the runner's default RESTART_ASSET_TRIPLES could not be read");
+  const node = await fakeNode(t);
+  const result = await uploadTwoAssets(node);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const assets = node.received.filter((request) => request.url === '/api/knowledge-assets');
+  assert.equal(assets.length, 2);
+  for (const [i, asset] of assets.entries()) {
+    assert.equal(asset.auth, 'Bearer test-token');
+    const body = JSON.parse(asset.body);
+    assert.equal(body.name, `restart-drill-${i + 1}`);
+    assert.equal(body.contextGraphId, 'read-graphs-restart-test');
+    assert.equal(body.alsoShareSwm, true);
+    assert.equal(body.quads.length, DEFAULT_ASSET_TRIPLES);
+    assert.equal(new Set(body.quads.map((quad) => quad.object)).size, DEFAULT_ASSET_TRIPLES);
+    // More than Linux takes in one command-line argument: as one curl argument, this body would not be sent there.
+    assert.ok(Buffer.byteLength(asset.body) > LINUX_ARGUMENT_BYTES, `a default-size body is only ${Buffer.byteLength(asset.body)} bytes`);
+  }
+});
+
+test('on Linux, a default-size asset body cannot go to curl as one argument', { skip: process.platform !== 'linux' && 'only Linux limits one argument' }, async (t) => {
+  const node = await fakeNode(t);
+  // The transport before api_file: the body as one argument, as devnet-lib.sh's api passes it.
+  const result = await uploadTwoAssets(node, 'api_file() { api "$1" "$2" "$3" "$(cat "$4")"; }');
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /asset 1 of 2: HTTP 0+/);
+  assert.equal(node.received.filter((request) => request.url === '/api/knowledge-assets').length, 0);
 });

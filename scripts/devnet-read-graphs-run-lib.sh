@@ -1,7 +1,54 @@
 #!/usr/bin/env bash
-# Sourceable helpers of scripts/devnet-read-graphs-build-run.sh: the gate's log watchers, which run in the
-# background while the devnet's own scripts stop and start nodes. Function definitions only, no side effects on
-# source. The caller sets DEVNET_DIR. bash 3.2 compatible.
+# Sourceable helpers of scripts/devnet-read-graphs-build-run.sh, the ones its tests run: the gate's log watchers,
+# which run in the background while the devnet's own scripts stop and start nodes, and the restart drill's uploads.
+# Function definitions only, no side effects on source. The caller sources scripts/devnet-lib.sh and sets DEVNET_DIR
+# and API_PORT_BASE (and, for the restart drill, RESTART_TRIPLES and RESTART_ASSET_TRIPLES). bash 3.2 compatible.
+
+# api_file <node> <METHOD> <path> <file>: as devnet-lib.sh's api, with the request body read from <file>. Linux allows
+# 128 KiB per command-line argument, less than a large body: api passes its body as one.
+api_file() {
+  local n="$1" port token tmp code
+  port=$(node_port "$n"); token=$(node_token "$n"); tmp="$(mktemp "${TMPDIR:-/tmp}/dkg-api-XXXXXX")"
+  code=$(curl -sS --max-time "${DKG_API_MAXTIME:-120}" --connect-timeout 5 -o "$tmp" -w '%{http_code}' -X "$2" \
+    -H "Authorization: Bearer $token" -H 'Content-Type: application/json' --data-binary "@$4" \
+    "http://127.0.0.1:${port}$3" 2>/dev/null || echo 000)
+  printf '%s\n' "$code"; cat "$tmp" 2>/dev/null; rm -f "$tmp"
+}
+# shared_ok <response body>: whether a knowledge-asset write answered that it was shared to shared memory.
+shared_ok() {
+  printf '%s' "$1" | node -e '
+    let d = ""; process.stdin.on("data", (c) => d += c); process.stdin.on("end", () => {
+      let j; try { j = JSON.parse(d); } catch { process.exit(1); }
+      process.exit(j?.swmShared === true || ["swm-shared", "vm-confirmed"].includes(j?.status) ? 0 : 1);
+    });'
+}
+# restart_drill_graph <n> <context graph>: node <n> creates the context graph and shares RESTART_TRIPLES triples into
+# its shared memory, RESTART_ASSET_TRIPLES per knowledge asset, so that rebuilding its shared-memory read graph takes
+# seconds. Each asset's body goes through a file (api_file). Prints why and fails when the node refuses a step.
+restart_drill_graph() {
+  local n="$1" cg="$2" body resp k=0 assets file why=""
+  body="{\"id\":\"$cg\",\"name\":\"Read-graph restart drill\"}"
+  resp="$(api "$n" POST /api/context-graph/create "$body")"
+  case "$(code_of "$resp")" in 200|201|409) ;; *) echo "creating context graph $cg: HTTP $(code_of "$resp")"; return 1 ;; esac
+  file="$(mktemp "${TMPDIR:-/tmp}/read-graphs-restart-XXXXXX")" || { echo "no temporary file for the asset bodies"; return 1; }
+  assets=$(( (RESTART_TRIPLES + RESTART_ASSET_TRIPLES - 1) / RESTART_ASSET_TRIPLES ))
+  while [ -z "$why" ] && [ "$k" -lt "$assets" ]; do
+    k=$((k + 1))
+    node -e '
+      const [contextGraphId, k, count] = process.argv.slice(1);
+      const subject = `urn:read-graphs-run:restart-drill:${contextGraphId}:${k}`;
+      const quads = Array.from({ length: Number(count) }, (_, i) => ({ subject, predicate: "http://schema.org/value", object: `"${k}.${i}"`, graph: "" }));
+      console.log(JSON.stringify({ contextGraphId, name: `restart-drill-${k}`, quads, finalize: true, alsoShareSwm: true }));
+    ' "$cg" "$k" "$RESTART_ASSET_TRIPLES" > "$file" || { why="asset $k of $assets: its body could not be written"; break; }
+    resp="$(api_file "$n" POST /api/knowledge-assets "$file")"
+    case "$(code_of "$resp")" in
+      2??) shared_ok "$(body_of "$resp")" || why="asset $k of $assets was not shared: $(body_of "$resp" | head -c 200)" ;;
+      *) why="asset $k of $assets: HTTP $(code_of "$resp") $(body_of "$resp" | head -c 200)" ;;
+    esac
+  done
+  rm -f "$file"
+  [ -z "$why" ] || { echo "$why"; return 1; }
+}
 
 # log_position <n>: "<size> <device:inode>" of node <n>'s daemon.log now, or "0 none" when there is none.
 log_position() {
