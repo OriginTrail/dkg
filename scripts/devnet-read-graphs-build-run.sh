@@ -66,10 +66,11 @@
 #   drills    a restart during a rebuild (of the drill's own context graph,
 #             whose shared memory takes seconds to copy: the read graphs a
 #             devnet holds are rebuilt in milliseconds); a kill of the daemon worker while it
-#             holds a working-memory write (writes of several hundred triples
+#             holds a working-memory write (writes of several thousand triples
 #             from a writer bounded by time, while a second writer loads the
-#             node; each kill aimed late in a write, at a share of the median
-#             write time; up to two rounds of five crashes), with that agent's read graph
+#             node; each kill aimed at the end of a write, at a share of the
+#             median time of the current worker's writes; up to two rounds of
+#             five crashes), with that agent's read graph
 #             built first (a kill counts only when the write's whole request
 #             was uploaded and dropped unanswered, and its data is there after
 #             the restart, so the worker had begun to store it; the
@@ -165,9 +166,9 @@
 #                                              knowledge asset (default 2000)
 #   READ_GRAPHS_DRILLS                         the drills the drills phase runs (default "restart kill cli rollback
 #                                              flag"); one left out is INCONCLUSIVE, so the run cannot pass
-#   READ_GRAPHS_DRILL_KILL_WRITE_TRIPLES       triples per working-memory write in the kill drill (default 500)
-#   READ_GRAPHS_DRILL_KILL_WRITER_SECONDS      how long the kill drill's writer goes on at most (default 600; 3,000
-#                                              writes at most)
+#   READ_GRAPHS_DRILL_KILL_WRITE_TRIPLES       triples per working-memory write in the kill drill (default 5000)
+#   READ_GRAPHS_DRILL_KILL_WRITER_SECONDS      how long the kill drill's writers go on at most (default 600; 500
+#                                              writes each at most)
 #   READ_GRAPHS_PUBLISH_TIMEOUT                seconds the cli and rollback drills wait for their own publish job to
 #                                              be finalized (default 300)
 #   READ_GRAPHS_RUN_RESULTS, READ_GRAPHS_RUN_KEEP
@@ -204,7 +205,7 @@ ROLLBACK_NODE="${READ_GRAPHS_DRILL_ROLLBACK_NODE:-4}"
 FLAG_NODE="${READ_GRAPHS_DRILL_FLAG_NODE:-2}"
 RESTART_TRIPLES="${READ_GRAPHS_DRILL_RESTART_TRIPLES:-500000}"
 RESTART_ASSET_TRIPLES="${READ_GRAPHS_DRILL_RESTART_ASSET_TRIPLES:-2000}"
-KILL_WRITE_TRIPLES="${READ_GRAPHS_DRILL_KILL_WRITE_TRIPLES:-500}"
+KILL_WRITE_TRIPLES="${READ_GRAPHS_DRILL_KILL_WRITE_TRIPLES:-5000}"
 KILL_WRITER_SECONDS="${READ_GRAPHS_DRILL_KILL_WRITER_SECONDS:-600}"
 DRILLS="${READ_GRAPHS_DRILLS:-restart kill cli rollback flag}"
 PUBLISH_TIMEOUT="${READ_GRAPHS_PUBLISH_TIMEOUT:-300}"
@@ -1474,9 +1475,10 @@ drill_write_template() {
 }
 # aim_kill <inflight> <answers> <acked> <acked copy> <pid> <fraction> <after> <timeout s>: wait for a kill-drill write
 # after write <after> to start (its number appears in <inflight>); once it has run <fraction> of the median time of the
-# writes acknowledged so far (curl's time_total in <answers>), and while it is still in flight, copy <acked> to
-# <acked copy> and send SIGKILL to <pid>. A write answered before its aim is passed over for the next one. Prints
-# "<write> <answers lines before the kill> <median ms>"; prints nothing when no write could be aimed at in time.
+# writes acknowledged after write <after> (curl's time_total in <answers>: the current worker's, at least three), and
+# while it is still in flight, copy <acked> to <acked copy> and send SIGKILL to <pid>. A write answered before its aim
+# is passed over for the next one. Prints "<write> <answers lines before the kill> <median ms>"; prints nothing when no
+# write could be aimed at in time.
 aim_kill() {
   node -e '
     const fs = require("fs");
@@ -1485,8 +1487,8 @@ aim_kill() {
     const median = () => {
       const times = [];
       for (const line of fs.readFileSync(answers, "utf8").split("\n")) {
-        const m = /^write \d+ rc=0 code=2\d\d .* time=(\d+(?:\.\d+)?)$/.exec(line);
-        if (m) times.push(Number(m[1]) * 1000);
+        const m = /^write (\d+) rc=0 code=2\d\d .* time=(\d+(?:\.\d+)?)$/.exec(line);
+        if (m && Number(m[1]) > Number(after)) times.push(Number(m[2]) * 1000);
       }
       times.sort((a, b) => a - b);
       return times.length >= 3 ? times[Math.floor(times.length / 2)] : undefined;
@@ -1599,7 +1601,8 @@ drill_kill_during_write() {
   # request and its connection was dropped unanswered; exit 7 means the request never reached it; exit 0 means it was
   # answered. After a write that was not acknowledged it waits a moment, so a restarting node does not use up its
   # writes. Each write is KILL_WRITE_TRIPLES triples on its own subject: its name, which the readback reads, and values
-  # that make it heavier to store. Its body goes through a file. It stops after KILL_WRITER_SECONDS or 3,000 writes.
+  # that make it heavier to store, so the worker's request to the store at its end lasts longer. Its body goes through
+  # a file. It stops after KILL_WRITER_SECONDS or 500 writes.
   inflight="$RESULTS/drill-kill.inflight"; answers="$RESULTS/drill-kill.answers"; : > "$inflight"; : > "$answers"
   template="$RESULTS/drill-kill.body-template"; bodyfile="$RESULTS/drill-kill.body"
   load_cg="$cg-load"; load_template="$RESULTS/drill-kill.load-template"; load_body="$RESULTS/drill-kill.load-body"
@@ -1620,7 +1623,7 @@ drill_kill_during_write() {
   (
     export DKG_API_MAXTIME=15
     j=0; until_s=$(( $(now) + KILL_WRITER_SECONDS ))
-    while [ "$j" -lt 3000 ] && [ "$(now)" -lt "$until_s" ]; do
+    while [ "$j" -lt 500 ] && [ "$(now)" -lt "$until_s" ]; do
       j=$((j + 1))
       api "$n" POST /api/knowledge-assets "{\"contextGraphId\":\"$load_cg\",\"name\":\"load-$j\"}" > /dev/null 2>&1 || true
       sed "s/@I@/$j/g" "$load_template" > "$load_body"
@@ -1636,7 +1639,7 @@ drill_kill_during_write() {
   (
     export DKG_API_MAXTIME=15
     i=0; until_s=$(( $(now) + KILL_WRITER_SECONDS ))
-    while [ "$i" -lt 3000 ] && [ "$(now)" -lt "$until_s" ]; do
+    while [ "$i" -lt 500 ] && [ "$(now)" -lt "$until_s" ]; do
       i=$((i + 1))
       api "$n" POST /api/knowledge-assets "{\"contextGraphId\":\"$cg\",\"name\":\"drill-$i\"}" > /dev/null 2>&1 || true
       sed "s/@I@/$i/g" "$template" > "$bodyfile"
@@ -1663,15 +1666,16 @@ drill_kill_during_write() {
   # inside the read-graph update itself, rather than after it, cannot be seen from outside the daemon; a pause hook at
   # the store-write boundary is a follow-up, and a kill in the middle of an engine write is covered by the storage
   # tests (oxigraph-worker-respawn.test.ts).
-  overlap=""; attempt=0; last_write=0; fractions="0.60 0.75 0.85 0.92 0.97"
+  overlap=""; attempt=0; last_write=0; fractions="0.90 0.95 0.98 1.00 1.03"
   while [ -z "$overlap" ] && [ "$attempt" -lt 10 ]; do
     attempt=$((attempt + 1))
-    # Aim the kill late in a write: once three writes were acknowledged, at a share of the median time they took
-    # (curl's time_total), swept from 60 % to 97 % over the five crashes of a round. The worker is resolved first, so
+    # Aim the kill at the end of a write, where its store write is: once three writes were acknowledged by the current
+    # worker (after the last crash; a fresh worker's first writes are slower), at a share of the median time those took
+    # (curl's time_total), swept from 90 % to 103 % over the five crashes of a round. The worker is resolved first, so
     # the kill follows the aim at once.
     fraction="$(echo "$fractions" | cut -d' ' -f$(( (attempt - 1) % 5 + 1 )))"
     for i in $(seq 1 600); do
-      [ "$(acked_count "$acked")" -ge 3 ] && break
+      [ "$(awk -v a="$last_write" '$1 > a' "$acked" | wc -l | tr -d ' ')" -ge 3 ] && break
       kill -0 "$writer" 2>/dev/null || break
       sleep 0.1
     done
@@ -1683,7 +1687,7 @@ drill_kill_during_write() {
     aimed="$(aim_kill "$inflight" "$answers" "$acked" "$RESULTS/drill-kill.acked-crash$attempt" "$pid" "$fraction" "$last_write" 60)"
     if [ -z "$aimed" ]; then
       stop_writer "$writer"
-      record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "no working-memory write could be aimed at within a minute after three were acknowledged ($(acked_count "$acked") acknowledged; crash $attempt), so no kill landed during one"
+      record drill-kill INCONCLUSIVE "$(( $(now) - started ))" "no working-memory write could be aimed at within a minute after three were acknowledged by the current worker ($(acked_count "$acked") acknowledged in all; crash $attempt), so no kill landed during one"
       return
     fi
     # The crash must happen: SIGKILL delivered to the daemon worker, that worker gone, and a new worker in its place
