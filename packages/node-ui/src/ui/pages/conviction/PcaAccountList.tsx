@@ -168,7 +168,7 @@ function CheckById({ onCheck }: { onCheck: (id: string) => void }) {
     onCheck(id);
   };
   return (
-    <>
+    <div className="v10-pca-check">
       <div className="v10-pca-overview-cta-group">
         <input
           type="text"
@@ -187,7 +187,7 @@ function CheckById({ onCheck }: { onCheck: (id: string) => void }) {
         </button>
       </div>
       {error && <p id={errorId} className="v10-pca-crux-error" role="alert">{error}</p>}
-    </>
+    </div>
   );
 }
 
@@ -203,7 +203,7 @@ export function PcaAccountList({
   onRetry,
   onAddFound,
   onCheckId,
-  walletControl,
+  renderWalletControl,
   readingWallet,
   nowSec = Math.floor(Date.now() / 1000),
 }: {
@@ -218,8 +218,9 @@ export function PcaAccountList({
   onAddFound: (id: string) => void;
   /** Opens Get added with this PCA ID already checked. */
   onCheckId: (id: string) => void;
-  /** Connect wallet, on the same row as the ID check: both are ways to find your PCAs. */
-  walletControl?: React.ReactNode;
+  /** Renders Connect wallet with the ID check on its action row (both are ways to find your
+   *  PCAs). Without it, the ID check stands alone. */
+  renderWalletControl?: (leading: React.ReactNode) => React.ReactNode;
   /** The full address of the wallet being read; shown shortened, in full on hover. */
   readingWallet: string | null;
   nowSec?: number;
@@ -233,10 +234,9 @@ export function PcaAccountList({
     <section className="v10-pca-section" data-testid="pca-list">
       <div className="v10-pca-section-head v10-pca-section-head-stacked">
         <h3 className="v10-pca-section-title">{hasRows || loading ? 'PCAs' : 'Already have a PCA?'}</h3>
-        <div className="v10-pca-find-row">
-          <CheckById onCheck={onCheckId} />
-          {walletControl}
-        </div>
+        {renderWalletControl
+          ? renderWalletControl(<CheckById onCheck={onCheckId} />)
+          : <CheckById onCheck={onCheckId} />}
       </div>
       {loading && !hasRows && <div className="card ds-card v10-pca-card v10-pca-card-skeleton" aria-hidden="true" />}
       {hasRows && (

@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react';
-import { Lock, Globe, Share2, TrendingUp, UsersRound, Wallet, Check, Diamond, RefreshCw } from 'lucide-react';
+import { Lock, Globe, Share2, TrendingUp, UsersRound, Wallet, Check, Diamond } from 'lucide-react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
 import { chooseTab as openTab } from '../lib/shellNavigation.js';

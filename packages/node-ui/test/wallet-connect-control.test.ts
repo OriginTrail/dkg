@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -26,5 +27,27 @@ describe('feature-owned wallet connection guidance', () => {
     const html = renderToStaticMarkup(React.createElement(PcaSurfaceWalletConnectControl));
     expect(html).toContain('Publishing wallets sign automatically');
     expect(html).toContain('allowance, plus any top-up balance');
+  });
+
+  it.each([
+    ['disconnected', null],
+    ['connected', '0x1111111111111111111111111111111111111111'],
+  ] as const)('puts `leading` controls on its own action row when %s, with the notes below it', (_state, address) => {
+    useWalletStore.setState({ address });
+    const div = document.createElement('div');
+    div.innerHTML = renderToStaticMarkup(React.createElement(WalletConnectControl, {
+      leading: React.createElement('input', { 'data-testid': 'lead' }),
+    }));
+    const row = div.querySelector('.v10-wallet-connect > .v10-wallet-connect-row')!;
+    expect(row).toBeTruthy();
+    expect(row.firstElementChild?.getAttribute('data-testid')).toBe('lead');
+    expect(row.children).toHaveLength(2);
+    expect(row.querySelector('.v10-wallet-note')).toBeNull();
+    expect(div.querySelectorAll('.v10-wallet-connect > .v10-wallet-note').length).toBeGreaterThan(0);
+  });
+
+  it('keeps its plain layout without `leading`', () => {
+    const html = renderToStaticMarkup(React.createElement(WalletConnectControl));
+    expect(html).not.toContain('v10-wallet-connect-row');
   });
 });

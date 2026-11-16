@@ -207,7 +207,7 @@ export function PanelLeft() {
   const toggleLeftSectionIntegrations = useLayoutStore((s) => s.toggleLeftSectionIntegrations);
   const activeTabId = useTabsStore((s) => s.activeTabId);
   const { activeProjectId, setActiveProject } = useProjectsStore();
-  const { contextGraphs, error: listError, identity: sharedAgent,
+  const { contextGraphs, identity: sharedAgent,
     inventoryLoading, inventoryError } = useContextGraphInventory();
   const stage = useJourneyStore((s) => s.stage);
 

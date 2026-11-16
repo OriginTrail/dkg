@@ -131,7 +131,17 @@ describe('real DashboardView size presentation', () => {
     expect(preview.values).toEqual(['1+', '~3']);
     expect(preview.labels[1].textContent).toBe('triples preview');
     expect(preview.row.textContent).toContain('~3 triples · loaded preview');
-    expect(preview.card.textContent).toContain('can rise or fall');
+    // The qualification lives behind the size card's info button: open it, check it, close it.
+    const toggle = preview.card.querySelector<HTMLButtonElement>('.stat-about-toggle')!;
+    const panel = preview.card.querySelector<HTMLElement>(`#${CSS.escape(toggle.getAttribute('aria-controls')!)}`)!;
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(panel.hidden).toBe(true);
+    await act(async () => { toggle.click(); });
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(panel.hidden).toBe(false);
+    expect(panel.textContent).toContain('can rise or fall');
+    await act(async () => { toggle.click(); });
+    expect(panel.hidden).toBe(true);
 
     probes.graphs = [];
     addGraph('residue', { layeredTriples: [...working,

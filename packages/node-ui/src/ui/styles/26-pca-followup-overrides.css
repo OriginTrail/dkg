@@ -201,10 +201,6 @@
   .v10-pca-node-picker-own { grid-column: 2; }
 }
 
-/* PCAs / Already have a PCA?: the title, then one left-aligned row with the ID check and
-   Connect wallet. The wallet's notes and any error wrap to full width below the row. */
+/* PCAs / Already have a PCA?: the title, then the wallet control's action row, which carries the ID check. */
 .v10-pca-section-head.v10-pca-section-head-stacked { flex-direction: column; align-items: stretch; gap: var(--space-8); }
-.v10-pca-find-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); }
-.v10-pca-find-row .v10-wallet-connect { display: contents; }
-.v10-pca-find-row :is(.v10-pca-crux-error, .v10-wallet-note, .v10-wallet-picker) { flex-basis: 100%; order: 1; margin: 0; }
-.v10-pca-find-row .v10-wallet-connect-btn { align-self: center; }
+.v10-pca-check { display: grid; gap: var(--space-4); }
