@@ -15,7 +15,11 @@ export class LeftPanelPage {
   constructor(page: Page) {
     this.page = page;
     this.root = page.locator(sel.leftPanel.root).first();
-    this.newProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /^New context graph$/i });
+    // Both sidebar states share the accessible name: the first-run card shows "New" with an
+    // aria-label, the group's button shows "New context graph" as its text.
+    this.newProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).and(
+      page.getByRole('button', { name: 'New context graph', exact: true }),
+    );
     this.joinProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /^Join$/i });
     this.oraclePlaceholder = page.locator(sel.leftPanel.oraclePlaceholder);
     this.nodePlaces = page.getByRole('navigation', { name: 'Node' });
