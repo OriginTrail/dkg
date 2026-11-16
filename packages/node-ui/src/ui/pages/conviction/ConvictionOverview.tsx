@@ -7,7 +7,7 @@ import { usePcaOverview } from '../../hooks/usePcaOverview.js';
 import { useDiscoveredPcas } from '../../hooks/useDiscoveredPcas.js';
 import { useConnectedWalletPcas } from '../../hooks/useConnectedWalletPcas.js';
 import { listPcaContracts } from '../../api.js';
-import { WalletConnectControl, WalletRow } from '../../components/Pca/index.js';
+import { WalletRow } from '../../components/Pca/index.js';
 import { RetryButton } from '../../components/ds/RetryButton.js';
 import { walletCoverageRow, summarizeCoverage, withLookupOutcome } from '../../pca/walletCoverage.js';
 import { PcaAccountList, type PcaListAccount } from './PcaAccountList.js';
@@ -266,7 +266,6 @@ export function ConvictionOverview() {
         onRetry={() => refresh()}
         onAddFound={trackAccount}
         onCheckId={(id) => setSponsored({ initialAccountId: id })}
-        renderWalletControl={(leading) => <WalletConnectControl className="compact" testId="pca-wallet-connect" leading={leading} />}
         readingWallet={connectedWalletPcas.loading && connectedWallet ? connectedWallet : null}
       />
 

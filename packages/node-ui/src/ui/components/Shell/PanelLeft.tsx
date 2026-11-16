@@ -318,12 +318,9 @@ export function PanelLeft() {
                 </div>
               )}
             </div>
-          ) : myProjects.length === 0 ? (
-            <div className="v10-sidebar-empty" role={inventoryError ? 'alert' : membershipNote ? 'status' : undefined}>
+          ) : myProjects.length === 0 && !inventoryError ? (
+            <div className="v10-sidebar-empty" role={membershipNote ? 'status' : undefined}>
               <span>{membershipNote ?? 'No context graphs in this section yet.'}</span>
-              {inventoryError && !inventoryLoading && (
-                <RetryButton className="v10-sidebar-retry" onClick={() => { void refreshContextGraphInventory(true); }} />
-              )}
             </div>
           ) : myProjects.map((cg) => (
             <ProjectTreeItem
@@ -352,7 +349,18 @@ export function PanelLeft() {
             </button>
           )}
 
-          {!showCardActions && !(inventoryError && myProjects.length === 0) && (
+          {/* A failed load is said once, here: one line with Retry, under whatever list is still shown. */}
+          {inventoryError && (
+            <div className="v10-sidebar-empty" role="alert">
+              <span>{INVENTORY_ERROR_SHORT}</span>
+              {!inventoryLoading && (
+                <RetryButton className="v10-sidebar-retry" onClick={() => { void refreshContextGraphInventory(true); }} />
+              )}
+            </div>
+          )}
+
+          {/* New and Join stay available: each dialog checks its own prerequisites. */}
+          {!showCardActions && (
             <div className="v10-sidebar-inline-actions v10-sidebar-group-actions">
               <button type="button" className="ds-btn ds-ghost ds-sm" onClick={openCreateModal}><Plus size={14} aria-hidden="true" />New context graph</button>
               <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="Join context graph" onClick={() => openJoinModal()}><LogIn size={14} aria-hidden="true" />Join</button>

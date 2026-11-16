@@ -176,7 +176,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     const probeRoot = createRoot(probeContainer); mountedRoots.push(probeRoot); mountedContainers.push(probeContainer);
     await act(async () => { probeRoot.render(React.createElement(DashboardProbe)); });
     await flush();
-    // The sidebar keeps the last list without an error box; the dashboard banner carries the error.
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
     expect(mine.cgsError).toContain('list unavailable');
     apiFetchContextGraphsMock.mockResolvedValue({ contextGraphs: [{ id: 'recovered', name: 'Recovered graph', callerInvolved: true }] });
     await act(async () => { await mine.retry(); });
@@ -227,8 +227,8 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     apiFetchContextGraphsMock.mockRejectedValueOnce(new Error('list unavailable'));
     const { container } = await renderPanel();
     expect(container.textContent).toContain('My First CG');
-    // The sidebar keeps the last list without a box; the page banner says it may be stale.
-    expect(container.querySelector('[role="alert"]')).toBeNull();
+    // The group keeps the last list, with one error line and Retry under it (no box at the top).
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Couldn’t load context graphs');
     expect(container.querySelector('.v10-journey-empty-card')).toBeNull();
   });
 

@@ -1,5 +1,5 @@
 import React, { useId, useState } from 'react';
-import { HealthChip, formatExpiryShort, formatPcaTrac, truncateAddress } from '../../components/Pca/index.js';
+import { HealthChip, WalletConnectControl, formatExpiryShort, formatPcaTrac, truncateAddress } from '../../components/Pca/index.js';
 import { RetryButton } from '../../components/ds/RetryButton.js';
 import type { ResolvedPcaAccount } from '../../hooks/usePcaOverview.js';
 import type { DiscoveredPca } from '../../hooks/useDiscoveredPcas.js';
@@ -203,7 +203,6 @@ export function PcaAccountList({
   onRetry,
   onAddFound,
   onCheckId,
-  renderWalletControl,
   readingWallet,
   nowSec = Math.floor(Date.now() / 1000),
 }: {
@@ -218,9 +217,6 @@ export function PcaAccountList({
   onAddFound: (id: string) => void;
   /** Opens Get added with this PCA ID already checked. */
   onCheckId: (id: string) => void;
-  /** Renders Connect wallet with the ID check on its action row (both are ways to find your
-   *  PCAs). Without it, the ID check stands alone. */
-  renderWalletControl?: (leading: React.ReactNode) => React.ReactNode;
   /** The full address of the wallet being read; shown shortened, in full on hover. */
   readingWallet: string | null;
   nowSec?: number;
@@ -234,9 +230,8 @@ export function PcaAccountList({
     <section className="v10-pca-section" data-testid="pca-list">
       <div className="v10-pca-section-head v10-pca-section-head-stacked">
         <h3 className="v10-pca-section-title">{hasRows || loading ? 'PCAs' : 'Already have a PCA?'}</h3>
-        {renderWalletControl
-          ? renderWalletControl(<CheckById onCheck={onCheckId} />)
-          : <CheckById onCheck={onCheckId} />}
+        {/* Two ways to find your PCAs, on one row: the ID check, then Connect wallet. */}
+        <WalletConnectControl className="compact" testId="pca-wallet-connect" leading={<CheckById onCheck={onCheckId} />} />
       </div>
       {loading && !hasRows && <div className="card ds-card v10-pca-card v10-pca-card-skeleton" aria-hidden="true" />}
       {hasRows && (
