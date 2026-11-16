@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
-import React from 'react';
+import React, { act } from 'react';
+import { createRoot } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { WalletConnectControl } from '../src/ui/components/Wallet/WalletConnectControl.js';
@@ -30,20 +31,30 @@ describe('feature-owned wallet connection guidance', () => {
   });
 
   it.each([
-    ['disconnected', null],
-    ['connected', '0x1111111111111111111111111111111111111111'],
-  ] as const)('puts `leading` controls on its own action row when %s, with the notes below it', (_state, address) => {
+    ['disconnected', null, '[data-testid="wallet-connect"]'],
+    ['connected', '0x1111111111111111111111111111111111111111', '.v10-wallet-pill'],
+  ] as const)('puts `leading` controls on its own action row when %s, with the notes below it', async (_state, address, control) => {
+    // Mount in a live DOM: server rendering reads the store's initial (disconnected) snapshot.
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     useWalletStore.setState({ address });
-    const div = document.createElement('div');
-    div.innerHTML = renderToStaticMarkup(React.createElement(WalletConnectControl, {
-      leading: React.createElement('input', { 'data-testid': 'lead' }),
-    }));
-    const row = div.querySelector('.v10-wallet-connect > .v10-wallet-connect-row')!;
-    expect(row).toBeTruthy();
-    expect(row.firstElementChild?.getAttribute('data-testid')).toBe('lead');
-    expect(row.children).toHaveLength(2);
-    expect(row.querySelector('.v10-wallet-note')).toBeNull();
-    expect(div.querySelectorAll('.v10-wallet-connect > .v10-wallet-note').length).toBeGreaterThan(0);
+    const host = document.createElement('div'); document.body.appendChild(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => {
+        root.render(React.createElement(WalletConnectControl, { leading: React.createElement('input', { 'data-testid': 'lead' }) }));
+      });
+      const row = host.querySelector('.v10-wallet-connect > .v10-wallet-connect-row')!;
+      expect(row).toBeTruthy();
+      expect(row.children).toHaveLength(2);
+      expect(row.firstElementChild?.getAttribute('data-testid')).toBe('lead');
+      // The wallet's own control for this state sits beside the leading control.
+      expect(row.lastElementChild?.matches(control) || row.lastElementChild?.querySelector(control)).toBeTruthy();
+      expect(row.querySelector('.v10-wallet-note')).toBeNull();
+      expect(host.querySelectorAll('.v10-wallet-connect > .v10-wallet-note').length).toBeGreaterThan(0);
+    } finally {
+      await act(async () => { root.unmount(); });
+      host.remove();
+    }
   });
 
   it('keeps its plain layout without `leading`', () => {
