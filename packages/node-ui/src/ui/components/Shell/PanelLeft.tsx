@@ -1,5 +1,7 @@
 import React, { useCallback, useState } from 'react';
-import { Activity, ClipboardList, Eye, KeyRound, RefreshCw, Store, X } from 'lucide-react';
+import { Activity, ClipboardList, Eye, KeyRound, LogIn, Plus, Store, X } from 'lucide-react';
+import { RetryButton } from '../ds/RetryButton.js';
+import { INVENTORY_ERROR_SHORT } from '../../lib/inventory-copy.js';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { chooseOpenTab, chooseTab as openTab } from '../../lib/shellNavigation.js';
@@ -243,7 +245,7 @@ export function PanelLeft() {
   const showCardActions = showEmptyCard && stage === 1;
 
   const membershipNote = inventoryError
-    ? 'Context graph membership unavailable.'
+    ? INVENTORY_ERROR_SHORT
     : inventoryLoading
       ? 'Loading context graphs…'
       : null;
@@ -295,14 +297,6 @@ export function PanelLeft() {
           </SidebarSection>
         )}
 
-        {inventoryError && (
-          <div className="v10-journey-empty-card ds-card" role="alert">
-            <div>{listError ? 'Context graphs unavailable. ' : ''}{sharedAgent.error ? 'Agent identity unavailable.' : ''}</div>
-            <div>{contextGraphs.length ? 'Showing the last available context graphs.' : 'Context graph membership is unknown.'}</div>
-            <button type="button" className="ds-btn ds-sm" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}><RefreshCw size={12} />Retry</button>
-          </div>
-        )}
-
         <SidebarSection
           label="My context graphs"
           count={myProjects.length}
@@ -325,8 +319,11 @@ export function PanelLeft() {
               )}
             </div>
           ) : myProjects.length === 0 ? (
-            <div className="v10-sidebar-empty" role={membershipNote ? 'status' : undefined}>
+            <div className="v10-sidebar-empty" role={inventoryError ? 'alert' : membershipNote ? 'status' : undefined}>
               <span>{membershipNote ?? 'No context graphs in this section yet.'}</span>
+              {inventoryError && !inventoryLoading && (
+                <RetryButton className="v10-sidebar-retry" onClick={() => { void refreshContextGraphInventory(true); }} />
+              )}
             </div>
           ) : myProjects.map((cg) => (
             <ProjectTreeItem
@@ -355,10 +352,10 @@ export function PanelLeft() {
             </button>
           )}
 
-          {!showCardActions && (
-            <div className="v10-sidebar-inline-actions">
-              <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="New context graph" onClick={openCreateModal}>New</button>
-              <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="Join context graph" onClick={() => openJoinModal()}>Join</button>
+          {!showCardActions && !(inventoryError && myProjects.length === 0) && (
+            <div className="v10-sidebar-inline-actions v10-sidebar-group-actions">
+              <button type="button" className="ds-btn ds-ghost ds-sm" onClick={openCreateModal}><Plus size={14} aria-hidden="true" />New context graph</button>
+              <button type="button" className="ds-btn ds-ghost ds-sm" aria-label="Join context graph" onClick={() => openJoinModal()}><LogIn size={14} aria-hidden="true" />Join</button>
             </div>
           )}
         </SidebarSection>
@@ -408,7 +405,7 @@ export function PanelLeft() {
             );
           }) : (
             <div className="v10-sidebar-empty" role={membershipNote ? 'status' : undefined}>
-              <span>{membershipNote ?? 'Discovered public graphs will appear here. Use Join to subscribe by ID.'}</span>
+              <span>{inventoryError ? 'Shown once context graphs load.' : membershipNote ?? 'Discovered public graphs will appear here. Use Join to subscribe by ID.'}</span>
             </div>
           )}
         </SidebarSection>

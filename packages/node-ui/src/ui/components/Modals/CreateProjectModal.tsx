@@ -68,6 +68,9 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   const [identityError, setIdentityError] = useState(false);
 
   const { contextGraphs, setActiveProject } = useProjectsStore();
+  // Read the shared list's state without subscribing: the sidebar already keeps it fresh.
+  const listLoaded = useProjectsStore((s) => s.inventoryLoaded && !s.loading);
+  const listError = useProjectsStore((s) => s.inventoryError);
   const { setStage, stage } = useJourneyStore();
 
   const loadAgentIdentity = () => {
@@ -274,7 +277,8 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
     }
   };
 
-  const isFirstProject = contextGraphs.length === 0;
+  // Only once the list has loaded and is empty: a slow or failed load isn't a first run.
+  const isFirstProject = contextGraphs.length === 0 && listLoaded && !listError;
 
   // Phase 8: after CG creation succeeds we drop the create form and
   // render the WireWorkspacePanel inline. The modal stays open and
@@ -302,20 +306,22 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           aria-modal="true"
           aria-labelledby="dkg-wire-modal-title"
         >
-          <button
-            type="button"
-            className="v10-modal-close ds-btn ds-ghost ds-icon v10-modal-close-corner"
-            onClick={handleWireDone}
-            aria-label="Close wire workspace dialog"
-            title="Close (Esc)"
-          >
-            <X size={14} />
-          </button>
-          <div className="v10-modal-header">
-            <div id="dkg-wire-modal-title" className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
-            <div className="v10-modal-subtitle">
-              Context graph created. Now wire a local workspace so you can plan it from your own Cursor.
+          <div className="v10-modal-header v10-modal-header-row">
+            <div className="v10-modal-heading">
+              <div id="dkg-wire-modal-title" className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
+              <div className="v10-modal-subtitle">
+                Context graph created. Now wire a local workspace so you can plan it from your own Cursor.
+              </div>
             </div>
+            <button
+              type="button"
+              className="v10-modal-close ds-btn ds-ghost ds-icon"
+              onClick={handleWireDone}
+              aria-label="Close wire workspace dialog"
+              title="Close (Esc)"
+            >
+              <X size={14} />
+            </button>
           </div>
           <div className="v10-modal-body">
             {registrationWarning && (
@@ -349,20 +355,22 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
         aria-labelledby="dkg-create-cg-title"
         aria-describedby="dkg-create-cg-subtitle"
       >
-        <button
-          type="button"
-          className="v10-modal-close ds-btn ds-ghost ds-icon v10-modal-close-corner"
-          onClick={onClose}
-          aria-label="Close create context graph dialog"
-          title="Close (Esc)"
-        >
-          <X size={14} />
-        </button>
-        <div className="v10-modal-header">
-          <div id="dkg-create-cg-title" className="v10-modal-title">Create new context graph</div>
-          <div id="dkg-create-cg-subtitle" className="v10-modal-subtitle">
-            A context graph gives your agent structured memory — a place to draft, share, and publish knowledge.
+        <div className="v10-modal-header v10-modal-header-row">
+          <div className="v10-modal-heading">
+            <div id="dkg-create-cg-title" className="v10-modal-title">Create new context graph</div>
+            <div id="dkg-create-cg-subtitle" className="v10-modal-subtitle">
+              A context graph gives your agent structured memory — a place to draft, share, and publish knowledge.
+            </div>
           </div>
+          <button
+            type="button"
+            className="v10-modal-close ds-btn ds-ghost ds-icon"
+            onClick={onClose}
+            aria-label="Close create context graph dialog"
+            title="Close (Esc)"
+          >
+            <X size={14} />
+          </button>
         </div>
 
         <div className="v10-modal-body">
@@ -475,8 +483,8 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               <span>
                 Register on chain now (required for Verifiable Memory publishing)
                 <div className="v10-create-radio-note">
-                  Off by default: the project is created locally and can be registered later
-                  from its Settings tab when your wallet is funded and a working RPC is configured.
+                  Off by default. The context graph is created on this node, and you can register it later
+                  from its Settings tab once your wallet is funded and an RPC URL is set.
                 </div>
               </span>
             </label>

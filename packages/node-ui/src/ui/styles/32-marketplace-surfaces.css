@@ -1,7 +1,8 @@
 /* Marketplace surfaces: catalog, model page, playground, plans and the
    purchase flow, access and operate. Tokens only (30-marketplace-tokens.css). */
 .mkt-mono { font-family: var(--font-mono); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
-.mkt-frame { max-width: 1040px; padding: var(--sp-6) var(--sp-5); display: grid; gap: var(--sp-5); }
+/* The page shell sets the gutter, as on every other page. */
+.mkt-frame { max-width: 1040px; padding: 0; display: grid; gap: var(--sp-5); }
 .mkt-card { background: var(--surface-1); border: 1px solid var(--border-subtle); border-radius: var(--radius-card); padding: var(--sp-6); display: grid; gap: var(--sp-4); }
 .mkt-muted { color: var(--text-tertiary); }
 /* The component gallery: a sticky "fixture data" banner, and centred placeholder cards. */

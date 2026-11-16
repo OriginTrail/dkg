@@ -50,6 +50,10 @@
 .v10-sidebar-first-run { padding: var(--space-12); gap: var(--space-8); border: 1px solid var(--border-default); border-radius: var(--radius-card); background: var(--bg-surface); }
 .v10-sidebar-inline-actions { display: flex; gap: var(--space-8); padding: var(--space-4) var(--space-8) 0; }
 .v10-sidebar-inline-actions .ds-btn { flex: 1; }
+/* Under the list: ghost buttons with icons, the icon on the place icons' line. */
+.v10-sidebar-group-actions { padding: var(--space-4) var(--space-4) 0; gap: var(--space-4); }
+.v10-sidebar-group-actions .ds-btn { flex: none; }
+.v10-sidebar-retry { justify-self: start; }
 .v10-sidebar-first-run .v10-sidebar-inline-actions { padding: 0; }
 
 /* Tree sections (project list) */
@@ -130,15 +134,6 @@
   font-size: var(--fs-control);
 }
 
-/* Journey empty card */
-.v10-journey-empty-card {
-  margin: var(--space-16) var(--space-8);
-  padding: var(--space-16);
-  border: 1px solid var(--border-default);
-  background: var(--bg-surface);
-  text-align: center;
-}
-.v10-journey-empty-card > button { margin-top: var(--space-8); }
 
 /* Tree items are toggled via React state — no CSS display:none needed */
 

@@ -96,7 +96,7 @@ describe('real DashboardView size presentation', () => {
     probes[failed] = 'endpoint unavailable';
     await render();
     expect(container.textContent).not.toContain('No context graphs yet');
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain('could not be loaded');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Couldn’t load');
     expect(container.querySelector('.v10-dash-section-badge')?.textContent).toBe('—');
     const retry = [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry')!;
     await act(async () => { retry.click(); });
@@ -109,7 +109,7 @@ describe('real DashboardView size presentation', () => {
     await render();
     expect(container.querySelector('.v10-cg-row')?.textContent).toContain('retained');
     expect(container.querySelector('.v10-dash-section-badge')?.textContent).toBe('~1');
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain('last available');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('last ones loaded');
     probes.cgsError = null;
     await render();
     expect(container.querySelector('[role="alert"]')).toBeNull();
@@ -131,7 +131,7 @@ describe('real DashboardView size presentation', () => {
     expect(preview.values).toEqual(['1+', '~3']);
     expect(preview.labels[1].textContent).toBe('triples preview');
     expect(preview.row.textContent).toContain('~3 triples · loaded preview');
-    expect(preview.card.textContent).toContain('may increase or decrease');
+    expect(preview.card.textContent).toContain('can rise or fall');
 
     probes.graphs = [];
     addGraph('residue', { layeredTriples: [...working,
@@ -141,7 +141,7 @@ describe('real DashboardView size presentation', () => {
     const complete = await render();
     expect(complete.values).toEqual(['2', '2']);
     expect(complete.row.textContent).toContain('2 entities · 2 triples');
-    expect(complete.card.textContent).not.toContain('Partial preview');
+    expect(complete.card.textContent).not.toContain('Partial:');
   });
 
   it.each([false, true])('marks capped or unavailable memory as an entity lower bound and triple preview (failed layer: %s)', async (failedLayer) => {
@@ -152,7 +152,7 @@ describe('real DashboardView size presentation', () => {
     expect(row.textContent).toContain(`${(1_251).toLocaleString()}+ entities`);
     expect(row.textContent).toContain(`~${(50_001).toLocaleString()} triples · loaded preview`);
     expect(row.querySelector('[title]')?.getAttribute('title')).toMatch(/capped or unavailable.*increase or decrease/);
-    expect(card.textContent).toContain('Partial preview');
+    expect(card.textContent).toContain('Partial:');
     expect(card.querySelectorAll('.v10-layerbar')).toHaveLength(2);
   });
 
@@ -162,7 +162,7 @@ describe('real DashboardView size presentation', () => {
     expect(values).toEqual(['2', (2_003).toLocaleString()]);
     expect(labels.map((element) => element.textContent)).toEqual(['entities / Knowledge Assets', 'triples']);
     expect(row.textContent).toContain('2 entities · 2k triples');
-    expect(card.textContent).not.toContain('Partial preview');
+    expect(card.textContent).not.toContain('Partial:');
     expect(card.querySelectorAll('.v10-layerbar')).toHaveLength(2);
   });
 

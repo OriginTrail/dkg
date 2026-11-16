@@ -266,12 +266,9 @@ export function ConvictionOverview() {
         onRetry={() => refresh()}
         onAddFound={trackAccount}
         onCheckId={(id) => setSponsored({ initialAccountId: id })}
+        walletControl={<WalletConnectControl className="compact" testId="pca-wallet-connect" />}
         readingWallet={connectedWalletPcas.loading && connectedWallet ? connectedWallet : null}
       />
-
-      <div className="v10-pca-overview-wallet">
-        <WalletConnectControl className="compact" testId="pca-wallet-connect" />
-      </div>
 
       {createOpen && (
         <CreatePcaModal

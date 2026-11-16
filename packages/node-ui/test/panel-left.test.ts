@@ -176,7 +176,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     const probeRoot = createRoot(probeContainer); mountedRoots.push(probeRoot); mountedContainers.push(probeContainer);
     await act(async () => { probeRoot.render(React.createElement(DashboardProbe)); });
     await flush();
-    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+    // The sidebar keeps the last list without an error box; the dashboard banner carries the error.
     expect(mine.cgsError).toContain('list unavailable');
     apiFetchContextGraphsMock.mockResolvedValue({ contextGraphs: [{ id: 'recovered', name: 'Recovered graph', callerInvolved: true }] });
     await act(async () => { await mine.retry(); });
@@ -209,7 +209,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     const failed = endpoint === 'graphs' ? apiFetchContextGraphsMock : fetchCurrentAgentMock;
     failed.mockRejectedValueOnce(new Error(`${endpoint} unavailable`));
     const { container } = await renderPanel({ graphs: [], stage: 1 });
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain('unavailable');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Couldn’t load context graphs');
     expect(container.textContent).not.toContain('No context graphs yet');
     expect(container.textContent).not.toContain('No context graphs in this section yet.');
     await act(async () => { sectionHeader(container, 'Public graphs').click(); });
@@ -227,7 +227,9 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     apiFetchContextGraphsMock.mockRejectedValueOnce(new Error('list unavailable'));
     const { container } = await renderPanel();
     expect(container.textContent).toContain('My First CG');
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain('last available');
+    // The sidebar keeps the last list without a box; the page banner says it may be stale.
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.querySelector('.v10-journey-empty-card')).toBeNull();
   });
 
   it('does not show empty onboarding while the list is still loading', async () => {

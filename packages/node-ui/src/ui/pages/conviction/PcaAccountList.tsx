@@ -172,7 +172,7 @@ function CheckById({ onCheck }: { onCheck: (id: string) => void }) {
       <div className="v10-pca-overview-cta-group">
         <input
           type="text"
-          className="v10-form-input ds-input ds-sm"
+          className="v10-form-input ds-input"
           data-testid="pca-check-input"
           value={value}
           onChange={(e) => setValue(e.target.value)}
@@ -182,7 +182,7 @@ function CheckById({ onCheck }: { onCheck: (id: string) => void }) {
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? errorId : undefined}
         />
-        <button type="button" className="v10-pca-card-btn ds-btn ds-sm" data-testid="pca-check-submit" onClick={submit}>
+        <button type="button" className="v10-pca-card-btn ds-btn" data-testid="pca-check-submit" onClick={submit}>
           Check
         </button>
       </div>
@@ -203,6 +203,7 @@ export function PcaAccountList({
   onRetry,
   onAddFound,
   onCheckId,
+  walletControl,
   readingWallet,
   nowSec = Math.floor(Date.now() / 1000),
 }: {
@@ -217,6 +218,8 @@ export function PcaAccountList({
   onAddFound: (id: string) => void;
   /** Opens Get added with this PCA ID already checked. */
   onCheckId: (id: string) => void;
+  /** Connect wallet, on the same row as the ID check: both are ways to find your PCAs. */
+  walletControl?: React.ReactNode;
   /** The full address of the wallet being read; shown shortened, in full on hover. */
   readingWallet: string | null;
   nowSec?: number;
@@ -228,9 +231,12 @@ export function PcaAccountList({
 
   return (
     <section className="v10-pca-section" data-testid="pca-list">
-      <div className="v10-pca-section-head">
+      <div className="v10-pca-section-head v10-pca-section-head-stacked">
         <h3 className="v10-pca-section-title">{hasRows || loading ? 'PCAs' : 'Already have a PCA?'}</h3>
-        <CheckById onCheck={onCheckId} />
+        <div className="v10-pca-find-row">
+          <CheckById onCheck={onCheckId} />
+          {walletControl}
+        </div>
       </div>
       {loading && !hasRows && <div className="card ds-card v10-pca-card v10-pca-card-skeleton" aria-hidden="true" />}
       {hasRows && (

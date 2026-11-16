@@ -2,13 +2,6 @@
 
 /* ----- PCA UX follow-up: combined coverage + compact controls ----- */
 
-.v10-pca-overview-wallet {
-  width: auto;
-  max-width: min(420px, 100%);
-  margin-left: 0;
-  margin-top: var(--space-16);
-}
-
 .v10-wallet-connect.compact {
   min-width: 0;
   max-width: 420px;
@@ -207,3 +200,11 @@
   .v10-pca-node-picker-stake,
   .v10-pca-node-picker-own { grid-column: 2; }
 }
+
+/* PCAs / Already have a PCA?: the title, then one left-aligned row with the ID check and
+   Connect wallet. The wallet's notes and any error wrap to full width below the row. */
+.v10-pca-section-head.v10-pca-section-head-stacked { flex-direction: column; align-items: stretch; gap: var(--space-8); }
+.v10-pca-find-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); }
+.v10-pca-find-row .v10-wallet-connect { display: contents; }
+.v10-pca-find-row :is(.v10-pca-crux-error, .v10-wallet-note, .v10-wallet-picker) { flex-basis: 100%; order: 1; margin: 0; }
+.v10-pca-find-row .v10-wallet-connect-btn { align-self: center; }
