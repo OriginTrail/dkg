@@ -82,7 +82,7 @@ export class DashboardPage {
         await this.page
           .locator(sel.leftPanel.root)
           .locator(sel.leftPanel.newProjectBtn)
-          .filter({ hasText: /^New$/i })
+          .filter({ hasText: /^New context graph$/i })
           .first()
           .click();
       },
