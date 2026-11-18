@@ -33,6 +33,9 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: 22
+      # dkg-semantic-runtime's prepack builds and verifies its Wasm, which needs the pinned Rust
+      # nightly and wasm-bindgen that this action installs.
+      - uses: ./.github/actions/setup-semantic-runtime
       - name: Prepare complete immutable package set
         run: |
           VERSION=$(node -p "require('./package.json').version")
