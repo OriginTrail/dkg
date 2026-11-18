@@ -2,7 +2,9 @@
 // data.json. A systemd --user timer runs it every five minutes.
 //
 // It reads views through Multicall3, pinned to one block, and events from
-// Blockscout, because the public RPC limits eth_getLogs to 200 blocks. It holds no
+// Blockscout, because the public RPC limits eth_getLogs to 200 blocks. Blockscout
+// answers 150 requests in each five minutes, so a run reads only the events that
+// are new, and a rescan reads a bounded stretch again (lib/events.mjs). It holds no
 // key and sends no transaction. It knows who is who only from a public file, and
 // everything it shows about them comes from the chain.
 //
@@ -18,8 +20,9 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, appendFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-import { BlockscoutSource, decodeBatchInput, decodeLog, decodeRevert, functionName, HUB_NAMES, IFACES, NodeSource, revertHexOf, Rpc, subscriptionIdOf } from './lib/chain.mjs';
+import { BlockscoutSource, decodeRevert, HUB_NAMES, IFACES, NodeSource, revertHexOf, Rpc, subscriptionIdOf } from './lib/chain.mjs';
 import { compose, FAULTS, startOf } from './lib/compose.mjs';
+import { readEvents, repairState, RESCAN_MIN_QUOTA, RESCAN_PAUSE_SECONDS, rescanPlan } from './lib/events.mjs';
 
 const env = process.env;
 const DEFAULT_HUB = '0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6';
@@ -49,8 +52,6 @@ const paths = {
   log: join(config.dir, 'logs', 'indexer.log'),
 };
 
-/** Blocks re-read behind each cursor, about 30 minutes: an explorer may index a block late. */
-const OVERLAP_BLOCKS = 9_000;
 /** An epoch's numbers are final only if read this long after its end, past any lagging node. */
 const FINAL_MARGIN_SECONDS = 30;
 const LOG_LIMIT_BYTES = 1024 * 1024;
@@ -89,7 +90,7 @@ function readJson(path) {
 }
 
 function emptyState() {
-  return { v: 1, addresses: {}, cursors: {}, logs: [], txs: {}, final: {}, live: {}, split: {}, positions: {}, operators: {}, sellersLive: {}, buyersLive: {}, lastOk: {}, fullScanEpoch: null };
+  return { v: 2, addresses: {}, cursors: {}, logs: [], txs: {}, final: {}, live: {}, split: {}, positions: {}, operators: {}, sellersLive: {}, buyersLive: {}, lastOk: {}, rescanEpoch: null, rescanFrom: null, rescanNotBefore: null };
 }
 
 // ------------------------------------------------------------------ the public file
@@ -183,65 +184,32 @@ async function readClock(rpc, st, pin) {
 
 // ------------------------------------------------------------------ events
 
-const LOG_CONTRACTS = [
-  { name: 'QueryInferenceSettlement', txs: true },
-  { name: 'ServiceSubscriptions', txs: true },
-  { name: 'ServiceSubscriptionsWallet', txs: true },
-  { name: 'StakingV10', topicEvent: 'RewardsClaimed' },
-];
-
-const KEEP = new Set(['ReceiptsLanded', 'ReceiptBatchAccepted', 'SubscriptionFunded', 'SubscriptionToppedUp', 'BuyerAdded', 'BuyerRemoved', 'BuyerLimitsUpdated', 'ServiceSpendingSet', 'RewardsClaimed']);
-
-async function readEvents(source, st, rpc) {
-  const clock = st.clock;
-  // Once an epoch, and whenever the numbers disagree, everything is read again from
-  // nothing, which also drops whatever a reorganized block took back.
-  const fullScan = st.fullScanEpoch !== clock?.currentEpoch || st.needFullScan === true;
-  const logs = fullScan ? [] : st.logs;
-  const seen = new Set(logs.map((l) => `${l.tx}:${l.idx}`));
-  const known = new Set(st.logs.map((l) => `${l.tx}:${l.idx}`));
-  let added = 0;
-  for (const { name, txs: wantTxs, topicEvent } of LOG_CONTRACTS) {
-    for (const address of st.addresses[name] ?? []) {
-      const iface = IFACES[HUB_NAMES[name]];
-      const logKey = `${address}:logs`;
-      const since = fullScan ? 0 : Math.max(0, (st.cursors[logKey] ?? 0) - OVERLAP_BLOCKS);
-      const topic = topicEvent ? iface.getEvent(topicEvent).topicHash : null;
-      const raws = await source.logs(address, { sinceBlock: since, topic });
-      for (const raw of raws) {
-        st.cursors[logKey] = Math.max(st.cursors[logKey] ?? 0, raw.block);
-        const key = `${raw.tx}:${raw.idx}`;
-        if (seen.has(key)) continue;
-        const decoded = decodeLog(iface, raw);
-        if (!decoded || !KEEP.has(decoded.k)) continue;
-        seen.add(key);
-        logs.push(decoded);
-        if (!known.has(key)) added++;
-      }
-      if (!wantTxs) continue;
-      const txKey = `${address}:txs`;
-      const txSince = fullScan ? 0 : Math.max(0, (st.cursors[txKey] ?? 0) - OVERLAP_BLOCKS);
-      const list = await source.txs(address, { sinceBlock: txSince });
-      for (const t of list) {
-        st.cursors[txKey] = Math.max(st.cursors[txKey] ?? 0, t.block);
-        if (t.to !== address) continue;
-        const keepAll = name === 'QueryInferenceSettlement';
-        if (!keepAll && t.ok) continue;
-        if (st.txs[t.hash] && !(st.txs[t.hash].ok === false && !st.txs[t.hash].revert)) continue;
-        const groups = decodeBatchInput(t.input);
-        const record = { ok: t.ok, from: t.from, to: t.to, at: t.at, block: t.block, position: t.position, fn: functionName(t.input), groups };
-        if (!t.ok) record.revert = await revertOf(t, source, rpc);
-        st.txs[t.hash] = record;
-      }
-    }
+/**
+ * The rescan, when one is due and the explorer's current window has room for it.
+ * A failed one is tried again no sooner than a finished one would be: the new
+ * events are read either way, so the page stays current while it waits.
+ */
+async function rescan(source, st, reverts, stats) {
+  const now = nowSeconds();
+  const plan = rescanPlan(st, now);
+  if (!plan) return;
+  const left = source.quota();
+  if (left !== null && left < RESCAN_MIN_QUOTA) {
+    log(`rescan from epoch ${plan.fromEpoch} put off: ${left} explorer requests left in this window`);
+    return;
   }
-  logs.sort((a, b) => a.block - b.block || a.idx - b.idx);
-  st.logs = logs;
-  if (fullScan) {
-    st.fullScanEpoch = clock?.currentEpoch ?? null;
-    st.needFullScan = false;
+  const before = stats.explorerCalls ?? 0;
+  st.rescanNotBefore = now + RESCAN_PAUSE_SECONDS;
+  try {
+    const added = await readEvents(source, st, { fromBlock: plan.fromBlock, revertOf: reverts });
+    st.rescanEpoch = st.clock.currentEpoch;
+    st.rescanFrom = null;
+    st.lastRescan = { at: now, ok: true, fromEpoch: plan.fromEpoch, fromBlock: plan.fromBlock, calls: (stats.explorerCalls ?? 0) - before };
+    log(`rescan from epoch ${plan.fromEpoch} (block ${plan.fromBlock}): ${added} new, ${st.lastRescan.calls} explorer calls`);
+  } catch (e) {
+    st.lastRescan = { at: now, ok: false, fromEpoch: plan.fromEpoch, fromBlock: plan.fromBlock, error: e.message };
+    log(`rescan from epoch ${plan.fromEpoch} failed, next try after ${new Date(st.rescanNotBefore * 1000).toISOString()}: ${e.message}`);
   }
-  return added;
 }
 
 /** A reverted transaction's reason, however it can be had; null means the chain's record alone says it reverted. */
@@ -505,18 +473,28 @@ async function main() {
     log(`rpc failed: ${e.message}`);
   }
 
-  // Events need the addresses: from this run, or the last that had them.
+  // Events need the addresses: from this run, or the last that had them. What is
+  // new comes first, so a rescan that fails on the explorer's limit costs nothing
+  // the page shows.
   let eventsOk = false;
   let explorerHead = null;
   if (Object.keys(st.addresses).length) {
+    if (repairState(st)) log('state from before reads were all or nothing: each cursor capped at the newest event held');
+    const reverts = (t) => revertOf(t, source, rpc);
     try {
-      const added = await readEvents(source, st, rpc);
-      explorerHead = await source.head();
+      const added = await readEvents(source, st, { revertOf: reverts });
       eventsOk = true;
       if (added) log(`events: ${added} new, ${st.logs.length} held`);
     } catch (e) {
       errors.push(`Explorer: ${e.message}`);
       log(`explorer failed: ${e.message}`);
+    }
+    if (eventsOk) await rescan(source, st, reverts, stats);
+    // Only the lag shown on the page needs the explorer's head.
+    try {
+      explorerHead = await source.head();
+    } catch (e) {
+      log(`explorer head: ${e.message}`);
     }
   } else errors.push('Explorer: not read, the contract addresses are not known yet');
 
@@ -543,6 +521,7 @@ async function main() {
       lastOkAt: st.lastOk.events ?? null,
       head: explorerHead?.block ?? st.lastEvents?.head ?? null,
       lagBlocks: explorerHead && headBlock ? Math.max(0, headBlock - explorerHead.block) : (st.lastEvents?.lagBlocks ?? null),
+      rescan: st.lastRescan ?? null,
     },
     public: { source: publicSource, at: publicAt },
     run: { ms: Date.now() - startedAt, ...stats },
@@ -552,8 +531,8 @@ async function main() {
   const network = { chainId: config.chainId, hub: config.hub, explorer: config.explorer, blockscout: config.blockscout === 'node' ? null : config.blockscout, rpc: config.rpcUrls[0] };
   const data = compose({ state: st, pub, status, now, network });
 
-  // A cross-check that fails against the events asks for a full scan next time: a block may have been indexed late.
-  if (eventsOk && data.status.eventsBehind) st.needFullScan = true;
+  // A cross-check that fails against the events asks for a rescan from its epoch: a block may have been indexed late.
+  if (eventsOk && data.status.eventsBehind) st.rescanFrom = Math.min(st.rescanFrom ?? Infinity, data.status.eventsBehindFrom ?? st.clock.currentEpoch - 1);
 
   writeAtomic(paths.cache, JSON.stringify(st));
   writeAtomic(paths.data, JSON.stringify(data));

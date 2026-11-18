@@ -270,6 +270,9 @@ export function revertHexOf(reason) {
 
 // ------------------------------------------------------------------ Blockscout
 
+/** The explorer's answer once its requests for the current window are used up: asking again before the window ends only spends more. */
+export class RateLimited extends Error {}
+
 export class BlockscoutSource {
   constructor(base, { timeoutMs = 25_000, attempts = 4, pauseMs = 150, stats = {} } = {}) {
     this.base = base.replace(/\/$/, '');
@@ -277,6 +280,8 @@ export class BlockscoutSource {
     this.attempts = attempts;
     this.pauseMs = pauseMs;
     this.stats = stats;
+    /** Requests left in the explorer's current window, from its last answer. */
+    this.remaining = null;
   }
 
   async get(path, params = {}) {
@@ -287,15 +292,27 @@ export class BlockscoutSource {
       try {
         this.stats.explorerCalls = (this.stats.explorerCalls ?? 0) + 1;
         const res = await fetch(url, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(this.timeoutMs) });
+        const left = Number(res.headers.get('x-ratelimit-remaining') ?? Number.NaN);
+        if (Number.isFinite(left)) this.remaining = left;
+        if (res.status === 429) {
+          const resetMs = Number(res.headers.get('x-ratelimit-reset') ?? Number.NaN);
+          throw new RateLimited(`explorer ${path}: HTTP 429, its requests for this window are used up${Number.isFinite(resetMs) && resetMs > 0 ? ` for another ${Math.ceil(resetMs / 1000)} s` : ''}`);
+        }
         if (res.status === 404) return null;
         if (!res.ok) throw new Error(`explorer ${path}: HTTP ${res.status}`);
         return await res.json();
       } catch (e) {
+        if (e instanceof RateLimited) throw e;
         last = e;
         await sleep(1000 * 2 ** attempt);
       }
     }
     throw new Error(reasonOf(last));
+  }
+
+  /** Requests left in the explorer's current window, as its last answer said; null when it has not said. */
+  quota() {
+    return this.remaining;
   }
 
   /** Newest first, every page's `next_page_params` passed back as it came. */
@@ -421,6 +438,11 @@ export class NodeSource {
   }
 
   async revertOf() {
+    return null;
+  }
+
+  /** A node has no request window. */
+  quota() {
     return null;
   }
 

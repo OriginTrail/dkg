@@ -1,11 +1,14 @@
 // Builds the dashboard into dist/: the indexer bundled into one file, because the
 // machine it runs on has no checkout, with the server, the page and the units. It
 // can also make one standalone HTML file with a data.json embedded, a snapshot to
-// share.
+// share, and run the indexer's tests, bundled the same way because its modules
+// import the ABIs as JSON.
 //
 //   node build.mjs
 //   node build.mjs --snapshot <data.json path or URL> [--out snapshot.html]
+//   node build.mjs --test
 
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, copyFileSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
@@ -74,10 +77,32 @@ async function snapshot(from, out) {
   console.log(`snapshot written to ${name} (${Math.round(html.length / 1024)} KiB)`);
 }
 
+/** Each test/*.test.mjs bundled into dist/test/, then run by node's test runner. */
+async function test() {
+  const dir = join(here, 'test');
+  const out = join(dist, 'test');
+  const files = readdirSync(dir).filter((f) => f.endsWith('.test.mjs'));
+  mkdirSync(out, { recursive: true });
+  await loadEsbuild().build({
+    entryPoints: files.map((f) => join(dir, f)),
+    outdir: out,
+    outExtension: { '.js': '.cjs' },
+    bundle: true,
+    platform: 'node',
+    target: 'node22',
+    format: 'cjs',
+    logLevel: 'warning',
+    loader: { '.json': 'json' },
+  });
+  const run = spawnSync(process.execPath, ['--test', ...files.map((f) => join(out, f.replace(/\.mjs$/, '.cjs')))], { stdio: 'inherit' });
+  process.exitCode = run.status ?? 1;
+}
+
 const args = process.argv.slice(2);
 const flag = (name) => {
   const i = args.indexOf(name);
   return i >= 0 ? args[i + 1] : undefined;
 };
 if (args.includes('--snapshot')) await snapshot(flag('--snapshot'), flag('--out'));
+else if (args.includes('--test')) await test();
 else await build();

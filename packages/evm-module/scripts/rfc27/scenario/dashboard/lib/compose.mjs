@@ -643,13 +643,18 @@ export function compose({ state, pub, status, now, network }) {
 
   // The events are read just before the views, so in the epoch in progress they
   // can trail the views by a few blocks: that is "catching up" (null), not a
-  // disagreement. An ended epoch has no such excuse, and asks for a full scan.
+  // disagreement. An ended epoch has no such excuse, and asks for a rescan from
+  // the earliest such epoch.
   const checks = [];
   let eventsBehind = false;
+  let eventsBehindFrom = null;
   const check = (epoch, name, ok, detail) => checks.push({ epoch, name, ok: !!ok, detail });
   const checkEvents = (row, name, ok, detail) => {
     if (ok || row.state === 'ended') {
-      if (!ok) eventsBehind = true;
+      if (!ok) {
+        eventsBehind = true;
+        eventsBehindFrom = Math.min(eventsBehindFrom ?? row.epoch, row.epoch);
+      }
       checks.push({ epoch: row.epoch, name, ok, detail });
     } else checks.push({ epoch: row.epoch, name, ok: null, detail });
   };
@@ -681,7 +686,7 @@ export function compose({ state, pub, status, now, network }) {
   return {
     schema: 1,
     generatedAt: now,
-    status: { ...status, eventsBehind },
+    status: { ...status, eventsBehind, eventsBehindFrom },
     network,
     contracts: state.contracts ?? {},
     clock: { ...clock, firstEpoch },
