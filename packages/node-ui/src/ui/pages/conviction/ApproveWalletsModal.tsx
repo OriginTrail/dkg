@@ -28,7 +28,7 @@ import {
 } from '../../components/Pca/index.js';
 import { isWrongNetwork, useWalletStore } from '../../stores/wallet.js';
 import { StatusGlyph } from '../../components/ds/Badge.js';
-import { RefreshCw } from 'lucide-react';
+import { RetryButton } from '../../components/ds/RetryButton.js';
 
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 
@@ -432,9 +432,7 @@ export function ApproveWalletsModal({
         ) : counts.stranded > 0 ? (
           // One-click re-run to finish the stranded migrations. `run()` re-processes the
           // selected wallets; a stranded one is now UNBOUND (we deregistered it) → it registers.
-          <button type="button" className="v10-modal-btn primary ds-btn ds-primary" data-testid="pca-approve-retry-stranded" onClick={run}>
-            <RefreshCw size={12} />Retry to finish
-          </button>
+          <RetryButton size="md" className="v10-modal-btn" data-testid="pca-approve-retry-stranded" onClick={() => { void run(); }} />
         ) : null}
       </div>
     </PcaModalShell>

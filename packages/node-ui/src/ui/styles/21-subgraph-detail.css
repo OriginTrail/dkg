@@ -94,19 +94,7 @@
   min-width: 62px;
 }
 .v10-subgraph-filter-chips { display: flex; gap: var(--space-4); flex-wrap: wrap; }
-.v10-subgraph-filter-reset {
-  align-self: flex-start;
-  padding: var(--space-2) var(--space-8);
-  background: none;
-  border: 1px solid transparent;
-  color: var(--text-tertiary);
-  font-size: var(--fs-micro); font-family: var(--font-sans);
-  cursor: pointer;
-  border-radius: var(--radius-card);
-}
-.v10-subgraph-filter-reset:hover {
-  border-color: var(--border-subtle); color: var(--text-secondary);
-}
+.v10-subgraph-filter-reset { align-self: flex-start; }
 
 /* Timeline ribbon */
 .v10-subgraph-timeline {

@@ -439,8 +439,8 @@ function CgRow({
             : mem.partial
               ? (
                 // More layers can reveal residue and reduce canonical triple totals.
-                <span title="Loaded preview only — some memory layers are capped or unavailable; total triples may increase or decrease as layers load">
-                  {formatNumber(entities.total)}+ <span className="v10-cg-dim">entities</span> · ~{formatNumber(triples.total)} <span className="v10-cg-dim">triples · loaded preview</span>
+                <span title="Only part of the memory is loaded: some layers are capped or unavailable, so the triple total can rise or fall as they load">
+                  {formatNumber(entities.total)}+ <span className="v10-cg-dim">entities</span> · ~{formatNumber(triples.total)} <span className="v10-cg-dim">triples · loaded so far</span>
                 </span>
               )
               : <>{abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · {abbrev(triples.total)} <span className="v10-cg-dim">triples</span></>}
@@ -615,7 +615,7 @@ export function DashboardView() {
       />
 
       {inventoryFailed ? (
-        <div role="alert" className="v10-stale-banner">
+        <div role="alert" className="v10-modal-warning ds-card-nested ds-retry-row v10-page-note">
           <span>{inventoryErrorMessage({ listError: cgsError, identityError, hasGraphs: myCgs.length > 0 })}</span>
           {!inventoryLoading && <RetryButton className="v10-retry-btn" onClick={() => { void retry(); }} />}
         </div>

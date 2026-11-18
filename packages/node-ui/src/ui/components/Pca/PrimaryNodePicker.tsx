@@ -1,7 +1,8 @@
 import React, { useId, useMemo, useState } from 'react';
 import { formatWeiToTrac } from './format.js';
-import { Check, RefreshCw } from 'lucide-react';
+import { Check } from 'lucide-react';
 import { Loading } from '../ds/Loading.js';
+import { RetryButton } from '../ds/RetryButton.js';
 
 // The picker's prop type is intentionally separate from the API's `DesignatableNode`: the picker
 // doesn't display `ask`, but the API always returns it (and requires it). This type is a structural
@@ -141,15 +142,10 @@ export function PrimaryNodePicker({
         <Loading label="Loading Core nodes…" />
       ) : error ? (
         <div className="v10-modal-warning ds-card-nested" role="alert" data-testid="pca-primary-node-error">
-          Couldn’t load the list of Core nodes. A primary node is required to create a PCA.{' '}
-          <button
-            type="button"
-            className="v10-pca-card-btn ds-btn"
-            data-testid="pca-primary-node-retry"
-            onClick={onRetry}
-          >
-            <RefreshCw size={12} />Retry
-          </button>
+          <div className="ds-retry-row">
+            <span>Couldn’t load the list of Core nodes. A primary node is required to create a PCA.</span>
+            <RetryButton size="md" data-testid="pca-primary-node-retry" onClick={onRetry} />
+          </div>
           {/* Surface the best-effort default (core fell back to its own id) so it isn't
               invisible while the list is down. */}
           {value !== '' && (

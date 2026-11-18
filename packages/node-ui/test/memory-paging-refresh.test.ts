@@ -80,7 +80,7 @@ describe('memory continuation and refresh with the scoped native store', () => {
     failShared = true;
     await act(async () => memory.refresh());
     expect(memory.limitMessage).toBeTruthy(); expect(memory.canRetry).toBe(true);
-    const retry = [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry memory read');
+    const retry = [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry');
     expect(retry).toBeDefined();
     failWorkingBudget = false; failShared = false;
     await act(async () => retry!.click());
@@ -99,7 +99,7 @@ describe('memory continuation and refresh with the scoped native store', () => {
     await act(async () => memory.loadMore());
     expect(memory.counts.wm).toBe(0); expect(memory.counts.swm).toBe(6);
     expect(memory.hasMore).toBe(false); expect(memory.partial).toBe(false);
-    expect(previewClaim).toContain('Per-layer counts may change');
+    expect(previewClaim).toContain('the numbers and latest items may change');
     expect(previewClaim).not.toContain('lower bounds');
   });
   it.each([1, 6])('can retry a failed layer alongside clipped blanks across %i partitions', async partitions => {
@@ -116,7 +116,7 @@ describe('memory continuation and refresh with the scoped native store', () => {
     expect(memory.limitMessage).toBeTruthy();
     expect(memory.canRetry).toBe(true);
     expect(memory.hasMore).toBe(partitions > 5);
-    const retry = [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry memory read');
+    const retry = [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry');
     expect(retry).toBeDefined();
     failShared = false;
     await act(async () => retry!.click());
@@ -124,7 +124,7 @@ describe('memory continuation and refresh with the scoped native store', () => {
     expect(memory.canRetry).toBe(false);
     expect(memory.graphTriples.some(triple => triple.subject === 'urn:shared')).toBe(true);
     expect(memory.limitMessage).toBeTruthy();
-    expect([...container.querySelectorAll('button')].map(button => button.textContent)).toEqual(partitions > 5 ? ['Load more graph data'] : []);
+    expect([...container.querySelectorAll('button')].map(button => button.textContent)).toEqual(partitions > 5 ? ['Load more'] : []);
   });
   it('loads a small blank component after all IRI continuation pages finish', async () => {
     await seed(cg, 1); const graph = `did:dkg:context-graph:${cg}/_working_memory/${owner}/00`;

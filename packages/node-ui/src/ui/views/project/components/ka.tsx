@@ -501,7 +501,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
               {entity.types.includes(SR_PROGRAM) && (
                 isTypeScriptProgram ? <div className="v10-ka-section">
                   <div className="v10-ka-section-title">TypeScript Program</div>
-                  <button className="v10-ka-back" onClick={() => setShowProgramEditor(true)}>Edit TypeScript Program</button>
+                  <button type="button" className="ds-btn ds-sm" onClick={() => setShowProgramEditor(true)}>Edit TypeScript Program</button>
                   {showProgramEditor && <Suspense fallback={<p>Loading Program editor…</p>}>
                     <ProgramEditor contextGraphId={contextGraphId}
                       existing={{ label: entity.label, programIri: entity.uri, programLayer: entity.trustLevel === 'verified' ? 'vm' : entity.trustLevel === 'shared' ? 'swm' : 'wm' }}

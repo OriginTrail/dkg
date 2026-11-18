@@ -74,7 +74,7 @@
   cursor: pointer;
   border-radius: var(--radius-control);
   padding: var(--space-4) var(--space-8);
-  margin: -4px -8px;
+  margin: calc(-1 * var(--space-4)) calc(-1 * var(--space-8));
   transition: background var(--motion-base), color var(--motion-base), opacity var(--motion-base);
   /* Native button reset so the cell inherits the rest of the
      strip's typography rather than the UA <button> defaults. */

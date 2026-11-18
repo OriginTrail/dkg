@@ -37,7 +37,7 @@ export function GenWidget({ title, agent, footnote, dismissed, onDismiss, childr
             </span>
           )}
           {onDismiss && (
-            <button className="v10-gen-widget-dismiss" onClick={onDismiss} aria-label="Dismiss"><X size={12} /></button>
+            <button type="button" className="ds-btn ds-ghost ds-sm ds-icon" onClick={onDismiss} aria-label="Dismiss"><X size={12} /></button>
           )}
         </div>
       </div>
@@ -245,7 +245,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
     <LayerActionShell
       title="Share complete Knowledge Assets"
       footnote="Shares each Knowledge Asset as a whole: all of it reaches Shared Working Memory, or none of it does."
-      context={<>Shares all eligible complete Working Memory Knowledge Assets in this context graph, including assets outside the loaded preview.</>}
+      context={<>Shares all eligible complete Working Memory Knowledge Assets in this context graph, including assets that haven’t loaded on this screen.</>}
       outcome={outcome}
     >
       <button
@@ -317,7 +317,7 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
     <LayerActionShell
       title="Publish"
       footnote="Publishes all eligible complete Shared Working Memory Knowledge Assets in this context graph on-chain."
-      context={<>Publishes all eligible complete Shared Working Memory Knowledge Assets, including assets outside the loaded preview. On-chain publishing incurs a cost.</>}
+      context={<>Publishes all eligible complete Shared Working Memory Knowledge Assets, including assets that haven’t loaded on this screen. On-chain publishing incurs a cost.</>}
       outcome={outcome}
       extras={
         <>

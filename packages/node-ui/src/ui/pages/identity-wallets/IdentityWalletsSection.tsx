@@ -8,8 +8,8 @@ import {
 } from './useIdentityWalletManagement.js';
 import { Badge, StatusGlyph } from '../../components/ds/Badge.js';
 import { Loading } from '../../components/ds/Loading.js';
-import { RefreshCw } from 'lucide-react';
 import { ExternalMark } from '../../components/ds/ExternalMark.js';
+import { RetryButton } from '../../components/ds/RetryButton.js';
 
 /**
  * Hardware-wallet management for the node's on-chain identity keys.
@@ -100,10 +100,10 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
         <Loading label="Loading node identity wallets…" />
       )}
       {query.status === 'error' && (
-        <p className="v10-modal-warning ds-card-nested" role="alert">
-          Couldn&apos;t load identity wallet management: {query.message}.{' '}
-          <button type="button" className="v10-identity-wallet-btn compact ds-btn ds-sm" onClick={refreshQuery}><RefreshCw size={12} />Retry</button>
-        </p>
+        <div className="v10-modal-warning ds-card-nested ds-retry-row" role="alert">
+          <span>Couldn&apos;t load identity wallet management: {query.message}.</span>
+          <RetryButton onClick={refreshQuery} />
+        </div>
       )}
       {data && !data.hasProfile && (
         <p className="v10-modal-warning ds-card-nested" role="status">This node does not have an on-chain identity profile yet.</p>
@@ -122,10 +122,10 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
         <p className="v10-modal-warning ds-card-nested" role="status">Switch the connected wallet to this node&apos;s network to manage identity keys.</p>
       )}
       {summaryState.status === 'error' && (
-        <p className="v10-modal-warning ds-card-nested" role="alert">
-          Couldn&apos;t verify identity keys: {summaryState.message}{' '}
-          <button type="button" className="v10-identity-wallet-btn compact ds-btn ds-sm" onClick={reloadSummary}><RefreshCw size={12} />Retry</button>
-        </p>
+        <div className="v10-modal-warning ds-card-nested ds-retry-row" role="alert">
+          <span>Couldn&apos;t verify identity keys: {summaryState.message}</span>
+          <RetryButton onClick={reloadSummary} />
+        </div>
       )}
 
       <IdentityWalletKnownList

@@ -35,7 +35,7 @@ All colours are CSS variables. Never write a hex value in a component: use the t
 | Data | `--data-1`, `--data-2`, `--data-3`, `--data-4`, `--data-5`, `--data-6`, `--data-7`, `--data-8` | Charts and context graph identity colours. Use in this fixed order; never cycle within one chart. Separation between neighbours is validated in both themes. |
 | Signal tints | `--success-bg`, `--warning-bg`, `--danger-bg` (+ `-bg-strong`, `-border`) | Washes of the signal accents for notices, result cards and highlighted rows. Text on them uses the matching `--text-*` signal. Mixed from the accents, so they follow the theme. |
 | Neutral tints | `--tint-faint`, `--tint-subtle`, `--tint-strong` | Hover rows, wells, tracks and inline code. A wash of the text colour, so they read in both themes (white-alpha disappears in light mode). |
-| Elevation | `--shadow-xs`, `--shadow-sm`, `--shadow-menu`, `--shadow-popover`, `--shadow-lift`, `--shadow-modal`, `--shadow-drawer`; `--scrim`, `--scrim-strong`, `--shade` | One shadow per kind of surface: sm for hovered cards, menu for dropdowns and floating panels, popover for popovers, lift for raised graph cards, modal for dialogs, drawer for side sheets. Scrim dims the page behind a modal or drawer; shade darkens an expanded row or inset well. |
+| Elevation | `--shadow-xs`, `--shadow-sm`, `--shadow-menu`, `--shadow-popover`, `--shadow-lift`, `--shadow-modal`, `--shadow-drawer`; `--scrim`, `--scrim-strong`, `--shade`; `--ring-default`, `--ring-strong`; `--blur-sm`, `--blur-md` | One shadow per kind of surface: sm for hovered cards, menu for dropdowns and floating panels, popover for popovers, lift for raised graph cards, modal for dialogs, drawer for side sheets. Scrim dims the page behind a modal or drawer; shade darkens an expanded row or inset well. `--ring-default` and `--ring-strong` draw a 1px outline inside an element without moving its layout (swatches, selected tiles). `--blur-sm` (2px) frosts the chat composer's overlay; `--blur-md` (6px) sits behind dialogs and panels floating over the graph. |
 | Identity fallback | `--identity-fallback`, `--text-on-identity` | The colour an agent, cell or sub-graph shows before its own identity colour is known, and text on identity fills. |
 | Log viewer | `--log-bg`, `--log-text`, `--log-meta`, `--log-timestamp`, `--log-module`, `--log-error`, `--log-error-bg`, `--log-warn` | The terminal well on Observability, which stays dark in both themes. Nowhere else. |
 
@@ -75,6 +75,7 @@ The same rules as nOS, so the two products read alike. Write for someone who run
 - An error says what failed and what to do next, and includes useful details when there are any.
 - Where nOS and the node UI show the same state, they use the same status word: `Done`, `Failed`, `Partial`, `Pending`, `Ready`, `Blocked`. `In progress` is the one exception: nOS says `Running`, which reads wrong on a task. Words only one product has are free, such as `Proposed`, `Merged` and `Healthy`.
 - Keep a technical word only when people need it to act: SPARQL in the query editor, UAL when copying one, RPC URL in Settings.
+- Explain what is happening in everyday words, then what it means for the person and what they can do. Don't name how the node works inside: words such as page, cursor, preview, triple counts, per-layer, response limit or query budget stay out of messages. When a technical word is needed to act, the sentence says what it means. Plain never means vague or wrong: the text stays true to what the system does. For example, not "Only loaded memory is shown. Per-layer counts may change as more memory loads" but "Only part of this context graph's memory is loaded, so the numbers and latest items may change as more loads."
 - A security statement says only what the system guarantees. Check it with the owner of that guarantee before it ships.
 
 | Use | Not |
@@ -90,6 +91,7 @@ The same rules as nOS, so the two products read alike. Write for someone who run
 | `Refused` | not admitted |
 | saved, stored | vaulted |
 | Say what happens | atomic, bootstrap, canonical, seeded, envelope, triage, nonce |
+| what's loaded so far, the numbers for each memory layer, where it stopped, too large to load in full | loaded preview, memory preview, per-layer, graph data, loaded page, response limit |
 
 ## Shape and size
 
@@ -109,7 +111,7 @@ The same rules as nOS, so the two products read alike. Write for someone who run
 
 ### Spacing
 
-Padding, margins and gaps use `--space-2`, `--space-4`, `--space-6`, `--space-8`, `--space-12`, `--space-16`, `--space-20`, `--space-24` and `--space-32`. 10 and 14 only appear inside the nested padding tokens. A value that lands between two steps rounds up for padding and down for gaps and margins, so density stays about the same.
+Padding, margins and gaps use `--space-2`, `--space-4`, `--space-6`, `--space-8`, `--space-12`, `--space-16`, `--space-20`, `--space-24` and `--space-32`. 10 and 14 only appear inside the nested padding tokens. A value that lands between two steps rounds up for padding and down for gaps and margins, so density stays about the same. A negative margin only cancels a parent's padding or overlaps a neighbour (avatars in a stack, a pill over the message above it), and is written as `calc(-1 * var(--space-*))`; a `-1px` that overlaps a border is a hairline and stays.
 
 Styles belong in a stylesheet. A `style` attribute is only for a value worked out from data at runtime, such as a bar's width, a Context Graph's colour or a panel's dragged size, and it carries only that value. A value known from a name, such as a layer's colour, is a class (`layer-tone-wm`, `layer-tone-swm`, `layer-tone-vm`).
 
@@ -118,7 +120,7 @@ Styles belong in a stylesheet. A `style` attribute is only for a value worked ou
 | Token | px | Use |
 |---|---|---|
 | `--pad-card` | 16 | Cards and their header and body |
-| `--pad-compact` | 12 | Small cards in a dense grid: `<StatTile label value sub />`, chart tiles |
+| `--pad-compact` | 12 | Small cards in a dense grid: `<StatTile label value sub about />`, chart tiles |
 | `--pad-nested` | 10 / 14 | Anything inside a card |
 | `--pad-nested-sm` | 8 / 10 | Small nested rows and notes |
 
@@ -211,6 +213,19 @@ A leading mark says "this opens":
 ### Inputs
 
 `.ds-input` for text fields, selects and text areas: 6px corners, 32px tall (`.ds-sm` 24px) to match the buttons beside them, 12px text, one focus ring. A field with `aria-invalid` gets a `--accent-red` border, and the message beside it says what's wrong. A combobox stays neutral until something is picked, because unfinished isn't wrong. The chat composer is a card, not an input.
+
+### Stats
+
+- **`<StatTile label value sub about />`**: a number in its own card, label first (Dashboard, Network, Observability). `about` adds the info button described under [Tooltips](#layout-and-overlays).
+- **`<StatStrip items />`**: a row of numbers inside a page section, under its heading (a context graph's At a glance, the Verifiable Memory view, a PCA). Number first, a small uppercase label under it, in nested cells. Numbers use `--fs-display`. `compact` lists them as rows inside a card.
+
+### Wallet control
+
+`<WalletConnectControl leading>` is the connect button, or the connected wallet, with its notes, provider list and errors under it. `leading` puts other controls on the same row before the wallet (the PCA ID check on Publisher Conviction); the wallet keeps its own layout, and callers don't style its parts.
+
+## NS Marketplace
+
+The NS Marketplace (`src/ui/marketplace`, styles in `31-marketplace-ui.css` and `32-marketplace-surfaces.css`) uses the app's tokens directly: spacing, type, line height and colour, with no layer of its own. Its own components keep the `mkt-` prefix: price lines, budget bars and sparklines, call and seller states, the purchase composer and top-up. Its buttons are the shared button. The component gallery at `/dev/gallery` shows them with fixture data.
 
 ## Navigation and tabs
 
@@ -308,13 +323,13 @@ Every table header looks the same: `--fs-label`, weight 500, uppercase with `--l
 | `--z-floating` | 1100 | Menus that can open over a dialog |
 | `--z-skip` | 10000 | The skip link |
 
-**Overlays.** A dialog or drawer sits on `--scrim`, uses `--radius-overlay` and `--shadow-popover`, and takes `useModalDismiss`. A menu closes on Escape and on a click outside.
+**Overlays.** A dialog or drawer sits on `--scrim`, uses `--radius-overlay` and `--shadow-popover`, and takes `useModalDismiss`. Its close button is a `ds-ghost ds-icon` button at the end of the header row (`v10-modal-header v10-modal-header-row`, with the title and subtitle in `v10-modal-heading`), never placed at a corner of the window. A menu closes on Escape and on a click outside.
 
-**Tooltips.** Use the native `title` for extra detail, such as a full address behind a shortened one. Nothing that needs reading lives only in a tooltip, because touch and keyboard users can't reach it, and a tooltip is never a control's name.
+**Tooltips.** Use the native `title` for extra detail, such as a full address behind a shortened one. Nothing that needs reading lives only in a tooltip, because touch and keyboard users can't reach it, and a tooltip is never a control's name. A longer explanation of a stat goes behind `StatTile`'s `about`: an info button at the end of the label row opens the text under the card, and closes it again.
 
 **Breakpoints.** Use 600, 720, 860 and 920. The context graph tab bar has its own fitting steps at 1180, 1320 and 1500.
 
-**Motion.** `--motion-fast` (.12s) for hover and press, `--motion-base` (.15s) for things that appear or move, `--motion-slow` (.3s) for larger changes.
+**Motion.** `--motion-fast` (.12s) for hover and press, `--motion-base` (.15s) for things that appear or move, `--motion-slow` (.3s) for larger changes. Entrance animations take the same tokens. Every spinner is `ds-spin` at 1s; loops that pulse or shimmer keep their own pace.
 
 **Line height.** `--lh-tight` for headings and chips, `--lh-snug` for dense rows, `--lh-body` for reading text, `--lh-loose` for long notes. A single-line control can use `1`.
 
@@ -326,7 +341,8 @@ Every view that waits on data shows one of four states, and says which.
 | --- | --- | --- |
 | Loading | `<Loading label="Loading peers…" />`, `block` to fill a view | Name what's loading and end with `…`. `EmptyState busy` when a sentence of context helps. |
 | Empty | `<EmptyState title description actions />`, `compact inline` inside a card | Centre it when it fills a view or pane; align it left inside a card or sidebar. Say what will appear, or what to do next. One line of text is enough inside a list. |
-| Error | `EmptyState tone="danger"` for a view, `role="alert"` on `v10-modal-error` inside a form, `aria-invalid` on a field | Say what failed and offer a way forward. Retry is `<RetryButton size>` (small by default, `md` beside a default-size button) and sits outside the message, below it or beside it, never inside the sentence or box. Never leave a view loading after a failure. |
+| Error | `EmptyState tone="danger"` for a view, `role="alert"` on `v10-modal-error` inside a form, `aria-invalid` on a field | Say what failed and offer a way forward. Retry is `<RetryButton size>` (small by default, `md` beside a default-size button). It says "Retry": the message names what failed. It sits outside the message, below it or beside it in a `ds-retry-row` (8px gap, wrapping when narrow), never inside the sentence. A button that reloads the whole page says so ("Reload page") and is not a Retry. Never leave a view loading after a failure. |
+| Notice | A strip (`v10-stale-banner`) directly under a view's header; a note (`v10-modal-warning ds-card-nested`) anywhere else | A strip spans the view under its header. Inside a page, card or column a notice is a note: full border, nested corners, `--pad-nested`, 16px from what follows on a page, 8px from the text above in a card or column (`v10-inset-note`), where its buttons go under the text. On a page row the text takes the space and its actions follow (`v10-page-note`). |
 | Disabled | `disabled` on the control | `--opacity-disabled`, the one disabled look. Say why nearby when the reason isn't obvious. |
 
 ## Accessibility

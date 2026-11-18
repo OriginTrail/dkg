@@ -17,7 +17,7 @@ import type { PcaAlert } from '../../hooks/usePcaAlerts.js';
 import { JoinRequestRow, ActivityDigestRow, ConfirmationRow, PcaCostCoveredRow } from './rows.js';
 import { Count } from '../ds/Badge.js';
 import { Loading } from '../ds/Loading.js';
-import { RefreshCw } from 'lucide-react';
+import { RetryButton } from '../ds/RetryButton.js';
 
 export interface NotificationsPaneProps {
   feed: UseNotificationsFeed;
@@ -99,7 +99,7 @@ export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], on
                   <div className="v10-pca-alert-title">{al.title}</div>
                   <div className="v10-pca-alert-msg">{al.message}</div>
                   {onOpenPca && (
-                    <button type="button" className="v10-pca-alert-action" onClick={() => onOpenPca(al.accountId)}>
+                    <button type="button" className="ds-btn ds-ghost ds-sm v10-pca-alert-action" onClick={() => onOpenPca(al.accountId)}>
                       Manage PCA #{al.accountId}
                     </button>
                   )}
@@ -115,9 +115,9 @@ export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], on
         ) : status === 'loading' && isEmpty ? (
           <Loading label="Loading notifications…" />
         ) : status === 'error' && isEmpty ? (
-          <div className="v10-notif-pane-error" role="status" aria-live="polite">
-            Couldn’t load notifications.{' '}
-            <button type="button" className="v10-notif-retry" onClick={feed.retry}><RefreshCw size={12} />Retry</button>
+          <div className="v10-notif-pane-error ds-retry-row ds-center" role="status" aria-live="polite">
+            <span>Couldn’t load notifications.</span>
+            <RetryButton onClick={feed.retry} />
           </div>
         ) : isEmpty ? (
           <div className="v10-notif-pane-empty" role="status">
@@ -131,9 +131,9 @@ export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], on
             {/* A refresh error while we still have cached rows: thin banner
                 above, list preserved (last-known-good, ui-brief §4.5). */}
             {refreshError && (
-              <div className="v10-notif-pane-error v10-notif-pane-error-inline" role="status" aria-live="polite">
-                Couldn’t refresh notifications.{' '}
-                <button type="button" className="v10-notif-retry" onClick={feed.retry}><RefreshCw size={12} />Retry</button>
+              <div className="v10-notif-pane-error v10-notif-pane-error-inline ds-retry-row" role="status" aria-live="polite">
+                <span>Couldn’t refresh notifications.</span>
+                <RetryButton onClick={feed.retry} />
               </div>
             )}
 

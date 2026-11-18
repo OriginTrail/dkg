@@ -41,7 +41,7 @@ export function WaitingTopUp({ catalog, subscription, serviceId, onOpen }: {
   return (
     <div className="mkt-notice" role="status" data-testid={`mkt-topup-waiting-${serviceId}`} data-phase={held.kind === 'reserving' ? 'sending' : held.kind}>
       <span data-copy="topup.waiting">{copy('topup.waiting', { name, n: subscription.epoch, trac: fmtTrac(held.attempt.service.value) })}</span>{' '}
-      <button type="button" className="mkt-linkbtn" data-testid={`mkt-topup-open-${serviceId}`} data-copy="topup.waiting.open" onClick={onOpen}>{copy('topup.waiting.open')}</button>
+      <button type="button" className="ds-btn ds-ghost ds-sm" data-testid={`mkt-topup-open-${serviceId}`} data-copy="topup.waiting.open" onClick={onOpen}>{copy('topup.waiting.open')}</button>
     </div>
   );
 }
@@ -113,7 +113,7 @@ export function TopUp({ catalog, subscription, serviceId, onDone, onCancel }: {
         {answer.txHash
           ? <span data-copy="topup.sent">{copy('topup.sent', { name, tx: fmtHex(answer.txHash) })}</span>
           : <span data-copy="topup.sent.shown">{copy('topup.sent.shown', { name })}</span>}{' '}
-        <button type="button" className="mkt-linkbtn" data-copy="ctl.done" onClick={onDone}>{copy('ctl.done')}</button>
+        <button type="button" className="ds-btn ds-ghost ds-sm" data-copy="ctl.done" onClick={onDone}>{copy('ctl.done')}</button>
       </div>
     );
   }
@@ -150,7 +150,7 @@ export function TopUp({ catalog, subscription, serviceId, onDone, onCancel }: {
             {copy(`topup.unknown.${seen}`, { now: fmtTrac(held.read.state === 'read' ? held.read.now : 0n), before: fmtTrac(held.attempt.before) })}
           </span>{' '}
           {seen !== 'checking' && (
-            <button type="button" className="mkt-linkbtn" data-testid="mkt-topup-check" data-copy="topup.unknown.again" onClick={() => topUpAttempts.readAgain(subscriptionId, serviceId)}>{copy('topup.unknown.again')}</button>
+            <button type="button" className="ds-btn ds-ghost ds-sm" data-testid="mkt-topup-check" data-copy="topup.unknown.again" onClick={() => topUpAttempts.readAgain(subscriptionId, serviceId)}>{copy('topup.unknown.again')}</button>
           )}
           {held.read.state === 'unread' && <ErrorCard err={held.read.err} />}
           {held.err ? <ErrorCard err={held.err} /> : null}

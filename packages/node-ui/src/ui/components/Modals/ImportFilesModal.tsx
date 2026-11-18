@@ -223,7 +223,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
                         <span className="v10-import-file-icon">{fileIcon(f.file.name)}</span>
                         <span className="v10-import-file-name">{f.file.name}</span>
                         <span className="v10-import-file-size">{formatBytes(f.file.size)}</span>
-                        <button className="v10-import-file-remove" onClick={() => removeFile(f.id)} aria-label="Remove" title="Remove"><X size={14} /></button>
+                        <button type="button" className="ds-btn ds-ghost ds-sm ds-icon v10-import-file-remove" onClick={() => removeFile(f.id)} aria-label="Remove" title="Remove"><X size={14} /></button>
                       </div>
                     ))}
                   </div>

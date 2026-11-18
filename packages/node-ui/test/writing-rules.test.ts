@@ -28,6 +28,12 @@ const WORDS: [RegExp, string][] = [
   [/\bContext Graphs?\b/, 'context graph'],
   [/\b(?:neuro[ -]?[Ss]ymbolic|Neuro(?:[ -][Ss]ymbolic|symbolic))\b/, 'NeuroSymbolic Marketplace, or NS Marketplace'],
   [/\bSPEC_[A-Z]/, 'no spec notes on screen'],
+  // How the node loads memory stays out of messages (DESIGN.md · Writing: explain, don't name the mechanism).
+  [/\bper-layer\b/i, 'the numbers for each memory layer'],
+  [/\b(?:loaded|memory|triples) preview\b/i, 'what’s loaded so far'],
+  [/\bgraph data\b/i, 'name the context graph or what it holds'],
+  [/\bloaded page\b/i, 'where it stopped'],
+  [/\bresponse limit\b/i, 'too large to load in full'],
   [/^\d+ · /, 'a label and its detail take a colon'],
 ];
 
@@ -155,7 +161,7 @@ describe('writing rules', () => {
     // One comes from a helper (formatJoinRequestError)
     // and the last from the Marketplace's text table.
     for (const known of [
-      'Retry loading agent', 'Copy UAL', 'Context graph', 'You don’t need to connect a wallet',
+      'Couldn’t load notifications', 'Copy UAL', 'Context graph', 'You don’t need to connect a wallet',
       'out-of-date network setting', 'The NS Marketplace is off on this node',
     ]) {
       expect([...allText].some((line) => line.includes(known)), known).toBe(true);

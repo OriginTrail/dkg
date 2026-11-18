@@ -90,7 +90,7 @@ export function ApiTokenPrompt({
         value={value}
         onChange={(event) => setValue(event.target.value)}
       />
-      <button type="submit" className="v10-token-prompt-submit" disabled={!value.trim()}>
+      <button type="submit" className="ds-btn ds-sm v10-token-prompt-submit" disabled={!value.trim()}>
         Use token
       </button>
     </form>

@@ -109,7 +109,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
             <div className="v10-vm-identity-row">
               <span className="v10-vm-identity-lbl">UAL</span>
               <span className="v10-vm-identity-val mono" title={receipt.ual}>{receipt.ual}</span>
-              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.ual!)} aria-label="Copy UAL" title="Copy UAL"><Copy size={12} /></button>
+              <button type="button" className="ds-btn ds-ghost ds-sm ds-icon" onClick={() => copy(receipt.ual!)} aria-label="Copy UAL" title="Copy UAL"><Copy size={12} /></button>
             </div>
           )}
 
@@ -129,7 +129,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
               ) : (
                 <span className="v10-vm-identity-val mono" title={receipt.txHash}>{truncateId(receipt.txHash, 10, 8)}</span>
               )}
-              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.txHash!)} aria-label="Copy transaction hash" title="Copy transaction hash"><Copy size={12} /></button>
+              <button type="button" className="ds-btn ds-ghost ds-sm ds-icon" onClick={() => copy(receipt.txHash!)} aria-label="Copy transaction hash" title="Copy transaction hash"><Copy size={12} /></button>
             </div>
           )}
 
@@ -144,7 +144,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
             <div className="v10-vm-identity-row">
               <span className="v10-vm-identity-lbl">Knowledge Asset ID</span>
               <span className="v10-vm-identity-val mono" title={receipt.kaId}>{truncateId(receipt.kaId, 8, 8)}</span>
-              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.kaId!)} aria-label="Copy Knowledge Asset ID" title="Copy Knowledge Asset ID"><Copy size={12} /></button>
+              <button type="button" className="ds-btn ds-ghost ds-sm ds-icon" onClick={() => copy(receipt.kaId!)} aria-label="Copy Knowledge Asset ID" title="Copy Knowledge Asset ID"><Copy size={12} /></button>
             </div>
           )}
 
@@ -164,7 +164,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
               ) : (
                 <span className="v10-vm-identity-val mono" title={receipt.author}>{truncateId(receipt.author, 6, 4)}</span>
               )}
-              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.author!)} aria-label="Copy author address" title="Copy author address"><Copy size={12} /></button>
+              <button type="button" className="ds-btn ds-ghost ds-sm ds-icon" onClick={() => copy(receipt.author!)} aria-label="Copy author address" title="Copy author address"><Copy size={12} /></button>
             </div>
           )}
 

@@ -40,6 +40,7 @@ import {
 } from './project/components.js';
 import { RefreshCw } from 'lucide-react';
 import { Loading } from '../components/ds/Loading.js';
+import { RetryButton } from '../components/ds/RetryButton.js';
 
 interface ProjectViewProps {
   contextGraphId: string;
@@ -722,9 +723,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
               <RefreshCw size={12} />Refresh page
             </button>
           ) : (
-            <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={refreshContextGraphs}>
-              <RefreshCw size={12} />Retry
-            </button>
+            <RetryButton className="v10-retry-btn" onClick={() => { void refreshContextGraphs(); }} />
           )}
         </div>
       );
@@ -787,10 +786,8 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             </>
           ) : (
             <>
-              <span>Couldn’t refresh context-graph data — showing last known values.</span>
-              <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={refreshContextGraphs}>
-                <RefreshCw size={12} />Retry
-              </button>
+              <span>Couldn’t refresh this context graph. Showing what was last loaded.</span>
+              <RetryButton className="v10-retry-btn" onClick={() => { void refreshContextGraphs(); }} />
             </>
           )}
         </div>
@@ -824,8 +821,8 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           {detailRead.loading ? 'Loading resource details…' : detailRead.error ?? (detailRead.partial
             ? 'The resource detail read reached its limit. Some relationships may be missing. Use a narrower query to inspect them.'
             : 'This resource is referenced here, but has no details in this view.')}
-          {detailRead.error && <button onClick={detailRead.refresh}><RefreshCw size={12} />Retry resource details</button>}
-          {!selectedEntity && <button onClick={handleDetailClose}>Close resource</button>}
+          {detailRead.error && <RetryButton onClick={() => { void detailRead.refresh(); }} />}
+          {!selectedEntity && <button type="button" className="ds-btn ds-ghost ds-sm" onClick={handleDetailClose}>Close resource</button>}
         </div>
       )}
       {/* Drilldown overlay */}

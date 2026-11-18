@@ -184,7 +184,7 @@ export function Composer({ catalog, funding, draft, onChange, fundsEpoch, endsAt
           <div className="mkt-fork">
             <span className="mkt-muted" data-copy="_data"><strong className="mkt-mono" title={line.serviceId}>{fmtHex(line.serviceId)}</strong></span>
             <span className="mkt-muted mkt-xs" data-copy="composer.unavailable">{copy('composer.unavailable')}</span>
-            <button type="button" className="mkt-linkbtn mkt-xs" data-testid={`mkt-remove-${line.serviceId}`} data-copy="composer.remove"
+            <button type="button" className="ds-btn ds-ghost ds-sm" data-testid={`mkt-remove-${line.serviceId}`} data-copy="composer.remove"
               onClick={() => set({ lines: draft.lines.filter((l) => l.serviceId !== line.serviceId) })}>{copy('composer.remove')}</button>
           </div>
           <div className="mkt-alloc">

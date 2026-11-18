@@ -141,8 +141,8 @@ describe('real DashboardView size presentation', () => {
     addGraph('residue', { layeredTriples: working, partial: true, failedLayer: true });
     const preview = await render();
     expect(preview.values).toEqual(['1+', '~3']);
-    expect(preview.labels[1].textContent).toBe('triples preview');
-    expect(preview.row.textContent).toContain('~3 triples · loaded preview');
+    expect(preview.labels[1].textContent).toBe('triples so far');
+    expect(preview.row.textContent).toContain('~3 triples · loaded so far');
     // The qualification lives behind the size card's info button: open it, check it, close it.
     const toggle = preview.card.querySelector<HTMLButtonElement>('.stat-about-toggle')!;
     const panel = preview.card.querySelector<HTMLElement>(`#${CSS.escape(toggle.getAttribute('aria-controls')!)}`)!;
@@ -170,10 +170,10 @@ describe('real DashboardView size presentation', () => {
     addGraph('preview', { triples: 50_001, subjects: 1_251, partial: true, failedLayer });
     const { row, card, values, labels } = await render();
     expect(values).toEqual([`${(1_251).toLocaleString()}+`, `~${(50_001).toLocaleString()}`]);
-    expect(labels.map((element) => element.textContent)).toEqual(['entities loaded', 'triples preview']);
+    expect(labels.map((element) => element.textContent)).toEqual(['entities loaded', 'triples so far']);
     expect(row.textContent).toContain(`${(1_251).toLocaleString()}+ entities`);
-    expect(row.textContent).toContain(`~${(50_001).toLocaleString()} triples · loaded preview`);
-    expect(row.querySelector('[title]')?.getAttribute('title')).toMatch(/capped or unavailable.*increase or decrease/);
+    expect(row.textContent).toContain(`~${(50_001).toLocaleString()} triples · loaded so far`);
+    expect(row.querySelector('[title]')?.getAttribute('title')).toMatch(/capped or unavailable.*rise or fall/);
     expect(card.textContent).toContain('Partial:');
     expect(card.querySelectorAll('.v10-layerbar')).toHaveLength(2);
   });

@@ -10,7 +10,7 @@
    (160ms), opacity + 4px translate only, `both` so it doesn't flash the
    pre-animation state. Fully disabled under reduced-motion. */
 @keyframes v10DashMount { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-.v10-anim-mount { animation: v10DashMount 160ms ease-out both; }
+.v10-anim-mount { animation: v10DashMount var(--motion-base) ease-out both; }
 @media (prefers-reduced-motion: reduce) { .v10-anim-mount { animation: none; } }
 
 .v10-dash-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--space-12); margin-bottom: var(--space-24); }
