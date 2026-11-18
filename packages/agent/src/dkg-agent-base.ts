@@ -1505,6 +1505,8 @@ export class DKGAgentBase {
   /** Detached owner for post-readiness persisted-subscription authority recovery. */
   protected contextGraphSubscriptionAuthorityRecoveryRuntime?:
     CoalescingRecurringTask;
+  /** Rows the startup pass left dormant without their chain name binding, asked again once started. */
+  protected readonly contextGraphSubscriptionNameBindingRetryIds = new Set<string>();
   /** Detached owner that drains activation-cap subscriptions as slots become safe. */
   protected contextGraphSubscriptionRehydrationPromotionRuntime?:
     CoalescingRecurringTask;
