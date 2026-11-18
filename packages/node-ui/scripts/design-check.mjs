@@ -292,7 +292,7 @@ function lineIndex(text) {
 }
 
 /** Files the rules skip: the tokens themselves, canvas palettes (graph-viz can't read CSS variables) and the reference page. */
-const skipFile = (file) => /00-theme\.css$|-colors\.ts$|design-system[\w-]*\.(tsx|html)$|30-marketplace-tokens\.css$/.test(file.replace(/\\/g, '/'));
+const skipFile = (file) => /00-theme\.css$|-colors\.ts$|design-system[\w-]*\.(tsx|html)$/.test(file.replace(/\\/g, '/'));
 
 export function checkText(system, text, file, { known, mockup = false, keepLine = () => true } = {}) {
   const ext = extname(file).toLowerCase();

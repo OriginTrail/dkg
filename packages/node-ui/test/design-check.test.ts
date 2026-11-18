@@ -51,7 +51,7 @@ describe('design check', () => {
   // suggestion, so a failure here says what to write instead.
   it('finds nothing off the system in the UI stylesheets', () => {
     const known = runtimeProps();
-    const off = cssFiles.filter((f) => !/00-theme\.css$|30-marketplace-tokens\.css$/.test(f)).flatMap((f) => (
+    const off = cssFiles.filter((f) => !f.endsWith('00-theme.css')).flatMap((f) => (
       checkText(system, read(f), f, { known })
         .filter((x: { offScale?: boolean }) => x.offScale)
         .map((x: { line: number; prop: string; value: string; use: string }) => `${where(f)}:${x.line} ${x.prop}: ${x.value} → ${x.use}`)
