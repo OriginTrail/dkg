@@ -75,7 +75,7 @@ Three layered scanners run as informational checks in CI (`tornado-static-analys
 | Tool | Purpose | Install |
 |---|---|---|
 | **Slither** | Mature Solidity static analyzer (Trail of Bits). Detects reentrancy, uninitialized storage, dangerous delegatecall, etc. | `pip install slither-analyzer` (Python). Requires `solc` 0.8.20 — install via [`solc-select`](https://github.com/crytic/solc-select) or rely on hardhat's bundled compiler. |
-| **Aderyn** | Cyfrin's Rust-based analyzer, complementary detector set. | Already a devDep (`@cyfrin/aderyn`). `pnpm install` fetches the platform binary. |
+| **Aderyn** | Cyfrin's Rust-based analyzer, complementary detector set. | Install the pinned release from [Cyfrin upstream source](https://github.com/Cyfrin/aderyn/tree/a288420403cb1ae5f38ce606c3a6d4e605b9c81d) using the Cargo command in the CI lane. Add the installed binary to `PATH` for local use. |
 | **solhint** | Solidity linter — style + a lightweight security ruleset. | Already a devDep (`solhint`). |
 
 ### Running locally
