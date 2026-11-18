@@ -145,6 +145,12 @@ export interface DeferredContextGraphSubscriptionAuthorityRecoveryPorts {
    * restart.
    */
   capped(contextGraphId: string): void;
+  /**
+   * Another owner is asking about this row now (rows the startup pass left
+   * dormant without their chain name binding are asked again within seconds).
+   * The pass leaves it alone until that owner lets it go.
+   */
+  heldElsewhere?(contextGraphId: string): boolean;
 }
 
 /** Executes one fenced pass over only the authority-unavailable durable rows. */
@@ -155,7 +161,7 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
   const status = ports.getStatus();
   if (!status?.rehydrationEnabled || !ports.isCurrent()) return;
   const candidateIds = [...ports.dormancyById]
-    .filter(([, reason]) => reason === 'authorityUnavailable')
+    .filter(([id, reason]) => reason === 'authorityUnavailable' && ports.heldElsewhere?.(id) !== true)
     .map(([id]) => id)
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   const snapshotRows = async (): Promise<ReadonlyMap<string, ContextGraphSubscriptionRecord>> => (
