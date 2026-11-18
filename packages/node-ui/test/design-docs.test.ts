@@ -23,6 +23,16 @@ describe('DESIGN.md', () => {
     expect(components.filter((name) => !design.includes(name))).toEqual([]);
   });
 
+  // DESIGN.md · Adding to the system, step 3: a component nobody can see on the
+  // reference page doesn't get reused, so the next screen builds its own.
+  it('shows every ds component on the reference page', () => {
+    const page = readFileSync(resolve(root, 'src/ui/design-system.tsx'), 'utf8');
+    const components = readdirSync(resolve(root, 'src/ui/components/ds'))
+      .filter((file) => file.endsWith('.tsx'))
+      .map((file) => file.replace('.tsx', ''));
+    expect(components.filter((name) => !new RegExp(`<${name}\\b`).test(page))).toEqual([]);
+  });
+
   it('names no token that has been removed', () => {
     const named = [...design.matchAll(/`(--[a-z0-9]+(?:-[a-z0-9]+)*)`/g)].map((m) => m[1]);
     expect([...new Set(named)].filter((token) => !tokens.includes(token))).toEqual([]);
