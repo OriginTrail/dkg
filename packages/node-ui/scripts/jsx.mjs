@@ -8,7 +8,12 @@ import ts from 'typescript';
 export { ts };
 
 /** @typedef {ts.JsxElement | ts.JsxSelfClosingElement} Jsx */
-/** @typedef {{ prop: string, value: string, line: number, endLine: number }} Declaration */
+/**
+ * One declaration: the lines its property and value span, and its scope (the offset of the
+ * rule, style attribute or JSX element it belongs to, -1 for none), which says which of a
+ * mock-up's variable definitions applies to it.
+ * @typedef {{ prop: string, value: string, line: number, endLine: number, scope: number }} Declaration
+ */
 
 /** @param {Jsx} n @returns {ts.JsxOpeningLikeElement} */
 export const opening = (n) => (ts.isJsxElement(n) ? n.openingElement : n);
@@ -97,12 +102,13 @@ export function styleDeclarations(text, fileName = 'inline.tsx') {
     const init = attrsOf(node).get('style')?.initializer;
     const obj = init && ts.isJsxExpression(init) ? styleObject(init.expression) : null;
     if (!obj) return;
+    const scope = node.getStart(tree);
     for (const p of obj.properties) {
       if (!ts.isPropertyAssignment(p)) continue;
       const name = ts.isIdentifier(p.name) || ts.isStringLiteral(p.name) ? p.name.text : null;
       const value = name === null ? null : literalValue(name, p.initializer);
       if (name === null || value === null) continue;
-      out.push({ prop: name.startsWith('--') ? name : camelToKebab(name), value, line: lineOf(p.getStart(tree)), endLine: lineOf(p.getEnd()) });
+      out.push({ prop: name.startsWith('--') ? name : camelToKebab(name), value, line: lineOf(p.getStart(tree)), endLine: lineOf(p.getEnd()), scope });
     }
   });
   return out;

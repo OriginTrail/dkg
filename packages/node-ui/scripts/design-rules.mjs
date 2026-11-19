@@ -2,17 +2,25 @@
 // The design rules both the checks and the design check apply: how a declaration is
 // found in a file, and which literal values in it fall under a rule. Policy lives
 // here once. test/layout-tokens.test.ts fails on any value a rule finds, and
-// scripts/design-check.mjs turns each one into a suggestion (the token to use, or
+// scripts/design-suggest.mjs turns each one into a suggestion (the token to use, or
 // that the system needs a new one). The JSDoc types are checked: tsconfig.type-tests.json
 // runs tsc with checkJs over this file.
 import { styleDeclarations } from './jsx.mjs';
 
 /** @typedef {import('./jsx.mjs').Declaration} Declaration */
-/** @typedef {'corner' | 'spacing' | 'type size' | 'weight' | 'line height' | 'layer' | 'height' | 'motion'} Kind */
+
 /**
- * A literal value a rule covers. `n` is the number on the rule's scale (px, or ms for motion);
- * `pill` marks a 999px corner, `up` padding (ties round up), `unit` a type size in em, rem or pt.
- * @typedef {{ kind: Kind, value: string, n?: number, pill?: boolean, up?: boolean, unit?: boolean }} Hit
+ * A literal value a rule covers. Each kind carries what its rule needs: `n` is the
+ * number on the rule's scale (px, or ms for motion) wherever there is one.
+ * @typedef {{ kind: 'corner', value: string, n: number }} CornerHit        a border radius in px
+ * @typedef {{ kind: 'corner', value: string, pill: true }} PillHit        a 999px corner: the pill token
+ * @typedef {{ kind: 'spacing', value: string, n: number, up: boolean }} SpacingHit  `up` on padding: ties round up
+ * @typedef {{ kind: 'type size', value: string, n: number }} TypeSizeHit  a size in px
+ * @typedef {{ kind: 'type size', value: string, unit: true }} TypeUnitHit a size in em, rem or pt
+ * @typedef {{ kind: 'weight', value: string }} WeightHit                 a numeric weight off WEIGHTS
+ * @typedef {{ kind: 'line height' | 'layer' | 'height' | 'motion', value: string, n: number }} ScaleHit
+ * @typedef {CornerHit | PillHit | SpacingHit | TypeSizeHit | TypeUnitHit | WeightHit | ScaleHit} Hit
+ * @typedef {Hit['kind']} Kind
  */
 
 /** Font weights the type scale uses (DESIGN.md · Type). */
@@ -25,28 +33,51 @@ export const MOTION_FREE_MS = 0.5;
 /** @param {string} css @returns {string} */
 export const stripComments = (css) => css.replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' '));
 
+/** HTML without its comments, each replaced by spaces so every offset and line stays where it was. @param {string} html @returns {string} */
+export const maskHtmlComments = (html) => html.replace(/<!--[\s\S]*?-->/g, (c) => c.replace(/[^\n]/g, ' '));
+
 const VAR = /var\(\s*(--[\w-]+)\s*(?:,((?:[^()]|\([^()]*\))*))?\)/g;
 
 /** A value with its var() expressions taken out, so the literals beside a token are still checked. @param {string} value @returns {string} */
 export const literals = (value) => value.replace(VAR, ' ');
 
+/** Most values one declaration is checked with, when its variables have several definitions. */
+const MAX_CANDIDATES = 16;
+
 /**
- * A value with each var() of a variable in `vars` replaced by that variable's value,
- * through variables that refer to others. A mock-up's own `--gap: 10px` is then
- * checked where `gap: var(--gap)` uses it. Other var()s are left as they are.
+ * The values a declaration can have once a mock-up's own variables are put in, so
+ * `gap: var(--gap)` with `--gap: 10px` is checked as a 10px gap. A definition in the
+ * declaration's own scope (the same rule, or the same style attribute) is the one that
+ * applies. Without one, the value can come from any other definition, so each is
+ * checked. Variables with no definition are left as they are.
  * @param {string} value
- * @param {Map<string, string>} vars
- * @returns {string}
+ * @param {Map<string, { value: string, scope: number }[]>} defs every definition of each variable
+ * @param {number} scope the declaration's scope
+ * @returns {string[]} distinct values, `value` itself when nothing resolves
  */
-export function resolveVars(value, vars) {
-  let out = value;
+export function resolveVars(value, defs, scope) {
+  /** @param {string} name */
+  const options = (name) => {
+    const all = defs.get(name) ?? [];
+    const local = all.filter((d) => d.scope === scope);
+    return [...new Set((local.length ? local : all).map((d) => d.value))];
+  };
+  let values = [value];
   // A few rounds, for variables that refer to variables; a loop between them stops here.
   for (let depth = 0; depth < 8; depth++) {
-    const next = out.replace(VAR, (all, name) => vars.get(name) ?? all);
-    if (next === out) break;
-    out = next;
+    /** @type {string[]} */
+    const next = [];
+    for (const v of values) {
+      const m = [...v.matchAll(VAR)].find((x) => options(x[1]).length);
+      if (!m) { next.push(v); continue; }
+      const at = m.index ?? 0;
+      for (const o of options(m[1])) next.push(v.slice(0, at) + o + v.slice(at + m[0].length));
+    }
+    const distinct = [...new Set(next)].slice(0, MAX_CANDIDATES);
+    if (distinct.length === values.length && distinct.every((v, i) => v === values[i])) break;
+    values = distinct;
   }
-  return out;
+  return values;
 }
 
 /** The line each character index is on, from 1. @param {string} text @returns {(index: number) => number} */
@@ -61,32 +92,60 @@ export function lineIndex(text) {
 }
 
 /**
+ * For each index in a stylesheet, the offset of the `{` of the rule it's in (-1 outside any).
+ * @param {string} css
+ * @returns {(index: number) => number}
+ */
+function blockIndex(css) {
+  /** @type {number[]} */
+  const stack = [];
+  const at = new Int32Array(css.length + 1);
+  for (let i = 0; i < css.length; i++) {
+    if (css[i] === '{') stack.push(i);
+    at[i] = stack.length ? stack[stack.length - 1] : -1;
+    if (css[i] === '}') stack.pop();
+  }
+  at[css.length] = -1;
+  return (index) => at[Math.min(Math.max(index, 0), css.length)];
+}
+
+/**
  * Every declaration in a file, in line order, where line and endLine are the lines
- * its property and value span: CSS, <style> blocks, style attributes in either quote,
- * and JSX style objects (read by scripts/jsx.mjs).
+ * its property and value span and scope says which rule, style attribute or JSX
+ * element it belongs to: CSS, <style> blocks, style attributes in either quote, and
+ * JSX style objects (read by scripts/jsx.mjs). HTML comments are left out.
  * @param {string} text
  * @param {string} ext the file's extension, with its dot
  * @returns {Declaration[]}
  */
 export function declarations(text, ext) {
-  const lineAt = lineIndex(text);
+  const html = ext === '.html' || ext === '.htm';
+  const source = html ? maskHtmlComments(text) : text;
+  const lineAt = lineIndex(source);
   /** @type {Declaration[]} */
   const out = [];
-  /** @param {string} css @param {number} offset */
-  const cssIn = (css, offset) => {
-    for (const m of stripComments(css).matchAll(/(?<![\w-])(--[\w-]+|[a-z-]+)\s*:\s*([^;{}]+?)\s*(?=;|}|$)/gm)) {
+  /** @param {string} css @param {number} offset @param {number | null} fixedScope one scope for all of it (a style attribute) */
+  const cssIn = (css, offset, fixedScope) => {
+    const clean = stripComments(css);
+    const blockAt = fixedScope === null ? blockIndex(clean) : null;
+    for (const m of clean.matchAll(/(?<![\w-])(--[\w-]+|[a-z-]+)\s*:\s*([^;{}]+?)\s*(?=;|}|$)/gm)) {
       if (/^(https?|data)$/.test(m[1])) continue;
       const start = offset + (m.index ?? 0);
-      out.push({ prop: m[1], value: m[2], line: lineAt(start), endLine: lineAt(start + m[0].length - 1) });
+      const block = blockAt ? blockAt(m.index ?? 0) : -1;
+      const scope = fixedScope ?? (block === -1 ? -1 : offset + block);
+      out.push({ prop: m[1], value: m[2], line: lineAt(start), endLine: lineAt(start + m[0].length - 1), scope });
     }
   };
-  if (ext === '.css') { cssIn(text, 0); return out; }
+  if (ext === '.css') { cssIn(source, 0, null); return out; }
   // Each body's offset is where it starts in the file, so a declaration keeps its own lines.
-  for (const m of text.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)) cssIn(m[1], (m.index ?? 0) + m[0].length - '</style>'.length - m[1].length);
+  for (const m of source.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)) cssIn(m[1], (m.index ?? 0) + m[0].length - '</style>'.length - m[1].length, null);
   if (ext === '.tsx' || ext === '.jsx') {
-    out.push(...styleDeclarations(text, `inline${ext}`));
+    out.push(...styleDeclarations(source, `inline${ext}`));
   } else {
-    for (const m of text.matchAll(/\bstyle=(["'])([\s\S]*?)\1/g)) cssIn(m[2], (m.index ?? 0) + 'style="'.length);
+    for (const m of source.matchAll(/\bstyle=(["'])([\s\S]*?)\1/g)) {
+      const at = (m.index ?? 0) + 'style="'.length;
+      cssIn(m[2], at, at);
+    }
   }
   return out.sort((a, b) => a.line - b.line);
 }
@@ -96,14 +155,14 @@ export function declarations(text, ext) {
  * exceptions applied. Values inside var() are tokens and aren't returned;
  * literals beside them are.
  *
- *   corner       border radius in px (0 and pills of 100px+ aside; `pill` marks 999px)
- *   spacing      padding, margin and gap over 1px (negative margins aside); `up` on padding
- *   type size    font-size, and the size in a `font` shorthand; `unit` for em, rem and pt
+ *   corner       border radius in px (0 and pills of 100px+ aside); a 999px pill
+ *   spacing      padding, margin and gap over 1px (negative margins aside)
+ *   type size    font-size, and the size in a `font` shorthand, in px or another unit
  *   weight       a numeric weight off WEIGHTS
  *   line height  a unitless line height other than 0 and 1
  *   layer        a z-index over LAYER_FREE_MAX
  *   height       height and min-height in px (a control height only if it matches one)
- *   motion       a transition duration or delay over MOTION_FREE_MS, as `n` ms
+ *   motion       a transition duration or delay over MOTION_FREE_MS, in ms
  *
  * @param {string} prop
  * @param {string} value

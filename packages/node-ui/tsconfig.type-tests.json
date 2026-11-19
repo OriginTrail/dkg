@@ -14,6 +14,7 @@
     "test/**/*.typecheck.ts",
     "scripts/colour.mjs",
     "scripts/jsx.mjs",
-    "scripts/design-rules.mjs"
+    "scripts/design-rules.mjs",
+    "scripts/design-suggest.mjs"
   ]
 }

@@ -135,6 +135,26 @@ describe('design check', () => {
     expect(found('<style>:root { --gap: var(--space-8); } .x { gap: var(--gap); }</style>')).toEqual([]);
   });
 
+  it('keeps a variable defined in a rule to that rule', () => {
+    const gaps = (css: string) => checkText(system, `<style>${css}</style>`, 'mock.html', { known: new Set(['--gap']), mockup: true })
+      .filter((f: { offScale?: boolean; prop: string }) => f.offScale && f.prop === 'gap')
+      .map((f: { value: string }) => f.value);
+    // .a reads the 10px from :root; .b defines its own 8px, which is on the scale.
+    expect(gaps(':root { --gap: 10px; } .a { gap: var(--gap); } .b { --gap: 8px; gap: var(--gap); }')).toEqual(['10px']);
+    // Whichever definition applies, a use with no definition of its own is checked against each.
+    expect(gaps(':root { --gap: 8px; } .b { --gap: 10px; } .a { gap: var(--gap); }')).toEqual(['10px']);
+    expect(gaps(':root { --gap: 8px; } .b { --gap: 12px; } .a { gap: var(--gap); }')).toEqual([]);
+  });
+
+  it('leaves commented-out HTML alone, and keeps lines after it', () => {
+    const found = (html: string) => checkText(system, html, 'mock.html', { known: new Set(), mockup: true })
+      .filter((f: { offScale?: boolean }) => f.offScale)
+      .map((f: { line: number; kind: string }) => `${f.line} ${f.kind}`);
+    expect(found('<!-- <button>Old button</button> -->')).toEqual([]);
+    expect(found('<!--\n<div style="padding: 10px"></div>\n<style>.a { gap: 10px; }</style>\n-->')).toEqual([]);
+    expect(found('<!-- old\n-->\n<button>New</button>\n<div style="padding: 10px"></div>')).toEqual(['3 component', '4 spacing']);
+  });
+
   it('reads style attributes in either quote', () => {
     const found = (html: string) => checkText(system, html, 'mock.html', { known: new Set(), mockup: true })
       .map((f: { prop: string; value: string }) => `${f.prop} ${f.value}`);

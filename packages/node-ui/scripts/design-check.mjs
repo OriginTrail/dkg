@@ -18,7 +18,8 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseColour } from './colour.mjs';
-import { WEIGHTS, classify, declarations, lineIndex, literals, resolveVars, stripComments } from './design-rules.mjs';
+import { classify, declarations, lineIndex, literals, maskHtmlComments, resolveVars, stripComments } from './design-rules.mjs';
+import { ADD, suggest } from './design-suggest.mjs';
 
 export { declarations, parseColour };
 
@@ -123,25 +124,10 @@ function colourRole(prop) {
   return null;
 }
 
-/** The closest step. On a tie, `up` picks the larger one (DESIGN.md · Spacing: padding rounds up, gaps and margins down). */
-const nearest = (scale, value, up = false) => scale.reduce((best, t) => {
-  if (!best) return t;
-  const [d, bd] = [Math.abs(t.value - value), Math.abs(best.value - value)];
-  return d < bd || (d === bd && (up ? t.value > best.value : t.value < best.value)) ? t : best;
-}, null);
-
 // ── Rules ───────────────────────────────────────────────────────────────────
 // Each rule looks at one declaration (property, value) and returns findings:
-// { kind, value, use } where `use` is the suggestion.
-
-const ADD = 'or, if this is a new rule, add a token (DESIGN.md · Adding to the system)';
-
-function scaleRule(kind, scale, value, unit = 'px', up = false) {
-  const hit = scale.find((t) => t.value === value);
-  if (hit) return { kind, use: `var(${hit.name})` };
-  const near = nearest(scale, value, up);
-  return { kind, use: near ? `nearest is var(${near.name}) (${near.value}${unit}), ${ADD}` : ADD, offScale: true };
-}
+// { kind, value, use } where `use` is the suggestion. Colours and unknown tokens are
+// checked here; literal values go through classify() and suggest().
 
 export function checkDeclaration(system, prop, value, { known, mockup = false } = {}) {
   const out = [];
@@ -189,19 +175,8 @@ export function checkDeclaration(system, prop, value, { known, mockup = false } 
   // Literal values, with the rules' exceptions applied in design-rules.mjs. A token in
   // the same declaration doesn't excuse the literals beside it (`padding: var(--space-4) 10px`).
   for (const hit of classify(p, v)) {
-    const { kind, value: shown, n } = hit;
-    if (kind === 'corner') out.push(hit.pill ? { kind, value: shown, use: 'var(--radius-pill)' } : { value: shown, ...scaleRule(kind, system.radius, n) });
-    else if (kind === 'spacing') out.push({ value: shown, ...scaleRule(kind, system.space, n, 'px', hit.up) });
-    else if (kind === 'type size') out.push(hit.unit ? { kind, value: shown, use: 'type sizes are px tokens (--fs-*)', offScale: true } : { value: shown, ...scaleRule(kind, system.fontSize, n) });
-    else if (kind === 'weight') out.push({ kind, value: shown, use: `weights are ${WEIGHT_LIST}`, offScale: true });
-    else if (kind === 'line height') out.push({ value: shown, ...scaleRule(kind, system.lineHeight, n, '') });
-    else if (kind === 'layer') out.push({ value: shown, ...scaleRule(kind, system.z, n, '') });
-    else if (kind === 'motion') out.push({ value: shown, ...scaleRule(kind, system.motion, n, 'ms') });
-    else if (kind === 'height') {
-      // Only sizes that are already a control or badge height: anything else may be layout.
-      const token = system.height.find((t) => t.value === n);
-      if (token) out.push({ kind, value: shown, use: `var(${token.name}), if this is a control, badge or row` });
-    }
+    const finding = suggest(system, hit);
+    if (finding) out.push(finding);
   }
   const lit = literals(v);
   if (p === 'box-shadow' && mockup && /\d+px/.test(lit) && !/^inset\b/.test(v)) {
@@ -209,8 +184,6 @@ export function checkDeclaration(system, prop, value, { known, mockup = false } 
   }
   return out;
 }
-
-const WEIGHT_LIST = `${WEIGHTS.slice(0, -1).join(', ')} or ${WEIGHTS.at(-1)}`;
 
 // Components: markup that rebuilds something the system already has. Each rule reads
 // the whole opening tag, so a tag that already has the shared class passes.
@@ -269,21 +242,38 @@ export function checkText(system, text, file, { known, mockup = false, keepLine 
   const findings = [];
   const decls = declarations(text, ext);
   // A mock-up's own variables (`--gap: 10px`) are checked where they're used, against the
-  // scale of the property that uses them: `gap: var(--gap)` is a gap of 10px.
-  const vars = new Map(mockup ? decls.filter((d) => d.prop.startsWith('--') && !system.tokens.has(d.prop)).map((d) => [d.prop, d.value]) : []);
+  // scale of the property that uses them: `gap: var(--gap)` is a gap of 10px. Every
+  // definition is kept with its scope, so a rule's own definition applies inside it.
+  const defs = new Map();
+  if (mockup) {
+    for (const d of decls) {
+      if (!d.prop.startsWith('--') || system.tokens.has(d.prop)) continue;
+      if (!defs.has(d.prop)) defs.set(d.prop, []);
+      defs.get(d.prop).push({ value: d.value, scope: d.scope });
+    }
+  }
   for (const d of decls) {
     // A declaration counts as changed when any line it spans is: `padding:\n  10px;` with only the value edited.
     let changed = false;
     for (let l = d.line; l <= (d.endLine ?? d.line) && !changed; l++) changed = keepLine(l);
     if (!changed) continue;
-    const resolved = vars.size && !d.prop.startsWith('--') ? resolveVars(d.value, vars) : d.value;
-    for (const f of checkDeclaration(system, d.prop, resolved, { known, mockup })) {
-      findings.push({ line: d.line, prop: d.prop, ...f, ...(resolved !== d.value ? { written: d.value } : {}) });
+    // With several possible definitions, each value it could have is checked, once per finding.
+    const values = defs.size && !d.prop.startsWith('--') ? resolveVars(d.value, defs, d.scope) : [d.value];
+    const seen = new Set();
+    for (const resolved of values) {
+      for (const f of checkDeclaration(system, d.prop, resolved, { known, mockup })) {
+        const key = `${f.kind}\0${f.value}\0${f.use}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        findings.push({ line: d.line, prop: d.prop, ...f, ...(resolved !== d.value ? { written: d.value } : {}) });
+      }
     }
   }
   // In shipped code, test/ds-classes.test.ts and test/button-classes.test.ts already check
   // components with the context they need. A mock-up has no such tests, so it gets the hints here.
-  if (mockup && ext !== '.css') findings.push(...checkMarkup(text, lineIndex(text), keepLine));
+  // Commented-out HTML renders nothing, so it isn't checked; offsets stay where they were.
+  const markup = ext === '.html' || ext === '.htm' ? maskHtmlComments(text) : text;
+  if (mockup && ext !== '.css') findings.push(...checkMarkup(markup, lineIndex(markup), keepLine));
   return findings.sort((a, b) => a.line - b.line);
 }
 
