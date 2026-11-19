@@ -5,7 +5,7 @@
 // scripts/design-suggest.mjs turns each one into a suggestion (the token to use, or
 // that the system needs a new one). The JSDoc types are checked: tsconfig.type-tests.json
 // runs tsc with checkJs over this file.
-import { cssDeclarations } from './css.mjs';
+import { CssReadError, cssDeclarations } from './css.mjs';
 import { maskHtmlComments, readHtml } from './html.mjs';
 import { styleDeclarations } from './jsx.mjs';
 
@@ -104,10 +104,25 @@ export function declarations(text, ext) {
   const lineAt = lineIndex(text);
   /** @type {Declaration[]} */
   const out = [];
-  /** @param {string} css @param {number} offset @param {number} [rootScope] */
-  const cssIn = (css, offset, rootScope) => {
-    for (const d of cssDeclarations(css, offset, rootScope)) {
-      out.push({ prop: d.prop, value: d.value, line: lineAt(d.start), endLine: lineAt(d.end), scope: d.scope });
+  /**
+   * @param {string} css
+   * @param {number} offset where `css` starts in the file
+   * @param {number} [rootScope]
+   * @param {(index: number) => number} [at] where character i of `css` is in the file, when `css` isn't a plain slice of it (a decoded attribute)
+   */
+  const cssIn = (css, offset, rootScope, at) => {
+    const place = at ?? ((i) => offset + i);
+    let found;
+    try {
+      found = cssDeclarations(css, 0, rootScope);
+    } catch (error) {
+      if (error instanceof CssReadError) throw new CssReadError(error.reason, place(error.index));
+      throw error;
+    }
+    for (const d of found) {
+      // A rule's scope is an offset in `css`; put it where the rule is in the file.
+      const scope = d.scope === (rootScope ?? -1) ? d.scope : place(d.scope);
+      out.push({ prop: d.prop, value: d.value, line: lineAt(place(d.start)), endLine: lineAt(place(d.end)), scope });
     }
   };
   if (ext === '.css') { cssIn(text, 0); return out; }
@@ -119,7 +134,8 @@ export function declarations(text, ext) {
     // A style attribute's declarations share one scope: the attribute's own.
     for (const tag of doc.tags) {
       const style = tag.attrs.get('style');
-      if (style) cssIn(style.value, style.start, style.start);
+      // The value as the browser reads it, with character references decoded.
+      if (style) cssIn(style.value, style.start, style.start, style.offsetAt);
     }
   }
   return out.sort((a, b) => a.line - b.line);

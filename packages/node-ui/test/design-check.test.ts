@@ -240,6 +240,29 @@ describe('design check', () => {
     expect(found('<script>"<div style=\'padding: 10px\'>"</script>\n<div style="padding: 10px"></div>')).toEqual(['2 spacing']);
   });
 
+  it('decodes character references in attributes, as the browser does', () => {
+    const found = (html: string) => checkText(system, html, 'mock.html', { known: new Set(), mockup: true })
+      .filter((f: { offScale?: boolean }) => f.offScale)
+      .map((f: { line: number; kind: string; value: string }) => `${f.line} ${f.kind} ${f.value}`);
+    expect(found('<button class="ds&#45;btn">Save</button>')).toEqual([]);
+    expect(found('<button class="ds&#x2D;btn">Save</button>')).toEqual(found('<button class="ds-btn">Save</button>'));
+    expect(found('<div style="font-family: &quot;JetBrains Mono&quot;; padding: var(--space-8)"></div>')).toEqual([]);
+    // Encoded and literal versions give the same findings, on the same lines.
+    expect(found('<div style="padding:&#32;10px; color: &#35;ff00ff"></div>')).toEqual(found('<div style="padding: 10px; color: #ff00ff"></div>'));
+    expect(found('<div style="font-family: &quot;A&quot;;\n  padding: 10px"></div>')).toEqual(['2 spacing 10px']);
+    expect(found('<div title="&copy=x" class="tag"></div>')).toEqual(['1 component <div title="&copy=x" class="tag">']);
+  });
+
+  it('reads no variable inside quoted text or a URL', () => {
+    const tokens = (prop: string, value: string) => checkDeclaration(system, prop, value, { known: new Set() })
+      .filter((f: { kind: string }) => f.kind === 'token').map((f: { value: string }) => f.value);
+    expect(tokens('content', '"var(--example)"')).toEqual([]);
+    expect(tokens('content', "'see var(--x)'")).toEqual([]);
+    expect(tokens('background', 'url("var(--x).png")')).toEqual([]);
+    expect(tokens('color', 'var(--missing)')).toEqual(['--missing']);
+    expect(tokens('content', '"x" var(--missing)')).toEqual(['--missing']);
+  });
+
   it('reads HTML attributes with > inside their quotes', () => {
     const hints = (html: string) => checkText(system, html, 'mock.html', { known: new Set(), mockup: true })
       .filter((f: { kind: string }) => f.kind === 'component').length;
