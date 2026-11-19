@@ -11,9 +11,9 @@ export const LAYER_FREE_MAX = 10;
 /** Durations at or under this are reduced-motion overrides, not timings. */
 export const MOTION_FREE_MS = 0.5;
 
-export const stripComments = (css) => css.replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' '));
+import { styleDeclarations } from './jsx.mjs';
 
-const camelToKebab = (s) => s.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
+export const stripComments = (css) => css.replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' '));
 
 /** A value with its var() expressions taken out, so the literals beside a token are still checked. */
 export const literals = (value) => value.replace(/var\((?:[^()]|\([^()]*\))*\)/g, ' ');
@@ -29,30 +29,30 @@ export function lineIndex(text) {
   };
 }
 
-/** Every declaration in a file with its line: CSS, <style> blocks, style="" and style={{}}. */
+/**
+ * Every declaration in a file as `{ prop, value, line, endLine }`, where line and
+ * endLine are the lines its property and value span: CSS, <style> blocks, style
+ * attributes in either quote, and JSX style objects (read by scripts/jsx.mjs).
+ */
 export function declarations(text, ext) {
   const lineAt = lineIndex(text);
   const out = [];
-  const add = (prop, value, index) => out.push({ prop, value, line: lineAt(index) });
   const cssIn = (css, offset) => {
     for (const m of stripComments(css).matchAll(/(?<![\w-])(--[\w-]+|[a-z-]+)\s*:\s*([^;{}]+?)\s*(?=;|}|$)/gm)) {
       if (/^(https?|data)$/.test(m[1])) continue;
-      add(m[1], m[2], offset + m.index);
+      const start = offset + m.index;
+      out.push({ prop: m[1], value: m[2], line: lineAt(start), endLine: lineAt(start + m[0].length - 1) });
     }
   };
   if (ext === '.css') { cssIn(text, 0); return out; }
-  // Each body's offset is where it starts in the file, so a declaration keeps its own line.
+  // Each body's offset is where it starts in the file, so a declaration keeps its own lines.
   for (const m of text.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)) cssIn(m[1], m.index + m[0].length - '</style>'.length - m[1].length);
-  for (const m of text.matchAll(/\bstyle="([^"]*)"/g)) cssIn(m[1], m.index + 'style="'.length);
-  for (const m of text.matchAll(/\bstyle=\{\{([\s\S]*?)\}\}/g)) {
-    const at = m.index + 'style={{'.length;
-    for (const d of m[1].matchAll(/['"]?([\w-]+)['"]?\s*:\s*(['"`])([^'"`]*)\2/g)) add(camelToKebab(d[1]), d[3], at + d.index);
-    for (const d of m[1].matchAll(/\b(fontSize|borderRadius|padding|margin|gap|zIndex|fontWeight|lineHeight)\s*:\s*(\d*\.?\d+)\b/g)) {
-      const unitless = ['zIndex', 'fontWeight', 'lineHeight'].includes(d[1]);
-      add(camelToKebab(d[1]), unitless ? d[2] : `${d[2]}px`, at + d.index);
-    }
+  if (ext === '.tsx' || ext === '.jsx') {
+    out.push(...styleDeclarations(text, `inline${ext}`));
+  } else {
+    for (const m of text.matchAll(/\bstyle=(["'])([\s\S]*?)\1/g)) cssIn(m[2], m.index + 'style="'.length);
   }
-  return out;
+  return out.sort((a, b) => a.line - b.line);
 }
 
 /**

@@ -17,11 +17,14 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseColour } from './colour.mjs';
 import { WEIGHTS, classify, declarations, lineIndex, literals, stripComments } from './design-rules.mjs';
 
-export { declarations };
+export { declarations, parseColour };
 
-const PKG = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+// DESIGN_CHECK_PKG points the check at another copy of the package: the tests use it
+// to run --changed against a git repository of their own.
+const PKG = process.env.DESIGN_CHECK_PKG ? resolve(process.env.DESIGN_CHECK_PKG) : resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const UI = join(PKG, 'src/ui');
 const THEME = join(UI, 'styles/00-theme.css');
 const EXTENSIONS = new Set(['.css', '.html', '.htm', '.tsx', '.jsx']);
@@ -85,39 +88,6 @@ export function runtimeProps() {
 // ── Values ──────────────────────────────────────────────────────────────────
 
 const COLOUR = /#(?:[0-9a-f]{8}|[0-9a-f]{6}|[0-9a-f]{3,4})\b|\b(?:rgba?|hsla?)\([^)]*\)/gi;
-
-/** A colour as `{ rgb: [r, g, b], alpha }`, alpha from 0 to 1; null if it isn't one. */
-export function parseColour(text) {
-  const t = text.trim().toLowerCase();
-  let m = t.match(/^#([0-9a-f]{3,8})$/);
-  if (m) {
-    let h = m[1];
-    if (h.length === 3 || h.length === 4) h = [...h].map((c) => c + c).join('');
-    if (h.length !== 6 && h.length !== 8) return null;
-    return { rgb: [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)), alpha: h.length === 8 ? parseInt(h.slice(6), 16) / 255 : 1 };
-  }
-  m = t.match(/^(rgba?|hsla?)\(([^)]*)\)$/);
-  if (!m) return null;
-  const parts = m[2].split(/[\s,/]+/).filter(Boolean);
-  if (parts.length < 3) return null;
-  const a = parts[3];
-  const alpha = a === undefined ? 1 : a.endsWith('%') ? parseFloat(a) / 100 : Number(a);
-  if (Number.isNaN(alpha)) return null;
-  if (m[1].startsWith('rgb')) {
-    const rgb = parts.slice(0, 3).map(Number);
-    return rgb.some(Number.isNaN) ? null : { rgb, alpha };
-  }
-  const [h, s, l] = [parseFloat(parts[0]), parseFloat(parts[1]), parseFloat(parts[2])];
-  if ([h, s, l].some(Number.isNaN)) return null;
-  return { rgb: hslToRgb(h, s / 100, l / 100), alpha };
-}
-
-function hslToRgb(h, s, l) {
-  const k = (n) => (n + h / 30) % 12;
-  const a = s * Math.min(l, 1 - l);
-  const f = (n) => l - a * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1));
-  return [f(0), f(8), f(4)].map((v) => Math.round(v * 255));
-}
 
 /** CIE76 distance in Lab: under ~2 reads as the same colour, under ~10 as a close one. */
 export function colourDistance(a, b) {
@@ -298,7 +268,10 @@ export function checkText(system, text, file, { known, mockup = false, keepLine 
   const ext = extname(file).toLowerCase();
   const findings = [];
   for (const d of declarations(text, ext)) {
-    if (!keepLine(d.line)) continue;
+    // A declaration counts as changed when any line it spans is: `padding:\n  10px;` with only the value edited.
+    let changed = false;
+    for (let l = d.line; l <= (d.endLine ?? d.line) && !changed; l++) changed = keepLine(l);
+    if (!changed) continue;
     for (const f of checkDeclaration(system, d.prop, d.value, { known, mockup })) findings.push({ line: d.line, prop: d.prop, ...f });
   }
   // In shipped code, test/ds-classes.test.ts and test/button-classes.test.ts already check

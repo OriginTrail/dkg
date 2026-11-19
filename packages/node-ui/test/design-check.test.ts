@@ -2,8 +2,8 @@
 // 00-theme.css and says, for each value that isn't on it, which token to use or
 // that the system needs a new one. These tests keep its suggestions right, and run
 // it over the UI so a value off the system fails here with that suggestion attached.
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -106,6 +106,31 @@ describe('design check', () => {
     expect(checkText(system, text, 'x.tsx', { known: new Set(), keepLine: (l: number) => l === 3 })).toHaveLength(1);
   });
 
+  it('counts a declaration as changed when only its value line changed', () => {
+    const only3 = { known: new Set(), keepLine: (l: number) => l === 3 };
+    expect(checkText(system, '.a {\n  padding:\n    10px;\n}', 'x.css', only3)).toHaveLength(1);
+    expect(checkText(system, '<div style={{\n  padding:\n    10,\n}} />', 'x.tsx', only3)).toHaveLength(1);
+    expect(checkText(system, '.a {\n  padding: 10px;\n  color: var(--text-primary);\n}', 'x.css', only3)).toEqual([]);
+  });
+
+  it('reads style attributes in either quote', () => {
+    const found = (html: string) => checkText(system, html, 'mock.html', { known: new Set(), mockup: true })
+      .map((f: { prop: string; value: string }) => `${f.prop} ${f.value}`);
+    const double = found('<div style="padding: 10px; color: #ff00ff"></div>');
+    expect(double).toEqual(['padding 10px', 'color #ff00ff']);
+    expect(found("<div style='padding: 10px; color: #ff00ff'></div>")).toEqual(double);
+  });
+
+  it('reads JSX style objects through casts, for any property', () => {
+    const found = (tsx: string) => checkText(system, tsx, 'x.tsx', { known: new Set() })
+      .map((f: { line: number; prop: string; value: string }) => `${f.line} ${f.prop} ${f.value}`);
+    const plain = found('<div style={{ paddingTop: 10, zIndex: 50 }} />');
+    expect(plain).toEqual(['1 padding-top 10px', '1 z-index 50']);
+    expect(found('<div style={{ paddingTop: 10, zIndex: 50 } as React.CSSProperties} />')).toEqual(plain);
+    expect(found('<div style={({ paddingTop: 10, zIndex: 50 }) satisfies Style} />')).toEqual(plain);
+    expect(found('<div style={{ padding: gap, width: `${w}px` }} />')).toEqual([]); // worked out at runtime
+  });
+
   it('exits 1 on a design off the system, and 0 on one on it', () => {
     const dir = mkdtempSync(join(tmpdir(), 'design-check-'));
     try {
@@ -118,6 +143,35 @@ describe('design check', () => {
       expect(run('.a { padding: var(--space-12); }')).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // --changed against a git repository of its own: a tracked stylesheet with a value off
+  // the system on an old line and on a new one, and an untracked stylesheet.
+  it('checks only added lines and untracked files with --changed', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'design-check-git-'));
+    try {
+      const pkg = join(repo, 'packages/node-ui');
+      const styles = join(pkg, 'src/ui/styles');
+      mkdirSync(styles, { recursive: true });
+      copyFileSync(join(__dirname, '../src/ui/styles/00-theme.css'), join(styles, '00-theme.css'));
+      const git = (...args: string[]) => execFileSync('git', ['-c', 'user.name=design-check', '-c', 'user.email=design-check@example.invalid', '-c', 'commit.gpgsign=false', ...args], { cwd: repo, stdio: 'pipe' });
+      git('init', '-q', '-b', 'main');
+      writeFileSync(join(styles, 'a.css'), '.old { padding: 10px; }\n');
+      git('add', '-A');
+      git('commit', '-q', '-m', 'base');
+      git('checkout', '-q', '-b', 'feature');
+      writeFileSync(join(styles, 'a.css'), '.old { padding: 10px; }\n.new { gap: 10px; }\n');
+      git('commit', '-q', '-am', 'feature');
+      writeFileSync(join(styles, 'b.css'), '.u {\n  padding:\n    10px;\n}\n');
+
+      const run = spawnSync(process.execPath, [SCRIPT, '--changed', 'main', '--json'], { cwd: pkg, encoding: 'utf8', env: { ...process.env, DESIGN_CHECK_PKG: pkg } });
+      const results = JSON.parse(run.stdout) as { file: string; findings: { line: number; prop: string; offScale?: boolean }[] }[];
+      const found = results.flatMap((r) => r.findings.filter((f) => f.offScale).map((f) => `${r.file}:${f.line} ${f.prop}`));
+      expect(found.sort()).toEqual(['src/ui/styles/a.css:2 gap', 'src/ui/styles/b.css:2 padding']);
+      expect(run.status).toBe(1);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
     }
   });
 
