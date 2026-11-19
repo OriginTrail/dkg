@@ -185,6 +185,16 @@ export {
   type ACKTransportFactory,
 } from './ack-transport.js';
 export {
+  type ACKPeerRoundOutcome,
+  type ACKPeerOutcomeReport,
+  type ACKPeerOutcomesObserver,
+} from './ack-peer-status-ledger.js';
+export {
+  ACKPeerTrackRecord,
+  ACK_PEER_TRACK_RECORD_TTL_MS,
+  type ACKCandidatePlan,
+} from './ack-peer-track-record.js';
+export {
   selectCanonicalACKCandidateUniverse,
   selectCanonicalACKCandidatePeersWithDiagnostics,
   type ACKCanonicalCandidatePeerSelectionInput,

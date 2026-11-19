@@ -1267,6 +1267,8 @@ export class DKGAgentBase {
   protected selectedVmReconcileBindingGeneration = 0;
   /** Bounded root bookkeeping for sibling cleanup only; never currentness authority. */
   protected readonly recentReconciledUals = new RecentUalSet();
+  /** This node's own just-confirmed publishes, `${onChainCgId}:${kaId}` → local graph (handleKARegisteredNudge). */
+  protected readonly ownConfirmedRegistrations = new RecentReconcileEvidenceMap<string>(256, 10 * 60_000);
   /** Bounded same-finalized-block leases; never durable across a stagnant head. */
   protected readonly vmReconcileFinalizedSlotEvidence =
     new RecentReconcileEvidenceMap<{

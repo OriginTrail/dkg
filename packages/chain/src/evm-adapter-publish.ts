@@ -11,6 +11,7 @@ import { decodeV9UpdateReceiptLog, decodeV10UpdateReceiptLog, type UpdateReceipt
  */
 
 import { EVMChainAdapterBase, decodeConvictionCostCovered, type EvmSigner } from './evm-adapter-base.js';
+import { decodeKnowledgeAssetRegistration } from './knowledge-asset-registration-log.js';
 import { numericChainIdOf } from './evm-adapter-storage-reads.js';
 import { ethers, Contract } from 'ethers';
 import type {
@@ -908,10 +909,12 @@ export class PublishMethods extends EVMChainAdapterBase {
     }
 
     const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
+    const contextGraphId = decodeKnowledgeAssetRegistration(this.contracts.contextGraphStorage, receipt.logs, kaId);
 
     return {
       batchId: kaId,
       kaId: kaId,
+      ...(contextGraphId === undefined ? {} : { contextGraphId }),
       knowledgeAssetsContract: String(kas.target),
       merkleRoot,
       startKAId,

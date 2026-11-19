@@ -127,6 +127,9 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
     expect(firstPublishResult.onChainResult!.txHash).toMatch(/^0x[0-9a-f]{64}$/);
     expect(firstPublishResult.onChainResult!.batchId).toBeGreaterThan(0n);
     expect(firstPublishResult.onChainResult!.blockNumber).toBeGreaterThan(0);
+    // The receipt's own KnowledgeAssetRegisteredToContextGraph event names the
+    // graph, so the scoped promote needs no kaToContextGraph read for it.
+    expect(firstPublishResult.onChainResult!.contextGraphId).toBe(BigInt(CONTEXT_GRAPH));
     expect(firstPublishResult.ual).toContain('did:dkg:evm:31337/');
   }, 60_000);
 

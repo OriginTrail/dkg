@@ -39,6 +39,22 @@ export const DKGEvent = {
 
 export type DKGEventType = (typeof DKGEvent)[keyof typeof DKGEvent];
 
+/**
+ * Payload of {@link DKGEvent.KC_CONFIRMED}: this node's own publish has its
+ * confirmed receipt. Emitted before the publisher stores its confirmed copy, so
+ * listeners learn of the registration before the chain event for it arrives.
+ */
+export interface KnowledgeAssetConfirmedEvent {
+  /** Local graph the publisher stores the confirmed copy in. */
+  readonly contextGraphId: string;
+  /** Sub-graph of `contextGraphId` the copy goes to, if any. */
+  readonly subGraphName?: string;
+  /** On-chain Context Graph the transaction registered the KA to. */
+  readonly onChainContextGraphId: bigint;
+  readonly kaId: bigint;
+  readonly txHash: string;
+}
+
 export class TypedEventBus implements EventBus {
   private listeners = new Map<string, Set<(data: unknown) => void>>();
 
