@@ -61,7 +61,10 @@ function main(argv) {
   const args = argv.filter((a) => !a.startsWith('--'));
   const changedAt = argv.indexOf('--changed');
   const system = buildSystem(readTokens());
-  const known = runtimeProps();
+  // Variables the UI sets at runtime, read only when a UI file is checked: a mock-up has its own.
+  /** @type {Set<string> | undefined} */
+  let uiVariables;
+  const known = () => (uiVariables ??= runtimeProps());
 
   let targets; // Map<file, Set<line> | null>
   if (changedAt !== -1) {
@@ -84,7 +87,7 @@ function main(argv) {
     const text = readFileSync(file, 'utf8');
     const findings = checkText(system, text, file, {
       // A mock-up's own variables are found by checkText; the UI also sets some at runtime.
-      known: isMockup ? undefined : known,
+      known: isMockup ? undefined : known(),
       mockup: isMockup,
       keepLine: lines ? (l) => lines.has(l) : undefined,
     });

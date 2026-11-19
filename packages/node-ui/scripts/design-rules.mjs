@@ -17,12 +17,14 @@ import { styleDeclarations } from './jsx.mjs';
  * number on the rule's scale (px, or ms for motion) wherever there is one.
  * @typedef {{ kind: 'corner', value: string, n: number }} CornerHit        a border radius in px
  * @typedef {{ kind: 'corner', value: string, pill: true }} PillHit        a 999px corner: the pill token
+ * @typedef {{ kind: 'corner', value: string, unit: true }} CornerUnitHit  a radius in another length unit (rem, em, vw …)
  * @typedef {{ kind: 'spacing', value: string, n: number, up: boolean }} SpacingHit  `up` on padding: ties round up
+ * @typedef {{ kind: 'spacing', value: string, unit: true }} SpacingUnitHit a space in another length unit
  * @typedef {{ kind: 'type size', value: string, n: number }} TypeSizeHit  a size in px
- * @typedef {{ kind: 'type size', value: string, unit: true }} TypeUnitHit a size in em, rem or pt
+ * @typedef {{ kind: 'type size', value: string, unit: true }} TypeUnitHit a size in another unit (em, rem, pt, vw, % …)
  * @typedef {{ kind: 'weight', value: string }} WeightHit                 a numeric weight off WEIGHTS
  * @typedef {{ kind: 'line height' | 'layer' | 'height' | 'motion', value: string, n: number }} ScaleHit
- * @typedef {CornerHit | PillHit | SpacingHit | TypeSizeHit | TypeUnitHit | WeightHit | ScaleHit} Hit
+ * @typedef {CornerHit | PillHit | CornerUnitHit | SpacingHit | SpacingUnitHit | TypeSizeHit | TypeUnitHit | WeightHit | ScaleHit} Hit
  * @typedef {Hit['kind']} Kind
  */
 
@@ -32,6 +34,13 @@ export const WEIGHTS = ['400', '500', '600', '700'];
 export const LAYER_FREE_MAX = 10;
 /** Durations at or under this are reduced-motion overrides, not timings. */
 export const MOTION_FREE_MS = 0.5;
+
+/**
+ * A length in a unit other than px, whose size the scales (all in px) can't check: rem
+ * and em, print units, viewport and container units, ch, ex and the like. Percentages
+ * aren't here: a % corner is a circle and a % space is layout.
+ */
+const OTHER_LENGTH = /^(-?\d*\.?\d+)(rem|em|pt|pc|in|cm|mm|q|vw|vh|vi|vb|vmin|vmax|[sld]v[whib]|cq[whib]|cqmin|cqmax|ch|ex|cap|ic|r?lh)$/i;
 
 export { maskHtmlComments };
 
@@ -160,9 +169,9 @@ export function declarations(text, ext) {
  * exceptions applied. Values inside var() are tokens and aren't returned;
  * literals beside them are.
  *
- *   corner       border radius in px (0 and pills of 100px+ aside); a 999px pill
- *   spacing      padding, margin and gap over 1px (negative margins aside)
- *   type size    font-size, and the size in a `font` shorthand, in px or another unit
+ *   corner       border radius in px (0 and pills of 100px+ aside), a 999px pill, or one in another unit (% aside)
+ *   spacing      padding, margin and gap over 1px (negative margins aside), or one in another unit (% aside)
+ *   type size    font-size, and the size in a `font` shorthand, in px or another unit (1em aside)
  *   weight       a numeric weight off WEIGHTS
  *   line height  a unitless line height other than 0 and 1
  *   layer        a z-index over LAYER_FREE_MAX
@@ -182,16 +191,26 @@ export function classify(prop, value, nodes) {
   /** @param {RegExp} re */
   const numbers = (re) => words.map((w) => re.exec(w)).filter((m) => m !== null).map((m) => Number(m[1]));
   const px = () => numbers(/^(-?\d*\.?\d+)px$/i);
+  // Lengths in other units, zero aside (0rem is 0 in any unit).
+  const others = () => words.filter((w) => OTHER_LENGTH.test(w) && parseFloat(w) !== 0);
   /** @type {Hit[]} */
   const out = [];
   if (/^border(-[a-z]+)*-radius$/.test(p)) {
     for (const n of px()) if (n !== 0 && n < 100) out.push({ kind: 'corner', value: `${n}px`, n });
     if (words.some((w) => /^(999|9999)px$/i.test(w))) out.push({ kind: 'corner', value: v, pill: true });
+    for (const w of others()) out.push({ kind: 'corner', value: w, unit: true });
   } else if (/^(padding|margin|gap|row-gap|column-gap)(-[a-z]+)*$/.test(p)) {
     for (const n of px()) if (n > 1) out.push({ kind: 'spacing', value: `${n}px`, n, up: p.startsWith('padding') });
+    // Negative margins pull back by a known amount in any unit, as in px.
+    for (const w of others()) if (parseFloat(w) > 0) out.push({ kind: 'spacing', value: w, unit: true });
   } else if (p === 'font-size' || p === 'font') {
     for (const n of p === 'font' ? px().slice(0, 1) : px()) out.push({ kind: 'type size', value: `${n}px`, n });
-    if (words.some((w) => /^-?\d*\.?\d+(r?em|pt)$/i.test(w)) && v !== '1em') out.push({ kind: 'type size', value: v, unit: true });
+    // 1em is the parent's own size; anything else relative or in another unit can't be checked.
+    // In a `font` shorthand, only the size counts (the first length), not a weight or line height.
+    const lengths = words.filter((w) => /^-?\d*\.?\d+[a-z%]+$/i.test(w));
+    for (const w of p === 'font' ? lengths.slice(0, 1) : lengths) {
+      if ((OTHER_LENGTH.test(w) || w.endsWith('%')) && parseFloat(w) !== 0 && w.toLowerCase() !== '1em') out.push({ kind: 'type size', value: w, unit: true });
+    }
   } else if (p === 'font-weight') {
     if (/^\d+$/.test(v) && !WEIGHTS.includes(v)) out.push({ kind: 'weight', value: v });
   } else if (p === 'line-height') {

@@ -55,8 +55,11 @@ export function suggest(scales, hit) {
   const { value } = hit;
   switch (hit.kind) {
     case 'corner':
-      return 'pill' in hit ? { kind: hit.kind, value, use: 'var(--radius-pill)' } : { value, ...scaleRule(hit.kind, scales.radius, hit.n) };
+      if ('pill' in hit) return { kind: hit.kind, value, use: 'var(--radius-pill)' };
+      if ('unit' in hit) return { kind: hit.kind, value, use: `corners are px tokens (--radius-*): work out ${value} in px and use the nearest, ${ADD}`, offScale: true };
+      return { value, ...scaleRule(hit.kind, scales.radius, hit.n) };
     case 'spacing':
+      if ('unit' in hit) return { kind: hit.kind, value, use: `spacing is px tokens (--space-*): work out ${value} in px and use the nearest, ${ADD}`, offScale: true };
       return { value, ...scaleRule(hit.kind, scales.space, hit.n, 'px', hit.up) };
     case 'type size':
       return 'unit' in hit

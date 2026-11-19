@@ -147,7 +147,16 @@ export function runtimeProps(ui = UI) {
   const names = new Set();
   for (const file of walk(ui)) {
     if (file.endsWith('.css')) {
-      for (const d of cssDeclarations(readFileSync(file, 'utf8'))) if (d.prop.startsWith('--')) names.add(d.prop);
+      // A stylesheet that can't be read is reported where it's checked itself (checkText),
+      // with its line; it doesn't stop every other check from running.
+      let decls;
+      try {
+        decls = cssDeclarations(readFileSync(file, 'utf8'));
+      } catch (error) {
+        if (error instanceof CssReadError) continue;
+        throw error;
+      }
+      for (const d of decls) if (d.prop.startsWith('--')) names.add(d.prop);
     } else if (/\.tsx?$/.test(file) && !file.endsWith('.d.ts')) {
       for (const name of customPropertyNames(readFileSync(file, 'utf8'), file)) names.add(name);
     }

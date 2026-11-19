@@ -24,10 +24,12 @@ export const bareCorner: Hit = { kind: 'corner', value: '8px' };
 // @ts-expect-error: before narrowing, a hit's number isn't there for every kind
 export const unnarrowed: number = classify('gap', '10px')[0].n;
 for (const hit of classify('gap', '10px')) {
-  // Narrowed by kind, the number is required.
-  if (hit.kind === 'spacing') { const n: number = hit.n; const up: boolean = hit.up; void n; void up; }
-  if (hit.kind === 'corner' && !('pill' in hit)) { const n: number = hit.n; void n; }
+  // Narrowed by kind and to a px value (not a pill, not another unit), the number is required.
+  if (hit.kind === 'spacing' && !('unit' in hit)) { const n: number = hit.n; const up: boolean = hit.up; void n; void up; }
+  if (hit.kind === 'corner' && !('pill' in hit) && !('unit' in hit)) { const n: number = hit.n; void n; }
   if (hit.kind === 'type size' && 'unit' in hit) { const unit: true = hit.unit; void unit; }
+  // @ts-expect-error: a spacing hit in another unit has no px number
+  if (hit.kind === 'spacing') { const n: number = hit.n; void n; }
 }
 
 const step = { name: '--space-8', value: 8 };

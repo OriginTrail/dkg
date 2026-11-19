@@ -298,6 +298,27 @@ describe('design check', () => {
     expect(colours('.x { --card-bg: #ffffff; }')).toEqual([]); // a token's value
   });
 
+  it('fails lengths in other units, which the px scales cannot check', () => {
+    const off = (css: string) => checkText(system, `<style>.a { ${css} }</style>`, 'mock.html', { known: new Set(), mockup: true })
+      .filter((f: { offScale?: boolean }) => f.offScale).map((f: { kind: string; value: string }) => `${f.kind} ${f.value}`);
+    const failing: [string, string[]][] = [
+      ['padding: 0.625rem', ['spacing 0.625rem']],
+      ['gap: 1em', ['spacing 1em']],
+      ['margin: 0 2vw', ['spacing 2vw']],
+      ['border-radius: 0.4375rem', ['corner 0.4375rem']],
+      ['border-top-left-radius: 1ch', ['corner 1ch']],
+      ['font-size: 2vw', ['type size 2vw']],
+      ['font-size: 0.875rem', ['type size 0.875rem']],
+      ['font-size: 120%', ['type size 120%']],
+      ['font: 600 1.25rem/1.4 sans-serif', ['type size 1.25rem']],
+    ];
+    for (const [css, expected] of failing) expect(off(css), css).toEqual(expected);
+    // Documented exceptions: zero, % corners (circles) and spaces (layout), negative margins, 1em type, tokens.
+    for (const css of ['padding: 0rem', 'border-radius: 50%', 'padding-top: 56.25%', 'margin: -0.5em', 'font-size: 1em', 'border-radius: var(--radius-card)', 'gap: var(--space-8)']) {
+      expect(off(css), css).toEqual([]);
+    }
+  });
+
   it('treats a folder beside src/ui as mock-ups, not as the UI', () => {
     const ui = join(__dirname, '../src/ui');
     expect(inUi(join(ui, 'styles/27-ds-components.css'))).toBe(true);
@@ -314,6 +335,30 @@ describe('design check', () => {
       const run = spawnSync(process.execPath, [SCRIPT, '--json', mock], { cwd: pkg, encoding: 'utf8', env: { ...process.env, DESIGN_CHECK_PKG: pkg } });
       expect(JSON.parse(run.stdout)[0].findings.map((f: { kind: string }) => f.kind)).toEqual(['component']);
       expect(run.status).toBe(1);
+    } finally {
+      rmSync(pkg, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps checking when a UI stylesheet cannot be read, and reports that sheet itself', () => {
+    const pkg = mkdtempSync(join(tmpdir(), 'design-check-broken-'));
+    try {
+      const styles = join(pkg, 'src/ui/styles');
+      mkdirSync(styles, { recursive: true });
+      copyFileSync(join(__dirname, '../src/ui/styles/00-theme.css'), join(styles, '00-theme.css'));
+      writeFileSync(join(styles, 'broken.css'), '.ok { gap: var(--space-8); }\n.x { gap 10px; }\n');
+      const mock = join(pkg, 'mock.html');
+      writeFileSync(mock, '<style>.a { gap: var(--space-8); }</style>');
+      const run = (target: string) => spawnSync(process.execPath, [SCRIPT, '--json', target], { cwd: pkg, encoding: 'utf8', env: { ...process.env, DESIGN_CHECK_PKG: pkg } });
+      // An unrelated mock-up: a JSON report, and a pass.
+      const clean = run(mock);
+      expect(JSON.parse(clean.stdout)).toEqual([]);
+      expect(clean.status).toBe(0);
+      // The broken sheet itself, in the UI: a located CSS finding, and a fail.
+      const broken = run(join(styles, 'broken.css'));
+      expect(JSON.parse(broken.stdout)[0].findings.map((f: { line: number; kind: string }) => `${f.line} ${f.kind}`)).toEqual(['2 css']);
+      expect(broken.status).toBe(1);
+      expect(() => runtimeProps(join(pkg, 'src/ui'))).not.toThrow();
     } finally {
       rmSync(pkg, { recursive: true, force: true });
     }
@@ -442,6 +487,9 @@ describe('design check', () => {
       expect(run('.a { padding: var(--space-12); }')).toBe(0);
       expect(run('.a { padding: 16px; }')).toBe(0); // on the scale, written as a number: a suggestion, not a failure
       expect(run('.a { content: "#ff00ff"; }')).toBe(0);
+      expect(run('.a { padding: 0.625rem; }')).toBe(1); // another unit
+      expect(run('.a { font-size: 2vw; }')).toBe(1);
+      expect(run('.a { border-radius: 50%; padding: 0rem; }')).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
