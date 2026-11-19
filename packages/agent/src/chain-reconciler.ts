@@ -203,7 +203,14 @@ export interface ReconcilePassTimings {
 export interface ReconcileResult {
   head: number;
   watermark: number;
+  /** Ordinals completed this pass: written by it (`materialized`) or already in VM. */
   reconciled: number;
+  /**
+   * The part of `reconciled` this pass wrote to the store itself (`reconciled`
+   * outcomes, recovery included); the rest was already local. Absent from
+   * results built elsewhere, which callers treat as all `reconciled`.
+   */
+  materialized?: number;
   pending: number;
   processed: number;
   /**
@@ -410,6 +417,7 @@ export async function reconcileContextGraph(
   if (headBlock !== undefined) absorbConfirmed(state, headBlock, deps.confirmationDepth);
 
   let reconciled = 0;
+  let materialized = 0;
   let processed = 0;
   let staleTarget = false;
   let recovery: PendingOrdinalRecoveryDisposition = { kind: 'not-attempted' };
@@ -567,6 +575,7 @@ export async function reconcileContextGraph(
       if (!outcome) continue;
       if (outcome.status === 'reconciled' || outcome.status === 'already') {
         reconciled += 1;
+        if (outcome.status === 'reconciled') materialized += 1;
         // With a known head, apply the reorg-depth gate; otherwise (no chain
         // head) absorb as soon as contiguous (depth 0) using the registration
         // block as a self-consistent head.
@@ -631,6 +640,7 @@ export async function reconcileContextGraph(
     head,
     watermark: state.watermark,
     reconciled,
+    materialized,
     pending,
     processed,
     hasMore,

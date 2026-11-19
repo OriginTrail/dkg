@@ -3244,7 +3244,7 @@ export class DKGAgent extends DKGAgentBase {
         ? this.networkAdmissionCoordinator.verifiedSameNetworkPeerIds()
         : undefined,
       protocol,
-    }, this.localACKCandidate());
+    }, this.localACKCandidate(), undefined, requiredACKs);
     return this.logACKCandidatePlan(selection, protocol, requiredACKs);
   }
 
@@ -3294,6 +3294,7 @@ export class DKGAgent extends DKGAgentBase {
         this.ackOperationContext(protocol),
       ),
       log: options.log,
+      onPeerOutcomes: (reports) => this.ackCandidateDiscovery.recordRoundOutcomes(reports),
     });
   }
 
@@ -3399,10 +3400,8 @@ export class DKGAgent extends DKGAgentBase {
             }
           }
         : undefined,
-      log: (msg: string) => {
-        const ctx = createOperationContext('publish');
-        this.log.info(ctx, msg);
-      },
+      log: (msg: string) => this.log.info(createOperationContext('publish'), msg),
+      onPeerOutcomes: (reports) => this.ackCandidateDiscovery.recordRoundOutcomes(reports),
     });
 
     const chain = this.chain;
@@ -3542,10 +3541,8 @@ export class DKGAgent extends DKGAgentBase {
             }
           }
         : undefined,
-      log: (msg: string) => {
-        const ctx = createOperationContext('update');
-        this.log.info(ctx, msg);
-      },
+      log: (msg: string) => this.log.info(createOperationContext('update'), msg),
+      onPeerOutcomes: (reports) => this.ackCandidateDiscovery.recordRoundOutcomes(reports),
     });
 
     const chain = this.chain;

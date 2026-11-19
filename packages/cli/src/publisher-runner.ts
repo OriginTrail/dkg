@@ -864,6 +864,7 @@ function createV10ACKProviderForPublisher(
         chain.verifyACKIdentityDetailed!(recoveredAddress, claimedIdentityId, options),
     } : {}),
     log: transport.log,
+    onPeerOutcomes: transport.onPeerOutcomes,
   });
 
   return async (params: V10ACKProviderParams) => {

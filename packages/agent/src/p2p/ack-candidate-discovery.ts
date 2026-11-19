@@ -1,10 +1,14 @@
 import { PROTOCOL_STORAGE_ACK, STORAGE_ACK_PROTOCOLS, isStorageACKProtocol, type StorageACKProtocol } from '@origintrail-official/dkg-core';
 import { PeerCapabilityRegistry, type PeerCapabilityRound } from './peer-capability.js';
 import {
+  ACKPeerTrackRecord,
+  DEFAULT_REQUIRED_ACKS,
   selectCanonicalACKCandidateUniverse,
   selectCanonicalACKCandidatePeersWithDiagnostics,
+  type ACKCanonicalCandidatePeerDiagnostic,
   type ACKCanonicalCandidatePeerSelectionInput,
   type ACKCanonicalCandidatePeerSelectionResult,
+  type ACKPeerOutcomeReport,
 } from '@origintrail-official/dkg-publisher';
 
 export interface LocalACKCandidate {
@@ -98,26 +102,70 @@ function scheduleProbeWindow(input: {
   ];
 }
 
+/**
+ * Apply the cores' track record to one selection: remote candidates the chain
+ * recently said cannot sign a counted ACK are left out (reason
+ * `ineligible-signer`), the rest are put in asking order. The local candidate
+ * stays first, and the diagnostics list the selected cores in that order.
+ */
+function applyTrackRecord(
+  selection: ACKCanonicalCandidatePeerSelectionResult,
+  localCandidate: LocalACKCandidate,
+  trackRecord: ACKPeerTrackRecord,
+  requiredACKs: number,
+): ACKCanonicalCandidatePeerSelectionResult {
+  const local = localCandidate.available ? localCandidate.peerId : undefined;
+  const remote = selection.peers.filter((peerId) => peerId !== local);
+  // The local candidate counts toward the quorum without a remote ACK.
+  const plan = trackRecord.plan(remote, Math.max(1, requiredACKs - (local === undefined ? 0 : 1)));
+  if (plan.ineligible.size === 0 && plan.peers.every((peerId, index) => peerId === remote[index])) return selection;
+  const order = new Map(plan.peers.map((peerId, index) => [peerId, index]));
+  const diagnostics: ACKCanonicalCandidatePeerDiagnostic[] = selection.diagnostics.map((diagnostic) =>
+    plan.ineligible.has(diagnostic.peerId) && diagnostic.peerId !== local
+      ? { ...diagnostic, selected: false, reason: 'ineligible-signer' }
+      : diagnostic);
+  const rank = (diagnostic: ACKCanonicalCandidatePeerDiagnostic): number => diagnostic.peerId === localCandidate.peerId
+    ? -1
+    : order.get(diagnostic.peerId) ?? Number.MAX_SAFE_INTEGER;
+  return {
+    peers: local === undefined ? plan.peers : [local, ...plan.peers],
+    diagnostics: diagnostics
+      .map((diagnostic, index) => ({ diagnostic, index }))
+      .sort((a, b) => rank(a.diagnostic) - rank(b.diagnostic) || a.index - b.index)
+      .map(({ diagnostic }) => diagnostic),
+  };
+}
+
 /** Bounded ACK discovery and final candidate planning for publish rounds. */
 export class ACKCandidateDiscoveryCoordinator {
   private preferredProbeCursor = 0;
   private otherProbeCursor = 0;
+  /** What earlier rounds showed about each core (see `ACKPeerTrackRecord`). */
+  readonly trackRecord: ACKPeerTrackRecord;
 
-  constructor(private readonly registry: PeerCapabilityRegistry) {}
+  constructor(private readonly registry: PeerCapabilityRegistry, trackRecord = new ACKPeerTrackRecord()) {
+    this.trackRecord = trackRecord;
+  }
+
+  /** Keep a finished round's per-core outcomes for the rounds after it. */
+  recordRoundOutcomes(reports: readonly ACKPeerOutcomeReport[]): void {
+    this.trackRecord.record(reports);
+  }
 
   selectCandidates(
     input: Omit<ACKCanonicalCandidatePeerSelectionInput, 'capability' | 'selfPeerId' | 'localCandidate'>,
     localCandidate: LocalACKCandidate,
     snapshot: ACKCapabilitySnapshot = snapshotACK(this.registry.beginRound()),
+    requiredACKs: number = DEFAULT_REQUIRED_ACKS,
   ): ACKCanonicalCandidatePeerSelectionResult {
     const requestedProtocolPeers = input.protocol && input.protocol !== PROTOCOL_STORAGE_ACK
       ? snapshot.supportByProtocol.get(input.protocol)
       : undefined;
-    return selectCanonicalACKCandidatePeersWithDiagnostics({
+    return applyTrackRecord(selectCanonicalACKCandidatePeersWithDiagnostics({
       ...input,
       localCandidate,
       capability: { mode: 'require', corePeers: snapshot.corePeerIds, requestedProtocolPeers },
-    });
+    }), localCandidate, this.trackRecord, requiredACKs);
   }
 
   async resolveRound(ports: ACKRoundPorts): Promise<ACKCanonicalCandidatePeerSelectionResult> {
@@ -188,6 +236,6 @@ export class ACKCandidateDiscoveryCoordinator {
       preferredACKPeerIds: ports.preferredACKPeerIds,
       verifiedSameNetworkPeerIds: ports.verifiedSameNetworkPeerIds(),
       protocol: requestedProtocol,
-    }, ports.localCandidate, snapshotACK(round));
+    }, ports.localCandidate, snapshotACK(round), ports.requiredACKs);
   }
 }

@@ -27,7 +27,7 @@ import { ethers } from 'ethers';
 import { QuorumUnmetError, assertACKCandidateQuorum, type PeerOutcome } from './ack-errors.js';
 import type { V10ACKMode } from './publisher.js';
 import { hasValidGraphScopedContent } from './graph-publish-envelope.js';
-import { PeerStatusLedger } from './ack-peer-status-ledger.js';
+import { PeerStatusLedger, type ACKPeerOutcomesObserver } from './ack-peer-status-ledger.js';
 import { ACKRoundDiagnostics, type ACKBackoffReason, type ACKDiagnosticSummary } from './ack-diagnostics.js';
 import { createACKRoundLifetime } from './ack-round-lifetime.js';
 
@@ -73,6 +73,8 @@ export interface ACKCollectorDeps {
     claimedIdentityId: bigint, options?: { signal?: AbortSignal },
   ) => Promise<ACKVerifyResult>;
   log?: (msg: string) => void;
+  /** Each asked core's outcome once a round is decided (ack-peer-track-record.ts keeps them). */
+  onPeerOutcomes?: ACKPeerOutcomesObserver;
   /**
    * Backoff sleep between transport-error retries and transient
    * SWM-decline retries (#887). Injectable so unit tests can exercise
@@ -223,13 +225,10 @@ function declineLogMessage(message: string): string {
 }
 
 /**
- * ACKCollector implements V10 spec §9.0 Phase 3: collecting 3 core node
- * StorageACKs via direct P2P before the chain TX.
- *
- * Flow:
- * 1. Broadcast PublishIntent via GossipSub (finalization topic)
- * 2. Concurrently dial each known core node on PROTOCOL_STORAGE_ACK
- * 3. First 3 valid ACKs win; verify each signature via ecrecover
+ * ACKCollector implements V10 spec §9.0 Phase 3: collecting core node
+ * StorageACKs via direct P2P before the chain TX. It dials every candidate
+ * core at once; the first `requiredACKs` valid ACKs (signer recovered via
+ * ecrecover and checked on chain) win.
  */
 export class ACKCollector {
   private deps: ACKCollectorDeps;
@@ -1151,7 +1150,7 @@ export class ACKCollector {
       // any `requestACK` loops still sleeping between retries to abandon on
       // wake rather than keep dialing after the caller has its answer.
       roundSettled = true;
-      diagnostics.finish(peerStatuses.counts(corePeers));
+      diagnostics.finish(peerStatuses.settle(corePeers, this.deps.onPeerOutcomes));
       lifetime.dispose();
     }
 

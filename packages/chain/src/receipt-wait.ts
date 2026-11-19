@@ -33,7 +33,8 @@ export interface WaitForReceiptWithDeadlineOptions<TReceipt> {
   /** The hash the timeout names; defaults to the last of `txHashes`. */
   timeoutTxHash?: () => string;
   receiptTimeoutMs: number;
-  pollIntervalMs: number;
+  /** Pause between lookups; a function is read again before every pause. */
+  pollIntervalMs: number | (() => number);
   /**
    * Fetch one receipt across the configured endpoint set. The absolute
    * deadline is required here so the endpoint pass cannot outlive this wait.
@@ -143,7 +144,10 @@ export async function waitForReceiptWithDeadline<TReceipt>(
         continue;
       case 'continue-polling': {
         if (deadlineReached) break;
-        const sleepMs = Math.min(options.pollIntervalMs, deadlineMs - Date.now());
+        const pollIntervalMs = typeof options.pollIntervalMs === 'function'
+          ? options.pollIntervalMs()
+          : options.pollIntervalMs;
+        const sleepMs = Math.min(pollIntervalMs, deadlineMs - Date.now());
         if (sleepMs > 0) await sleep(sleepMs);
         continue;
       }

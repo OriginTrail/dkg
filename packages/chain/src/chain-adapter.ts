@@ -273,13 +273,13 @@ export interface OnChainPublishResult {
   batchId: bigint;
   /** Greenfield: equals `batchId` when tokenId == kaId. */
   kaId?: bigint;
+  contextGraphId?: bigint; // graph this tx registered the KA to (its receipt's event; set once on chain)
   /** Merkle root emitted by the exact publish transaction being resolved. */
   merkleRoot?: Uint8Array;
   /** `DKGKnowledgeAssets` contract address used in the UAL path segment. */
   knowledgeAssetsContract?: string;
-  /** Absent for updates (no new KAs minted). */
+  /** Both absent for updates (no new KAs minted). */
   startKAId?: bigint;
-  /** Absent for updates (no new KAs minted). */
   endKAId?: bigint;
   txHash: string;
   blockNumber: number;

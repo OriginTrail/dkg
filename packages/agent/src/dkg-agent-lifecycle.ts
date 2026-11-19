@@ -56,7 +56,7 @@ import { captureExactBatchStreamRefusalScope } from './sync/exact-batch-stream-c
 import { createStorageACKRegistrationPlan } from './p2p/storage-ack-registrar.js';
 import { isRedundantLimitedConnection, syncOpenedPeerConnection, syncClosedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
-import { ProtocolRouter, GossipSubManager, DKGEvent,
+import { ProtocolRouter, GossipSubManager, DKGEvent, type KnowledgeAssetConfirmedEvent,
   registerExperimentalExactBatchResponder,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
@@ -3170,6 +3170,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // logged inside the method and we don't want to disrupt gossip
         // delivery if a single peer happens to be unreachable.
       });
+    });
+    // This node's own confirmed publishes need no chain-event reconcile pass.
+    this.eventBus.on(DKGEvent.KC_CONFIRMED, (data) => {
+      this.rememberOwnConfirmedRegistration(data as KnowledgeAssetConfirmedEvent);
     });
 
     // Sync from peers already connected (e.g. relay dialed during node.start())
