@@ -310,13 +310,31 @@ describe('design check', () => {
       ['font-size: 2vw', ['type size 2vw']],
       ['font-size: 0.875rem', ['type size 0.875rem']],
       ['font-size: 120%', ['type size 120%']],
-      ['font: 600 1.25rem/1.4 sans-serif', ['type size 1.25rem']],
+      ['font: 600 1.25rem/1.4 sans-serif', ['type size 1.25rem', 'line height 1.4']], // and its line height, off the scale
     ];
     for (const [css, expected] of failing) expect(off(css), css).toEqual(expected);
     // Documented exceptions: zero, % corners (circles) and spaces (layout), negative margins, 1em type, tokens.
     for (const css of ['padding: 0rem', 'border-radius: 50%', 'padding-top: 56.25%', 'margin: -0.5em', 'font-size: 1em', 'border-radius: var(--radius-card)', 'gap: var(--space-8)']) {
       expect(off(css), css).toEqual([]);
     }
+  });
+
+  it("fails a token redefined in the UI's own stylesheets, as in a mock-up", () => {
+    const tokens = (css: string) => checkText(system, css, 'x.css', { known: new Set() })
+      .filter((f: { kind: string; offScale?: boolean }) => f.kind === 'token' && f.offScale)
+      .map((f: { prop?: string; value: string }) => `${f.prop} ${f.value}`);
+    expect(tokens('.x { --bg-surface: magenta; background: var(--bg-surface); }')).toEqual(['--bg-surface magenta']);
+    expect(tokens('.x { --space-8: 10px; }')).toEqual(['--space-8 10px']);
+    expect(tokens('.x { background: var(--bg-surface); gap: var(--space-8); }')).toEqual([]);
+  });
+
+  it('checks the weight and line height in a font shorthand, as their own properties', () => {
+    const kinds = (value: string) => classify('font', value).map((h: { kind: string; value: string }) => `${h.kind} ${h.value}`);
+    expect(kinds('900 var(--fs-control)/1.9 var(--font-sans)')).toEqual(['weight 900', 'line height 1.9']);
+    expect(kinds('600 var(--fs-control)/var(--lh-body) var(--font-sans)')).toEqual([]);
+    expect(kinds('500 var(--fs-micro) var(--font-mono)')).toEqual([]);
+    expect(kinds('italic 300 13px/1 sans-serif')).toEqual(['type size 13px', 'weight 300']);
+    expect(kinds('inherit')).toEqual([]);
   });
 
   it('treats a folder beside src/ui as mock-ups, not as the UI', () => {
@@ -370,7 +388,7 @@ describe('design check', () => {
     expect(kinds('margin', 'calc(-1 * var(--space-4)) 12px')).toEqual(['spacing 12px']);
     expect(kinds('transition', 'opacity var(--motion-fast), color 1s')).toEqual(['motion 1s']);
     expect(kinds('border-radius', '999px')).toEqual(['corner 999px']);
-    expect(kinds('font', '600 15px/1.4 "Inter 10px", sans-serif')).toEqual(['type size 15px']); // text in quotes isn't a size
+    expect(kinds('font', '600 15px/1.4 "Inter 10px", sans-serif')).toEqual(['type size 15px', 'line height 1.4']); // text in quotes isn't a size
     expect(classify('gap', 'var(--space-4) 10px')).toEqual(classify('gap', 'var(--space-4) 10px', parseValue('var(--space-4) 10px')));
   });
 

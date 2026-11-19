@@ -186,8 +186,9 @@ export function declarations(text, ext) {
 export function classify(prop, value, nodes) {
   const p = prop.toLowerCase();
   const v = value.replace(/!important/, '').trim();
+  const tree = nodes ?? parseValue(v);
   // The words the value says itself: var() is a token, so `var(--space-4) 10px` is checked as 10px.
-  const words = literalWords(nodes ?? parseValue(v));
+  const words = literalWords(tree);
   /** @param {RegExp} re */
   const numbers = (re) => words.map((w) => re.exec(w)).filter((m) => m !== null).map((m) => Number(m[1]));
   const px = () => numbers(/^(-?\d*\.?\d+)px$/i);
@@ -210,6 +211,15 @@ export function classify(prop, value, nodes) {
     const lengths = words.filter((w) => /^-?\d*\.?\d+[a-z%]+$/i.test(w));
     for (const w of p === 'font' ? lengths.slice(0, 1) : lengths) {
       if ((OTHER_LENGTH.test(w) || w.endsWith('%')) && parseFloat(w) !== 0 && w.toLowerCase() !== '1em') out.push({ kind: 'type size', value: w, unit: true });
+    }
+    if (p === 'font') {
+      // The shorthand's weight (a number before the size) and line height (after the "/")
+      // follow the same rules as font-weight and line-height.
+      const slash = tree.findIndex((n) => n.type === 'div' && n.value === '/');
+      const weight = (slash === -1 ? tree : tree.slice(0, slash)).find((n) => n.type === 'word' && /^\d+$/.test(n.value));
+      if (weight) out.push(...classify('font-weight', weight.value));
+      const lineHeight = slash === -1 ? undefined : tree.slice(slash + 1).find((n) => n.type !== 'space');
+      if (lineHeight && lineHeight.type === 'word') out.push(...classify('line-height', lineHeight.value));
     }
   } else if (p === 'font-weight') {
     if (/^\d+$/.test(v) && !WEIGHTS.includes(v)) out.push({ kind: 'weight', value: v });

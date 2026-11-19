@@ -303,7 +303,7 @@ export function checkDeclaration(system, prop, value, { known, mockup = false } 
   // Colour, wherever it appears, custom-property definitions included: a mock-up's own
   // `--surface: #141414` says which node UI token it stands for, and the UI's own
   // `--card-bg: magenta` fails like `background: magenta`. A token's definition is the
-  // system itself (00-theme.css isn't checked); a mock-up's redefinition of one is
+  // system itself (00-theme.css isn't checked); a redefinition of one anywhere else is
   // reported by checkText.
   if (!p.startsWith('--') || !system.tokens.has(p)) {
     for (const text of colourTokens(p, v, nodes)) {
@@ -442,7 +442,8 @@ export function checkText(system, text, file, { known, mockup = false, keepLine 
   // A mock-up's own variables (`--gap: 10px`) are checked where they're used, against the
   // scale of the property that uses them: `gap: var(--gap)` is a gap of 10px. Every
   // definition is kept with its scope, so a rule's own definition applies inside it. A
-  // mock-up that redefines a node UI token is checked with its own value too.
+  // mock-up that redefines a node UI token is checked with its own value too, and a
+  // redefinition anywhere is reported below.
   // A mock-up may read the variables it defines; their definitions are what get checked.
   // Names the caller passes in are for variables defined somewhere else (at runtime).
   const knownHere = mockup ? new Set([...(known ?? []), ...decls.filter((d) => d.prop.startsWith('--')).map((d) => d.prop)]) : known;
@@ -463,8 +464,11 @@ export function checkText(system, text, file, { known, mockup = false, keepLine 
     let changed = false;
     for (let l = d.line; l <= d.endLine && !changed; l++) changed = keepLine(l);
     if (!changed) continue;
+    // A token set to a value it doesn't have in 00-theme.css, in a mock-up or in the UI's own
+    // stylesheets: `.x { --bg-surface: magenta }` changes the system outside the system.
+    // (00-theme.css itself is never checked.)
     const themed = system.themeValues.get(d.prop);
-    if (mockup && themed && !themed.has(d.value.trim())) {
+    if (themed && !themed.has(d.value.trim())) {
       findings.push({
         line: d.line, prop: d.prop, kind: 'token', value: d.value, offScale: true,
         use: `redefines var(${d.prop}), which is ${[...themed].join(' or ')} in 00-theme.css: use the token as it is, or change it in 00-theme.css and DESIGN.md`,
