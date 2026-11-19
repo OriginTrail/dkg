@@ -6,7 +6,19 @@
     "declarationMap": false,
     "noEmit": true,
     "rootDir": ".",
-    "sourceMap": false
+    "sourceMap": false,
+    "allowJs": true,
+    "checkJs": true
   },
-  "include": ["test/**/*.typecheck.ts"]
+  "include": [
+    "test/**/*.typecheck.ts",
+    "scripts/colour.mjs",
+    "scripts/jsx.mjs",
+    "scripts/design-rules.mjs",
+    "scripts/design-suggest.mjs",
+    "scripts/css.mjs",
+    "scripts/design-core.mjs",
+    "scripts/html.mjs",
+    "scripts/css-value.mjs"
+  ]
 }

@@ -24,6 +24,8 @@ import { EmptyState } from './components/ContextGraphPrimitives.js';
 import { StateMatrix } from './design-system-states.js';
 import { PageHeader } from './components/ds/PageHeader.js';
 import { Breadcrumbs } from './components/ds/Breadcrumbs.js';
+import { StatTile } from './components/ds/StatTile.js';
+import { ExternalMark } from './components/ds/ExternalMark.js';
 
 type Theme = 'dark' | 'light';
 
@@ -326,6 +328,10 @@ const App: React.FC = () => {
             </div>
           </div>
         </div>
+        <div className="dsp-nested-row">
+          <StatTile label="Total connections" value="1,284" sub="Stat tile: label, value, optional line of context" />
+          <StatTile label="Relayed" value="36" />
+        </div>
       </Section>
 
       <Section id="toggle" title="Toggle" lead="An on/off setting that takes effect straight away.">
@@ -350,6 +356,7 @@ const App: React.FC = () => {
           <span><StatusGlyph tone="warning" /> Warning</span>
           <span><StatusGlyph tone="danger" /> Danger</span>
           <span><StatusGlyph tone="pending" /> Pending</span>
+          <span>Opens outside the app <ExternalMark /></span>
         </div>
       </Section>
 
