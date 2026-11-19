@@ -271,6 +271,13 @@ export function checkDeclaration(system, prop, value, { known, mockup = false } 
 /** A class named for the thing (card, stat-card), not one that only starts with it (card-body). @param {string[]} classes @param {string} words */
 const endsWith = (classes, words) => classes.some((c) => new RegExp(`(${words})$`).test(c));
 
+// The base class each shared component renders. Only that class makes an element the
+// component: another ds-* class (ds-btn on a tag) or a part of one (ds-card-header) doesn't.
+/** The card classes (DESIGN.md · Card padding). */
+const CARD_BASES = new Set(['ds-card', 'ds-card-nested']);
+/** <Badge> and <LayerBadge>, <Count> and <ContextGraphChip> (components/ds/Badge.tsx, ContextGraphChip.tsx). */
+const LABEL_BASES = new Set(['ds-badge', 'ds-count', 'ds-entity-chip']);
+
 /** @type {{ flags: (t: Tag) => boolean, use: string }[]} */
 const COMPONENT_RULES = [
   {
@@ -282,11 +289,11 @@ const COMPONENT_RULES = [
     use: 'class="ds-input" (ds-sm in dense rows), see DESIGN.md · Inputs',
   },
   {
-    flags: (t) => endsWith(t.classes, 'card') && !t.classes.some((c) => /^ds-card\b/.test(c)),
+    flags: (t) => endsWith(t.classes, 'card') && !t.classes.some((c) => CARD_BASES.has(c)),
     use: 'class="ds-card" (ds-card-nested inside a card), see DESIGN.md · Card padding',
   },
   {
-    flags: (t) => endsWith(t.classes, 'badge|pill|chip|tag') && !t.classes.some((c) => c.startsWith('ds-')),
+    flags: (t) => endsWith(t.classes, 'badge|pill|chip|tag') && !t.classes.some((c) => LABEL_BASES.has(c)),
     use: '<Badge>, <LayerBadge>, <Count> or <ContextGraphChip>, see DESIGN.md · Labels',
   },
   {

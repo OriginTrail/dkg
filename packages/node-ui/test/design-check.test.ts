@@ -216,6 +216,30 @@ describe('design check', () => {
     expect(found('<style media="screen">\n.a { gap: 10px; }\n</style >')).toEqual(['2 spacing']);
   });
 
+  it('needs the component\'s own shared class, not any ds- class', () => {
+    const hints = (html: string) => checkText(system, html, 'mock.html', { known: new Set(), mockup: true })
+      .filter((f: { kind: string }) => f.kind === 'component').length;
+    expect(hints('<span class="tag ds-btn">VM</span>')).toBe(1); // a button class on a label
+    expect(hints('<span class="tag ds-badge-dot">VM</span>')).toBe(1); // a part of a badge, not one
+    expect(hints('<div class="stat-card ds-card-header">Content</div>')).toBe(1);
+    expect(hints('<span class="tag ds-badge">VM</span>')).toBe(0);
+    expect(hints('<span class="ds-count">3</span><span class="cg-chip ds-entity-chip">x</span>')).toBe(0);
+    expect(hints('<div class="stat-card ds-card-nested">Content</div>')).toBe(0);
+  });
+
+  it('reads tag-shaped text in scripts, styles and text fields as text', () => {
+    const found = (html: string) => checkText(system, html, 'mock.html', { known: new Set(), mockup: true })
+      .filter((f: { offScale?: boolean }) => f.offScale)
+      .map((f: { line: number; kind: string }) => `${f.line} ${f.kind}`);
+    expect(found('<textarea class="ds-input"><button>Example</button></textarea>')).toEqual([]);
+    expect(found('<script>const html = "<button class=\\"btn\\">x</button>";</script>')).toEqual([]);
+    expect(found('<title><div class="card"></title>')).toEqual([]);
+    // A style block's CSS is still read, and markup after it is still checked, at its own line.
+    expect(found('<style>.x::before { content: "<button>"; gap: 10px; }</style>\n<button>Real</button>'))
+      .toEqual(['1 spacing', '2 component']);
+    expect(found('<script>"<div style=\'padding: 10px\'>"</script>\n<div style="padding: 10px"></div>')).toEqual(['2 spacing']);
+  });
+
   it('reads HTML attributes with > inside their quotes', () => {
     const hints = (html: string) => checkText(system, html, 'mock.html', { known: new Set(), mockup: true })
       .filter((f: { kind: string }) => f.kind === 'component').length;

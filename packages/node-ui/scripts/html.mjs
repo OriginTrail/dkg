@@ -23,6 +23,8 @@ export const maskHtmlComments = (html) => html.replace(/<!--[\s\S]*?-->/g, (c) =
 const ATTR = String.raw`([^\s=>/"']+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+)))?`;
 const TAG = new RegExp(String.raw`<([a-z][\w-]*)((?:\s+${ATTR})*)\s*\/?>`, 'gi');
 const ATTRS = new RegExp(ATTR, 'gd');
+/** Elements whose content is raw or escapable text, never elements (HTML's raw text and escapable raw text elements). */
+const RAW_TEXT = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes']);
 
 /**
  * Every opening tag and <style> block in an HTML document, outside its comments.
@@ -35,8 +37,14 @@ export function readHtml(html) {
   const tags = [];
   /** @type {HtmlStyle[]} */
   const styles = [];
-  for (const m of source.matchAll(TAG)) {
-    const index = m.index ?? 0;
+  // Elements whose body is text, not markup: a `<button>` written inside a textarea, a
+  // script string or a CSS `content` value is text, so reading skips to the closing tag.
+  // A <style> body is still read, as CSS.
+  const tagAt = new RegExp(TAG.source, 'gi');
+  /** @type {RegExpExecArray | null} */
+  let m;
+  while ((m = tagAt.exec(source))) {
+    const index = m.index;
     const attrsAt = index + 1 + m[1].length;
     /** @type {Map<string, HtmlAttr>} */
     const attrs = new Map();
@@ -47,10 +55,12 @@ export function readHtml(html) {
     }
     const name = m[1].toLowerCase();
     tags.push({ name, index, source: m[0], attrs });
-    if (name === 'style') {
+    if (RAW_TEXT.has(name) && !m[0].endsWith('/>')) {
       const start = index + m[0].length;
-      const close = source.slice(start).search(/<\/style\s*>/i);
-      styles.push({ css: source.slice(start, close === -1 ? source.length : start + close), start });
+      const close = new RegExp(`</${name}\\s*>`, 'i').exec(source.slice(start));
+      const end = close ? start + close.index : source.length;
+      if (name === 'style') styles.push({ css: source.slice(start, end), start });
+      tagAt.lastIndex = close ? end + close[0].length : source.length;
     }
   }
   return { tags, styles };
