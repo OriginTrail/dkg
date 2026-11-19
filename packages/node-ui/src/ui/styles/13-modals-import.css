@@ -103,7 +103,7 @@
   font-size: var(--fs-label);
   color: var(--text-tertiary);
   margin-left: var(--space-24);
-  margin-top: -4px;
+  margin-top: calc(-1 * var(--space-4));
 }
 .v10-form-select {
   width: 100%;
@@ -205,17 +205,7 @@ body.light .v10-modal-box {
 }
 .v10-import-file-name { flex: 1; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .v10-import-file-size { font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--text-tertiary); flex-shrink: 0; }
-.v10-import-file-remove {
-  background: none;
-  border: none;
-  color: var(--text-tertiary);
-  cursor: pointer;
-  font-size: var(--fs-body);
-  padding: 0 var(--space-2);
-  line-height: 1;
-  flex-shrink: 0;
-}
-.v10-import-file-remove:hover { color: var(--text-danger); }
+.v10-import-file-remove { flex-shrink: 0; }
 .v10-import-option {
   display: flex;
   align-items: center;

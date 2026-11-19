@@ -23,7 +23,7 @@ function ChunkLoadFailure() {
   return (
     <div className="lazy-spinner" role="alert">
       <p>This view could not be opened. Reload the page to try again.</p>
-      <button type="button" onClick={() => window.location.reload()}><RefreshCw size={12} />Reload page</button>
+      <button type="button" className="ds-btn ds-sm" onClick={() => window.location.reload()}><RefreshCw size={12} aria-hidden="true" />Reload page</button>
     </div>
   );
 }

@@ -3,7 +3,7 @@ import { CoalescingRecurringTask } from '@origintrail-official/dkg-core/dist/coa
 import { invalidateQueryCache } from '../api.js';
 import { useMemoryGraphEvents } from './useNodeEvents.js';
 import { memoryQueryDefinitions, type MemoryQueryDefinition } from './memory-query-definition.js';
-import { MEMORY_LIMIT_MESSAGE, readMemoryGraphPage, type MemoryGraphPage, type MemoryReadFailureReason } from './memory-graph-query.js';
+import { MEMORY_LIMIT_MESSAGE, MEMORY_RETRY_MESSAGE, readMemoryGraphPage, type MemoryGraphPage, type MemoryReadFailureReason } from './memory-graph-query.js';
 import type { LayeredMemoryTriple, MemoryLayerStatus, TrustLevel } from './useMemoryEntities.js';
 
 interface MemorySource {
@@ -21,7 +21,6 @@ interface MemoryPages {
 }
 
 type ReadMode = 'refresh' | 'append';
-const RETRY_PAGE = 'Could not load more graph data. Retry to continue from the last loaded page.';
 const emptySource = (definition: MemoryQueryDefinition): MemorySource => ({ definition, pages: [], read: { kind: 'loading' } });
 
 function sourceActions(source: MemorySource) {
@@ -37,7 +36,7 @@ const canContinue = (source: MemorySource) => sourceActions(source).canContinue;
 
 function pageFailureMessage(source: MemorySource): string | null {
   if (source.read.kind !== 'failed' || source.read.mode !== 'append' || source.read.reason === 'cancelled') return null;
-  return source.read.reason === 'response-limit' ? MEMORY_LIMIT_MESSAGE : RETRY_PAGE;
+  return source.read.reason === 'response-limit' ? MEMORY_LIMIT_MESSAGE : MEMORY_RETRY_MESSAGE;
 }
 
 /** Refresh and continuation both accept complete pages through this transition. */

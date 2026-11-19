@@ -112,7 +112,7 @@
 }
 .v10-agent-dot-stack { display: inline-flex; align-items: center; }
 .v10-agent-dot-stack .v10-agent-dot { box-shadow: 0 0 0 2px var(--bg-surface); }
-.v10-agent-dot-stack .v10-agent-dot + .v10-agent-dot { margin-left: -3px; }
+.v10-agent-dot-stack .v10-agent-dot + .v10-agent-dot { margin-left: calc(-1 * var(--space-4)); }
 .v10-agent-dot-more { box-sizing: border-box; padding: 0 var(--space-4); border-radius: var(--radius-pill); background: var(--bg-elevated); color: var(--text-secondary); }
 
 /* ── Activity feed ── */
@@ -273,7 +273,7 @@
   text-transform: uppercase;
   font-size: var(--fs-micro); font-weight: 700;
   letter-spacing: var(--ls-caps);
-  color: var(--text-ghost);
+  color: var(--text-tertiary);
   min-width: 80px;
 }
 .v10-agent-profile-meta-val { color: var(--text-secondary); }
@@ -287,7 +287,7 @@
   background: none;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xs);
-  color: var(--text-ghost);
+  color: var(--text-tertiary);
   font-size: var(--fs-micro);
   cursor: pointer;
   font-family: var(--font-sans);

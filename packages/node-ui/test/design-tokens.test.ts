@@ -16,7 +16,6 @@ type Kind = 'colour' | 'radius';
 /** Where colour values legitimately live. */
 const COLOUR_SOURCES = new Set([
   'styles/00-theme.css', // the tokens themselves
-  'styles/30-marketplace-tokens.css', // the Marketplace's own palette, scoped to its views
 ]);
 /** Canvas palettes: graph-viz draws with literal colours read from these. */
 const isPaletteFile = (file: string) => /(^|\/)[\w-]*-colors\.ts$/.test(file);

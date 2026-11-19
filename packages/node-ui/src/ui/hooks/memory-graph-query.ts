@@ -80,7 +80,9 @@ export interface MemoryGraphPage {
 }
 export type MemoryReadFailureReason = 'unavailable' | 'response-limit' | 'cancelled';
 export type LayerResult = MemoryGraphPage | { ok: false; reason: MemoryReadFailureReason };
-export const MEMORY_LIMIT_MESSAGE = 'Memory preview limit reached. Some relationships remain unloaded. Use a narrower query to inspect them.';
+export const MEMORY_LIMIT_MESSAGE = 'This memory is too large to load in full here, so some links between items aren’t shown. To see them, run a query that asks about a smaller part of it.';
+/** Shown whenever a part of memory failed to load and Retry is offered. */
+export const MEMORY_RETRY_MESSAGE = 'Couldn’t load the next part of this memory. Retry to carry on from where it stopped.';
 
 interface QueryLayerOptions {
   includeContextGraphPartitions?: boolean;

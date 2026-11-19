@@ -1,4 +1,4 @@
-import { RefreshCw } from 'lucide-react';
+import { RetryButton } from './ds/RetryButton.js';
 
 /** A failed status probe must never present fabricated operational health.
  * The document theme is applied by App, which renders this view. */
@@ -10,9 +10,7 @@ export function NodeUnavailableView() {
         <h1>Node unavailable</h1>
         <p>Live node data could not be loaded. The node may be stopped, timing out or returning errors.</p>
         <p>Node status, balances, graphs and integration readiness are unavailable. Check that the node is running, then reload the page.</p>
-        <button type="button" className="v10-modal-btn primary ds-btn ds-primary" onClick={() => window.location.reload()}>
-          <RefreshCw size={12} />Retry connection
-        </button>
+        <RetryButton size="md" onClick={() => window.location.reload()} />
       </section>
     </main>
   );

@@ -177,7 +177,8 @@ export function SemanticProgramPanel({
             <option value="vm">Verifiable Memory — published</option>
           </select>
           <button
-            className="v10-ka-back semantic-program-gap"
+            type="button"
+            className="ds-btn ds-sm semantic-program-gap"
             data-testid="run-semantic-program"
             disabled={!resolution.executable || !executionLayer || running}
             onClick={run}
@@ -186,7 +187,8 @@ export function SemanticProgramPanel({
           </button>
           {!showFork && (
             <button
-              className="v10-ka-back semantic-program-gap-sm"
+              type="button"
+              className="ds-btn ds-sm semantic-program-gap-sm"
               data-testid="fork-semantic-program"
               disabled={running || forking}
               onClick={beginFork}
@@ -223,7 +225,8 @@ export function SemanticProgramPanel({
               </select>
               <div className="semantic-program-actions">
                 <button
-                  className="v10-ka-back"
+                  type="button"
+                  className="ds-btn ds-sm"
                   data-testid="confirm-fork-semantic-program"
                   disabled={forking || !forkIri.trim() || !forkLayer}
                   onClick={forkProgram}
@@ -231,7 +234,8 @@ export function SemanticProgramPanel({
                   {forking ? 'Storing copy…' : 'Create Copy'}
                 </button>
                 <button
-                  className="v10-ka-back"
+                  type="button"
+                  className="ds-btn ds-sm"
                   disabled={forking}
                   onClick={() => setShowFork(false)}
                 >

@@ -1,26 +1,24 @@
 /* The component gallery's page (/dev/gallery): its root, frame, headings and
-   section labels. Every value binds to the Layer 2 tokens in
-   30-marketplace-tokens.css, scoped under .mktx so the gallery coexists with
-   the shell's own styles; the components on it are styled in
-   32-marketplace-surfaces.css, as everywhere else. */
+   section labels, on the app's tokens (00-theme.css). The components on it are
+   styled in 32-marketplace-surfaces.css, as everywhere else. */
 
-.mktx { background: var(--surface-0); color: var(--text-primary);
-  font-family: var(--font-ui); font-size: var(--fs-md); line-height: var(--lh-normal);
+.mktx { background: var(--bg-panel); color: var(--text-primary);
+  font-family: var(--font-sans); font-size: var(--fs-body); line-height: var(--lh-body);
   min-height: 100%; }
-.mktx h2 { font-size: var(--fs-lg); font-weight: var(--fw-semibold); line-height: var(--lh-tight); margin: 0; }
+.mktx h2 { font-size: var(--fs-title); font-weight: 600; line-height: var(--lh-tight); margin: 0; }
 .mktx p { margin: 0; }
 
-.mktx .frame { max-width: 1180px; margin: 0 auto; padding: var(--sp-6) var(--sp-5); }
+.mktx .frame { max-width: 1180px; margin: 0 auto; padding: var(--space-24) var(--space-20); }
 
 /* standalone /dev/gallery route: the shell locks body scroll (01-base);
    the gallery page carries its own scroll container */
 .mktx--page { height: 100vh; overflow-y: auto; }
-.mktx .state-label { margin: var(--sp-10) 0 var(--sp-3); color: var(--text-tertiary);
-  font-size: var(--fs-xs); font-weight: var(--fw-semibold);
+.mktx .state-label { margin: var(--space-32) 0 var(--space-12); color: var(--text-tertiary);
+  font-size: var(--fs-label); font-weight: 600;
   text-transform: uppercase; letter-spacing: var(--ls-caps);
-  display: flex; align-items: center; gap: var(--sp-2); }
+  display: flex; align-items: center; gap: var(--space-8); }
 .mktx .state-label::after { content: ""; flex: 1; height: 1px; background: var(--border-subtle); }
 
 @media (max-width: 600px) {
-  .mktx .frame { padding: var(--sp-5) var(--sp-3); }
+  .mktx .frame { padding: var(--space-20) var(--space-12); }
 }

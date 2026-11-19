@@ -188,7 +188,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
           </>
         }
         emptyHint={
-          partial ? 'No entries for this agent in the loaded preview. Load more memory to check later assets.' : total === 0
+          partial ? 'Nothing from this agent in the memory loaded so far. Load more to check the rest.' : total === 0
             ? `${agent?.name ?? agentUri} hasn't authored anything in this project yet.`
             : 'No entries match the current filter.'
         }

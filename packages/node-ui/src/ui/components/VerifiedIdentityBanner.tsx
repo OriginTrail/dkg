@@ -84,7 +84,7 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
           </span>
           <button
             type="button"
-            className="v10-vm-identity-copy"
+            className="ds-btn ds-ghost ds-sm ds-icon"
             onClick={() => copy(onChainUal)}
             aria-label="Copy UAL" title="Copy UAL"
           ><Copy size={12} /></button>
@@ -111,7 +111,7 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
           )}
           <button
             type="button"
-            className="v10-vm-identity-copy"
+            className="ds-btn ds-ghost ds-sm ds-icon"
             onClick={() => copy(receipt.txHash!)}
             aria-label="Copy transaction hash" title="Copy transaction hash"
           ><Copy size={12} /></button>
@@ -129,7 +129,7 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
           </span>
           <button
             type="button"
-            className="v10-vm-identity-copy"
+            className="ds-btn ds-ghost ds-sm ds-icon"
             onClick={() => copy(receipt.kaId!)}
             aria-label="Copy Knowledge Asset ID" title="Copy Knowledge Asset ID"
           ><Copy size={12} /></button>
@@ -155,7 +155,7 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
               </span>
               <button
                 type="button"
-                className="v10-vm-identity-copy"
+                className="ds-btn ds-ghost ds-sm ds-icon"
                 onClick={() => copy(identity.owner!)}
                 aria-label="Copy owner id" title="Copy owner id"
               ><Copy size={12} /></button>

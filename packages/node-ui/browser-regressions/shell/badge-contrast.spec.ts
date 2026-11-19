@@ -101,6 +101,20 @@ test('badges are readable on every surface in both themes', async ({ page }) => 
   }
 });
 
+test('text colours are readable on every surface in both themes', async ({ page }) => {
+  // DESIGN.md · Colour: anything a person reads clears 4.5:1; --text-ghost is decoration only.
+  const TEXT = ['--text-primary', '--text-secondary', '--text-tertiary', '--text-success', '--text-warning', '--text-danger'];
+  for (const theme of THEMES) {
+    await setTheme(page, theme);
+    for (const surface of SURFACES) {
+      const bg = await token(page, surface);
+      for (const text of TEXT) {
+        expect(contrastRatio(await token(page, text), bg, bg), `${theme} ${text} on ${surface}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  }
+});
+
 test('counts are readable on every surface in both themes', async ({ page }) => {
   for (const theme of THEMES) {
     await setTheme(page, theme);

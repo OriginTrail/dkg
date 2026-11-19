@@ -15,7 +15,7 @@ export default function ExecutionTrace({ trace, layer, onExecution }: { trace: P
         {call.resultTruncated && <p className="program-editor-help">Result preview truncated to keep the trace bounded.</p>}
         <details><summary>Advanced · call identifiers</summary><p className="program-editor-reference">Call {call.id}: <code>{call.target}</code></p><p>Started {call.startedAt}</p>
           {call.executionIri && <p className="program-editor-reference">Child execution: <code>{call.executionIri}</code></p>}</details>
-        {call.executionIri && onExecution && <button type="button" onClick={() => onExecution(call.executionIri!, layer)}>Open child execution</button>}
+        {call.executionIri && onExecution && <button type="button" className="ds-btn ds-sm" onClick={() => onExecution(call.executionIri!, layer)}>Open child execution</button>}
       </details>
     </li>)}</ol>
     {trace.failure && <p role="alert">{trace.failure.location}: {trace.failure.message}</p>}

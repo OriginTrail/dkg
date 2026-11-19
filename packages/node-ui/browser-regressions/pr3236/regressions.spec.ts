@@ -104,10 +104,10 @@ test('incrementally ingested data images keep their WebGL sprite when the view c
 });
 test('Memory Stack flags the five-graph preview and loads the sixth graph', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByText('Only loaded memory is shown.', { exact: false })).toBeVisible();
+  await expect(page.getByText('Only part of this context graph’s memory is loaded', { exact: false })).toBeVisible();
   await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('5');
   await expect(page.locator('.v10-memstack-cell-n-lbl').first()).toHaveText('loaded entities');
-  await page.getByRole('button', { name: 'Load more graph data' }).click();
+  await page.getByRole('button', { name: 'Load more', exact: true }).click();
   await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('6');
 });
 test('Memory Stack distinguishes loading and failure from empty inventory, retries, and retains loaded graphs', async ({ page }) => {
@@ -139,11 +139,11 @@ test('Memory Stack distinguishes loading and failure from empty inventory, retri
 });
 test('agent preview does not claim no contributions when the author is in a later graph', async ({ page }) => {
   await page.goto('/?view=agent');
-  await expect(page.getByText('No entries for this agent in the loaded preview.', { exact: false })).toBeVisible();
+  await expect(page.getByText('Nothing from this agent in the memory loaded so far.', { exact: false })).toBeVisible();
   await expect(page.getByText("hasn't authored anything", { exact: false })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Load more graph data' }).click();
+  await page.getByRole('button', { name: 'Load more', exact: true }).click();
   await expect(page.getByText('Later decision', { exact: false })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Load more graph data' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Load more', exact: true })).toHaveCount(0);
 });
 test('real WebGL icons retain their Three.js scene parent after redraws', async ({ page }) => {
   await page.goto('/?view=scene');
@@ -170,7 +170,7 @@ test('Memory Stack describes loaded counts when later SWM pages reduce WM member
   await expect(page.locator('.v10-memstack-cell-n').first()).toContainText('5');
   const initialCount = await page.locator('.v10-memstack-cell-n').first().innerText();
   const initialLabel = await page.locator('.v10-memstack-cell-n-lbl').first().innerText();
-  await page.getByRole('button', { name: 'Load more graph data' }).click();
+  await page.getByRole('button', { name: 'Load more', exact: true }).click();
   await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('4');
   expect(initialCount).toBe('5'); expect(initialLabel).toBe('loaded entities');
   await expect(page.getByText('lower bounds', { exact: false })).toHaveCount(0);
@@ -182,11 +182,11 @@ test('Memory Stack keeps a budget warning after graph continuation ends', async 
   })));
   await page.goto('/');
   await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('5');
-  await page.getByRole('button', { name: 'Load more graph data' }).click();
-  await expect(page.getByText('Memory preview limit reached.', { exact: false })).toBeVisible();
+  await page.getByRole('button', { name: 'Load more', exact: true }).click();
+  await expect(page.getByText('This memory is too large to load in full here', { exact: false })).toBeVisible();
   await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('5005');
-  await page.getByRole('button', { name: 'Load more graph data' }).click();
-  await expect(page.getByRole('button', { name: 'Load more graph data' })).toHaveCount(0);
-  await expect(page.getByText('Memory preview limit reached.', { exact: false })).toBeVisible();
+  await page.getByRole('button', { name: 'Load more', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Load more', exact: true })).toHaveCount(0);
+  await expect(page.getByText('This memory is too large to load in full here', { exact: false })).toBeVisible();
   await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('5006');
 });

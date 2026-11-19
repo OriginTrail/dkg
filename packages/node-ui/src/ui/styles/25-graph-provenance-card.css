@@ -20,7 +20,7 @@
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   box-shadow: var(--shadow-lift);
-  backdrop-filter: blur(6px);
+  backdrop-filter: blur(var(--blur-md));
   font-size: var(--fs-control);
   color: var(--text-primary);
   pointer-events: auto;

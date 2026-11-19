@@ -14,6 +14,7 @@ import { FileText, RefreshCw } from 'lucide-react';
 import { StatusGlyph } from '../../../components/ds/Badge.js';
 import { failed, succeeded, succeededWithWarning, type ActionOutcome } from '../../../lib/actionOutcome.js';
 import { publishOutcome } from '../../../lib/publishOutcome.js';
+import { RetryButton } from '../../../components/ds/RetryButton.js';
 
 export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = false, onComplete, scrollKey }: {
   contextGraphId: string;
@@ -162,7 +163,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
     );
   }
 
-  if (loadError) return <div role="alert" className="v10-assertion-scroll">Could not load assertions: {loadError} <button onClick={refresh}><RefreshCw size={12} />Retry</button></div>;
+  if (loadError) return <div role="alert" className="v10-assertion-scroll ds-retry-row"><span>Could not load assertions: {loadError}</span><RetryButton onClick={() => { void refresh(); }} /></div>;
 
   if (!assertions.length && !page?.nextCursor && pageIndex === 0) {
     return (
@@ -251,7 +252,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         <button disabled={!page?.nextCursor || busy !== null} onClick={() => {
           setPaging({ scope, cursors: [...cursors.slice(0, pageIndex + 1), page!.nextCursor], index: pageIndex + 1 });
         }}>Next assertions</button>
-        <button disabled={busy !== null} onClick={refresh}><RefreshCw size={12} />Refresh assertions</button>
+        <button type="button" className="ds-btn ds-sm" disabled={busy !== null} onClick={refresh}><RefreshCw size={12} />Refresh assertions</button>
       </nav>
     </div>
   );

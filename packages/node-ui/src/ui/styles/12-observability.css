@@ -120,8 +120,8 @@ select.input {
   display: flex;
   align-items: center;
   justify-content: center;
-  backdrop-filter: blur(4px);
-  animation: fadeSlideIn 0.15s ease;
+  backdrop-filter: blur(var(--blur-md));
+  animation: fadeSlideIn var(--motion-base) ease;
 }
 .v10-modal-box {
   background: var(--bg-elevated);
@@ -178,6 +178,10 @@ select.input {
   color: var(--text-warning);
   line-height: var(--lh-body);
 }
+/* A note inside a card or narrow column: text first, its actions under it. */
+.v10-inset-note { display: grid; justify-items: start; gap: var(--space-8); margin: var(--space-8) 0 0; font-size: var(--fs-label); }
+/* A note at the top of a page: text, then its actions at the end of the row. */
+.v10-page-note > span { flex: 1 1 220px; min-width: 0; }
 
 .v10-modal-tip {
   padding: var(--pad-nested);
@@ -510,7 +514,7 @@ select.input {
 .settings-hint { font-size: var(--fs-micro); color: var(--text-tertiary); margin-top: var(--space-4); }
 .settings-note { font-size: var(--fs-label); color: var(--text-secondary); margin-top: var(--space-4); }
 .settings-block { margin-bottom: var(--space-8); }
-.settings-meta-row { display: flex; gap: var(--space-16); margin-top: -6px; }
+.settings-meta-row { display: flex; gap: var(--space-16); margin-top: calc(-1 * var(--space-6)); }
 .settings-meta { font-size: var(--fs-label); color: var(--text-secondary); }
 .settings-danger-note { padding: var(--space-8) var(--space-12); border-radius: var(--radius-nested); background: var(--danger-bg); border: 1px solid var(--danger-border); }
 .settings-danger-title { font-size: var(--fs-micro); font-weight: 700; color: var(--text-danger); margin-bottom: var(--space-2); }

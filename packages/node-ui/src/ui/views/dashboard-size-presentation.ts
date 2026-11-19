@@ -24,7 +24,7 @@ export function dashboardSizePresentation(size: {
     entityTitle,
     tripleValue: size.triplesUnknown ? '—'
       : `${size.sizePartial || size.sizeApprox ? '~' : ''}${formatNumber(size.triples.total)}`,
-    tripleLabel: loaded ? 'triples preview' : 'triples',
+    tripleLabel: loaded ? 'triples so far' : 'triples',
     showLayerBars: !size.triplesUnknown && !size.sizeApprox,
   };
 }

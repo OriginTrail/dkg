@@ -17,7 +17,7 @@
 .v10-graph-overlay .v10-swm-legend,
 .v10-graph-overlay .v10-vm-legend {
   box-shadow: var(--shadow-lift);
-  backdrop-filter: blur(6px);
+  backdrop-filter: blur(var(--blur-md));
 }
 .v10-graph-rail {
   flex: 0 0 230px;
@@ -381,7 +381,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   display: inline-flex; align-items: center; gap: var(--space-4);
   height: var(--h-badge-sm); padding: 0 var(--space-6);
   border-radius: var(--radius-pill);
-  box-shadow: inset 0 0 0 1px var(--border-default);
+  box-shadow: var(--ring-default);
   color: var(--text-secondary);
   font-size: var(--fs-micro); font-weight: 600;
 }

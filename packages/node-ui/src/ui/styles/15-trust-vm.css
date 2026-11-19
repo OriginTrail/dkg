@@ -100,7 +100,6 @@
 
 /* ── Verifiable Memory Hero Banner ── */
 .v10-vm-hero {
-  --v10-vm-accent: var(--layer-verified-text);
   --v10-vm-accent-strong: var(--layer-verified);
   --v10-vm-border: var(--layer-verified-border);
   --v10-vm-surface: var(--layer-verified-bg);

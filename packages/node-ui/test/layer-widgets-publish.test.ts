@@ -75,7 +75,7 @@ describe('PublishVmWidget — B8 confirmed discount badge (#1365 r3)', () => {
     apiMocks.publishAssertionsToVm.mockResolvedValue({ published: 3, total: 3, partial: 0, failures: [] });
     const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }));
     expect(container.textContent).toContain('all eligible complete Shared Working Memory Knowledge Assets');
-    expect(container.textContent).toContain('including assets outside the loaded preview');
+    expect(container.textContent).toContain('including assets that haven’t loaded on this screen');
     expect(container.textContent).toContain('incurs a cost');
     await clickPublish(container); await flush();
     expect(apiMocks.publishAssertionsToVm).toHaveBeenCalledWith('cg', assertions);
@@ -86,7 +86,7 @@ describe('PublishVmWidget — B8 confirmed discount badge (#1365 r3)', () => {
     apiMocks.listAssertions.mockResolvedValue(['a', 'b', 'c'].map(name => ({ name, graphUri: name })));
     const { container, unmount } = await render(React.createElement(PromoteWidget, { count: 1, contextGraphId: 'cg' }));
     expect(container.textContent).toContain('all eligible complete Working Memory Knowledge Assets');
-    expect(container.textContent).toContain('including assets outside the loaded preview');
+    expect(container.textContent).toContain('including assets that haven’t loaded on this screen');
     await act(async () => (container.querySelector('[data-testid="widget-promote-all-btn"]') as HTMLButtonElement).click());
     await flush(); expect(apiMocks.promoteAssertion).toHaveBeenCalledTimes(3); await unmount();
   });

@@ -40,21 +40,7 @@
   background: var(--bg-surface);
   border: 1px solid var(--warning-border);
 }
-.v10-token-prompt-submit {
-  flex: 0 0 auto;
-  font-size: var(--fs-label);
-  font-weight: 600;
-  padding: var(--space-4) var(--space-12);
-  border-radius: var(--radius-control);
-  cursor: pointer;
-  color: var(--text-warning);
-  background: var(--warning-bg-strong);
-  border: 1px solid var(--warning-border);
-}
-.v10-token-prompt-submit:disabled {
-  cursor: default;
-  opacity: var(--opacity-disabled);
-}
+.v10-token-prompt-submit { flex: 0 0 auto; }
 
 /* ── Inline stale-refresh banner for an open project (GH #905) ── */
 .v10-stale-banner {
@@ -219,18 +205,6 @@
 .v10-notif-pane-empty { padding: var(--space-24) var(--space-16); text-align: center; }
 .v10-notif-pane-empty-lead { font-size: var(--fs-body); color: var(--text-secondary); margin-bottom: var(--space-4); }
 .v10-notif-pane-empty-sub { font-size: var(--fs-label); color: var(--text-tertiary); line-height: var(--lh-snug); }
-.v10-notif-retry {
-  font-family: var(--font-sans);
-  font-size: inherit;
-  font-weight: 600;
-  color: var(--text-secondary);
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 0;
-  text-decoration: underline;
-}
-.v10-notif-retry:hover { color: var(--text-primary); }
 
 /* Sections */
 .v10-notif-section { padding: var(--space-4) 0; }

@@ -167,7 +167,7 @@ export function ErrorCard({ err, onRetry, retryKey = 'ctl.retry', children }: {
         {onRetry && d.retryable && <button type="button" className="ds-btn" data-copy={retryKey} onClick={onRetry}>{copy(retryKey)}</button>}
         {children}
         {(d.code || d.detail) && (
-          <button type="button" className="mkt-linkbtn mkt-xs" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+          <button type="button" className="ds-btn ds-ghost ds-sm" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
             <span data-copy="err.code">{copy('err.code')}</span>{' '}<span className="mkt-mono" data-copy="_data">{d.code ?? '—'}</span>
           </button>
         )}

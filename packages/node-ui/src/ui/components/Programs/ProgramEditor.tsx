@@ -431,7 +431,7 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
           {result && !result.trace && <p className="program-editor-help">Detailed trace is unavailable for this receipt. Intermediate results are visible only to the executor agent.</p>}
           {result && <section aria-label="Execution result"><JsonViewer value={result.outputs} label="Program output" />
             <details><summary>Advanced · execution ID</summary><p className="program-editor-reference">Execution: <code>{result.executionIri}</code></p></details>
-            {onExecution && <button type="button" onClick={() => onExecution(result.executionIri, result.executionLayer)}>Open execution</button>}</section>}
+            {onExecution && <button type="button" className="ds-btn ds-sm" onClick={() => onExecution(result.executionIri, result.executionLayer)}>Open execution</button>}</section>}
         </aside>
       </div>
       <footer>{busy && <p role="status">{busy}</p>}{notice && <p role="status">{notice}</p>}{error && <p role="alert">{error}</p>}</footer>

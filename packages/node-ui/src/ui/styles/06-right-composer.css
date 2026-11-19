@@ -108,10 +108,7 @@
    state (informational only) — the underlying :disabled rule above
    handles its appearance; this rule just animates the inner icon. */
 .v10-local-agent-inline-send-spinner {
-  animation: v10-spin 0.85s linear infinite;
-}
-@keyframes v10-spin {
-  to { transform: rotate(360deg); }
+  animation: ds-spin 1s linear infinite;
 }
 @media (prefers-reduced-motion: reduce) {
   .v10-local-agent-inline-send-spinner { animation: none; }
@@ -262,8 +259,8 @@
   opacity: 0;
   transition: opacity var(--motion-fast) ease-out;
   background: color-mix(in srgb, var(--bg-root) 60%, transparent);
-  backdrop-filter: blur(2px);
-  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(var(--blur-sm));
+  -webkit-backdrop-filter: blur(var(--blur-sm));
 }
 .v10-drop-overlay.active {
   opacity: 1;

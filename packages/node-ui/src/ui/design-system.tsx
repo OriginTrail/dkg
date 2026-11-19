@@ -329,7 +329,7 @@ const App: React.FC = () => {
       </Section>
 
       <Section id="toggle" title="Toggle" lead="An on/off setting that takes effect straight away.">
-        <div style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
+        <div className="dsp-inline">
           <Toggle checked={false} aria-label="Off example" />
           <Toggle checked aria-label="On example" />
           <Toggle checked busy aria-label="Saving example" />
@@ -337,7 +337,7 @@ const App: React.FC = () => {
       </Section>
 
       <Section id="icons" title="Icons" lead="Lucide for actions and things, LayerGlyph for memory layers, StatusGlyph for status. One icon per job.">
-        <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap', fontSize: 'var(--fs-control)' }}>
+        <div className="dsp-inline-wrap">
           <span><X size={14} /> Close</span>
           <span><RefreshCw size={14} /> Refresh</span>
           <span><Copy size={14} /> Copy</span>
@@ -354,7 +354,7 @@ const App: React.FC = () => {
       </Section>
 
       <Section id="feedback" title="Feedback" lead="Loading, empty, error and disabled: one look each.">
-        <div style={{ display: 'grid', gap: 12 }}>
+        <div className="dsp-stack">
           <Loading label="Loading peers…" />
           <EmptyState compact inline title="No active connections" description="Connections will appear here as your node links with peers." />
           <EmptyState compact tone="danger" title="Could not load peers" description="The node didn't respond." actions={[{ label: 'Retry', onClick: () => undefined }]} />
@@ -391,46 +391,49 @@ const App: React.FC = () => {
 // Page chrome only; uses tokens so it stays inside the rules it documents.
 const PAGE_CSS = `
 html, body { background: var(--bg-root); color: var(--text-primary); font-family: var(--font-sans); margin: 0; overflow: auto; height: auto; }
-.dsp { max-width: 1120px; margin: 0 auto; padding: 32px 24px 80px; display: grid; gap: 40px; }
-.dsp-header { display: flex; gap: 24px; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; }
-.dsp h1 { font-size: var(--fs-display); margin: 4px 0 8px; }
+.dsp { max-width: 1120px; margin: 0 auto; padding: var(--space-32) var(--space-24) calc(var(--space-20) * 4); display: grid; gap: calc(var(--space-20) * 2); }
+.dsp-header { display: flex; gap: var(--space-24); justify-content: space-between; align-items: flex-start; flex-wrap: wrap; }
+.dsp h1 { font-size: var(--fs-display); margin: var(--space-4) 0 var(--space-8); }
 .dsp h2 { font-size: var(--fs-heading); margin: 0; }
 .dsp code { font-family: var(--font-mono); font-size: var(--fs-label); color: var(--text-secondary); }
-.dsp-kicker { font-size: var(--fs-label); font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--text-tertiary); }
-.dsp-lead { margin: 0; max-width: 72ch; color: var(--text-secondary); font-size: var(--fs-body); line-height: 1.55; }
+.dsp-kicker { font-size: var(--fs-label); font-weight: 600; letter-spacing: var(--ls-caps); text-transform: uppercase; color: var(--text-tertiary); }
+.dsp-lead { margin: 0; max-width: 72ch; color: var(--text-secondary); font-size: var(--fs-body); line-height: var(--lh-body); }
 .dsp-muted { color: var(--text-tertiary); font-size: var(--fs-label); }
-.dsp-toc { display: flex; flex-wrap: wrap; gap: 4px 16px; padding-bottom: 12px; border-bottom: 1px solid var(--border-default); position: sticky; top: 0; background: var(--bg-root); z-index: 2; padding-top: 12px; }
+.dsp-toc { display: flex; flex-wrap: wrap; gap: var(--space-4) var(--space-16); padding-bottom: var(--space-12); border-bottom: 1px solid var(--border-default); position: sticky; top: 0; background: var(--bg-root); z-index: 2; padding-top: var(--space-12); }
 .dsp-toc a { color: var(--text-secondary); font-size: var(--fs-control); text-decoration: none; }
 .dsp-toc a:hover { color: var(--text-primary); }
-.dsp-section { display: grid; gap: 16px; scroll-margin-top: 56px; }
-.dsp-row { display: grid; grid-template-columns: 200px 1fr; gap: 16px; align-items: start; padding: 12px 0; border-top: 1px solid var(--border-subtle); }
-.dsp-row-label { display: grid; gap: 2px; font-size: var(--fs-body); }
+.dsp-section { display: grid; gap: var(--space-16); scroll-margin-top: calc(var(--space-24) + var(--space-32)); }
+.dsp-row { display: grid; grid-template-columns: 200px 1fr; gap: var(--space-16); align-items: start; padding: var(--space-12) 0; border-top: 1px solid var(--border-subtle); }
+.dsp-row-label { display: grid; gap: var(--space-2); font-size: var(--fs-body); }
 .dsp-row-label span { color: var(--text-tertiary); font-size: var(--fs-label); }
-.dsp-row-items { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: center; min-width: 0; }
-.dsp-swatch { display: flex; gap: 8px; align-items: center; min-width: 210px; }
-.dsp-chip { width: 32px; height: 32px; border-radius: var(--radius-control); box-shadow: inset 0 0 0 1px var(--border-default); flex-shrink: 0; }
+.dsp-row-items { display: flex; flex-wrap: wrap; gap: var(--space-12) var(--space-16); align-items: center; min-width: 0; }
+.dsp-swatch { display: flex; gap: var(--space-8); align-items: center; min-width: 210px; }
+.dsp-chip { width: 32px; height: 32px; border-radius: var(--radius-control); box-shadow: var(--ring-default); flex-shrink: 0; }
 .dsp-swatch-text { display: grid; gap: 1px; }
-.dsp-type { display: grid; grid-template-columns: 200px 1fr; gap: 16px; align-items: baseline; padding: 8px 0; border-top: 1px solid var(--border-subtle); }
-.dsp-spec { display: grid; gap: 6px; justify-items: start; }
-.dsp-box { display: inline-flex; align-items: center; height: var(--h-control-lg); padding: 0 14px; background: var(--bg-elevated); box-shadow: inset 0 0 0 1px var(--border-strong); font-size: var(--fs-control); }
-.dsp-bar { display: block; width: 64px; background: var(--bg-active); border-radius: var(--radius-xs); box-shadow: inset 0 0 0 1px var(--border-strong); }
+.dsp-type { display: grid; grid-template-columns: 200px 1fr; gap: var(--space-16); align-items: baseline; padding: var(--space-8) 0; border-top: 1px solid var(--border-subtle); }
+.dsp-spec { display: grid; gap: var(--space-6); justify-items: start; }
+.dsp-box { display: inline-flex; align-items: center; height: var(--h-control-lg); padding: 0 var(--space-16); background: var(--bg-elevated); box-shadow: var(--ring-strong); font-size: var(--fs-control); }
+.dsp-bar { display: block; width: 64px; background: var(--bg-active); border-radius: var(--radius-xs); box-shadow: var(--ring-strong); }
 .dsp-tabs { display: flex; height: var(--tab-h); border-bottom: 1px solid var(--border-default); }
-.dsp-surface { display: grid; gap: 12px; padding: 16px; background: var(--bg-surface); border: 1px solid var(--border-default); }
+.dsp-surface { display: grid; gap: var(--space-12); padding: var(--space-16); background: var(--bg-surface); border: 1px solid var(--border-default); }
 .dsp-overlay { background: var(--bg-elevated); max-width: 560px; }
-.dsp-nested-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.dsp-nested { background: var(--bg-panel); gap: 4px; padding: 12px; }
-.dsp-textarea { width: min(100%, 480px); min-height: 72px; padding: 8px 10px; font-family: var(--font-mono); }
+.dsp-nested-row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-12); }
+.dsp-nested { background: var(--bg-panel); gap: var(--space-4); padding: var(--space-12); }
+.dsp-textarea { width: min(100%, 480px); min-height: 72px; padding: var(--pad-nested-sm); font-family: var(--font-mono); }
 .dsp-matrix { border-collapse: collapse; width: 100%; font-size: var(--fs-control); }
-.dsp-matrix th { padding: 8px 12px 8px 0; text-align: left; font-weight: 500; color: var(--text-secondary); white-space: nowrap; }
+.dsp-matrix th { padding: var(--space-8) var(--space-12) var(--space-8) 0; text-align: left; font-weight: 500; color: var(--text-secondary); white-space: nowrap; }
 .dsp-matrix thead th { font-size: var(--fs-label); color: var(--text-tertiary); }
-.dsp-matrix tbody th { display: grid; gap: 2px; }
+.dsp-matrix tbody th { display: grid; gap: var(--space-2); }
 .dsp-matrix tbody th b { font-weight: 500; }
 .dsp-matrix tbody th span { color: var(--text-tertiary); font-size: var(--fs-label); white-space: normal; max-width: 180px; }
-.dsp-matrix td { padding: 8px 12px 8px 0; min-width: 120px; vertical-align: middle; }
+.dsp-matrix td { padding: var(--space-8) var(--space-12) var(--space-8) 0; min-width: 120px; vertical-align: middle; }
 .dsp-matrix tr { border-top: 1px solid var(--border-subtle); }
 .dsp-matrix .ds-input { width: 112px; }
 .dsp-none { color: var(--text-tertiary); }
-@media (max-width: 720px) { .dsp-row, .dsp-type { grid-template-columns: 1fr; gap: 8px; } }
+@media (max-width: 720px) { .dsp-row, .dsp-type { grid-template-columns: 1fr; gap: var(--space-8); } }
+.dsp-inline { display: flex; gap: var(--space-16); align-items: center; }
+.dsp-inline-wrap { display: flex; gap: var(--space-16); align-items: center; flex-wrap: wrap; font-size: var(--fs-control); }
+.dsp-stack { display: grid; gap: var(--space-12); }
 `;
 
 applyTheme(readTheme());

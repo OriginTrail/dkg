@@ -216,7 +216,7 @@
 /* ── Generative Widgets ── */
 .v10-gen-widget {
   width: 100%; border: 1px solid var(--border-default); background: var(--bg-surface); overflow: hidden;
-  animation: v10SlideUp 0.3s ease;
+  animation: v10SlideUp var(--motion-slow) ease;
 }
 @keyframes v10SlideUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 .v10-gen-widget-header {
@@ -227,14 +227,9 @@
 .v10-gen-widget-right { display: flex; align-items: center; gap: var(--space-8); }
 .v10-gen-widget-agent { display: flex; align-items: center; gap: var(--space-4); font-size: var(--fs-micro); color: var(--text-tertiary); font-family: var(--font-mono); }
 .v10-gen-widget-agent-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--role); }
-.v10-gen-widget-dismiss {
-  font-size: var(--fs-body); color: var(--text-tertiary); padding: var(--space-2) var(--space-4); border-radius: var(--radius-xs);
-  transition: all var(--motion-base); cursor: pointer; border: none; background: none;
-}
-.v10-gen-widget-dismiss:hover { color: var(--text-secondary); background: var(--bg-hover); }
 .v10-gen-widget-body { padding: var(--space-16); }
 .v10-gen-widget-footnote { padding: var(--pad-nested); border-top: 1px solid var(--border-subtle); font-size: var(--fs-micro); color: var(--text-tertiary); line-height: var(--lh-body); }
-.v10-gen-widget.dissolved { opacity: 0.3; filter: blur(1px); pointer-events: none; max-height: 40px; overflow: hidden; transition: all var(--motion-slow); }
+.v10-gen-widget.dissolved { opacity: 0.3; filter: blur(var(--blur-sm)); pointer-events: none; max-height: 40px; overflow: hidden; transition: all var(--motion-slow); }
 
 /* Decision card widget */
 .v10-decision-context { font-size: var(--fs-control); color: var(--text-secondary); line-height: var(--lh-loose); margin-bottom: var(--space-12); }

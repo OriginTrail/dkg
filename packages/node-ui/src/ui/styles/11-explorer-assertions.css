@@ -246,7 +246,7 @@
   gap: var(--space-8);
   align-items: end;
   padding: var(--pad-nested);
-  margin: -4px 0 var(--space-16);
+  margin: calc(-1 * var(--space-4)) 0 var(--space-16);
   border: 1px solid var(--border-subtle);
   background: var(--bg-panel);
 }
