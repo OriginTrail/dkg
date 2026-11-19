@@ -82,7 +82,8 @@ export class DashboardPage {
         await this.page
           .locator(sel.leftPanel.root)
           .locator(sel.leftPanel.newProjectBtn)
-          .filter({ hasText: /^New$/i })
+          // Accessible name, so the first-run card's "New" and the group's button both match.
+          .and(this.page.getByRole('button', { name: 'New context graph', exact: true }))
           .first()
           .click();
       },

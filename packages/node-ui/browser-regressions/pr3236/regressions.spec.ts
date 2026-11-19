@@ -125,16 +125,16 @@ test('Memory Stack distinguishes loading and failure from empty inventory, retri
     await expect(page.getByRole('status').filter({ hasText: 'Loading context graphs' })).toBeVisible();
     await expect(page.getByText('No visible context graphs.', { exact: false })).toHaveCount(0);
   } finally { release(); }
-  await expect(page.getByRole('alert')).toContainText('Context graphs unavailable.');
+  await expect(page.getByRole('alert')).toContainText('Couldn’t load context graphs: inventory unavailable.');
   await expect(page.getByText('No visible context graphs.', { exact: false })).toHaveCount(0);
   failing = false;
-  await page.getByRole('button', { name: 'Retry context graphs', exact: true }).click();
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
   await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('5');
   await expect(page.getByRole('alert')).toHaveCount(0);
   failing = true;
   // Ordinary polls may reuse the five-minute list cache; expire it before failing refresh.
   await page.clock.fastForward(6 * 60_000);
-  await expect(page.getByRole('alert')).toContainText('Showing the last available context graphs.');
+  await expect(page.getByRole('alert')).toContainText('Showing the last ones loaded.');
   await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('5');
 });
 test('agent preview does not claim no contributions when the author is in a later graph', async ({ page }) => {

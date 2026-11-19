@@ -18,7 +18,7 @@ test.describe('Context Graph visibility', () => {
   test('dashboard My Context Graphs stat reflects the seeded count', async ({ page }) => {
     const card = page
       .locator('.stat-card')
-      .filter({ has: page.locator('.stat-label', { hasText: 'My context graphs' }) });
+      .filter({ has: page.locator('.stat-label', { hasText: /^Context graphs$/ }) });
     await expect(card).toBeVisible();
     // The value slot shows a "loading…" placeholder until the CG set resolves
     // (can be slow under load), so poll the .stat-value until it's a number.
@@ -116,7 +116,7 @@ test.describe('Context Graph hide / restore (sidebar visibility toggle)', () => 
     // was extracted to guarantee. A regression to three private copies fails here.
     const statValue = page
       .locator('.stat-card')
-      .filter({ has: page.locator('.stat-label', { hasText: 'My context graphs' }) })
+      .filter({ has: page.locator('.stat-label', { hasText: /^Context graphs$/ }) })
       .locator('.stat-value');
 
     const readCount = async () => {

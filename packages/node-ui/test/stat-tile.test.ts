@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 // One stat card for the whole UI. The Dashboard's local StatCard is gone.
-import React from 'react';
+import React, { act } from 'react';
+import { createRoot } from 'react-dom/client';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -40,6 +41,31 @@ describe('StatTile', () => {
     expect(card.querySelector('.stat-label svg[data-icon="trend"]')).toBeTruthy();
     const order = [...card.children].map((c) => c.className);
     expect(order).toEqual(['stat-label', 'v10-cg-size-detail', 'stat-sub']);
+  });
+
+  it('opens and closes the `about` explanation from its button, never as a hover tooltip', async () => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    const host = document.createElement('div'); document.body.appendChild(host);
+    const root = createRoot(host);
+    await act(async () => { root.render(React.createElement(StatTile, { label: 'Agents', value: 3, sub: 'Short line.', about: 'The longer explanation.' })); });
+    const toggle = host.querySelector<HTMLButtonElement>('.stat-about-toggle')!;
+    const panel = host.querySelector<HTMLElement>(`#${CSS.escape(toggle.getAttribute('aria-controls')!)}`)!;
+    expect(toggle.getAttribute('title')).toBeNull();
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(panel.hidden).toBe(true);
+    await act(async () => { toggle.click(); });
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(panel.hidden).toBe(false);
+    expect(panel.textContent).toBe('The longer explanation.');
+    await act(async () => { toggle.click(); });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(panel.hidden).toBe(true);
+    await act(async () => { root.unmount(); });
+    host.remove();
+  });
+
+  it('renders no info button without `about`', () => {
+    expect(html(React.createElement(StatTile, { label: 'Direct', value: 3 })).querySelector('.stat-about-toggle')).toBeNull();
   });
 
   it('is the only stat card implementation', () => {

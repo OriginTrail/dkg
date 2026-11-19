@@ -46,9 +46,6 @@
   gap: var(--space-8);
   flex-wrap: wrap;
 }
-.v10-pca-overview-wallet {
-  width: min(460px, 100%);
-}
 .v10-pca-wallet-list {
   display: flex;
   flex-direction: column;

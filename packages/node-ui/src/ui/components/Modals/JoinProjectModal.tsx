@@ -162,7 +162,7 @@ export function resolveJoinIntent(
     kind: 'privateJoin',
     invite,
     validationError: validateInvite(invite),
-    idleLabel: 'Request to Join',
+    idleLabel: 'Request to join',
     sendingLabel: 'Sending request…',
   };
 }
@@ -522,20 +522,22 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           aria-modal="true"
           aria-labelledby="dkg-join-wire-title"
         >
-          <button
-            type="button"
-            className="v10-modal-close ds-btn ds-ghost ds-icon v10-modal-close-corner"
-            onClick={handleWireDone}
-            aria-label="Close wire workspace dialog"
-            title="Close (Esc)"
-          >
-            <X size={14} />
-          </button>
-          <div className="v10-modal-header">
-            <div id="dkg-join-wire-title" className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
-            <div className="v10-modal-subtitle">
-              Curator approved. Now wire a local workspace so this Cursor can collaborate on the context graph.
+          <div className="v10-modal-header v10-modal-header-row">
+            <div className="v10-modal-heading">
+              <div id="dkg-join-wire-title" className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
+              <div className="v10-modal-subtitle">
+                Curator approved. Now wire a local workspace so this Cursor can collaborate on the context graph.
+              </div>
             </div>
+            <button
+              type="button"
+              className="v10-modal-close ds-btn ds-ghost ds-icon"
+              onClick={handleWireDone}
+              aria-label="Close wire workspace dialog"
+              title="Close (Esc)"
+            >
+              <X size={14} />
+            </button>
           </div>
           <div className="v10-modal-body">
             <WireWorkspacePanel
@@ -570,20 +572,22 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         aria-labelledby="dkg-join-cg-title"
         aria-describedby="dkg-join-cg-subtitle"
       >
-        <button
-          type="button"
-          className="v10-modal-close ds-btn ds-ghost ds-icon v10-modal-close-corner"
-          onClick={onClose}
-          aria-label="Close join context graph dialog"
-          title="Close (Esc)"
-        >
-          <X size={14} />
-        </button>
-        <div className="v10-modal-header">
-          <div id="dkg-join-cg-title" className="v10-modal-title">Join a context graph</div>
-          <div id="dkg-join-cg-subtitle" className="v10-modal-subtitle">
-            Enter a discovered public context graph ID to subscribe, or paste a curator invite for a private graph.
+        <div className="v10-modal-header v10-modal-header-row">
+          <div className="v10-modal-heading">
+            <div id="dkg-join-cg-title" className="v10-modal-title">Join a context graph</div>
+            <div id="dkg-join-cg-subtitle" className="v10-modal-subtitle">
+              Enter a discovered public context graph ID to subscribe, or paste a curator invite for a private graph.
+            </div>
           </div>
+          <button
+            type="button"
+            className="v10-modal-close ds-btn ds-ghost ds-icon"
+            onClick={onClose}
+            aria-label="Close join context graph dialog"
+            title="Close (Esc)"
+          >
+            <X size={14} />
+          </button>
         </div>
 
         <div className="v10-modal-body">
@@ -617,7 +621,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
               value={inviteCode}
               onChange={(e) => setInviteCode(e.target.value)}
               autoFocus
-              rows={3}
+              rows={5}
               disabled={sending || pending || approved}
               aria-label="Context graph invite code"
               autoComplete="off"

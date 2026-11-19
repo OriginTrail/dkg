@@ -39,15 +39,18 @@ export function ProjectHeaderStrip({
     <div className="v10-project-strip" style={{ '--sg-color': activeSubGraph ? activeSubGraph.color ?? 'var(--text-tertiary)' : cgColor } as React.CSSProperties}>
       <ContextGraphMark id={cg.id} name={name} size="md" />
       <h1 className="v10-project-strip-heading">
-        <button
-          type="button"
-          className="v10-project-strip-name"
-          onClick={activeSubGraph ? onClearSubGraph : undefined}
-          disabled={!activeSubGraph}
-          title={activeSubGraph ? 'Back to context graph overview' : cg.id}
-        >
-          {name}
-        </button>
+        {activeSubGraph ? (
+          <button
+            type="button"
+            className="v10-project-strip-name"
+            onClick={onClearSubGraph}
+            title="Back to context graph overview"
+          >
+            {name}
+          </button>
+        ) : (
+          <span className="v10-project-strip-name" title={cg.id}>{name}</span>
+        )}
       </h1>
       {activeSubGraph ? (
         <>

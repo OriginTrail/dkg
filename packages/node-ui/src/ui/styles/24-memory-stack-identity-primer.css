@@ -286,7 +286,7 @@
 }
 .v10-project-strip-heading { min-width: 0; margin: 0; font: inherit; }
 .v10-project-strip-name {
-  font-size: var(--fs-body); font-weight: 600;
+  font-size: var(--fs-heading); font-weight: 600; line-height: var(--lh-tight);
   color: var(--text-primary);
   background: none; border: none; padding: 0;
   cursor: pointer;
@@ -296,6 +296,8 @@
 .v10-project-strip-name:disabled {
   cursor: default; opacity: var(--opacity-disabled);
 }
+/* With no subgraph open the name is the page title, not a control. */
+span.v10-project-strip-name { cursor: default; }
 .v10-project-strip-name:not(:disabled):hover {
   color: var(--sg-color, var(--text-tertiary));
 }

@@ -15,7 +15,11 @@ export class LeftPanelPage {
   constructor(page: Page) {
     this.page = page;
     this.root = page.locator(sel.leftPanel.root).first();
-    this.newProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /^New$/i });
+    // Both sidebar states share the accessible name: the first-run card shows "New" with an
+    // aria-label, the group's button shows "New context graph" as its text.
+    this.newProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).and(
+      page.getByRole('button', { name: 'New context graph', exact: true }),
+    );
     this.joinProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /^Join$/i });
     this.oraclePlaceholder = page.locator(sel.leftPanel.oraclePlaceholder);
     this.nodePlaces = page.getByRole('navigation', { name: 'Node' });
@@ -176,7 +180,8 @@ export class LeftPanelPage {
     // failure worth surfacing).
     await this.page
       .locator('.v10-center-content .v10-memory-explorer')
-      .filter({ has: this.page.getByRole('button', { name }) })
+      // The title is plain text (a button only while a subgraph is open), so match its element.
+      .filter({ has: this.page.locator('.v10-project-strip-name', { hasText: name }) })
       .first()
       .waitFor({ state: 'visible', timeout: 30_000 });
   }
@@ -218,7 +223,7 @@ export class LeftPanelPage {
     await tab.click();
     await tab.waitFor({ state: 'visible' });
     const root = this.page.locator('.v10-center-content .v10-memory-explorer').filter({
-      has: this.page.getByRole('button', { name: projectName }),
+      has: this.page.locator('.v10-project-strip-name', { hasText: projectName }),
     });
     // ProjectView renders "Loading context graph..." (a `.v10-view-placeholder`,
     // NOT the explorer) until its async `fetchContextGraphs` resolves and the CG

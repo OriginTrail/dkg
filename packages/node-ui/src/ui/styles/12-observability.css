@@ -105,6 +105,9 @@ select.input {
 .stat-label{font-size: var(--fs-control);color:var(--text-secondary);font-weight:600;letter-spacing: var(--ls-caps);text-transform:uppercase;margin-bottom:var(--space-8);display:flex;align-items:center;gap:var(--space-6)}
 .stat-value{font-size: var(--fs-display);font-weight:700;color:var(--text-primary);line-height:1}
 .stat-sub{font-size: var(--fs-body);color:var(--text-secondary);margin-top:var(--space-6)}
+/* StatTile `about`: the info button sits at the end of the label row; the text opens under the card's line. */
+.stat-about-toggle{margin-left:auto;margin-block:calc(-1 * var(--space-4))}
+.stat-about{color:var(--text-tertiary)}
 
 /* ══════════════════════════════════════════
    MODAL STYLES (V10)

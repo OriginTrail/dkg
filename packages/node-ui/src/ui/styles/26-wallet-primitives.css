@@ -55,6 +55,11 @@
   gap: var(--space-6);
 }
 .v10-wallet-connect-btn { align-self: flex-start; }
+/* The action row when a caller puts controls before the wallet (`leading`), e.g. the PCA ID check. */
+.v10-wallet-connect-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-8); }
+.v10-wallet-connect-row > .v10-wallet-connect-btn { align-self: auto; }
+/* With a leading control the row takes the width it needs; the notes keep their own measure. */
+.v10-wallet-connect.compact:has(> .v10-wallet-connect-row) { max-width: none; }
 .v10-wallet-connect-btn:focus-visible,
 .v10-wallet-provider:focus-visible,
 .v10-wallet-pill-btn:focus-visible,
