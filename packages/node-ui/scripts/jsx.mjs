@@ -117,7 +117,8 @@ function literalValue(name, init) {
   if (ts.isNumericLiteral(init)) n = init.text;
   else if (ts.isPrefixUnaryExpression(init) && init.operator === ts.SyntaxKind.MinusToken && ts.isNumericLiteral(init.operand)) n = `-${init.operand.text}`;
   if (n === null) return null;
-  return UNITLESS.has(name) || n === '0' ? n : `${n}px`;
+  // React writes a custom property's number as it is: `'--layer': 50` is 50, not 50px.
+  return name.startsWith('--') || UNITLESS.has(name) || n === '0' ? n : `${n}px`;
 }
 
 /**

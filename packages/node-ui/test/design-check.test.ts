@@ -198,6 +198,24 @@ describe('design check', () => {
     expect(hints('<div role="dialog" className="ds-overlay" />')).toEqual([]);
   });
 
+  it('keeps a JSX custom property number unitless, as React does', () => {
+    const found = (tsx: string) => checkText(system, tsx, 'mock.tsx', { mockup: true })
+      .filter((f: { offScale?: boolean }) => f.offScale)
+      .map((f: { kind: string; prop?: string; value: string }) => `${f.kind} ${f.prop} ${f.value}`);
+    expect(found("<div style={{ '--layer': 50, zIndex: 'var(--layer)' }} />")).toEqual(['layer z-index 50']);
+    expect(found("<div style={{ '--layer': 5, zIndex: 'var(--layer)', padding: 10 }} />")).toEqual(['spacing padding 10px']);
+  });
+
+  it('reads tags and style attributes in one pass over the HTML', () => {
+    const found = (html: string) => checkText(system, html, 'mock.html', { known: new Set(), mockup: true })
+      .filter((f: { offScale?: boolean }) => f.offScale)
+      .map((f: { line: number; kind: string }) => `${f.line} ${f.kind}`);
+    expect(found('<button class="btn" style="padding: 10px">Save</button>')).toEqual(['1 spacing', '1 component']);
+    expect(found('<div\n  title="a > b"\n  style="padding: 10px"></div>')).toEqual(['3 spacing']);
+    expect(found('<div title="style=&quot;x&quot;" data-style="padding: 10px"></div>')).toEqual([]);
+    expect(found('<style media="screen">\n.a { gap: 10px; }\n</style >')).toEqual(['2 spacing']);
+  });
+
   it('reads HTML attributes with > inside their quotes', () => {
     const hints = (html: string) => checkText(system, html, 'mock.html', { known: new Set(), mockup: true })
       .filter((f: { kind: string }) => f.kind === 'component').length;
@@ -285,6 +303,10 @@ describe('design check', () => {
       copyFileSync(join(__dirname, '../src/ui/styles/00-theme.css'), join(styles, '00-theme.css'));
       const git = (...args: string[]) => execFileSync('git', ['-c', 'user.name=design-check', '-c', 'user.email=design-check@example.invalid', '-c', 'commit.gpgsign=false', ...args], { cwd: repo, stdio: 'pipe' });
       git('init', '-q', '-b', 'main');
+      // Settings that change diff headers must not hide changed files from the check.
+      git('config', 'diff.noprefix', 'true');
+      git('config', 'diff.mnemonicPrefix', 'true');
+      git('config', 'diff.relative', 'true');
       writeFileSync(join(styles, 'a.css'), '.old { padding: 10px; }\n');
       git('add', '-A');
       git('commit', '-q', '-m', 'base');

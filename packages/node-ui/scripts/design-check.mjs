@@ -30,7 +30,14 @@ const skipFile = (file) => /00-theme\.css$|-colors\.ts$|design-system[\w-]*\.(ts
 /** Lines each file adds against `base`, from git. */
 function changedLines(base) {
   const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: PKG, encoding: 'utf8' }).trim();
-  const diff = execFileSync('git', ['diff', '-U0', '--no-color', '--merge-base', base, '--', relative(root, UI)], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  // Headers the parser below can rely on, whatever the user's git config says: a/ and b/
+  // prefixes (diff.noprefix, diff.mnemonicPrefix), paths from the repository root
+  // (diff.relative), unquoted paths (core.quotePath), and no external diff tools.
+  const diff = execFileSync('git', [
+    '-c', 'core.quotePath=false',
+    'diff', '-U0', '--no-color', '--no-ext-diff', '--no-textconv', '--no-relative', '--src-prefix=a/', '--dst-prefix=b/',
+    '--merge-base', base, '--', relative(root, UI),
+  ], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   const files = new Map();
   let current = null;
   for (const line of diff.split('\n')) {

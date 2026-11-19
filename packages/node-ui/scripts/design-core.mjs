@@ -9,7 +9,8 @@ import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NAMED_COLOURS, parseColour } from './colour.mjs';
 import { CssReadError, cssDeclarations } from './css.mjs';
-import { classify, declarations, lineIndex, literals, maskHtmlComments, resolveVars } from './design-rules.mjs';
+import { classify, declarations, lineIndex, literals, resolveVars } from './design-rules.mjs';
+import { readHtml } from './html.mjs';
 import { ADD, suggest } from './design-suggest.mjs';
 import { attrText, attrsOf, classNames, opening, parseTsx, tagName, walkJsx } from './jsx.mjs';
 
@@ -294,18 +295,13 @@ const COMPONENT_RULES = [
   },
 ];
 
-/** HTML opening tags, with attribute values in quotes holding any character (`>` too). @param {string} html @returns {Tag[]} */
+/** HTML opening tags, from the same reader the declaration check uses (scripts/html.mjs). @param {string} html @returns {Tag[]} */
 function htmlTags(html) {
-  /** @type {Tag[]} */
-  const out = [];
-  const ATTR = /([^\s=>/"']+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+)))?/g;
-  for (const m of html.matchAll(/<([a-z][\w-]*)((?:\s+[^\s=>/"']+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>"']+))?)*)\s*\/?>/gi)) {
+  return readHtml(html).tags.map((t) => {
     /** @type {Map<string, string | null>} */
-    const attrs = new Map();
-    for (const a of m[2].matchAll(ATTR)) attrs.set(a[1].toLowerCase(), a[2] ?? a[3] ?? a[4] ?? '');
-    out.push({ name: m[1].toLowerCase(), source: m[0], index: m.index ?? 0, classes: (attrs.get('class') ?? '').split(/\s+/).filter(Boolean), attrs });
-  }
-  return out;
+    const attrs = new Map([...t.attrs].map(([k, a]) => [k, a.value]));
+    return { name: t.name, source: t.source, index: t.index, classes: (attrs.get('class') ?? '').split(/\s+/).filter(Boolean), attrs };
+  });
 }
 
 /** JSX elements, read with the shared parser (scripts/jsx.mjs). A capitalised component (<Button>) is a system part already. @param {string} text @param {string} ext @returns {Tag[]} */
@@ -330,7 +326,7 @@ function checkMarkup(text, ext, keepLine) {
   const lineOf = lineIndex(text);
   /** @type {Reported[]} */
   const out = [];
-  const tags = ext === '.tsx' || ext === '.jsx' ? jsxTags(text, ext) : htmlTags(maskHtmlComments(text));
+  const tags = ext === '.tsx' || ext === '.jsx' ? jsxTags(text, ext) : htmlTags(text);
   for (const tag of tags) {
     for (const rule of COMPONENT_RULES) {
       if (!rule.flags(tag)) continue;

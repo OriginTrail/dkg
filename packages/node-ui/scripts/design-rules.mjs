@@ -6,6 +6,7 @@
 // that the system needs a new one). The JSDoc types are checked: tsconfig.type-tests.json
 // runs tsc with checkJs over this file.
 import { cssDeclarations } from './css.mjs';
+import { maskHtmlComments, readHtml } from './html.mjs';
 import { styleDeclarations } from './jsx.mjs';
 
 /** @typedef {import('./jsx.mjs').Declaration} Declaration */
@@ -31,8 +32,7 @@ export const LAYER_FREE_MAX = 10;
 /** Durations at or under this are reduced-motion overrides, not timings. */
 export const MOTION_FREE_MS = 0.5;
 
-/** HTML without its comments, each replaced by spaces so every offset and line stays where it was. @param {string} html @returns {string} */
-export const maskHtmlComments = (html) => html.replace(/<!--[\s\S]*?-->/g, (c) => c.replace(/[^\n]/g, ' '));
+export { maskHtmlComments };
 
 const VAR = /var\(\s*(--[\w-]+)\s*(?:,((?:[^()]|\([^()]*\))*))?\)/g;
 
@@ -92,18 +92,16 @@ export function lineIndex(text) {
 /**
  * Every declaration in a file, in line order, where line and endLine are the lines
  * its property and value span and scope says which rule, style attribute or JSX
- * element it belongs to: CSS and <style> blocks (read by scripts/css.mjs), style
- * attributes in either quote, and JSX style objects (read by scripts/jsx.mjs). HTML
- * comments are left out.
+ * element it belongs to: CSS (read by scripts/css.mjs), an HTML mock-up's <style>
+ * blocks and style attributes (found by scripts/html.mjs, outside its comments), and
+ * JSX style objects (read by scripts/jsx.mjs).
  * @param {string} text
  * @param {string} ext the file's extension, with its dot
  * @returns {Declaration[]}
  * @throws {import('./css.mjs').CssReadError} when a stylesheet or style block can't be read
  */
 export function declarations(text, ext) {
-  const html = ext === '.html' || ext === '.htm';
-  const source = html ? maskHtmlComments(text) : text;
-  const lineAt = lineIndex(source);
+  const lineAt = lineIndex(text);
   /** @type {Declaration[]} */
   const out = [];
   /** @param {string} css @param {number} offset @param {number} [rootScope] */
@@ -112,16 +110,16 @@ export function declarations(text, ext) {
       out.push({ prop: d.prop, value: d.value, line: lineAt(d.start), endLine: lineAt(d.end), scope: d.scope });
     }
   };
-  if (ext === '.css') { cssIn(source, 0); return out; }
-  // Each body's offset is where it starts in the file, so a declaration keeps its own lines.
-  for (const m of source.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)) cssIn(m[1], (m.index ?? 0) + m[0].length - '</style>'.length - m[1].length);
+  if (ext === '.css') { cssIn(text, 0); return out; }
   if (ext === '.tsx' || ext === '.jsx') {
-    out.push(...styleDeclarations(source, `inline${ext}`));
+    out.push(...styleDeclarations(text, `inline${ext}`));
   } else {
-    // A style attribute, with HTML's optional spaces around `=`: its declarations share one scope.
-    for (const m of source.matchAll(/(?<![\w-])style\s*=\s*(["'])([\s\S]*?)\1/gi)) {
-      const at = (m.index ?? 0) + m[0].length - 1 - m[2].length;
-      cssIn(m[2], at, at);
+    const doc = readHtml(text);
+    for (const style of doc.styles) cssIn(style.css, style.start);
+    // A style attribute's declarations share one scope: the attribute's own.
+    for (const tag of doc.tags) {
+      const style = tag.attrs.get('style');
+      if (style) cssIn(style.value, style.start, style.start);
     }
   }
   return out.sort((a, b) => a.line - b.line);

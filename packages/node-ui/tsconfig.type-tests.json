@@ -17,6 +17,7 @@
     "scripts/design-rules.mjs",
     "scripts/design-suggest.mjs",
     "scripts/css.mjs",
-    "scripts/design-core.mjs"
+    "scripts/design-core.mjs",
+    "scripts/html.mjs"
   ]
 }
