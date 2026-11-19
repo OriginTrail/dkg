@@ -270,6 +270,7 @@ export default defineConfig({
       "test/durable-large-prefix-production.test.ts",
       "test/store-content-fence-bounds.test.ts",
       "test/store-lane-yield.test.ts",
+      "test/durable-recovery-held-copy.test.ts",
       "test/durable-progress.test.ts",
       "test/gossip-publish-handler.test.ts",
       "test/discovery-subscription-boundary.test.ts",

@@ -70,6 +70,8 @@ export type { VerifyContextGraphBinding } from './graph-scoped-chain-views.js';
 
 export type GraphScopedMaterializationOutcome =
   | 'applied'
+  /** The store already held exactly this version's copy, so nothing was written. */
+  | 'unchanged'
   | 'stale'
   | 'quarantined';
 
@@ -302,6 +304,12 @@ export async function materializeVerifiedGraphScopedAsset(params: {
   shouldQuarantineCommitted?: () => boolean;
   /** Internal composition seam for callers that already hold this asset's shared lock. */
   lockAlreadyHeldByCaller?: boolean;
+  /**
+   * A same-version replay whose stored copy already is exactly the replacement
+   * (metadata rows and assertion graph rows) is not written again: the outcome
+   * is 'unchanged'. Any other copy, a poisoned one included, is still replaced.
+   */
+  keepHeldCopy?: boolean;
   options?: QueryOptions;
   oversizeHooks?: OversizeGuardHooks;
 }): Promise<GraphScopedMaterializationOutcome> {
@@ -311,6 +319,7 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     isCurrent,
     shouldQuarantineCommitted,
     lockAlreadyHeldByCaller = false,
+    keepHeldCopy = false,
     options = {},
     oversizeHooks,
   } = params;
@@ -338,9 +347,10 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     if (!replaced) throw Object.assign(new Error(ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1(capability)),
       { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' });
   };
-  return executeGraphScopedPublication({ store, assets: [asset], options, assertCurrent,
+  return executeGraphScopedPublication<GraphScopedMaterializationOutcome>({ store, assets: [asset], options, assertCurrent,
     shouldQuarantineCommitted, lockAlreadyHeldByCaller, requireCurrentMetadata: false,
     stale: () => 'stale', complete: () => isCurrent?.() === false ? 'quarantined' : 'applied',
+    ...(keepHeldCopy ? { unchanged: () => 'unchanged' as const } : {}),
     publish: (replacements, commitOptions) => write(replacements, commitOptions, 'atomic data/metadata replacement'),
     quarantine: (replacements, commitOptions) => write(replacements, commitOptions, 'atomic stale-binding quarantine'),
   });

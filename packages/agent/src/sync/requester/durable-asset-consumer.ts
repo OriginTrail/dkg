@@ -35,6 +35,10 @@ export function materializedAssetConsumer(input: {
       // Record each atomic commit immediately: a later failure must not erase it.
       recordDurableSyncDiagnostics(input.accumulator, { insertedDataTriples: asset.dataQuads.length,
         insertedMetaTriples: asset.metadataQuads.length, insertedTriples: asset.dataQuads.length + asset.metadataQuads.length });
+    } else if (outcome === 'unchanged') {
+      // Authenticated and already stored exactly: held at this version, as the holdings check counts it.
+      input.committedExactAssetUals?.push(asset.ual);
+      recordDurableSyncDiagnostics(input.accumulator, { verifiedHeldAssets: 1 });
     } else if (outcome === 'stale') {
       logDebug(ctx, `Skipped stale graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
     } else {

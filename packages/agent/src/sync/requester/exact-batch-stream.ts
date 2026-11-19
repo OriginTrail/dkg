@@ -106,9 +106,12 @@ export function createExactBatchVerifiedCommitter(options: ExactBatchVerifiedRec
     const started = performance.now();
     const outcome = await options.storeGraphScopedAsset({ asset, authenticationDeadline: deadline, signal });
     observeExactBatch(() => options.onStage?.('authenticate-and-store', received.assetIndex, performance.now() - started));
-    // The prototype ACK certifies a completed normal atomic application, not an
-    // inferred stale/quarantined result or mere receipt of peer bytes.
-    if (outcome !== 'applied') throw new Error('Exact batch asset did not complete atomic materialization');
+    // The prototype ACK certifies a completed normal atomic application (or a
+    // stored copy already exactly this version), not an inferred
+    // stale/quarantined result or mere receipt of peer bytes.
+    if (outcome !== 'applied' && outcome !== 'unchanged') {
+      throw new Error('Exact batch asset did not complete atomic materialization');
+    }
     observeExactBatch(() => options.onCommitted?.(asset.ual));
   };
 }

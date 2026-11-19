@@ -245,6 +245,12 @@ async function exchangeExactBatchOnce(
             fetchedDataTriples: request.asset.dataQuads.length,
             fetchedMetaTriples: request.asset.metadataQuads.length,
           });
+        } else if (outcome === 'unchanged') {
+          recordDurableSyncDiagnostics(accumulator, {
+            verifiedHeldAssets: 1,
+            fetchedDataTriples: request.asset.dataQuads.length,
+            fetchedMetaTriples: request.asset.metadataQuads.length,
+          });
         }
         return outcome;
       },
