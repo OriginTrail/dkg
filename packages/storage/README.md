@@ -275,7 +275,7 @@ setting.
 
 | Setting | Default | Purpose |
 |---|---:|---|
-| `DKG_STORE_CONTROL_RESERVED_SLOTS` | unset | `0` turns the path off. `share:1,publisher:2` sets the slots per queue (caps: share 1, publisher 2; a queue left out gets 0; a higher number is clamped with a warning). A malformed value, or a variable that is set but blank, is refused with a warning and leaves the path off. An explicit value is honoured on any host and with any backend. Wins over the config value when set. Read once at start. |
+| `DKG_STORE_CONTROL_RESERVED_SLOTS` | unset | `0` turns the path off. `share:1,publisher:2` sets the slots per queue (caps: share 1, publisher 2, preflight 1; a queue left out gets 0; a higher number is clamped with a warning). A malformed value, or a variable that is set but blank, is refused with a warning and leaves the path off. An explicit value is honoured on any host and with any backend. Wins over the config value when set. Read once at start. |
 | node config `store.controlReservedSlots` | absent | The same values (also the number `0`), used when the variable is unset. A malformed value (`null`, `true`, any number but `0` included) is refused with a warning that names the key and leaves the path off. Read by the daemon only. |
 
 With neither setting, the default is share 1 + publisher 2 for
@@ -284,6 +284,15 @@ a node whose configured backend is `blazegraph` or managed `oxigraph-server`
 (`availableParallelism()`), and off for every other node: 2 or fewer CPUs,
 `sparql-http` (any other SPARQL store) and any other backend. A malformed value
 never falls through to the other setting or to the default.
+
+To reserve one additional slot for fresh graph checks before async sharing and
+publishing, include `preflight:1` alongside the desired queue settings (for
+example, `share:1,publisher:2,preflight:1`). Both routes share that slot.
+It handles the exact declaration and existence queries. Catalog fallback,
+content discovery, and later publish checks keep their existing scheduling.
+Cached positive answers still skip the reads. An occupied store backend can
+still delay execution after the scheduler admits a query. Omit `preflight`
+to restore the default. Changes take effect on restart.
 
 The daemon calls `configureStoreControlPath({ backend, configured })` with the
 node's `store.backend` (the configured name, so managed Oxigraph is

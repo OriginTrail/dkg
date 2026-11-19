@@ -599,7 +599,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   async contextGraphExists(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; controlQueue?: 'preflight' } = {},
   ): Promise<boolean> {
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     // The id is caller-supplied on several paths (scoped queries, HTTP routes,
@@ -611,7 +611,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       `SELECT ?g WHERE {
         GRAPH ?g { <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> }
       } LIMIT 1`,
-      { signal: options.signal, source: 'agent.contextGraph.exists' },
+      { signal: options.signal, source: 'agent.contextGraph.exists', controlQueue: options.controlQueue },
     );
     if (result.type === 'bindings' && result.bindings.length > 0) {
       return true;

@@ -12,7 +12,7 @@ import {
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, StoreOperationTimeoutError, type Quad, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { buildStoreControlPath, selectStoreScheduler, setStoreControlPathForTesting, StorePriorityScheduler, OxigraphStore, StoreOperationTimeoutError, type Quad, type QueryOptions } from '@origintrail-official/dkg-storage';
 import { LocalContextGraphProvenance } from '../../agent/src/local-context-graph-provenance.js';
 import { ContextGraphResolveMethods } from '../../agent/src/dkg-agent-cg-resolve.js';
 import {
@@ -131,7 +131,7 @@ async function seamAgent(options: { now?: () => number; unresolvedWindowMs?: num
       laterHolds.push({ reached: reachedNext, gate: nextGate });
       return { reached: reachedPromise, release: releaseNext };
     },
-    resolve: async (caller: typeof SCOPED = SCOPED) => {
+    resolve: async (caller: typeof SCOPED & { asyncAdmission?: boolean } = SCOPED) => {
       const { res, out } = captureRes();
       const id = await resolveRequiredWriteContextGraphId(provider as never, CG, res, caller);
       return { id, out };
@@ -152,6 +152,49 @@ beforeEach(() => { configureWritePreflightCoalescing({}, { info: () => {}, warn:
 afterEach(() => { configureWritePreflightCoalescing({}, { info: () => {}, warn: () => {} }); });
 
 describe('concurrent write preflights with the real probe', () => {
+  it('completes a fresh admission while an ordinary probe for the same caller is queued', async () => {
+    const seam = await seamAgent();
+    seam.release();
+    const shared = new StorePriorityScheduler({ maxConcurrent: 1, queueWaitTimeoutMs: 15_000 });
+    setStoreControlPathForTesting(buildStoreControlPath({ share: 0, publisher: 0, preflight: 1 }, shared));
+    let release!: () => void;
+    const held = shared.run('normal', 'fixture.read', () => new Promise<void>(resolve => { release = resolve; }));
+    const query = seam.store.query.bind(seam.store);
+    const protectedReads: string[] = [];
+    seam.store.query = (sparql, options) => {
+      const scheduler = selectStoreScheduler(shared, options);
+      const source = options?.source ?? 'query';
+      if (scheduler !== shared) protectedReads.push(source);
+      return scheduler.run('normal', source, () => query(sparql, options));
+    };
+    const ordinary = seam.resolve();
+    try {
+      expect((await whileHeld(seam.resolve({ ...SCOPED, asyncAdmission: true }))).id).toBe(CG);
+      expect(protectedReads.sort()).toEqual(['agent.contextGraph.exists', DECLARATION_SOURCE]);
+    } finally {
+      release();
+      await Promise.all([held, ordinary]);
+      setStoreControlPathForTesting(undefined);
+    }
+  });
+
+  it('reuses a completed positive check across lanes and invalidates it on a policy change', async () => {
+    configureWritePreflightCoalescing({ [WRITE_PREFLIGHT_CACHE_ENV]: '1' }, { info() {}, warn() {} });
+    setStoreControlPathForTesting(buildStoreControlPath({ share: 0, publisher: 0, preflight: 1 }));
+    try {
+      const seam = await seamAgent();
+      seam.release();
+      expect((await seam.resolve()).id).toBe(CG);
+      expect((await seam.resolve({ ...SCOPED, asyncAdmission: true })).id).toBe(CG);
+      expect(seam.declarationReads()).toBe(1);
+      await seam.store.insert([policyQuad('private', contextGraphMetaGraphUri(CG))]);
+      expect((await seam.resolve({ ...SCOPED, asyncAdmission: true })).id).toBeNull();
+      expect(seam.declarationReads()).toBe(2);
+    } finally {
+      setStoreControlPathForTesting(undefined);
+    }
+  });
+
   it('read the store once for callers that arrive together, and again once the probe is over', async () => {
     const seam = await seamAgent();
     const first = seam.resolve();

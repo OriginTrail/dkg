@@ -926,6 +926,7 @@ async function resolveWriteContextGraphIdOnce(
     writePreflightDiagnostics?: WritePreflightDiagnostics;
     /** Set by the re-resolve after a readiness wait: the exact probe must not share one that began before it. */
     freshProbe?: boolean;
+    asyncAdmission?: boolean;
     /** Caller-owned rendering for validation/store unavailability, never permission or readiness refusals. */
     renderUnavailable?: UnavailableResponseRenderer;
   } = {},
@@ -956,6 +957,7 @@ async function resolveWriteContextGraphIdOnce(
     isBareCandidateId,
     allowLocalExactFallback: opts.allowLocalExactFallback === true,
     freshProbe: opts.freshProbe,
+    asyncAdmission: opts.asyncAdmission,
   });
   if (exactDecision.kind === "accept") return candidateId;
   if (exactDecision.kind === "rejectUnknown") {

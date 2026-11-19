@@ -24,15 +24,17 @@ import type { QueryOptions, StoreControlQueue } from './triple-store.js';
  *   (`configureStoreControlPath`, before anything builds the path); any other process that imports this package
  *   honours the environment variable alone and otherwise keeps the path off, which is today's lane choice exactly.
  */
-export const STORE_CONTROL_QUEUES: readonly StoreControlQueue[] = Object.freeze(['share', 'publisher']);
+export const STORE_CONTROL_QUEUES: readonly StoreControlQueue[] = Object.freeze(['share', 'publisher', 'preflight']);
 
 /** The most slots each queue's instance may ever have (its cap); configuration can lower it, never raise it. */
 export const STORE_CONTROL_MAX_SLOTS: Readonly<Record<StoreControlQueue, number>> = Object.freeze({
   share: 1,
   publisher: 2,
+  preflight: 1,
 });
 
-export type StoreControlSlots = Readonly<Record<StoreControlQueue, number>>;
+type ControlSlotCounts = { share: number; publisher: number; preflight?: number };
+export type StoreControlSlots = Readonly<ControlSlotCounts>;
 
 export const STORE_CONTROL_RESERVED_SLOTS_ENV = 'DKG_STORE_CONTROL_RESERVED_SLOTS';
 
@@ -58,6 +60,7 @@ export const STORE_CONTROL_DEFAULT_BACKENDS: readonly string[] = Object.freeze([
 /** The embedded backends run no store scheduler, so the path never applies to them, whatever its setting. */
 const EMBEDDED_BACKENDS: ReadonlySet<string> = new Set(['oxigraph', 'oxigraph-persistent', 'oxigraph-worker']);
 
+const DEFAULT_SLOTS: StoreControlSlots = Object.freeze({ share: 1, publisher: 2 });
 const NO_SLOTS: StoreControlSlots = Object.freeze({ share: 0, publisher: 0 });
 
 /**
@@ -67,7 +70,7 @@ const NO_SLOTS: StoreControlSlots = Object.freeze({ share: 0, publisher: 0 });
  */
 export function defaultStoreControlSlots(cpus: number, backend?: string): StoreControlSlots {
   const onByDefault = backend !== undefined && STORE_CONTROL_DEFAULT_BACKENDS.includes(backend);
-  return onByDefault && cpus > SMALL_HOST_CPUS ? STORE_CONTROL_MAX_SLOTS : NO_SLOTS;
+  return onByDefault && cpus > SMALL_HOST_CPUS ? DEFAULT_SLOTS : NO_SLOTS;
 }
 
 export interface StoreControlConfig {
@@ -107,12 +110,12 @@ function parseStoreControlSetting(raw: string, setting: string, source: 'env' | 
     refusedSetting(setting, `${JSON.stringify(text.slice(0, 64))}${text ? '' : ' (set but blank)'}`, expected);
   if (!text) return refused();
   if (text === '0') return { slots: NO_SLOTS, source, reason: `${setting}=0`, warnings: [] };
-  const slots: Record<StoreControlQueue, number> = { share: 0, publisher: 0 };
+  const slots: ControlSlotCounts = { share: 0, publisher: 0 };
   const warnings: string[] = [];
   const seen = new Set<StoreControlQueue>();
   const shown: string[] = []; // the value as set, normalized (case, spaces, line breaks) for the one-line log
   for (const entry of text.split(',')) {
-    const match = /^\s*(share|publisher)\s*:\s*(\d+)\s*$/i.exec(entry);
+    const match = /^\s*(share|publisher|preflight)\s*:\s*(\d+)\s*$/i.exec(entry);
     if (!match) return refused();
     const queue = match[1].toLowerCase() as StoreControlQueue;
     if (seen.has(queue)) return refused();
@@ -177,7 +180,7 @@ export function buildStoreControlPath(
   const { normalQueueLimit, queueWaitTimeoutMs } = shared.snapshot;
   const path: Partial<Record<StoreControlQueue, StorePriorityScheduler>> = {};
   for (const queue of STORE_CONTROL_QUEUES) {
-    const maxConcurrent = Math.min(slots[queue], STORE_CONTROL_MAX_SLOTS[queue]);
+    const maxConcurrent = Math.min(slots[queue] ?? 0, STORE_CONTROL_MAX_SLOTS[queue]);
     if (!(maxConcurrent > 0)) continue;
     path[queue] = new StorePriorityScheduler({
       controlId: `${STORE_CONTROL_SCHEDULER_ID_PREFIX}${queue}`,
@@ -304,8 +307,11 @@ export function setStoreControlPathForTesting(path?: StoreControlPath): void {
   resolved = undefined;
   settings = undefined;
   if (!path) return;
-  const slots = { share: 0, publisher: 0 };
-  for (const queue of STORE_CONTROL_QUEUES) slots[queue] = path[queue]?.snapshot.maxConcurrent ?? 0;
+  const slots = {
+    share: path.share?.snapshot.maxConcurrent ?? 0,
+    publisher: path.publisher?.snapshot.maxConcurrent ?? 0,
+    ...(path.preflight && { preflight: path.preflight.snapshot.maxConcurrent }),
+  };
   resolved = {
     config: { slots, source: 'env', reason: 'set for testing', warnings: [] },
     path,
@@ -326,7 +332,7 @@ export function selectStoreScheduler(
   const queue = options?.controlQueue;
   if (queue === undefined) return shared;
   const path = getStoreControlPath();
-  return (queue === 'share' ? path.share : queue === 'publisher' ? path.publisher : undefined) ?? shared;
+  return Object.hasOwn(path, queue) ? path[queue] ?? shared : shared;
 }
 
 /** Options for a queue's control call: its source label and queue, and no priority. */
@@ -340,7 +346,7 @@ export function controlStoreOptions(
 /** The one-line description of the effective geometry and the setting that decided it, as logged at daemon start. */
 export function describeStoreControlPath(): string {
   const { config, path, settings: built } = resolveControlPath();
-  const slots = STORE_CONTROL_QUEUES.map((queue) => `${queue}=${path[queue]?.snapshot.maxConcurrent ?? 0}`).join(' ');
+  const slots = STORE_CONTROL_QUEUES.filter(queue => config.slots[queue] !== undefined).map((queue) => `${queue}=${path[queue]?.snapshot.maxConcurrent ?? 0}`).join(' ');
   const on = STORE_CONTROL_QUEUES.some((queue) => path[queue] !== undefined);
   const backend = built?.backend;
   const unused = backend !== undefined && EMBEDDED_BACKENDS.has(backend) ? `; the embedded ${backend} store never uses it` : '';
