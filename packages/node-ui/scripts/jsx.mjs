@@ -28,6 +28,41 @@ export const hasSpread = (n) => opening(n).attributes.properties.some(ts.isJsxSp
 /** The className as written, a string or an expression, for matching class names in it. @param {Jsx} n @returns {string} */
 export const classText = (n) => attrsOf(n).get('className')?.initializer?.getText() ?? '';
 
+/**
+ * The string an attribute is set to, written as `a="x"` or `a={'x'}`; '' for a bare
+ * attribute; null when it's worked out at runtime.
+ * @param {ts.JsxAttribute} attr @returns {string | null}
+ */
+export function attrText(attr) {
+  const init = attr.initializer;
+  if (!init) return '';
+  if (ts.isStringLiteral(init)) return init.text;
+  const e = ts.isJsxExpression(init) ? init.expression : undefined;
+  return e && (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) ? e.text : null;
+}
+
+/**
+ * Every class name an element's className can hold: the words of each string in it,
+ * so `className={cx('ds-btn', active && 'is-on')}` gives ds-btn and is-on.
+ * @param {Jsx} n @returns {string[]}
+ */
+export function classNames(n) {
+  const init = attrsOf(n).get('className')?.initializer;
+  if (!init) return [];
+  /** @type {string[]} */
+  const words = [];
+  /** @param {ts.Node} x */
+  const collect = (x) => {
+    if (ts.isStringLiteral(x) || ts.isNoSubstitutionTemplateLiteral(x) || ts.isTemplateHead(x) || ts.isTemplateMiddle(x) || ts.isTemplateTail(x)) {
+      words.push(...x.text.split(/\s+/).filter(Boolean));
+    }
+    ts.forEachChild(x, collect);
+  };
+  if (ts.isStringLiteral(init)) collect(init);
+  else ts.forEachChild(init, collect);
+  return words;
+}
+
 /** @param {string} source @param {string} [fileName] @returns {ts.SourceFile} */
 export function parseTsx(source, fileName = 'inline.tsx') {
   return ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);

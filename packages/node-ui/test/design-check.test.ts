@@ -155,6 +155,56 @@ describe('design check', () => {
     expect(found('<!-- old\n-->\n<button>New</button>\n<div style="padding: 10px"></div>')).toEqual(['3 component', '4 spacing']);
   });
 
+  it('fails an opaque colour off the system, and passes one on it', () => {
+    const off = (prop: string, value: string) => checkDeclaration(system, prop, value, { known: new Set() })
+      .filter((f: { kind: string }) => f.kind === 'colour').map((f: { offScale?: boolean }) => Boolean(f.offScale));
+    expect(off('color', '#ffffff')).toEqual([false]);
+    expect(off('background', '#ff00ff')).toEqual([true]);
+    expect(off('background', '#7a1f55')).toEqual([true]);
+  });
+
+  it('reads colours in every CSS syntax, and leaves text and URLs alone', () => {
+    const colours = (prop: string, value: string) => checkDeclaration(system, prop, value, { known: new Set() })
+      .filter((f: { kind: string; offScale?: boolean }) => f.kind === 'colour' && f.offScale).map((f: { value: string }) => f.value);
+    for (const magenta of ['#ff00ff', 'rgb(255 0 255)', 'hsl(300 100% 50%)', 'color(srgb 1 0 1)', 'magenta', 'Fuchsia']) {
+      expect(colours('color', magenta), magenta).toEqual([magenta]);
+    }
+    expect(colours('background', 'linear-gradient(red, color-mix(in srgb, #ff00ff 40%, transparent))')).toEqual(['red', '#ff00ff']);
+    expect(colours('box-shadow', '0 0 4px rgba(255, 0, 255, 0.5)')).toHaveLength(1);
+    expect(colours('content', '"#ff00ff"')).toEqual([]);
+    expect(colours('mask', 'url(#ff00ff)')).toEqual([]);
+    expect(colours('background', 'url("img/red.png") no-repeat')).toEqual([]);
+    expect(colours('grid-area', 'tan')).toEqual([]); // a name, not a colour
+    expect(colours('font-family', 'Tan, sans-serif')).toEqual([]);
+    expect(colours('color', 'transparent')).toEqual([]);
+    expect(colours('color', 'currentColor')).toEqual([]);
+  });
+
+  it("knows a mock-up's own variables without being told", () => {
+    const tokens = (css: string) => checkText(system, `<style>${css}</style>`, 'mock.html', { mockup: true })
+      .filter((f: { kind: string }) => f.kind === 'token').map((f: { value: string }) => f.value);
+    expect(tokens(':root { --gap: 8px; --pad: var(--gap); } .x { padding: var(--pad); }')).toEqual([]);
+    expect(tokens('.x { padding: var(--nope); }')).toEqual(['--nope']);
+  });
+
+  it('reads JSX mock-ups with the TypeScript parser', () => {
+    const hints = (tsx: string) => checkText(system, tsx, 'mock.tsx', { known: new Set(), mockup: true })
+      .filter((f: { kind: string }) => f.kind === 'component').map((f: { line: number }) => f.line);
+    expect(hints('<button onClick={() => save()} className="ds-btn">Save</button>')).toEqual([]);
+    expect(hints('<button onClick={() => save()} className={cx("ds-btn", on && "is-on")}>Save</button>')).toEqual([]);
+    expect(hints('const a = 1;\n<button onClick={() => save()} className="btn">Save</button>')).toEqual([2]);
+    expect(hints('<Button onClick={() => save()}>Save</Button>')).toEqual([]);
+    expect(hints('<input type="checkbox" /><input type={"text"} className="ds-input" />')).toEqual([]);
+    expect(hints('<div role="dialog" className="ds-overlay" />')).toEqual([]);
+  });
+
+  it('reads HTML attributes with > inside their quotes', () => {
+    const hints = (html: string) => checkText(system, html, 'mock.html', { known: new Set(), mockup: true })
+      .filter((f: { kind: string }) => f.kind === 'component').length;
+    expect(hints('<button data-x="a > b" class="ds-btn">Save</button>')).toBe(0);
+    expect(hints('<button data-x="a > b" class="btn">Save</button>')).toBe(1);
+  });
+
   it('reads style attributes with spaces around the =', () => {
     const found = (html: string) => checkText(system, html, 'mock.html', { known: new Set(), mockup: true })
       .map((f: { line: number; prop?: string; value: string }) => `${f.line} ${f.prop} ${f.value}`);
@@ -214,7 +264,11 @@ describe('design check', () => {
         return spawnSync(process.execPath, [SCRIPT, '--json', file], { encoding: 'utf8' }).status;
       };
       expect(run('.a { padding: 10px; }')).toBe(1);
+      expect(run('.a { color: #ff00ff; }')).toBe(1); // an opaque colour off the system
+      expect(run('.a { color: magenta; }')).toBe(1);
       expect(run('.a { padding: var(--space-12); }')).toBe(0);
+      expect(run('.a { padding: 16px; }')).toBe(0); // on the scale, written as a number: a suggestion, not a failure
+      expect(run('.a { content: "#ff00ff"; }')).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

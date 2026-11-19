@@ -79,8 +79,8 @@ function main(argv) {
     const isMockup = !file.startsWith(UI);
     const text = readFileSync(file, 'utf8');
     const findings = checkText(system, text, file, {
-      // A mock-up may read its own variables; their definitions are what get checked.
-      known: isMockup ? new Set([...text.matchAll(/(--[\w-]+)\s*:/g)].map((m) => m[1])) : known,
+      // A mock-up's own variables are found by checkText; the UI also sets some at runtime.
+      known: isMockup ? undefined : known,
       mockup: isMockup,
       keepLine: lines ? (l) => lines.has(l) : undefined,
     });

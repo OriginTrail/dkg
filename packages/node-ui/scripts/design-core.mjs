@@ -7,10 +7,11 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseColour } from './colour.mjs';
+import { NAMED_COLOURS, parseColour } from './colour.mjs';
 import { CssReadError, cssDeclarations } from './css.mjs';
 import { classify, declarations, lineIndex, literals, maskHtmlComments, resolveVars } from './design-rules.mjs';
 import { ADD, suggest } from './design-suggest.mjs';
+import { attrText, attrsOf, classNames, opening, parseTsx, tagName, walkJsx } from './jsx.mjs';
 
 export { declarations, parseColour };
 
@@ -117,7 +118,29 @@ export function runtimeProps(ui = UI) {
 
 // ── Colours ─────────────────────────────────────────────────────────────────
 
-const COLOUR = /#(?:[0-9a-f]{8}|[0-9a-f]{6}|[0-9a-f]{3,4})\b|\b(?:rgba?|hsla?)\([^)]*\)/gi;
+/** Properties a named colour can be in. Elsewhere a word like `tan` or `red` is a name, not a colour. */
+const COLOUR_PROPS = /^(--.+|color|background(-color|-image)?|border(-(top|right|bottom|left|block|inline)(-(start|end))?)?(-color)?|outline(-color)?|box-shadow|text-shadow|fill|stroke|caret-color|accent-color|text-decoration(-color)?|text-emphasis(-color)?|column-rule(-color)?|stop-color|flood-color|lighting-color|scrollbar-color)$/;
+
+/**
+ * The colours in a value, as written, wherever they are: on their own, in a gradient,
+ * a shadow or a color-mix(). Quoted text and url() are left out, so `content: "#ff00ff"`
+ * and `url(#mask)` aren't colours.
+ * @param {string} prop @param {string} value @returns {string[]}
+ */
+export function colourTokens(prop, value) {
+  const v = value
+    .replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, (s) => ' '.repeat(s.length))
+    .replace(/\burl\((?:[^()"']|\([^()]*\))*\)/gi, (s) => ' '.repeat(s.length));
+  /** @type {{ at: number, text: string }[]} */
+  const found = [];
+  for (const m of v.matchAll(/#(?:[0-9a-f]{8}|[0-9a-f]{6}|[0-9a-f]{3,4})(?![\w-])|\b(?:rgba?|hsla?|color)\([^()]*\)/gi)) found.push({ at: m.index ?? 0, text: m[0] });
+  if (COLOUR_PROPS.test(prop.toLowerCase())) {
+    for (const m of v.matchAll(/(?<![\w#.-])([a-z]+)(?![\w(-])/gi)) {
+      if (NAMED_COLOURS.has(m[1].toLowerCase())) found.push({ at: m.index ?? 0, text: m[0] });
+    }
+  }
+  return found.sort((a, b) => a.at - b.at).map((f) => f.text);
+}
 
 /** CIE76 distance in Lab: under ~2 reads as the same colour, under ~10 as a close one. @param {number[]} a @param {number[]} b @returns {number} */
 export function colourDistance(a, b) {
@@ -211,8 +234,8 @@ export function checkDeclaration(system, prop, value, { known, mockup = false } 
   // Colour, wherever it appears. A mock-up's own variables are checked where they are
   // defined, so `--surface: #141414` says which node UI token it stands for.
   if (!p.startsWith('--') || (mockup && !system.tokens.has(p))) {
-    for (const m of v.matchAll(COLOUR)) {
-      const f = checkColour(system, p, m[0]);
+    for (const text of colourTokens(p, v)) {
+      const f = checkColour(system, p, text);
       if (f) out.push(f);
     }
   }
@@ -237,7 +260,12 @@ export function checkDeclaration(system, prop, value, { known, mockup = false } 
 // Components a mock-up rebuilds that the system already has. Each rule reads the whole
 // opening tag, so a tag that already has the shared class passes.
 
-/** @typedef {{ name: string, tag: string, index: number, classes: string[] }} Tag */
+/**
+ * An element as the component rules see it, from HTML or from JSX: its tag name, where
+ * it starts, its classes and its attributes (a string, '' when bare, null when set at
+ * runtime). `source` is how it's written, for the report.
+ * @typedef {{ name: string, source: string, index: number, classes: string[], attrs: Map<string, string | null> }} Tag
+ */
 
 /** A class named for the thing (card, stat-card), not one that only starts with it (card-body). @param {string[]} classes @param {string} words */
 const endsWith = (classes, words) => classes.some((c) => new RegExp(`(${words})$`).test(c));
@@ -249,7 +277,7 @@ const COMPONENT_RULES = [
     use: '<Button> (or class="ds-btn"), see DESIGN.md · Button',
   },
   {
-    flags: (t) => /^(input|select|textarea)$/.test(t.name) && !/\btype\s*=\s*["'](checkbox|radio|hidden|file|range)["']/i.test(t.tag) && !t.classes.includes('ds-input'),
+    flags: (t) => /^(input|select|textarea)$/.test(t.name) && !/^(checkbox|radio|hidden|file|range)$/i.test(t.attrs.get('type') ?? '') && !t.classes.includes('ds-input'),
     use: 'class="ds-input" (ds-sm in dense rows), see DESIGN.md · Inputs',
   },
   {
@@ -261,29 +289,53 @@ const COMPONENT_RULES = [
     use: '<Badge>, <LayerBadge>, <Count> or <ContextGraphChip>, see DESIGN.md · Labels',
   },
   {
-    flags: (t) => /^(div|section)$/.test(t.name) && (/\brole\s*=\s*["']dialog["']/i.test(t.tag) || t.classes.some((c) => /(modal|dialog)(-box)?$/.test(c))) && !t.classes.includes('ds-overlay'),
+    flags: (t) => /^(div|section)$/.test(t.name) && (t.attrs.get('role') === 'dialog' || t.classes.some((c) => /(modal|dialog)(-box)?$/.test(c))) && !t.classes.includes('ds-overlay'),
     use: 'class="ds-overlay", see DESIGN.md · Layout and overlays',
   },
 ];
 
-/** Opening tags with their name and classes. A capitalised JSX component (<Button>) is a system part already. @param {string} text @returns {Tag[]} */
-function openingTags(text) {
-  return [...text.matchAll(/<([a-z][\w-]*)\b[^>]*>/g)].map((m) => {
-    const cls = m[0].match(/\bclass(?:Name)?\s*=\s*(?:"([^"]*)"|'([^']*)'|\{\s*["'`]([^"'`]*)["'`]\s*\})/);
-    return { name: m[1], tag: m[0], index: m.index ?? 0, classes: (cls ? cls[1] ?? cls[2] ?? cls[3] : '').split(/\s+/).filter(Boolean) };
-  });
+/** HTML opening tags, with attribute values in quotes holding any character (`>` too). @param {string} html @returns {Tag[]} */
+function htmlTags(html) {
+  /** @type {Tag[]} */
+  const out = [];
+  const ATTR = /([^\s=>/"']+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+)))?/g;
+  for (const m of html.matchAll(/<([a-z][\w-]*)((?:\s+[^\s=>/"']+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>"']+))?)*)\s*\/?>/gi)) {
+    /** @type {Map<string, string | null>} */
+    const attrs = new Map();
+    for (const a of m[2].matchAll(ATTR)) attrs.set(a[1].toLowerCase(), a[2] ?? a[3] ?? a[4] ?? '');
+    out.push({ name: m[1].toLowerCase(), source: m[0], index: m.index ?? 0, classes: (attrs.get('class') ?? '').split(/\s+/).filter(Boolean), attrs });
+  }
+  return out;
 }
 
-/** @param {string} text @param {(line: number) => boolean} keepLine @returns {Reported[]} */
-function checkMarkup(text, keepLine) {
+/** JSX elements, read with the shared parser (scripts/jsx.mjs). A capitalised component (<Button>) is a system part already. @param {string} text @param {string} ext @returns {Tag[]} */
+function jsxTags(text, ext) {
+  const tree = parseTsx(text, `inline${ext}`);
+  /** @type {Tag[]} */
+  const out = [];
+  walkJsx(tree, (node) => {
+    const name = tagName(node);
+    if (!/^[a-z]/.test(name)) return;
+    /** @type {Map<string, string | null>} */
+    const attrs = new Map();
+    for (const [key, attr] of attrsOf(node)) attrs.set(key, attrText(attr));
+    const index = node.getStart(tree);
+    out.push({ name, source: opening(node).getText(tree), index, classes: classNames(node), attrs });
+  });
+  return out;
+}
+
+/** @param {string} text @param {string} ext @param {(line: number) => boolean} keepLine @returns {Reported[]} */
+function checkMarkup(text, ext, keepLine) {
   const lineOf = lineIndex(text);
   /** @type {Reported[]} */
   const out = [];
-  for (const tag of openingTags(text)) {
+  const tags = ext === '.tsx' || ext === '.jsx' ? jsxTags(text, ext) : htmlTags(maskHtmlComments(text));
+  for (const tag of tags) {
     for (const rule of COMPONENT_RULES) {
       if (!rule.flags(tag)) continue;
       const line = lineOf(tag.index);
-      if (keepLine(line)) out.push({ line, kind: 'component', value: tag.tag.slice(0, 60), use: rule.use, offScale: true });
+      if (keepLine(line)) out.push({ line, kind: 'component', value: tag.source.slice(0, 60), use: rule.use, offScale: true });
     }
   }
   return out;
@@ -316,6 +368,9 @@ export function checkText(system, text, file, { known, mockup = false, keepLine 
   // scale of the property that uses them: `gap: var(--gap)` is a gap of 10px. Every
   // definition is kept with its scope, so a rule's own definition applies inside it. A
   // mock-up that redefines a node UI token is checked with its own value too.
+  // A mock-up may read the variables it defines; their definitions are what get checked.
+  // Names the caller passes in are for variables defined somewhere else (at runtime).
+  const knownHere = mockup ? new Set([...(known ?? []), ...decls.filter((d) => d.prop.startsWith('--')).map((d) => d.prop)]) : known;
   /** @type {Map<string, { value: string, scope: number }[]>} */
   const defs = new Map();
   if (mockup) {
@@ -345,7 +400,7 @@ export function checkText(system, text, file, { known, mockup = false, keepLine 
     /** @type {Set<string>} */
     const seen = new Set();
     for (const resolved of values) {
-      for (const f of checkDeclaration(system, d.prop, resolved, { known, mockup })) {
+      for (const f of checkDeclaration(system, d.prop, resolved, { known: knownHere, mockup })) {
         const key = `${f.kind}\0${f.value}\0${f.use}`;
         if (seen.has(key)) continue;
         seen.add(key);
@@ -356,6 +411,6 @@ export function checkText(system, text, file, { known, mockup = false, keepLine 
   // In shipped code, test/ds-classes.test.ts and test/button-classes.test.ts already check
   // components with the context they need. A mock-up has no such tests, so it gets the hints here.
   // Commented-out HTML renders nothing, so it isn't checked; offsets stay where they were.
-  if (mockup && ext !== '.css') findings.push(...checkMarkup(ext === '.html' || ext === '.htm' ? maskHtmlComments(text) : text, keepLine));
+  if (mockup && ext !== '.css') findings.push(...checkMarkup(text, ext, keepLine));
   return findings.sort((a, b) => a.line - b.line);
 }
