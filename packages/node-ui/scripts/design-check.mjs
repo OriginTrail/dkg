@@ -17,15 +17,12 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PKG, UI, buildSystem, checkText, readTokens, runtimeProps, walk } from './design-core.mjs';
+import { PKG, UI, buildSystem, checkText, isExempt, readTokens, runtimeProps, walk } from './design-core.mjs';
 
 // The checks themselves are in design-core.mjs; this is the command line around them.
 export * from './design-core.mjs';
 
 const EXTENSIONS = new Set(['.css', '.html', '.htm', '.tsx', '.jsx']);
-
-/** Files the rules skip: the tokens themselves, canvas palettes (graph-viz can't read CSS variables) and the reference page. */
-const skipFile = (file) => /00-theme\.css$|-colors\.ts$|design-system[\w-]*\.(tsx|html)$/.test(file.replace(/\\/g, '/'));
 
 /** Lines each file adds against `base`, from git. */
 function changedLines(base) {
@@ -82,7 +79,7 @@ function main(argv) {
 
   const results = [];
   for (const [file, lines] of targets) {
-    if (!EXTENSIONS.has(extname(file).toLowerCase()) || skipFile(file) || !existsSync(file)) continue;
+    if (!EXTENSIONS.has(extname(file).toLowerCase()) || isExempt(file) || !existsSync(file)) continue;
     const isMockup = !file.startsWith(UI);
     const text = readFileSync(file, 'utf8');
     const findings = checkText(system, text, file, {

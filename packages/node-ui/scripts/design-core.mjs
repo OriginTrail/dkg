@@ -5,7 +5,7 @@
 // checked by tsc (tsconfig.type-tests.json), so a change on one side of a contract
 // shows up on the other.
 import { readFileSync, readdirSync } from 'node:fs';
-import { dirname, extname, join, resolve } from 'node:path';
+import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NAMED_COLOURS, parseColour } from './colour.mjs';
 import { CssReadError, cssDeclarations } from './css.mjs';
@@ -46,6 +46,24 @@ export { declarations, parseColour };
 export const PKG = process.env.DESIGN_CHECK_PKG ? resolve(process.env.DESIGN_CHECK_PKG) : resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const UI = join(PKG, 'src/ui');
 export const THEME = join(UI, 'styles/00-theme.css');
+
+/**
+ * The package's own files the rules don't apply to: the tokens themselves (00-theme.css),
+ * canvas palettes under src/ui (graph-viz can't read CSS variables) and the reference
+ * page (src/ui/design-system*.tsx and .html). Matched by where they are, so a mock-up
+ * elsewhere that happens to share a name is still checked.
+ * @param {string} file
+ * @returns {boolean}
+ */
+export function isExempt(file) {
+  const f = resolve(file);
+  const same = (/** @type {string} */ a, /** @type {string} */ b) => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b);
+  if (same(f, THEME)) return true;
+  const rel = relative(UI, f);
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) return false;
+  const path = rel.replace(/\\/g, '/');
+  return /(^|\/)[\w-]+-colors\.ts$/.test(path) || /^design-system[\w-]*\.(tsx|html)$/.test(path);
+}
 
 // ── The system ──────────────────────────────────────────────────────────────
 
@@ -257,9 +275,12 @@ export function checkDeclaration(system, prop, value, { known, mockup = false } 
   const p = prop.toLowerCase();
   const v = value.replace(/!important/, '').trim();
 
-  // Colour, wherever it appears. A mock-up's own variables are checked where they are
-  // defined, so `--surface: #141414` says which node UI token it stands for.
-  if (!p.startsWith('--') || (mockup && !system.tokens.has(p))) {
+  // Colour, wherever it appears, custom-property definitions included: a mock-up's own
+  // `--surface: #141414` says which node UI token it stands for, and the UI's own
+  // `--card-bg: magenta` fails like `background: magenta`. A token's definition is the
+  // system itself (00-theme.css isn't checked); a mock-up's redefinition of one is
+  // reported by checkText.
+  if (!p.startsWith('--') || !system.tokens.has(p)) {
     for (const text of colourTokens(p, v)) {
       const f = checkColour(system, p, text);
       if (f) out.push(f);

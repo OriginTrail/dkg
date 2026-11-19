@@ -8,7 +8,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { buildSystem, checkDeclaration, checkText, parseColour, readTokens, runtimeProps } from '../scripts/design-core.mjs';
+import { buildSystem, checkDeclaration, checkText, isExempt, parseColour, readTokens, runtimeProps } from '../scripts/design-core.mjs';
 import { parseValue, varRefs } from '../scripts/css-value.mjs';
 import { customPropertyNames } from '../scripts/jsx.mjs';
 import { cssFiles, read, where } from './helpers/source.js';
@@ -288,6 +288,28 @@ describe('design check', () => {
     expect(() => pads(':root { --a: var(--b); --b: var(--a); } .x { padding: var(--a); }')).not.toThrow();
   });
 
+  it('checks the colour a custom property is defined with, in the UI too', () => {
+    const colours = (css: string) => checkText(system, css, 'x.css', { known: new Set(['--card-bg']) })
+      .filter((f: { kind: string; offScale?: boolean }) => f.kind === 'colour' && f.offScale)
+      .map((f: { prop?: string; value: string }) => `${f.prop} ${f.value}`);
+    expect(colours('.x { --card-bg: magenta; background: var(--card-bg); }')).toEqual(['--card-bg magenta']);
+    expect(colours('.x { --card-bg: var(--bg-surface); background: var(--card-bg); }')).toEqual([]);
+    expect(colours('.x { --card-bg: #ffffff; }')).toEqual([]); // a token's value
+  });
+
+  it("skips only the package's own theme, palettes and reference page", () => {
+    const ui = join(__dirname, '../src/ui');
+    expect(isExempt(join(ui, 'styles/00-theme.css'))).toBe(true);
+    expect(isExempt(join(ui, 'layer-colors.ts'))).toBe(true);
+    expect(isExempt(join(ui, 'views/schema-type-colors.ts'))).toBe(true);
+    expect(isExempt(join(ui, 'design-system.html'))).toBe(true);
+    expect(isExempt(join(ui, 'design-system-states.tsx'))).toBe(true);
+    expect(isExempt(join(ui, 'styles/27-ds-components.css'))).toBe(false);
+    expect(isExempt(join(tmpdir(), 'design-system.html'))).toBe(false);
+    expect(isExempt(join(tmpdir(), 'styles/00-theme.css'))).toBe(false);
+    expect(isExempt(join(ui, 'views/design-system.html'))).toBe(false); // only the page at src/ui
+  });
+
   it('finds the variables code sets at runtime from its syntax tree', () => {
     const names = (source: string, file = 'x.tsx') => [...customPropertyNames(source, file)].sort();
     expect(names("<div style={{ '--cg-color': color, ['--agent' as string]: c } as CSSProperties} />")).toEqual(['--agent', '--cg-color']);
@@ -374,12 +396,15 @@ describe('design check', () => {
   it('exits 1 on a design off the system, and 0 on one on it', () => {
     const dir = mkdtempSync(join(tmpdir(), 'design-check-'));
     try {
-      const run = (css: string) => {
-        const file = join(dir, 'mock.html');
-        writeFileSync(file, `<style>${css}</style>`);
+      const run = (css: string, name = 'mock.html') => {
+        const file = join(dir, name);
+        writeFileSync(file, name.endsWith('.css') ? css : `<style>${css}</style>`);
         return spawnSync(process.execPath, [SCRIPT, '--json', file], { encoding: 'utf8' }).status;
       };
       expect(run('.a { padding: 10px; }')).toBe(1);
+      // A mock-up named like one of the package's own exempt files is still checked.
+      expect(run('.a { padding: 10px; }', 'design-system.html')).toBe(1);
+      expect(run('.a { padding: 10px; }', '00-theme.css')).toBe(1);
       expect(run('.a { color: #ff00ff; }')).toBe(1); // an opaque colour off the system
       expect(run('.a { color: magenta; }')).toBe(1);
       expect(run('.a { padding: var(--space-12); }')).toBe(0);
