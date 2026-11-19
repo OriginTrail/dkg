@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildSystem, checkDeclaration, checkText, parseColour, readTokens, runtimeProps } from '../scripts/design-core.mjs';
 import { parseValue, varRefs } from '../scripts/css-value.mjs';
+import { customPropertyNames } from '../scripts/jsx.mjs';
 import { cssFiles, read, where } from './helpers/source.js';
 
 const SCRIPT = join(__dirname, '../scripts/design-check.mjs');
@@ -164,6 +165,28 @@ describe('design check', () => {
     expect(off('background', '#7a1f55')).toEqual([true]);
   });
 
+  it("passes every token's own colour, whatever the property's job", () => {
+    const tokenColours = system.colours.filter((t: { alpha: number; text: string }) => t.alpha === 1 && !/var\(/.test(t.text));
+    expect(tokenColours.length).toBeGreaterThan(10);
+    const off = tokenColours.flatMap((t: { name: string; text: string }) => ['color', 'background', 'border-color'].flatMap((prop) => (
+      checkDeclaration(system, prop, t.text, { known: new Set() })
+        .filter((f: { kind: string; offScale?: boolean }) => f.kind === 'colour' && f.offScale)
+        .map(() => `${prop}: ${t.text} (${t.name})`)
+    )));
+    expect(off).toEqual([]);
+  });
+
+  it('fails a colour in a format it cannot compare, instead of passing it', () => {
+    const colour = (value: string) => checkDeclaration(system, 'color', value, { known: new Set() })
+      .filter((f: { kind: string }) => f.kind === 'colour')
+      .map((f: { offScale?: boolean; use: string }) => ({ offScale: f.offScale, cannot: /can't be compared/.test(f.use) }));
+    expect(parseColour('hwb(300 0% 0%)').rgb).toEqual([255, 0, 255]);
+    expect(colour('hwb(300 0% 0%)')).toEqual(colour('#ff00ff'));
+    for (const unread of ['oklch(0.7 0.3 330)', 'lab(60 90 -60)', 'color(display-p3 1 0 1)']) {
+      expect(colour(unread), unread).toEqual([{ offScale: true, cannot: true }]);
+    }
+  });
+
   it('reads colours in every CSS syntax, and leaves text and URLs alone', () => {
     const colours = (prop: string, value: string) => checkDeclaration(system, prop, value, { known: new Set() })
       .filter((f: { kind: string; offScale?: boolean }) => f.kind === 'colour' && f.offScale).map((f: { value: string }) => f.value);
@@ -263,6 +286,14 @@ describe('design check', () => {
     expect(pads(':root { --gap: 8px; --pad: var(--gap); } .a { --gap: 10px; padding: var(--pad); }')).toEqual([]);
     // A loop between variables stops, and leaves the value as written.
     expect(() => pads(':root { --a: var(--b); --b: var(--a); } .x { padding: var(--a); }')).not.toThrow();
+  });
+
+  it('finds the variables code sets at runtime from its syntax tree', () => {
+    const names = (source: string, file = 'x.tsx') => [...customPropertyNames(source, file)].sort();
+    expect(names("<div style={{ '--cg-color': color, ['--agent' as string]: c } as CSSProperties} />")).toEqual(['--agent', '--cg-color']);
+    expect(names("el.style.setProperty('--w', `${w}px`);", 'x.ts')).toEqual(['--w']);
+    expect(names("// e.g. { '--example': red }\nconst s = \"'--also-text': 1\";")).toEqual([]);
+    expect(runtimeProps().has('--cg-color')).toBe(true);
   });
 
   it('reads a value once, into words, strings and functions', () => {

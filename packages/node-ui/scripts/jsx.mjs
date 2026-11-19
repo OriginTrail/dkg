@@ -63,6 +63,42 @@ export function classNames(n) {
   return words;
 }
 
+/**
+ * The CSS custom properties a TypeScript or TSX file sets, by name, whatever their value:
+ * object keys like `'--cg-color': color` or `['--x' as string]: v` (style objects, and
+ * objects passed to one), and `el.style.setProperty('--x', v)`. Read from the tree, so a
+ * name in a comment or in other text isn't one.
+ * @param {string} source
+ * @param {string} fileName decides TS or TSX
+ * @returns {Set<string>}
+ */
+export function customPropertyNames(source, fileName) {
+  const kind = /\.tsx$/i.test(fileName) ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const tree = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, kind);
+  /** @type {Set<string>} */
+  const names = new Set();
+  /** @param {ts.Expression} e */
+  const text = (e) => {
+    while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e) || ts.isTypeAssertionExpression(e)) e = e.expression;
+    return ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e) ? e.text : null;
+  };
+  /** @param {string | null} name */
+  const add = (name) => { if (name && /^--[\w-]+$/.test(name)) names.add(name); };
+  /** @param {ts.Node} n */
+  const visit = (n) => {
+    if (ts.isPropertyAssignment(n) || ts.isShorthandPropertyAssignment(n)) {
+      const key = n.name;
+      if (ts.isStringLiteral(key) || ts.isNoSubstitutionTemplateLiteral(key)) add(key.text);
+      else if (ts.isComputedPropertyName(key)) add(text(key.expression));
+    } else if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && n.expression.name.text === 'setProperty' && n.arguments[0]) {
+      add(text(n.arguments[0]));
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(tree);
+  return names;
+}
+
 /** @param {string} source @param {string} [fileName] @returns {ts.SourceFile} */
 export function parseTsx(source, fileName = 'inline.tsx') {
   return ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);

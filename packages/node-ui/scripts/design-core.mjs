@@ -13,7 +13,7 @@ import { classify, declarations, lineIndex, literals, resolveVars } from './desi
 import { parseValue, varRefs, walkValue } from './css-value.mjs';
 import { readHtml } from './html.mjs';
 import { ADD, suggest } from './design-suggest.mjs';
-import { attrText, attrsOf, classNames, opening, parseTsx, tagName, walkJsx } from './jsx.mjs';
+import { attrText, attrsOf, classNames, customPropertyNames, opening, parseTsx, tagName, walkJsx } from './jsx.mjs';
 
 export { declarations, parseColour };
 
@@ -107,13 +107,21 @@ export function walk(dir) {
   });
 }
 
-/** Custom properties the UI defines at runtime (--cg-color and the like), which are fine to read. @param {string} [ui] @returns {Set<string>} */
+/**
+ * Custom properties the UI defines, which are fine to read though they aren't tokens:
+ * those its stylesheets declare (read by css.mjs) and those its code sets at runtime
+ * (--cg-color and the like, read by jsx.mjs), whatever their values.
+ * @param {string} [ui] @returns {Set<string>}
+ */
 export function runtimeProps(ui = UI) {
   /** @type {Set<string>} */
   const names = new Set();
   for (const file of walk(ui)) {
-    if (!/\.(css|tsx?)$/.test(file)) continue;
-    for (const m of readFileSync(file, 'utf8').matchAll(/['"[]?(--[\w-]+)['"]?(?:\s+as\s+\w+)?\]?\s*:/g)) names.add(m[1]);
+    if (file.endsWith('.css')) {
+      for (const d of cssDeclarations(readFileSync(file, 'utf8'))) if (d.prop.startsWith('--')) names.add(d.prop);
+    } else if (/\.tsx?$/.test(file) && !file.endsWith('.d.ts')) {
+      for (const name of customPropertyNames(readFileSync(file, 'utf8'), file)) names.add(name);
+    }
   }
   return names;
 }
@@ -123,8 +131,8 @@ export function runtimeProps(ui = UI) {
 /** Properties a named colour can be in. Elsewhere a word like `tan` or `red` is a name, not a colour. */
 const COLOUR_PROPS = /^(--.+|color|background(-color|-image)?|border(-(top|right|bottom|left|block|inline)(-(start|end))?)?(-color)?|outline(-color)?|box-shadow|text-shadow|fill|stroke|caret-color|accent-color|text-decoration(-color)?|text-emphasis(-color)?|column-rule(-color)?|stop-color|flood-color|lighting-color|scrollbar-color)$/;
 
-/** Colour functions: what's inside one is the colour, not more colours. */
-const COLOUR_FUNCTIONS = new Set(['rgb', 'rgba', 'hsl', 'hsla', 'color']);
+/** Colour functions (CSS Color 4): what's inside one is the colour, not more colours. */
+const COLOUR_FUNCTIONS = new Set(['rgb', 'rgba', 'hsl', 'hsla', 'hwb', 'lab', 'lch', 'oklab', 'oklch', 'color', 'device-cmyk']);
 
 /**
  * The colours in a value, as written, wherever they are: on their own, in a gradient,
@@ -191,7 +199,9 @@ function colourRole(prop) {
 /** @param {DesignSystem} system @param {string} prop @param {string} text @returns {Finding | null} */
 function checkColour(system, prop, text) {
   const c = parseColour(text);
-  if (!c) return null;
+  // A colour in a format this can't read (lab(), oklch(), color(display-p3 …)) can't be
+  // compared with the tokens, so it can't pass as one.
+  if (!c) return { kind: 'colour', value: text, use: `this colour format can't be compared with the tokens: use a token (var(--…)), or write it as hex, rgb(), hsl() or hwb() to see the nearest, ${ADD}`, offScale: true };
   // Opacity counts: a 10% white wash isn't an opaque white token.
   /** @param {ColourToken} t */
   const score = (t) => colourDistance(c.rgb, t.rgb) + Math.abs(c.alpha - t.alpha) * 100;
@@ -202,13 +212,21 @@ function checkColour(system, prop, text) {
     for (const t of list) { const d = score(t); if (!best || d < best.d) best = { t, d }; }
     return best;
   };
-  // Prefer a token with the same job (a fill for a fill, text for text), if one is close.
+  // A colour that is a token's value is on the system, whatever the token's job; among
+  // exact matches, the one with the same job (a fill for a fill, text for text) is named.
+  // Only for a colour that isn't one does the job decide which close token to suggest.
   const role = colourRole(prop);
   const inRole = role ? pick(system.colours.filter((t) => ROLES[role].test(t.name))) : null;
-  const best = inRole && inRole.d < 10 ? inRole : pick(system.colours);
-  const exact = best !== null && best.d < 2;
+  const anywhere = pick(system.colours);
+  /** @param {{ d: number } | null} m */
+  const isExact = (m) => m !== null && m.d < 2;
+  const best = isExact(inRole) ? inRole : isExact(anywhere) ? anywhere : inRole && inRole.d < 10 ? inRole : anywhere;
+  const exact = isExact(best);
   let use;
-  if (best && exact) use = `var(${best.t.name})`;
+  if (best && exact && inRole && best !== inRole && inRole.d < 10) {
+    // On the system, but as another job's token: name it, and the one meant for this job.
+    use = `var(${best.t.name}) has this value; for this job, var(${inRole.t.name}) (${inRole.t.text}) is the token meant for it`;
+  } else if (best && exact) use = `var(${best.t.name})`;
   else if (best && best.d < 10) use = `nearest is var(${best.t.name}) (${best.t.text}), ${ADD}`;
   else if (c.alpha < 1) {
     // A wash: keep the opacity on a token of the same colour, if there is one.

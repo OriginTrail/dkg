@@ -54,7 +54,7 @@ export const NAMED_COLOURS = new Map(Object.entries({
 
 /**
  * Reads a CSS colour, or returns null if it isn't one: `#rgb`, `#rgba`, `#rrggbb`,
- * `#rrggbbaa`, `rgb()`/`rgba()` and `hsl()`/`hsla()` with commas or spaces and an
+ * `#rrggbbaa`, `rgb()`/`rgba()`, `hsl()`/`hsla()` and `hwb()` with commas or spaces and an
  * optional `/ alpha` (a number or a percentage), `color(srgb r g b / a)` as
  * getComputedStyle reports it, a named colour, and `transparent`. `color(srgb …)`
  * keeps its precision.
@@ -74,7 +74,7 @@ export function parseColour(value) {
     const [r, g, b] = [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
     return { rgb: [r, g, b], alpha: h.length === 8 ? parseInt(h.slice(6), 16) / 255 : 1 };
   }
-  const fn = /^(rgba?|hsla?|color)\(([^)]*)\)$/.exec(v);
+  const fn = /^(rgba?|hsla?|hwb|color)\(([^)]*)\)$/.exec(v);
   if (!fn) return null;
   let parts = fn[2].split(/[\s,/]+/).filter(Boolean);
   if (fn[1] === 'color') {
@@ -94,7 +94,17 @@ export function parseColour(value) {
     rgb = [channel(parts[0]), channel(parts[1]), channel(parts[2])];
   } else {
     const [s, l] = [parts[1], parts[2]].map((p) => (p.endsWith('%') ? parseFloat(p) : Number.NaN));
-    rgb = hslToRgb(parseHue(parts[0]), s / 100, l / 100);
+    if (fn[1] === 'hwb') {
+      // hwb(h w b): the pure hue, mixed with w of white and b of black.
+      const [w, bl] = [s / 100, l / 100];
+      const sum = w + bl;
+      const pure = hslToRgb(parseHue(parts[0]), 1, 0.5);
+      /** @param {number} c */
+      const mix = (c) => Math.round(sum >= 1 ? (w / sum) * 255 : c * (1 - w - bl) + w * 255);
+      rgb = [mix(pure[0]), mix(pure[1]), mix(pure[2])];
+    } else {
+      rgb = hslToRgb(parseHue(parts[0]), s / 100, l / 100);
+    }
   }
   return rgb.some(Number.isNaN) ? null : { rgb, alpha };
 }
