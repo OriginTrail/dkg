@@ -65,6 +65,7 @@
     "cross-env": "^10.1.0",
     "esbuild": "0.25.12",
     "happy-dom": "20.8.9",
+    "postcss": "^8.5.15",
     "react": "^19",
     "react-dom": "^19",
     "react-router-dom": "^7",

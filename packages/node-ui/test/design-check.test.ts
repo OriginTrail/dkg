@@ -1,14 +1,14 @@
-// scripts/design-check.mjs (DESIGN.md · Checking a new design) reads the scale from
-// 00-theme.css and says, for each value that isn't on it, which token to use or
-// that the system needs a new one. These tests keep its suggestions right, and run
-// it over the UI so a value off the system fails here with that suggestion attached.
+// The design check (DESIGN.md · Checking a new design: scripts/design-core.mjs, with its
+// command line in scripts/design-check.mjs) reads the scale from 00-theme.css and says,
+// for each value that isn't on it, which token to use or that the system needs a new
+// one. These tests keep its suggestions right, and run it over the UI so a value off the
+// system fails here with that suggestion attached.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-// @ts-expect-error: a plain .mjs script, with no types
-import { buildSystem, checkDeclaration, checkText, parseColour, readTokens, runtimeProps } from '../scripts/design-check.mjs';
+import { buildSystem, checkDeclaration, checkText, parseColour, readTokens, runtimeProps } from '../scripts/design-core.mjs';
 import { cssFiles, read, where } from './helpers/source.js';
 
 const SCRIPT = join(__dirname, '../scripts/design-check.mjs');
@@ -153,6 +153,38 @@ describe('design check', () => {
     expect(found('<!-- <button>Old button</button> -->')).toEqual([]);
     expect(found('<!--\n<div style="padding: 10px"></div>\n<style>.a { gap: 10px; }</style>\n-->')).toEqual([]);
     expect(found('<!-- old\n-->\n<button>New</button>\n<div style="padding: 10px"></div>')).toEqual(['3 component', '4 spacing']);
+  });
+
+  it('reads style attributes with spaces around the =', () => {
+    const found = (html: string) => checkText(system, html, 'mock.html', { known: new Set(), mockup: true })
+      .map((f: { line: number; prop?: string; value: string }) => `${f.line} ${f.prop} ${f.value}`);
+    const plain = found('<div style="padding: 10px"></div>');
+    expect(plain).toEqual(['1 padding 10px']);
+    expect(found('<div style = "padding: 10px"></div>')).toEqual(plain);
+    expect(found("<div style\n  =\n  'padding: 10px'></div>")).toEqual(['3 padding 10px']);
+    expect(found('<div data-style="padding: 10px"></div>')).toEqual([]); // another attribute
+  });
+
+  it("checks a mock-up's redefinition of a node UI token", () => {
+    const found = (css: string) => checkText(system, `<style>${css}</style>`, 'mock.html', { known: new Set(), mockup: true })
+      .filter((f: { offScale?: boolean }) => f.offScale)
+      .map((f: { prop?: string; kind: string; value: string }) => `${f.prop} ${f.kind} ${f.value}`);
+    expect(found(':root { --space-8: 10px; } .x { gap: var(--space-8); }')).toEqual(['--space-8 token 10px', 'gap spacing 10px']);
+    // A copy of the token at its own value, and a plain use of a token, are fine.
+    expect(found(':root { --space-8: 8px; } .x { gap: var(--space-8); }')).toEqual([]);
+    expect(found('.x { gap: var(--space-8); }')).toEqual([]);
+  });
+
+  it('says where CSS it cannot read is, instead of passing it', () => {
+    const [f] = checkText(system, '.a {\n  gap 10px;\n}', 'x.css', { known: new Set() });
+    expect(f).toMatchObject({ line: 2, kind: 'css', offScale: true });
+  });
+
+  it('reads CSS values with delimiters in quotes, and comments in values', () => {
+    const found = (css: string) => checkText(system, css, 'x.css', { known: new Set() })
+      .filter((f: { offScale?: boolean }) => f.offScale).map((f: { prop?: string; value: string }) => `${f.prop} ${f.value}`);
+    expect(found('.a { content: "a; b }"; gap: 10px; }')).toEqual(['gap 10px']);
+    expect(found('.a { gap: /* was 12px */ 10px; }')).toEqual(['gap 10px']);
   });
 
   it('reads style attributes in either quote', () => {

@@ -5,6 +5,7 @@
 // scripts/design-suggest.mjs turns each one into a suggestion (the token to use, or
 // that the system needs a new one). The JSDoc types are checked: tsconfig.type-tests.json
 // runs tsc with checkJs over this file.
+import { cssDeclarations } from './css.mjs';
 import { styleDeclarations } from './jsx.mjs';
 
 /** @typedef {import('./jsx.mjs').Declaration} Declaration */
@@ -29,9 +30,6 @@ export const WEIGHTS = ['400', '500', '600', '700'];
 export const LAYER_FREE_MAX = 10;
 /** Durations at or under this are reduced-motion overrides, not timings. */
 export const MOTION_FREE_MS = 0.5;
-
-/** @param {string} css @returns {string} */
-export const stripComments = (css) => css.replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' '));
 
 /** HTML without its comments, each replaced by spaces so every offset and line stays where it was. @param {string} html @returns {string} */
 export const maskHtmlComments = (html) => html.replace(/<!--[\s\S]*?-->/g, (c) => c.replace(/[^\n]/g, ' '));
@@ -92,31 +90,15 @@ export function lineIndex(text) {
 }
 
 /**
- * For each index in a stylesheet, the offset of the `{` of the rule it's in (-1 outside any).
- * @param {string} css
- * @returns {(index: number) => number}
- */
-function blockIndex(css) {
-  /** @type {number[]} */
-  const stack = [];
-  const at = new Int32Array(css.length + 1);
-  for (let i = 0; i < css.length; i++) {
-    if (css[i] === '{') stack.push(i);
-    at[i] = stack.length ? stack[stack.length - 1] : -1;
-    if (css[i] === '}') stack.pop();
-  }
-  at[css.length] = -1;
-  return (index) => at[Math.min(Math.max(index, 0), css.length)];
-}
-
-/**
  * Every declaration in a file, in line order, where line and endLine are the lines
  * its property and value span and scope says which rule, style attribute or JSX
- * element it belongs to: CSS, <style> blocks, style attributes in either quote, and
- * JSX style objects (read by scripts/jsx.mjs). HTML comments are left out.
+ * element it belongs to: CSS and <style> blocks (read by scripts/css.mjs), style
+ * attributes in either quote, and JSX style objects (read by scripts/jsx.mjs). HTML
+ * comments are left out.
  * @param {string} text
  * @param {string} ext the file's extension, with its dot
  * @returns {Declaration[]}
+ * @throws {import('./css.mjs').CssReadError} when a stylesheet or style block can't be read
  */
 export function declarations(text, ext) {
   const html = ext === '.html' || ext === '.htm';
@@ -124,26 +106,21 @@ export function declarations(text, ext) {
   const lineAt = lineIndex(source);
   /** @type {Declaration[]} */
   const out = [];
-  /** @param {string} css @param {number} offset @param {number | null} fixedScope one scope for all of it (a style attribute) */
-  const cssIn = (css, offset, fixedScope) => {
-    const clean = stripComments(css);
-    const blockAt = fixedScope === null ? blockIndex(clean) : null;
-    for (const m of clean.matchAll(/(?<![\w-])(--[\w-]+|[a-z-]+)\s*:\s*([^;{}]+?)\s*(?=;|}|$)/gm)) {
-      if (/^(https?|data)$/.test(m[1])) continue;
-      const start = offset + (m.index ?? 0);
-      const block = blockAt ? blockAt(m.index ?? 0) : -1;
-      const scope = fixedScope ?? (block === -1 ? -1 : offset + block);
-      out.push({ prop: m[1], value: m[2], line: lineAt(start), endLine: lineAt(start + m[0].length - 1), scope });
+  /** @param {string} css @param {number} offset @param {number} [rootScope] */
+  const cssIn = (css, offset, rootScope) => {
+    for (const d of cssDeclarations(css, offset, rootScope)) {
+      out.push({ prop: d.prop, value: d.value, line: lineAt(d.start), endLine: lineAt(d.end), scope: d.scope });
     }
   };
-  if (ext === '.css') { cssIn(source, 0, null); return out; }
+  if (ext === '.css') { cssIn(source, 0); return out; }
   // Each body's offset is where it starts in the file, so a declaration keeps its own lines.
-  for (const m of source.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)) cssIn(m[1], (m.index ?? 0) + m[0].length - '</style>'.length - m[1].length, null);
+  for (const m of source.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)) cssIn(m[1], (m.index ?? 0) + m[0].length - '</style>'.length - m[1].length);
   if (ext === '.tsx' || ext === '.jsx') {
     out.push(...styleDeclarations(source, `inline${ext}`));
   } else {
-    for (const m of source.matchAll(/\bstyle=(["'])([\s\S]*?)\1/g)) {
-      const at = (m.index ?? 0) + 'style="'.length;
+    // A style attribute, with HTML's optional spaces around `=`: its declarations share one scope.
+    for (const m of source.matchAll(/(?<![\w-])style\s*=\s*(["'])([\s\S]*?)\1/gi)) {
+      const at = (m.index ?? 0) + m[0].length - 1 - m[2].length;
       cssIn(m[2], at, at);
     }
   }
