@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { NAMED_COLOURS, parseColour } from './colour.mjs';
 import { CssReadError, cssDeclarations } from './css.mjs';
 import { classify, declarations, lineIndex, literals, resolveVars } from './design-rules.mjs';
+import { parseValue, varRefs, walkValue } from './css-value.mjs';
 import { readHtml } from './html.mjs';
 import { ADD, suggest } from './design-suggest.mjs';
 import { attrText, attrsOf, classNames, opening, parseTsx, tagName, walkJsx } from './jsx.mjs';
@@ -122,32 +123,31 @@ export function runtimeProps(ui = UI) {
 /** Properties a named colour can be in. Elsewhere a word like `tan` or `red` is a name, not a colour. */
 const COLOUR_PROPS = /^(--.+|color|background(-color|-image)?|border(-(top|right|bottom|left|block|inline)(-(start|end))?)?(-color)?|outline(-color)?|box-shadow|text-shadow|fill|stroke|caret-color|accent-color|text-decoration(-color)?|text-emphasis(-color)?|column-rule(-color)?|stop-color|flood-color|lighting-color|scrollbar-color)$/;
 
-/**
- * A value with its quoted strings and url()s blanked out, same length, so what's left is
- * what CSS reads as values: `content: "var(--x)"` reads no variable, `url(#mask)` is no colour.
- * @param {string} value @returns {string}
- */
-export const withoutText = (value) => value
-  .replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, (s) => ' '.repeat(s.length))
-  .replace(/\burl\((?:[^()"']|\([^()]*\))*\)/gi, (s) => ' '.repeat(s.length));
+/** Colour functions: what's inside one is the colour, not more colours. */
+const COLOUR_FUNCTIONS = new Set(['rgb', 'rgba', 'hsl', 'hsla', 'color']);
 
 /**
  * The colours in a value, as written, wherever they are: on their own, in a gradient,
- * a shadow or a color-mix(). Quoted text and url() are left out, so `content: "#ff00ff"`
- * and `url(#mask)` aren't colours.
+ * a shadow, a color-mix() or a var() fallback. Strings and url() are text, so
+ * `content: "#ff00ff"` and `url(#mask)` aren't colours.
  * @param {string} prop @param {string} value @returns {string[]}
  */
 export function colourTokens(prop, value) {
-  const v = withoutText(value);
-  /** @type {{ at: number, text: string }[]} */
+  const named = COLOUR_PROPS.test(prop.toLowerCase());
+  /** @type {string[]} */
   const found = [];
-  for (const m of v.matchAll(/#(?:[0-9a-f]{8}|[0-9a-f]{6}|[0-9a-f]{3,4})(?![\w-])|\b(?:rgba?|hsla?|color)\([^()]*\)/gi)) found.push({ at: m.index ?? 0, text: m[0] });
-  if (COLOUR_PROPS.test(prop.toLowerCase())) {
-    for (const m of v.matchAll(/(?<![\w#.-])([a-z]+)(?![\w(-])/gi)) {
-      if (NAMED_COLOURS.has(m[1].toLowerCase())) found.push({ at: m.index ?? 0, text: m[0] });
+  walkValue(parseValue(value), (n) => {
+    if (n.type === 'function') {
+      if (n.value === 'url') return false;
+      if (COLOUR_FUNCTIONS.has(n.value)) { found.push(value.slice(n.start, n.end)); return false; }
+      return true;
     }
-  }
-  return found.sort((a, b) => a.at - b.at).map((f) => f.text);
+    if (n.type !== 'word') return true;
+    if (/^#(?:[0-9a-f]{8}|[0-9a-f]{6}|[0-9a-f]{3,4})$/i.test(n.value)) found.push(n.value);
+    else if (named && NAMED_COLOURS.has(n.value.toLowerCase())) found.push(n.value);
+    return true;
+  });
+  return found;
 }
 
 /** CIE76 distance in Lab: under ~2 reads as the same colour, under ~10 as a close one. @param {number[]} a @param {number[]} b @returns {number} */
@@ -248,9 +248,10 @@ export function checkDeclaration(system, prop, value, { known, mockup = false } 
     }
   }
   // Tokens that don't exist (a mock-up's own variables, or a typo).
-  for (const m of withoutText(v).matchAll(/var\(\s*(--[\w-]+)/g)) {
-    if (!system.tokens.has(m[1]) && !known?.has(m[1])) {
-      out.push({ kind: 'token', value: m[1], use: 'not a node UI token: use one from 00-theme.css (see the reference page), or add it there and to DESIGN.md', offScale: true });
+  // A var() in a string or url() is text, so it reads nothing (css-value.mjs · varRefs).
+  for (const { name } of varRefs(parseValue(v))) {
+    if (!system.tokens.has(name) && !known?.has(name)) {
+      out.push({ kind: 'token', value: name, use: 'not a node UI token: use one from 00-theme.css (see the reference page), or add it there and to DESIGN.md', offScale: true });
     }
   }
   // Literal values. A token in the same declaration doesn't excuse the literals beside it.

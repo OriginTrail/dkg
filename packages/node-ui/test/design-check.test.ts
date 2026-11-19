@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildSystem, checkDeclaration, checkText, parseColour, readTokens, runtimeProps } from '../scripts/design-core.mjs';
+import { parseValue, varRefs } from '../scripts/css-value.mjs';
 import { cssFiles, read, where } from './helpers/source.js';
 
 const SCRIPT = join(__dirname, '../scripts/design-check.mjs');
@@ -251,6 +252,25 @@ describe('design check', () => {
     expect(found('<div style="padding:&#32;10px; color: &#35;ff00ff"></div>')).toEqual(found('<div style="padding: 10px; color: #ff00ff"></div>'));
     expect(found('<div style="font-family: &quot;A&quot;;\n  padding: 10px"></div>')).toEqual(['2 spacing 10px']);
     expect(found('<div title="&copy=x" class="tag"></div>')).toEqual(['1 component <div title="&copy=x" class="tag">']);
+  });
+
+  it("resolves a variable's own references where it is defined, as CSS does", () => {
+    const pads = (css: string) => checkText(system, `<style>${css}</style>`, 'mock.html', { mockup: true })
+      .filter((f: { offScale?: boolean; prop?: string }) => f.offScale && f.prop === 'padding')
+      .map((f: { value: string }) => f.value);
+    // --pad is computed at :root, with :root's --gap, before .a's --gap applies.
+    expect(pads(':root { --gap: 10px; --pad: var(--gap); } .a { --gap: 8px; padding: var(--pad); }')).toEqual(['10px']);
+    expect(pads(':root { --gap: 8px; --pad: var(--gap); } .a { --gap: 10px; padding: var(--pad); }')).toEqual([]);
+    // A loop between variables stops, and leaves the value as written.
+    expect(() => pads(':root { --a: var(--b); --b: var(--a); } .x { padding: var(--a); }')).not.toThrow();
+  });
+
+  it('reads a value once, into words, strings and functions', () => {
+    const tree = parseValue('var(--a, var(--b)) "x(y)" url(a b.png) calc(-1 * 4px)');
+    expect(tree.filter((n: { type: string }) => n.type !== 'space').map((n: { type: string; value: string }) => `${n.type}:${n.value}`))
+      .toEqual(['function:var', 'string:"x(y)"', 'function:url', 'function:calc']);
+    expect(varRefs(tree).map((r: { name: string }) => r.name)).toEqual(['--a', '--b']);
+    expect(varRefs(parseValue('"var(--a)" url(var(--b))'))).toEqual([]);
   });
 
   it('reads no variable inside quoted text or a URL', () => {

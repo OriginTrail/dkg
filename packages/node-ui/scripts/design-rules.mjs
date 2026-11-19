@@ -6,6 +6,7 @@
 // that the system needs a new one). The JSDoc types are checked: tsconfig.type-tests.json
 // runs tsc with checkJs over this file.
 import { CssReadError, cssDeclarations } from './css.mjs';
+import { parseValue, rewriteValue, varRefs } from './css-value.mjs';
 import { maskHtmlComments, readHtml } from './html.mjs';
 import { styleDeclarations } from './jsx.mjs';
 
@@ -34,10 +35,8 @@ export const MOTION_FREE_MS = 0.5;
 
 export { maskHtmlComments };
 
-const VAR = /var\(\s*(--[\w-]+)\s*(?:,((?:[^()]|\([^()]*\))*))?\)/g;
-
 /** A value with its var() expressions taken out, so the literals beside a token are still checked. @param {string} value @returns {string} */
-export const literals = (value) => value.replace(VAR, ' ');
+export const literals = (value) => rewriteValue(value, parseValue(value), (n) => (n.type === 'function' && n.value === 'var' ? ' ' : undefined));
 
 /** Most values one declaration is checked with, when its variables have several definitions. */
 const MAX_CANDIDATES = 16;
@@ -47,35 +46,52 @@ const MAX_CANDIDATES = 16;
  * `gap: var(--gap)` with `--gap: 10px` is checked as a 10px gap. A definition in the
  * declaration's own scope (the same rule, or the same style attribute) is the one that
  * applies. Without one, the value can come from any other definition, so each is
- * checked. Variables with no definition are left as they are.
+ * checked. A definition's own references are resolved where it's defined, as CSS
+ * computes them: with `:root { --gap: 10px; --pad: var(--gap) }`, `.a { --gap: 8px; padding: var(--pad) }`
+ * is 10px. Variables with no definition, and loops between them, are left as they are.
  * @param {string} value
  * @param {Map<string, { value: string, scope: number }[]>} defs every definition of each variable
  * @param {number} scope the declaration's scope
  * @returns {string[]} distinct values, `value` itself when nothing resolves
  */
 export function resolveVars(value, defs, scope) {
-  /** @param {string} name */
-  const options = (name) => {
+  /** The definitions that can apply in a scope. @param {string} name @param {number} at */
+  const options = (name, at) => {
     const all = defs.get(name) ?? [];
-    const local = all.filter((d) => d.scope === scope);
-    return [...new Set((local.length ? local : all).map((d) => d.value))];
+    const local = all.filter((d) => d.scope === at);
+    /** @type {Set<string>} */
+    const seen = new Set();
+    return (local.length ? local : all).filter((d) => {
+      const key = `${d.scope}|${d.value}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   };
-  let values = [value];
-  // A few rounds, for variables that refer to variables; a loop between them stops here.
-  for (let depth = 0; depth < 8; depth++) {
-    /** @type {string[]} */
-    const next = [];
-    for (const v of values) {
-      const m = [...v.matchAll(VAR)].find((x) => options(x[1]).length);
-      if (!m) { next.push(v); continue; }
-      const at = m.index ?? 0;
-      for (const o of options(m[1])) next.push(v.slice(0, at) + o + v.slice(at + m[0].length));
+  /**
+   * @param {string} text
+   * @param {number} at the scope its references are resolved in
+   * @param {Set<string>} open variables being resolved further out, so a loop stops
+   * @returns {string[]}
+   */
+  const resolve = (text, at, open) => {
+    const refs = varRefs(parseValue(text)).filter((r) => !open.has(r.name) && options(r.name, at).length);
+    // The outermost references: one inside another's fallback is replaced with it.
+    const outer = refs.filter((r) => !refs.some((o) => o !== r && o.node.start <= r.node.start && r.node.end <= o.node.end));
+    if (!outer.length) return [text];
+    let results = [''];
+    let last = 0;
+    for (const r of outer) {
+      /** @type {Set<string>} */
+      const values = new Set();
+      for (const d of options(r.name, at)) for (const v of resolve(d.value, d.scope, new Set([...open, r.name]))) values.add(v);
+      const before = text.slice(last, r.node.start);
+      results = [...new Set(results.flatMap((p) => [...values].map((v) => p + before + v)))].slice(0, MAX_CANDIDATES);
+      last = r.node.end;
     }
-    const distinct = [...new Set(next)].slice(0, MAX_CANDIDATES);
-    if (distinct.length === values.length && distinct.every((v, i) => v === values[i])) break;
-    values = distinct;
-  }
-  return values;
+    return results.map((p) => p + text.slice(last));
+  };
+  return [...new Set(resolve(value, scope, new Set()))].slice(0, MAX_CANDIDATES);
 }
 
 /** The line each character index is on, from 1. @param {string} text @returns {(index: number) => number} */

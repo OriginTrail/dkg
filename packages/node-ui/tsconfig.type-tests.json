@@ -18,6 +18,7 @@
     "scripts/design-suggest.mjs",
     "scripts/css.mjs",
     "scripts/design-core.mjs",
-    "scripts/html.mjs"
+    "scripts/html.mjs",
+    "scripts/css-value.mjs"
   ]
 }
