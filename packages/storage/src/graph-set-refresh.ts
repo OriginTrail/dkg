@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * How a warm graph catalog revalidates once it is due. `background` answers
- * every caller from the warm catalog and refreshes it in one background
- * flight; `blocking`, the behaviour before, makes the caller that finds it due
- * wait for the refresh. Cold seeds and dirty rebuilds block either way.
+ * How a warm graph catalog revalidates once it is due. `blocking`, the
+ * default, makes the caller that finds it due wait for the refresh;
+ * `background` answers every caller from the warm catalog and refreshes it in
+ * one background flight. Cold seeds and dirty rebuilds block either way.
  */
 export type GraphSetRevalidation = 'background' | 'blocking';
 

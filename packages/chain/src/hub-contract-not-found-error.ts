@@ -25,3 +25,11 @@ export class HubAssetStorageNotFoundError extends HubBindingNotFoundError {
     this.name = 'HubAssetStorageNotFoundError';
   }
 }
+
+/**
+ * Whether `err` is the Hub's own answer that it names no such contract or asset storage. Only
+ * the typed miss counts: a failed RPC call, or any other error, says nothing about the Hub.
+ */
+export function isHubBindingNotFoundError(err: unknown): err is HubBindingNotFoundError {
+  return err instanceof HubBindingNotFoundError;
+}
