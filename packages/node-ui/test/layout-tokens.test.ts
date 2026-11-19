@@ -1,8 +1,7 @@
 // Layers, breakpoints, motion and line height come from fixed scales (see
 // DESIGN.md · Layout and overlays).
 import { describe, expect, it } from 'vitest';
-// @ts-expect-error: a plain .mjs module, with no types
-import { classify, declarations } from '../scripts/design-rules.mjs';
+import { classify, declarations, type Kind } from '../scripts/design-rules.mjs';
 import { cssFiles as css, findAll, read, tsxFiles as tsx, where, withoutCssComments as strip } from './helpers/source.js';
 
 const matches = (list: string[], pattern: RegExp, keep: (m: RegExpMatchArray) => boolean = () => true) => findAll(list, pattern, { prepare: strip, keep });
@@ -10,9 +9,8 @@ const matches = (list: string[], pattern: RegExp, keep: (m: RegExpMatchArray) =>
 // Stylesheet rules come from scripts/design-rules.mjs, which design:check uses too, so the
 // rule and its exceptions are written once. Here any literal a rule finds fails; the
 // design check turns the same finding into a suggestion.
-type Hit = { kind: string; value: string };
-const literal = (kinds: string[], files = css) => files.flatMap((f) => declarations(read(f), '.css')
-  .flatMap((d: { prop: string; value: string; line: number }) => (classify(d.prop, d.value) as Hit[])
+const literal = (kinds: Kind[], files = css) => files.flatMap((f) => declarations(read(f), '.css')
+  .flatMap((d) => classify(d.prop, d.value)
     .filter((h) => kinds.includes(h.kind))
     .map((h) => `${where(f)}:${d.line} ${d.prop}: ${h.value}`)));
 const sheets = css.filter((f) => !f.endsWith('00-theme.css'));

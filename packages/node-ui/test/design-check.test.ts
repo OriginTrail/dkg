@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error: a plain .mjs script, with no types
-import { buildSystem, checkDeclaration, checkText, readTokens, runtimeProps } from '../scripts/design-check.mjs';
+import { buildSystem, checkDeclaration, checkText, parseColour, readTokens, runtimeProps } from '../scripts/design-check.mjs';
 import { cssFiles, read, where } from './helpers/source.js';
 
 const SCRIPT = join(__dirname, '../scripts/design-check.mjs');
@@ -73,6 +73,16 @@ describe('design check', () => {
     expect(use('background', 'rgba(255, 255, 255, 1)')[0]).not.toMatch(/wash/);
   });
 
+  it('reads hues in every CSS angle unit, negative ones too', () => {
+    const blue = parseColour('hsl(240 100% 50%)').rgb;
+    expect(blue).toEqual([0, 0, 255]);
+    for (const hue of ['-120', '240deg', '-120deg', '0.6666667turn', `${(4 * Math.PI) / 3}rad`, '266.6667grad', '600']) {
+      expect(parseColour(`hsl(${hue} 100% 50%)`).rgb, hue).toEqual(blue);
+    }
+    expect(parseColour('hsl(0.5turn 100% 50%)').rgb).toEqual([0, 255, 255]);
+    expect(parseColour('hsl(10vw 100% 50%)')).toBeNull();
+  });
+
   it('checks the literals beside a token', () => {
     expect(use('padding', 'var(--space-4) 10px')[0]).toMatch(/nearest is var\(--space-12\)/);
     expect(use('transition', 'opacity var(--motion-fast), color 1s')[0]).toMatch(/nearest is var\(--motion-/);
@@ -111,6 +121,18 @@ describe('design check', () => {
     expect(checkText(system, '.a {\n  padding:\n    10px;\n}', 'x.css', only3)).toHaveLength(1);
     expect(checkText(system, '<div style={{\n  padding:\n    10,\n}} />', 'x.tsx', only3)).toHaveLength(1);
     expect(checkText(system, '.a {\n  padding: 10px;\n  color: var(--text-primary);\n}', 'x.css', only3)).toEqual([]);
+  });
+
+  it("checks a mock-up's own variables where they're used", () => {
+    const found = (html: string) => checkText(system, html, 'mock.html', { known: new Set(['--gap', '--round', '--pad', '--inner']), mockup: true })
+      .filter((f: { offScale?: boolean }) => f.offScale)
+      .map((f: { prop: string; value: string; written?: string }) => `${f.prop} ${f.value} ${f.written}`);
+    expect(found('<style>:root { --gap: 10px; --round: 7px; } .x { gap: var(--gap); border-radius: var(--round); }</style>'))
+      .toEqual(['gap 10px var(--gap)', 'border-radius 7px var(--round)']);
+    // Through a variable that refers to another, and beside a node UI token.
+    expect(found('<style>:root { --inner: 10px; --pad: var(--inner); } .x { padding: var(--space-4) var(--pad); }</style>'))
+      .toEqual(['padding 10px var(--space-4) var(--pad)']);
+    expect(found('<style>:root { --gap: var(--space-8); } .x { gap: var(--gap); }</style>')).toEqual([]);
   });
 
   it('reads style attributes in either quote', () => {

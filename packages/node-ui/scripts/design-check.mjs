@@ -18,7 +18,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseColour } from './colour.mjs';
-import { WEIGHTS, classify, declarations, lineIndex, literals, stripComments } from './design-rules.mjs';
+import { WEIGHTS, classify, declarations, lineIndex, literals, resolveVars, stripComments } from './design-rules.mjs';
 
 export { declarations, parseColour };
 
@@ -267,12 +267,19 @@ const skipFile = (file) => /00-theme\.css$|-colors\.ts$|design-system[\w-]*\.(ts
 export function checkText(system, text, file, { known, mockup = false, keepLine = () => true } = {}) {
   const ext = extname(file).toLowerCase();
   const findings = [];
-  for (const d of declarations(text, ext)) {
+  const decls = declarations(text, ext);
+  // A mock-up's own variables (`--gap: 10px`) are checked where they're used, against the
+  // scale of the property that uses them: `gap: var(--gap)` is a gap of 10px.
+  const vars = new Map(mockup ? decls.filter((d) => d.prop.startsWith('--') && !system.tokens.has(d.prop)).map((d) => [d.prop, d.value]) : []);
+  for (const d of decls) {
     // A declaration counts as changed when any line it spans is: `padding:\n  10px;` with only the value edited.
     let changed = false;
     for (let l = d.line; l <= (d.endLine ?? d.line) && !changed; l++) changed = keepLine(l);
     if (!changed) continue;
-    for (const f of checkDeclaration(system, d.prop, d.value, { known, mockup })) findings.push({ line: d.line, prop: d.prop, ...f });
+    const resolved = vars.size && !d.prop.startsWith('--') ? resolveVars(d.value, vars) : d.value;
+    for (const f of checkDeclaration(system, d.prop, resolved, { known, mockup })) {
+      findings.push({ line: d.line, prop: d.prop, ...f, ...(resolved !== d.value ? { written: d.value } : {}) });
+    }
   }
   // In shipped code, test/ds-classes.test.ts and test/button-classes.test.ts already check
   // components with the context they need. A mock-up has no such tests, so it gets the hints here.
@@ -366,7 +373,7 @@ function main(argv) {
       console.log(`\n── ${title} ──`);
       for (const r of rows) {
         console.log(`\n${r.file}`);
-        for (const f of r.findings) console.log(`  ${String(f.line).padStart(4)}  ${f.kind.padEnd(10)} ${(f.prop ? `${f.prop}: ` : '') + f.value}\n        → ${f.use}`);
+        for (const f of r.findings) console.log(`  ${String(f.line).padStart(4)}  ${f.kind.padEnd(10)} ${(f.prop ? `${f.prop}: ` : '') + f.value}${f.written ? ` (written ${f.written})` : ''}\n        → ${f.use}`);
       }
     }
     console.log('');

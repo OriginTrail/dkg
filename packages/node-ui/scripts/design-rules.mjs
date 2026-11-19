@@ -1,8 +1,19 @@
+// @ts-check
 // The design rules both the checks and the design check apply: how a declaration is
 // found in a file, and which literal values in it fall under a rule. Policy lives
 // here once. test/layout-tokens.test.ts fails on any value a rule finds, and
 // scripts/design-check.mjs turns each one into a suggestion (the token to use, or
-// that the system needs a new one).
+// that the system needs a new one). The JSDoc types are checked: tsconfig.type-tests.json
+// runs tsc with checkJs over this file.
+import { styleDeclarations } from './jsx.mjs';
+
+/** @typedef {import('./jsx.mjs').Declaration} Declaration */
+/** @typedef {'corner' | 'spacing' | 'type size' | 'weight' | 'line height' | 'layer' | 'height' | 'motion'} Kind */
+/**
+ * A literal value a rule covers. `n` is the number on the rule's scale (px, or ms for motion);
+ * `pill` marks a 999px corner, `up` padding (ties round up), `unit` a type size in em, rem or pt.
+ * @typedef {{ kind: Kind, value: string, n?: number, pill?: boolean, up?: boolean, unit?: boolean }} Hit
+ */
 
 /** Font weights the type scale uses (DESIGN.md · Type). */
 export const WEIGHTS = ['400', '500', '600', '700'];
@@ -11,14 +22,34 @@ export const LAYER_FREE_MAX = 10;
 /** Durations at or under this are reduced-motion overrides, not timings. */
 export const MOTION_FREE_MS = 0.5;
 
-import { styleDeclarations } from './jsx.mjs';
-
+/** @param {string} css @returns {string} */
 export const stripComments = (css) => css.replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' '));
 
-/** A value with its var() expressions taken out, so the literals beside a token are still checked. */
-export const literals = (value) => value.replace(/var\((?:[^()]|\([^()]*\))*\)/g, ' ');
+const VAR = /var\(\s*(--[\w-]+)\s*(?:,((?:[^()]|\([^()]*\))*))?\)/g;
 
-/** The line each character index is on, from 1. */
+/** A value with its var() expressions taken out, so the literals beside a token are still checked. @param {string} value @returns {string} */
+export const literals = (value) => value.replace(VAR, ' ');
+
+/**
+ * A value with each var() of a variable in `vars` replaced by that variable's value,
+ * through variables that refer to others. A mock-up's own `--gap: 10px` is then
+ * checked where `gap: var(--gap)` uses it. Other var()s are left as they are.
+ * @param {string} value
+ * @param {Map<string, string>} vars
+ * @returns {string}
+ */
+export function resolveVars(value, vars) {
+  let out = value;
+  // A few rounds, for variables that refer to variables; a loop between them stops here.
+  for (let depth = 0; depth < 8; depth++) {
+    const next = out.replace(VAR, (all, name) => vars.get(name) ?? all);
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+/** The line each character index is on, from 1. @param {string} text @returns {(index: number) => number} */
 export function lineIndex(text) {
   const starts = [0];
   for (let i = 0; i < text.length; i++) if (text[i] === '\n') starts.push(i + 1);
@@ -30,35 +61,40 @@ export function lineIndex(text) {
 }
 
 /**
- * Every declaration in a file as `{ prop, value, line, endLine }`, where line and
- * endLine are the lines its property and value span: CSS, <style> blocks, style
- * attributes in either quote, and JSX style objects (read by scripts/jsx.mjs).
+ * Every declaration in a file, in line order, where line and endLine are the lines
+ * its property and value span: CSS, <style> blocks, style attributes in either quote,
+ * and JSX style objects (read by scripts/jsx.mjs).
+ * @param {string} text
+ * @param {string} ext the file's extension, with its dot
+ * @returns {Declaration[]}
  */
 export function declarations(text, ext) {
   const lineAt = lineIndex(text);
+  /** @type {Declaration[]} */
   const out = [];
+  /** @param {string} css @param {number} offset */
   const cssIn = (css, offset) => {
     for (const m of stripComments(css).matchAll(/(?<![\w-])(--[\w-]+|[a-z-]+)\s*:\s*([^;{}]+?)\s*(?=;|}|$)/gm)) {
       if (/^(https?|data)$/.test(m[1])) continue;
-      const start = offset + m.index;
+      const start = offset + (m.index ?? 0);
       out.push({ prop: m[1], value: m[2], line: lineAt(start), endLine: lineAt(start + m[0].length - 1) });
     }
   };
   if (ext === '.css') { cssIn(text, 0); return out; }
   // Each body's offset is where it starts in the file, so a declaration keeps its own lines.
-  for (const m of text.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)) cssIn(m[1], m.index + m[0].length - '</style>'.length - m[1].length);
+  for (const m of text.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)) cssIn(m[1], (m.index ?? 0) + m[0].length - '</style>'.length - m[1].length);
   if (ext === '.tsx' || ext === '.jsx') {
     out.push(...styleDeclarations(text, `inline${ext}`));
   } else {
-    for (const m of text.matchAll(/\bstyle=(["'])([\s\S]*?)\1/g)) cssIn(m[2], m.index + 'style="'.length);
+    for (const m of text.matchAll(/\bstyle=(["'])([\s\S]*?)\1/g)) cssIn(m[2], (m.index ?? 0) + 'style="'.length);
   }
   return out.sort((a, b) => a.line - b.line);
 }
 
 /**
  * The literal values in one declaration that a rule covers, with the rule's
- * exceptions applied: `{ kind, value, n? }`. Values inside var() are tokens and
- * aren't returned; literals beside them are.
+ * exceptions applied. Values inside var() are tokens and aren't returned;
+ * literals beside them are.
  *
  *   corner       border radius in px (0 and pills of 100px+ aside; `pill` marks 999px)
  *   spacing      padding, margin and gap over 1px (negative margins aside); `up` on padding
@@ -68,12 +104,17 @@ export function declarations(text, ext) {
  *   layer        a z-index over LAYER_FREE_MAX
  *   height       height and min-height in px (a control height only if it matches one)
  *   motion       a transition duration or delay over MOTION_FREE_MS, as `n` ms
+ *
+ * @param {string} prop
+ * @param {string} value
+ * @returns {Hit[]}
  */
 export function classify(prop, value) {
   const p = prop.toLowerCase();
   const v = value.replace(/!important/, '').trim();
   const lit = literals(v);
   const px = () => [...lit.matchAll(/(?<![\w.#-])(-?\d*\.?\d+)px\b/g)].map((m) => Number(m[1]));
+  /** @type {Hit[]} */
   const out = [];
   if (/^border(-[a-z]+)*-radius$/.test(p)) {
     for (const n of px()) if (n !== 0 && n < 100) out.push({ kind: 'corner', value: `${n}px`, n });
