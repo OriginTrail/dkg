@@ -17,6 +17,9 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { WEIGHTS, classify, declarations, lineIndex, literals, stripComments } from './design-rules.mjs';
+
+export { declarations };
 
 const PKG = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const UI = join(PKG, 'src/ui');
@@ -25,26 +28,35 @@ const EXTENSIONS = new Set(['.css', '.html', '.htm', '.tsx', '.jsx']);
 
 // ── The system ──────────────────────────────────────────────────────────────
 
-/** Tokens from 00-theme.css: every custom property and its literal value (the first, dark, value wins). */
+/**
+ * @typedef {object} TokenInventory
+ * @property {Map<string, string>} byName       each token's first value (the dark one, where a theme redefines it)
+ * @property {Array<[string, string]>} allValues every definition in every theme, in file order
+ */
+
+/** Tokens from 00-theme.css. @returns {TokenInventory} */
 export function readTokens(css = readFileSync(THEME, 'utf8')) {
-  const tokens = new Map();
-  const all = [];
+  const byName = new Map();
+  const allValues = [];
   for (const m of stripComments(css).matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) {
-    if (!tokens.has(m[1])) tokens.set(m[1], m[2].trim());
-    all.push([m[1], m[2].trim()]);
+    if (!byName.has(m[1])) byName.set(m[1], m[2].trim());
+    allValues.push([m[1], m[2].trim()]);
   }
-  tokens.all = all; // every value, so a colour can match its dark or its light value
-  return tokens;
+  return { byName, allValues };
 }
 
-/** The scales the rules check against, built from the tokens. */
-export function buildSystem(tokens) {
+/** The scales the rules check against. @param {TokenInventory} inventory */
+export function buildSystem(inventory) {
+  const { byName, allValues } = inventory ?? {};
+  if (!(byName instanceof Map) || !Array.isArray(allValues)) throw new TypeError('buildSystem takes the { byName, allValues } that readTokens returns');
+  const tokens = byName;
   const px = (prefix) => [...tokens].filter(([n, v]) => n.startsWith(prefix) && /^\d+px$/.test(v))
     .map(([name, v]) => ({ name, value: parseInt(v, 10) }));
+  // Colours match against every theme's value, so a colour can match its dark or its light one.
   const colours = [];
-  for (const [name, v] of tokens.all ?? tokens) {
-    const rgb = parseColour(v);
-    if (rgb && !/^--(data|log)-/.test(name)) colours.push({ name, rgb, text: v });
+  for (const [name, v] of allValues) {
+    const c = parseColour(v);
+    if (c && !/^--(data|log)-/.test(name)) colours.push({ name, rgb: c.rgb, alpha: c.alpha, text: v });
   }
   return {
     tokens,
@@ -74,6 +86,7 @@ export function runtimeProps() {
 
 const COLOUR = /#(?:[0-9a-f]{8}|[0-9a-f]{6}|[0-9a-f]{3,4})\b|\b(?:rgba?|hsla?)\([^)]*\)/gi;
 
+/** A colour as `{ rgb: [r, g, b], alpha }`, alpha from 0 to 1; null if it isn't one. */
 export function parseColour(text) {
   const t = text.trim().toLowerCase();
   let m = t.match(/^#([0-9a-f]{3,8})$/);
@@ -81,13 +94,22 @@ export function parseColour(text) {
     let h = m[1];
     if (h.length === 3 || h.length === 4) h = [...h].map((c) => c + c).join('');
     if (h.length !== 6 && h.length !== 8) return null;
-    return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+    return { rgb: [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)), alpha: h.length === 8 ? parseInt(h.slice(6), 16) / 255 : 1 };
   }
-  m = t.match(/^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/);
-  if (m) return [m[1], m[2], m[3]].map(Number);
-  m = t.match(/^hsla?\(\s*([\d.]+)(?:deg)?[\s,]+([\d.]+)%[\s,]+([\d.]+)%/);
-  if (m) return hslToRgb(Number(m[1]), Number(m[2]) / 100, Number(m[3]) / 100);
-  return null;
+  m = t.match(/^(rgba?|hsla?)\(([^)]*)\)$/);
+  if (!m) return null;
+  const parts = m[2].split(/[\s,/]+/).filter(Boolean);
+  if (parts.length < 3) return null;
+  const a = parts[3];
+  const alpha = a === undefined ? 1 : a.endsWith('%') ? parseFloat(a) / 100 : Number(a);
+  if (Number.isNaN(alpha)) return null;
+  if (m[1].startsWith('rgb')) {
+    const rgb = parts.slice(0, 3).map(Number);
+    return rgb.some(Number.isNaN) ? null : { rgb, alpha };
+  }
+  const [h, s, l] = [parseFloat(parts[0]), parseFloat(parts[1]), parseFloat(parts[2])];
+  if ([h, s, l].some(Number.isNaN)) return null;
+  return { rgb: hslToRgb(h, s / 100, l / 100), alpha };
 }
 
 function hslToRgb(h, s, l) {
@@ -155,33 +177,36 @@ export function checkDeclaration(system, prop, value, { known, mockup = false } 
   const out = [];
   const p = prop.toLowerCase();
   const v = value.replace(/!important/, '').trim();
-  const pxValues = () => [...v.matchAll(/(?<![\w.#-])(-?\d*\.?\d+)px\b/g)].map((m) => Number(m[1]));
 
   // Colour, wherever it appears. A mock-up's own variables are checked where they are
   // defined, so `--surface: #141414` says which node UI token it stands for.
   if (!p.startsWith('--') || (mockup && !system.tokens.has(p))) {
     for (const m of v.matchAll(COLOUR)) {
-      const rgb = parseColour(m[0]);
-      if (!rgb) continue;
+      const c = parseColour(m[0]);
+      if (!c) continue;
+      // Opacity counts: a 10% white wash isn't an opaque white token.
+      const score = (t) => colourDistance(c.rgb, t.rgb) + Math.abs(c.alpha - t.alpha) * 100;
+      const pick = (list) => list.reduce((b, t) => {
+        const d = score(t);
+        return !b || d < b.d ? { t, d } : b;
+      }, null);
       // Prefer a token with the same job (a fill for a fill, text for text), if one is close.
       const role = colourRole(p);
-      const sameRole = role ? system.colours.filter((t) => ROLES[role].test(t.name)) : [];
-      const pick = (list) => list.reduce((b, t) => {
-        const d = colourDistance(rgb, t.rgb);
-        return !b || d < b.d ? { t, d } : b;
-      }, null);
-      const inRole = pick(sameRole);
-      const best = inRole && inRole.d < 10 ? inRole : system.colours.reduce((b, t) => {
-        const d = colourDistance(rgb, t.rgb);
-        return !b || d < b.d ? { t, d } : b;
-      }, null);
-      const alpha = /rgba|hsla|#[0-9a-f]{8}\b/i.test(m[0]) && !/,\s*1\s*\)$/.test(m[0]);
+      const inRole = pick(role ? system.colours.filter((t) => ROLES[role].test(t.name)) : []);
+      const best = inRole && inRole.d < 10 ? inRole : pick(system.colours);
+      const exact = best && best.d < 2;
       let use;
-      if (best && best.d < 2) use = `var(${best.t.name})`;
+      if (exact) use = `var(${best.t.name})`;
       else if (best && best.d < 10) use = `nearest is var(${best.t.name}) (${best.t.text}), ${ADD}`;
-      else use = `no token is close. If the colour has a job of its own, add a token with a value for both themes; if it only needs to stand out, use contrast and weight (DESIGN.md · Principles 2)`;
-      if (alpha && !(best && best.d < 2)) use += '. For a wash, use a tint token (--tint-*, --*-bg) or color-mix() on a token';
-      out.push({ kind: 'colour', value: m[0], use, offScale: !(best && best.d < 2) });
+      else if (c.alpha < 1) {
+        // A wash: keep the opacity on a token of the same colour, if there is one.
+        const base = pick(system.colours.filter((t) => t.alpha === 1).map((t) => ({ ...t, alpha: c.alpha })));
+        const pct = Math.round(c.alpha * 100);
+        use = base && base.d < 2
+          ? `a ${pct}% wash of var(${base.t.name}): use a tint token (--tint-*, --*-bg) if one fits, or color-mix(in srgb, var(${base.t.name}) ${pct}%, transparent)`
+          : `no token is close. For a wash, use a tint token (--tint-*, --*-bg) or color-mix() on a token, ${ADD}`;
+      } else use = `no token is close. If the colour has a job of its own, add a token with a value for both themes; if it only needs to stand out, use contrast and weight (DESIGN.md · Principles 2)`;
+      out.push({ kind: 'colour', value: m[0], use, offScale: !exact });
     }
   }
 
@@ -191,105 +216,80 @@ export function checkDeclaration(system, prop, value, { known, mockup = false } 
       out.push({ kind: 'token', value: m[1], use: 'not a node UI token: use one from 00-theme.css (see the reference page), or add it there and to DESIGN.md', offScale: true });
     }
   }
-  if (v.includes('var(')) return out;
-
-  if (/^border(-[a-z]+)*-radius$/.test(p)) {
-    for (const n of pxValues()) if (n !== 0 && n < 100) out.push({ value: `${n}px`, ...scaleRule('corner', system.radius, n) });
-    if (/\b(999|9999)px\b/.test(v)) out.push({ kind: 'corner', value: v, use: 'var(--radius-pill)' });
-  } else if (/^(padding|margin|gap|row-gap|column-gap)(-[a-z]+)*$/.test(p)) {
-    // Negative margins pull an element back by a known amount and stay as numbers.
-    for (const n of pxValues()) if (n > 1) out.push({ value: `${n}px`, ...scaleRule('spacing', system.space, n, 'px', p.startsWith('padding')) });
-  } else if (p === 'font-size' || p === 'font') {
-    // `font: 15px/1.5 …` carries a size too; only its first px value is the size.
-    for (const n of p === 'font' ? pxValues().slice(0, 1) : pxValues()) out.push({ value: `${n}px`, ...scaleRule('type size', system.fontSize, n) });
-    if (/\d(r?em|pt)\b/.test(v) && v !== '1em') out.push({ kind: 'type size', value: v, use: 'type sizes are px tokens (--fs-*)', offScale: true });
-  } else if (p === 'font-weight') {
-    if (/^\d+$/.test(v) && !['400', '500', '600', '700'].includes(v)) out.push({ kind: 'weight', value: v, use: 'weights are 400, 500, 600 or 700', offScale: true });
-  } else if (p === 'line-height') {
-    const n = Number(v);
-    if (!Number.isNaN(n) && n !== 1 && n !== 0) out.push({ value: v, ...scaleRule('line height', system.lineHeight, n, '') });
-  } else if (p === 'z-index') {
-    const n = Number(v);
-    if (n > 10) out.push({ value: v, ...scaleRule('layer', system.z, n, '') });
-  } else if (/^(height|min-height)$/.test(p)) {
-    // Only sizes that are already a control or badge height: anything else may be layout.
-    for (const n of pxValues()) {
-      const hit = system.height.find((t) => t.value === n);
-      if (hit) out.push({ kind: 'height', value: `${n}px`, use: `var(${hit.name}), if this is a control, badge or row` });
+  // Literal values, with the rules' exceptions applied in design-rules.mjs. A token in
+  // the same declaration doesn't excuse the literals beside it (`padding: var(--space-4) 10px`).
+  for (const hit of classify(p, v)) {
+    const { kind, value: shown, n } = hit;
+    if (kind === 'corner') out.push(hit.pill ? { kind, value: shown, use: 'var(--radius-pill)' } : { value: shown, ...scaleRule(kind, system.radius, n) });
+    else if (kind === 'spacing') out.push({ value: shown, ...scaleRule(kind, system.space, n, 'px', hit.up) });
+    else if (kind === 'type size') out.push(hit.unit ? { kind, value: shown, use: 'type sizes are px tokens (--fs-*)', offScale: true } : { value: shown, ...scaleRule(kind, system.fontSize, n) });
+    else if (kind === 'weight') out.push({ kind, value: shown, use: `weights are ${WEIGHT_LIST}`, offScale: true });
+    else if (kind === 'line height') out.push({ value: shown, ...scaleRule(kind, system.lineHeight, n, '') });
+    else if (kind === 'layer') out.push({ value: shown, ...scaleRule(kind, system.z, n, '') });
+    else if (kind === 'motion') out.push({ value: shown, ...scaleRule(kind, system.motion, n, 'ms') });
+    else if (kind === 'height') {
+      // Only sizes that are already a control or badge height: anything else may be layout.
+      const token = system.height.find((t) => t.value === n);
+      if (token) out.push({ kind, value: shown, use: `var(${token.name}), if this is a control, badge or row` });
     }
-  } else if (/^transition(-duration)?$/.test(p)) {
-    // Transitions only: a looping animation (a spinner, a pulse) has its own length.
-    for (const m of v.matchAll(/(?<![\w.-])(\d*\.?\d+)(m?s)\b/g)) {
-      const ms = Number(m[1]) * (m[2] === 's' ? 1000 : 1);
-      if (ms > 0.5) out.push({ value: m[0], ...scaleRule('motion', system.motion, ms, 'ms') });
-    }
-  } else if (p === 'box-shadow' && mockup && /\d+px/.test(v) && !/^inset\b/.test(v)) {
+  }
+  const lit = literals(v);
+  if (p === 'box-shadow' && mockup && /\d+px/.test(lit) && !/^inset\b/.test(v)) {
     out.push({ kind: 'shadow', value: v.slice(0, 40), use: `one shadow per kind of surface: ${system.shadows.map((s) => `var(${s})`).join(', ')}`, offScale: true });
   }
   return out;
 }
 
-// Components: markup that rebuilds something the system already has.
+const WEIGHT_LIST = `${WEIGHTS.slice(0, -1).join(', ')} or ${WEIGHTS.at(-1)}`;
+
+// Components: markup that rebuilds something the system already has. Each rule reads
+// the whole opening tag, so a tag that already has the shared class passes.
+/** A class named for the thing (card, stat-card), not one that only starts with it (card-body). */
+const endsWith = (classes, words) => classes.some((c) => new RegExp(`(${words})$`).test(c));
 const COMPONENT_RULES = [
-  { re: /<button\b(?![^>]*\bds-btn\b)(?![^>]*\bds-(tab|seg-item|filter)\b)[^>]*>/gi, use: '<Button> (or class="ds-btn"), see DESIGN.md · Button' },
-  { re: /<(input|select|textarea)\b(?![^>]*type=["'](checkbox|radio|hidden|file|range)["'])(?![^>]*\bds-input\b)[^>]*>/gi, use: 'class="ds-input" (ds-sm in dense rows), see DESIGN.md · Inputs' },
-  { re: /<[a-z]+\b[^>]*class(Name)?=["'][^"']*\b[\w-]*card\b(?![\w-])[^"']*["'](?![^>]*\bds-card)[^>]*>/gi, use: 'class="ds-card" (ds-card-nested inside a card), see DESIGN.md · Card padding' },
-  { re: /<[a-z]+\b[^>]*class(Name)?=["'][^"']*\b[\w-]*(badge|pill|chip|tag)\b(?![\w-])[^"']*["'](?![^>]*\bds-)[^>]*>/gi, use: '<Badge>, <LayerBadge>, <Count> or <ContextGraphChip>, see DESIGN.md · Labels' },
-  { re: /<(?:div|section)\b[^>]*\b(role=["']dialog["']|class(Name)?=["'][^"']*\b[\w-]*(modal|dialog)(-box)?(?![\w-]))(?![^>]*\bds-overlay\b)[^>]*>/gi, use: 'class="ds-overlay", see DESIGN.md · Layout and overlays' },
+  {
+    flags: (t) => t.name === 'button' && !t.classes.some((c) => /^ds-(btn|tab|seg-item|filter)$/.test(c)),
+    use: '<Button> (or class="ds-btn"), see DESIGN.md · Button',
+  },
+  {
+    flags: (t) => /^(input|select|textarea)$/.test(t.name) && !/\btype=["'](checkbox|radio|hidden|file|range)["']/i.test(t.tag) && !t.classes.includes('ds-input'),
+    use: 'class="ds-input" (ds-sm in dense rows), see DESIGN.md · Inputs',
+  },
+  {
+    flags: (t) => endsWith(t.classes, 'card') && !t.classes.some((c) => /^ds-card\b/.test(c)),
+    use: 'class="ds-card" (ds-card-nested inside a card), see DESIGN.md · Card padding',
+  },
+  {
+    flags: (t) => endsWith(t.classes, 'badge|pill|chip|tag') && !t.classes.some((c) => c.startsWith('ds-')),
+    use: '<Badge>, <LayerBadge>, <Count> or <ContextGraphChip>, see DESIGN.md · Labels',
+  },
+  {
+    flags: (t) => /^(div|section)$/.test(t.name) && (/\brole=["']dialog["']/i.test(t.tag) || t.classes.some((c) => /(modal|dialog)(-box)?$/.test(c))) && !t.classes.includes('ds-overlay'),
+    use: 'class="ds-overlay", see DESIGN.md · Layout and overlays',
+  },
 ];
+
+/** Opening tags with their name and classes. A capitalised JSX component (<Button>) is a system part already. */
+function openingTags(text) {
+  return [...text.matchAll(/<([a-z][\w-]*)\b[^>]*>/g)].map((m) => {
+    const cls = m[0].match(/\bclass(?:Name)?=(?:"([^"]*)"|'([^']*)'|\{\s*["'`]([^"'`]*)["'`]\s*\})/);
+    return { name: m[1], tag: m[0], index: m.index, classes: (cls ? cls[1] ?? cls[2] ?? cls[3] : '').split(/\s+/).filter(Boolean) };
+  });
+}
 
 function checkMarkup(text, lineOf, keepLine) {
   const out = [];
-  for (const rule of COMPONENT_RULES) {
-    for (const m of text.matchAll(rule.re)) {
-      if (/^<Button\b/.test(m[0])) continue;
-      const line = lineOf(m.index);
-      if (!keepLine(line)) continue;
-      out.push({ line, kind: 'component', value: m[0].slice(0, 60), use: rule.use, offScale: true });
+  for (const tag of openingTags(text)) {
+    for (const rule of COMPONENT_RULES) {
+      if (!rule.flags(tag)) continue;
+      const line = lineOf(tag.index);
+      if (keepLine(line)) out.push({ line, kind: 'component', value: tag.tag.slice(0, 60), use: rule.use, offScale: true });
     }
   }
   return out;
 }
 
 // ── Files ───────────────────────────────────────────────────────────────────
-
-function stripComments(css) { return css.replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' ')); }
-
-const camelToKebab = (s) => s.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
-
-/** Every declaration in a file with its line: CSS, <style> blocks, style="" and style={{}}. */
-export function declarations(text, ext) {
-  const lineAt = lineIndex(text);
-  const out = [];
-  const add = (prop, value, index) => out.push({ prop, value, line: lineAt(index) });
-  const cssIn = (css, offset) => {
-    for (const m of stripComments(css).matchAll(/(?<![\w-])(--[\w-]+|[a-z-]+)\s*:\s*([^;{}]+?)\s*(?=;|}|$)/gm)) {
-      if (/^(https?|data)$/.test(m[1])) continue;
-      add(m[1], m[2], offset + m.index);
-    }
-  };
-  if (ext === '.css') { cssIn(text, 0); return out; }
-  for (const m of text.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)) cssIn(m[1], m.index + m[0].indexOf(m[1]));
-  for (const m of text.matchAll(/\bstyle="([^"]*)"/g)) cssIn(m[1], m.index);
-  for (const m of text.matchAll(/\bstyle=\{\{([\s\S]*?)\}\}/g)) {
-    for (const d of m[1].matchAll(/['"]?([\w-]+)['"]?\s*:\s*(['"`])([^'"`]*)\2/g)) add(camelToKebab(d[1]), d[3], m.index + d.index);
-    for (const d of m[1].matchAll(/\b(fontSize|borderRadius|padding|margin|gap|zIndex|fontWeight|lineHeight)\s*:\s*(\d*\.?\d+)\b/g)) {
-      const unitless = ['zIndex', 'fontWeight', 'lineHeight'].includes(d[1]);
-      add(camelToKebab(d[1]), unitless ? d[2] : `${d[2]}px`, m.index + d.index);
-    }
-  }
-  return out;
-}
-
-function lineIndex(text) {
-  const starts = [0];
-  for (let i = 0; i < text.length; i++) if (text[i] === '\n') starts.push(i + 1);
-  return (index) => {
-    let lo = 0, hi = starts.length - 1;
-    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= index) lo = mid; else hi = mid - 1; }
-    return lo + 1;
-  };
-}
 
 /** Files the rules skip: the tokens themselves, canvas palettes (graph-viz can't read CSS variables) and the reference page. */
 const skipFile = (file) => /00-theme\.css$|-colors\.ts$|design-system[\w-]*\.(tsx|html)$/.test(file.replace(/\\/g, '/'));

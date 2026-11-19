@@ -2,11 +2,16 @@
 // 00-theme.css and says, for each value that isn't on it, which token to use or
 // that the system needs a new one. These tests keep its suggestions right, and run
 // it over the UI so a value off the system fails here with that suggestion attached.
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error: a plain .mjs script, with no types
 import { buildSystem, checkDeclaration, checkText, readTokens, runtimeProps } from '../scripts/design-check.mjs';
 import { cssFiles, read, where } from './helpers/source.js';
 
+const SCRIPT = join(__dirname, '../scripts/design-check.mjs');
 const system = buildSystem(readTokens());
 const use = (prop: string, value: string, mockup = false) => checkDeclaration(system, prop, value, { known: new Set(), mockup })
   .map((f: { use: string }) => f.use);
@@ -45,6 +50,75 @@ describe('design check', () => {
       .map((f: { use: string }) => f.use.split(' ')[0]);
     expect(kinds(true).sort()).toEqual(['<Badge>,', '<Button>', 'class="ds-input"']);
     expect(kinds(false)).toEqual([]);
+  });
+
+  it('lets markup that already uses the shared class through', () => {
+    const hints = (html: string) => checkText(system, html, 'mock.html', { known: new Set(), mockup: true }).length;
+    expect(hints('<div class="ds-card">Content</div>')).toBe(0);
+    expect(hints('<div class="stat ds-card wide">Content</div>')).toBe(0);
+    expect(hints('<div class="card-body">Content</div>')).toBe(0); // part of a card, not one
+    expect(hints('<div class="stat-card">Content</div>')).toBe(1);
+    expect(hints('<span class="ds-badge tag">VM</span>')).toBe(0);
+    expect(hints('<span class="tag">VM</span>')).toBe(1);
+    expect(hints('<div class="modal ds-overlay"></div>')).toBe(0);
+    expect(hints('<div role="dialog"></div>')).toBe(1);
+  });
+
+  it('keeps the opacity of a colour', () => {
+    for (const wash of ['rgba(255, 255, 255, 0.1)', '#ffffff1a', 'rgb(255 255 255 / 10%)']) {
+      const [f] = checkDeclaration(system, 'background', wash, { known: new Set() });
+      expect(f.offScale, wash).toBe(true);
+      expect(f.use, wash).toMatch(/10% wash|tint token/);
+    }
+    expect(use('background', 'rgba(255, 255, 255, 1)')[0]).not.toMatch(/wash/);
+  });
+
+  it('checks the literals beside a token', () => {
+    expect(use('padding', 'var(--space-4) 10px')[0]).toMatch(/nearest is var\(--space-12\)/);
+    expect(use('transition', 'opacity var(--motion-fast), color 1s')[0]).toMatch(/nearest is var\(--motion-/);
+    expect(use('margin', 'calc(-1 * var(--space-4))')).toEqual([]);
+  });
+
+  it('reads tokens from every theme, and looks them up by their first value', () => {
+    const inventory = readTokens(':root { --bg-test: #101010; --space-test: 5px; } :root.light { --bg-test: #fafafa; }');
+    expect(inventory.byName.get('--bg-test')).toBe('#101010');
+    expect(inventory.allValues.filter(([n]: [string]) => n === '--bg-test')).toHaveLength(2);
+    const two = buildSystem(inventory);
+    expect(two.colours.filter((c: { name: string }) => c.name === '--bg-test')).toHaveLength(2);
+    expect(checkDeclaration(two, 'background', '#fafafa', { known: new Set() })[0].use).toBe('var(--bg-test)');
+    expect(() => buildSystem(new Map())).toThrow(TypeError);
+  });
+
+  // Each kind of file, with a value off the system on a known line, must be found there.
+  it('finds values off the system in CSS, HTML and TSX', () => {
+    const found = (text: string, file: string, mockup = false) => checkText(system, text, file, { known: new Set(), mockup })
+      .filter((f: { offScale?: boolean }) => f.offScale)
+      .map((f: { line: number; prop: string; value: string }) => `${f.line} ${f.prop} ${f.value}`);
+    expect(found('.a {\n  color: var(--missing);\n  padding: 10px;\n}', 'x.css')).toEqual(['2 color --missing', '3 padding 10px']);
+    expect(found('<style>\n.a { gap: 10px; }\n</style>', 'mock.html', true)).toEqual(['2 gap 10px']);
+    expect(found('<div style="\n  padding: 10px;"></div>', 'mock.html', true)).toEqual(['2 padding 10px']);
+    expect(found('<div style={{\n  fontSize: 15,\n}} />', 'x.tsx')).toEqual(['2 font-size 15px']);
+    expect(found("<div style={{\n  padding: '10px',\n}} />", 'x.tsx')).toEqual(['2 padding 10px']);
+  });
+
+  it('keeps a changed line in a multi-line style when only that line is checked', () => {
+    const text = '<div style={{\n  color: "var(--text-primary)",\n  fontSize: 15,\n}} />';
+    expect(checkText(system, text, 'x.tsx', { known: new Set(), keepLine: (l: number) => l === 3 })).toHaveLength(1);
+  });
+
+  it('exits 1 on a design off the system, and 0 on one on it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'design-check-'));
+    try {
+      const run = (css: string) => {
+        const file = join(dir, 'mock.html');
+        writeFileSync(file, `<style>${css}</style>`);
+        return spawnSync(process.execPath, [SCRIPT, '--json', file], { encoding: 'utf8' }).status;
+      };
+      expect(run('.a { padding: 10px; }')).toBe(1);
+      expect(run('.a { padding: var(--space-12); }')).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   // The suites in design-tokens and layout-tokens hold the rules; this one adds the

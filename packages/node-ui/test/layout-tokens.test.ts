@@ -1,9 +1,21 @@
 // Layers, breakpoints, motion and line height come from fixed scales (see
 // DESIGN.md · Layout and overlays).
 import { describe, expect, it } from 'vitest';
-import { cssFiles as css, findAll, read, tsxFiles as tsx, withoutCssComments as strip } from './helpers/source.js';
+// @ts-expect-error: a plain .mjs module, with no types
+import { classify, declarations } from '../scripts/design-rules.mjs';
+import { cssFiles as css, findAll, read, tsxFiles as tsx, where, withoutCssComments as strip } from './helpers/source.js';
 
 const matches = (list: string[], pattern: RegExp, keep: (m: RegExpMatchArray) => boolean = () => true) => findAll(list, pattern, { prepare: strip, keep });
+
+// Stylesheet rules come from scripts/design-rules.mjs, which design:check uses too, so the
+// rule and its exceptions are written once. Here any literal a rule finds fails; the
+// design check turns the same finding into a suggestion.
+type Hit = { kind: string; value: string };
+const literal = (kinds: string[], files = css) => files.flatMap((f) => declarations(read(f), '.css')
+  .flatMap((d: { prop: string; value: string; line: number }) => (classify(d.prop, d.value) as Hit[])
+    .filter((h) => kinds.includes(h.kind))
+    .map((h) => `${where(f)}:${d.line} ${d.prop}: ${h.value}`)));
+const sheets = css.filter((f) => !f.endsWith('00-theme.css'));
 
 const OFF_SCALE_SPACING = 0;
 // Values from data only: colours, sizes and positions the code works out at runtime.
@@ -12,7 +24,7 @@ const INLINE_FONT_SIZES = 0; // Canvas options take numbers and sit outside styl
 
 describe('layout tokens', () => {
   it('uses a layer token for anything above 10', () => {
-    expect(matches(css, /z-index:\s*(\d+)/g, (m) => Number(m[1]) > 10)).toEqual([]);
+    expect(literal(['layer'])).toEqual([]);
     expect(matches(tsx, /zIndex:\s*(\d+)/g, (m) => Number(m[1]) > 10)).toEqual([]);
   });
 
@@ -22,13 +34,11 @@ describe('layout tokens', () => {
   });
 
   it('times transitions with the motion tokens', () => {
-    expect(matches(css, /transition(?:-duration)?:[^;}]*?(?<![\w.-])\d*\.?\d+m?s\b[^;}]*/g, (m) => !/\.01ms/.test(m[0]))).toEqual([]);
+    expect(literal(['motion'])).toEqual([]);
   });
 
   it('sets type from the tokens', () => {
-    const sheets = css.filter((f) => !f.endsWith('00-theme.css'));
-    expect(matches(sheets, /font-size:\s*\d+px/g)).toEqual([]);
-    expect(matches(sheets, /font-weight:\s*(\d+)/g, (m) => !['400', '500', '600', '700'].includes(m[1]!))).toEqual([]);
+    expect(literal(['type size', 'weight'], sheets)).toEqual([]);
     expect(matches(sheets, /letter-spacing:\s*([^;}\s]+)/g, (m) => m[1] !== '0' && m[1] !== 'var(--ls-caps)')).toEqual([]);
   });
 
@@ -39,11 +49,7 @@ describe('layout tokens', () => {
 
   // 10 and 14 stay inside the nested padding tokens in 00-theme.css, and nowhere else.
   it('does not add spacing outside the scale', () => {
-    const sheets = css.filter((f) => !f.endsWith('00-theme.css'));
-    const spacing = /(?:padding|margin|gap)[a-z-]*\s*:[^;}]*/g;
-    const offScale = sheets.flatMap((f) => [...strip(read(f)).matchAll(spacing)]
-      .flatMap((m) => [...m[0].matchAll(/(?<![\w.#-])(\d+)px\b/g)].filter((v) => v[1] !== '1' && v[1] !== '0')));
-    expect(offScale.length).toBeLessThanOrEqual(OFF_SCALE_SPACING);
+    expect(literal(['spacing'], sheets).length).toBeLessThanOrEqual(OFF_SCALE_SPACING);
   });
 
   it('does not add inline styles', () => {
@@ -53,7 +59,7 @@ describe('layout tokens', () => {
   });
 
   it('sets line height from the scale', () => {
-    expect(matches(css, /line-height:\s*(\d*\.\d+)/g)).toEqual([]);
+    expect(literal(['line height'])).toEqual([]);
     expect(matches(tsx, /lineHeight:\s*(\d*\.\d+)/g)).toEqual([]);
   });
 });
