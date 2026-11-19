@@ -8,7 +8,8 @@ import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { buildSystem, checkDeclaration, checkText, isExempt, parseColour, readTokens, runtimeProps } from '../scripts/design-core.mjs';
+import { buildSystem, checkDeclaration, checkText, inUi, isExempt, parseColour, readTokens, runtimeProps } from '../scripts/design-core.mjs';
+import { classify } from '../scripts/design-rules.mjs';
 import { parseValue, varRefs } from '../scripts/css-value.mjs';
 import { customPropertyNames } from '../scripts/jsx.mjs';
 import { cssFiles, read, where } from './helpers/source.js';
@@ -295,6 +296,37 @@ describe('design check', () => {
     expect(colours('.x { --card-bg: magenta; background: var(--card-bg); }')).toEqual(['--card-bg magenta']);
     expect(colours('.x { --card-bg: var(--bg-surface); background: var(--card-bg); }')).toEqual([]);
     expect(colours('.x { --card-bg: #ffffff; }')).toEqual([]); // a token's value
+  });
+
+  it('treats a folder beside src/ui as mock-ups, not as the UI', () => {
+    const ui = join(__dirname, '../src/ui');
+    expect(inUi(join(ui, 'styles/27-ds-components.css'))).toBe(true);
+    expect(inUi(join(ui, '../ui-mockups/mock.html'))).toBe(false);
+    expect(inUi(join(tmpdir(), 'mock.html'))).toBe(false);
+    // Through the CLI: a button drawn by hand in src/ui-mockups is a mock-up's component finding.
+    const pkg = mkdtempSync(join(tmpdir(), 'design-check-pkg-'));
+    try {
+      mkdirSync(join(pkg, 'src/ui/styles'), { recursive: true });
+      mkdirSync(join(pkg, 'src/ui-mockups'), { recursive: true });
+      copyFileSync(join(ui, 'styles/00-theme.css'), join(pkg, 'src/ui/styles/00-theme.css'));
+      const mock = join(pkg, 'src/ui-mockups/mock.html');
+      writeFileSync(mock, '<button>Save</button>');
+      const run = spawnSync(process.execPath, [SCRIPT, '--json', mock], { cwd: pkg, encoding: 'utf8', env: { ...process.env, DESIGN_CHECK_PKG: pkg } });
+      expect(JSON.parse(run.stdout)[0].findings.map((f: { kind: string }) => f.kind)).toEqual(['component']);
+      expect(run.status).toBe(1);
+    } finally {
+      rmSync(pkg, { recursive: true, force: true });
+    }
+  });
+
+  it('classifies the words of a value read once, beside its tokens', () => {
+    const kinds = (prop: string, value: string) => classify(prop, value, parseValue(value)).map((h: { kind: string; value: string }) => `${h.kind} ${h.value}`);
+    expect(kinds('gap', 'var(--space-4) 10px')).toEqual(['spacing 10px']);
+    expect(kinds('margin', 'calc(-1 * var(--space-4)) 12px')).toEqual(['spacing 12px']);
+    expect(kinds('transition', 'opacity var(--motion-fast), color 1s')).toEqual(['motion 1s']);
+    expect(kinds('border-radius', '999px')).toEqual(['corner 999px']);
+    expect(kinds('font', '600 15px/1.4 "Inter 10px", sans-serif')).toEqual(['type size 15px']); // text in quotes isn't a size
+    expect(classify('gap', 'var(--space-4) 10px')).toEqual(classify('gap', 'var(--space-4) 10px', parseValue('var(--space-4) 10px')));
   });
 
   it("skips only the package's own theme, palettes and reference page", () => {

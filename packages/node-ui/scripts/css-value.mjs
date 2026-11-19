@@ -77,26 +77,21 @@ export function walkValue(nodes, visit) {
 }
 
 /**
- * The value again, with each node `replace` returns text for written as that text instead.
- * Positions stay meaningful only when replacements keep their length.
- * @param {string} text the value the nodes were read from
+ * The words a value says itself, in order: what's outside var() (a token), url() and
+ * strings (text), including inside other functions such as calc(). `var(--space-4) 10px`
+ * gives 10px.
  * @param {ValueNode[]} nodes
- * @param {(node: ValueNode) => string | undefined} replace
- * @returns {string}
+ * @returns {string[]}
  */
-export function rewriteValue(text, nodes, replace) {
-  /** @type {{ start: number, end: number, with: string }[]} */
-  const edits = [];
+export function literalWords(nodes) {
+  /** @type {string[]} */
+  const out = [];
   walkValue(nodes, (n) => {
-    const r = replace(n);
-    if (r === undefined) return true;
-    edits.push({ start: n.start, end: n.end, with: r });
-    return false;
+    if (n.type === 'function') return n.value !== 'var' && n.value !== 'url';
+    if (n.type === 'word') out.push(n.value);
+    return true;
   });
-  let out = '';
-  let at = 0;
-  for (const e of edits) { out += text.slice(at, e.start) + e.with; at = e.end; }
-  return out + text.slice(at);
+  return out;
 }
 
 /**

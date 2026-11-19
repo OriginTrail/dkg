@@ -5,12 +5,12 @@
 // checked by tsc (tsconfig.type-tests.json), so a change on one side of a contract
 // shows up on the other.
 import { readFileSync, readdirSync } from 'node:fs';
-import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NAMED_COLOURS, parseColour } from './colour.mjs';
 import { CssReadError, cssDeclarations } from './css.mjs';
-import { classify, declarations, lineIndex, literals, resolveVars } from './design-rules.mjs';
-import { parseValue, varRefs, walkValue } from './css-value.mjs';
+import { classify, declarations, lineIndex, resolveVars } from './design-rules.mjs';
+import { literalWords, parseValue, varRefs, walkValue } from './css-value.mjs';
 import { readHtml } from './html.mjs';
 import { ADD, suggest } from './design-suggest.mjs';
 import { attrText, attrsOf, classNames, customPropertyNames, opening, parseTsx, tagName, walkJsx } from './jsx.mjs';
@@ -56,14 +56,25 @@ export const THEME = join(UI, 'styles/00-theme.css');
  * @returns {boolean}
  */
 export function isExempt(file) {
-  const f = resolve(file);
-  const same = (/** @type {string} */ a, /** @type {string} */ b) => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b);
-  if (same(f, THEME)) return true;
-  const rel = relative(UI, f);
-  if (!rel || rel.startsWith('..') || isAbsolute(rel)) return false;
-  const path = rel.replace(/\\/g, '/');
-  return /(^|\/)[\w-]+-colors\.ts$/.test(path) || /^design-system[\w-]*\.(tsx|html)$/.test(path);
+  const path = uiPath(file);
+  if (path === null) return false;
+  return path === 'styles/00-theme.css' || /(^|\/)[\w-]+-colors\.ts$/.test(path) || /^design-system[\w-]*\.(tsx|html)$/.test(path);
 }
+
+/**
+ * Where a file is inside src/ui, with forward slashes, or null when it isn't in it.
+ * A directory boundary counts, so src/ui-mockups is outside src/ui.
+ * @param {string} file
+ * @returns {string | null}
+ */
+function uiPath(file) {
+  const rel = relative(UI, resolve(file));
+  if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
+  return rel.replace(/\\/g, '/');
+}
+
+/** Whether a file is shipped node UI code (under src/ui); anything else is a mock-up. @param {string} file @returns {boolean} */
+export const inUi = (file) => uiPath(file) !== null;
 
 // ── The system ──────────────────────────────────────────────────────────────
 
@@ -156,13 +167,16 @@ const COLOUR_FUNCTIONS = new Set(['rgb', 'rgba', 'hsl', 'hsla', 'hwb', 'lab', 'l
  * The colours in a value, as written, wherever they are: on their own, in a gradient,
  * a shadow, a color-mix() or a var() fallback. Strings and url() are text, so
  * `content: "#ff00ff"` and `url(#mask)` aren't colours.
- * @param {string} prop @param {string} value @returns {string[]}
+ * @param {string} prop
+ * @param {string} value
+ * @param {import('./css-value.mjs').ValueNode[]} [nodes] the value already read by parseValue
+ * @returns {string[]}
  */
-export function colourTokens(prop, value) {
+export function colourTokens(prop, value, nodes = parseValue(value)) {
   const named = COLOUR_PROPS.test(prop.toLowerCase());
   /** @type {string[]} */
   const found = [];
-  walkValue(parseValue(value), (n) => {
+  walkValue(nodes, (n) => {
     if (n.type === 'function') {
       if (n.value === 'url') return false;
       if (COLOUR_FUNCTIONS.has(n.value)) { found.push(value.slice(n.start, n.end)); return false; }
@@ -274,6 +288,8 @@ export function checkDeclaration(system, prop, value, { known, mockup = false } 
   const out = [];
   const p = prop.toLowerCase();
   const v = value.replace(/!important/, '').trim();
+  // The value is read once (css-value.mjs); every check below walks the same tree.
+  const nodes = parseValue(v);
 
   // Colour, wherever it appears, custom-property definitions included: a mock-up's own
   // `--surface: #141414` says which node UI token it stands for, and the UI's own
@@ -281,24 +297,24 @@ export function checkDeclaration(system, prop, value, { known, mockup = false } 
   // system itself (00-theme.css isn't checked); a mock-up's redefinition of one is
   // reported by checkText.
   if (!p.startsWith('--') || !system.tokens.has(p)) {
-    for (const text of colourTokens(p, v)) {
+    for (const text of colourTokens(p, v, nodes)) {
       const f = checkColour(system, p, text);
       if (f) out.push(f);
     }
   }
   // Tokens that don't exist (a mock-up's own variables, or a typo).
   // A var() in a string or url() is text, so it reads nothing (css-value.mjs · varRefs).
-  for (const { name } of varRefs(parseValue(v))) {
+  for (const { name } of varRefs(nodes)) {
     if (!system.tokens.has(name) && !known?.has(name)) {
       out.push({ kind: 'token', value: name, use: 'not a node UI token: use one from 00-theme.css (see the reference page), or add it there and to DESIGN.md', offScale: true });
     }
   }
   // Literal values. A token in the same declaration doesn't excuse the literals beside it.
-  for (const hit of classify(p, v)) {
+  for (const hit of classify(p, v, nodes)) {
     const finding = suggest(system, hit);
     if (finding) out.push(finding);
   }
-  if (p === 'box-shadow' && mockup && /\d+px/.test(literals(v)) && !/^inset\b/.test(v)) {
+  if (p === 'box-shadow' && mockup && literalWords(nodes).some((w) => /\d+px$/i.test(w)) && !/^inset\b/.test(v)) {
     out.push({ kind: 'shadow', value: v.slice(0, 40), use: `one shadow per kind of surface: ${system.shadows.map((s) => `var(${s})`).join(', ')}`, offScale: true });
   }
   return out;

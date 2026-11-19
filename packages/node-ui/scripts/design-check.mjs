@@ -17,7 +17,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PKG, UI, buildSystem, checkText, isExempt, readTokens, runtimeProps, walk } from './design-core.mjs';
+import { PKG, UI, buildSystem, checkText, inUi, isExempt, readTokens, runtimeProps, walk } from './design-core.mjs';
 
 // The checks themselves are in design-core.mjs; this is the command line around them.
 export * from './design-core.mjs';
@@ -80,7 +80,7 @@ function main(argv) {
   const results = [];
   for (const [file, lines] of targets) {
     if (!EXTENSIONS.has(extname(file).toLowerCase()) || isExempt(file) || !existsSync(file)) continue;
-    const isMockup = !file.startsWith(UI);
+    const isMockup = !inUi(file);
     const text = readFileSync(file, 'utf8');
     const findings = checkText(system, text, file, {
       // A mock-up's own variables are found by checkText; the UI also sets some at runtime.

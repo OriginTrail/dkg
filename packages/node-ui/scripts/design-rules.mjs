@@ -6,7 +6,7 @@
 // that the system needs a new one). The JSDoc types are checked: tsconfig.type-tests.json
 // runs tsc with checkJs over this file.
 import { CssReadError, cssDeclarations } from './css.mjs';
-import { parseValue, rewriteValue, varRefs } from './css-value.mjs';
+import { literalWords, parseValue, varRefs } from './css-value.mjs';
 import { maskHtmlComments, readHtml } from './html.mjs';
 import { styleDeclarations } from './jsx.mjs';
 
@@ -35,8 +35,6 @@ export const MOTION_FREE_MS = 0.5;
 
 export { maskHtmlComments };
 
-/** A value with its var() expressions taken out, so the literals beside a token are still checked. @param {string} value @returns {string} */
-export const literals = (value) => rewriteValue(value, parseValue(value), (n) => (n.type === 'function' && n.value === 'var' ? ' ' : undefined));
 
 /** Most values one declaration is checked with, when its variables have several definitions. */
 const MAX_CANDIDATES = 16;
@@ -173,23 +171,27 @@ export function declarations(text, ext) {
  *
  * @param {string} prop
  * @param {string} value
+ * @param {import('./css-value.mjs').ValueNode[]} [nodes] the value already read by parseValue, so it's read once
  * @returns {Hit[]}
  */
-export function classify(prop, value) {
+export function classify(prop, value, nodes) {
   const p = prop.toLowerCase();
   const v = value.replace(/!important/, '').trim();
-  const lit = literals(v);
-  const px = () => [...lit.matchAll(/(?<![\w.#-])(-?\d*\.?\d+)px\b/g)].map((m) => Number(m[1]));
+  // The words the value says itself: var() is a token, so `var(--space-4) 10px` is checked as 10px.
+  const words = literalWords(nodes ?? parseValue(v));
+  /** @param {RegExp} re */
+  const numbers = (re) => words.map((w) => re.exec(w)).filter((m) => m !== null).map((m) => Number(m[1]));
+  const px = () => numbers(/^(-?\d*\.?\d+)px$/i);
   /** @type {Hit[]} */
   const out = [];
   if (/^border(-[a-z]+)*-radius$/.test(p)) {
     for (const n of px()) if (n !== 0 && n < 100) out.push({ kind: 'corner', value: `${n}px`, n });
-    if (/\b(999|9999)px\b/.test(lit)) out.push({ kind: 'corner', value: v, pill: true });
+    if (words.some((w) => /^(999|9999)px$/i.test(w))) out.push({ kind: 'corner', value: v, pill: true });
   } else if (/^(padding|margin|gap|row-gap|column-gap)(-[a-z]+)*$/.test(p)) {
     for (const n of px()) if (n > 1) out.push({ kind: 'spacing', value: `${n}px`, n, up: p.startsWith('padding') });
   } else if (p === 'font-size' || p === 'font') {
     for (const n of p === 'font' ? px().slice(0, 1) : px()) out.push({ kind: 'type size', value: `${n}px`, n });
-    if (/\d(r?em|pt)\b/.test(lit) && v !== '1em') out.push({ kind: 'type size', value: v, unit: true });
+    if (words.some((w) => /^-?\d*\.?\d+(r?em|pt)$/i.test(w)) && v !== '1em') out.push({ kind: 'type size', value: v, unit: true });
   } else if (p === 'font-weight') {
     if (/^\d+$/.test(v) && !WEIGHTS.includes(v)) out.push({ kind: 'weight', value: v });
   } else if (p === 'line-height') {
@@ -202,7 +204,7 @@ export function classify(prop, value) {
     for (const n of px()) out.push({ kind: 'height', value: `${n}px`, n });
   } else if (/^transition(-duration|-delay)?$/.test(p)) {
     // Transitions only: a looping animation (a spinner, a pulse) has its own length.
-    for (const m of lit.matchAll(/(?<![\w.-])(\d*\.?\d+)(m?s)\b/g)) {
+    for (const m of words.map((w) => /^(\d*\.?\d+)(m?s)$/i.exec(w)).filter((x) => x !== null)) {
       const ms = Number(m[1]) * (m[2] === 's' ? 1000 : 1);
       if (ms > MOTION_FREE_MS) out.push({ kind: 'motion', value: m[0], n: ms });
     }
