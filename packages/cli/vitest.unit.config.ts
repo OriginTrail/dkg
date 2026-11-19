@@ -15,6 +15,7 @@ export default defineConfig({
           'test/async-share-bound-recovery.test.ts',
           'test/write-preflight-diagnostics.test.ts',
           'test/durable-synchronous-share.test.ts',
+          'test/durable-share-snapshot-writes.test.ts',
           'test/durable-private-payload-recovery.test.ts',
           'test/durable-gossip-signer-lookup.test.ts',
           'test/durable-share-preparation-race.test.ts',
