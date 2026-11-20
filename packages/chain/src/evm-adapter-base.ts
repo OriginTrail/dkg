@@ -151,7 +151,10 @@ import {
   type StuckTransactionTarget,
 } from './stuck-transaction-recovery.js';
 import { ContextGraphAuthorityHistoryCache } from './context-graph-authority-history.js';
-import { ContextGraphAuthorityIndex } from './context-graph-authority-index.js';
+import {
+  ContextGraphAuthorityIndex,
+  type ContextGraphAuthorityIndexDeploymentLookup,
+} from './context-graph-authority-index.js';
 import {
   createEvmContextGraphAuthorityIndexRevisionReaderV1,
   type EvmContextGraphAuthorityIndexReaderV1,
@@ -1582,8 +1585,8 @@ export class EVMChainAdapterBase {
             options,
           ),
           // The index reader consumes only the deploy block: no head probe on a cache hit.
-          resolveContractDeployBlockNumber: (address, operationLabel, contractLabel) =>
-            this.resolveContractDeployBlockNumber(
+          resolveContractDeployBlock: (address, operationLabel, contractLabel) =>
+            this.resolveContractDeployBlockLookup(
               address,
               operationLabel,
               contractLabel,
@@ -3767,13 +3770,23 @@ export class EVMChainAdapterBase {
     operationLabel: string,
     contractLabel: string,
   ): Promise<number> {
+    return (await this.resolveContractDeployBlockLookup(address, operationLabel, contractLabel))
+      .blockNumber;
+  }
+
+  /** The same lookup, saying whether it pinned the block or fell back to genesis. */
+  protected async resolveContractDeployBlockLookup(
+    address: string,
+    operationLabel: string,
+    contractLabel: string,
+  ): Promise<ContextGraphAuthorityIndexDeploymentLookup> {
     const cached = this.cachedContractDeployBlocks.get(address.toLowerCase());
-    if (cached !== undefined) return cached;
-    return (await this.resolveContractDeployBlock(
-      address,
-      operationLabel,
-      contractLabel,
-    )).fromBlock;
+    if (cached !== undefined) return Object.freeze({ blockNumber: cached, pinned: true });
+    const resolved = await this.resolveContractDeployBlock(address, operationLabel, contractLabel);
+    return Object.freeze({
+      blockNumber: resolved.fromBlock,
+      pinned: resolved.degradedFromGenesis !== true,
+    });
   }
 
   protected async resolveContractDeployBlock(
