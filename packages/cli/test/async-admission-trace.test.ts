@@ -266,7 +266,8 @@ it('joins each opt-in share timing to its own enqueue and bounds the gateway fie
     const first = start(raw);
     const abandoned = start([raw, raw]);
     const publish = start(raw, PUBLISH);
-    advance(7);
+    advance(2);
+    await admissionStep(first, 'write_preflight', async () => { advance(5); });
     const requestId = await admissionStep(first, 'enqueue', async () => currentAsyncAdmissionDiagnosticContext()?.requestId);
     advance(3);
     abandoned.close();
@@ -281,7 +282,7 @@ it('joins each opt-in share timing to its own enqueue and bounds the gateway fie
     expect(closed).toEqual({ event: 'async_share_http_timing', requestId: expect.any(String), phase: 'request', status: 0, elapsedMs: 10 });
     expect(closed.requestId).not.toBe(requestId);
     expect(answered).toEqual({ event: 'async_share_http_timing', requestId, exchangeHash: createHash('sha256').update(raw).digest('hex'),
-      phase: 'enqueue', status: 202, elapsedMs: 10, enqueueStartedAfterMs: 7 });
+      phase: 'enqueue', status: 202, elapsedMs: 10, enqueueStartedAfterMs: 7, writePreflightStartedAfterMs: 2, writePreflightSettledAfterMs: 7 });
     expect(messages.join('')).not.toContain(raw);
   } finally {
     sink.mockRestore();

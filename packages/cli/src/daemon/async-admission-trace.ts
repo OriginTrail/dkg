@@ -1,3 +1,4 @@
+import { shareConnectionTiming, shareDispatchGc, type ConnectionTiming } from './share-connection-timing.js';
 import { createHash } from 'node:crypto';
 import type { ServerResponse } from 'node:http';
 import {
@@ -58,7 +59,13 @@ interface AdmissionTrace {
   /** The step the request is in now. */
   phase: AsyncAdmissionPhase;
   closed?: boolean;
-  shareTiming?: { exchangeHash?: string; enqueueStartedAfterMs?: number };
+  shareTiming?: Partial<ConnectionTiming> & {
+    exchangeHash?: string;
+    handlerEnteredAtUnixMs?: number;
+    writePreflightStartedAfterMs?: number;
+    writePreflightSettledAfterMs?: number;
+    enqueueStartedAfterMs?: number;
+  };
   /** The first answer, with the phase it was given in. */
   answer?: { status: number; code: string; phase: AsyncAdmissionPhase; atMs: number };
 }
@@ -80,7 +87,8 @@ export function beginAsyncAdmissionTrace(
   };
   if (route === 'share_async' && process.env.DKG_ASYNC_PROMOTE_ADMISSION_TRACE === '1') {
     const id = res.req?.headers['x-scan-admission-id'];
-    trace.shareTiming = {};
+    const connection = shareConnectionTiming(res.req);
+    trace.shareTiming = connection ? { ...connection, handlerEnteredAtUnixMs: Math.round(performance.timeOrigin + trace.startedAtMs) } : {};
     if (typeof id === 'string' && id.length === 32 && /^[0-9a-f]+$/.test(id)) {
       trace.shareTiming.exchangeHash = createHash('sha256').update(id).digest('hex');
     }
@@ -102,9 +110,15 @@ export async function admissionStep<T>(
   if (phase === 'enqueue' && trace.shareTiming && trace.shareTiming.enqueueStartedAfterMs === undefined) {
     trace.shareTiming.enqueueStartedAfterMs = Math.round(trace.clock() - trace.startedAtMs);
   }
-  const result = await trace.diagnostic.run(phase, run);
-  trace.phase = previous;
-  return result;
+  const preflight = phase === 'write_preflight' ? trace.shareTiming : undefined;
+  if (preflight) preflight.writePreflightStartedAfterMs = Math.round(trace.clock() - trace.startedAtMs);
+  try {
+    const result = await trace.diagnostic.run(phase, run);
+    trace.phase = previous;
+    return result;
+  } finally {
+    if (preflight) preflight.writePreflightSettledAfterMs = Math.round(trace.clock() - trace.startedAtMs);
+  }
 }
 
 /** The first answer a traced request sends wins; `body` is the serialized JSON the route sends. */
@@ -150,6 +164,7 @@ function finishTrace(res: ServerResponse, trace: AdmissionTrace): void {
     try {
       logger.info(createOperationContext('system'), JSON.stringify({
         event: 'async_share_http_timing', requestId: trace.diagnostic.requestId, ...trace.shareTiming,
+        gcBeforeDispatch: shareDispatchGc(res.req),
         phase, status, elapsedMs: Math.round(latencyMs),
       }));
     } catch { /* Timing cannot affect the response or ordinary usage accounting. */ }

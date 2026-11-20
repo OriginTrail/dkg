@@ -1,3 +1,4 @@
+import { traceShareStoreCall } from './share-store-timing.js';
 import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';
 import { performance } from 'node:perf_hooks';
 import { availableParallelism } from 'node:os';
@@ -190,6 +191,7 @@ interface QueueEntry<T> {
   storeOperation?: StoreOperation;
   queuedAt: number;
   admission?: AsyncAdmissionDiagnosticContext;
+  timing?: ReturnType<typeof traceShareStoreCall>;
   pressureTicket: SchedulerPressureTicket;
   work: () => Promise<T>;
   resolve: (value: T) => void;
@@ -536,11 +538,16 @@ export class StorePriorityScheduler extends ObservableScheduler {
       ? priority ?? defaultStoreWorkPriority.getStore() ?? 'normal'
       : 'normal';
     const lane: StoreSchedulerPriority = this.controlId === undefined ? normalizedPriority : 'control';
+    const busy = this.normalInflight + this.ackInflight + this.healthInflight + this.backgroundInflight > 0;
+    const timing = traceShareStoreCall(operation, metadata?.storeOperation, lane, this.controlId,
+      busy ? () => this.getBackpressureSnapshot() : undefined);
     if (signal?.aborted) {
+      timing?.finish('aborted');
       const reason = signal.reason;
       throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
     }
     if (this.queues[normalizedPriority].length >= this.queueLimits[normalizedPriority]) {
+      timing?.finish('queue_full');
       const error = new StoreSchedulerBusyError(
         'queue_full',
         lane,
@@ -566,8 +573,8 @@ export class StorePriorityScheduler extends ObservableScheduler {
         storeOperation: metadata?.storeOperation,
         queuedAt: this.now(),
         admission: currentAsyncAdmissionDiagnosticContext(),
-        pressureTicket,
-        work: AsyncResource.bind(work),
+        pressureTicket, timing,
+        work: AsyncResource.bind(timing ? () => timing.run(work) : work),
         resolve,
         reject,
         signal,
@@ -575,6 +582,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
       const onAbort = () => {
         if (this.removeQueued(entry as QueueEntry<unknown>)) {
           this.cleanupQueuedEntry(entry as QueueEntry<unknown>);
+          timing?.finish('aborted');
           this.pressureCancelQueued(entry.pressureTicket, 'aborted');
           this.stats.recordQueueWait(entry.lane, this.now() - entry.queuedAt);
           const reason = signal?.reason;
@@ -600,6 +608,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
           () => this.getBackpressureSnapshot(),
           () => activeStoreAdmissionsSnapshot(this.activeAdmissions, this.now()),
         );
+        timing?.finish('queue_wait_timeout');
         this.pressureRejectQueued(entry.pressureTicket, error.reason);
         this.observeRejection(error, this.now() - entry.queuedAt);
         reject(error);
@@ -686,11 +695,13 @@ export class StorePriorityScheduler extends ObservableScheduler {
     let pressureOutcome: SchedulerPressureOutcome = 'completed';
     result
       .then((value) => {
+        entry.timing?.finish('ok');
         this.observeDuration(entry, startedAt, 'ok');
         entry.resolve(value);
       })
       .catch((err) => {
         pressureOutcome = 'failed';
+        entry.timing?.finish('error');
         this.observeDuration(entry, startedAt, 'error');
         entry.reject(err);
       })

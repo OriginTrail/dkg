@@ -231,6 +231,7 @@ import { endContextGraphWriteReadinessWaits } from './context-graph-write-readin
 import { daemonCpuProfiles } from './cpu-profile.js';
 import { daemonReadGraphRequests } from './routes/read-graphs.js';
 import { startContextGraphCatchupProgress } from './context-graph-catchup-progress-sources.js';
+import { observeShareConnections } from './share-connection-timing.js';
 import { beginAsyncAdmissionTrace } from './async-admission-trace.js';
 import { authenticateHttpRequest, canAdministerNode, loadTokens } from '../auth.js';
 import { AGENT_HTTP_HEADERS, isKnownAgentKeySigner, normalizeOperatorAgentAddresses } from '../agent-http-auth.js';
@@ -3706,6 +3707,7 @@ async function runDaemonInnerWithStartupOwnership(
   // Resolution + assignment live in applyServerLimits (unit-tested); tunable via
   // DKG_MAX_CONNECTIONS / DKG_HEADERS_TIMEOUT_MS, with malformed/empty values
   // falling back to defaults rather than becoming NaN.
+  observeShareConnections(server);
   applyServerLimits(server, {
     maxConnectionsEnv: process.env.DKG_MAX_CONNECTIONS,
     maxConnectionsConfig: config.maxConnections,
