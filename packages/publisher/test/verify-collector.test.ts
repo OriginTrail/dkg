@@ -3,8 +3,13 @@ import {
   VerifyCollector,
   VERIFY_COLLECTION_TIMEOUT_MAX_MS,
 } from '../src/verify-collector.js';
-import { encodeVerifyApproval, decodeVerifyProposal } from '@origintrail-official/dkg-core';
+import { encodeVerifyApproval, decodeVerifyProposal, computeACKDigest, computeVerifyApprovalDigest } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
+
+const DOMAIN = { chainId: 84532n, contractAddress: '0x00000000000000000000000000000000000000a1' };
+/** What an approver signs for batch 100 of on-chain context graph 42. */
+const approvalDigest = (merkleRoot: Uint8Array) =>
+  computeVerifyApprovalDigest(DOMAIN.chainId, DOMAIN.contractAddress, 42n, 100n, merkleRoot);
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -37,15 +42,7 @@ describe('VerifyCollector', () => {
 
     const sendP2P = async (_peerId: string, _protocol: string, data: Uint8Array) => {
       const proposal = decodeVerifyProposal(data);
-
-      const contextGraphIdBig = BigInt(42);
-      const packed = new Uint8Array(64);
-      const cgBytes = new Uint8Array(32);
-      const view = new DataView(cgBytes.buffer);
-      view.setBigUint64(24, contextGraphIdBig);
-      packed.set(cgBytes, 0);
-      packed.set(proposal.merkleRoot, 32);
-      const digest = ethers.getBytes(ethers.keccak256(packed));
+      const digest = approvalDigest(proposal.merkleRoot);
 
       if (_peerId === 'peer-a') return makeApproval(proposal.proposalId, walletA, digest);
       if (_peerId === 'peer-b') return makeApproval(proposal.proposalId, walletB, digest);
@@ -60,6 +57,7 @@ describe('VerifyCollector', () => {
     const result = await collector.collect({
       contextGraphId: 'test-cg',
       contextGraphIdOnChain: 42n,
+      signingDomain: DOMAIN,
       verifiableMemoryId: 1n,
       batchId: 100n,
       merkleRoot,
@@ -86,6 +84,7 @@ describe('VerifyCollector', () => {
     await expect(collector.collect({
       contextGraphId: 'test-cg',
       contextGraphIdOnChain: 42n,
+      signingDomain: DOMAIN,
       verifiableMemoryId: 1n,
       batchId: 100n,
       merkleRoot: new Uint8Array(32),
@@ -105,6 +104,7 @@ describe('VerifyCollector', () => {
     await expect(collector.collect({
       contextGraphId: 'test-cg',
       contextGraphIdOnChain: 42n,
+      signingDomain: DOMAIN,
       verifiableMemoryId: 1n,
       batchId: 100n,
       merkleRoot: new Uint8Array(32),
@@ -124,6 +124,7 @@ describe('VerifyCollector', () => {
     const result = await collector.collect({
       contextGraphId: 'test-cg',
       contextGraphIdOnChain: 42n,
+      signingDomain: DOMAIN,
       verifiableMemoryId: 1n,
       batchId: 100n,
       merkleRoot: new Uint8Array(32),
@@ -149,6 +150,7 @@ describe('VerifyCollector', () => {
     await expect(collector.collect({
       contextGraphId: 'test-cg',
       contextGraphIdOnChain: 42n,
+      signingDomain: DOMAIN,
       verifiableMemoryId: 1n,
       batchId: 100n,
       merkleRoot: new Uint8Array(32),
@@ -167,14 +169,7 @@ describe('VerifyCollector', () => {
     const merkleRoot = ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('timer-root')));
     const sendP2P = async (_peerId: string, _protocol: string, data: Uint8Array) => {
       const proposal = decodeVerifyProposal(data);
-      const contextGraphIdBig = BigInt(42);
-      const packed = new Uint8Array(64);
-      const cgBytes = new Uint8Array(32);
-      const view = new DataView(cgBytes.buffer);
-      view.setBigUint64(24, contextGraphIdBig);
-      packed.set(cgBytes, 0);
-      packed.set(proposal.merkleRoot, 32);
-      const digest = ethers.getBytes(ethers.keccak256(packed));
+      const digest = approvalDigest(proposal.merkleRoot);
       return makeApproval(proposal.proposalId, walletA, digest);
     };
     const collector = new VerifyCollector({
@@ -185,6 +180,7 @@ describe('VerifyCollector', () => {
     await collector.collect({
       contextGraphId: 'test-cg',
       contextGraphIdOnChain: 42n,
+      signingDomain: DOMAIN,
       verifiableMemoryId: 1n,
       batchId: 100n,
       merkleRoot,
@@ -206,6 +202,7 @@ describe('VerifyCollector', () => {
     const baseCollectArgs = {
       contextGraphId: 'test-cg',
       contextGraphIdOnChain: 42n,
+      signingDomain: DOMAIN,
       verifiableMemoryId: 1n,
       batchId: 100n,
       merkleRoot: new Uint8Array(32),
@@ -272,6 +269,7 @@ describe('VerifyCollector', () => {
     const baseCollectArgs = {
       contextGraphId: 'test-cg',
       contextGraphIdOnChain: 42n,
+      signingDomain: DOMAIN,
       verifiableMemoryId: 1n,
       batchId: 100n,
       merkleRoot: new Uint8Array(32),
@@ -341,6 +339,7 @@ describe('VerifyCollector', () => {
     await expect(collector.collect({
       contextGraphId: 'cg-x',
       contextGraphIdOnChain: 42n,
+      signingDomain: DOMAIN,
       verifiableMemoryId: 1n,
       batchId: 100n,
       merkleRoot: new Uint8Array(32),
@@ -349,5 +348,47 @@ describe('VerifyCollector', () => {
       requiredSignatures: 2,
       timeoutMs: 1000,
     })).rejects.toThrow(/verify_no_peers/);
+  });
+});
+
+describe('VerifyCollector approval digest', () => {
+  const merkleRoot = ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('bound-digest-root')));
+
+  async function approverOf(sign: (proposal: ReturnType<typeof decodeVerifyProposal>) => Uint8Array, wallet: ethers.Wallet) {
+    const collector = new VerifyCollector({
+      sendP2P: async (_peerId, _protocol, data) => {
+        const proposal = decodeVerifyProposal(data);
+        return makeApproval(proposal.proposalId, wallet, sign(proposal));
+      },
+      getParticipantPeers: () => ['peer-a'],
+    });
+    const result = await collector.collect({
+      contextGraphId: 'test-cg',
+      contextGraphIdOnChain: 42n,
+      signingDomain: DOMAIN,
+      verifiableMemoryId: 1n,
+      batchId: 100n,
+      merkleRoot,
+      entities: [],
+      proposerSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+      requiredSignatures: 2,
+      timeoutMs: 5000,
+    });
+    return result.approvals.map((approval) => approval.approverAddress);
+  }
+
+  it('attributes an approval to its signer when it signs the digest bound to this chain, deployment and batch', async () => {
+    const wallet = new ethers.Wallet(ethers.Wallet.createRandom().privateKey);
+    expect(await approverOf((proposal) => approvalDigest(proposal.merkleRoot), wallet)).toEqual([wallet.address]);
+  });
+
+  it.each([
+    ['the unbound two-field digest', (root: Uint8Array) => computeACKDigest(42n, root)],
+    ['another chain', (root: Uint8Array) => computeVerifyApprovalDigest(1n, DOMAIN.contractAddress, 42n, 100n, root)],
+    ['another deployment', (root: Uint8Array) => computeVerifyApprovalDigest(DOMAIN.chainId, '0x00000000000000000000000000000000000000a2', 42n, 100n, root)],
+    ['another batch', (root: Uint8Array) => computeVerifyApprovalDigest(DOMAIN.chainId, DOMAIN.contractAddress, 42n, 101n, root)],
+  ])('does not attribute an approval signed over %s to its signer', async (_name, digestFor) => {
+    const wallet = new ethers.Wallet(ethers.Wallet.createRandom().privateKey);
+    expect(await approverOf((proposal) => digestFor(proposal.merkleRoot), wallet)).not.toContain(wallet.address);
   });
 });

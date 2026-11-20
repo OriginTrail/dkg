@@ -20,7 +20,6 @@ import {
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
   deriveCuratorDidFromCgId,
   MemoryLayer,
-  computeACKDigest,
   encodePublishRequest,
   encodeKAUpdateRequest,
   encodeGossipEnvelope,
@@ -131,6 +130,7 @@ import {
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 
 import { ProfileManager } from './profile-manager.js';
+import { verifyApprovalSigningInput } from './verify-approval-signing.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck } from './messaging.js';
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
@@ -527,7 +527,7 @@ export class EndorseVerifyMethods extends DKGAgentBase {
       ?? this.config.chainConfig?.operationalKeys?.[0];
     if (!signerKey) throw new Error('No signer key available for verify');
 
-    const digest = computeACKDigest(contextGraphIdOnChain, merkleRoot);
+    const { signingDomain, digest } = await verifyApprovalSigningInput(this.chain, contextGraphIdOnChain, opts.batchId, merkleRoot);
     const prefixedHash = ethers.hashMessage(digest);
     const signingKey = new ethers.SigningKey(signerKey);
     const proposerSig = signingKey.sign(prefixedHash);
@@ -635,7 +635,7 @@ export class EndorseVerifyMethods extends DKGAgentBase {
 
     const result = await collector.collect({
       contextGraphId: opts.contextGraphId,
-      contextGraphIdOnChain,
+      contextGraphIdOnChain, signingDomain,
       verifiableMemoryId: (() => {
         try { return BigInt(opts.verifiableMemoryId); }
         catch { throw new Error(`verifiableMemoryId must be a numeric string, got: "${opts.verifiableMemoryId}"`); }

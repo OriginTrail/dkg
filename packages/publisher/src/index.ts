@@ -257,7 +257,7 @@ export {
   type CollectedApproval,
   type VerifyCollectionResult,
 } from './verify-collector.js';
-export { VerifyProposalHandler, type VerifyProposalHandlerDeps } from './verify-proposal-handler.js';
+export { VerifyProposalHandler, type VerifyProposalHandlerDeps, type VerifyApprovalSigningDomain } from './verify-proposal-handler.js';
 export { buildVerificationMetadata } from './verification-metadata.js';
 export { PublishHandler, parseSimpleNQuads } from './publish-handler.js';
 export { PublishJournal, type JournalEntry } from './publish-journal.js';

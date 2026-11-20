@@ -8,7 +8,8 @@ import { startLiveDaemon, stopLiveDaemon, type LiveDaemon } from './helpers/live
 // End to end through a real daemon on the isolated mock chain: node-wide
 // settings, node logs, agent registration and shutdown accept the node-operator
 // token and refuse an agent-scoped one, and the dashboard shell embeds the
-// operator token only for a loopback caller with a loopback Host. This covers
+// operator token only when auth.dashboardAutoSignIn is on, and then only for a
+// loopback caller with a loopback Host. This covers
 // the daemon wiring that unit tests of the individual handlers cannot: the
 // shared memory TTL route, the caller scope passed to the dashboard API
 // handler, and the `nodeUiTokenForRequest` decision at the `/ui` call site.
@@ -75,11 +76,13 @@ describe('node-admin scope on a live daemon (mock chain)', () => {
     if (createdShellDir) rmSync(shellDir, { recursive: true, force: true });
   });
 
-  it('embeds the operator token in /ui only for a loopback caller with a loopback Host', async () => {
+  it('serves /ui without the operator token by default, even to a loopback caller with a loopback Host', async () => {
+    // The token is embedded only with auth.dashboardAutoSignIn.
     const port = daemon.apiPort;
     const local = await getUi(port, `localhost:${port}`);
     expect(local.status).toBe(200);
-    expect(local.body).toContain(`window.__DKG_TOKEN__=${JSON.stringify(operatorToken)}`);
+    expect(local.body).not.toContain('__DKG_TOKEN__');
+    expect(local.body).not.toContain(operatorToken);
 
     const foreignHost = await getUi(port, `evil.example:${port}`);
     expect(foreignHost.status).toBe(200);
@@ -91,6 +94,25 @@ describe('node-admin scope on a live daemon (mock chain)', () => {
       const proxied = await getUi(port, `localhost:${port}`, forwarded);
       expect(proxied.status).toBe(200);
       expect(proxied.body).not.toContain('__DKG_TOKEN__');
+    }
+  });
+
+  it('embeds the operator token in /ui only for a local caller once auth.dashboardAutoSignIn is on', async () => {
+    const signIn = await startLiveDaemon({
+      extraConfig: { chain: { type: 'mock' }, auth: { enabled: true, dashboardAutoSignIn: true } },
+    });
+    try {
+      const port = signIn.apiPort;
+      const local = await getUi(port, `localhost:${port}`);
+      expect(local.status).toBe(200);
+      expect(local.body).toContain(`window.__DKG_TOKEN__=${JSON.stringify(signIn.token)}`);
+
+      const foreignHost = await getUi(port, `evil.example:${port}`);
+      expect(foreignHost.body).not.toContain('__DKG_TOKEN__');
+      const proxied = await getUi(port, `localhost:${port}`, { 'X-Forwarded-For': '203.0.113.7' });
+      expect(proxied.body).not.toContain('__DKG_TOKEN__');
+    } finally {
+      await stopLiveDaemon(signIn);
     }
   });
 

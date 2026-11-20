@@ -105,6 +105,14 @@ export class EncryptionKeyEnrollments {
     });
   }
 
+  /** Whether an unexpired enrollment for `agentAddress` is waiting for its activation on this node. */
+  async hasPending(agentAddress: string): Promise<boolean> {
+    const address = agentAddress.toLowerCase();
+    const now = this.now();
+    return Object.values(await this.read()).some(({ challenge }) =>
+      challenge.agentAddress.toLowerCase() === address && challenge.targetPeerId === this.peerId && challenge.expiresAt > now);
+  }
+
   async activate<T>(input: { agentAddress: string; enrollmentId: string; encryptionKeyProof: string; custodyProof: string },
     persist: (publicKey: string, entry: WorkspaceEncryptionKeyEntry) => Promise<T>): Promise<T> {
     return withPrivateFileLock(this.path, async () => {

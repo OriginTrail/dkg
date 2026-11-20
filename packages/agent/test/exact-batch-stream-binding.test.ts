@@ -57,7 +57,7 @@ async function fixture(assetCount = 10, rows = 2000) {
   const parse = vi.fn((bytes: Uint8Array) => ContextGraphResolveMethods.prototype.parseSyncRequest.call({
     parsePipeDelimitedSyncRequest: ContextGraphResolveMethods.prototype.parsePipeDelimitedSyncRequest,
   } as never, bytes));
-  const publicAgent = { isPrivateContextGraph: vi.fn(async () => false) };
+  const publicAgent = { keepsContextGraphLocally: () => false, isPrivateContextGraph: vi.fn(async () => false) };
   // The real normal authorizer intentionally allows public CG reads. A signed
   // START uses the real digest/builder, not a synthetic authorize()=>true port.
   const authorize = vi.fn((request, peer, options) => ContextGraphResolveMethods.prototype.authorizeSyncRequest.call(publicAgent as never, request, peer, options));

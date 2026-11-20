@@ -22,6 +22,7 @@ import { normalizeExactSyncResponseEncoding } from './sync/wire-compression.js';
 import { normalizeExactAssetUals, requireExactAssetUals } from './sync/exact-assets.js';
 import { decodePipeSyncRequestTail, normalizeByteBudgetPageHint } from './sync/auth/pipe-request-tail.js';
 import { authorizePrivateSyncRequest, syncAgentGateOf } from './sync/auth/request-authorize.js';
+import { syncContextGraphIdRefusal } from './sync/auth/sync-context-graph-id.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
 // type alias so listPendingJoinApprovalRetries() retains its old
@@ -1084,6 +1085,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     options: { signal?: AbortSignal } = {},
   ): Promise<boolean> {
     throwIfOperationAborted(options.signal);
+    // Refuse an id naming another graph's partitions before its policy lookup.
+    if (syncContextGraphIdRefusal(request.contextGraphId, (id) => this.keepsContextGraphLocally(id)) !== undefined) {
+      return false;
+    }
     const isPrivate = await this.isPrivateContextGraph(request.contextGraphId, { signal: options.signal });
     throwIfOperationAborted(options.signal);
     if (!isPrivate) {
