@@ -34,6 +34,13 @@ All notable changes to the DKG V10 node are documented here. The format is based
   Keep the API on `127.0.0.1`, reach the node from elsewhere through a
   reverse proxy that terminates TLS, and set `corsOrigins` to the origins
   that need the API.
+- Gossip runs on gossipsub 17.2.1 (was 16.1.1), which limits the topic
+  subscriptions it records for each peer. The node records up to 2 MiB of
+  topics per peer on the mainnets, about 1,500 to 1,850 DKG topics, and
+  8 MiB elsewhere, about 6,000 to 7,400. gossipsub's 1 MiB default holds
+  fewer than a testnet Core node subscribes to. The node leaves a peer out
+  of its publishes on topics beyond the limit. Nodes on 16.1.1 and 17.2.1
+  share one gossip mesh.
 
 ## [10.1.1] - Unreleased
 

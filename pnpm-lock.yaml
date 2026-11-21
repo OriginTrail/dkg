@@ -965,8 +965,8 @@ importers:
         specifier: 3.0.32
         version: 3.0.32
       '@libp2p/gossipsub':
-        specifier: 16.1.1
-        version: 16.1.1
+        specifier: 17.2.1
+        version: 17.2.1
       '@libp2p/identify':
         specifier: 4.1.18
         version: 4.1.18
@@ -2997,8 +2997,8 @@ packages:
   '@libp2p/dcutr@3.0.32':
     resolution: {integrity: sha512-ZlF6OIitErofHNlFuemn6JlHqNIV03w0Uhz6UC2E13ExJXhowiPq/s/OMaautHKl3//wPySABlAoLRCm/39GQQ==}
 
-  '@libp2p/gossipsub@16.1.1':
-    resolution: {integrity: sha512-GX2eDwn11eiRzfxGZ/c0KcndnQLBAVdnBR3/bQvrd5rFrZhc9wEMJmAwPzzjs1XSNE7xgqMnM5Ky3nM7lCxqbg==}
+  '@libp2p/gossipsub@17.2.1':
+    resolution: {integrity: sha512-eHJiRZanzlJOXlHOfeyaOsI93qv4E8dy80CBVlyLeoec1mNy4ph+v8KJqS7V7c1OL+fbG2h1druwsOK3iZGs1g==}
     engines: {npm: '>=8.7.0'}
 
   '@libp2p/identify@4.1.18':
@@ -10482,7 +10482,7 @@ snapshots:
       protons-runtime: 7.1.2
       uint8arraylist: 3.0.2
 
-  '@libp2p/gossipsub@16.1.1':
+  '@libp2p/gossipsub@17.2.1':
     dependencies:
       '@libp2p/crypto': 5.2.0
       '@libp2p/interface': 3.4.0

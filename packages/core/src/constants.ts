@@ -261,6 +261,32 @@ export const DKG_GOSSIP_MAX_MESSAGE_BYTES = STORAGE_ACK_MAX_STAGING_BYTES;
 /** Allows GossipSub RPC framing around one max-sized application payload. */
 export const DKG_GOSSIP_MAX_RPC_BYTES = DKG_GOSSIP_MAX_MESSAGE_BYTES + 256 * 1024;
 
+/**
+ * gossipsub 17+ keeps at most this many bytes of one peer's subscriptions, charging
+ * each topic its length plus 1024, and silently leaves the peer out of publishes on
+ * the topics beyond it. A DKG wire topic is 106 to 375 characters (the longest with a
+ * 256-character context graph id), so gossipsub's 1 MiB default holds about 750 to
+ * 930 of them, fewer than testnet Core nodes subscribe to. 8 MiB holds about 6,000 to
+ * 7,400: at least the 5,000 subscriptions gossipsub decodes from the one RPC in which
+ * a peer announces its topics. Subscriptions a peer adds later arrive one per RPC and
+ * can go past it. The charge counts UTF-16 units, so a node can hold up to about
+ * twice the cap for each connected peer.
+ */
+export const DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER = 8 * 1024 * 1024;
+
+/**
+ * The cap on the mainnets, whose Core nodes subscribe to a few hundred topics. 2 MiB
+ * holds about 1,500 to 1,850 of them and keeps what peers can make a node hold small.
+ */
+export const DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER_MAINNET = 2 * 1024 * 1024;
+
+/** The per-peer topic cap for the selected network config: `mainnet-*` configs get the mainnet cap. */
+export function gossipMaxTopicBytesPerPeer(networkConfigName?: string): number {
+  return networkConfigName?.startsWith('mainnet-')
+    ? DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER_MAINNET
+    : DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER;
+}
+
 // ── V10 GossipSub Topics ───────────────────────────────────────────────
 
 export function contextGraphSharedMemoryTopic(contextGraphId: string): string {
