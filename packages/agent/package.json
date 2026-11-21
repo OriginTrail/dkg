@@ -140,6 +140,7 @@
     "./dist/rfc64/inventory-v1/swm-author-inventory-mutation.js": null,
     "./dist/rfc64/inventory-v1/swm-author-inventory-persistence.js": null,
     "./dist/rfc64/inventory-v1/swm-author-inventory-sql-codec.js": null,
+    "./dist/rfc64/inventory-v1/swm-author-inventory-stored-rows.js": null,
     "./dist/rfc64/inventory-v1/swm-author-inventory-contracts.js": null,
     "./dist/rfc64/inventory-persistence-failure.js": null,
     "./dist/rfc64/inventory-v1/open-error.js": null,

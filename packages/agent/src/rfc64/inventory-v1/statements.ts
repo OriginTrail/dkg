@@ -312,11 +312,15 @@ FROM rfc64_swm_author_inventory_heads_v1
 WHERE inventory_scope_digest = :scope
   AND author_address = :author;`,
 
+  // ROWS DDL allows 1024 + 256 + 256 Unicode scalars, at most four encoded bytes each.
   getSwmAuthorRows: `
 SELECT ka_ual, assertion_coordinate, assertion_version_u64be,
        share_operation_id, projection_digest, public_triple_count_u64be,
        private_triple_count_u64be, seal_digest, shared_at_u64be,
-       expires_at_u64be
+       expires_at_u64be,
+       CASE WHEN octet_length(ka_ual) + octet_length(assertion_coordinate) + octet_length(share_operation_id) <= 6144
+            THEN CAST(char(65279) || ka_ual || char(0) || assertion_coordinate || char(0) || share_operation_id AS BLOB)
+       END AS exact_text
 FROM rfc64_swm_author_inventory_rows_v1
 WHERE inventory_scope_digest = :scope
   AND author_address = :author;`,
