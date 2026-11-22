@@ -180,6 +180,96 @@ describe('retained share reconciliation', () => {
       shareEvidence: { ...proof, agentAddress: 'different-peer' } })).rejects.toThrow('does not match');
     expect((await queue.getStatus(id))?.state).toBe('running');
   });
+  describe('atomic bound share completion', () => {
+    const boundRequest = { ...request, recoveryBinding: {
+      version: 1 as const, sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(proof.seal),
+      inventoryRequired: false, intent: { version: 1 as const, operationId: proof.shareOperationId,
+        timestampMs: 1, confirmationRequired: false, accessPolicy: 'public' as const, allowedPeers: [] },
+    } };
+    const result = () => ({ promotedCount: 1, succeededAt: Date.now(), shareEvidence: proof });
+    async function started() {
+      const id = await queue.enqueue(boundRequest);
+      const job = (await queue.claimNext('worker'))!;
+      await queue.recordCommitMarker(id, job.lease!.claimToken, 'promoteStarted');
+      return (await queue.getStatus(id))!;
+    }
+
+    it.each(['lane', 'seal', 'operation'] as const)('refuses %s mismatch without persisting any marker or result', async mismatch => {
+      const job = await started();
+      const variants = {
+        lane: { ...proof, agentAddress: 'different-peer' },
+        seal: { ...proof, seal: { ...proof.seal, assertionMerkleRoot: `0x${'bb'.repeat(32)}` } },
+        operation: { ...proof, shareOperationId: 'other-operation' },
+      };
+      const write = vi.spyOn(store, 'replaceSubject');
+      await expect(queue.succeedWithShareEvidence(job.jobId, job.lease!.claimToken,
+        { ...result(), shareEvidence: variants[mismatch] })).rejects.toThrow('does not match');
+      expect(write).not.toHaveBeenCalled();
+      expect(await queue.getStatus(job.jobId)).toEqual(job);
+    });
+
+    it.each(['unbound', 'unstarted'] as const)('does not grant atomic completion authority to an %s job', async mode => {
+      const id = await queue.enqueue(mode === 'unbound' ? request : boundRequest);
+      const claimed = (await queue.claimNext('worker'))!;
+      if (mode === 'unbound') await queue.recordCommitMarker(id, claimed.lease!.claimToken, 'promoteStarted');
+      const before = await queue.getStatus(id);
+      await expect(queue.succeedWithShareEvidence(id, claimed.lease!.claimToken, result())).rejects.toThrow('started, bound');
+      expect(await queue.getStatus(id)).toEqual(before);
+    });
+
+    it.each(['wrong-token', 'expired'] as const)('refuses a %s lease without changing the durable started job', async mode => {
+      let now = 1_000_000;
+      queue = new TripleStoreAsyncPromoteQueue(store, { now: () => now, leaseMs: 100 });
+      const job = await started();
+      if (mode === 'expired') now += 100;
+      const write = vi.spyOn(store, 'replaceSubject');
+      await expect(queue.succeedWithShareEvidence(job.jobId,
+        mode === 'wrong-token' ? 'stale-claim' : job.lease!.claimToken, result()))
+        .rejects.toMatchObject({ name: 'PromoteJobLeaseError' });
+      expect(write).not.toHaveBeenCalled();
+      expect(await queue.getStatus(job.jobId)).toEqual(job);
+    });
+
+    it.each(['acknowledged', 'not-written', 'lost-ack'] as const)(
+      'reconstructs exact success or the original started state after %s', async outcome => {
+        const job = await started();
+        const completion = result();
+        const replace = store.replaceSubject.bind(store);
+        const write = vi.spyOn(store, 'replaceSubject').mockImplementation(async (...args) => {
+          if (outcome === 'not-written') throw new Error('store unavailable');
+          await replace(...args);
+          if (outcome === 'lost-ack') throw new Error('acknowledgement lost');
+        });
+        const finishing = queue.succeedWithShareEvidence(job.jobId, job.lease!.claimToken, completion);
+        if (outcome === 'acknowledged') await expect(finishing).resolves.toBeUndefined();
+        else await expect(finishing).rejects.toThrow(outcome === 'not-written' ? 'store unavailable' : 'acknowledgement lost');
+        expect(write).toHaveBeenCalledTimes(1);
+        write.mockRestore();
+
+        // Reconstruct over the actual persisted triples, not the writer's local cache.
+        const restarted = new TripleStoreAsyncPromoteQueue(store);
+        const enqueue = vi.spyOn(restarted, 'enqueue');
+        await restarted.recoverOnStartup();
+        if (outcome === 'not-written') {
+          expect(await restarted.getStatus(job.jobId)).toEqual(job);
+          expect(await restarted.reconcileShare(input)).toMatchObject({ outcome: 'unproven', reason: 'unfinished' });
+        } else {
+          const persisted = (await restarted.getStatus(job.jobId))!;
+          expect(persisted).toMatchObject({ state: 'succeeded', result: completion,
+            commitMarker: { ...job.commitMarker, swmInserted: true } });
+          expect(persisted.lease).toBeUndefined();
+          expect(persisted.request).toEqual(job.request);
+          expect(persisted.attempt).toEqual(job.attempt);
+          expect(await restarted.reconcileShare(input)).toMatchObject({ outcome: 'proven',
+            jobId: job.jobId, evidence: proof, mutationRetryAllowed: false });
+          await expect(restarted.succeedWithShareEvidence(job.jobId, job.lease!.claimToken, completion))
+            .rejects.toMatchObject({ name: 'PromoteJobLeaseError' });
+        }
+        expect(await restarted.claimNext('replacement-worker')).toBeNull();
+        expect(await restarted.list()).toHaveLength(1);
+        expect(enqueue).not.toHaveBeenCalled();
+      });
+  });
   it.each([{ entities: undefined }, { assertionVersion: '0' }, { assertionVersion: '01' }, { authorAddress: `0x${'00'.repeat(20)}` }, { assertionVersion: '18446744073709551616' },
     { merkleRoot: 'not-a-root' }, { shareOperationId: 'with whitespace' }])('rejects incomplete or malformed intent %j', patch => {
     expect(() => validateShareReconciliationInput({ ...input, ...patch })).toThrow();

@@ -2,7 +2,7 @@ import type { PromoteLockOperation } from './promote-lock-timing.js';
 import { bindUnstartedPromoteJob } from './bind-promote-recovery.js';
 import type { PromoteRecoveryBinding } from './promote-recovery-binding.js';
 import { reconcileRetainedShareUnlocked, validateShareReconciliationInput, type ShareReconciliationInput } from './share-reconciliation.js';
-import { readShareCompletionEvidence } from './share-completion-evidence.js';
+import { readShareCompletionEvidence, type ShareCompletionEvidence } from './share-completion-evidence.js';
 import { promoteSuccessTransition } from './async-promote-success.js';
 import { persistPromoteJobWithEvidence, type PromotePersistenceResult } from './promote-admission-persistence.js';
 import { PromoteAdmissionCoordinator, PromoteAdmissionError, type PromoteAdmissionAttempt } from './promote-admission.js';
@@ -401,6 +401,22 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       this.assertLeaseHeld(job, claimToken);
       const succeeded = promoteSuccessTransition(job, snapshot, this.now());
       await this.writeJob(succeeded);
+    });
+  }
+
+  async succeedWithShareEvidence(jobId: string, claimToken: string, result: PromoteResult & { shareEvidence: ShareCompletionEvidence }): Promise<void> {
+    const snapshot = { ...result, shareEvidence: readShareCompletionEvidence(result.shareEvidence) };
+    await this.withMutationLock('succeed', async () => {
+      await this.ensureGraph();
+      const job = await this.requireJob(jobId);
+      this.assertLeaseHeld(job, claimToken);
+      if (!isBoundPromoteJob(job) || !job.commitMarker?.promoteStarted) {
+        throw new Error('Atomic share completion requires a started, bound promote job');
+      }
+      // The transition checks the proof against the durable operation and seal.
+      // The bound writer commits marker, receipt and lease release in one replacement.
+      const marked = { ...job, commitMarker: { ...job.commitMarker, swmInserted: true } };
+      await this.writeJob(promoteSuccessTransition(marked, snapshot, this.now()));
     });
   }
 
