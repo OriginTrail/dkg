@@ -297,6 +297,17 @@ export function getStoreControlPath(): StoreControlPath {
 }
 
 /**
+ * Whether calls tagged for `queue` run on that queue's own scheduler: the path has the queue, and the configured
+ * backend is not one of the embedded stores, which ignore the tag. A process that configured no backend (a tool, a
+ * test) counts as using the path whenever it has the queue.
+ */
+export function storeControlQueueInUse(queue: StoreControlQueue): boolean {
+  if (getStoreControlPath()[queue] === undefined) return false;
+  const backend = resolveControlPath().settings?.backend;
+  return backend === undefined || !EMBEDDED_BACKENDS.has(backend);
+}
+
+/**
  * Test injection point. Replaces the process-wide path with `path` (injected instances are not registered), or
  * with nothing, which returns the process to the unconfigured state (built from the environment alone on next use);
  * either way the previous path's registrations are undone and any configured settings are cleared.

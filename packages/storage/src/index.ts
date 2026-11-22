@@ -145,6 +145,7 @@ export {
   logStoreControlPathGeometry,
   resolveStoreControlConfig,
   selectStoreScheduler,
+  storeControlQueueInUse,
   type StoreControlConfig,
   type StoreControlPath,
   type StoreControlPathSettings,

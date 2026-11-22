@@ -1,4 +1,4 @@
-import { getStoreControlPath } from '@origintrail-official/dkg-storage';
+import { storeControlQueueInUse } from '@origintrail-official/dkg-storage';
 import type { ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-agent';
 import {
   WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS,
@@ -357,7 +357,8 @@ export async function probeWritePreflight(
   options: { accepts: (probe: Probe) => boolean; fresh?: boolean; asyncAdmission?: boolean; now?: MonotonicClockMs },
 ): Promise<CoalescedProbe> {
   const config = effectiveConfig;
-  const protectedReads = options.asyncAdmission === true && getStoreControlPath().preflight !== undefined;
+  // Embedded stores ignore the tag; there a separate flight would only double the reads.
+  const protectedReads = options.asyncAdmission === true && storeControlQueueInUse('preflight');
   const probeOptions = {
     callerAgentAddress,
     contentCheck: 'when-needed-for-write' as const,
