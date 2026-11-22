@@ -148,32 +148,72 @@ function whileHeld<T>(pending: Promise<T>): Promise<T> {
   return Promise.race([pending, timeout]).finally(() => clearTimeout(timer));
 }
 
+/**
+ * Runs every store read of the probe, queries and graph listings alike, on the scheduler its options select:
+ * the held shared one, or the reserved one. Returns the sources of the reads that used the reserved one.
+ */
+function routeStoreReads(store: any, shared: StorePriorityScheduler): string[] {
+  const protectedReads: string[] = [];
+  const route = <T>(source: string, options: unknown, run: () => Promise<T>): Promise<T> => {
+    const scheduler = selectStoreScheduler(shared, typeof options === 'object' && options !== null ? options as QueryOptions : undefined);
+    if (scheduler !== shared) protectedReads.push(source);
+    return scheduler.run('normal', source, run);
+  };
+  const query = store.query.bind(store);
+  store.query = (sparql: string, options?: QueryOptions) => route(options?.source ?? 'query', options, () => query(sparql, options));
+  for (const name of ['listGraphs', 'listGraphsByPrefix', 'hasGraph']) {
+    const original = typeof store[name] === 'function' ? store[name].bind(store) : undefined;
+    if (original) store[name] = (...args: unknown[]) => route(name, args.at(-1), () => original(...args));
+  }
+  return protectedReads;
+}
+
 beforeEach(() => { configureWritePreflightCoalescing({}, { info: () => {}, warn: () => {} }); });
 afterEach(() => { configureWritePreflightCoalescing({}, { info: () => {}, warn: () => {} }); });
 
 describe('concurrent write preflights with the real probe', () => {
-  it('completes a fresh admission while an ordinary probe for the same caller is queued', async () => {
+  it('completes a fresh admission for a synced graph while an ordinary probe for the same caller is queued', async () => {
+    const seam = await seamAgent();
+    seam.release();
+    // A subscribed, synced public graph needs no content read, so only the two reserved reads remain.
+    seam.subs.set(CG, { subscribed: true, synced: true });
+    const shared = new StorePriorityScheduler({ maxConcurrent: 1, queueWaitTimeoutMs: 15_000 });
+    setStoreControlPathForTesting(buildStoreControlPath({ share: 0, publisher: 0, preflight: 1 }, shared));
+    let release!: () => void;
+    const held = shared.run('normal', 'fixture.read', () => new Promise<void>(resolve => { release = resolve; }));
+    const protectedReads = routeStoreReads(seam.store, shared);
+    const ordinary = seam.resolve();
+    try {
+      // Every other store read would wait behind the held shared read.
+      expect((await whileHeld(seam.resolve({ ...SCOPED, asyncAdmission: true }))).id).toBe(CG);
+      expect(protectedReads.sort()).toEqual(['agent.contextGraph.exists', DECLARATION_SOURCE]);
+    } finally {
+      release();
+      await Promise.all([held, ordinary]);
+      setStoreControlPathForTesting(undefined);
+    }
+  });
+
+  it('still runs the content read of a graph that is not synced on the shared scheduler', async () => {
     const seam = await seamAgent();
     seam.release();
     const shared = new StorePriorityScheduler({ maxConcurrent: 1, queueWaitTimeoutMs: 15_000 });
     setStoreControlPathForTesting(buildStoreControlPath({ share: 0, publisher: 0, preflight: 1 }, shared));
     let release!: () => void;
     const held = shared.run('normal', 'fixture.read', () => new Promise<void>(resolve => { release = resolve; }));
-    const query = seam.store.query.bind(seam.store);
-    const protectedReads: string[] = [];
-    seam.store.query = (sparql, options) => {
-      const scheduler = selectStoreScheduler(shared, options);
-      const source = options?.source ?? 'query';
-      if (scheduler !== shared) protectedReads.push(source);
-      return scheduler.run('normal', source, () => query(sparql, options));
-    };
-    const ordinary = seam.resolve();
+    const protectedReads = routeStoreReads(seam.store, shared);
+    const admission = seam.resolve({ ...SCOPED, asyncAdmission: true });
     try {
-      expect((await whileHeld(seam.resolve({ ...SCOPED, asyncAdmission: true }))).id).toBe(CG);
-      expect(protectedReads.sort()).toEqual(['agent.contextGraph.exists', DECLARATION_SOURCE]);
+      const waited = await Promise.race([admission.then(() => false), new Promise<boolean>(resolve => setTimeout(() => resolve(true), 500))]);
+      expect(waited).toBe(true);
     } finally {
       release();
-      await Promise.all([held, ordinary]);
+      await held;
+    }
+    try {
+      expect((await admission).id).toBe(CG);
+      expect(protectedReads.sort()).toEqual(['agent.contextGraph.exists', DECLARATION_SOURCE]);
+    } finally {
       setStoreControlPathForTesting(undefined);
     }
   });
