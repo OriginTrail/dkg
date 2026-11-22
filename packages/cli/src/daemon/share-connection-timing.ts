@@ -30,7 +30,9 @@ export interface ConnectionTiming {
   loopAtDispatch: LoopTiming;
 }
 
-const requests = new WeakMap<IncomingMessage, { timing: ConnectionTiming; gc: ReturnType<typeof observeShareGc> }>();
+type GcObserver = ReturnType<typeof observeShareGc>;
+interface RequestRecord { timing: ConnectionTiming; gc: GcObserver; gcBeforeDispatch?: ReturnType<GcObserver['snapshot']> }
+const requests = new WeakMap<IncomingMessage, RequestRecord>();
 const SAMPLE_MS = 500;
 const MAX_TICKS = 41; // About 20 seconds at the normal sampling rate; report the actual window.
 
@@ -79,10 +81,14 @@ function localPortHash(socket: Socket): string | undefined {
 }
 
 /** These are JavaScript callbacks. Time in the kernel before Node dispatches one is invisible here. */
-export function observeShareConnections(server: Server, readTick: () => LoopTick = loopTick): void {
+export function observeShareConnections(
+  server: Server,
+  readTick: () => LoopTick = loopTick,
+  observeGc: () => GcObserver = observeShareGc,
+): void {
   if (process.env.DKG_ASYNC_PROMOTE_ADMISSION_TRACE !== '1') return;
   const sockets = new WeakMap<Socket, { observed: number; used: boolean }>();
-  const gc = observeShareGc();
+  const gc = observeGc();
   const ticks = [readTick()];
   const timer = setInterval(() => {
     if (ticks.length === MAX_TICKS) ticks.shift();
@@ -111,7 +117,11 @@ export function observeShareConnections(server: Server, readTick: () => LoopTick
       timing.connectionObservedAtUnixMs = Math.round(performance.timeOrigin + socket.observed);
       timing.connectionToRequestMs = Math.round(current.at - socket.observed);
     }
-    requests.set(req, { timing, gc });
+    const record: RequestRecord = { timing, gc };
+    requests.set(req, record);
+    // Summarize pre-dispatch GC now: later GC would evict those entries from the bounded ring before close.
+    // One turn later, so GC entries recorded just before dispatch have reached the observer.
+    setImmediate(() => { record.gcBeforeDispatch ??= dispatchGc(record); });
   }
   server.prependListener('connection', onConnection);
   server.prependListener('request', onRequest);
@@ -128,11 +138,15 @@ export function shareConnectionTiming(req: IncomingMessage | undefined): Connect
 }
 
 
-// Read at response close, using the original pre-dispatch boundaries. Later GC is excluded.
-export function shareDispatchGc(req: IncomingMessage | undefined) {
-  const record = req && requests.get(req);
-  if (!record) return;
+function dispatchGc(record: RequestRecord) {
   const { requestDispatchedAtUnixMs: dispatch, loopAtDispatch: loop } = record.timing;
   return record.gc.snapshot({ windowStart: dispatch - loop.windowMs, dispatch,
     intervalStart: loop.maxIntervalStartUnixMs, intervalEnd: loop.maxIntervalEndUnixMs });
+}
+
+// Taken one turn after dispatch (or at close, if that comes first), with the pre-dispatch boundaries.
+export function shareDispatchGc(req: IncomingMessage | undefined) {
+  const record = req && requests.get(req);
+  if (!record) return;
+  return record.gcBeforeDispatch ??= dispatchGc(record);
 }

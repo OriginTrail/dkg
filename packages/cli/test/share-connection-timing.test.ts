@@ -6,7 +6,7 @@ import type { Socket } from 'node:net';
 import { Agent, createServer, request, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, expect, it, vi } from 'vitest';
-import { observeShareConnections, shareConnectionTiming } from '../src/daemon/share-connection-timing.js';
+import { observeShareConnections, shareConnectionTiming, shareDispatchGc } from '../src/daemon/share-connection-timing.js';
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -125,4 +125,34 @@ it('clips GC to the earlier request window, unions nested intervals, and marks e
     longestKind: 'major', longestOverlapMs: 30 });
   gc.add(Array.from({ length: 65 }, (_, i) => ({ startTime: 200 + i, duration: 1 })));
   expect(gc.summarize(window)).toEqual({ observedCount: 0, retentionLimited: true, maxLoopIntervalOverlapMs: 0 });
+});
+
+it('summarizes pre-dispatch GC one turn after dispatch, before later GC can evict it', async () => {
+  vi.stubEnv('DKG_ASYNC_PROMOTE_ADMISSION_TRACE', '1');
+  const server = new EventEmitter() as Server;
+  let evicted = false;
+  const snapshots: unknown[] = [];
+  const kept = { observedCount: 2, retentionLimited: false, maxLoopIntervalOverlapMs: 12 };
+  observeShareConnections(server, undefined, () => ({
+    snapshot: (window: unknown) => {
+      snapshots.push(window);
+      return evicted ? { observedCount: 0, retentionLimited: true, maxLoopIntervalOverlapMs: 0 } : kept;
+    },
+    close: () => {},
+  }));
+  try {
+    const req = { method: 'POST', socket: {} } as IncomingMessage;
+    server.emit('request', req);
+    await new Promise(resolve => setImmediate(resolve));
+    evicted = true;
+    expect(shareDispatchGc(req)).toEqual(kept);
+    expect(snapshots).toHaveLength(1);
+    const early = { method: 'POST', socket: {} } as IncomingMessage;
+    server.emit('request', early);
+    // A response that closes before that turn still gets one summary, the same one later.
+    const atClose = shareDispatchGc(early);
+    await new Promise(resolve => setImmediate(resolve));
+    expect(shareDispatchGc(early)).toBe(atClose);
+    expect(snapshots).toHaveLength(2);
+  } finally { server.emit('close'); }
 });

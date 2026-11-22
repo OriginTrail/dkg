@@ -15,7 +15,7 @@ const queueOperations = [
 ];
 const sources = new Set([
   ...queueOperations.map(name => `publisher.asyncPromote.${name}`),
-  'agent.writePreflight.declaration', 'api.readGraphs.rows', 'storage.readGraphRegistryRecord', 'storage.readGraphStartup',
+  'agent.writePreflight.declaration', 'agent.contextGraph.exists', 'api.readGraphs.rows', 'storage.readGraphRegistryRecord', 'storage.readGraphStartup',
 ]);
 function publicSource(value: string): string {
   if (sources.has(value)) {
