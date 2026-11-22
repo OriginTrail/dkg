@@ -40,7 +40,7 @@ Store control path: on (added slots share=1 publisher=2; default for oxigraph-se
 
 ## Write preflight sharing
 
-Before a write, the node checks that the target context graph exists and that the caller may write to it. When many writes from one caller to one graph arrive at once, they share one check.
+Before a write, the node checks that the target context graph exists and that the caller may write to it. When many writes from one caller to one graph arrive at once, they share one check. With a `preflight` slot in `DKG_STORE_CONTROL_RESERVED_SLOTS`, async shares and publishes on a Blazegraph or managed Oxigraph node share their own check, apart from other writes.
 
 It is on by default. To turn it off, set `DKG_WRITE_PREFLIGHT_COALESCING=0` in the daemon's environment and restart. The startup log then shows `Write preflight coalescing: off`.
 
