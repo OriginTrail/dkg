@@ -9,6 +9,9 @@ import { shareEvidence } from '../../publisher/test/_helpers/share-completion-ev
 import { runPromoteJob } from '../src/daemon/worker/async-promote-worker.js';
 import { deferred } from './_helpers/async-promote-worker-fixture.js';
 
+// The worker and the fixture import the publisher package; use the same source classes as the queue here.
+vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
+
 function proofFor(name: string) {
   return { ...shareEvidence(), assertionName: name, shareOperationId: `op-${name}` };
 }
@@ -27,7 +30,7 @@ afterEach(async () => {
   await Promise.all(stores.splice(0).map(store => store.close()));
 });
 
-it('two completing workers on one graph each write once, and a queued admission waits only for the current completion', async () => {
+it('two completing workers on one graph each write once, and an admission queued during the second completion runs right after it', async () => {
   const store = new OxigraphStore();
   stores.push(store);
   async function startWorker(name: string) {
