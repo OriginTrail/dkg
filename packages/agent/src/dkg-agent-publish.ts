@@ -164,7 +164,6 @@ import  {
   resolveKnowledgeAssetWorkspaceHead,
   workspaceHeadIncludesShareOperationId,
   KnowledgeAssetOperationPublicSnapshotNotFoundError,
-  workspacePublicQuadsDigest,
   subtractFinalizedExactQuads,
   TripleStoreAsyncLiftPublisher,
   TripleStoreAsyncPromoteQueue,
@@ -5294,7 +5293,7 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    let trustedPublicQuadsDigest: string | undefined;
+    let operationSnapshot: Awaited<ReturnType<typeof resolveKnowledgeAssetOperationPublicQuads>> | undefined;
     let trustedPublisherPeerId = this.peerId;
     const observeConfirmedPublication = () => this.afterConfirmedGraphScopedVmPublishV1({
       status: 'confirmed',
@@ -5318,10 +5317,8 @@ export class PublishMethods extends DKGAgentBase {
     });
 
     if (!recovered.materialization.superseded) {
-      let snapshot: Awaited<ReturnType<typeof resolveKnowledgeAssetOperationPublicQuads>>
-        | undefined;
       try {
-        snapshot = await resolveKnowledgeAssetOperationPublicQuads({
+        operationSnapshot = await resolveKnowledgeAssetOperationPublicQuads({
           store: this.store,
           graphManager: new GraphManager(this.store),
           contextGraphId: request.contextGraphId,
@@ -5351,19 +5348,18 @@ export class PublishMethods extends DKGAgentBase {
             + `using the immutable seal envelope: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
-      if (snapshot) {
-        if (snapshot.quads.length !== request.publicTripleCount) {
+      if (operationSnapshot) {
+        if (operationSnapshot.quads.length !== request.publicTripleCount) {
           throw Object.assign(
             new Error(
               `Named KA recovery rejected for "${request.name}": queued public count `
                 + `${request.publicTripleCount} does not match operation snapshot count `
-                + `${snapshot.quads.length}`,
+                + `${operationSnapshot.quads.length}`,
             ),
             { code: 'KA_VM_RECOVERY_INCONSISTENT' },
           );
         }
-        trustedPublicQuadsDigest = workspacePublicQuadsDigest(snapshot.quads);
-        trustedPublisherPeerId = snapshot.publisherPeerId ?? trustedPublisherPeerId;
+        trustedPublisherPeerId = operationSnapshot.publisherPeerId ?? trustedPublisherPeerId;
       }
     }
 
@@ -5448,8 +5444,9 @@ export class PublishMethods extends DKGAgentBase {
       subGraphName: request.subGraphName,
       trustedAssertionEvidence: {
         assertionVersion: request.assertionVersion,
-        ...(trustedPublicQuadsDigest
-          ? { publicQuadsDigest: trustedPublicQuadsDigest }
+        ...(operationSnapshot
+          ? { publicQuadsDigest: operationSnapshot.publicQuadsDigest,
+              operationSnapshot: { shareOperationId: request.shareOperationId, quads: operationSnapshot.quads } }
           : {}),
         publicTripleCount: request.publicTripleCount,
         ...(request.privateMerkleRoot
