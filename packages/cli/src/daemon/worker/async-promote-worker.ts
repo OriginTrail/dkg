@@ -417,16 +417,17 @@ export async function runPromoteJob<T extends { promotedCount: number; shareEvid
     // an uncertain outer marker write. Bound jobs retain their immutable owner.
     const bookkeepingDeadlineAt = now() + Math.max(0, bookkeepingRetryBudgetMs);
     try {
-      await persistWithRecovery('record swmInserted', bookkeepingDeadlineAt, () =>
-        queue.recordCommitMarker(job.jobId, claimToken, 'swmInserted'),
-      );
-      await persistWithRecovery('record success', bookkeepingDeadlineAt, () =>
-        queue.succeed(job.jobId, claimToken, {
-          promotedCount: result.promotedCount,
-          succeededAt: now(),
-          ...(job.request.agentAddress && result.shareEvidence ? { shareEvidence: result.shareEvidence } : {}),
-        }),
-      );
+      const proof = job.request.agentAddress ? result.shareEvidence : undefined;
+      if (job.request.recoveryBinding && proof && queue.succeedWithShareEvidence) {
+        const complete = queue.succeedWithShareEvidence.bind(queue);
+        await persistWithRecovery('record proven share success', bookkeepingDeadlineAt, () =>
+          complete(job.jobId, claimToken, { promotedCount: result.promotedCount, succeededAt: now(), shareEvidence: proof }));
+      } else {
+        await persistWithRecovery('record swmInserted', bookkeepingDeadlineAt, () =>
+          queue.recordCommitMarker(job.jobId, claimToken, 'swmInserted'));
+        await persistWithRecovery('record success', bookkeepingDeadlineAt, () =>
+          queue.succeed(job.jobId, claimToken, { promotedCount: result.promotedCount, succeededAt: now(), ...(proof && { shareEvidence: proof }) }));
+      }
     } catch (bookkeepingErr: unknown) {
       if (bookkeepingErr instanceof PromoteWorkerShutdownError) throw bookkeepingErr;
       const message =
@@ -437,9 +438,8 @@ export async function runPromoteJob<T extends { promotedCount: number; shareEvid
         `PARTIAL-PROMOTE-AMBIGUITY: jobId=${job.jobId} ` +
           `assertion.promote() returned successfully (promotedCount=${result.promotedCount}) ` +
           `but post-promote bookkeeping failed: ${message}. ` +
-          `Leaving job in 'running' state; recoverOnStartup() will pick this up ` +
-          `on next boot as abandoned partial promote. ` +
-          `Operator action: inspect SWM/VM for the assertion before any /recover.`,
+          `Inspect the durable job and SWM evidence before any /recover. ` +
+          `A lost acknowledgment can leave a committed success; a still-running job retains its lease recovery path.`,
       );
       return {
         outcome: 'partial_promote_ambiguity', result, cause: bookkeepingErr,

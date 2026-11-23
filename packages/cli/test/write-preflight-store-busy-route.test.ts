@@ -6,7 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { StoreOperationTimeoutError, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
+import { buildStoreControlPath, setStoreControlPathForTesting, StoreOperationTimeoutError, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import type { ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-agent';
 import { asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
@@ -128,6 +128,19 @@ describe('store pressure in the preflight follow-up reads, at both async admissi
   ] as const;
 
   describe.each(routes)('%s', (route, verbPath) => {
+    it('requests the protected graph check when configured', async () => {
+      setStoreControlPathForTesting(buildStoreControlPath({ share: 0, publisher: 0, preflight: 1 }));
+      try {
+        const probe = vi.fn(async () => { throw busy(); });
+        await start({ listContextGraphs: async () => [], probeContextGraphWritePreflight: probe });
+        await post(verbPath);
+        expect(probe).toHaveBeenCalledWith(CG, expect.objectContaining({ controlQueue: 'preflight' }));
+        expect(enqueue).not.toHaveBeenCalled();
+      } finally {
+        setStoreControlPathForTesting(undefined);
+      }
+    });
+
     it.each([
       ['the writability read', failingWritabilityRead],
       ['the local existence read', failingExistenceRead],

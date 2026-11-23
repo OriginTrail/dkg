@@ -56,8 +56,8 @@ resolver also validates resolved records for both runner setup and evidence
 verification, including the run identity and canonical profile settings. Campaign
 completion is checked against that validated trial budget. The
 planner/aggregate controller stays pinned to reviewed protected commit
-`8af04a376332c17527ce0f7dffaac8432ba1a9b3`; this change does not rotate it or remove
-the publisher-route shim. The existing `CI gate` requires both coverage and the
+`TRUSTED_CI_CONTROLLER_SHA` (set in `scripts/lib/__tests__/ci-plan-fixtures.mjs`);
+this change does not rotate it. The existing `CI gate` requires both coverage and the
 execution-profile verdict, then always runs the trusted aggregate so one missing
 verdict does not suppress other failures. No protected controller activation is
 needed for this workflow wiring. Scheduled execution starts using it when the

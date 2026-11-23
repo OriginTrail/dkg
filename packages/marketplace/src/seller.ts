@@ -18,7 +18,16 @@
  *   it names the node's peer id, and the receipts' operational wallet signs
  *   it. The job runs at every tick, beside the landing and never inside it.
  * - **Each call** is checked, cheapest check first, then
- *   served by the service's backend, cut to the units the request allows, and
+ *   served by the service's backend. Until its signature is known to be the
+ *   subscription's, a call reads nothing from chain but that subscription:
+ *   the chain's time is the last tick's, moved on by this host's clock, and
+ *   the request's signer is recovered before the subscription is read. A
+ *   subscription once read is kept for its epoch, and an id with none is kept
+ *   as missing for a while; a peer may start only so many reads of
+ *   subscriptions not kept, and only so many run at once. A subscription's
+ *   budgets are read once its signature checks, and again only when they fund
+ *   no budget for the call's service. The call is then cut to the units the
+ *   request allows, and
  *   its receipt signed by an operational wallet. A call with tools is taken
  *   only by a service that takes tool calls (`tools`, said in its quotes);
  *   its tools go to the backend, and the tools the model called come back in
@@ -39,6 +48,20 @@
  *   unit cap the input could use up is refused before the backend runs, and
  *   the backend is asked for no more output than the cap pays for. A call
  *   whose backend ran but gave nothing to sign is not run again.
+ * - **A backend that refuses a call.** An answer about the call itself (400,
+ *   404, 413, 415 or 422) is refused as `BadRequest`, which a buyer does not
+ *   retry: it tries other sellers first for a while, and still routes this
+ *   seller's other services. Any other failure (no answer in time, or 401,
+ *   403, 408, 409, 429 or 5xx, about the seller's key, quota or load) is
+ *   `UpstreamError`, to retry. When the backend refuses a call with tools as
+ *   made (400 or 422) and has shown nothing of tools since the node started,
+ *   it is checked with minimal calls with tools of the seller's own, which no
+ *   buyer's content is in: the model's own choice of tools, then the function
+ *   named (seller-backend.ts). Both refused as made, the service takes no tool
+ *   calls until the node restarts, and its quotes stop saying it takes them;
+ *   either served, the refusal was that call's own, and the service keeps its
+ *   tools. The refused call waits for that a few seconds at most, and never
+ *   past its backend's time limit, which the buyer's wait for it outlasts.
  * - **The end of the epoch.** Within `stopServingSeconds` of it, new calls are
  *   refused: their receipts could not land in time.
  * - **The job.** Ticks every `tickSeconds` from the epoch's start, and once
@@ -59,7 +82,9 @@ import {
   type MarketplaceChainAdapter,
   type MarketplaceDomain,
   type QueryInferenceReceipt,
+  type ServiceBudget,
   type ServiceRequest,
+  type Subscription,
 } from '@origintrail-official/dkg-chain';
 import { MarketplaceRefusal } from './buyer.js';
 import { UpstreamError, type Completion, type Connector } from './connector.js';
@@ -67,6 +92,7 @@ import { KeyedLock, setAside, writeDurably } from './journal.js';
 import { DEFAULT_LANDING, Lander, nextLandingAt, secondsToNextTick, secondsToRetry, type LandingReport, type LandingSettings } from './landing.js';
 import { SellerLedger, type ServedCall } from './ledger.js';
 import { OfferJob, type OfferAssets } from './offer-job.js';
+import { ServiceBackend } from './seller-backend.js';
 import { inputUnitsBound } from './seller-bounds.js';
 import {
   PEER_LIMITS,
@@ -99,6 +125,22 @@ export const MAX_BACKEND_TIMEOUT_MS = PEER_LIMITS.serveTimeoutMs - 10_000;
 const RECEIPT_SECONDS = 5;
 /** Calls whose backend ran but gave nothing to sign, kept so a repeat does not run it again: the newest this many. */
 const FAILED_CALLS_KEPT = 10_000;
+/** Subscriptions kept from chain reads, found or missing, and their budgets: the most recently read this many. */
+const SUBSCRIPTIONS_KEPT = 4_096;
+/** A subscription id read and found missing is taken as missing for this long, in ms. */
+const SUBSCRIPTION_MISSING_MS = 30_000;
+/** Reads of subscriptions not kept: each peer may start this many at once, and one more each `NEW_READ_EVERY_MS`. */
+const NEW_READS_PER_PEER = 32;
+const NEW_READ_EVERY_MS = 1_000;
+/** Reads of subscriptions not kept that may run at once, whichever peers asked. */
+const NEW_READS_AT_ONCE = 8;
+/** Peers whose allowance of reads is kept: the most recently seen this many. */
+const PEERS_KEPT = 4_096;
+/**
+ * A backend's statuses about the call itself, not the seller's key, quota or load: the same call would be refused
+ * again, so it is refused as `BadRequest`, not to retry. Any other failure is `UpstreamError`, to retry.
+ */
+const CALL_REFUSED: ReadonlySet<number> = new Set([400, 404, 413, 415, 422]);
 
 export interface SellerService {
   /** The model's URN; `serviceId` is its keccak256. */
@@ -112,7 +154,10 @@ export interface SellerService {
   connector: Connector;
   /** The connector's time limit: a request that expires sooner, and the receipt after it, is refused. `DEFAULT_BACKEND_TIMEOUT_MS` by default. */
   backendTimeoutMs?: number;
-  /** Whether it takes tool calls: said in its quotes. Off unless set. */
+  /**
+   * Whether it takes tool calls: said in its quotes. Off unless set; off too, until the node restarts, once its
+   * backend refuses the seller's own minimal calls with tools as made (`ServiceBackend`).
+   */
   tools?: boolean;
 }
 
@@ -152,18 +197,36 @@ export class Seller {
   private identityId = 0n;
   private open = false;
   private domain: MarketplaceDomain | undefined;
-  /** service id => whether its backend answered the last call. */
-  private readonly backends = new Map<string, 'up' | 'down'>();
+  /** service id => its backend: whether the last call answered, and what it has shown of tools. */
+  private readonly backends: ReadonlyMap<string, ServiceBackend>;
   /** The chain's time as the last tick read it, and when, by this host's clock. */
   private lastTimes: { times: EpochTimes; at: number } | undefined;
   /** request digest => the refusal of a call whose backend ran but gave nothing to sign, oldest first. */
   private readonly failed = new Map<string, ServeRefusal>();
+  /**
+   * subscription id => the subscription as read, `null` when there was none: a found one until its epoch has
+   * passed, as nothing a call is checked against changes in it, and a missing one until `missingUntil`.
+   */
+  private readonly subscriptions = new Map<string, { subscription: Subscription | null; missingUntil: number }>();
+  /** subscription id => its read in flight: calls that name it meanwhile wait for that read. */
+  private readonly subscriptionReads = new Map<string, Promise<Subscription | null>>();
+  /** subscription id => its budgets as last read. A top-up only adds to them or appends new ones. */
+  private readonly budgets = new Map<string, ServiceBudget[]>();
+  /** peer => the reads of subscriptions not kept it may still start, and when that was counted. */
+  private readonly newReads = new Map<string, { left: number; at: number }>();
+  private newReadsRunning = 0;
+  /** The chain's time being read again for a call, if it is. */
+  private timesRead: Promise<void> | undefined;
   private running = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private ticking: Promise<void> | undefined;
 
   constructor(private readonly deps: SellerDeps) {
     this.services = new Map(deps.services.map((s) => [s.serviceId.toLowerCase(), s]));
+    this.backends = new Map(deps.services.map((s) => [
+      s.serviceId.toLowerCase(),
+      new ServiceBackend(s.connector, { model: s.model, takesTools: s.tools === true, timeoutMs: s.backendTimeoutMs ?? DEFAULT_BACKEND_TIMEOUT_MS }, deps.log),
+    ]));
     this.landing = deps.landing ?? DEFAULT_LANDING;
     this.ledger = new SellerLedger(deps.dir, deps.log);
     this.lander = new Lander({ chain: deps.chain, ledger: this.ledger, settings: this.landing, ...(deps.log ? { log: deps.log } : {}) });
@@ -197,7 +260,7 @@ export class Seller {
 
   /** Whether a service's backend answered its last call: `up` until one fails. */
   backendOf(serviceId: string): 'up' | 'down' {
-    return this.backends.get(serviceId.toLowerCase()) ?? 'up';
+    return this.backends.get(serviceId.toLowerCase())?.state ?? 'up';
   }
 
   /** When the next landing is due, in chain seconds. */
@@ -274,6 +337,7 @@ export class Seller {
     await this.readGate();
     const times = await this.deps.chain.getEpochTimes();
     this.lastTimes = { times, at: Date.now() };
+    this.forgetSubscriptionsBefore(times.epoch);
     // Not awaited: a publish waits for ACKs and a transaction, and landing never waits for it.
     this.offers?.poke();
     this.lastLanding = await this.lander.tick(this.open).catch((err: unknown) => {
@@ -331,7 +395,9 @@ export class Seller {
 
   async quote(raw: unknown): Promise<QuoteResponse> {
     const { services } = quoteRequestFromWire(raw);
-    const times = await this.deps.chain.getEpochTimes();
+    // The chain's time from the last tick: a quote reads nothing from chain, and before the first tick offers nothing.
+    const times = this.timesNow();
+    if (!times) return { seller: this.identityId.toString(), epoch: 0, offers: [] };
     const available = this.open && times.endsAt - times.now > this.deps.stopServingSeconds;
     const offers = [];
     for (const id of services) {
@@ -339,7 +405,7 @@ export class Seller {
       if (!s) continue;
       offers.push({
         serviceId: s.serviceId, pricePerUnit: (await this.priceFor(s, times.epoch, times.epoch)).toString(), available, capacity: s.capacity,
-        ...(s.tools ? { tools: true as const } : {}),
+        ...(this.backendFor(s).takesTools ? { tools: true as const } : {}),
       });
     }
     return { seller: this.identityId.toString(), epoch: times.epoch, offers };
@@ -375,28 +441,36 @@ export class Seller {
     if (repeat) return repeat;
 
     const chain = this.deps.chain;
-    const times = await chain.getEpochTimes();
+    // The chain's time from the last tick and this host's clock: until its signature is known to be the
+    // subscription's, a call reads nothing from chain but its subscription, kept once read, and the chain's time
+    // again when the call was issued after the time this seller has.
+    const times = await this.timesFor(request.issuedAt, from);
+    if (!times) return refusal('NotServing');
     const readAt = Date.now();
     // 1. Not too near the epoch's end, at this epoch's price.
     if (times.endsAt - times.now <= this.deps.stopServingSeconds) return refusal('EpochEnding');
     const service = this.services.get(request.serviceId);
     if (!service) return refusal('UnknownService');
     // A buyer sends a call with tools only to a seller whose quote says it takes them.
-    if (!service.tools && usesTools(call.body)) return refusal('BadRequest', 'this service takes no tool calls');
+    if (!this.backendFor(service).takesTools && usesTools(call.body)) return refusal('BadRequest', 'this service takes no tool calls');
     if (request.pricePerUnit !== await this.priceFor(service, times.epoch, times.epoch)) return refusal('WrongPrice');
-    // 2. A subscription of this epoch that funds the service, under its price cap.
-    const subscription = await chain.getSubscription(request.subscriptionId);
+    // 2. A signature with a low s, from some key: the subscription's session key is checked once it is read.
+    const signer = recoverSigner(requestDigest, call.signature);
+    if (!signer) return refusal('BadSignature');
+    // 3. Not issued in the future, and not expiring before the backend's longest answer and the receipt after it.
+    if (request.issuedAt > times.now) return refusal('NotYetValid');
+    if (this.expiresTooSoon(service, request, times.now)) return refusal('Expired');
+    // 4. A subscription of this epoch, whose session key signed the call, and that funds the service under its price cap.
+    const subscription = await this.subscriptionOf(request.subscriptionId, from);
+    if (subscription === 'busy') return refusal('Unavailable');
     if (!subscription) return refusal('SubscriptionNotFound');
     if (subscription.epoch !== times.epoch) return refusal('NotCurrentEpoch');
-    const budgets = await chain.getBudgets(request.subscriptionId);
+    if (signer !== ethers.getAddress(subscription.sessionKey)) return refusal('BadSignature');
+    if (request.issuedAt < subscription.startsAt) return refusal('NotYetValid');
+    const budgets = await this.budgetsOf(request.subscriptionId, request.serviceId);
     const budgetIndex = budgets.findIndex((b) => b.serviceId.toLowerCase() === request.serviceId);
     if (budgetIndex < 0) return refusal('ServiceNotFunded');
     if (request.pricePerUnit > budgets[budgetIndex]!.maxPricePerUnit) return refusal('PriceOverCap');
-    // 3. Signed by the subscription's session key, with a low s.
-    if (recoverSigner(requestDigest, call.signature) !== ethers.getAddress(subscription.sessionKey)) return refusal('BadSignature');
-    // 4. Issued within the subscription, and not expiring before the backend's longest answer and the receipt after it.
-    if (request.issuedAt < subscription.startsAt || request.issuedAt > times.now) return refusal('NotYetValid');
-    if (this.expiresTooSoon(service, request, times.now)) return refusal('Expired');
     // 5. For an account's subscription, issued while the grant it was funded under lasts.
     if (subscription.accountId !== 0n) {
       const end = await chain.grantEnd(subscription.accountId, subscription.buyer, subscription.grantNonce);
@@ -435,7 +509,8 @@ export class Seller {
     let completion;
     try {
       const { tools, tool_choice: toolChoice, parallel_tool_calls: parallelToolCalls } = call.body;
-      completion = await service.connector.complete({
+      // A call with tools refused as made may first wait, within its time limit, for the check of the backend's tools.
+      completion = await this.backendFor(service).complete({
         messages: call.body.messages,
         // No more output than the cap pays for once the input takes the most it could.
         maxTokens: Number(minBig(BigInt(call.body.max_tokens), at.room)),
@@ -443,16 +518,18 @@ export class Seller {
         ...(tools && toolChoice !== undefined ? { toolChoice } : {}),
         ...(tools && parallelToolCalls !== undefined ? { parallelToolCalls } : {}),
       });
-      this.backends.set(service.serviceId, 'up');
     } catch (err) {
-      this.backends.set(service.serviceId, 'down');
-      // The backend's detail (a missing key's variable, an address) stays in the log.
+      // The backend's detail (a missing key's variable, an address, its own words) stays in the log.
       this.deps.log?.(`[marketplace] the backend of ${service.model} failed: ${err instanceof UpstreamError ? err.message : String(err)}`);
-      return this.failedOnce(requestDigest, refusal('UpstreamError'));
+      const status = err instanceof UpstreamError ? err.status : undefined;
+      // No answer, or one about the seller's key, quota or load: the call may be served later.
+      if (status === undefined || !CALL_REFUSED.has(status)) return this.failedOnce(requestDigest, refusal('UpstreamError'));
+      return this.failedOnce(requestDigest, refusal('BadRequest', `the service's backend refused the call (${status})`));
     }
     try {
       const input = BigInt(completion.promptTokens);
       if (input >= unitCap) return this.failedOnce(requestDigest, refusal('UnitsTooFew'));
+      // The chain's own time for the receipt, read once the backend has served a call its subscription signed.
       const completedAt = Math.max((await this.deps.chain.getEpochTimes()).now, request.issuedAt);
       // The chain refuses a receipt completed after its request's expiry: no receipt, and no answer.
       if (completedAt > request.expiry) return this.failedOnce(requestDigest, refusal('Expired'));
@@ -502,12 +579,116 @@ export class Seller {
     return this.failed.get(requestDigest);
   }
 
+  /** The chain's time now: the last tick's read, moved on by this host's clock since. `undefined` before the first tick. */
+  private timesNow(): EpochTimes | undefined {
+    if (!this.lastTimes) return undefined;
+    const { times, at } = this.lastTimes;
+    return { ...times, now: times.now + Math.max(0, Math.floor((Date.now() - at) / 1_000)) };
+  }
+
+  /**
+   * The chain's time for a call issued at `issuedAt`: `timesNow()`, unless the call was issued after it, as when the
+   * chain's head moved on faster than this host's clock or the epoch turned before this seller's tick. Then the
+   * chain's time is read again, one read at a time, as one of `from`'s new reads; with none left, `timesNow()`.
+   */
+  private async timesFor(issuedAt: number, from: string): Promise<EpochTimes | undefined> {
+    const times = this.timesNow();
+    if (!times || issuedAt <= times.now) return times;
+    if (!this.timesRead) {
+      if (!this.startNewRead(from, Date.now())) return times;
+      this.timesRead = (async () => {
+        this.newReadsRunning++;
+        try {
+          const read = await this.deps.chain.getEpochTimes();
+          this.lastTimes = { times: read, at: Date.now() };
+          this.forgetSubscriptionsBefore(read.epoch);
+        } finally {
+          this.newReadsRunning--;
+          this.timesRead = undefined;
+        }
+      })();
+    }
+    await this.timesRead;
+    return this.timesNow();
+  }
+
+  /**
+   * The subscription `subscriptionId` names, as kept or read now; `null` when it has none. `'busy'`, reading
+   * nothing, when it is not kept and `from` may start no more reads now, or `NEW_READS_AT_ONCE` run already. A read
+   * that fails is not kept.
+   */
+  private async subscriptionOf(subscriptionId: string, from: string): Promise<Subscription | null | 'busy'> {
+    const id = subscriptionId.toLowerCase();
+    const now = Date.now();
+    const kept = this.subscriptions.get(id);
+    if (kept && (kept.subscription || kept.missingUntil > now)) return kept.subscription;
+    const reading = this.subscriptionReads.get(id);
+    if (reading) return reading;
+    if (!this.startNewRead(from, now)) return 'busy';
+    const read = (async () => {
+      this.newReadsRunning++;
+      try {
+        const subscription = await this.deps.chain.getSubscription(subscriptionId);
+        this.subscriptions.delete(id);
+        this.subscriptions.set(id, { subscription, missingUntil: Date.now() + SUBSCRIPTION_MISSING_MS });
+        while (this.subscriptions.size > SUBSCRIPTIONS_KEPT) {
+          const oldest = this.subscriptions.keys().next().value!;
+          this.subscriptions.delete(oldest);
+          this.budgets.delete(oldest);
+        }
+        return subscription;
+      } finally {
+        this.newReadsRunning--;
+        this.subscriptionReads.delete(id);
+      }
+    })();
+    this.subscriptionReads.set(id, read);
+    return read;
+  }
+
+  /** Whether `from` may start a read of a subscription not kept now: a token from its allowance, if one is left. */
+  private startNewRead(from: string, now: number): boolean {
+    if (this.newReadsRunning >= NEW_READS_AT_ONCE) return false;
+    const was = this.newReads.get(from);
+    const left = was ? Math.min(NEW_READS_PER_PEER, was.left + (now - was.at) / NEW_READ_EVERY_MS) : NEW_READS_PER_PEER;
+    this.newReads.delete(from);
+    this.newReads.set(from, { left: left >= 1 ? left - 1 : left, at: now });
+    if (this.newReads.size > PEERS_KEPT) this.newReads.delete(this.newReads.keys().next().value!);
+    return left >= 1;
+  }
+
+  /** A subscription's budgets, once a call its session key signed names it: as kept, unless they fund no `serviceId`. */
+  private async budgetsOf(subscriptionId: string, serviceId: string): Promise<ServiceBudget[]> {
+    const id = subscriptionId.toLowerCase();
+    const kept = this.budgets.get(id);
+    if (kept?.some((b) => b.serviceId.toLowerCase() === serviceId)) return kept;
+    const budgets = await this.deps.chain.getBudgets(subscriptionId);
+    if (this.subscriptions.has(id)) this.budgets.set(id, budgets);
+    return budgets;
+  }
+
+  /** Forget the subscriptions of epochs before `epoch`, their budgets, and the ids found missing a while ago. */
+  private forgetSubscriptionsBefore(epoch: number): void {
+    const now = Date.now();
+    for (const [id, kept] of this.subscriptions) {
+      if (kept.subscription ? kept.subscription.epoch < epoch : kept.missingUntil <= now) {
+        this.subscriptions.delete(id);
+        this.budgets.delete(id);
+      }
+    }
+  }
+
   /** Keep a call whose backend ran but gave nothing to sign, and its refusal: the newest `FAILED_CALLS_KEPT`. */
   private failedOnce(requestDigest: string, refused: ServeRefusal): ServeRefusal {
     this.failed.delete(requestDigest);
     this.failed.set(requestDigest, refused);
     if (this.failed.size > FAILED_CALLS_KEPT) this.failed.delete(this.failed.keys().next().value!);
     return refused;
+  }
+
+  /** The service's backend: one per service, made with the seller. */
+  private backendFor(service: SellerService): ServiceBackend {
+    return this.backends.get(service.serviceId.toLowerCase())!;
   }
 
   /** Whether `request` expires before the service's backend could answer and its receipt be signed, at chain time `now`. */

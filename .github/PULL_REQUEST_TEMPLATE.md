@@ -15,6 +15,7 @@
 - [ ] Tests pass locally (`pnpm test`)
 - [ ] Build succeeds (`pnpm build`)
 - [ ] Manually tested with `dkg start` (if applicable)
+- [ ] UI change: follows `packages/node-ui/DESIGN.md`, or updates it in this PR
 
 ## Related Issues
 

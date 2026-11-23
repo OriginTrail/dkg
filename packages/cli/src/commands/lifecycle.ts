@@ -31,6 +31,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { resolveRetentionConfigOrExit } from '../retention-config.js';
+import { resolveQueryConfigOrExit } from '../update/read-graph-rollback-target.js';
 import { ApiClient, type DaemonStatusResponse } from '../api-client.js';
 import {
   STORE_QUADS_REFRESH_AFTER_MS,
@@ -299,6 +300,8 @@ program
     exitOnStoreConfigErrors(bootConfig, (message) => console.error(message));
     // OT-RFC-73 P10b: a bad queue-retention value is refused here, naming the key, before a detached daemon could hide it.
     resolveRetentionConfigOrExit(bootConfig.queueRetention, (message) => console.error(message));
+    // OT-RFC-74: so is a bad `query` value, and read graphs that the rollback target would not recognize.
+    await resolveQueryConfigOrExit(bootConfig, (message) => console.error(message));
 
     const pid = await readPid();
     if (pid && isProcessRunning(pid)) {

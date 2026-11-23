@@ -1,4 +1,5 @@
 import { TrustLevel } from './memory-model.js';
+import { unwrapIri } from './sparql-terms.js';
 
 export const TRUST_LEVEL_PREDICATE = 'http://dkg.io/ontology/trustLevel';
 export const LEGACY_TRUST_LEVEL_PREDICATE = 'https://dkg.network/ontology#trustLevel';
@@ -21,8 +22,9 @@ type TrustLevelQuadLike = {
   graph: string;
 };
 
+/** Compares the predicate as the store writes it (`<iri>` is stored as `iri`). */
 export function isTrustLevelQuad(quad: Pick<TrustLevelQuadLike, 'predicate'>): boolean {
-  return TRUST_LEVEL_PREDICATES.has(quad.predicate);
+  return TRUST_LEVEL_PREDICATES.has(unwrapIri(quad.predicate));
 }
 
 /**
@@ -46,7 +48,7 @@ export const WORKSPACE_OWNER_PREDICATE = 'http://dkg.io/ontology/workspaceOwner'
  * had filtered out and declined every folded-private ACK.
  */
 export function isSwmMerkleExcludedQuad(quad: Pick<TrustLevelQuadLike, 'predicate'>): boolean {
-  return isTrustLevelQuad(quad) || quad.predicate === WORKSPACE_OWNER_PREDICATE;
+  return isTrustLevelQuad(quad) || unwrapIri(quad.predicate) === WORKSPACE_OWNER_PREDICATE;
 }
 
 export function isTrustLevel(value: unknown): value is TrustLevel {
@@ -76,15 +78,26 @@ export function buildTrustLevelQuads(
   }));
 }
 
+/** The `code` of a {@link UserAuthoredTrustLevelError}, which routes answer with 400. */
+export const USER_AUTHORED_TRUST_LEVEL_CODE = 'USER_AUTHORED_TRUST_LEVEL';
+
+/** A write carried trust-level metadata, which only the protocol may generate. */
+export class UserAuthoredTrustLevelError extends Error {
+  readonly code = USER_AUTHORED_TRUST_LEVEL_CODE;
+
+  constructor(subject: string) {
+    super(
+      `User-authored dkg:trustLevel metadata is not allowed for subject ${subject}. ` +
+      'Trust metadata is protocol-generated after publish, endorse, or verify confirmation.',
+    );
+    this.name = 'UserAuthoredTrustLevelError';
+  }
+}
+
 export function assertNoUserAuthoredTrustLevelQuads(
   quads: Iterable<Pick<TrustLevelQuadLike, 'subject' | 'predicate'>>,
 ): void {
   for (const quad of quads) {
-    if (isTrustLevelQuad(quad)) {
-      throw new Error(
-        `User-authored dkg:trustLevel metadata is not allowed for subject ${quad.subject}. ` +
-        'Trust metadata is protocol-generated after publish, endorse, or verify confirmation.',
-      );
-    }
+    if (isTrustLevelQuad(quad)) throw new UserAuthoredTrustLevelError(quad.subject);
   }
 }

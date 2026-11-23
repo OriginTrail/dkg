@@ -3,6 +3,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loadConfig, describeConfig } from '../src/config.js';
+const fixture = vi.hoisted(() => ({ home: '' }));
+vi.mock('node:os', async (original) => {
+  const actual = await original<typeof import('node:os')>();
+  return { ...actual, homedir: () => fixture.home, default: { ...actual, homedir: () => fixture.home } };
+});
 let root: string;
 function write(file: string, body: string) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -21,7 +26,7 @@ beforeEach(() => {
     'DKG_AGENT_URI',
   ])
     vi.stubEnv(key, undefined);
-  vi.spyOn(os, 'homedir').mockReturnValue(root);
+  fixture.home = root;
   vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 });
 afterEach(() => {

@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-agent",
-  "version": "10.1.0",
+  "version": "10.1.2",
   "type": "module",
   "engines": {
     "node": ">=22.13.0 <23.0.0 || >=23.4.0"
@@ -140,6 +140,7 @@
     "./dist/rfc64/inventory-v1/swm-author-inventory-mutation.js": null,
     "./dist/rfc64/inventory-v1/swm-author-inventory-persistence.js": null,
     "./dist/rfc64/inventory-v1/swm-author-inventory-sql-codec.js": null,
+    "./dist/rfc64/inventory-v1/swm-author-inventory-stored-rows.js": null,
     "./dist/rfc64/inventory-v1/swm-author-inventory-contracts.js": null,
     "./dist/rfc64/inventory-persistence-failure.js": null,
     "./dist/rfc64/inventory-v1/open-error.js": null,
@@ -161,6 +162,7 @@
     "./dist/rfc64/public-catalog-inventory-completeness-v1.js": null,
     "./dist/rfc64/public-catalog-native-receiver-v1.js": null,
     "./dist/rfc64/public-catalog-native-committed-head-token-v1.js": null,
+    "./dist/rfc64/public-catalog-native-precommit-v1.js": null,
     "./dist/rfc64/public-catalog-native-reconciler-v1.js": null,
     "./dist/rfc64/public-catalog-native-transport-v1.js": null,
     "./dist/rfc64/public-open-catalog-scope-v1.js": null,

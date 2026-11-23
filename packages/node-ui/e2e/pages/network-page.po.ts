@@ -11,11 +11,11 @@ export class NetworkPagePO {
 
   async goto() {
     await this.page.goto('/network');
-    await this.page.locator('.page-title, h1').first().waitFor({ state: 'visible', timeout: 10_000 });
+    await this.page.locator('.ds-page-title, h1').first().waitFor({ state: 'visible', timeout: 10_000 });
   }
 
   async getTitle() {
-    return this.page.locator('.page-title, h1').first().textContent();
+    return this.page.locator('.ds-page-title, h1').first().textContent();
   }
 
   async getStatCards() {

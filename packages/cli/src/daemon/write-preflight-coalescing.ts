@@ -1,3 +1,4 @@
+import { storeControlQueueInUse } from '@origintrail-official/dkg-storage';
 import type { ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-agent';
 import {
   WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS,
@@ -218,7 +219,7 @@ type Probe = ContextGraphWritePreflightProbe;
 export interface CoalescingProbeAgent {
   probeContextGraphWritePreflight: (
     contextGraphId: string,
-    opts?: { callerAgentAddress?: string | null; onChainLookup?: () => void; contentCheck?: 'always' | 'when-needed-for-write' },
+    opts?: { controlQueue?: 'preflight'; callerAgentAddress?: string | null; onChainLookup?: () => void; contentCheck?: 'always' | 'when-needed-for-write' },
   ) => Promise<Probe>;
   writePreflightIdentity?: (
     contextGraphId: string,
@@ -291,7 +292,7 @@ function stateOf(agent: object): AgentState {
 function copyProbe(probe: Probe): Probe {
   const {
     storeAvailable, exists, hasLocalContent, inMemorySubscription, persistedSubscription, declarationFound,
-    accessPolicy, curator, callerAuthorized, storeUnavailable, storeErrorMessage, failureAttribution,
+    accessPolicy, curator, callerAuthorized, storeUnavailable, storeErrorMessage, failureAttribution, locallyCreated,
     ...undeclared
   } = probe;
   const allFieldsCopied: keyof typeof undeclared extends never ? true : never = true;
@@ -299,6 +300,7 @@ function copyProbe(probe: Probe): Probe {
   // A field the probe did not set stays unset, as in the probe itself.
   return {
     storeAvailable,
+    ...(locallyCreated !== undefined ? { locallyCreated } : {}),
     ...(exists !== undefined ? { exists } : {}),
     ...(hasLocalContent !== undefined ? { hasLocalContent } : {}),
     ...(inMemorySubscription !== undefined
@@ -352,13 +354,20 @@ export async function probeWritePreflight(
   agent: CoalescingProbeAgent,
   contextGraphId: string,
   callerAgentAddress: string | null,
-  options: { accepts: (probe: Probe) => boolean; fresh?: boolean; now?: MonotonicClockMs },
+  options: { accepts: (probe: Probe) => boolean; fresh?: boolean; asyncAdmission?: boolean; now?: MonotonicClockMs },
 ): Promise<CoalescedProbe> {
   const config = effectiveConfig;
+  // Embedded stores ignore the tag; there a separate flight would only double the reads.
+  const protectedReads = options.asyncAdmission === true && storeControlQueueInUse('preflight');
+  const probeOptions = {
+    callerAgentAddress,
+    contentCheck: 'when-needed-for-write' as const,
+    ...(protectedReads && { controlQueue: 'preflight' as const }),
+  };
   const identity = config.coalescing ? identityOf(agent, contextGraphId, callerAgentAddress) : undefined;
   if (identity === undefined) {
     counters.direct += 1;
-    return { probe: await agent.probeContextGraphWritePreflight(contextGraphId, { callerAgentAddress, contentCheck: 'when-needed-for-write' }), fastAccepted: noop };
+    return { probe: await agent.probeContextGraphWritePreflight(contextGraphId, probeOptions), fastAccepted: noop };
   }
 
   const state = stateOf(agent);
@@ -375,19 +384,20 @@ export async function probeWritePreflight(
     }
   }
 
-  let flight = options.fresh === true ? undefined : state.flights.get(identity.key);
+  // A queued ordinary probe must not strand an admission behind it. Completed results remain interchangeable.
+  const flightKey = (protectedReads ? 'preflight:' : 'ordinary:') + identity.key;
+  let flight = options.fresh === true ? undefined : state.flights.get(flightKey);
   if (flight === undefined || flight.stamp !== identity.stamp || !isYoungerThan(flight.startedAt, now, WRITE_PREFLIGHT_FLIGHT_MAX_JOIN_MS)) {
     const started: Flight = { id: nextFlightId += 1, stamp: identity.stamp, startedAt: now, chainDerived: false, promise: undefined as unknown as Promise<Probe> };
     // A synchronous throw of the probe call becomes the flight's rejection, as for a rejected promise.
     started.promise = new Promise<Probe>((resolve) => resolve(agent.probeContextGraphWritePreflight(contextGraphId, {
-      callerAgentAddress,
-      contentCheck: 'when-needed-for-write',
+      ...probeOptions,
       onChainLookup: () => { started.chainDerived = true; },
     }))).finally(() => {
       // A newer flight may have taken the key; only the flight that holds it releases it.
-      if (state.flights.get(identity.key) === started) state.flights.delete(identity.key);
+      if (state.flights.get(flightKey) === started) state.flights.delete(flightKey);
     });
-    state.flights.set(identity.key, started);
+    state.flights.set(flightKey, started);
     counters.flights += 1;
     flight = started;
   } else {

@@ -1183,6 +1183,44 @@ describe('Phase D - local-first VM reconcile and batch recovery', () => {
     },
   );
 
+  it('asks for the latest root and its publisher together on the chain-backed path', async () => {
+    // Views issued in one turn share one batched request; an ordinal that stays
+    // pending reads both again on every sweep.
+    const internals = await boot();
+    const onChainCgId = 670n;
+    const kaId = packKnowledgeAssetIdFromIdentity({ agentAddress: STAGED_KA_AUTHOR, kaNumber: 13n });
+    const root = `0x${'a8'.repeat(32)}`;
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId, root);
+    const chain = internals.chain;
+    const readRoot = chain.getLatestMerkleRoot.bind(chain);
+    const readPublisher = chain.getLatestMerkleRootPublisher.bind(chain);
+    const asked: string[] = [];
+    chain.getLatestMerkleRoot = async (id: bigint) => {
+      asked.push('root');
+      await new Promise<void>((resolve) => { setImmediate(resolve); });
+      asked.push('root answered');
+      return readRoot(id);
+    };
+    chain.getLatestMerkleRootPublisher = async (id: bigint) => {
+      asked.push('publisher');
+      return readPublisher(id);
+    };
+    const finalized = vi.fn(async () => 'no-swm' as const);
+    (internals as any).getOrCreateFinalizationHandler = () => ({
+      classifyChainReconcileLocalCandidate: async () => ({ kind: 'present' }),
+      handleChainReconciledKC: finalized,
+    });
+
+    const outcome = await internals.reconcileChainOrdinal('670', onChainCgId, 0, 100);
+
+    expect(asked).toEqual(['root', 'publisher', 'root answered']);
+    expect(outcome).toMatchObject({ status: 'pending', recovery: { merkleRoot: root.slice(2), reason: 'no-swm' } });
+    expect(finalized).toHaveBeenCalledWith(
+      expect.objectContaining({ publisherAddress: await readPublisher(kaId) }),
+      expect.anything(),
+    );
+  });
+
   it('keeps a corrupt SWM head on one KA from failing the whole graph reconcile', async () => {
     const captured: ReplicationEvent[] = [];
     agent = await DKGAgent.create({

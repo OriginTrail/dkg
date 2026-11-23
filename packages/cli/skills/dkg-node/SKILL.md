@@ -570,7 +570,7 @@ The `<recalled-memory>` block is stripped from outgoing assistant text before tu
 
 ## 6. Context Graphs
 
-Context Graphs are scoped knowledge domains with configurable access and governance. In the node UI, context graphs are called **projects** — when a user says "my project" or selects a project in the right-panel dropdown, they mean a context graph.
+Context Graphs are scoped knowledge domains with configurable access and governance. The node UI labels them **Context Graphs**; legacy tool parameters named `projectId` still refer to a context graph. The MCP `mine` scope matches the UI membership set; discovery or subscription alone does not make a graph yours.
 
 > **Default privacy model.** Context graphs created via the
 > `dkg_context_graph_create` tool are **curated/private by default** —

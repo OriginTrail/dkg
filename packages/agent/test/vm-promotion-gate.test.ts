@@ -1025,6 +1025,37 @@ describe('core VM-promotion guarantees', () => {
       expect(vm.values).not.toContain('"first"');
     });
 
+    it('reads the latest root and its publisher together for a per-asset promotion', async () => {
+      // Views issued in one turn share one batched request, so the pair costs one.
+      const internals = await boot();
+      await internals.ensureStorageAckLedgerReady();
+      const handler = realHandler(internals);
+      expect(isStorageACKDecline(await ack(handler, 'first', 1))).toBe(false);
+      landOnChain(internals, 'first', 1);
+      const chain = internals.chain;
+      const readRoot = chain.getLatestMerkleRoot.bind(chain);
+      const readPublisher = chain.getLatestMerkleRootPublisher.bind(chain);
+      const asked: string[] = [];
+      chain.getLatestMerkleRoot = async (id: bigint) => {
+        asked.push('root');
+        await new Promise<void>((resolve) => { setImmediate(resolve); });
+        asked.push('root answered');
+        return readRoot(id);
+      };
+      chain.getLatestMerkleRootPublisher = async (id: bigint) => {
+        asked.push('publisher');
+        return readPublisher(id);
+      };
+
+      expect(await internals.reconcileStorageAckCopy({
+        operationSubject: 'unused', namespace: NAMESPACE, kaUal: ual(N), assertionVersion: 1n,
+        signedAtMs: 0, contextGraphId: TARGET, registered: true,
+      }, TARGET)).toBe(true);
+
+      expect(asked.slice(0, 3)).toEqual(['root', 'publisher', 'root answered']);
+      expect((await vmState(internals.store)).values).toEqual(['"first"']);
+    });
+
     it('releases an update copy the chain moved past, and then accepts the next update', async () => {
       const internals = await boot();
       await internals.ensureStorageAckLedgerReady();

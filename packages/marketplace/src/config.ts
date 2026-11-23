@@ -206,6 +206,9 @@ export function resolveSellerConfig(config: MarketplaceConfig | undefined): Reso
     if (b.temperature !== undefined && b.temperature !== null && (typeof b.temperature !== 'number' || !Number.isFinite(b.temperature) || b.temperature < 0 || b.temperature > 2)) {
       throw new Error(`${at}.backend.temperature must be a number from 0 to 2, or null to send none`);
     }
+    if (b.reasoningEffortWithTools !== undefined && (typeof b.reasoningEffortWithTools !== 'string' || !/^[a-z]{1,16}$/.test(b.reasoningEffortWithTools))) {
+      throw new Error(`${at}.backend.reasoningEffortWithTools must be a reasoning effort, such as none or low`);
+    }
     return {
       model: s.model,
       serviceId,

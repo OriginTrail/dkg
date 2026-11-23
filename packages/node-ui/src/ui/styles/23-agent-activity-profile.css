@@ -2,21 +2,21 @@
 .v10-agent-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 8px 2px 2px;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--agent-color, #64748b) 30%, var(--border-subtle));
-  background: color-mix(in srgb, var(--agent-color, #64748b) 6%, transparent);
+  gap: var(--space-6);
+  padding: var(--space-2) var(--space-8) var(--space-2) var(--space-2);
+  border-radius: var(--radius-pill);
+  border: 1px solid color-mix(in srgb, var(--agent-color, var(--identity-fallback)) 30%, var(--border-subtle));
+  background: color-mix(in srgb, var(--agent-color, var(--identity-fallback)) 6%, transparent);
   color: var(--text-secondary);
   font-family: var(--font-sans);
   vertical-align: middle;
   max-width: 100%;
   user-select: none;
 }
-.v10-agent-chip.interactive { cursor: pointer; transition: background 0.15s, border-color 0.15s; }
+.v10-agent-chip.interactive { cursor: pointer; transition: background var(--motion-base), border-color var(--motion-base); }
 .v10-agent-chip.interactive:hover {
-  background: color-mix(in srgb, var(--agent-color, #64748b) 14%, transparent);
-  border-color: color-mix(in srgb, var(--agent-color, #64748b) 50%, var(--border-default));
+  background: color-mix(in srgb, var(--agent-color, var(--identity-fallback)) 14%, transparent);
+  border-color: color-mix(in srgb, var(--agent-color, var(--identity-fallback)) 50%, var(--border-default));
 }
 .v10-agent-chip-avatar {
   position: relative;
@@ -25,32 +25,32 @@
   justify-content: center;
   flex-shrink: 0;
   border-radius: 50%;
-  background: var(--agent-color, #64748b);
-  color: #fff;
+  background: var(--agent-color, var(--identity-fallback));
+  color: var(--text-on-identity);
   font-weight: 700;
   line-height: 1;
 }
 .v10-agent-chip-initials {
   font-family: var(--font-mono);
-  letter-spacing: 0.02em;
+  letter-spacing: 0;
 }
 .v10-agent-chip-glyph {
   position: absolute;
   bottom: -2px;
   right: -4px;
-  background: var(--bg-surface, #1a1d23);
-  border: 1px solid color-mix(in srgb, var(--agent-color, #64748b) 50%, var(--border-default));
+  background: var(--bg-surface);
+  border: 1px solid color-mix(in srgb, var(--agent-color, var(--identity-fallback)) 50%, var(--border-default));
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--agent-color, #64748b);
+  color: var(--agent-color, var(--identity-fallback));
   line-height: 1;
 }
 .v10-agent-chip-body {
   display: inline-flex;
   flex-direction: column;
-  line-height: 1.15;
+  line-height: var(--lh-tight);
   min-width: 0;
   max-width: 100%;
 }
@@ -63,44 +63,70 @@
 }
 .v10-agent-chip-sub {
   display: inline-flex;
-  gap: 4px;
-  font-size: var(--font-size-micro);
+  gap: var(--space-4);
+  font-size: var(--fs-micro);
   color: var(--text-tertiary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  text-transform: none;
+  letter-spacing: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.v10-agent-chip-fw { font-weight: 700; color: var(--agent-color, #64748b); }
+.v10-agent-chip-fw { font-weight: 700; color: var(--agent-color, var(--identity-fallback)); }
 .v10-agent-chip-sep { opacity: 0.5; }
 .v10-agent-chip-op { opacity: 0.85; }
 
 /* Size variants */
-.v10-agent-chip-sm { font-size: var(--font-size-meta); padding: 1px 7px 1px 1px; }
-.v10-agent-chip-sm .v10-agent-chip-avatar { width: 16px; height: 16px; font-size: 8px; }
-.v10-agent-chip-sm .v10-agent-chip-glyph { width: 9px; height: 9px; font-size: 7px; bottom: -1px; right: -2px; }
+/* Avatars 20 / 24 / 32 on the shared scale; chip heights match the controls. */
+.v10-agent-chip-sm { height: var(--h-control-sm); box-sizing: border-box; padding: 0 var(--space-8) 0 var(--space-2); font-size: var(--fs-label); }
+.v10-agent-chip-sm .v10-agent-chip-avatar { width: 20px; height: 20px; font-size: var(--fs-micro); }
+.v10-agent-chip-sm .v10-agent-chip-glyph { width: 12px; height: 12px; font-size: var(--fs-micro); bottom: -3px; right: -4px; }
 
-.v10-agent-chip-md { font-size: var(--font-size-caption); padding: 2px 9px 2px 2px; }
-.v10-agent-chip-md .v10-agent-chip-avatar { width: 22px; height: 22px; font-size: var(--font-size-micro); }
-.v10-agent-chip-md .v10-agent-chip-glyph  { width: 11px; height: 11px; font-size: 8px; }
+.v10-agent-chip-md { height: 28px; box-sizing: border-box; padding: 0 var(--space-12) 0 var(--space-2); font-size: var(--fs-control); }
+.v10-agent-chip-md .v10-agent-chip-avatar { width: 24px; height: 24px; font-size: var(--fs-micro); }
+.v10-agent-chip-md .v10-agent-chip-glyph { width: 14px; height: 14px; font-size: var(--fs-micro); bottom: -3px; right: -4px; }
 
-.v10-agent-chip-lg { font-size: var(--font-size-ui); padding: 4px 12px 4px 4px; }
-.v10-agent-chip-lg .v10-agent-chip-avatar { width: 30px; height: 30px; font-size: var(--font-size-caption); }
-.v10-agent-chip-lg .v10-agent-chip-glyph  { width: 14px; height: 14px; font-size: var(--font-size-meta); bottom: -2px; right: -4px; }
+.v10-agent-chip-lg { min-height: 40px; box-sizing: border-box; padding: var(--space-4) var(--space-16) var(--space-4) var(--space-4); font-size: var(--fs-body); }
+.v10-agent-chip-lg .v10-agent-chip-avatar, .v10-agent-title .v10-agent-chip-avatar { width: 32px; height: 32px; font-size: var(--fs-control); }
+.v10-agent-chip-lg .v10-agent-chip-glyph, .v10-agent-title .v10-agent-chip-glyph { width: 14px; height: 14px; font-size: var(--fs-micro); bottom: -2px; right: -4px; }
+
+/* An agent as a page title. The name stays on one line, so a long ID can't push the page wider. */
+.v10-agent-title { display: flex; align-items: center; gap: var(--space-12); min-width: 0; max-width: 100%; }
+.v10-agent-title-text { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.v10-agent-title .ds-page-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Agent dot: the chip's avatar on its own (AgentDot / AgentDotStack).
+   Same circle as agent nodes in the graphs. ── */
+.v10-agent-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 50%;
+  color: var(--text-on-identity);
+  font-family: var(--font-mono);
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1;
+  vertical-align: middle;
+}
+.v10-agent-dot-stack { display: inline-flex; align-items: center; }
+.v10-agent-dot-stack .v10-agent-dot { box-shadow: 0 0 0 2px var(--bg-surface); }
+.v10-agent-dot-stack .v10-agent-dot + .v10-agent-dot { margin-left: -3px; }
+.v10-agent-dot-more { box-sizing: border-box; padding: 0 var(--space-4); border-radius: var(--radius-pill); background: var(--bg-elevated); color: var(--text-secondary); }
 
 /* ── Activity feed ── */
 .v10-activity-feed {
-  display: flex; flex-direction: column; gap: 14px;
-  padding: 14px 16px;
+  display: flex; flex-direction: column; gap: var(--space-12);
+  padding: var(--space-16) var(--space-16);
   border-top: 1px solid var(--border-subtle);
   border-bottom: 1px solid var(--border-subtle);
-  background: rgba(255, 255, 255, 0.015);
+  background: var(--tint-faint);
 }
 .v10-activity-feed-title {
-  display: flex; align-items: baseline; gap: 8px;
-  font-size: var(--font-size-label); font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.06em;
+  display: flex; align-items: baseline; gap: var(--space-8);
+  font-size: var(--fs-control); font-weight: 700;
+  text-transform: uppercase; letter-spacing: var(--ls-caps);
   color: var(--text-tertiary);
 }
 .v10-activity-feed-title-label { flex: 0 1 auto; }
@@ -109,7 +135,7 @@
    * Same mono+tertiary treatment as `.v10-activity-feed-bucket-count`
    * so the two read as the same kind of signal at different scopes. */
   font-family: var(--font-mono); font-weight: 400;
-  font-size: var(--font-size-meta); letter-spacing: 0;
+  font-size: var(--fs-micro); letter-spacing: 0;
   text-transform: none;
   color: var(--text-tertiary);
 }
@@ -120,34 +146,34 @@
   /* N6 polish (item 2) — quieter than the prior centered/bold
    * EmptyState primitive; recedes so the rest of the Overview
    * stays the focal area. */
-  margin-top: 8px;
-  font-size: var(--font-size-label); font-weight: 400; line-height: 1.5;
+  margin-top: var(--space-8);
+  font-size: var(--fs-control); font-weight: 400; line-height: var(--lh-body);
   color: var(--text-tertiary);
 }
 .v10-activity-feed-error {
   /* PR #694 Comment 8 — distinguishable from `.v10-activity-feed-empty-hint`
    * so the user can tell "couldn't load" apart from "no activity
    * yet", but still quieter than the loud `EmptyState` primitive. */
-  margin-top: 8px;
-  padding: 6px 8px;
-  border-left: 2px solid var(--accent-warn, #f59e0b);
-  font-size: var(--font-size-label); font-weight: 400; line-height: 1.5;
+  margin-top: var(--space-8);
+  padding: var(--space-6) var(--space-8);
+  border-left: 2px solid var(--accent-amber);
+  font-size: var(--fs-control); font-weight: 400; line-height: var(--lh-body);
   color: var(--text-tertiary);
 }
-.v10-activity-feed-bucket { display: flex; flex-direction: column; gap: 4px; }
+.v10-activity-feed-bucket { display: flex; flex-direction: column; gap: var(--space-4); }
 .v10-activity-feed-bucket-head {
-  display: flex; align-items: center; gap: 8px;
-  padding: 4px 2px;
+  display: flex; align-items: center; gap: var(--space-8);
+  padding: var(--space-4) var(--space-2);
   border-bottom: 1px dashed var(--border-subtle);
 }
 .v10-activity-feed-bucket-label {
-  font-size: var(--font-size-meta); font-weight: 700; letter-spacing: 0.08em;
+  font-size: var(--fs-micro); font-weight: 700; letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--text-secondary);
 }
 .v10-activity-feed-bucket-count {
   margin-left: auto;
-  font-family: var(--font-mono); font-size: var(--font-size-meta); color: var(--text-tertiary);
+  font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--text-tertiary);
 }
 .v10-activity-feed-items { display: flex; flex-direction: column; }
 
@@ -155,18 +181,18 @@
   display: grid;
   grid-template-columns: 16px auto 1fr auto auto auto;
   align-items: center;
-  gap: 10px;
-  padding: 7px 8px;
+  gap: var(--space-8);
+  padding: var(--space-8) var(--space-8);
   border: none;
   background: none;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   text-align: left;
   cursor: pointer;
   color: var(--text-primary);
   font-family: var(--font-sans);
-  transition: background 0.12s;
+  transition: background var(--motion-fast);
 }
-.v10-activity-feed-row:hover { background: rgba(255,255,255,0.04); }
+.v10-activity-feed-row:hover { background: var(--tint-subtle); }
 .v10-activity-feed-row + .v10-activity-feed-row {
   border-top: 1px solid var(--border-subtle);
   border-radius: 0;
@@ -185,21 +211,9 @@
 }
 .v10-activity-feed-row-static:hover { background: none; }
 .v10-activity-feed-layer {
-  font-size: var(--font-size-body); line-height: 1;
+  font-size: var(--fs-body); line-height: 1;
   justify-self: center;
 }
-.v10-activity-feed-type {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-size: var(--font-size-meta); font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.04em;
-  color: var(--text-secondary);
-  background: color-mix(in srgb, var(--type-color, #a855f7) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--type-color, #a855f7) 30%, var(--border-subtle));
-  white-space: nowrap;
-}
-.v10-activity-feed-type-icon { font-size: var(--font-size-caption); color: var(--type-color, #a855f7); }
 .v10-activity-feed-title-text {
   /* Entity / assertion name in each row (e.g.
    * "pharmaceutical-derived-product-metadata"). Was `600` to
@@ -208,26 +222,14 @@
    * body relative to the surrounding chrome (`RECENT ACTIVITY · 7`
    * title, `TODAY` bucket label, agent chips). Dropped one notch
    * to `500` to bring it inline with the chrome's body weight. */
-  font-size: var(--font-size-label); font-weight: 500;
+  font-size: var(--fs-control); font-weight: 500;
   color: var(--text-primary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   min-width: 0;
 }
-.v10-activity-feed-status {
-  font-size: var(--font-size-micro); font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.04em;
-  padding: 1px 6px;
-  border-radius: 8px;
-  border: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
-  background: var(--bg-elevated);
-}
-.v10-activity-feed-status.status-good  { color: var(--text-success); border-color: rgba(34,197,94,0.35); background: rgba(34,197,94,0.08); }
-.v10-activity-feed-status.status-warn  { color: var(--text-warning); border-color: rgba(245,158,11,0.35); background: rgba(245,158,11,0.08); }
-.v10-activity-feed-status.status-bad   { color: var(--text-danger); border-color: rgba(239,68,68,0.35); background: rgba(239,68,68,0.08); }
 .v10-activity-feed-author { display: inline-flex; }
 .v10-activity-feed-time {
-  font-family: var(--font-mono); font-size: var(--font-size-meta);
+  font-family: var(--font-mono); font-size: var(--fs-micro);
   color: var(--text-tertiary);
   white-space: nowrap;
   min-width: 54px; text-align: right;
@@ -237,77 +239,76 @@
 .v10-agent-profile {
   display: flex; flex-direction: column;
   overflow: auto;
-  padding: 12px 0;
+  padding: var(--space-12) 0;
 }
 .v10-agent-profile-header {
-  display: flex; flex-direction: column; gap: 14px;
-  padding: 12px 20px 18px;
+  display: flex; flex-direction: column; gap: var(--space-12);
+  padding: var(--space-12) var(--space-20) var(--space-16);
   border-bottom: 1px solid var(--border-subtle);
   background: linear-gradient(
     180deg,
-    rgba(255,255,255,0.04) 0%,
+    var(--tint-subtle) 0%,
     transparent 100%
   );
 }
 .v10-agent-profile-head {
-  display: flex; align-items: center; gap: 16px;
+  display: flex; align-items: center; gap: var(--space-16);
   flex-wrap: wrap;
 }
 .v10-agent-profile-reputation {
-  font-size: var(--font-size-ui); color: var(--text-secondary);
-  line-height: 1.55;
+  font-size: var(--fs-body); color: var(--text-secondary);
+  line-height: var(--lh-body);
   max-width: 640px;
   flex: 1 1 260px;
 }
 .v10-agent-profile-meta {
-  display: flex; flex-direction: column; gap: 4px;
-  padding-top: 4px;
+  display: flex; flex-direction: column; gap: var(--space-4);
+  padding-top: var(--space-4);
 }
 .v10-agent-profile-meta-row {
-  display: flex; gap: 10px; align-items: center;
-  font-size: var(--font-size-caption);
+  display: flex; gap: var(--space-8); align-items: center;
+  font-size: var(--fs-label);
 }
 .v10-agent-profile-meta-lbl {
   text-transform: uppercase;
-  font-size: var(--font-size-micro); font-weight: 700;
-  letter-spacing: 0.08em;
+  font-size: var(--fs-micro); font-weight: 700;
+  letter-spacing: var(--ls-caps);
   color: var(--text-ghost);
   min-width: 80px;
 }
 .v10-agent-profile-meta-val { color: var(--text-secondary); }
-.v10-agent-profile-meta-val.mono { font-family: var(--font-mono); font-size: var(--font-size-caption); }
+.v10-agent-profile-meta-val.mono { font-family: var(--font-mono); font-size: var(--fs-label); }
 .v10-agent-profile-wallet {
-  display: inline-flex; align-items: center; gap: 6px;
+  display: inline-flex; align-items: center; gap: var(--space-6);
   color: var(--text-primary);
 }
 .v10-agent-profile-copy {
-  padding: 1px 6px;
+  padding: 1px var(--space-6);
   background: none;
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-ghost);
-  font-size: var(--font-size-meta);
+  font-size: var(--fs-micro);
   cursor: pointer;
   font-family: var(--font-sans);
-  transition: border-color 0.15s, color 0.15s;
+  transition: border-color var(--motion-base), color var(--motion-base);
 }
 .v10-agent-profile-copy:hover { border-color: var(--border-strong); color: var(--text-primary); }
 
 .v10-agent-profile-stats {
-  display: flex; flex-wrap: wrap; gap: 8px;
-  padding: 12px 20px;
+  display: flex; flex-wrap: wrap; gap: var(--space-8);
+  padding: var(--space-12) var(--space-20);
   border-bottom: 1px solid var(--border-subtle);
 }
 .v10-agent-profile-stat {
-  display: inline-flex; flex-direction: column; gap: 2px;
-  padding: 6px 12px;
+  display: inline-flex; flex-direction: column; gap: var(--space-2);
+  padding: var(--space-6) var(--space-12);
   border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  background: var(--bg-elevated, rgba(255,255,255,0.03));
+  background: var(--bg-elevated);
   cursor: pointer;
   color: var(--text-secondary);
   font-family: var(--font-sans);
-  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  transition: border-color var(--motion-base), color var(--motion-base), background var(--motion-base);
 }
 .v10-agent-profile-stat:hover {
   border-color: var(--stat-color, var(--border-strong));
@@ -319,14 +320,14 @@
   color: var(--text-primary);
 }
 .v10-agent-profile-stat-val {
-  font-size: 17px; font-weight: 700;
+  font-size: var(--fs-heading); font-weight: 700;
   font-family: var(--font-mono);
   line-height: 1;
   color: var(--stat-color, var(--text-primary));
 }
 .v10-agent-profile-stat-lbl {
-  font-size: var(--font-size-meta); text-transform: uppercase;
-  letter-spacing: 0.06em;
+  font-size: var(--fs-micro); text-transform: uppercase;
+  letter-spacing: var(--ls-caps);
   color: var(--text-tertiary);
 }
 .v10-agent-profile-feed-sub {

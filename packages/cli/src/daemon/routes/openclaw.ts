@@ -736,7 +736,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
       try {
         const forwardRes = await fetch(target.inboundUrl, {
           method: "POST",
-          headers: buildOpenClawChannelHeaders(target, bridgeAuthToken, {
+          headers: buildOpenClawChannelHeaders(target, bridgeAuthToken, target.inboundUrl, {
             "Content-Type": "application/json",
           }),
           body: JSON.stringify({
@@ -869,6 +869,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
           headers: buildOpenClawChannelHeaders(
             target,
             bridgeAuthToken,
+            target.streamUrl ?? target.inboundUrl,
             {
               'Content-Type': 'application/json',
               'Accept': 'text/event-stream',

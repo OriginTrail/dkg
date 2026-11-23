@@ -29,10 +29,10 @@ function uint256ToBytes(value: bigint): Uint8Array {
 }
 
 /**
- * LEGACY 2-field / 6-field ACK digest used by the **verify-proposal** flow
- * (`verify-proposal-handler.ts`, `verify-collector.ts`). NOT used by the
- * V10 publish path — see `computePublishACKDigest` below for the
- * H5-prefixed 8-field layout that matches `KnowledgeAssetsV10.sol:362-373`.
+ * LEGACY 2-field / 6-field ACK digest, which the **verify-proposal** flow
+ * used before `computeVerifyApprovalDigest`. NOT used by the V10 publish
+ * path — see `computePublishACKDigest` below for the H5-prefixed 8-field
+ * layout that matches `KnowledgeAssetsV10.sol:362-373`.
  *
  * This function has two shapes kept for backward compatibility:
  *   - 2-field: `keccak256(abi.encodePacked(contextGraphId, merkleRoot))`
@@ -81,6 +81,56 @@ export function computeACKDigest(
   const packed = new Uint8Array(64);
   packed.set(uint256ToBytes(contextGraphId), 0);
   packed.set(merkleRoot, 32);
+  return keccak256(packed);
+}
+
+/**
+ * The first packed member of the verify-approval digest:
+ * `keccak256("dkg:verify-approval:v1")`. A new layout gets a new tag. A
+ * function rather than a module constant, so a bundle that does not use the
+ * digest does not compute it at load.
+ */
+function verifyApprovalDigestTag(): Uint8Array {
+  return keccak256(new TextEncoder().encode('dkg:verify-approval:v1'));
+}
+
+/**
+ * The digest a VERIFY approver signs (EIP-191) and the proposer's
+ * `VerifyCollector` checks:
+ *
+ *     keccak256(abi.encodePacked(VERIFY_APPROVAL_DIGEST_TAG, chainId,
+ *       contractAddress, contextGraphId, batchId, merkleRoot))
+ *
+ * The tag, the chain and the deployment's `KnowledgeAssetsLifecycle`
+ * address bind an approval to this purpose and network, and the context
+ * graph and batch bind it to the batch it approves. Its 180-byte preimage
+ * shares no layout with an ACK digest. No contract checks these signatures;
+ * they count toward the proposer's quorum only.
+ *
+ * @param chainId - The EVM chain id
+ * @param contractAddress - The deployment's KnowledgeAssetsLifecycle address
+ * @param contextGraphId - The on-chain uint256 context graph id
+ * @param batchId - The batch being verified
+ * @param merkleRoot - The batch's 32-byte merkle root
+ */
+export function computeVerifyApprovalDigest(
+  chainId: bigint,
+  contractAddress: string,
+  contextGraphId: bigint,
+  batchId: bigint,
+  merkleRoot: Uint8Array,
+): Uint8Array {
+  if (merkleRoot.length !== 32) {
+    throw new Error(`merkleRoot must be 32 bytes, got ${merkleRoot.length}`);
+  }
+  const packed = new Uint8Array(180);
+  let offset = 0;
+  packed.set(verifyApprovalDigestTag(), offset); offset += 32;
+  packed.set(uint256ToBytes(chainId), offset); offset += 32;
+  packed.set(addressToBytes(contractAddress), offset); offset += 20;
+  packed.set(uint256ToBytes(contextGraphId), offset); offset += 32;
+  packed.set(uint256ToBytes(batchId), offset); offset += 32;
+  packed.set(merkleRoot, offset);
   return keccak256(packed);
 }
 

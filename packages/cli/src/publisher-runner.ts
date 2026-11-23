@@ -52,7 +52,8 @@ import {
   type WorkspacePublicSnapshotStore,
   type StorageAckCopyCleanupWriter,
 } from '@origintrail-official/dkg-publisher';
-import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { createPublisherStore } from './publisher-store.js';
 import {
   loadNetworkConfig,
   loadResolvedNetworkConfig,
@@ -1277,43 +1278,6 @@ function mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
   };
 }
 
-
-async function createPublisherStore(dataDir: string, config: DkgConfig, readOnly = false): Promise<TripleStore> {
-  if (config.store) {
-    const storeConfig = config.store as any;
-    return await createTripleStore({
-      ...storeConfig,
-      // Only the embedded Oxigraph adapters write a store file back; an external store is a server the inspector only queries.
-      ...(readOnly && isLocalOxigraphStoreConfig(storeConfig) ? { options: { ...storeConfig.options, readOnly } } : {}),
-      // OT-RFC-59 §5.3: the daemon-down CLI publisher is a SECOND writer against
-      // the same store. It MUST NOT maintain the change log — a second in-memory
-      // seq allocator would fork the log (commit order ≠ seq order across
-      // processes). Only the single-writer daemon owns the changelog; force it
-      // off here regardless of config.store.changelog.
-      changelog: false,
-      largeLiteralStorage: config.largeLiteralStorage ?? (
-        isLocalOxigraphStoreConfig(storeConfig)
-          ? defaultLargeLiteralStorage(dataDir, config)
-          : undefined
-      ),
-    });
-  }
-
-  return await createTripleStore({
-    backend: 'oxigraph-worker',
-    options: { path: join(dataDir, 'store.nq'), readOnly },
-    largeLiteralStorage: defaultLargeLiteralStorage(dataDir, config),
-  });
-}
-
-function defaultLargeLiteralStorage(dataDir: string, config: DkgConfig) {
-  return {
-    enabled: config.largeLiteralStorage?.enabled ?? true,
-    thresholdBytes: config.largeLiteralStorage?.thresholdBytes,
-    directory: config.largeLiteralStorage?.directory ?? join(dataDir, 'literal-blobs'),
-  };
-}
-
 export function createPublicSnapshotStore(
   dataDir: string,
   config?: Pick<DkgConfig, 'sharedMemoryPublicSnapshotStorage'>,
@@ -1333,12 +1297,6 @@ export function createPublicSnapshotStore(
     { gc: snapshotConfig?.gc, log: options.log,
       isSnapshotReferenced: options.store ? snapshotReferenceCheck(options.store) : undefined },
   );
-}
-
-function isLocalOxigraphStoreConfig(storeConfig: { backend?: unknown }): boolean {
-  return storeConfig.backend === 'oxigraph'
-    || storeConfig.backend === 'oxigraph-worker'
-    || storeConfig.backend === 'oxigraph-persistent';
 }
 
 async function loadOrCreateAgentWallet(dataDir: string): Promise<DKGAgentWallet> {

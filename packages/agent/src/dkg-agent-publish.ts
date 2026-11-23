@@ -5,7 +5,7 @@ import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from '
 import { incompleteNamedKaLifecycleOwner } from './incomplete-named-ka-lifecycle.js';
 import { tryWithKeyedLocks, assertionLifecycleWriteLockKey, type PromoteExecutionAuthority } from '@origintrail-official/dkg-publisher';
 
-import { createPromoteRetryableFailure } from '@origintrail-official/dkg-publisher';
+import { createPromoteRetryableFailure, rejectUserAuthoredProtocolMetadata } from '@origintrail-official/dkg-publisher';
 import { isTransientInventorySignerFailure } from './internal/promote/share-inventory-signing-capability.js';
 import { resolvePromoteRecipientsWithinBound } from './internal/promote/assertion-promote-precommit.js';
 import { finalizeQueuedKnowledgeAssetVmPublish, retireLegacySwmAfterConfirmedLocalPublish } from './queued-publish-finalization.js';
@@ -2415,6 +2415,9 @@ export class PublishMethods extends DKGAgentBase {
     this.log.info(ctx, `Starting update of kaId=${kaId} in context graph "${contextGraphId}" with ${quads.length} triples`);
     rejectOversizedRdfLiterals(quads, 'agent.update.quads');
     rejectOversizedRdfLiterals(privateQuads, 'agent.update.privateQuads');
+    if (opts?.[INTERNAL_ROOTLESS_UPDATE_ORIGIN] !== true) {
+      rejectUserAuthoredProtocolMetadata([...quads, ...(privateQuads ?? [])]);
+    }
 
     if (!opts?.precomputedUpdateAttestation) {
       throw new Error(

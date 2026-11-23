@@ -22,7 +22,7 @@ import type { DkgClient, SparqlResult } from '../client.js';
 import type { DkgConfig } from '../config.js';
 import { bindingsToTable } from '../sparql.js';
 import { EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION } from './context-graph-description.js';
-import { filterContextGraphsForScope } from './context-graph-scope.js';
+import { listContextGraphsForScope } from './context-graph-scope.js';
 import { resolveWorkingMemoryAgentAddress } from './working-memory-identity.js';
 
 type ToolResult = {
@@ -179,7 +179,7 @@ export function registerQueryCatalogTools(
     },
     async ({ scope = 'mine', limit = 100, selectorLimit = 10 }): Promise<ToolResult> => {
       try {
-        const accessible = filterContextGraphsForScope(await client.listProjects(), scope);
+        const accessible = await listContextGraphsForScope(client, scope);
         const inspected = accessible.slice(0, limit);
         const outcomes: Array<{
           row: (typeof inspected)[number];

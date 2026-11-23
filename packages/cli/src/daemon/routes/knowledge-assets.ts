@@ -1135,6 +1135,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     res,
     {
       ...writePreflightContextGraphOpts,
+      asyncAdmission: (layer === 'swm' && verb === 'share-async') || (layer === 'vm' && verb === 'publish-async'),
       // This common preflight precedes every mutation and the publish enqueue fence.
       ...(layer === 'vm' && verb === 'publish-async' ? { renderUnavailable: renderPublishPreflightUnavailable } : {}),
     },

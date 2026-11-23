@@ -139,10 +139,17 @@ export function validatePrimaryResults({ eventName, plan, needs }) {
   requireSuccess(needs, 'abi-freshness', Boolean(plan.abiFreshnessRelevant), errors);
   const candidateEvent = eventName === 'pull_request' || eventName === 'merge_group';
   requireSuccess(needs, 'solidity', candidateEvent && contracts, errors);
+  // A push proves its contracts with either the sharded Hardhat tests or the
+  // coverage run (which executes the same tests instrumented); scheduled and
+  // manual runs still require coverage and its ratchet.
+  const push = eventName === 'push';
+  if (push && contracts && needs.solidity?.result !== 'success' && needs['solidity-coverage']?.result !== 'success') {
+    errors.push('push ran neither solidity nor solidity-coverage to success');
+  }
   requireSuccess(
     needs,
     'solidity-coverage',
-    !candidateEvent,
+    !candidateEvent && !push,
     errors,
   );
   requireSuccess(

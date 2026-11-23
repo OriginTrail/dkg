@@ -422,9 +422,12 @@ describe('the offer job', () => {
   it('runs beside the landing tick: a slow publish holds no tick, a run asked for meanwhile follows it, and stop waits for it', async () => {
     let release!: () => void;
     let held = new Promise<void>((resolve) => { release = resolve; });
+    let entered!: () => void;
+    let publishing = new Promise<void>((resolve) => { entered = resolve; });
     const slow = memoryAssets();
     const publish = slow.publish.bind(slow);
     slow.publish = async (name, quads) => {
+      entered();
       await held;
       return publish(name, quads);
     };
@@ -438,9 +441,12 @@ describe('the offer job', () => {
     await vi.waitFor(() => expect(slow.published.map((p) => p.offer.nextPricePerUnit)).toEqual([undefined, 30n]));
     // A run in progress at stop is waited for, and none follows it.
     held = new Promise<void>((resolve) => { release = resolve; });
+    publishing = new Promise<void>((resolve) => { entered = resolve; });
     await seller.setNextPrice(A, 40n);
     seller.offers!.poke();
     seller.offers!.poke();
+    // The run before may still be finishing, so the pokes can only ask for the next one: stop once it publishes.
+    await publishing;
     let stopped = false;
     const stopping = seller.stop().then(() => { stopped = true; });
     await new Promise((resolve) => setTimeout(resolve, 20));

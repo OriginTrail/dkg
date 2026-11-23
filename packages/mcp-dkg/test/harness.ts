@@ -483,7 +483,7 @@ export class FakeClient {
 
   async listProjects() {
     if (this.overrides.listProjects) return this.overrides.listProjects.call(this);
-    return Array.from(this.contextGraphs).map((id) => ({ id, name: id }));
+    return Array.from(this.contextGraphs).map((id) => ({ id, name: id, callerInvolved: true }));
   }
 
   async listSubGraphs(_: string) {

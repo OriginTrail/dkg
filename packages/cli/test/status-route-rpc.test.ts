@@ -340,10 +340,11 @@ describe('/api/wallets/balances governed transport', () => {
       expect(usage.byMethod.eth_getBalance).toBe(1);
       expect(usage.byMethod.eth_call).toBe(2);
       expect(methods).toEqual(expect.arrayContaining([
-        'eth_chainId',
         'eth_getBalance',
         'eth_call',
       ]));
+      // The route's providers take the configured chain's network, so none asks for it.
+      expect(methods).not.toContain('eth_chainId');
       expect(runtime.governor.snapshot().foregroundAdmitted).toBe(methods.length);
     } finally {
       await new Promise<void>((resolve, reject) => {

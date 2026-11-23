@@ -10,13 +10,13 @@
   justify-content: center;
   width: 24px;
   min-height: 32px;
-  padding: 0 4px;
+  padding: 0 var(--space-4);
   border: 0;
   background: transparent;
   color: var(--text-secondary);
-  font-size: var(--font-size-body);
+  font-size: var(--fs-body);
   line-height: 1;
-  border-radius: 0 4px 4px 0;
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
   cursor: pointer;
 }
 .v10-agent-tab-menu-trigger:hover {
@@ -38,11 +38,10 @@
   min-width: 200px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-  z-index: 200;
+  box-shadow: var(--shadow-menu);
+  z-index: var(--z-popover);
   overflow: hidden;
-  padding: 4px;
+  padding: var(--space-4);
 }
 .v10-agent-tab-menu-popover.align-right {
   /* Right-anchored fallback when the left-anchored popover would
@@ -54,25 +53,25 @@
 .v10-agent-tab-menu-status {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  font-size: var(--font-size-caption);
+  gap: var(--space-8);
+  padding: var(--pad-nested-sm);
+  font-size: var(--fs-label);
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border-subtle);
-  margin-bottom: 4px;
+  margin-bottom: var(--space-4);
 }
 .v10-agent-tab-menu-item {
   display: block;
   width: 100%;
-  padding: 8px 10px;
+  padding: var(--pad-nested-sm);
   background: transparent;
   border: 0;
   text-align: left;
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   color: var(--text-primary);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background var(--motion-fast);
 }
 .v10-agent-tab-menu-item:hover:not(:disabled) {
   background: var(--bg-hover);
@@ -85,7 +84,7 @@
   color: var(--text-danger);
 }
 .v10-agent-tab-menu-item.danger:hover:not(:disabled) {
-  background: color-mix(in srgb, #ef4444 12%, var(--bg-hover));
+  background: color-mix(in srgb, var(--accent-red) 12%, var(--bg-hover));
   color: var(--text-danger-hover);
 }
 
@@ -100,18 +99,15 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-8);
   width: 100%;
-  height: 36px;
-  padding: 0 12px;
-  border-radius: 8px;
+  padding: 0 var(--space-12);
   border: 1px solid var(--border-subtle);
   background: var(--bg-elevated);
   color: var(--text-primary);
-  font-size: var(--font-size-label);
   font-family: inherit;
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
+  transition: border-color var(--motion-base), background var(--motion-base);
   text-align: left;
 }
 .v10-select-trigger:hover:not(:disabled) {
@@ -119,15 +115,14 @@
   background: var(--bg-hover);
 }
 .v10-select-trigger:focus-visible {
-  outline: none;
-  border-color: var(--accent-blue);
-  box-shadow: 0 0 0 1px var(--accent-blue);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }
 .v10-select.open .v10-select-trigger {
   border-color: var(--border-strong);
 }
 .v10-select-trigger:disabled {
-  opacity: 0.6;
+  opacity: var(--opacity-disabled);
   cursor: not-allowed;
 }
 .v10-select-value {
@@ -142,37 +137,38 @@
 }
 .v10-select-caret {
   flex-shrink: 0;
-  font-size: var(--font-size-meta);
+  font-size: var(--fs-micro);
   color: var(--text-tertiary);
-  transition: transform 0.15s;
+  transition: transform var(--motion-base);
 }
 .v10-select.open .v10-select-caret {
   transform: rotate(180deg);
 }
 .v10-select-menu {
+  position: fixed;
   max-height: 240px;
   overflow-y: auto;
   list-style: none;
   margin: 0;
-  padding: 4px;
+  padding: var(--space-4);
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-  z-index: 1000;
+  box-shadow: var(--shadow-menu);
+  z-index: var(--z-floating);
 }
 .v10-select-menu:focus { outline: none; }
 .v10-select-menu-above {
+  transform: translateY(-100%);
   margin-top: -4px;
 }
 .v10-select-menu-below {
-  margin-top: 4px;
+  margin-top: var(--space-4);
 }
 .v10-select-option {
-  padding: 8px 10px;
-  font-size: var(--font-size-label);
+  padding: var(--pad-nested-sm);
+  font-size: var(--fs-control);
   color: var(--text-primary);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
@@ -198,7 +194,7 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px 14px;
+  padding: var(--space-12) var(--space-16);
 }
 
 /* Floating "scroll to latest" pill — sticks to the bottom-center of the
@@ -227,15 +223,15 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--border-default);
   background: var(--bg-elevated);
   color: var(--text-secondary);
   cursor: pointer;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-menu);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 150ms ease-out, background 0.15s, color 0.15s;
+  transition: opacity var(--motion-base) ease-out, background var(--motion-base), color var(--motion-base);
   z-index: 5;
   /* Negative top margin so the pill overlays the previous message instead
      of forcing extra vertical space when invisible. */
@@ -259,8 +255,8 @@
      visible (full date + time vs. previous time-only). Pre-existing
      AA fail surfaced by PR4: tertiary clears only 2.31-2.66:1 against
      bg-panel; secondary clears 5.58/7.17. UI-lead Task #68. */
-  margin-top: 4px;
-  font-size: var(--font-size-meta);
+  margin-top: var(--space-4);
+  font-size: var(--fs-micro);
   color: var(--text-secondary);
   font-family: var(--font-mono);
   /* Hidden by default, revealed on message hover/focus — same recipe
@@ -268,7 +264,7 @@
      assistant turns full-width with no bubble. Colour/contrast (AA per
      Task #68) is unchanged; only visibility toggles. */
   opacity: 0;
-  transition: opacity 120ms ease-out;
+  transition: opacity var(--motion-fast) ease-out;
 }
 .v10-chat-msg:hover .v10-local-agent-msg-time,
 .v10-chat-msg:focus-within .v10-local-agent-msg-time {
@@ -288,51 +284,30 @@
 @media (prefers-reduced-motion: reduce) {
   .v10-local-agent-msg-time { opacity: 1; transition: none; }
 }
-.v10-local-agent-setup {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
 .v10-local-agent-warning {
-  padding: 10px 12px;
-  border-radius: 6px;
-  font-size: var(--font-size-caption);
-  line-height: 1.55;
+  padding: var(--pad-nested);
+  font-size: var(--fs-label);
+  line-height: var(--lh-body);
   border: 1px solid var(--border-default);
 }
 .v10-local-agent-warning.connecting {
-  color: #bfdbfe;
-  background: color-mix(in srgb, var(--accent-blue) 12%, var(--bg-surface));
-  border-color: color-mix(in srgb, var(--accent-blue) 28%, var(--border-subtle));
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border-color: var(--border-default);
 }
 .v10-local-agent-warning.offline {
-  color: #fcd34d;
-  background: color-mix(in srgb, #f59e0b 10%, var(--bg-surface));
-  border-color: color-mix(in srgb, #f59e0b 28%, var(--border-subtle));
+  color: var(--text-warning);
+  background: color-mix(in srgb, var(--accent-amber) 10%, var(--bg-surface));
+  border-color: color-mix(in srgb, var(--accent-amber) 28%, var(--border-subtle));
 }
 .v10-local-agent-copy {
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   color: var(--text-secondary);
-  line-height: 1.55;
-}
-.v10-local-agent-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.v10-local-agent-target-picker {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  width: 100%;
-  margin: 0;
+  line-height: var(--lh-body);
 }
 .v10-local-agent-target-label {
-  font-size: var(--font-size-caption);
-  letter-spacing: 0.08em;
+  font-size: var(--fs-label);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--text-tertiary);
   flex-shrink: 0;
@@ -342,13 +317,15 @@
   width: 100%;
   min-width: 0;
 }
-.v10-local-agent-toolbar-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
 .v10-local-agent-composer-row {
   display: flex;
   align-items: stretch;
-  gap: 8px;
+  gap: var(--space-8);
 }
+
+/* ── Connected agents ── */
+.v10-local-agent-attachment-row { display: flex; flex-wrap: wrap; gap: var(--space-6); margin-top: var(--space-6); }
+.v10-local-agent-attachment-chip { padding: var(--space-2) var(--space-8); border-radius: var(--radius-pill); background: var(--bg-elevated); font-size: var(--fs-label); }
+.v10-local-agent-stack { display: flex; flex-direction: column; gap: var(--space-8); width: 100%; }
+.v10-local-agent-copy.v10-local-agent-copy-flat { margin: 0; color: var(--text-tertiary); }
+.v10-local-agent-file-input { display: none; }

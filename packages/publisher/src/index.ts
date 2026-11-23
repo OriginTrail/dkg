@@ -19,6 +19,7 @@ export { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
 export type { LiftJobTailStep, LiftJobTailStepObserver } from './lift-job-tail-steps.js';
 export { skolemize, isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } from './skolemize.js';
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
+export { assertNoReceivedProtocolMetadata, rejectReservedSubjectPrefixes, rejectUserAuthoredProtocolMetadata } from './protocol-metadata.js';
 export {
   KNOWLEDGE_ASSET_SKOLEM_PREFIX,
   KNOWLEDGE_ASSET_PRIVATE_SKOLEM_PREFIX,
@@ -114,6 +115,9 @@ export {
 export {
   validatePublishRequest,
   validateCanonicalGraphScopedKnowledgeAssetPayload,
+  assertWritableQuadTerms,
+  findMalformedQuadTerm,
+  type MalformedQuadTerm,
   type ValidationResult,
   type ValidationOptions,
 } from './validation.js';
@@ -253,7 +257,7 @@ export {
   type CollectedApproval,
   type VerifyCollectionResult,
 } from './verify-collector.js';
-export { VerifyProposalHandler, type VerifyProposalHandlerDeps } from './verify-proposal-handler.js';
+export { VerifyProposalHandler, type VerifyProposalHandlerDeps, type VerifyApprovalSigningDomain } from './verify-proposal-handler.js';
 export { buildVerificationMetadata } from './verification-metadata.js';
 export { PublishHandler, parseSimpleNQuads } from './publish-handler.js';
 export { PublishJournal, type JournalEntry } from './publish-journal.js';

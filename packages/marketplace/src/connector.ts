@@ -15,8 +15,12 @@
  * (api.openai.com) gets `max_completion_tokens` and no temperature, which its
  * reasoning models (GPT-5 and on) need, as they refuse `max_tokens` and any
  * temperature but the default; every other backend `max_tokens` and a
- * temperature of 0, as in 10.1.0. A backend that refuses a call has its own
- * words for why in the error and the seller's log, cut short, the key never.
+ * temperature of 0, as in 10.1.0. A call with tools also sends the
+ * `reasoning_effort` its service names (`reasoningEffortWithTools`), and none
+ * by default: some OpenAI reasoning models take function tools on chat
+ * completions only with `none`. A backend that refuses a call has its own
+ * words for why in the error and the seller's log, cut short, the key never,
+ * and the error carries the HTTP status it answered (`UpstreamError.status`).
  */
 import { WireError, answerFromWire, type Answer, type ChatMessage, type FinishReason, type ToolChoice, type ToolSpec } from './wire.js';
 
@@ -56,6 +60,11 @@ export interface ConnectorSettings {
   maxTokensField?: MaxTokensField;
   /** The temperature sent; `null` sends none, for the backend's default. By default none for api.openai.com, 0 elsewhere. */
   temperature?: number | null;
+  /**
+   * The `reasoning_effort` sent with a call that carries tools, e.g. `none`; by default none is sent, for the model's
+   * own. Some OpenAI reasoning models refuse function tools on chat completions at any effort but `none`.
+   */
+  reasoningEffortWithTools?: string;
 }
 
 export type MaxTokensField = 'max_tokens' | 'max_completion_tokens';
@@ -97,11 +106,18 @@ export function backendMessageOf(body: unknown, key: string | undefined): string
   return text.length > BACKEND_MESSAGE_CHARS ? `${text.slice(0, BACKEND_MESSAGE_CHARS - 1)}…` : text;
 }
 
-/** The backend failed or answered without text and token counts: nothing was served. */
+/**
+ * The backend failed or answered without text and token counts: nothing was served. `status` is the HTTP status of
+ * a backend that refused the call with one; it is unset when the backend did not answer, or answered with nothing to
+ * serve.
+ */
 export class UpstreamError extends Error {
-  constructor(message: string) {
+  readonly status: number | undefined;
+
+  constructor(message: string, status?: number) {
     super(message);
     this.name = 'UpstreamError';
+    this.status = status;
   }
 }
 
@@ -139,6 +155,7 @@ export function connectorOf(settings: ConnectorSettings): Connector {
               tools,
               ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
               ...(parallelToolCalls !== undefined ? { parallel_tool_calls: parallelToolCalls } : {}),
+              ...(settings.reasoningEffortWithTools !== undefined ? { reasoning_effort: settings.reasoningEffortWithTools } : {}),
             } : {}),
           }),
           signal: AbortSignal.timeout(settings.timeoutMs ?? 60_000),
@@ -148,7 +165,7 @@ export function connectorOf(settings: ConnectorSettings): Connector {
       }
       if (!res.ok) {
         const said = backendMessageOf(await res.json().catch(() => null), key);
-        throw new UpstreamError(`the backend answered ${res.status}${said ? `: ${said}` : ''}`);
+        throw new UpstreamError(`the backend answered ${res.status}${said ? `: ${said}` : ''}`, res.status);
       }
       const out = await res.json().catch(() => null) as {
         choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }>;
