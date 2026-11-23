@@ -13,6 +13,8 @@
 #     spreads KCs across two registered context graphs, distributing
 #     publishes round-robin across all 4 core nodes' APIs (so the
 #     publisher path is exercised on every node, not just node 1).
+#     A share the node answers as retryable is shared again, as a client
+#     would; each such answer is reported.
 #   - Stake & reward accounting: 10 distinct wallets stake on the 4
 #     core identities (asymmetrically — cores 1+2 carry 100k each,
 #     cores 3+4 carry 75k each). We snapshot
@@ -397,6 +399,13 @@ PUBLISH_LOG="$OUT_DIR/publish.jsonl"
 : > "$PUBLISH_LOG"
 CGS=("devnet-test" "devnet-isolation")
 NODES=(1 2 3 4)
+# A share whose prerequisite the node could not read just now gets a retryable
+# 503 (Retry-After: 1, retryAction resume_existing_knowledge_asset). The client
+# rule is to wait and share the same draft again. The CLI prints the answer and
+# exits 1, so the loop follows the rule itself, a bounded number of times, and
+# records how often it did.
+SHARE_RETRYABLE_ANSWER="A promote prerequisite is temporarily unavailable"
+SHARE_RETRY_MAX=5
 TMP=$(mktemp -d -t soak-pub)
 trap 'rm -rf "$TMP"' EXIT
 i=0
@@ -414,8 +423,24 @@ while [ "$(date +%s)" -lt "$END_TS" ]; do
 EOF
   start_s=$(date +%s)
   rc=0
-  out=$(DKG_HOME="$DEVNET_DIR/node${node_idx}" node "$CLI_JS" ka create "$ka_name" --context-graph-id "$cg" --input-file "$fixture" --share 2>&1 \
-    && DKG_HOME="$DEVNET_DIR/node${node_idx}" node "$CLI_JS" ka publish "$ka_name" --context-graph-id "$cg" 2>&1) || rc=$?
+  share_retries=0
+  last_out=$(DKG_HOME="$DEVNET_DIR/node${node_idx}" node "$CLI_JS" ka create "$ka_name" --context-graph-id "$cg" --input-file "$fixture" --share 2>&1) || rc=$?
+  out="$last_out"
+  while [ "$rc" -ne 0 ] && [ "$share_retries" -lt "$SHARE_RETRY_MAX" ] \
+    && [[ "$last_out" == *"$SHARE_RETRYABLE_ANSWER"* ]]; do
+    share_retries=$((share_retries + 1))
+    sleep "$share_retries"
+    rc=0
+    last_out=$(DKG_HOME="$DEVNET_DIR/node${node_idx}" node "$CLI_JS" ka share "$ka_name" --context-graph-id "$cg" 2>&1) || rc=$?
+    out="${out}
+[soak] retryable share answer followed: ka share, retry ${share_retries}
+${last_out}"
+  done
+  if [ "$rc" -eq 0 ]; then
+    last_out=$(DKG_HOME="$DEVNET_DIR/node${node_idx}" node "$CLI_JS" ka publish "$ka_name" --context-graph-id "$cg" 2>&1) || rc=$?
+    out="${out}
+${last_out}"
+  fi
   end_s=$(date +%s)
   status="ok"
   [ "$rc" -ne 0 ] && status="fail"
@@ -424,8 +449,8 @@ EOF
   # `out` capture can contain arbitrary CLI stderr; pipe it through python for
   # a guaranteed-valid string literal.
   out_json=$(printf '%s' "$out" | python3 -c 'import sys,json;print(json.dumps(sys.stdin.read()))')
-  printf '{"ts":"%s","cg":"%s","node":%d,"i":%d,"subject":"%s","status":"%s","rc":%d,"elapsed_s":%d,"out":%s}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$cg" "$node_idx" "$i" "$subj" "$status" "$rc" "$elapsed_s" "$out_json" \
+  printf '{"ts":"%s","cg":"%s","node":%d,"i":%d,"subject":"%s","status":"%s","rc":%d,"share_retries":%d,"elapsed_s":%d,"out":%s}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$cg" "$node_idx" "$i" "$subj" "$status" "$rc" "$share_retries" "$elapsed_s" "$out_json" \
     >> "$PUBLISH_LOG"
   rm -f "$fixture"
   i=$((i + 1))
@@ -774,6 +799,21 @@ if (effectivePubTotal > 0 && blockingPubFailures.length === 0 && pubOk / effecti
   ok.push("PUBLISH success rate excluding planned restart window " + pubOk + "/" + effectivePubTotal + " (" + Math.round(100*pubOk/effectivePubTotal) + "%) >= 90%");
 } else {
   fail.push("PUBLISH success rate excluding planned restart window " + pubOk + "/" + effectivePubTotal + " (blocking failures=" + blockingPubFailures.length + ", total failures=" + pubFail + ")");
+}
+// A publish whose share the node first answered as retryable counts as ok when
+// sharing the same draft again succeeded (the client rule). Every followed
+// answer is reported, and the lane fails when more than one publish in ten
+// needed one.
+const pubShareRetried = pubLines.filter(p => Number(p.share_retries ?? 0) > 0);
+if (pubShareRetried.length > 0) {
+  const answers = pubShareRetried.reduce((n, p) => n + Number(p.share_retries), 0);
+  const where = pubShareRetried.map(p => "i" + p.i + " node" + p.node + " x" + p.share_retries + " " + p.status).join(", ");
+  const line = "PUBLISH followed " + answers + " retryable share answer(s) on " + pubShareRetried.length + " publish(es): " + where;
+  if (effectivePubTotal > 0 && pubShareRetried.length / effectivePubTotal > 0.1) {
+    fail.push(line + " (more than 1 publish in 10)");
+  } else {
+    warn.push(line);
+  }
 }
 
 // 2. RS prover: take the PEAK submittedCount per node across the whole
