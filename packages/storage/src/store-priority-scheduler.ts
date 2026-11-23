@@ -35,10 +35,9 @@ import { StoreSchedulerStats, metricOperation, registerStoreSchedulerStats } fro
 const defaultStoreWorkPriority = new AsyncLocalStorage<StoreWorkPriority>();
 
 /**
- * Run `fn` with a default admission lane for store work that names none.
- * Explicit per-call priorities still win. Long background walks use this so
- * every store call they make stays out of the normal lane without threading
- * a priority through each helper.
+ * Run `fn` with a default admission lane for store work that names none. Explicit per-call priorities still
+ * win. Long background walks use this so every store call they make stays out of the normal lane without
+ * threading a priority through each helper.
  */
 export function withDefaultStoreWorkPriority<T>(priority: StoreWorkPriority, fn: () => T): T {
   return defaultStoreWorkPriority.run(priority, fn);
@@ -59,11 +58,10 @@ export function withoutDefaultStoreWorkPriority<T>(fn: () => T): T {
 }
 
 /**
- * How many operations of one shared lane `store` admits at once, or undefined
- * when the store does not say. Without `priority` it answers for the lane that
- * unprioritised work started here runs in. A caller that fans out reads uses
- * it as its width: a wider fan-out only queues the surplus behind its own
- * siblings, where each read waits against the queue deadline.
+ * How many operations of one shared lane `store` admits at once, or undefined when the store does not say.
+ * Without `priority` it answers for the lane that unprioritised work started here runs in. A caller that fans
+ * out reads uses it as its width: a wider fan-out only queues the surplus behind its own siblings, where each
+ * read waits against the queue deadline.
  */
 export function storeLaneInflightLimit(
   store: Pick<TripleStore, 'getPressureSnapshot'>,
@@ -108,10 +106,7 @@ export interface StoreSchedulerBusyErrorOptions extends ErrorOptions {
   storeOperation?: StoreOperation;
 }
 
-/**
- * A retry-safe overload rejection emitted only while work is still queued.
- * Callers may retry because the operation closure has not started.
- */
+/** A retry-safe overload rejection: emitted only while the work is queued, before its closure starts. */
 export class StoreSchedulerBusyError extends Error implements StoreOperationOutcomeTagged {
   readonly code = 'STORE_SCHEDULER_BUSY' as const;
   readonly retryable = true as const;
@@ -262,16 +257,14 @@ function resolveMaxConcurrentFromEnv(): number {
   if (process.env.DKG_STORE_CONCURRENCY_POLICY?.trim() === 'configured' && Number.isSafeInteger(configured)) {
     return configured;
   }
-  // One admitted SPARQL request can use several Oxigraph/Rayon worker threads.
-  // Letting an operator's stale tuning admit more store jobs than the host has
-  // logical CPUs multiplies runnable work and can starve the reserved ACK lane
-  // even while the JS scheduler reports empty queues. Keep explicit constructor
-  // options available to tests/embedded callers, but make the process-level
-  // environment setting a hardware-aware ceiling.
-  // A one-slot automatic ceiling would normalize the default ACK reservation
-  // to zero. Keep one ordinary slot plus the default reserved ACK slot even on
-  // a single-vCPU runtime. An explicitly lower process setting is still
-  // honored because it remains the first operand of Math.min().
+  // One admitted SPARQL request can use several Oxigraph/Rayon worker threads. Letting an operator's stale
+  // tuning admit more store jobs than the host has logical CPUs multiplies runnable work and can starve the
+  // reserved ACK lane even while the JS scheduler reports empty queues. Keep explicit constructor options
+  // available to tests/embedded callers, but make the process-level environment setting a hardware-aware
+  // ceiling.
+  // A one-slot automatic ceiling would normalize the default ACK reservation to zero. Keep one ordinary slot
+  // plus the default reserved ACK slot even on a single-vCPU runtime. An explicitly lower process setting is
+  // still honored because it remains the first operand of Math.min().
   return Math.min(
     configured,
     Math.max(MIN_ACK_SAFE_MAX_CONCURRENT, availableParallelism()),
