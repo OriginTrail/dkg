@@ -4,6 +4,44 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Changed
+
+- Nodes no longer serve the legacy publish protocol `/dkg/10.0.0/publish`,
+  which nothing has sent on since publishing moved to the V10 lifecycle and
+  StorageACK. Tentative publishes that an earlier version journaled are
+  still restored at start, and confirmed or expired as before.
+- VERIFY approvals (`dkg verify`, `POST /api/verify`) use a new signing
+  format. Approvers and proposers on earlier versions do not count each
+  other's approvals, so until every approver runs this release, a batch
+  reaches quorum only among upgraded nodes and is otherwise stamped
+  partially verified or self-attested, as when approvals are missing.
+- The daemon does not start when API authentication is off
+  (`auth.enabled: false`) and `apiHost` is not a loopback address, such as
+  `0.0.0.0`, `::`, a LAN address or a host name other than `localhost`.
+  `daemon.log` says why the node stopped: turn authentication back on, or
+  set `apiHost` to `127.0.0.1`.
+- Blazegraph setup no longer reuses or restarts an existing DKG Blazegraph
+  container that publishes its port beyond this host's loopback interface
+  (`0.0.0.0`, `::`, another address, or the host's network), as containers
+  created before 7 Aug 2026 do. Setup stops and says how to recreate the
+  container on `127.0.0.1`: with `docker rm -f <container>` and setup again
+  when the journal is in the container's named volume, and after a backup
+  otherwise. To check a running node, `docker port <container>` should list
+  only `127.0.0.1`.
+- The daemon logs a `WARNING` at start-up when `apiHost` is not a loopback
+  address, and a second one when CORS allows every origin there:
+  `apiHost: "0.0.0.0"` with `corsOrigins` unset, or `corsOrigins: "*"`.
+  Keep the API on `127.0.0.1`, reach the node from elsewhere through a
+  reverse proxy that terminates TLS, and set `corsOrigins` to the origins
+  that need the API.
+- Gossip runs on gossipsub 17.2.1 (was 16.1.1), which limits the topic
+  subscriptions it records for each peer. The node records up to 2 MiB of
+  topics per peer on the mainnets, about 1,500 to 1,850 DKG topics, and
+  8 MiB elsewhere, about 6,000 to 7,400. gossipsub's 1 MiB default holds
+  fewer than a testnet Core node subscribes to. The node leaves a peer out
+  of its publishes on topics beyond the limit. Nodes on 16.1.1 and 17.2.1
+  share one gossip mesh.
+
 ## [10.1.1] - Unreleased
 
 10.1.1 is the first 10.1 release for mainnet: nodes moving from 10.0.27
@@ -98,9 +136,33 @@ no marketplace contracts yet.
   load only the modules they use, the Graph Computer SDK loads only the
   parts of ethers it uses, and the build no longer gzips every chunk just to
   report its size.
+- A request signed with an agent key (`Authorization: DKG-Agent …`) needs
+  an agent registered on the node (custodial, or self-sovereign by its
+  public key through `POST /api/agent/register`) or an address in
+  `auth.operatorAgentAddresses`; any other key gets
+  `401 AGENT_HTTP_AGENT_UNKNOWN`. The recipient of an encryption enrollment
+  the operator prepared may still sign its own activation. Register a
+  backend's agent, such as a Graph Computer SDK client's, on each node it
+  calls; its key stays with the backend. A Program invocation forwarded by
+  another node carries its own signed delegation and needs no registration
+  on the runner, but a caller's direct requests to the runner do.
+- The node sends its operator token to the OpenClaw bridge only at a
+  bridge URL on this host (localhost, 127.0.0.0/8 or ::1), as for Hermes
+  and Prime Agent. Run the OpenClaw bridge on the node host.
+- The dashboard asks for the node's token once per browser tab
+  (`dkg auth show` prints it) instead of signing in automatically. On a
+  node with no proxy in front of the API,
+  `"auth": { "dashboardAutoSignIn": true }` restores automatic sign-in for
+  a browser on the node host.
 
 ### Fixed
 
+- Graph Computer Programs stay off until the node's operator turns them on
+  with `semanticRuntime.enabled: true`, as 10.1.0 described. Managing
+  Program bindings on a node that left it unset no longer starts the
+  runtime; the request answers `409 SEMANTIC_RUNTIME_DISABLED`. A node that
+  already stored Program configuration keeps the runtime on; set
+  `semanticRuntime.enabled: false` to turn it off.
 - A seller can serve tool calls on an OpenAI reasoning model that takes
   function tools on chat completions only with no reasoning. Set
   `marketplace.seller.services[].backend.reasoningEffortWithTools` to

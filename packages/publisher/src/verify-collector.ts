@@ -2,7 +2,7 @@ import {
   PROTOCOL_VERIFY_PROPOSAL,
   encodeVerifyProposal,
   decodeVerifyApproval,
-  computeACKDigest,
+  computeVerifyApprovalDigest,
   type VerifyProposalMsg,
   type VerifyApprovalMsg,
 } from '@origintrail-official/dkg-core';
@@ -75,7 +75,8 @@ export function assertVerifyCollectionTimeoutMs(timeoutMs: number): number {
  *
  * Flow:
  * 1. Send VerifyProposal to each participant peer via PROTOCOL_VERIFY_PROPOSAL
- * 2. Each participant signs keccak256(contextGraphId, merkleRoot) and returns VerifyApproval
+ * 2. Each participant signs the verify approval digest (`computeVerifyApprovalDigest`)
+ *    and returns VerifyApproval
  * 3. Collect until requiredSignatures reached or timeout
  */
 export class VerifyCollector {
@@ -88,6 +89,8 @@ export class VerifyCollector {
   async collect(params: {
     contextGraphId: string;
     contextGraphIdOnChain: bigint;
+    /** The chain id and KnowledgeAssetsLifecycle address the approvals are bound to. */
+    signingDomain: { chainId: bigint; contractAddress: string };
     verifiableMemoryId: bigint;
     batchId: bigint;
     merkleRoot: Uint8Array;
@@ -114,7 +117,7 @@ export class VerifyCollector {
     allowPartial?: boolean;
   }): Promise<VerifyCollectionResult> {
     const {
-      contextGraphId, contextGraphIdOnChain, verifiableMemoryId,
+      contextGraphId, contextGraphIdOnChain, signingDomain, verifiableMemoryId,
       batchId, merkleRoot, entities, proposerSignature,
       timeoutMs, allowPartial = false,
       proposerCountsTowardQuorum = true,
@@ -222,8 +225,14 @@ export class VerifyCollector {
 
     log(`[VerifyCollector] Requesting approvals from ${peers.length} participants (need ${remoteRequired} remote, ${requiredSignatures} total)`);
 
-    // Digest for signature verification: keccak256(contextGraphId, merkleRoot)
-    const digest = computeACKDigest(contextGraphIdOnChain, merkleRoot);
+    // The digest each approval must be a signature over.
+    const digest = computeVerifyApprovalDigest(
+      signingDomain.chainId,
+      signingDomain.contractAddress,
+      contextGraphIdOnChain,
+      batchId,
+      merkleRoot,
+    );
 
     const collected: CollectedApproval[] = [];
     const seenAddresses = new Set<string>();

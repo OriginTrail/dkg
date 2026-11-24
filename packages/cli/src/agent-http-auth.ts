@@ -16,7 +16,34 @@ export interface AgentHttpNonceStore {
 export interface AgentHttpAuthOptions {
   targetPeerId: string;
   operatorAgentAddresses: readonly string[];
+  /**
+   * Whether `address` is an agent this node knows as a signer of this request, usually a registered
+   * agent (custodial or self-sovereign); see `isKnownAgentKeySigner`. Only these agents and the operator
+   * agents may sign requests; any other key is refused before its body is read.
+   */
+  isRegisteredAgent: (address: string) => boolean | Promise<boolean>;
   nonces: AgentHttpNonceStore;
+}
+
+/** The route where the recipient of an encryption enrollment signs before this node records its agent. */
+export const ENCRYPTION_ENROLLMENT_ACTIVATION_PATH = '/api/agent/encryption-enrollments/activate';
+
+/**
+ * Whether this node knows `address` as a signer of a request to `path`: an agent registered here
+ * (custodial or self-sovereign), or, on the enrollment activation route only, the recipient of an
+ * unexpired encryption enrollment that an explicit node operator prepared here. Activation is what
+ * records that recipient as an agent.
+ */
+export function isKnownAgentKeySigner(
+  agent: {
+    getLocalAgentMode(address: string): unknown;
+    hasPendingEncryptionKeyEnrollment(address: string): Promise<boolean>;
+  },
+  address: string,
+  path: string,
+): boolean | Promise<boolean> {
+  if (agent.getLocalAgentMode(address) !== undefined) return true;
+  return path === ENCRYPTION_ENROLLMENT_ACTIVATION_PATH && agent.hasPendingEncryptionKeyEnrollment(address);
 }
 
 export class AgentHttpAuthenticationError extends Error {
@@ -67,6 +94,13 @@ export async function authenticateAgentHttpRequest(
   if (!path.startsWith('/') || path.startsWith('//') || /[\r\n#]/.test(path) || !/^[A-Z]+$/.test(method)) {
     throw new AgentHttpAuthenticationError('AGENT_HTTP_TARGET_INVALID');
   }
+  // Only an agent this node knows may sign. The claimed address is checked before the body is read,
+  // so an unknown key buffers no body and claims no nonce; the signature check below then proves the
+  // signer is the claimed address.
+  const isOperatorAgent = (address: string) =>
+    options.operatorAgentAddresses.some((operator) => operator.toLowerCase() === address.toLowerCase());
+  const knownAgent = async (address: string) => isOperatorAgent(address) || await options.isRegisteredAgent(address);
+  if (!await knownAgent(claimedAddress)) throw new AgentHttpAuthenticationError('AGENT_HTTP_AGENT_UNKNOWN');
   const contentType = req.headers['content-type'] === undefined ? '' : header(req, 'content-type');
   if (req.headers['content-encoding'] !== undefined && req.headers['content-encoding'] !== 'identity') {
     throw new AgentHttpAuthenticationError('AGENT_HTTP_CONTENT_ENCODING_UNSUPPORTED', 415);
@@ -88,16 +122,15 @@ export async function authenticateAgentHttpRequest(
   } catch {
     throw new AgentHttpAuthenticationError('AGENT_HTTP_SIGNATURE_INVALID');
   }
+  // An agent removed while its body was uploading is refused too.
+  if (!await knownAgent(agentAddress)) throw new AgentHttpAuthenticationError('AGENT_HTTP_AGENT_UNKNOWN');
   const now = fresh(); // A slow body must not extend the freshness window.
   let accepted: boolean;
   try { accepted = options.nonces.claim(targetPeerId, agentAddress.toLowerCase(), nonce, expiresAt, now); }
   catch { throw new AgentHttpAuthenticationError('AGENT_HTTP_NONCE_STORE_UNAVAILABLE', 503); }
   if (!accepted) throw new AgentHttpAuthenticationError('AGENT_HTTP_REPLAY');
   (req as IncomingMessage & { __dkgPrebufferedBody: Buffer }).__dkgPrebufferedBody = body;
-  return {
-    agentAddress,
-    nodeOperator: options.operatorAgentAddresses.some((address) => address.toLowerCase() === agentAddress.toLowerCase()),
-  };
+  return { agentAddress, nodeOperator: isOperatorAgent(agentAddress) };
 }
 
 function readSignedBody(req: IncomingMessage): Promise<Buffer> {

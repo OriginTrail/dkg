@@ -22,6 +22,7 @@ import { normalizeExactSyncResponseEncoding } from './sync/wire-compression.js';
 import { normalizeExactAssetUals, requireExactAssetUals } from './sync/exact-assets.js';
 import { decodePipeSyncRequestTail, normalizeByteBudgetPageHint } from './sync/auth/pipe-request-tail.js';
 import { authorizePrivateSyncRequest, syncAgentGateOf } from './sync/auth/request-authorize.js';
+import { syncContextGraphIdRefusal } from './sync/auth/sync-context-graph-id.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
 // type alias so listPendingJoinApprovalRetries() retains its old
@@ -598,7 +599,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   async contextGraphExists(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; controlQueue?: 'preflight' } = {},
   ): Promise<boolean> {
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     // The id is caller-supplied on several paths (scoped queries, HTTP routes,
@@ -610,7 +611,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       `SELECT ?g WHERE {
         GRAPH ?g { <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> }
       } LIMIT 1`,
-      { signal: options.signal, source: 'agent.contextGraph.exists' },
+      { signal: options.signal, source: 'agent.contextGraph.exists', controlQueue: options.controlQueue },
     );
     if (result.type === 'bindings' && result.bindings.length > 0) {
       return true;
@@ -1084,6 +1085,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     options: { signal?: AbortSignal } = {},
   ): Promise<boolean> {
     throwIfOperationAborted(options.signal);
+    // Refuse an id naming another graph's partitions before its policy lookup.
+    if (syncContextGraphIdRefusal(request.contextGraphId, (id) => this.keepsContextGraphLocally(id)) !== undefined) {
+      return false;
+    }
     const isPrivate = await this.isPrivateContextGraph(request.contextGraphId, { signal: options.signal });
     throwIfOperationAborted(options.signal);
     if (!isPrivate) {

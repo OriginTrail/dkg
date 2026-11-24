@@ -5,6 +5,19 @@ import { SemanticProgramConfiguration } from './semantic-runtime-configuration.j
 import { ConfiguredSemanticRuntimeDeps, ConfiguredSemanticRuntimeService } from './semantic-runtime-types.js';
 import { validateSemanticRuntimeSettings } from './semantic-runtime-settings.js';
 
+/**
+ * Start the runtime the way the daemon does, at boot and when a route needs it. It starts only
+ * when the operator set `semanticRuntime.enabled: true`, or when this node already stored Program
+ * configuration, so a node that used Programs keeps them. A management request never turns it on:
+ * Programs stay off until the operator enables them.
+ */
+export function startDaemonSemanticRuntime(
+  config: SemanticRuntimeConfig | undefined,
+  deps: Omit<ConfiguredSemanticRuntimeDeps, 'activate'>,
+): Promise<ConfiguredSemanticRuntimeService | null> {
+  return startConfiguredSemanticRuntime(config, { ...deps, activate: false });
+}
+
 export async function startConfiguredSemanticRuntime(
   config: SemanticRuntimeConfig | undefined,
   deps: ConfiguredSemanticRuntimeDeps,

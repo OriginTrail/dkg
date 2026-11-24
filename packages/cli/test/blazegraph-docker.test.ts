@@ -138,14 +138,18 @@ function dockerInspectNotFound(): DockerCommandResult {
   };
 }
 
-function dockerInspectRunning(hostPort = 9999): DockerCommandResult {
+/** A container's port bindings, as `docker inspect` lists them under `HostConfig.PortBindings` and `NetworkSettings.Ports`. */
+type PortBinding = { HostIp: string; HostPort: string };
+const loopbackBinding = (hostPort: number | string): PortBinding[] => [{ HostIp: '127.0.0.1', HostPort: String(hostPort) }];
+
+function dockerInspectRunning(hostPort = 9999, bindings: PortBinding[] = loopbackBinding(hostPort), networkMode?: string): DockerCommandResult {
   return {
     stdout: JSON.stringify([
       {
         State: { Running: true },
         NetworkSettings: {
           Ports: {
-            [`${BLAZEGRAPH_CONTAINER_PORT}/tcp`]: [{ HostIp: '0.0.0.0', HostPort: String(hostPort) }],
+            [`${BLAZEGRAPH_CONTAINER_PORT}/tcp`]: bindings,
           },
         },
         Mounts: [{
@@ -154,6 +158,8 @@ function dockerInspectRunning(hostPort = 9999): DockerCommandResult {
           Destination: BLAZEGRAPH_DATA_PATH,
         }],
         HostConfig: {
+          ...(networkMode ? { NetworkMode: networkMode } : {}),
+          PortBindings: { [`${BLAZEGRAPH_CONTAINER_PORT}/tcp`]: bindings },
           LogConfig: {
             Type: 'local',
             Config: {
@@ -169,15 +175,14 @@ function dockerInspectRunning(hostPort = 9999): DockerCommandResult {
   };
 }
 
-function dockerInspectStopped(): DockerCommandResult {
+/** A stopped container: Docker lists no live ports then, only the configured ones. */
+function dockerInspectStopped(bindings: PortBinding[] = loopbackBinding(9999)): DockerCommandResult {
   return {
     stdout: JSON.stringify([
       {
         State: { Running: false },
         NetworkSettings: {
-          Ports: {
-            [`${BLAZEGRAPH_CONTAINER_PORT}/tcp`]: [{ HostIp: '0.0.0.0', HostPort: '9999' }],
-          },
+          Ports: {},
         },
         Mounts: [{
           Type: 'volume',
@@ -185,6 +190,7 @@ function dockerInspectStopped(): DockerCommandResult {
           Destination: BLAZEGRAPH_DATA_PATH,
         }],
         HostConfig: {
+          PortBindings: { [`${BLAZEGRAPH_CONTAINER_PORT}/tcp`]: bindings },
           LogConfig: {
             Type: 'local',
             Config: {
@@ -805,5 +811,68 @@ describe('BLAZEGRAPH_NAMESPACE_XML_TEMPLATE', () => {
     expect(body).toContain('<!DOCTYPE properties SYSTEM "http://java.sun.com/dtd/properties.dtd">');
     // Quads mode requires inference disabled via NoAxioms.
     expect(body).toContain('axiomsClass">com.bigdata.rdf.axioms.NoAxioms');
+  });
+});
+
+describe('provisionBlazegraphDocker with a container published beyond loopback', () => {
+  /** Provision against a container `inspect` describes; every HTTP probe would succeed. */
+  function provision(inspect: () => DockerCommandResult) {
+    const { runner, calls } = mockDocker({
+      matchers: [
+        { when: (a) => a[0] === '--version', respond: dockerVersionOk },
+        { when: (a) => a[0] === 'inspect', respond: inspect },
+      ],
+    });
+    const { fn, calls: httpCalls } = mockFetch(() => new Response('ok', { status: 200 }));
+    const result = provisionBlazegraphDocker({
+      namespace: 'mynode', docker: runner, fetch: fn, isPortFree: async () => true, log: () => {},
+    });
+    return { result, calls, httpCalls };
+  }
+
+  it.each([
+    ['every IPv4 interface', [{ HostIp: '0.0.0.0', HostPort: '9999' }], '0.0.0.0:9999'],
+    ['every interface (an empty HostIp)', [{ HostIp: '', HostPort: '9999' }], '0.0.0.0:9999'],
+    ['every IPv6 interface, beside loopback', [{ HostIp: '127.0.0.1', HostPort: '9999' }, { HostIp: '::', HostPort: '9999' }], '[::]:9999'],
+    ['a LAN address', [{ HostIp: '192.168.1.20', HostPort: '9999' }], '192.168.1.20:9999'],
+  ])('refuses a running container published on %s, and uses none of it', async (_where, bindings, listed) => {
+    const { result, calls, httpCalls } = provision(() => dockerInspectRunning(9999, bindings));
+    await expect(result).rejects.toThrow(`beyond this host's loopback interface (${listed})`);
+    expect(httpCalls).toEqual([]);
+    expect(calls.some((call) => ['run', 'rm', 'start', 'stop'].includes(call[0]!))).toBe(false);
+  });
+
+  it('refuses a running container on the host\'s network', async () => {
+    const { result, httpCalls } = provision(() => dockerInspectRunning(9999, [], 'host'));
+    await expect(result).rejects.toThrow("beyond this host's loopback interface (the host's network)");
+    expect(httpCalls).toEqual([]);
+  });
+
+  it('refuses a stopped container whose configured ports are beyond loopback, before starting it', async () => {
+    const { result, calls } = provision(() => dockerInspectStopped([{ HostIp: '0.0.0.0', HostPort: '9999' }]));
+    await expect(result).rejects.toThrow("beyond this host's loopback interface (0.0.0.0:9999)");
+    expect(calls.some((call) => call[0] === 'start')).toBe(false);
+  });
+
+  it('says how to recreate a container whose journal is in the named volume, and to back up one it cannot confirm', async () => {
+    await expect(provision(() => dockerInspectRunning(9999, [{ HostIp: '0.0.0.0', HostPort: '9999' }])).result)
+      .rejects.toThrow(/named volume "dkg-blazegraph-mynode-data".*docker rm -f dkg-blazegraph-mynode" and this setup again/s);
+    const legacy = (): DockerCommandResult => ({
+      stdout: JSON.stringify([{
+        State: { Running: true },
+        NetworkSettings: { Ports: { '8080/tcp': [{ HostIp: '0.0.0.0', HostPort: '9999' }] } },
+      }]),
+      stderr: '',
+      exitCode: 0,
+    });
+    const { result, calls } = provision(legacy);
+    await expect(result).rejects.toThrow(/Back up its Blazegraph journal first/);
+    expect(calls.some((call) => call[0] === 'rm')).toBe(false);
+  });
+
+  it('still reuses a container published on loopback only, IPv6 included', async () => {
+    const bindings = [{ HostIp: '127.0.0.1', HostPort: '9999' }, { HostIp: '::1', HostPort: '9999' }];
+    const { result } = provision(() => dockerInspectRunning(9999, bindings));
+    await expect(result).resolves.toMatchObject({ reused: true, port: 9999 });
   });
 });

@@ -13,6 +13,20 @@ function row(n = 1): SwmAuthorInventoryRowV1 {
 }
 
 describe('owned SWM inventory snapshots', () => {
+  it('reuses a codec-owned catalog input while detaching an externally frozen array', () => {
+    const original = row();
+    const external = Object.freeze([original]);
+    const detached = codec.detachSwmAuthorInventoryRowsV1(external);
+    expect(detached).not.toBe(external);
+    expect(detached[0]).not.toBe(original);
+    expect(codec.detachSwmAuthorInventoryRowsV1(detached)).toBe(detached);
+    const owned = codec.snapshotSwmAuthorInventoryRowsV1(external);
+    expect(codec.detachSwmAuthorInventoryRowsV1(owned)).toBe(owned);
+    Object.assign(original, { shareOperationId: 'changed' });
+    expect(detached[0]!.shareOperationId).toBe('share-1');
+    expect(() => codec.detachSwmAuthorInventoryRowsV1([row(2), row(1)])).toThrow();
+  });
+
   it('preserves canonical bytes and digest without wire roundtrips', () => {
     const input = [row(1), row(2)];
     const expected = codec.canonicalizeSwmAuthorInventoryRowsBytesV1(input);

@@ -13,6 +13,7 @@ export default defineConfig({
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
           'test/async-share-bound-recovery.test.ts',
+          'test/async-share-completion-lock.test.ts',
           'test/write-preflight-diagnostics.test.ts',
           'test/durable-synchronous-share.test.ts',
           'test/durable-private-payload-recovery.test.ts',
@@ -25,6 +26,7 @@ export default defineConfig({
           'test/public-snapshot-job.test.ts',
           'test/public-checkpoint-job.test.ts',
           'test/public-checkpoint-config.test.ts',
+          'test/daemon-api-exposure-warning.test.ts',
           'test/snapshot-job-isolation.test.ts',
           'test/sync-checkpoint-command.test.ts',
           'test/core-chain-cache-config.test.ts',
@@ -506,6 +508,7 @@ export default defineConfig({
           // config type and loader, and the daemon configuring the path before any store call. No hardhat.
           'test/store-control-path-config.test.ts',
           'test/daemon-store-control-path-wiring.test.ts',
+          'test/daemon-api-bind-guard.test.ts',
         ],
     testTimeout: runsDaemonHttpBehavior ? 120_000 : 60_000,
     globalSetup: runsDaemonHttpBehavior ? ['../chain/test/hardhat-global-setup.ts'] : [],

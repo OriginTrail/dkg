@@ -17,13 +17,13 @@ Every HTTP call below is **signed directly with the agent's private key** using 
 | Operator HTTP signature | Same caller's local signer | Same `CALLER_AGENT_ADDRESS` | Administration on client only, after its operator explicitly configures this address. |
 | Invocation delegation in JSON | Caller's local signer | Same original caller | One data graph, operation, invocation UUID, execution peer and forwarding peer; expires within five minutes. |
 
-The caller's signing key is held by the client application and need not be stored on either node. Runner retains its own executor's custodial key. Graph permissions are independent of authentication and operator role. Configure `auth.operatorAgentAddresses` on client once, as documented in the linked profile; possessing a signing key does not automatically grant administration. Anonymous/public requests cannot manage bindings or routes, including when HTTP auth is disabled. An ordinary graph member cannot approve bindings.
+The caller's signing key is held by the client application and need not be stored on either node. A node accepts HTTP signatures only from agents it knows: its registered agents (custodial, or self-sovereign by public key through `POST /api/agent/register`, so the key stays with the client) and the addresses in `auth.operatorAgentAddresses`. Any other key gets 401 `AGENT_HTTP_AGENT_UNKNOWN`, except that the recipient of an operator-prepared enrollment may sign its activation in step 0. In this example the caller signs only to client, where it is an operator agent; the invocation client forwards to runner carries its own signed delegation. Runner retains its own executor's custodial key. Graph permissions are independent of authentication and operator role. Configure `auth.operatorAgentAddresses` on client once, as documented in the linked profile; possessing a signing key does not automatically grant administration. Anonymous/public requests cannot manage bindings or routes, including when HTTP auth is disabled. An ordinary graph member cannot approve bindings.
 
 An agent-authenticated graph owner may select only its **own custodial identity** as executor. Graph ownership or membership does not authorize borrowing another wallet for reads, writes or any other tool. A foreign executor is rejected with `PROGRAM_EXECUTOR_FORBIDDEN` (403) before Program resolution or permission persistence. Only an explicitly authenticated node operator may select a different local custodial executor. This API has no executor-delegation mechanism; an owner also cannot refresh an operator-issued foreign-executor binding, but may revoke it.
 
 The graph-owner manager must also be able to read the source Program under its own identity. The executor must have source/data read access and, for creation, write access. In this example the owner is also the runner's executor and Program uploader; the caller is a separate agent.
 
-On a node without an explicit runtime setting, the first authorized management request starts the runtime in-process. Durable API entries restore it on subsequent boots. No configuration file edit or daemon restart is required for these steps. An existing explicit `semanticRuntime.enabled: false` is an operator kill switch and returns 409; the management API does not override it.
+Programs run only on a node whose operator set `semanticRuntime.enabled: true` in its config and restarted it. A node that already stored Program configuration keeps the runtime on at boot. On any other node, management requests answer 409 `SEMANTIC_RUNTIME_DISABLED` and do not start it. An explicit `semanticRuntime.enabled: false` is the operator's kill switch, and the management API does not override it.
 
 ```sh
 export RUNNER_URL='http://runner.example:9200'
@@ -271,7 +271,7 @@ jq -n --arg cg "$DATA_GRAPH" \
 signed_curl "$CALLER_KEY_FILE" "$RUNNER_PEER_ID" "$RUNNER_URL" POST '/api/query' forbidden-read.json
 ```
 
-The caller's direct data query must disclose no rows. A receipt reference is not permission to read it. A successful older Program is not proof that the newly uploaded definition replicated; verify the exact source on client.
+The caller's direct data query must disclose no rows. Unless runner registered the caller as an agent, runner refuses it with 401 `AGENT_HTTP_AGENT_UNKNOWN` before any query runs. A receipt reference is not permission to read it. A successful older Program is not proof that the newly uploaded definition replicated; verify the exact source on client.
 
 ## 5. Update or revoke
 

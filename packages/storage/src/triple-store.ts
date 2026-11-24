@@ -67,7 +67,7 @@ export const STORE_WORK_PRIORITIES = Object.freeze([
   'background',
 ] as const);
 export type StoreWorkPriority = (typeof STORE_WORK_PRIORITIES)[number];
-export type StoreControlQueue = 'share' | 'publisher';
+export type StoreControlQueue = 'share' | 'publisher' | 'preflight';
 
 export function isStoreWorkPriority(value: unknown): value is StoreWorkPriority {
   return typeof value === 'string'
