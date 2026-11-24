@@ -31,6 +31,13 @@ export interface VerifyCollectorDeps {
    * legacy verify HTTP route with `?requiredSignatures=N`) can omit it.
    */
   getMinimumRequiredSignatures?: () => Promise<number>;
+  /**
+   * The identity an approver's address may count for, or `null` when its approval may not count
+   * (no identity, or not eligible to approve). When wired, only approvals it accepts count toward
+   * quorum, each identity once, so an approval that would be dropped before submission cannot end
+   * collection while eligible approvals are still on their way.
+   */
+  resolveEligibleApprover?: (approverAddress: string) => Promise<bigint | null>;
 }
 
 export interface CollectedApproval {
@@ -77,7 +84,9 @@ export function assertVerifyCollectionTimeoutMs(timeoutMs: number): number {
  * 1. Send VerifyProposal to each participant peer via PROTOCOL_VERIFY_PROPOSAL
  * 2. Each participant signs the verify approval digest (`computeVerifyApprovalDigest`)
  *    and returns VerifyApproval
- * 3. Collect until requiredSignatures reached or timeout
+ * 3. Count an approval only when its approver signed that digest and, when
+ *    `resolveEligibleApprover` is wired, it is an eligible identity not counted yet
+ * 4. Collect until requiredSignatures reached or timeout
  */
 export class VerifyCollector {
   private deps: VerifyCollectorDeps;
@@ -235,7 +244,8 @@ export class VerifyCollector {
     );
 
     const collected: CollectedApproval[] = [];
-    const seenAddresses = new Set<string>();
+    // One vote per eligible identity, or per address when no resolver is wired.
+    const counted = new Set<string>();
 
     const requestApproval = async (peerId: string): Promise<CollectedApproval | null> => {
       for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -243,9 +253,12 @@ export class VerifyCollector {
           const response = await this.deps.sendP2P(peerId, PROTOCOL_VERIFY_PROPOSAL, proposalBytes);
           const approval: VerifyApprovalMsg = decodeVerifyApproval(response);
 
+          // Any well-formed signature recovers to some address. Only one that recovers to the
+          // approver's own address was made over this digest, so an approval in an earlier
+          // signing format, or a malformed one, never counts.
           const recovered = this.recoverSigner(approval, digest);
-          if (!recovered) {
-            log(`[VerifyCollector] Invalid signature from ${peerId.slice(-8)}`);
+          if (!recovered || !isSignedBy(recovered, approval.approverAddress)) {
+            log(`[VerifyCollector] Approval from ${peerId.slice(-8)} is not signed by its approver over this digest; not counted`);
             return null;
           }
 
@@ -256,7 +269,7 @@ export class VerifyCollector {
             signatureR: approval.agentSignatureR,
             signatureVS: approval.agentSignatureVS,
             approverAddress: recovered,
-            identityId: 0n, // resolved during on-chain submission
+            identityId: 0n, // set below when a resolver is wired; otherwise resolved during on-chain submission
           };
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -281,12 +294,20 @@ export class VerifyCollector {
           const promises = peers.map(async (peerId) => {
             if (collected.length >= remoteRequired) return;
             const approval = await requestApproval(peerId);
-            if (approval && !seenAddresses.has(approval.approverAddress)) {
-              seenAddresses.add(approval.approverAddress);
-              collected.push(approval);
-              if (collected.length >= remoteRequired) {
-                quorumResolve?.();
-              }
+            if (!approval) return;
+            const identityId = await this.eligibleIdentityOf(approval, log);
+            if (identityId === null) return;
+            const key = identityId === undefined
+              ? `address:${approval.approverAddress.toLowerCase()}`
+              : `identity:${identityId}`;
+            if (counted.has(key)) {
+              log(`[VerifyCollector] Approval from ${peerId.slice(-8)} repeats a counted approver; counted once`);
+              return;
+            }
+            counted.add(key);
+            collected.push(identityId === undefined ? approval : { ...approval, identityId });
+            if (collected.length >= remoteRequired) {
+              quorumResolve?.();
             }
           });
           await Promise.race([Promise.allSettled(promises), quorumPromise]);
@@ -338,5 +359,36 @@ export class VerifyCollector {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * The identity `approval` counts for: `undefined` when no resolver is wired (it counts by
+   * address), `null` when it may not count. An approver that cannot be checked does not count,
+   * as submission would drop it too.
+   */
+  private async eligibleIdentityOf(
+    approval: CollectedApproval,
+    log: (msg: string) => void,
+  ): Promise<bigint | null | undefined> {
+    const resolve = this.deps.resolveEligibleApprover;
+    if (!resolve) return undefined;
+    const approver = `${approval.approverAddress.slice(0, 10)}... from ${approval.peerId.slice(-8)}`;
+    try {
+      const identityId = await resolve(approval.approverAddress);
+      if (identityId !== null && identityId > 0n) return identityId;
+      log(`[VerifyCollector] Approver ${approver} is not eligible to approve; not counted`);
+    } catch (err) {
+      log(`[VerifyCollector] Could not check approver ${approver} (${err instanceof Error ? err.message : String(err)}); not counted`);
+    }
+    return null;
+  }
+}
+
+/** Whether `recovered` is the address the approver says it signed with. */
+function isSignedBy(recovered: string, approverAddress: string): boolean {
+  try {
+    return ethers.getAddress(approverAddress) === ethers.getAddress(recovered);
+  } catch {
+    return false;
   }
 }

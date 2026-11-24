@@ -18,7 +18,7 @@ import {
   encodeReliableEnvelope,
   encodeVerifyProposal,
 } from '@origintrail-official/dkg-core';
-import { VerifyCollector } from '@origintrail-official/dkg-publisher';
+import { VerifyCollector, type VerifyCollectorDeps } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
 
@@ -141,5 +141,35 @@ describe('a VERIFY proposer', () => {
     });
     expect(params).toMatchObject({ contextGraphIdOnChain: ON_CHAIN_ID, batchId: BATCH_ID });
     expect(signerOver(await boundDigest(proposer), params.proposerSignature.r, params.proposerSignature.vs)).toBe(signer.address);
+  }, 60_000);
+
+  it('lets an approval count only for a sharding-table identity other than its own vote', async () => {
+    const proposer = await startedNode('VerifyProposerEligibility', 'core', ethers.Wallet.createRandom().privateKey);
+    await holdBatch(proposer);
+    const chain = (proposer as unknown as { chain: MockChainAdapter }).chain;
+    const collectorDeps: VerifyCollectorDeps[] = [];
+    vi.spyOn(VerifyCollector.prototype, 'collect').mockImplementation(async function (this: VerifyCollector) {
+      collectorDeps.push((this as unknown as { deps: VerifyCollectorDeps }).deps);
+      return {
+        approvals: [], merkleRoot: ROOT, contextGraphId: CONTEXT_GRAPH, verifiableMemoryId: 1n,
+        requiredRemoteApprovals: 1, quorumReached: false,
+      };
+    });
+    const [member, nonMember, unknown, ownIdentityKey] = Array.from({ length: 4 }, () => ethers.Wallet.createRandom().address);
+    expect(proposer.identityId).toBeGreaterThan(0n);
+    chain.seedIdentity(member!, 501n);
+    chain.seedIdentity(nonMember!, 502n);
+    chain.seedIdentity(ownIdentityKey!, proposer.identityId);
+    vi.spyOn(chain, 'isShardingTableMember').mockImplementation(async (identityId) => identityId > 0n && identityId !== 502n);
+
+    await proposer.verify({ contextGraphId: CONTEXT_GRAPH, verifiableMemoryId: '1', batchId: BATCH_ID, requiredSignatures: 2, timeoutMs: 1_000 });
+
+    const resolve = collectorDeps[0]?.resolveEligibleApprover;
+    expect(resolve).toBeTypeOf('function');
+    expect(await resolve!(member!)).toBe(501n);
+    expect(await resolve!(nonMember!)).toBeNull();
+    expect(await resolve!(unknown!)).toBeNull();
+    // The proposer's identity already votes through its own signature.
+    expect(await resolve!(ownIdentityKey!)).toBeNull();
   }, 60_000);
 });
