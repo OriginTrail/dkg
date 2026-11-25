@@ -1,9 +1,16 @@
 import type { DKGAgent } from '../src/dkg-agent.js';
-import type { AsyncPromoteQueue, PromoteTerminalJobClearer, PromoteShareReconciler } from '@origintrail-official/dkg-publisher';
+import type {
+  AsyncPromoteQueue, PromoteJobRetirer, PromoteShareReconciler, PromoteTerminalJobClearer,
+} from '@origintrail-official/dkg-publisher';
 
-declare const legacy: AsyncPromoteQueue & PromoteTerminalJobClearer;
-declare const complete: AsyncPromoteQueue & PromoteTerminalJobClearer & PromoteShareReconciler;
+type ClearableQueue = AsyncPromoteQueue & PromoteTerminalJobClearer;
+declare const lacksReconciliation: ClearableQueue & PromoteJobRetirer;
+declare const lacksRetirement: ClearableQueue & PromoteShareReconciler;
+declare const complete: ClearableQueue & PromoteShareReconciler & PromoteJobRetirer;
 declare function acceptAgentQueue(queue: DKGAgent['promoteQueue']): void;
-// @ts-expect-error The always-exposed agent read requires its queue capability.
-acceptAgentQueue(legacy);
+
+// @ts-expect-error The agent exposes reconciliation on its queue.
+acceptAgentQueue(lacksReconciliation);
+// @ts-expect-error The agent exposes operator retirement on its queue.
+acceptAgentQueue(lacksRetirement);
 acceptAgentQueue(complete);
