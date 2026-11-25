@@ -69,7 +69,7 @@ A client may have completed an asset another way while the node still holds its 
 
 Use operator retirement only when you have established that the original share is no longer wanted. Match the exact job and its bound content to the client's records. If a replacement was published, verify the replacement receipt first. A timeout or a missing success marker leaves the original attempt's effects uncertain. Retirement records the operator's decision and preserves the failed job for audit. It does not undo an earlier write to shared working memory.
 
-Use the node operator credential for both requests. Keep the daemon as the sole writer to the queue store during retirement.
+Use the node operator credential for both requests. Keep the daemon as the sole writer to the queue store and confirm that any earlier store request for this job has finished. A client timeout can leave a write running on the backend. Wait for it to settle before retiring the job.
 
 1. Read `GET /api/knowledge-assets/swm/share-jobs/{jobId}/retire`. For an eligible job, compare the returned graph, asset name, agent, seal digest and operation ID against your records. Save `jobSha256`, which identifies the exact failed record you inspected.
 2. Send `POST` to the same URL using the digest from your preview and the explicit acknowledgment below.
