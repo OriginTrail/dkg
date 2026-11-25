@@ -1,3 +1,4 @@
+import type { FinalizeGuard } from './finalize-guard.js';
 import { queryAssertionHistory } from './assertion-history-query.js';
 import { PublicSnapshotSessionMethods } from './public-snapshot-session.js';
 import type { AssertionPullFromOptions, AssertionPullFromResult, StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
@@ -3943,6 +3944,7 @@ export class DKGAgent extends DKGAgentBase {
         contextGraphId: string,
         name: string,
         opts?: {
+          guard?: FinalizeGuard;
           subGraphName?: string;
           agentAddress?: string;
           authorAgentAddress?: string;
@@ -3960,6 +3962,9 @@ export class DKGAgent extends DKGAgentBase {
           layer?: 'wm' | 'swm';
         },
       ): Promise<{
+        guardedOutcome?: 'sealed' | 'already_sealed';
+        publicTripleCount: number;
+        privateTripleCount: number;
         assertionUri: string;
         merkleRoot: Uint8Array;
         authorAddress: string;
@@ -3977,6 +3982,7 @@ export class DKGAgent extends DKGAgentBase {
           throw new LegacyKnowledgeAssetReadOnlyError();
         }
         return agent.assertionFinalize(contextGraphId, name, finalizeAgentAddress, {
+          guard: opts?.guard,
           subGraphName: opts?.subGraphName,
           authorAgentAddress: opts?.authorAgentAddress,
           preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
