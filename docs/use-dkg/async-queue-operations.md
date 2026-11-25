@@ -63,6 +63,25 @@ dkg ka share-job <job-id>
 dkg ka recover-share-job <job-id>
 ```
 
+### When a failed share is obsolete
+
+A client may have completed an asset another way while the node still holds its original failed share job. For example, after losing a response, a client might publish a replacement and verify its transaction and content root. Recovering the original job would ask the node to run the old share again.
+
+Use operator retirement only when you have established that the original share is no longer wanted. Match the exact job and its bound content to the client's records. If a replacement was published, verify the replacement receipt first. A timeout or a missing success marker leaves the original attempt's effects uncertain. Retirement records the operator's decision and preserves the failed job for audit. It does not undo an earlier write to shared working memory.
+
+Use the node operator credential for both requests. Keep the daemon as the sole writer to the queue store during retirement.
+
+1. Read `GET /api/knowledge-assets/swm/share-jobs/{jobId}/retire`. For an eligible job, compare the returned graph, asset name, agent, seal digest and operation ID against your records. Save `jobSha256`, which identifies the exact failed record you inspected.
+2. Send `POST` to the same URL using the digest from your preview and the explicit acknowledgment below.
+
+   ```json
+   { "expectedJobSha256": "<jobSha256 from the preview>", "acceptUnknownEffects": true }
+   ```
+
+3. Look for `outcome: "retired"` with the same digest. If the response is lost, read the same URL again to see whether the decision was recorded. A conflict calls for inspecting the latest record before taking further action.
+
+The operator can read the retirement receipt after a restart. It lives in the share queue's existing control graph, alongside the original failed payload under a separate record. An ordinary client clearing the old job now gets `already_absent`. Retirement makes no share or publication request. It applies to eligible failed share jobs on stores supporting the atomic move. Publish jobs have their own recovery procedure.
+
 ## Clean up finished jobs
 
 The queues keep every finished job until someone clears it. On a busy node the queue data keeps growing, and reads over it get slower. Cleanup removes these jobs 7 days after they finished:
@@ -70,7 +89,7 @@ The queues keep every finished job until someone clears it. On a busy node the q
 - **Share queue:** succeeded jobs, and cancelled or rejected jobs that provably never started the share.
 - **Publish queue:** finalized jobs, oldest first for each Knowledge Asset. An older failed job of the same asset holds the newer ones back until you clear it.
 
-Every other failed job stays until you clear it, for inspection or recovery.
+Other failed jobs remain available for inspection. A failed share with a durable recovery binding can still own the work. Ordinary cleanup leaves that job in place.
 
 Cleanup ships for evaluation. Leave it off on production nodes until a later release says it is ready; to try it, run `report` mode, which removes nothing, on a node whose store is backed up.
 
