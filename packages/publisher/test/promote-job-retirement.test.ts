@@ -1,11 +1,13 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createTripleStore, GraphWriteGenTracker, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
 import { jobSubject, PROMOTE_STATE } from '../src/async-promote-queue-utils.js';
 import { GRAPH, NOW, POST_COMMIT_ERROR, STARTED, mk, put } from './_helpers/share-retention-fixtures.js';
 
-function fixture() {
-  const store = new OxigraphStore();
+function fixture(store = new OxigraphStore()) {
   const queue = () => new TripleStoreAsyncPromoteQueue(store, { graphUri: GRAPH, now: () => NOW });
   const failed = mk('target', 'failed', { bound: true, commitMarker: STARTED,
     attempt: { count: 2, maxRetries: 5, lastError: { classification: 'fatal', retryable: false,
@@ -35,7 +37,7 @@ describe('retiring one failed bound recovery owner', () => {
     const reopened = queue();
     const receipt = await reopened.retireFailedJob(failed.jobId, command);
     expect(receipt).toEqual({ ...preview, outcome: 'retired', retiredAt: NOW });
-    expect(await reopened.retireFailedJob(failed.jobId)).toEqual(receipt);
+    expect(await reopened.retireFailedJob(failed.jobId)).toEqual({ ...receipt, outcome: 'observed' });
     expect(await reopened.retireFailedJob(failed.jobId, { ...command, expectedJobSha256: '0'.repeat(64) })).toEqual({ outcome: 'stale' });
     expect(await reopened.getStatus(failed.jobId)).toBeNull();
     expect(await reopened.clearTerminalJob(failed.jobId)).toEqual({ outcome: 'already_absent' });
@@ -44,7 +46,40 @@ describe('retiring one failed bound recovery owner', () => {
     expect(await reopened.recoverPostCommitFailures()).toEqual([]);
     expect(await reopened.claimNext('worker')).toBeNull();
     expect(await reopened.getStatus(other.jobId)).toEqual(other);
-    expect(await reopened.retireFailedJob(failed.jobId)).toEqual(receipt);
+    expect(await reopened.retireFailedJob(failed.jobId)).toEqual({ ...receipt, outcome: 'observed' });
+  });
+
+  it('confirms an observed move only after a successful flush; a new store loads the same receipt', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-share-retirement-'));
+    const file = join(dir, 'queue.nq');
+    const { store, queue, failed } = fixture(new OxigraphStore(file, { flushDelayMs: 600_000 }));
+    const fromDisk = () => fixture(new OxigraphStore(file, { readOnly: true })).queue();
+    try {
+      await put(store, failed);
+      await store.flush();
+      const q = queue(), preview = await q.retireFailedJob(failed.jobId);
+      if (preview.outcome !== 'eligible') throw Error('missing preview');
+      const command = { expectedJobSha256: preview.jobSha256, acceptUnknownEffects: true as const };
+      const update = vi.spyOn(store, 'update');
+      const flush = vi.spyOn(store, 'flush').mockRejectedValueOnce(new Error('disk full'))
+        .mockRejectedValueOnce(new Error('disk still full'));
+      await expect(q.retireFailedJob(failed.jobId, command)).rejects.toThrow('disk full');
+      expect(await fromDisk().getStatus(failed.jobId)).toEqual(failed);
+      const observed = await q.retireFailedJob(failed.jobId);
+      expect(observed).toMatchObject({ outcome: 'observed', retiredAt: NOW, jobSha256: preview.jobSha256 });
+      expect(flush).toHaveBeenCalledTimes(1);
+      await expect(q.retireFailedJob(failed.jobId, command)).rejects.toThrow('disk still full');
+      const receipt = await q.retireFailedJob(failed.jobId, command);
+      expect(receipt).toEqual({ ...observed, outcome: 'retired' });
+      expect(update).toHaveBeenCalledTimes(1);
+      // Hydrate from disk before close or another explicit flush can save the writer's state.
+      const restored = fromDisk();
+      expect(await restored.getStatus(failed.jobId)).toBeNull();
+      expect(await restored.retireFailedJob(failed.jobId)).toEqual(observed);
+    } finally {
+      await store.close();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('rechecks the whole subject at commit and refuses an index added after verification', async () => {

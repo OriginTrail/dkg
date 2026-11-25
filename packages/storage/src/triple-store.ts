@@ -393,6 +393,14 @@ export function findTripleStoreCapability<T>(
   return null;
 }
 
+/** Discover backend atomicity, but retain the outer mutation and persistence boundaries. */
+export function supportsAtomicSparqlModify(store: TripleStore): boolean {
+  const owner = findTripleStoreCapability(store, (candidate): candidate is TripleStore =>
+    typeof candidate === 'object' && candidate !== null
+    && (candidate as Partial<TripleStore>).atomicSparqlModify === true);
+  return !!owner && typeof store.update === 'function' && (!owner.flush || typeof store.flush === 'function');
+}
+
 /** Keep the outer decorator path, discovering only the backend's lifetime owner. */
 export function runLogicalStoreMutation<T>(
   store: unknown, operation: StoreOperation, options: QueryOptions | undefined,

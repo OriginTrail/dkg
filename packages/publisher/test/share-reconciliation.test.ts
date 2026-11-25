@@ -7,6 +7,8 @@ import { validateShareReconciliationInput } from '../src/share-reconciliation.js
 import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_PAYLOAD, PROMOTE_CONTEXT_GRAPH_ID, jobSubject, literal, serializeJobRecord } from '../src/async-promote-queue-utils.js';
 import { SHARE_AUTHOR, shareEvidence } from './_helpers/share-completion-evidence.js';
 
+import { mk, put, PREPARATION_ERROR, STARTED } from './_helpers/share-retention-fixtures.js';
+
 const proof = shareEvidence();
 const request = { contextGraphId: proof.contextGraphId, assertionName: proof.assertionName,
   agentAddress: SHARE_AUTHOR, entities: 'all' as const };
@@ -23,6 +25,23 @@ describe('retained share reconciliation', () => {
       ...(withEvidence ? { shareEvidence: proof } : {}) });
     return id;
   }
+  it('continues to prove an unrelated share after retirement and still rejects malformed queue subjects', async () => {
+    const id = await complete();
+    const failed = mk('other-job', 'failed', { bound: true, commitMarker: STARTED,
+      attempt: { count: 1, maxRetries: 3, lastError: PREPARATION_ERROR } });
+    await put(store, failed);
+    const before = await queue.reconcileShare(input);
+    expect(before).toMatchObject({ outcome: 'proven', jobId: id });
+    const preview = await queue.retireFailedJob(failed.jobId);
+    if (preview.outcome !== 'eligible') throw Error('missing preview');
+    expect(await queue.retireFailedJob(failed.jobId, {
+      expectedJobSha256: preview.jobSha256, acceptUnknownEffects: true,
+    })).toMatchObject({ outcome: 'retired' });
+    expect(await queue.reconcileShare(input)).toEqual(before);
+    await store.insert([{ graph: DEFAULT_PROMOTE_CONTROL_GRAPH_URI, subject: 'urn:example:incomplete',
+      predicate: PROMOTE_CONTEXT_GRAPH_ID, object: literal('other') }]);
+    expect(await queue.reconcileShare(input)).toMatchObject({ outcome: 'unproven', reason: 'incomplete_inventory' });
+  });
   it('exposes reconciliation only through the synchronized queue capability', async () => {
     const exports = await import('../src/index.js');
     expect(exports).not.toHaveProperty('reconcileRetainedShare');

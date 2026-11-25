@@ -136,7 +136,6 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
 
   private readonly inner: TripleStore;
   readonly innerStore: TripleStore;
-  get atomicSparqlModify(): true | undefined { return this.innerStore.atomicSparqlModify; }
   private readonly enabled: boolean;
   private readonly revalidateMs: number;
   private readonly revalidate: GraphSetRevalidation;

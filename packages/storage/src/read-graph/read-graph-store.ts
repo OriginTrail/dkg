@@ -177,7 +177,6 @@ function noteUnstoredDirtyMark(runtime: ReadGraphBackendRuntime, row: ReadGraphS
 /** The read-graph layer over one adapter. See the module documentation. */
 export class ReadGraphStore implements TripleStoreDecorator {
   readonly innerStore: TripleStore;
-  get atomicSparqlModify(): true | undefined { return this.innerStore.atomicSparqlModify; }
   /** The backend's shared state: locks, state mirror and registry snapshots. */
   readonly runtime: ReadGraphBackendRuntime;
   /** What the adapter below declares about read graphs; `undefined` when it declares nothing. */
