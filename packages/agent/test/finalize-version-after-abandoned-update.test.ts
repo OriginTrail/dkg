@@ -25,7 +25,7 @@ import {
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore, PrivateContentStore, type Quad } from '@origintrail-official/dkg-storage';
-import { DKGPublisher, computeFlatKCRootV10, computeStructuredKCRootV10, computePrivateRootV10 } from '@origintrail-official/dkg-publisher';
+import { DKGPublisher, computeFlatKCRootV10, computeStructuredKCRootV10, computePrivateRootV10, assertionLifecycleWriteLockKey, readAssertionLifecycleCandidates } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
@@ -63,7 +63,7 @@ function int(value: bigint | number): string {
   return `"${value.toString()}"^^<${XSD_INTEGER}>`;
 }
 
-async function makeAgent(store: OxigraphStore) {
+async function makeAgent(store: OxigraphStore, writeLocks = new Map<string, Promise<void>>()) {
   const chain = {
     chainId: CHAIN_ID,
     getEvmChainId: async () => EVM_CHAIN_ID,
@@ -77,7 +77,7 @@ async function makeAgent(store: OxigraphStore) {
     chain: chain as never,
     eventBus: new TypedEventBus(),
     keypair: await generateEd25519Keypair(),
-    writeLocks: new Map(),
+    writeLocks,
   });
   agent.kaNumberAllocator = makeTestKaNumberAllocator();
   agent.reconciledKaAuthors = new Set<string>();
@@ -501,7 +501,8 @@ describe('GH#2958 a replacement draft reuses its number and therefore its privat
 describe('conditional finalization of an existing shared asset', () => {
   async function workingCopy(privateValue?: string) {
     const store = new OxigraphStore();
-    const agent = await makeAgent(store);
+    const writeLocks = new Map<string, Promise<void>>();
+    const agent = await makeAgent(store, writeLocks);
     await agent.assertion.create(CG, NAME);
     await draft(agent, 'base');
     const source = await finalize(agent);
@@ -524,7 +525,7 @@ describe('conditional finalization of an existing shared asset', () => {
       expectedPredecessor: { reservedUal: source.kaUal, swmAssertionRoot: ethers.hexlify(source.merkleRoot) },
       expectedTarget: { merkleRoot: rootFor(privateRows), publicTripleCount: publicRows.length, privateTripleCount: privateRows.length },
     };
-    return { store, agent, source, history, before, rootFor, guard };
+    return { store, agent, source, history, before, rootFor, guard, writeLocks };
   }
 
   it('compares both complete RDF partitions and predecessor, then returns the same seal on retry', async () => {
@@ -576,25 +577,85 @@ describe('conditional finalization of an existing shared asset', () => {
     expect(allocate).not.toHaveBeenCalled();
   });
 
-  it('rechecks the VM predecessor at the first write and keeps concurrent private edits behind the draft lock', async () => {
-    const { agent, store, history, before, guard } = await workingCopy();
-    let entered!: () => void, release!: () => void;
-    const signing = new Promise<void>(resolve => { entered = resolve; });
-    const proceed = new Promise<void>(resolve => { release = resolve; });
-    const attempt = finalize(agent, undefined, { guard, authorSignTypedData: async (data: unknown) => {
-      entered(); await proceed; return signTypedData(data);
+  it('seals replacement C on the same asset after abandoning B and reopening published A', async () => {
+    const { agent, sealA } = await publishedKa();
+    const sealB = await editAndFinalize(agent, 'B');
+    await agent.assertion.pullFrom(CG, NAME, 'vm', { onConflict: 'replace' });
+    await draft(agent, 'C');
+    const history = await agent.assertion.history(CG, NAME, { agentAddress: AUTHOR });
+    const predecessor = ethers.hexlify(sealA.merkleRoot);
+    const target = ethers.hexlify(computeStructuredKCRootV10([...content('A'), ...content('C')], []).root);
+    expect(history.wmCurrentAssertion).toContain(ethers.hexlify(sealB.merkleRoot).slice(2));
+    const result = await finalize(agent, undefined, { guard: {
+      expectedAuthorAddress: AUTHOR, expectedWmAssertionGraph: history.assertionGraph,
+      expectedPredecessor: { reservedUal: sealA.kaUal, vmAssertionRoot: predecessor, swmAssertionRoot: predecessor },
+      expectedTarget: { merkleRoot: target, publicTripleCount: 2, privateTripleCount: 0 },
     } });
-    await signing;
-    let written = false;
-    const pending = agent.publisher.assertionWritePrivate(CG, NAME, AUTHOR, content('late')).then(() => { written = true; });
-    const vm = q(assertionLifecycleUri(CG, AUTHOR, NAME), DKG + 'vmCurrentAssertion', '"' + 'bb'.repeat(32) + '"', contextGraphMetaUri(CG));
+    expect(result).toMatchObject({ kaUal: sealA.kaUal, assertionVersion: '2', guardedOutcome: 'sealed' });
+    expect(ethers.hexlify(result.merkleRoot)).toBe(target);
+  });
+
+  it('rejects two valid case-equivalent owner records without allocating or writing', async () => {
+    const { agent, store, guard } = await workingCopy();
+    const readOwners = () => readAssertionLifecycleCandidates(store, CG, AUTHOR, NAME);
+    const [original] = await readOwners();
+    const other = original!.author === AUTHOR ? AUTHOR.toLowerCase() : AUTHOR;
+    const subject = assertionLifecycleUri(CG, other, NAME);
+    await store.insert(original!.record.bindings.map(row => q(subject, row.p, row.o, contextGraphMetaUri(CG))));
+    const before = await readOwners();
+    expect(before).toHaveLength(2);
+    const allocate = vi.spyOn(agent.kaNumberAllocator, 'allocate');
+    const write = vi.spyOn(store, 'insert');
+    await expect(finalize(agent, undefined, { guard })).rejects.toMatchObject({ code: 'FINALIZE_PRECONDITION_FAILED' });
+    expect(write).not.toHaveBeenCalled();
+    expect(allocate).not.toHaveBeenCalled();
+    expect(await readOwners()).toEqual(before);
+  });
+
+  function pausedSigner() {
+    let entered!: () => void;
+    let finish!: () => void;
+    const signing = new Promise<void>(resolve => { entered = resolve; });
+    const proceed = new Promise<void>(resolve => { finish = resolve; });
+    return { signing, finish, sign: async (data: unknown) => {
+      entered();
+      await proceed;
+      return signTypedData(data);
+    } };
+  }
+
+  it('refuses a VM predecessor that changes during signing before any seal is committed', async () => {
+    const { agent, store, guard, history, before } = await workingCopy('secret');
+    const signer = pausedSigner();
+    const attempt = finalize(agent, undefined, { guard, authorSignTypedData: signer.sign });
+    await signer.signing;
     try {
-      await store.insert([vm]);
-      expect(written).toBe(false);
-    } finally { release(); }
+      await store.insert([q(assertionLifecycleUri(CG, AUTHOR, NAME), DKG + 'vmCurrentAssertion',
+        '"' + 'bb'.repeat(32) + '"', contextGraphMetaUri(CG))]);
+    } finally { signer.finish(); }
     await expect(attempt).rejects.toMatchObject({ code: 'FINALIZE_PRECONDITION_FAILED' });
-    await pending;
     expect((await history()).wmCurrentAssertion).toBe(before.wmCurrentAssertion);
+  });
+
+  it('seals the expected private content before rejecting a concurrent private edit', async () => {
+    const { agent, guard, writeLocks } = await workingCopy('secret');
+    const signer = pausedSigner();
+    const attempt = finalize(agent, undefined, { guard, authorSignTypedData: signer.sign });
+    await signer.signing;
+    const key = assertionLifecycleWriteLockKey(CG, NAME, AUTHOR);
+    const sealGate = writeLocks.get(key);
+    const writer = agent.publisher.assertionWritePrivate(CG, NAME, AUTHOR, content('late'));
+    const rejection = expect(writer).rejects.toMatchObject({ code: 'KA_ASSERTION_ALREADY_FINALIZED' });
+    try {
+      // Both calls synchronously install their gate on the same lifecycle key.
+      expect(sealGate).toBeDefined();
+      expect(writeLocks.get(key)).toBeDefined();
+      expect(writeLocks.get(key)).not.toBe(sealGate);
+    } finally { signer.finish(); }
+    const sealed = await attempt;
+    await rejection;
+    expect(ethers.hexlify(sealed.merkleRoot)).toBe(guard.expectedTarget.merkleRoot);
+    expect(sealed).toMatchObject({ privateTripleCount: 1, guardedOutcome: 'sealed' });
   });
 
   it('repairs an interrupted stamp from the already durable seal with its original coordinates', async () => {

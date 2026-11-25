@@ -1,4 +1,4 @@
-import type { FinalizeGuard } from './finalize-guard.js';
+import type { AssertionFinalizeOptions, PublicFinalizeResult } from './assertion-finalize-types.js';
 import { queryAssertionHistory } from './assertion-history-query.js';
 import { PublicSnapshotSessionMethods } from './public-snapshot-session.js';
 import type { AssertionPullFromOptions, AssertionPullFromResult, StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
@@ -61,7 +61,7 @@ import {
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
   isTrustLevelQuad,
-  buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, type AuthorAttestationTypedData,
+  buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1,
   buildAssertionSealQuads, buildAssertionPublishReceiptQuads,
   type AssertionSeal,
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
@@ -382,7 +382,6 @@ import {
   StaleSenderKeyTargetError,
   SwmSenderKeySetupRejectionError,
   SyncAccessDeniedError,
-  type PreSignedAuthorAttestation,
   type AssertionPromoteOptions,
   type LocalSwmSenderKeySendState,
   type LocalSwmSenderKeyReceiveState,
@@ -3943,16 +3942,8 @@ export class DKGAgent extends DKGAgentBase {
       async finalize(
         contextGraphId: string,
         name: string,
-        opts?: {
-          guard?: FinalizeGuard;
-          subGraphName?: string;
+        opts?: AssertionFinalizeOptions & {
           agentAddress?: string;
-          authorAgentAddress?: string;
-          preSignedAuthorAttestation?: PreSignedAuthorAttestation;
-          authorSignTypedData?: (
-            typedData: AuthorAttestationTypedData,
-          ) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
-          schemeVersion?: number;
           /**
            * @deprecated `"swm"` remains recognizable only so mixed-version
            * callers get the stable `LEGACY_KA_READ_ONLY` error. New KAs are
@@ -3961,22 +3952,7 @@ export class DKGAgent extends DKGAgentBase {
            */
           layer?: 'wm' | 'swm';
         },
-      ): Promise<{
-        guardedOutcome?: 'sealed' | 'already_sealed';
-        publicTripleCount: number;
-        privateTripleCount: number;
-        assertionUri: string;
-        merkleRoot: Uint8Array;
-        authorAddress: string;
-        schemeVersion: number;
-        chainId: bigint;
-        kav10Address: string;
-        eip712Digest: string;
-        /** The KA this draft belongs to. */
-        kaUal: string;
-        /** The number this draft will be published as (GH#2958: one above the confirmed version). */
-        assertionVersion: string;
-      }> {
+      ): Promise<PublicFinalizeResult> {
         const finalizeAgentAddress = opts?.agentAddress ?? agentAddress;
         if (opts?.layer === 'swm') {
           throw new LegacyKnowledgeAssetReadOnlyError();

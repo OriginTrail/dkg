@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { lifecycleFields } from './lifecycle-fields.js';
 import { ethers } from 'ethers';
 import {
   assertCanonicalDeterministicUalV1, assertSafeIri, contextGraphLayerUri, contextGraphMetaUri,
@@ -60,7 +61,11 @@ export function parseFinalizeGuard(input: unknown): FinalizeGuard {
 }
 
 export function requireFinalizeMatch(matches: boolean): asserts matches {
-  if (!matches) throw Object.assign(new Error('The working draft no longer matches the finalize preconditions'), {
+  if (!matches) refuseFinalizeMatch();
+}
+
+function refuseFinalizeMatch(): never {
+  throw Object.assign(new Error('The working draft no longer matches the finalize preconditions'), {
     code: 'FINALIZE_PRECONDITION_FAILED',
   });
 }
@@ -77,30 +82,20 @@ export async function readGuardedDraftOwner(
   const owners = await readAssertionLifecycleCandidates(store, cg, author, name, subGraph);
   requireFinalizeMatch(owners.length === 1);
   const owner = owners[0]!;
-  const one = (key: string) => {
-    const rows = owner.record.bindings.filter(row => row.p === key);
-    requireFinalizeMatch(rows.length <= 1);
-    return rows[0]?.o;
-  };
+  const { one, literal } = lifecycleFields(owner.record.bindings, refuseFinalizeMatch);
   const dkg = 'http://dkg.io/ontology/';
-  const literal = (key: string) => {
-    const raw = one(dkg + key);
-    if (raw === undefined) return undefined;
-    const term = parseRdfLiteralTerm(raw);
-    requireFinalizeMatch(!!term && term.kind !== 'language' && (term.kind !== 'typed' ||
-      term.datatype === 'http://www.w3.org/2001/XMLSchema#' + (key === 'contentScopeVersion' ? 'integer' : 'string')));
-    return term.value;
-  };
+  // Pull-from can retain the last sealed WM pointer after replacing its draft.
+  // Check its storage representation; the target is proven from the actual quads.
+  const previousSeal = literal('wmCurrentAssertion');
+  requireFinalizeMatch(previousSeal === undefined || /^[0-9a-f]{64}$/i.test(previousSeal));
   const vm = literal('vmCurrentAssertion')?.toLowerCase();
   const swm = literal('swmCurrentAssertion')?.toLowerCase() ?? vm;
-  const wm = literal('wmCurrentAssertion')?.toLowerCase();
   requireFinalizeMatch(literal('assertionName') === name &&
     one('http://www.w3.org/ns/prov#wasAttributedTo')?.toLowerCase() === 'did:dkg:agent:' + guard.expectedAuthorAddress &&
-    literal('contentScopeVersion') === String(GRAPH_KA_CONTENT_SCOPE_VERSION) &&
+    literal('contentScopeVersion', 'integer') === String(GRAPH_KA_CONTENT_SCOPE_VERSION) &&
     literal('state') === 'created' && literal('memoryLayer') === MemoryLayer.WorkingMemory &&
     owner.record.number?.toString() === ka.kaNumber && literal('reservedUal') === ka.ual &&
-    swm === p.swmAssertionRoot.slice(2) && vm === p.vmAssertionRoot?.slice(2) &&
-    (wm === undefined || wm === swm || wm === guard.expectedTarget.merkleRoot.slice(2)));
+    swm === p.swmAssertionRoot.slice(2) && vm === p.vmAssertionRoot?.slice(2));
   const operation = literal('shareOperationId');
   if (operation !== undefined) requireFinalizeMatch(operation === p.shareOperationId);
   // The transient operation field can be trimmed while its promoted event survives.

@@ -1,4 +1,5 @@
-import { parseFinalizeGuard, readGuardedDraftOwner, requireFinalizeMatch, type FinalizeGuard } from './finalize-guard.js';
+import type { AssertionFinalizeResult, InternalFinalizeOptions } from './assertion-finalize-types.js';
+import { parseFinalizeGuard, readGuardedDraftOwner, requireFinalizeMatch } from './finalize-guard.js';
 import { admitQueuedCatalogPublicationV1 } from './internal/queued-catalog-publication-admission.js';
 import { ConfirmedCatalogObligationErrorV1, type ConfirmedCatalogObligationInputV1 } from './confirmed-catalog-obligation-error.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -57,7 +58,7 @@ import {
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
   isTrustLevelQuad,
-  buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, type AuthorAttestationTypedData,
+  buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1,
   buildAssertionSealQuads, buildAssertionPublishReceiptQuads,
   parseAssertionSealQuads, type AssertionSeal,
   ASSERTION_SEAL_PREDICATES,
@@ -3101,37 +3102,8 @@ export class PublishMethods extends DKGAgentBase {
     contextGraphId: string,
     name: string,
     agentAddress: string,
-    opts?: {
-      guard?: FinalizeGuard;
-      executionAuthority?: import('@origintrail-official/dkg-publisher').PromoteExecutionAuthority;
-      subGraphName?: string;
-      authorAgentAddress?: string;
-      preSignedAuthorAttestation?: PreSignedAuthorAttestation;
-      authorSignTypedData?: (
-        typedData: AuthorAttestationTypedData,
-      ) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
-      schemeVersion?: number;
-    },
-  ): Promise<{
-    guardedOutcome?: 'sealed' | 'already_sealed';
-    assertionUri: string;
-    merkleRoot: Uint8Array;
-    authorAddress: string;
-    /** Internal lifecycle identity used by seal-in-SWM migration. */
-    reservedKaId: bigint;
-    /** Internal exact payload boundary used by seal-in-SWM migration. */
-    rootEntities: string[];
-    contentScopeVersion: typeof GRAPH_KA_CONTENT_SCOPE_VERSION;
-    kaUal: string;
-    assertionVersion: string;
-    publicTripleCount: number;
-    privateMerkleRoot?: Uint8Array;
-    privateTripleCount: number;
-    schemeVersion: number;
-    chainId: bigint;
-    kav10Address: string;
-    eip712Digest: string;
-  }> {
+    opts?: InternalFinalizeOptions,
+  ): Promise<AssertionFinalizeResult> {
     if (
       opts?.preSignedAuthorAttestation != null
       && (opts.authorAgentAddress != null || opts.authorSignTypedData != null)
@@ -3351,9 +3323,10 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    const commitFinalized = async (ual: string, version: string, root: Uint8Array, persistFreshSeal?: () => Promise<void>) => {
+    const commitFinalized = async (ual: string, sealAuthor: string, version: string, root: Uint8Array, persistFreshSeal?: () => Promise<void>) => {
       const assertCurrent = () => opts?.executionAuthority?.assertCurrent();
       if (guard) {
+        requireFinalizeMatch(ual === guard.expectedPredecessor.reservedUal && sealAuthor.toLowerCase() === guard.expectedAuthorAddress);
         // Chain signing can take time. Sample lifecycle pointers again at the first storage write.
         requireFinalizeMatch(await readGuardedDraftOwner(this.store, guard, contextGraphId, name, agentAddress, opts?.subGraphName) === agentAddress);
       }
@@ -3441,9 +3414,7 @@ export class PublishMethods extends DKGAgentBase {
         schemeVersion: existingSeal.authorSchemeVersion,
       });
       // Repair an interrupted finalize through the same commit protocol as a fresh seal.
-      if (guard) requireFinalizeMatch(existingSeal.kaUal === guard.expectedPredecessor.reservedUal &&
-        existingSeal.authorAddress.toLowerCase() === guard.expectedAuthorAddress);
-      await commitFinalized(existingSeal.kaUal, existingSeal.assertionVersion, existingSeal.merkleRoot);
+      await commitFinalized(existingSeal.kaUal, existingSeal.authorAddress, existingSeal.assertionVersion, existingSeal.merkleRoot);
       return {
         ...(guard ? { guardedOutcome: 'already_sealed' as const } : {}),
         assertionUri,
@@ -3872,9 +3843,7 @@ export class PublishMethods extends DKGAgentBase {
       });
     }
 
-    if (guard) requireFinalizeMatch(kaUal === guard.expectedPredecessor.reservedUal &&
-      authorAddress.toLowerCase() === guard.expectedAuthorAddress);
-    await commitFinalized(kaUal, assertionVersion.toString(), merkleRoot,
+    await commitFinalized(kaUal, authorAddress, assertionVersion.toString(), merkleRoot,
       () => this.store.insert(sealQuads));
 
     return {
