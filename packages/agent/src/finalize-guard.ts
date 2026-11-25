@@ -31,6 +31,12 @@ const record = (v: unknown): v is Record<string, unknown> =>
 const digest = (v: unknown): v is string => typeof v === 'string' && /^0x[0-9a-f]{64}$/.test(v);
 const count = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
 
+// This is an RDF literal compared by value. Its spelling is independent of URL syntax.
+function validOperationId(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 256 && value.trim().length > 0
+    && !value.includes('\0') && !/[\uD800-\uDFFF]/u.test(value);
+}
+
 export function parseFinalizeGuard(input: unknown): FinalizeGuard {
   if (!record(input)) throw new Error('Invalid finalize guard');
   const p = input.expectedPredecessor;
@@ -39,7 +45,7 @@ export function parseFinalizeGuard(input: unknown): FinalizeGuard {
     || Object.keys(p).some(key => !['reservedUal', 'swmAssertionRoot', 'vmAssertionRoot', 'shareOperationId'].includes(key))
     || Object.keys(t).some(key => !['merkleRoot', 'publicTripleCount', 'privateTripleCount'].includes(key))
     || (p.vmAssertionRoot !== undefined && !digest(p.vmAssertionRoot))
-    || (p.shareOperationId !== undefined && (typeof p.shareOperationId !== 'string' || !/^[A-Za-z0-9._:~-]{1,256}$/.test(p.shareOperationId)))
+    || (p.shareOperationId !== undefined && !validOperationId(p.shareOperationId))
     || !count(t.publicTripleCount) || !count(t.privateTripleCount) || !(t.publicTripleCount || t.privateTripleCount)
     || typeof input.expectedAuthorAddress !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(input.expectedAuthorAddress)
     || typeof input.expectedWmAssertionGraph !== 'string' || input.expectedWmAssertionGraph.length > 2048) {

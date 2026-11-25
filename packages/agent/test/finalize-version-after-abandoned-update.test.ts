@@ -570,15 +570,15 @@ describe('conditional finalization of an existing shared asset', () => {
       q('urn:event:' + id, prov + 'startedAtTime', '"' + date + '"^^<http://www.w3.org/2001/XMLSchema#dateTime>', graph),
       q('urn:event:' + id, DKG + 'shareOperationId', '"' + id + '"', graph),
     ];
-    await store.insert([...event('old', '2026-01-01T01:00:00Z'), ...event('new', '2026-01-01T02:00:00Z')]);
+    await store.insert([...event('old', '2026-01-01T01:00:00Z'), ...event('share/op+1', '2026-01-01T02:00:00Z')]);
     const withOperation = (id: string) => ({ guard: { ...guard,
       expectedPredecessor: { ...guard.expectedPredecessor, shareOperationId: id } } });
     const snapshot = await storeSnapshot(store);
-    for (const stale of [{ guard }, withOperation('old')]) {
+    for (const stale of [{ guard }, withOperation('old'), withOperation('share%2Fop%2B1')]) {
       await expect(finalize(agent, undefined, stale)).rejects.toMatchObject({ code: 'FINALIZE_PRECONDITION_FAILED' });
       expect(await storeSnapshot(store)).toEqual(snapshot);
     }
-    await expect(finalize(agent, undefined, withOperation('new'))).resolves.toMatchObject({
+    await expect(finalize(agent, undefined, withOperation('share/op+1'))).resolves.toMatchObject({
       kaUal: source.kaUal, guardedOutcome: 'sealed',
     });
   });
@@ -588,11 +588,15 @@ describe('conditional finalization of an existing shared asset', () => {
     const subject = assertionLifecycleUri(CG, AUTHOR, NAME);
     const graph = contextGraphMetaUri(CG);
     const vmRoot = '0x' + 'aa'.repeat(32);
+    const operation = ' share/op+🌍'.padEnd(256, ' ');
     await store.insert([
-      q(subject, DKG + 'shareOperationId', '"promotion-1"', graph),
+      q(subject, DKG + 'shareOperationId', JSON.stringify(operation), graph),
       q(subject, DKG + 'vmCurrentAssertion', '"' + vmRoot.slice(2) + '"', graph),
     ]);
-    const predecessor = { ...guard.expectedPredecessor, vmAssertionRoot: vmRoot, shareOperationId: 'promotion-1' };
+    const predecessor = { ...guard.expectedPredecessor, vmAssertionRoot: vmRoot, shareOperationId: operation };
+    await expect(finalize(agent, undefined, { guard: { ...guard,
+      expectedPredecessor: { ...predecessor, shareOperationId: operation.trim() } } }))
+      .rejects.toMatchObject({ code: 'FINALIZE_PRECONDITION_FAILED' });
     for (const absent of ['vmAssertionRoot', 'shareOperationId'] as const) {
       const { [absent]: _missing, ...rest } = predecessor;
       await expect(finalize(agent, undefined, { guard: { ...guard, expectedPredecessor: rest } }))

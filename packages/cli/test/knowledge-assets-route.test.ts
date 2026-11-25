@@ -510,6 +510,13 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       })).status).toBe(403);
       const malformed = await client.post(guarded, { ...body, expectedTarget: {} });
       expect(malformed.status).toBe(400);
+      const withOperation = (id: unknown) => ({ ...body, expectedPredecessor: { ...body.expectedPredecessor, shareOperationId: id } });
+      for (const malformedId of [null, 123, '', '  ', 'x'.repeat(257), 'a\0b', '\ud800']) {
+        expect((await client.post(guarded, withOperation(malformedId))).status).toBe(400);
+      }
+      const differentOperation = await client.post(guarded, withOperation('share/op+1'));
+      expect(differentOperation.status).toBe(409);
+      expect(differentOperation.body.code).toBe('FINALIZE_PRECONDITION_FAILED');
       const stale = await client.post(guarded, { ...body, expectedTarget: { ...body.expectedTarget, privateTripleCount: 1 } });
       expect(stale.status).toBe(409);
       expect(stale.body).toEqual({ code: 'FINALIZE_PRECONDITION_FAILED', error: 'Finalize preconditions no longer match this draft' });

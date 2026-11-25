@@ -71,7 +71,7 @@ Use `POST /api/knowledge-assets/{name}/wm/finalize-guarded` to seal an existing 
 | --- | --- |
 | `expectedAuthorAddress` | The asset author's EVM address. |
 | `expectedWmAssertionGraph` | The exact working-memory graph for this asset. |
-| `expectedPredecessor` | An object containing `reservedUal`, `swmAssertionRoot`, and, when present, `vmAssertionRoot` and `shareOperationId`. Include the latest retained promotion operation even when the transient lifecycle operation field was cleared. |
+| `expectedPredecessor` | An object containing `reservedUal`, `swmAssertionRoot`, and, when present, `vmAssertionRoot` and `shareOperationId`. Include the latest retained promotion operation even when the transient lifecycle operation field was cleared. Copy its identifier exactly, including punctuation and any surrounding whitespace. |
 | `expectedTarget` | The complete canonical draft's `merkleRoot`, `publicTripleCount`, and `privateTripleCount`. All roots use lowercase, `0x`-prefixed 32-byte hex. |
 
 The node checks both draft partitions under the draft lock and rechecks the predecessor before its first storage write. A matching request returns HTTP 200 with `outcome` (`sealed` or `already_sealed`), the ordinary `seal` payload, and both triple counts. An identical retry can finish an interrupted local write. HTTP 409 with `FINALIZE_PRECONDITION_FAILED` means the caller should read the current asset before choosing a new action.
