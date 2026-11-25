@@ -62,3 +62,18 @@ dkg ka pull-from notes-doc -c my-project --layer swm \
 ## Snapshot limits
 
 The evidence describes the draft while verification held the lifecycle lock. A write after that snapshot can invalidate it. This response is not a capability authorizing a later mutation: every later mutation must perform its own locked validation. Do not use public equality, counts or this snapshot to justify replacing an unproven draft.
+
+## Seal an exact draft
+
+Use `POST /api/knowledge-assets/{name}/wm/finalize-guarded` to seal an existing working copy on its reserved asset identity. Use the same context, signer and graph access as ordinary finalize. Supply the usual finalize fields and the following evidence.
+
+| Field | Expected value |
+| --- | --- |
+| `expectedAuthorAddress` | The asset author's EVM address. |
+| `expectedWmAssertionGraph` | The exact working-memory graph for this asset. |
+| `expectedPredecessor` | An object containing `reservedUal`, `swmAssertionRoot`, and, when present, `vmAssertionRoot` and `shareOperationId`. Include the latest retained promotion operation even when the transient lifecycle operation field was cleared. |
+| `expectedTarget` | The complete canonical draft's `merkleRoot`, `publicTripleCount`, and `privateTripleCount`. All roots use lowercase, `0x`-prefixed 32-byte hex. |
+
+The node checks both draft partitions under the draft lock and rechecks the predecessor before its first storage write. A matching request returns HTTP 200 with `outcome` (`sealed` or `already_sealed`), the ordinary `seal` payload, and both triple counts. An identical retry can finish an interrupted local write. HTTP 409 with `FINALIZE_PRECONDITION_FAILED` means the caller should read the current asset before choosing a new action.
+
+This operation seals working memory. A separate publication can advance the published pointer after the last check.
