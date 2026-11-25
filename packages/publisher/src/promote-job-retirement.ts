@@ -17,6 +17,26 @@ export interface PromoteRetirementApproval {
   acceptUnknownEffects: true;
 }
 
+interface RetirementDecision {
+  disposition: typeof ABANDONED;
+  jobSha256: string;
+  retiredAt: number;
+}
+
+function readRetirementDecision(term: string, expectedDigest: string): RetirementDecision | undefined {
+  let value: unknown;
+  try {
+    const text: unknown = JSON.parse(term);
+    if (typeof text !== 'string') return;
+    value = JSON.parse(text);
+  } catch { return; }
+  if (!value || typeof value !== 'object') return;
+  const { disposition, jobSha256, retiredAt } = value as Record<string, unknown>;
+  if (disposition !== ABANDONED || jobSha256 !== expectedDigest || typeof retiredAt !== 'number'
+    || !Number.isSafeInteger(retiredAt) || retiredAt < 0) return;
+  return { disposition, jobSha256: expectedDigest, retiredAt };
+}
+
 interface PromoteRetirementIdentity {
   jobId: string;
   jobSha256: string;
@@ -87,9 +107,8 @@ export async function retireFailedPromote(store: TripleStore, graph: string, job
   if (archived) {
     const decision = rows.find(r => r.p === DECISION)?.o;
     if (rows.length !== 2 || rows.some(r => r.s !== receipt) || !decision) return { outcome: 'ineligible' };
-    let saved;
-    try { saved = JSON.parse(JSON.parse(decision)); } catch { return { outcome: 'ineligible' }; }
-    if (saved?.disposition !== ABANDONED || saved.jobSha256 !== digest || !Number.isSafeInteger(saved.retiredAt) || saved.retiredAt < 0) return { outcome: 'ineligible' };
+    const saved = readRetirementDecision(decision, digest);
+    if (!saved) return { outcome: 'ineligible' };
     if (approval && approval.expectedJobSha256 !== digest) return { outcome: 'stale' };
     if (!approval) return { outcome: 'observed', ...info, retiredAt: saved.retiredAt };
     if (!supportsAtomicSparqlModify(store)) return { outcome: 'unsupported' };
@@ -112,9 +131,9 @@ export async function retireFailedPromote(store: TripleStore, graph: string, job
   if (!approval) return { outcome: 'eligible', ...info };
   if (digest !== approval.expectedJobSha256) return { outcome: 'stale' };
   if (asGraphWriteRevisionSource(store)?.getWriteRevision('').stable === false) return { outcome: 'ineligible' };
-  const decision = literal(JSON.stringify({ disposition: ABANDONED, jobSha256: digest, retiredAt: now() }));
+  const decision: RetirementDecision = { disposition: ABANDONED, jobSha256: digest, retiredAt: now() };
   const updated = await tryUpdateWithTouchedGraphs(store, `DELETE { GRAPH ${g} { <${active}> ?p ?o } }
-    INSERT { GRAPH ${archive} { <${receipt}> <${ARCHIVED}> ?original ; <${DECISION}> ${decision} } }
+    INSERT { GRAPH ${archive} { <${receipt}> <${ARCHIVED}> ?original ; <${DECISION}> ${literal(JSON.stringify(decision))} } }
     WHERE { ${matching} GRAPH ${g} { <${active}> ?p ?o ; <${PROMOTE_PAYLOAD}> ?original } }`,
     [graph, archiveGraph], { ...options, writtenGraphs: [graph, archiveGraph] });
   if (!updated) return { outcome: 'unsupported' };

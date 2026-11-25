@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createTripleStore, GraphWriteGenTracker, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
-import { jobSubject, PROMOTE_STATE } from '../src/async-promote-queue-utils.js';
+import { jobSubject, literal, PROMOTE_STATE, serializeJobRecord } from '../src/async-promote-queue-utils.js';
 import { GRAPH, NOW, POST_COMMIT_ERROR, STARTED, mk, put } from './_helpers/share-retention-fixtures.js';
 
 function fixture(store = new OxigraphStore()) {
@@ -99,6 +99,45 @@ describe('retiring one failed bound recovery owner', () => {
       await store.close();
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it('rejects an old approval after a valid replacement of the failed job with the same identity', async () => {
+    const { store, queue, failed } = fixture();
+    await put(store, failed);
+    const q = queue();
+    const preview = await q.retireFailedJob(failed.jobId);
+    if (preview.outcome !== 'eligible') throw Error('missing preview');
+
+    const changed = { ...failed, attempt: { ...failed.attempt, count: failed.attempt.count + 1 } };
+    const { jobRef, jobQuads } = serializeJobRecord(changed, GRAPH);
+    await store.replaceSubject(GRAPH, jobRef, jobQuads);
+    const update = vi.spyOn(store, 'update');
+    expect(await q.retireFailedJob(failed.jobId, { expectedJobSha256: preview.jobSha256, acceptUnknownEffects: true }))
+      .toEqual({ outcome: 'stale' });
+    expect(update).not.toHaveBeenCalled();
+    expect(await q.getStatus(failed.jobId)).toEqual(changed);
+    const fresh = await q.retireFailedJob(failed.jobId);
+    if (fresh.outcome !== 'eligible') throw Error('expected the replacement to remain active');
+    expect(fresh.jobSha256).not.toBe(preview.jobSha256);
+  });
+
+  it('refuses an archived decision with a malformed timestamp', async () => {
+    const { store, queue, failed } = fixture();
+    await put(store, failed);
+    const q = queue();
+    const preview = await q.retireFailedJob(failed.jobId);
+    if (preview.outcome !== 'eligible') throw Error('missing preview');
+    const approval = { expectedJobSha256: preview.jobSha256, acceptUnknownEffects: true as const };
+    expect((await q.retireFailedJob(failed.jobId, approval)).outcome).toBe('retired');
+    const decision = { graph: GRAPH + ':retirements', subject: 'urn:dkg:promote-queue:abandoned-job:' + failed.jobId,
+      predicate: 'urn:dkg:promote-queue:abandoned:decision' };
+    await store.deleteByPattern(decision);
+    await store.insert([{ ...decision, object: literal(JSON.stringify({ disposition: 'operator_abandoned_unknown_effects',
+      jobSha256: preview.jobSha256, retiredAt: String(NOW) })) }]);
+    const update = vi.spyOn(store, 'update');
+    expect(await q.retireFailedJob(failed.jobId)).toEqual({ outcome: 'ineligible' });
+    expect(await q.retireFailedJob(failed.jobId, approval)).toEqual({ outcome: 'ineligible' });
+    expect(update).not.toHaveBeenCalled();
   });
 
   it('rechecks the whole subject at commit and refuses an index added after verification', async () => {
