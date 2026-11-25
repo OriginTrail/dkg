@@ -33,7 +33,7 @@ describe('operator retirement on Blazegraph', () => {
     const queue = new TripleStoreAsyncPromoteQueue(store, { graphUri: graph });
     const preview = await queue.retireFailedJob(id);
     if (preview.outcome !== 'eligible') throw new Error(`Unexpected preview: ${preview.outcome}`);
-    return { id, queue, approval: { expectedJobSha256: preview.jobSha256, acceptUnknownEffects: true as const } };
+    return { id, job, queue, approval: { expectedJobSha256: preview.jobSha256, acceptUnknownEffects: true as const } };
   }
 
   async function objects(graph: string, subject: string, predicate: string) {
@@ -52,6 +52,23 @@ describe('operator retirement on Blazegraph', () => {
     expect(await objects(`${graph}:retirements`, `urn:dkg:promote-queue:abandoned-job:${id}`,
       'urn:dkg:promote-queue:abandoned:originalFailedPayload')).toEqual(original);
     expect(await queue.clearTerminalJob(id)).toEqual({ outcome: 'already_absent' });
+  });
+
+  it('preserves a replacement with the same index count if the failed payload changes at commit', async () => {
+    const graph = 'urn:test:retirement:replaced';
+    const { id, job, queue, approval } = await seed(graph);
+    const replacement = { ...job, attempt: { ...job.attempt, count: job.attempt.count + 1 } };
+    const { jobRef, jobQuads } = serializeJobRecord(replacement, graph);
+    const update = store.update.bind(store);
+    const changing = vi.spyOn(store, 'update').mockImplementationOnce(async (query, options) => {
+      await store.replaceSubject(graph, jobRef, jobQuads);
+      await update(query, options);
+    });
+    try {
+      expect(await queue.retireFailedJob(id, approval)).toEqual({ outcome: 'stale' });
+    } finally { changing.mockRestore(); }
+    expect(await queue.getStatus(id)).toEqual(replacement);
+    expect(await store.countQuads(graph + ':retirements')).toBe(0);
   });
 
   it('leaves the original in place if its index changes just before the atomic move', async () => {

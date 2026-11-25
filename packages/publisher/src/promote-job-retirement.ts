@@ -66,18 +66,18 @@ export function isPromoteRetirementApproval(value: unknown): value is PromoteRet
     && typeof body.expectedJobSha256 === 'string' && /^[0-9a-f]{64}$/.test(body.expectedJobSha256);
 }
 
-function sourceJob(payload: string | undefined, jobId: string) {
+function readFailedJob(payload: string | undefined, jobId: string) {
   const job = parseJobPayload(payload);
   if (!payload || !job || job.jobId !== jobId || !isBoundPromoteJob(job) || job.state !== 'failed'
     || job.attempt.lastError?.classification !== 'fatal' || job.attempt.lastError.retryable !== false
     || typeof job.attempt.lastError.message !== 'string' || !Number.isSafeInteger(job.attempt.lastError.recordedAt)
-    || job.attempt.lastError.noEffectProof !== undefined || isPromotePostCommitAttemptError(job.attempt.lastError)
+    || job.attempt.lastError.noEffectProof !== undefined
     || job.lease !== undefined || job.result !== undefined || job.attempt.nextRetryAt !== undefined
     || !Number.isSafeInteger(job.attempt.count) || job.attempt.count < 1
     || !job.commitMarker || typeof job.commitMarker.promoteStarted !== 'boolean') return;
   const raw: unknown = JSON.parse(payload);
   if (typeof raw !== 'string') return;
-  return { job, raw, digest: createHash('sha256').update(raw).digest('hex') };
+  return { job, raw, error: job.attempt.lastError, commitMarker: job.commitMarker, digest: createHash('sha256').update(raw).digest('hex') };
 }
 
 /**
@@ -97,13 +97,13 @@ export async function retireFailedPromote(store: TripleStore, graph: string, job
   } LIMIT 20`, options));
   if (!rows.length) return { outcome: 'not_found' };
   const archived = rows.some(r => r.s === receipt);
-  const source = sourceJob(rows.find(r => r.p === (archived ? ARCHIVED : PROMOTE_PAYLOAD))?.o, jobId);
+  const source = readFailedJob(rows.find(r => r.p === (archived ? ARCHIVED : PROMOTE_PAYLOAD))?.o, jobId);
   if (!source) return { outcome: 'ineligible' };
   const { job, raw, digest } = source;
   const info = { jobId, jobSha256: digest, contextGraphId: job.request.contextGraphId, assertionName: job.request.assertionName,
     agentAddress: job.request.agentAddress, sealDigest: job.request.recoveryBinding.sealDigest,
     operationId: job.request.recoveryBinding.intent.operationId, attemptCount: job.attempt.count,
-    commitMarker: job.commitMarker!, effects: 'unknown' as const };
+    commitMarker: source.commitMarker, effects: 'unknown' as const };
   if (archived) {
     const decision = rows.find(r => r.p === DECISION)?.o;
     if (rows.length !== 2 || rows.some(r => r.s !== receipt) || !decision) return { outcome: 'ineligible' };
@@ -115,6 +115,9 @@ export async function retireFailedPromote(store: TripleStore, graph: string, job
     await store.flush?.();
     return { outcome: 'retired', ...info, retiredAt: saved.retiredAt };
   }
+  // A durable decision records the classification at retirement. Only an active job needs
+  // today's recovery policy to decide whether the operator may abandon it.
+  if (isPromotePostCommitAttemptError(source.error)) return { outcome: 'ineligible' };
   const expected = serializeJobRecord(job, graph).jobQuads.map(q => ({
     p: q.predicate, o: q.predicate === PROMOTE_PAYLOAD ? literal(raw) : q.object,
   }));

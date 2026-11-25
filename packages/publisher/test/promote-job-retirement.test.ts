@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createTripleStore, GraphWriteGenTracker, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
+import * as queueUtils from '../src/async-promote-queue-utils.js';
 import { jobSubject, literal, PROMOTE_STATE, serializeJobRecord } from '../src/async-promote-queue-utils.js';
 import { GRAPH, NOW, POST_COMMIT_ERROR, STARTED, mk, put } from './_helpers/share-retention-fixtures.js';
 
@@ -139,6 +140,66 @@ describe('retiring one failed bound recovery owner', () => {
     expect(await q.retireFailedJob(failed.jobId, approval)).toEqual({ outcome: 'ineligible' });
     expect(update).not.toHaveBeenCalled();
   });
+
+  it('reads a durable decision even when current recovery policy would reject a new retirement', async () => {
+    const { store, queue, failed } = fixture();
+    const other = { ...failed, jobId: 'still-active' };
+    await put(store, failed, other);
+    const q = queue(), preview = await q.retireFailedJob(failed.jobId);
+    if (preview.outcome !== 'eligible') throw Error('missing preview');
+    const approval = { expectedJobSha256: preview.jobSha256, acceptUnknownEffects: true as const };
+    const receipt = await q.retireFailedJob(failed.jobId, approval);
+    expect(receipt.outcome).toBe('retired');
+    const policy = vi.spyOn(queueUtils, 'isPromotePostCommitAttemptError').mockReturnValue(true);
+    try {
+      expect(await q.retireFailedJob(other.jobId)).toEqual({ outcome: 'ineligible' });
+      expect(await q.retireFailedJob(failed.jobId)).toEqual({ ...receipt, outcome: 'observed' });
+      expect(await q.retireFailedJob(failed.jobId, approval)).toEqual(receipt);
+    } finally { policy.mockRestore(); }
+  });
+
+  it('preserves the replacement if the payload changes at commit without adding an index', async () => {
+    const { store, queue, failed } = fixture();
+    await put(store, failed);
+    const q = queue(), preview = await q.retireFailedJob(failed.jobId);
+    if (preview.outcome !== 'eligible') throw Error('missing preview');
+    const changed = { ...failed, attempt: { ...failed.attempt, count: failed.attempt.count + 1 } };
+    const { jobRef, jobQuads } = serializeJobRecord(changed, GRAPH);
+    const update = store.update.bind(store);
+    vi.spyOn(store, 'update').mockImplementationOnce(async (query, options) => {
+      await store.replaceSubject(GRAPH, jobRef, jobQuads);
+      await update(query, options);
+    });
+    expect(await q.retireFailedJob(failed.jobId, { expectedJobSha256: preview.jobSha256, acceptUnknownEffects: true }))
+      .toEqual({ outcome: 'stale' });
+    expect(await q.getStatus(failed.jobId)).toEqual(changed);
+    expect((await q.retireFailedJob(failed.jobId)).outcome).toBe('eligible');
+    expect(await store.countQuads(GRAPH + ':retirements')).toBe(0);
+  });
+
+  it('retires on the decorated persistent worker and observes the original receipt after restart', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-retire-worker-'));
+    const open = () => createTripleStore({ backend: 'oxigraph-worker', options: { path: join(dir, 'store.nq') } });
+    try {
+      const { failed } = fixture();
+      const store = await open();
+      let receipt;
+      try {
+        await put(store, failed);
+        const q = new TripleStoreAsyncPromoteQueue(store, { graphUri: GRAPH, now: () => NOW });
+        const preview = await q.retireFailedJob(failed.jobId);
+        if (preview.outcome !== 'eligible') throw Error(`unexpected preview: ${preview.outcome}`);
+        receipt = await q.retireFailedJob(failed.jobId, { expectedJobSha256: preview.jobSha256, acceptUnknownEffects: true });
+      } finally { await store.close(); }
+      expect(receipt.outcome).toBe('retired');
+      const reopened = await open();
+      try {
+        const q = new TripleStoreAsyncPromoteQueue(reopened, { graphUri: GRAPH });
+        expect(await q.retireFailedJob(failed.jobId)).toEqual({ ...receipt, outcome: 'observed' });
+        expect(await q.getStatus(failed.jobId)).toBeNull();
+      } finally { await reopened.close(); }
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  }, 30_000);
 
   it('rechecks the whole subject at commit and refuses an index added after verification', async () => {
     const { store, queue, failed } = fixture();
