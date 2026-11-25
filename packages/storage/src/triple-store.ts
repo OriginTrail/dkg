@@ -348,6 +348,8 @@ export interface TripleStore {
    * fall back to `insert(quads)` for already-stored terms.
    */
   update?(sparql: string, options?: UpdateOptions): Promise<void>;
+  /** One SPARQL DELETE/INSERT WHERE passed to update() evaluates and commits as one backend transaction. */
+  readonly atomicSparqlModify?: true;
 
   countQuads(graphUri?: string, options?: QueryOptions): Promise<number>;
 

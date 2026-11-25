@@ -59,6 +59,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   }
 
   readonly innerStore: TripleStore;
+  get atomicSparqlModify(): true | undefined { return this.innerStore.atomicSparqlModify; }
   readonly graphEnumerationVisibility;
   private readonly inner: TripleStore;
   private readonly blobDir: string;

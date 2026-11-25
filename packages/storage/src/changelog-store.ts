@@ -236,6 +236,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
 
   private readonly inner: TripleStore;
   readonly innerStore: TripleStore;
+  get atomicSparqlModify(): true | undefined { return this.innerStore.atomicSparqlModify; }
   private readonly enabled: boolean;
   private readonly reserved: ReadonlySet<string>;
   private readonly reservedGuard: ChangelogReservedGraphs;

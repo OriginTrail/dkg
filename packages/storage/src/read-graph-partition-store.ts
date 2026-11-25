@@ -104,6 +104,7 @@ function refuseSparql(store: TripleStore, sparql: string, operation: StoreOperat
  */
 export class ReadGraphPartitionStore implements TripleStoreDecorator {
   readonly innerStore: TripleStore;
+  get atomicSparqlModify(): true | undefined { return this.innerStore.atomicSparqlModify; }
   readonly graphEnumerationVisibility;
   readonly deleteByPatternWithoutCount?: TripleStore['deleteByPatternWithoutCount'];
   readonly replaceGraph?: TripleStore['replaceGraph'];
