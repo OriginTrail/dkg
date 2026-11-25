@@ -49,6 +49,25 @@ describe('retiring one failed bound recovery owner', () => {
     expect(await reopened.retireFailedJob(failed.jobId)).toEqual({ ...receipt, outcome: 'observed' });
   });
 
+  it('admits the same selector immediately after retiring its cached failed owner', async () => {
+    const { store, queue, failed } = fixture();
+    await put(store, failed);
+    const q = queue();
+    const { contextGraphId, assertionName, agentAddress } = failed.request;
+    const request = { contextGraphId, assertionName, agentAddress, entities: 'all' as const };
+    expect(await q.getStatus(failed.jobId)).toEqual(failed);
+    await expect(q.enqueue(request)).rejects.toMatchObject({ existingJobId: failed.jobId, observedAdmission: true });
+
+    const preview = await q.retireFailedJob(failed.jobId);
+    if (preview.outcome !== 'eligible') throw Error('missing preview');
+    const receipt = await q.retireFailedJob(failed.jobId, { expectedJobSha256: preview.jobSha256, acceptUnknownEffects: true });
+    expect(receipt.outcome).toBe('retired');
+    // A status read here could invalidate the cache and mask a retirement regression.
+    const next = await q.enqueue(request);
+    expect(next).not.toBe(failed.jobId);
+    expect(await q.getStatus(next)).toMatchObject({ state: 'queued', request });
+  });
+
   it('confirms an observed move only after a successful flush; a new store loads the same receipt', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-share-retirement-'));
     const file = join(dir, 'queue.nq');
