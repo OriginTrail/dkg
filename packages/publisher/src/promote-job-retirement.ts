@@ -17,11 +17,23 @@ export interface PromoteRetirementApproval {
   acceptUnknownEffects: true;
 }
 
+interface PromoteRetirementIdentity {
+  jobId: string;
+  jobSha256: string;
+  contextGraphId: string;
+  assertionName: string;
+  agentAddress: string;
+  sealDigest: string;
+  operationId: string;
+  attemptCount: number;
+  commitMarker: NonNullable<BoundPromoteJob['commitMarker']>;
+  effects: 'unknown';
+}
+
 export type PromoteRetirementResult =
   | { outcome: 'not_found' | 'ineligible' | 'stale' | 'unsupported' }
-  | { outcome: 'eligible' | 'observed' | 'retired'; jobId: string; jobSha256: string; contextGraphId: string; assertionName: string;
-      agentAddress: string; sealDigest: string; operationId: string; attemptCount: number;
-      commitMarker: NonNullable<BoundPromoteJob['commitMarker']>; effects: 'unknown'; retiredAt?: number };
+  | (PromoteRetirementIdentity & { outcome: 'eligible' })
+  | (PromoteRetirementIdentity & { outcome: 'observed' | 'retired'; retiredAt: number });
 
 export interface PromoteJobRetirer {
   retireFailedJob(jobId: string, approval?: PromoteRetirementApproval): Promise<PromoteRetirementResult>;
