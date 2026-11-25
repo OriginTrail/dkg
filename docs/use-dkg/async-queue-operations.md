@@ -78,9 +78,9 @@ Use the node operator credential for both requests. Keep the daemon as the sole 
    { "expectedJobSha256": "<jobSha256 from the preview>", "acceptUnknownEffects": true }
    ```
 
-3. Look for `outcome: "retired"` with the same digest. If the response is lost, read the same URL again to see whether the decision was recorded. A conflict calls for inspecting the latest record before taking further action.
+3. Look for `outcome: "retired"` with the same digest. If the response is lost, read the same URL again. An `observed` receipt means the node can read the decision. Submit the same approved digest again to confirm it is durable. The repeat performs the persistence check without moving the job a second time. On a conflict, inspect the latest record before taking further action.
 
-The operator can read the retirement receipt after a restart. It lives in the share queue's existing control graph, alongside the original failed payload under a separate record. An ordinary client clearing the old job now gets `already_absent`. Retirement makes no share or publication request. It applies to eligible failed share jobs on stores supporting the atomic move. Publish jobs have their own recovery procedure.
+The operator can read the retirement receipt after a restart. It preserves the original failed payload in a dedicated archive graph. Back up that graph with the two queue graphs. Its name is the share control graph name followed by `:retirements`, which defaults to `urn:dkg:promote-queue:control-plane:retirements`. An ordinary client clearing the old job now gets `already_absent`. Retirement makes no share or publication request. It applies to eligible failed share jobs on stores supporting the atomic move. Publish jobs have their own recovery procedure.
 
 ## Clean up finished jobs
 
@@ -116,7 +116,7 @@ Removed jobs cannot be restored.
 
 1. Run `report` for at least two weeks.
 2. Check `wouldDelete` on the `async_promote_retention_pass` and `async_lift_retention_pass` log lines against what you expect to lose.
-3. Just before you switch, back up both queue graphs: `urn:dkg:promote-queue:control-plane` and `urn:dkg:publisher:control-plane`.
+3. Just before you switch, back up the share and publisher control graphs (`urn:dkg:promote-queue:control-plane` and `urn:dkg:publisher:control-plane`). Include the share retirement archive if you have used operator retirement.
 4. Set `mode` to `delete` and restart.
 
 ### After a job is removed
