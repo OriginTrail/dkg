@@ -16,7 +16,7 @@ export interface PublicSnapshotExactRecoveryOptions extends PublicSnapshotRecove
   /** Whether the asset is already stored as the snapshot pins it. */
   readonly holds?: (ual: string) => Promise<boolean>;
   /** One lane by default; per-peer locks serialize requests to a shared supplier. */
-  readonly maxLanes?: 1 | 2;
+  readonly maxLanes?: 1 | 2 | 4;
 }
 
 type ExactTransport = 'stream-preferred' | 'legacy';
@@ -39,17 +39,25 @@ export async function recoverPublicSnapshotExact(
 ): Promise<PublicSnapshotRecoveryResult> {
   const job = new PublicSnapshotExactJob(options);
   job.assertActive();
-  const lanes = options.maxLanes === 2 && options.uals.length > 10 ? 2 : 1;
-  const partitions: string[][] = Array.from({ length: lanes }, () => []);
-  for (let offset = 0; offset < options.uals.length; offset += 10)
-    partitions[(offset / 10) % lanes]!.push(...options.uals.slice(offset, offset + 10));
-  return job.run(partitions.map((uals, lane) => () => recoverLane(host, options, job, uals, lane)));
+  const requestedLanes = options.maxLanes === 4 ? 4 : options.maxLanes === 2 ? 2 : 1;
+  const lanes = Math.min(requestedLanes, Math.max(1, Math.ceil(options.uals.length / 10)));
+  let offset = 0;
+  const nextBatch = () => {
+    job.assertActive();
+    if (offset >= options.uals.length) return undefined;
+    const batch = options.uals.slice(offset, offset + 10);
+    offset += 10;
+    return batch;
+  };
+  // A ready lane takes the next disjoint batch instead of waiting behind a
+  // slower supplier's fixed partition. At most one batch per lane is owned.
+  return job.run(Array.from({ length: lanes }, (_, lane) => () => recoverLane(host, options, job, nextBatch, lane)));
 }
 
 /** Selection answers and supplier preference are lane-local; job state is not. */
 async function recoverLane(
   host: DurableRecoveryHost, options: PublicSnapshotExactRecoveryOptions,
-  job: PublicSnapshotExactJob, uals: readonly string[], lane: number,
+  job: PublicSnapshotExactJob, nextBatch: () => readonly string[] | undefined, lane: number,
 ): Promise<void> {
   const { contextGraphId, evidence } = options;
   const { committed, pacing, signal, isCurrent } = job;
@@ -107,8 +115,7 @@ async function recoverLane(
     if (selection.uals.every(ual => committed.has(ual))) return { kind: 'complete' };
     return wait ? { kind: 'wait', reason: wait } : { kind: 'answered' };
   };
-  for (let offset = 0; offset < uals.length; offset += 10) {
-    const batch = uals.slice(offset, offset + 10);
+  for (let batch = nextBatch(); batch; batch = nextBatch()) {
     await skipHeld(batch);
     if (batch.every(ual => committed.has(ual))) continue;
     const selections: RecoverySelection[] = [
