@@ -29,20 +29,14 @@ export interface PublicFinalizeOptions extends AssertionFinalizeOptions {
   layer?: 'wm' | 'swm';
 }
 
-export interface AssertionFinalizeResult {
+export interface PublicFinalizeResult {
   guardedOutcome?: FinalizeOutcome;
   assertionUri: string;
   merkleRoot: Uint8Array;
   authorAddress: string;
-  /** Internal lifecycle identity used by seal-in-SWM migration. */
-  reservedKaId: bigint;
-  /** Internal exact payload boundary used by seal-in-SWM migration. */
-  rootEntities: string[];
-  contentScopeVersion: typeof GRAPH_KA_CONTENT_SCOPE_VERSION;
   kaUal: string;
   assertionVersion: string;
   publicTripleCount: number;
-  privateMerkleRoot?: Uint8Array;
   privateTripleCount: number;
   schemeVersion: number;
   chainId: bigint;
@@ -50,4 +44,11 @@ export interface AssertionFinalizeResult {
   eip712Digest: string;
 }
 
-export type PublicFinalizeResult = Omit<AssertionFinalizeResult, 'reservedKaId' | 'rootEntities' | 'contentScopeVersion' | 'privateMerkleRoot'>;
+export interface AssertionFinalizeResult extends PublicFinalizeResult {
+  /** Internal lifecycle identity used by seal-in-SWM migration. */
+  reservedKaId: bigint;
+  /** Internal exact payload boundary used by seal-in-SWM migration. */
+  rootEntities: string[];
+  contentScopeVersion: typeof GRAPH_KA_CONTENT_SCOPE_VERSION;
+  privateMerkleRoot?: Uint8Array;
+}
