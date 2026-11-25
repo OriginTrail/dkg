@@ -133,7 +133,12 @@ export class VmReconcileDispatcher<T> {
     this.maxForegroundBurst = maxForegroundBurst;
     this.timerBoundOutstandingLimit = 2 * concurrency;
     this.pauses = options.pauses ?? new VmReconcilePauses();
-    this.stopWatchingPauses = this.pauses.onResume(() => this.drain());
+    this.stopWatchingPauses = this.pauses.onResume(() => {
+      this.drain();
+      // A sweep can be waiting for admission with no queued work: a paused
+      // graph cannot use the immediate-run exception to the reserved slot.
+      this.resolvePeriodicStateWaiters();
+    });
   }
 
   /** Enqueue a low-latency chain-event nudge; suppressed until a sweep after failure. */

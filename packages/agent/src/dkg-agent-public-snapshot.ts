@@ -132,8 +132,8 @@ export class PublicSnapshotMethods extends PublicSnapshotSessionMethods {
             });
           }
           return recoverPublicSnapshotExact(DKGAgentBase.createDurableRecoveryCapabilities(this), {
-            // Opt-in experiment: node admission and one-stream-per-peer locks still apply.
-            ...recovery, deadline, maxLanes: process.env.DKG_PUBLIC_SNAPSHOT_EXACT_LANES === '4' ? 4 : 2,
+            // Independent suppliers share bounded work; node admission still owns capacity.
+            ...recovery, deadline, maxLanes: 4,
             canAdmit: () => this.vmRecoverySyncAdmissionAvailable(contextGraphId),
             holds: createPublicSnapshotHeldAssetCheck(this.store, evidence),
           });

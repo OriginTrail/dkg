@@ -1,10 +1,45 @@
 import { describe, expect, it, vi } from 'vitest';
 import { getEventListeners } from 'node:events';
-import { VmReconcileDispatcher } from '../src/vm-reconcile-dispatcher.js';
+import { VmReconcileDispatcher, VmReconcileSchedulingRuntime } from '../src/vm-reconcile-dispatcher.js';
 import { VmReconcilePauses, vmReconcilePausesFor } from '../src/internal/vm-reconcile-pauses.js';
 
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 describe('foreground snapshot recovery ownership', () => {
+  it('wakes an explicit sweep rejected while a snapshot held its only queue slot', async () => {
+    const pauses = new VmReconcilePauses(), lease = pauses.acquire('a');
+    const run = vi.fn(async () => 1);
+    const runtime = new VmReconcileSchedulingRuntime(run, () => {}, { pauses, maxPending: 1 });
+    const sweep = runtime.completeSweep(['a'], [], () => true);
+    try {
+      await tick();
+      expect(runtime.snapshot()).toMatchObject({ active: 0, queued: 0 });
+      expect(run).not.toHaveBeenCalled();
+      lease.release(); await tick();
+      expect(run).toHaveBeenCalledTimes(1);
+      await sweep;
+    } finally { lease.release(); await runtime.close(); await sweep; }
+  });
+
+  it('drains a failing old dispatcher before a replacement resumes on the shared graph owner', async () => {
+    const pauses = new VmReconcilePauses();
+    let fail!: (error: Error) => void;
+    const old = new VmReconcileDispatcher(() => new Promise<void>((_, reject) => { fail = reject; }), () => {}, { pauses });
+    const active = old.triggerManual('a');
+    const rejected = expect(active).rejects.toThrow('old pass failed');
+    await tick();
+    const lease = pauses.acquire('a'), closing = old.close();
+    let drained = false;
+    const waiting = lease.wait(new AbortController().signal).then(() => { drained = true; });
+    const run = vi.fn(async () => 'new');
+    const next = new VmReconcileDispatcher(run, () => {}, { pauses });
+    const pending = next.triggerManual('a');
+    await tick(); expect(drained).toBe(false); expect(run).not.toHaveBeenCalled();
+    fail(new Error('old pass failed')); await rejected; await closing; await waiting;
+    expect(run).not.toHaveBeenCalled();
+    lease.release(); await expect(pending).resolves.toBe('new');
+    expect(old.snapshot()).toEqual({ active: 0, queued: 0, closed: true });
+    await next.close();
+  });
   it('drains an admitted pass, retains a trailing nudge and runs other graphs', async () => {
     const pauses = new VmReconcilePauses();
     let finish!: () => void;

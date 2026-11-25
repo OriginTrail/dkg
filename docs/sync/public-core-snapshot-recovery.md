@@ -80,7 +80,11 @@ await agent.query('SELECT ?s WHERE { ?s ?p ?o } LIMIT 20', {
 
 Local validation uses real DKG nodes, libp2p streaming, an isolated deployed Hardhat chain and separate Oxigraph stores. It checks core-cache transfers with receiver asset-RPC methods forbidden, independent RPC-only recovery, public/private behavior, evidence labeling and query refusal without acceptance. Contract tests reject stale/mis-scoped/malformed evidence; existing durable-materialization and private-query regression tests protect the reused boundaries.
 
-This implementation retains ten-asset streaming batches and sequential supplier fallback (up to four configured peers). A rerun resumes per asset from the local store, as described above. It does not yet implement 100 MB chunks, concurrent suppliers, resumable transfer sessions, background sampling audits or a large-graph five-minute performance guarantee. The storage benchmark is a separate lower-bound measurement. Cold snapshot generation still costs RPC work at the core; only a warm cache avoids that work for additional consumers.
+Exact recovery uses up to four lanes sharing disjoint ten-asset batches. Each ready lane takes the next batch, while a per-peer lock permits only one stream to any supplier. The node's existing sync admission and memory bounds still apply; fewer assets or suppliers naturally limit concurrency. A foreground job drains already-admitted VM recovery for its graph, then pauses competing VM passes until the job ends. Queued live, manual and periodic work stays bounded and resumes afterward; other graphs can continue.
+
+Concurrent authority-index block checks can share a physical RPC only when all callers enrolled before that read started. No block answer is retained for a later caller. A post-scan stabilization check therefore still makes a fresh observation, and each caller keeps its cancellation and deadline. Node shutdown drains outstanding provider reads before reopening.
+
+A rerun resumes per asset from the local store, as described above. These scheduling changes do not enable the optional bulk transport or promise a particular large-graph sync time. Cold snapshot generation still costs RPC work at the core; only a warm cache avoids that work for additional consumers. Full-current coverage and the final fresh observation remain required.
 
 The bounded SELECT and entity-discovery endpoints accept the same `chainEvidenceMode`
 and echo it in successful responses. Omitting it retains the independent policy;

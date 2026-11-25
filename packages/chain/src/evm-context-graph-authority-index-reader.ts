@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { setTimeout as sleep } from 'node:timers/promises';
+import { createAuthorityIndexBlockReadV1 } from './authority-index-block-reads.js';
 import { contextGraphAuthorityProjectionAnchorProvenByLogV1, contextGraphFinalizedNameAbsenceAnchorHoldsV1, peekRetainedAuthoritySnapshotsV1 } from './evm-context-graph-authority-retained.js';
 export { contextGraphAuthorityProjectionAnchorProvenByLogV1, contextGraphFinalizedNameAbsenceAnchorHoldsV1 } from './evm-context-graph-authority-retained.js';
 import { snapshotAuthorityRevisionTargetsV1, snapshotAuthorityNameHashTargetsV1, authoritySnapshotV1, projectAuthoritySnapshotsByNameHashesV1 } from './evm-context-graph-authority-snapshot.js';
@@ -53,6 +54,7 @@ import type { ReadOpts } from './rpc-failover-client.js';
 import {
   activeRpcRequestContext,
   withRpcRequestContext,
+  withOwnedRpcRequestContext,
 } from './rpc-request-transport.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
 
@@ -111,6 +113,7 @@ type EvmContextGraphAuthorityIndexReadInputV1 = Readonly<{
   contract: Contract;
   contractAddress: string;
   provider: JsonRpcProvider;
+  readBlock: ReturnType<typeof createAuthorityIndexBlockReadV1>;
   deploymentBlockNumber: number;
   deploymentBlockPinned?: boolean;
   scanClass?: ContextGraphAuthorityIndexScanClass;
@@ -221,11 +224,8 @@ function authorityIndexScanInputV1(
     readBlockHash: async (blockNumber, lifecycleSignal) => (
       (await withRpcUsageConsumer(
         'authorityIndex.lineage',
-        () => readOwnedAuthorityIndexRpcV1(
-          lifecycleSignal,
-          `${input.stabilizationOperation} block ${blockNumber}`,
-          () => input.provider.getBlock(blockNumber),
-        ),
+        () => withOwnedRpcRequestContext({ signal: lifecycleSignal }, () => input.readBlock(input.provider, blockNumber,
+          `${input.stabilizationOperation} block ${blockNumber}`, lifecycleSignal)),
       ))?.hash ?? null
     ),
     readPage: async (fromBlock, toBlock, lifecycleSignal) => {
@@ -279,11 +279,8 @@ async function readEvmContextGraphAuthorityIndexProjectionV1<T>(
       }
       const stable = await withRpcUsageConsumer(
         'authorityIndex.stabilize',
-        () => readEvmContextGraphAuthorityIndexRpcV1(
-          `${input.stabilizationOperation} stabilization block`,
-          () => input.provider.getBlock(input.finalized.number),
-          input.signal,
-        ),
+        () => input.readBlock(input.provider, input.finalized.number,
+          `${input.stabilizationOperation} stabilization block`, input.signal),
       );
       if (stable?.hash?.toLowerCase() !== input.finalized.hash.toLowerCase()) {
         // Anchored at the operator's depth the anchor can be the head, so a
@@ -417,6 +414,9 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
 ): EvmContextGraphAuthorityIndexReaderV1 {
   const lifecycle = new EvmContextGraphAuthorityIndexRevisionReadLifecycleV1();
   let lifecycleAbort = new AbortController();
+  const readBlock = createAuthorityIndexBlockReadV1({
+    lifecycleSignal: () => lifecycleAbort.signal, track: read => lifecycle.run(read),
+  });
   let ownScope: string | undefined;
   let closed = false;
   const assertOpen = (): void => {
@@ -536,7 +536,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
           deploymentId: dependencies.deploymentId,
           contract,
           contractAddress,
-          provider,
+          provider, readBlock,
           deploymentBlockNumber: lookup.blockNumber,
           deploymentBlockPinned: lookup.pinned,
           scanClass,
@@ -643,19 +643,11 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
           finalityConfirmations: dependencies.finalityConfirmations(),
           readHead: () => withRpcUsageConsumer(
             'authorityIndex.head',
-            () => readEvmContextGraphAuthorityIndexRpcV1(
-              `${operationLabel} chain head`,
-              () => provider.getBlock('latest'),
-              options.signal,
-            ),
+            () => readBlock(provider, 'latest', `${operationLabel} chain head`, options.signal),
           ),
           readBlockAt: (anchorBlockNumber) => withRpcUsageConsumer(
             'authorityIndex.anchor',
-            () => readEvmContextGraphAuthorityIndexRpcV1(
-              `${operationLabel} anchor block ${anchorBlockNumber}`,
-              () => provider.getBlock(anchorBlockNumber),
-              options.signal,
-            ),
+            () => readBlock(provider, anchorBlockNumber, `${operationLabel} anchor block ${anchorBlockNumber}`, options.signal),
           ),
           unavailable: contextGraphAuthorityAnchorUnavailableV1,
         });
@@ -755,11 +747,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
           async (provider) => {
             const anchor = await withRpcUsageConsumer(
               'authorityProjection.validateAnchor',
-              () => readEvmContextGraphAuthorityIndexRpcV1(
-                `${operationLabel} cached projection anchor block`,
-                () => provider.getBlock(cached.finalized.number),
-                options.signal,
-              ),
+              () => readBlock(provider, cached.finalized.number, `${operationLabel} cached projection anchor block`, options.signal),
             );
             if (anchor?.hash == null) return undefined;
             return anchor.hash.toLowerCase() === cached.finalized.hash.toLowerCase();
@@ -829,11 +817,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
           async (provider) => {
             const anchor = await withRpcUsageConsumer(
               'authorityProjection.validateAnchor',
-              () => readEvmContextGraphAuthorityIndexRpcV1(
-                `${operationLabel} cached projection anchor block`,
-                () => provider.getBlock(cached.finalized.number),
-                options.signal,
-              ),
+              () => readBlock(provider, cached.finalized.number, `${operationLabel} cached projection anchor block`, options.signal),
             );
             if (anchor?.hash == null) return undefined;
             return anchor.hash.toLowerCase() === cached.finalized.hash.toLowerCase();
@@ -962,19 +946,11 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
             finalityConfirmations: dependencies.finalityConfirmations(),
             readHead: () => withRpcUsageConsumer(
               'authorityProjection.absentNameHead',
-              () => readEvmContextGraphAuthorityIndexRpcV1(
-                `${operationLabel} absent-name chain head`,
-                () => provider.getBlock('latest'),
-                options.signal,
-              ),
+              () => readBlock(provider, 'latest', `${operationLabel} absent-name chain head`, options.signal),
             ),
             readBlockAt: (blockNumber) => withRpcUsageConsumer(
               'authorityProjection.absentNameAnchor',
-              () => readEvmContextGraphAuthorityIndexRpcV1(
-                `${operationLabel} absent-name anchor block ${blockNumber}`,
-                () => provider.getBlock(blockNumber),
-                options.signal,
-              ),
+              () => readBlock(provider, blockNumber, `${operationLabel} absent-name anchor block ${blockNumber}`, options.signal),
             ),
             unavailable: contextGraphAuthorityAnchorUnavailableV1,
           }),
@@ -1169,6 +1145,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
                   contract,
                   contractAddress,
                   provider,
+                  readBlock,
                   deploymentBlockNumber: lookup.blockNumber,
                   deploymentBlockPinned: lookup.pinned,
                   scanClass: activeRpcRequestContext().requestClass,
