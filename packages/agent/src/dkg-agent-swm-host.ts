@@ -12,6 +12,7 @@ import type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryRe
 import type { KnowledgeAssetUpdateIdentity } from '@origintrail-official/dkg-chain';
 import { orderVmRecoveryCandidates } from './vm-recovery-candidate-order.js';
 import { readLatestMerkleRootAndPublisher } from './ka-latest-root-and-publisher.js';
+import { vmReconcilePausesFor } from './internal/vm-reconcile-pauses.js';
 import {
   isCanonicalAuthoritativeContextGraphId, localContextGraphIdMatchesCommittedNameHash,
 } from './context-graph-binding-state.js';
@@ -4266,6 +4267,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         },
         {
           concurrency: DKGAgentBase.VM_RECONCILE_CONCURRENCY,
+          pauses: vmReconcilePausesFor(this),
           maxPending: DKGAgentBase.VM_RECONCILE_QUEUE_MAX_PENDING,
           maxForegroundBurst: DKGAgentBase.VM_RECONCILE_MAX_FOREGROUND_BURST,
           discoveryBatchSize: DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE,
