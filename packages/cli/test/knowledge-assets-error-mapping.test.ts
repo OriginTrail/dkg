@@ -71,6 +71,46 @@ describe('knowledge-assets mutation error mapping', () => {
     expect(JSON.parse(direct.record.body)).toEqual(JSON.parse(record.body));
   });
 
+  it.each([
+    { scenario: 'extra path segment', suffix: '/extra', status: 404 },
+    { scenario: 'malformed guard', suffix: '', status: 400 },
+    { scenario: 'different author', suffix: '', status: 403 },
+    { scenario: 'stale predecessor', suffix: '', status: 409 },
+  ])('guarded finalize refuses $scenario at the proper boundary', async ({ scenario, suffix, status }) => {
+    const author = '0x' + '11'.repeat(20);
+    const caller = scenario === 'different author' ? '0x' + '22'.repeat(20) : author;
+    const root = '0x' + 'aa'.repeat(32);
+    const guard = {
+      expectedAuthorAddress: author,
+      expectedWmAssertionGraph: 'urn:example:working-graph',
+      expectedPredecessor: { reservedUal: `did:dkg:mock:31337/${author}/1`, swmAssertionRoot: root },
+      expectedTarget: { merkleRoot: root, publicTripleCount: 1, privateTripleCount: 0 },
+    };
+    const finalize = vi.fn().mockRejectedValue(Object.assign(new Error('Finalize preconditions no longer match this draft'),
+      { code: 'FINALIZE_PRECONDITION_FAILED' }));
+    const url = new URL('http://localhost/api/knowledge-assets/asset/wm/finalize-guarded' + suffix);
+    const { record, res } = fakeResponse();
+    await handleKnowledgeAssetsRoutes({
+      url, path: url.pathname, res,
+      req: { method: 'POST', url: url.pathname, __dkgPrebufferedBody: Buffer.from(JSON.stringify({
+        contextGraphId: 'cg-1', ...(scenario === 'malformed guard' ? {} : guard),
+      })) },
+      authentication: requestAuthentication({ kind: 'agent', agentAddress: caller }),
+      agent: {
+        probeContextGraphWritePreflight: async () => ({ storeAvailable: true, exists: true, hasLocalContent: true,
+          declarationFound: true, accessPolicy: 'public', callerAuthorized: true }),
+        assertion: { finalize },
+      },
+    } as unknown as RequestContext);
+    expect(record.status, record.body).toBe(status);
+    if (status === 409) {
+      expect(finalize).toHaveBeenCalledWith('cg-1', 'asset', expect.objectContaining({ guard }));
+      expect(JSON.parse(record.body)).toEqual({ code: 'FINALIZE_PRECONDITION_FAILED', error: 'Finalize preconditions no longer match this draft' });
+    } else {
+      expect(finalize).not.toHaveBeenCalled();
+    }
+  });
+
   it('answers user-authored trust metadata with 400, not 500', () => {
     const error = new UserAuthoredTrustLevelError('urn:a');
     const { record, res } = fakeResponse();
