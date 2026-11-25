@@ -65,16 +65,18 @@ export function requireFinalizeMatch(matches: boolean): asserts matches {
 }
 
 function refuseFinalizeMatch(): never {
-  throw Object.assign(new Error('The working draft no longer matches the finalize preconditions'), {
+  throw Object.assign(new Error('Finalize preconditions no longer match this draft'), {
     code: 'FINALIZE_PRECONDITION_FAILED',
   });
 }
 
 /** Inspect the unique stored owner, including legacy checksum spelling. LIMIT 1 in a display
  * descriptor is insufficient for a write authorization: conflicting controls must refuse. */
-export async function readGuardedDraftOwner(
+export async function readGuardedFinalizeLifecycle(
   store: TripleStore, guard: FinalizeGuard, cg: string, name: string, author: string, subGraph?: string,
-): Promise<string> {
+): Promise<{
+  author: string; number: bigint; reservedUal: string; persistedAssertionVersion?: string; hasConfirmedVm: boolean;
+}> {
   const p = guard.expectedPredecessor;
   const ka = assertCanonicalDeterministicUalV1(p.reservedUal);
   requireFinalizeMatch(author.toLowerCase() === guard.expectedAuthorAddress &&
@@ -115,5 +117,8 @@ export async function readGuardedDraftOwner(
   } else {
     requireFinalizeMatch(p.shareOperationId === operation);
   }
-  return owner.author;
+  const number = owner.record.number;
+  requireFinalizeMatch(number !== undefined);
+  return { author: owner.author, number, reservedUal: ka.ual,
+    persistedAssertionVersion: literal('assertionVersion', 'integer'), hasConfirmedVm: vm !== undefined };
 }

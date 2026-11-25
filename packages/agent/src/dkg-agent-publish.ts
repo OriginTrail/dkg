@@ -1,5 +1,6 @@
+import { readFinalizeLifecycle, readFinalizeKaNumber } from './assertion-finalize-lifecycle.js';
 import type { AssertionFinalizeResult, InternalFinalizeOptions } from './assertion-finalize-types.js';
-import { parseFinalizeGuard, readGuardedDraftOwner, requireFinalizeMatch } from './finalize-guard.js';
+import { parseFinalizeGuard, readGuardedFinalizeLifecycle, requireFinalizeMatch } from './finalize-guard.js';
 import { admitQueuedCatalogPublicationV1 } from './internal/queued-catalog-publication-admission.js';
 import { ConfirmedCatalogObligationErrorV1, type ConfirmedCatalogObligationInputV1 } from './confirmed-catalog-obligation-error.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -3120,9 +3121,10 @@ export class PublishMethods extends DKGAgentBase {
     const specifiedAuthor = opts?.authorAgentAddress ?? opts?.preSignedAuthorAttestation?.address;
     if (guard && specifiedAuthor) requireFinalizeMatch(specifiedAuthor.toLowerCase() === guard.expectedAuthorAddress);
     return this.publisher.prepareAssertionShareSeal(contextGraphId, name, agentAddress, opts?.subGraphName, async () => {
-    if (guard) {
-      agentAddress = await readGuardedDraftOwner(this.store, guard, contextGraphId, name, agentAddress, opts?.subGraphName);
-    }
+    const guardedLifecycle = guard
+      ? await readGuardedFinalizeLifecycle(this.store, guard, contextGraphId, name, agentAddress, opts?.subGraphName)
+      : undefined;
+    if (guardedLifecycle) agentAddress = guardedLifecycle.author;
     // 1. Resolve URIs.
     const assertionUri = contextGraphAssertionUri(
       contextGraphId,
@@ -3328,7 +3330,8 @@ export class PublishMethods extends DKGAgentBase {
       if (guard) {
         requireFinalizeMatch(ual === guard.expectedPredecessor.reservedUal && sealAuthor.toLowerCase() === guard.expectedAuthorAddress);
         // Chain signing can take time. Sample lifecycle pointers again at the first storage write.
-        requireFinalizeMatch(await readGuardedDraftOwner(this.store, guard, contextGraphId, name, agentAddress, opts?.subGraphName) === agentAddress);
+        const current = await readGuardedFinalizeLifecycle(this.store, guard, contextGraphId, name, agentAddress, opts?.subGraphName);
+        requireFinalizeMatch(current.author === agentAddress && current.persistedAssertionVersion === guardedLifecycle?.persistedAssertionVersion);
       }
       await assertCurrent();
       const canonicalGraph = await this.publisher.materializeCanonicalWorkingMemory(
@@ -3395,14 +3398,8 @@ export class PublishMethods extends DKGAgentBase {
       // the binding, repack from the lifecycle-URN kaId stamp.
       let reReservedKaId = existingSeal.reservedKaId;
       if (reReservedKaId === undefined) {
-        const reKaIdRes = await this.store.query(
-          `SELECT ?n WHERE { GRAPH <${metaGraph}> { <${assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName)}> <${KA_ID_PRED}> ?n } } LIMIT 1`,
-          { source: 'agent.assertionFinalize.reservedKaId' },
-        );
-        const reNum =
-          reKaIdRes.type === 'bindings' && reKaIdRes.bindings[0]?.['n'] !== undefined
-            ? BigInt(String(reKaIdRes.bindings[0]['n']).replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim())
-            : 0n;
+        const reNum = guardedLifecycle?.number
+          ?? await readFinalizeKaNumber(this.store, metaGraph, lifecycleUri, 'agent.assertionFinalize.reservedKaId') ?? 0n;
         reReservedKaId = (BigInt(ethers.getAddress(existingSeal.authorAddress)) << 96n) | reNum;
       }
       const typedData = buildAuthorAttestationTypedData({
@@ -3514,27 +3511,8 @@ export class PublishMethods extends DKGAgentBase {
     //   • update of a previously-stamped name → reuse the stable existing number;
     //   • fresh create with an allocator → reconcile-once then allocate ONE number;
     //   • no allocator → 0n (non-Option-1; the on-chain namespace check rejects).
-    const lifecycleScopeResult = await this.store.query(
-      `SELECT ?scope ?version ?vm WHERE { GRAPH <${metaGraph}> {
-        OPTIONAL { <${lifecycleUri}> <${ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION}> ?scope }
-        OPTIONAL { <${lifecycleUri}> <${ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION}> ?version }
-        OPTIONAL { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm }
-      } } LIMIT 1`,
-      { source: 'agent.assertionFinalize.lifecycleScope' },
-    );
-    const lifecycleScopeRow = lifecycleScopeResult.type === 'bindings'
-      ? lifecycleScopeResult.bindings[0]
-      : undefined;
-    const stripLifecycleLiteral = (value: unknown): string | undefined => {
-      if (value === undefined) return undefined;
-      return String(value).replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim();
-    };
-    const persistedScopeVersion = stripLifecycleLiteral(lifecycleScopeRow?.['scope']);
-    const persistedAssertionVersion = stripLifecycleLiteral(lifecycleScopeRow?.['version']);
-    const hasConfirmedVm = lifecycleScopeRow?.['vm'] !== undefined;
-    if (persistedScopeVersion !== String(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
-      throw new LegacyKnowledgeAssetReadOnlyError();
-    }
+    const { persistedAssertionVersion, hasConfirmedVm, number: stampedNumber, reservedUal: stampedReservedUal } =
+      guardedLifecycle ?? await readFinalizeLifecycle(this.store, metaGraph, lifecycleUri, !preSigned);
     let assertionVersion = 1n;
     if (hasConfirmedVm) {
       if (persistedAssertionVersion === undefined) {
@@ -3546,23 +3524,14 @@ export class PublishMethods extends DKGAgentBase {
     } else if (persistedAssertionVersion !== undefined) {
       assertionVersion = BigInt(persistedAssertionVersion);
     }
-    const existingKaIdRes = await this.store.query(
-      `SELECT ?n WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${KA_ID_PRED}> ?n } } LIMIT 1`,
-      { source: 'agent.assertionFinalize.existingKaId' },
-    );
-    const hasExistingKaId =
-      existingKaIdRes.type === 'bindings' && existingKaIdRes.bindings.length > 0;
     const packReservedKaId = (addr: string, num: bigint): bigint =>
       (BigInt(ethers.getAddress(addr)) << 96n) | num;
-    const parseStampedNumber = (raw: unknown): bigint =>
-      BigInt(String(raw).replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim());
-    if (guard) requireFinalizeMatch(hasExistingKaId);
     let reservedKaId: bigint;
     // freshNumber is set ONLY when a NEW number must be stamped on the lifecycle
     // URN (fresh create, or a preSigned author whose slot isn't yet stamped).
     let freshNumber: bigint | undefined;
     if (preSigned) {
-      if (hasExistingKaId) {
+      if (stampedNumber !== undefined) {
         // The lifecycle already owns a stable slot. A re-finalize / update must
         // commit to THAT id, not whatever the caller signed over — otherwise the
         // persisted seal + on-chain mint (publishFromFinalizedAssertion reuses the
@@ -3571,7 +3540,7 @@ export class PublishMethods extends DKGAgentBase {
         // different number is rejected rather than silently re-slotted.
         const stampedKaId = packReservedKaId(
           authorAddress,
-          parseStampedNumber(existingKaIdRes.bindings[0]['n']),
+          stampedNumber,
         );
         if (preSigned.reservedKaId !== stampedKaId) {
           throw new Error(
@@ -3598,7 +3567,7 @@ export class PublishMethods extends DKGAgentBase {
         reservedKaId = preSigned.reservedKaId;
         freshNumber = reservedKaId & ((1n << 96n) - 1n);
       }
-    } else if (hasExistingKaId) {
+    } else if (stampedNumber !== undefined) {
       // The lifecycle already owns a stable slot. The stamped `dkg:kaId` number
       // was allocated in the ORIGINAL author's namespace — its packed id is
       // (uint160(originalAuthor) << 96) | number, recorded authoritatively in the
@@ -3609,15 +3578,6 @@ export class PublishMethods extends DKGAgentBase {
       // it with KaIdNamespaceMismatch — sealed locally, unpublishable. Preserve the
       // original author bits and reject author changes on an already-stamped name
       // (OT-RFC-43 §F2).
-      const stampedNumber = parseStampedNumber(existingKaIdRes.bindings[0]['n']);
-      const reservedUalRes = await this.store.query(
-        `SELECT ?u WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${RESERVED_UAL_PRED}> ?u } } LIMIT 1`,
-        { source: 'agent.assertionFinalize.reservedUal' },
-      );
-      const stampedReservedUal =
-        reservedUalRes.type === 'bindings' && reservedUalRes.bindings[0]?.['u'] !== undefined
-          ? String(reservedUalRes.bindings[0]['u']).replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim()
-          : undefined;
       // did:dkg:<chainId>/<addrLower>/<number> — the second path segment is the
       // original author. A pre-binding seal may lack `dkg:reservedUal`; only then
       // do we fall back to the current author (no recorded original to preserve).

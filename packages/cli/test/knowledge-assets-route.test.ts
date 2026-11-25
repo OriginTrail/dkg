@@ -511,7 +511,8 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       const malformed = await client.post(guarded, { ...body, expectedTarget: {} });
       expect(malformed.status).toBe(400);
       const stale = await client.post(guarded, { ...body, expectedTarget: { ...body.expectedTarget, privateTripleCount: 1 } });
-      expect(stale).toMatchObject({ status: 409, body: { code: 'FINALIZE_PRECONDITION_FAILED' } });
+      expect(stale.status).toBe(409);
+      expect(stale.body).toEqual({ code: 'FINALIZE_PRECONDITION_FAILED', error: 'Finalize preconditions no longer match this draft' });
       expect((await getDescriptor()).body).toEqual(before);
       const sealed = await client.post(guarded, body);
       expect(sealed.status, JSON.stringify(sealed.body)).toBe(200);

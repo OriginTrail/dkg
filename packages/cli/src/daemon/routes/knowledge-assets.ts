@@ -1647,8 +1647,6 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       }
     }
   } catch (e: any) {
-    if (e?.code === 'FINALIZE_PRECONDITION_FAILED')
-      return jsonResponse(res, 409, { code: e.code, error: 'Finalize preconditions no longer match this draft' });
     // WM/SWM mutation verbs (write/finalize/discard/pull-from/share) only.
     return respondAssertionError(res, e, {
       contextGraphId, name, subGraphName, phase: `${layer}-${verb}`,

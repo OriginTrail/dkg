@@ -548,6 +548,17 @@ describe('conditional finalization of an existing shared asset', () => {
     expect(again).toMatchObject({ ...sealed, guardedOutcome: 'already_sealed' });
   });
 
+  it('prepares from the validated reservation and independently rechecks it before writing', async () => {
+    const { agent, store, guard } = await workingCopy();
+    const query = vi.spyOn(store, 'query');
+    await finalize(agent, undefined, { guard });
+    const sources = query.mock.calls.map(([, options]) => options?.source);
+    expect(sources.filter(source => source === 'agent.finalizeGuard.promotedOperation')).toHaveLength(2);
+    expect(sources).not.toContain('agent.assertionFinalize.lifecycleScope');
+    expect(sources).not.toContain('agent.assertionFinalize.existingKaId');
+    expect(sources).not.toContain('agent.assertionFinalize.reservedUal');
+  });
+
   it('requires the current share operation and VM pointer when they exist', async () => {
     const { agent, store, guard } = await workingCopy();
     const subject = assertionLifecycleUri(CG, AUTHOR, NAME);
@@ -625,16 +636,23 @@ describe('conditional finalization of an existing shared asset', () => {
   }
 
   it('refuses a VM predecessor that changes during signing before any seal is committed', async () => {
-    const { agent, store, guard, history, before } = await workingCopy('secret');
+    const { agent, store, guard } = await workingCopy('secret');
     const signer = pausedSigner();
     const attempt = finalize(agent, undefined, { guard, authorSignTypedData: signer.sign });
     await signer.signing;
+    const snapshot = async () => {
+      const rows = await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o');
+      if (rows.type !== 'bindings') throw new Error('expected all graph bindings');
+      return { graphs: (await store.listGraphs()).sort(), rows: rows.bindings };
+    };
+    let before: Awaited<ReturnType<typeof snapshot>>;
     try {
       await store.insert([q(assertionLifecycleUri(CG, AUTHOR, NAME), DKG + 'vmCurrentAssertion',
         '"' + 'bb'.repeat(32) + '"', contextGraphMetaUri(CG))]);
+      before = await snapshot();
     } finally { signer.finish(); }
     await expect(attempt).rejects.toMatchObject({ code: 'FINALIZE_PRECONDITION_FAILED' });
-    expect((await history()).wmCurrentAssertion).toBe(before.wmCurrentAssertion);
+    expect(await snapshot()).toEqual(before);
   });
 
   it('seals the expected private content before rejecting a concurrent private edit', async () => {
