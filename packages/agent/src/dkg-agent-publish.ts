@@ -1,5 +1,5 @@
 import { readFinalizeLifecycle, readFinalizeKaNumber } from './assertion-finalize-lifecycle.js';
-import type { AssertionFinalizeResult, InternalFinalizeOptions } from './assertion-finalize-types.js';
+import type { AssertionFinalizeResult, InternalFinalizeOptions, WithFinalizeGuard, WithFinalizeOutcome } from './assertion-finalize-types.js';
 import { parseFinalizeGuard, readGuardedFinalizeLifecycle, requireFinalizeMatch } from './finalize-guard.js';
 import { admitQueuedCatalogPublicationV1 } from './internal/queued-catalog-publication-admission.js';
 import { ConfirmedCatalogObligationErrorV1, type ConfirmedCatalogObligationInputV1 } from './confirmed-catalog-obligation-error.js';
@@ -3099,6 +3099,10 @@ export class PublishMethods extends DKGAgentBase {
    *
    * See `assertion.finalize` (the public-facing wrapper) for usage docs.
    */
+  assertionFinalize(this: DKGAgent, contextGraphId: string, name: string, agentAddress: string,
+    opts: InternalFinalizeOptions & WithFinalizeGuard): Promise<AssertionFinalizeResult & WithFinalizeOutcome>;
+  assertionFinalize(this: DKGAgent, contextGraphId: string, name: string, agentAddress: string,
+    opts?: InternalFinalizeOptions): Promise<AssertionFinalizeResult>;
   async assertionFinalize(this: DKGAgent,
     contextGraphId: string,
     name: string,

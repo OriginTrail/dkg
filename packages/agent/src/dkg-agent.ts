@@ -1,4 +1,4 @@
-import type { AssertionFinalizeOptions, PublicFinalizeResult } from './assertion-finalize-types.js';
+import type { PublicFinalizeOptions, PublicFinalizeResult, WithFinalizeGuard, WithFinalizeOutcome } from './assertion-finalize-types.js';
 import { queryAssertionHistory } from './assertion-history-query.js';
 import { PublicSnapshotSessionMethods } from './public-snapshot-session.js';
 import type { AssertionPullFromOptions, AssertionPullFromResult, StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
@@ -3797,6 +3797,20 @@ export class DKGAgent extends DKGAgentBase {
         : undefined;
       return { author, allocateKaNumber };
     };
+    function finalize(contextGraphId: string, name: string, opts: PublicFinalizeOptions & WithFinalizeGuard):
+      Promise<PublicFinalizeResult & WithFinalizeOutcome>;
+    function finalize(contextGraphId: string, name: string, opts?: PublicFinalizeOptions): Promise<PublicFinalizeResult>;
+    async function finalize(contextGraphId: string, name: string, opts?: PublicFinalizeOptions): Promise<PublicFinalizeResult> {
+      if (opts?.layer === 'swm') throw new LegacyKnowledgeAssetReadOnlyError();
+      return agent.assertionFinalize(contextGraphId, name, opts?.agentAddress ?? agentAddress, {
+        guard: opts?.guard,
+        subGraphName: opts?.subGraphName,
+        authorAgentAddress: opts?.authorAgentAddress,
+        preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
+        authorSignTypedData: opts?.authorSignTypedData,
+        schemeVersion: opts?.schemeVersion,
+      });
+    }
     return {
       async create(
         contextGraphId: string,
@@ -3939,33 +3953,7 @@ export class DKGAgent extends DKGAgentBase {
        * same content returns the existing seal without re-signing. A
        * conflicting re-finalize (different content / author) throws.
        */
-      async finalize(
-        contextGraphId: string,
-        name: string,
-        opts?: AssertionFinalizeOptions & {
-          agentAddress?: string;
-          /**
-           * @deprecated `"swm"` remains recognizable only so mixed-version
-           * callers get the stable `LEGACY_KA_READ_ONLY` error. New KAs are
-           * sealed in WM and shared atomically; existing root-scoped SWM assets
-           * are readable but cannot be reconstructed, resealed, or migrated.
-           */
-          layer?: 'wm' | 'swm';
-        },
-      ): Promise<PublicFinalizeResult> {
-        const finalizeAgentAddress = opts?.agentAddress ?? agentAddress;
-        if (opts?.layer === 'swm') {
-          throw new LegacyKnowledgeAssetReadOnlyError();
-        }
-        return agent.assertionFinalize(contextGraphId, name, finalizeAgentAddress, {
-          guard: opts?.guard,
-          subGraphName: opts?.subGraphName,
-          authorAgentAddress: opts?.authorAgentAddress,
-          preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
-          authorSignTypedData: opts?.authorSignTypedData,
-          schemeVersion: opts?.schemeVersion,
-        });
-      },
+      finalize,
 
       async history(contextGraphId: string, name: string, opts?: { agentAddress?: string; subGraphName?: string; signal?: AbortSignal }): Promise<AssertionHistoryDescriptor | null> {
         let addr = opts?.agentAddress ?? agentAddress;

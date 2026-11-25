@@ -559,6 +559,30 @@ describe('conditional finalization of an existing shared asset', () => {
     expect(sources).not.toContain('agent.assertionFinalize.reservedUal');
   });
 
+  it('uses the latest retained promotion event when the lifecycle has no operation field', async () => {
+    const { agent, store, guard, source } = await workingCopy();
+    const graph = contextGraphMetaUri(CG);
+    const subject = assertionLifecycleUri(CG, AUTHOR, NAME);
+    const prov = 'http://www.w3.org/ns/prov#';
+    const event = (id: string, date: string) => [
+      q('urn:event:' + id, 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', DKG + 'AssertionPromoted', graph),
+      q('urn:event:' + id, prov + 'used', subject, graph),
+      q('urn:event:' + id, prov + 'startedAtTime', '"' + date + '"^^<http://www.w3.org/2001/XMLSchema#dateTime>', graph),
+      q('urn:event:' + id, DKG + 'shareOperationId', '"' + id + '"', graph),
+    ];
+    await store.insert([...event('old', '2026-01-01T01:00:00Z'), ...event('new', '2026-01-01T02:00:00Z')]);
+    const withOperation = (id: string) => ({ guard: { ...guard,
+      expectedPredecessor: { ...guard.expectedPredecessor, shareOperationId: id } } });
+    const snapshot = await storeSnapshot(store);
+    for (const stale of [{ guard }, withOperation('old')]) {
+      await expect(finalize(agent, undefined, stale)).rejects.toMatchObject({ code: 'FINALIZE_PRECONDITION_FAILED' });
+      expect(await storeSnapshot(store)).toEqual(snapshot);
+    }
+    await expect(finalize(agent, undefined, withOperation('new'))).resolves.toMatchObject({
+      kaUal: source.kaUal, guardedOutcome: 'sealed',
+    });
+  });
+
   it('requires the current share operation and VM pointer when they exist', async () => {
     const { agent, store, guard } = await workingCopy();
     const subject = assertionLifecycleUri(CG, AUTHOR, NAME);
@@ -623,6 +647,12 @@ describe('conditional finalization of an existing shared asset', () => {
     expect(await readOwners()).toEqual(before);
   });
 
+  async function storeSnapshot(store: OxigraphStore) {
+    const rows = await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o');
+    if (rows.type !== 'bindings') throw new Error('expected all graph bindings');
+    return { graphs: (await store.listGraphs()).sort(), rows: rows.bindings };
+  }
+
   function pausedSigner() {
     let entered!: () => void;
     let finish!: () => void;
@@ -640,19 +670,14 @@ describe('conditional finalization of an existing shared asset', () => {
     const signer = pausedSigner();
     const attempt = finalize(agent, undefined, { guard, authorSignTypedData: signer.sign });
     await signer.signing;
-    const snapshot = async () => {
-      const rows = await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o');
-      if (rows.type !== 'bindings') throw new Error('expected all graph bindings');
-      return { graphs: (await store.listGraphs()).sort(), rows: rows.bindings };
-    };
-    let before: Awaited<ReturnType<typeof snapshot>>;
+    let before: Awaited<ReturnType<typeof storeSnapshot>>;
     try {
       await store.insert([q(assertionLifecycleUri(CG, AUTHOR, NAME), DKG + 'vmCurrentAssertion',
         '"' + 'bb'.repeat(32) + '"', contextGraphMetaUri(CG))]);
-      before = await snapshot();
+      before = await storeSnapshot(store);
     } finally { signer.finish(); }
     await expect(attempt).rejects.toMatchObject({ code: 'FINALIZE_PRECONDITION_FAILED' });
-    expect(await snapshot()).toEqual(before);
+    expect(await storeSnapshot(store)).toEqual(before);
   });
 
   it('seals the expected private content before rejecting a concurrent private edit', async () => {

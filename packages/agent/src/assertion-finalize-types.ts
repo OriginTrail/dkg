@@ -19,8 +19,18 @@ export interface InternalFinalizeOptions extends AssertionFinalizeOptions {
   executionAuthority?: PromoteExecutionAuthority;
 }
 
+export type FinalizeOutcome = 'sealed' | 'already_sealed';
+export type WithFinalizeGuard = { guard: FinalizeGuard };
+export type WithFinalizeOutcome = { guardedOutcome: FinalizeOutcome };
+
+export interface PublicFinalizeOptions extends AssertionFinalizeOptions {
+  agentAddress?: string;
+  /** @deprecated SWM is recognized only to return the legacy read-only error. */
+  layer?: 'wm' | 'swm';
+}
+
 export interface AssertionFinalizeResult {
-  guardedOutcome?: 'sealed' | 'already_sealed';
+  guardedOutcome?: FinalizeOutcome;
   assertionUri: string;
   merkleRoot: Uint8Array;
   authorAddress: string;
