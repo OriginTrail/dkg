@@ -406,7 +406,7 @@ NODES=(1 2 3 4)
 # records how often it did.
 SHARE_RETRYABLE_ANSWER="A promote prerequisite is temporarily unavailable"
 SHARE_RETRY_MAX=5
-TMP=$(mktemp -d -t soak-pub)
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/soak-pub.XXXXXX") # a template GNU mktemp accepts too
 trap 'rm -rf "$TMP"' EXIT
 i=0
 while [ "$(date +%s)" -lt "$END_TS" ]; do
@@ -803,13 +803,15 @@ if (effectivePubTotal > 0 && blockingPubFailures.length === 0 && pubOk / effecti
 // A publish whose share the node first answered as retryable counts as ok when
 // sharing the same draft again succeeded (the client rule). Every followed
 // answer is reported, and the lane fails when more than one publish in ten
-// needed one.
+// needed one. The rate counts the attempts the success rate counts: a failure
+// the planned restart excuses is reported but left out of it.
 const pubShareRetried = pubLines.filter(p => Number(p.share_retries ?? 0) > 0);
 if (pubShareRetried.length > 0) {
   const answers = pubShareRetried.reduce((n, p) => n + Number(p.share_retries), 0);
   const where = pubShareRetried.map(p => "i" + p.i + " node" + p.node + " x" + p.share_retries + " " + p.status).join(", ");
   const line = "PUBLISH followed " + answers + " retryable share answer(s) on " + pubShareRetried.length + " publish(es): " + where;
-  if (effectivePubTotal > 0 && pubShareRetried.length / effectivePubTotal > 0.1) {
+  const countedRetried = pubShareRetried.filter(p => !isPlannedRestartPublishFailure(p));
+  if (effectivePubTotal > 0 && countedRetried.length / effectivePubTotal > 0.1) {
     fail.push(line + " (more than 1 publish in 10)");
   } else {
     warn.push(line);
