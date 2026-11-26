@@ -1,3 +1,4 @@
+export { parseFinalizeGuard, type FinalizeGuard } from './finalize-guard.js';
 export type { ContextGraphPartitionRead, ContextGraphNamedGraphStats } from '@origintrail-official/dkg-query';
 export type { ContextGraphPartitionInventoryOptions } from './internal/context-graph-partition-query.js';
 export { ConfirmedCatalogObligationErrorV1, parseConfirmedCatalogObligationRecoveryV1, type ConfirmedCatalogTransactionEvidenceV1, type ConfirmedCatalogObligationRecoveryV1 } from './confirmed-catalog-obligation-error.js';
