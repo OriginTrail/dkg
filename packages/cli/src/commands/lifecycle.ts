@@ -271,7 +271,7 @@ program
   .command('daemon-supervisor', { hidden: true })
   .description('Internal: supervise daemon worker restarts')
   .action(async () => {
-    await runDaemonSupervisor();
+    process.exitCode = await runDaemonSupervisor();
   });
 
 program
