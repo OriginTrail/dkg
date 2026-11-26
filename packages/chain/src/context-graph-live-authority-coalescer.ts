@@ -286,18 +286,13 @@ export interface ContextGraphLiveAuthorityCoalescerOptions {
    */
   readonly defer?: (dispatch: () => void) => void;
   /**
-   * Classifies a loader rejection a waiter that did not initiate it may still
-   * be answered with. Only deterministic "this read cannot answer" faults
-   * qualify; a transient failure or an abort never does.
+   * Whether a physical loader failure may be delivered to every enrolled
+   * caller. Live authority supplies only its deterministic-error predicate;
+   * block readers share every physical failure so the provider loop alone
+   * owns retry/failover. Unclassified errors retain bounded joiner retries.
+   * Caller cancellation stays local regardless of this predicate.
    */
-  readonly isDefinitiveError?: (error: unknown) => boolean;
-  /**
-   * Live authority retries indefinite joiner failures by default. Physical
-   * block readers use share-physical: their enclosing provider loop alone
-   * classifies failures and owns retries/failover. Caller cancellation remains
-   * local in either mode; no failure or value is retained after a flight.
-   */
-  readonly errorDelivery?: 'retry-joiners' | 'share-physical';
+  readonly shouldShareError?: (error: unknown) => boolean;
 }
 
 export interface ContextGraphLiveAuthorityRunOptions {
@@ -340,8 +335,7 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
     >
   >;
 
-  readonly #isDefinitiveError: (error: unknown) => boolean;
-  readonly #sharePhysicalErrors: boolean;
+  readonly #shouldShareError: (error: unknown) => boolean;
 
   constructor(options: ContextGraphLiveAuthorityCoalescerOptions = {}) {
     const defer = options.defer ?? ((dispatch) => {
@@ -358,8 +352,7 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
       foreground: partition(),
       background: partition(),
     });
-    this.#isDefinitiveError = options.isDefinitiveError ?? (() => false);
-    this.#sharePhysicalErrors = options.errorDelivery === 'share-physical';
+    this.#shouldShareError = options.shouldShareError ?? (() => false);
   }
 
   /**
@@ -428,9 +421,8 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
    * rather than a synthetic one.
    */
   #classify(error: unknown): ContextGraphLiveAuthorityFlightOutcome<V> {
-    if (this.#sharePhysicalErrors) return { kind: 'shared-error', error };
     try {
-      if (this.#isDefinitiveError(error)) return { kind: 'shared-error', error };
+      if (this.#shouldShareError(error)) return { kind: 'shared-error', error };
     } catch { /* unclassifiable: fall through */ }
     return { kind: 'indefinite-error', error };
   }

@@ -92,7 +92,7 @@ describe('EVM adapter: one-read live context graph authority', () => {
 
   // The two cases below drive `getContextGraphLiveAuthority` rather than the
   // coalescer, because the properties they pin live in the ADAPTER's wiring —
-  // the `isDefinitiveError` predicate and the flight key. A coalescer test
+  // the `shouldShareError` predicate and the flight key. A coalescer test
   // injects both, so it proves nothing about the pair that ships underneath a
   // security gate.
 

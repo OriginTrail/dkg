@@ -27,7 +27,7 @@ export function createAuthorityIndexBlockReadV1(owner: {
     if (!flights) {
       // The enclosing provider loop owns failure classification and failover.
       // Share only physical work here, without a second joiner retry policy.
-      flights = new ContextGraphLiveAuthorityCoalescer({ errorDelivery: 'share-physical' });
+      flights = new ContextGraphLiveAuthorityCoalescer({ shouldShareError: () => true });
       providers.set(provider, flights);
     }
     // Foreground/background partitioning belongs to the coalescer; authority

@@ -72,7 +72,7 @@ type ContextGraphLiveAuthorityCoalescerFixture =
 /** The production wiring, macrotask deferral and all. */
 function realDeferralCoalescer(): ContextGraphLiveAuthorityCoalescerFixture {
   return new ContextGraphLiveAuthorityCoalescer<Authority>({
-    isDefinitiveError: (error) => error instanceof ContextGraphLiveAuthorityUnsupportedError,
+    shouldShareError: (error) => error instanceof ContextGraphLiveAuthorityUnsupportedError,
   });
 }
 
@@ -81,7 +81,7 @@ function coalescer(
 ): ContextGraphLiveAuthorityCoalescerFixture {
   return new ContextGraphLiveAuthorityCoalescer<Authority>({
     defer: scheduler.defer,
-    isDefinitiveError: (error) => error instanceof ContextGraphLiveAuthorityUnsupportedError,
+    shouldShareError: (error) => error instanceof ContextGraphLiveAuthorityUnsupportedError,
   });
 }
 
@@ -220,7 +220,7 @@ describe('ContextGraphLiveAuthorityCoalescer', () => {
   it('delivers physical failures directly when the provider layer owns retry policy', async () => {
     const scheduler = manualScheduler();
     const flight = new ContextGraphLiveAuthorityCoalescer<Authority>({
-      defer: scheduler.defer, errorDelivery: 'share-physical',
+      defer: scheduler.defer, shouldShareError: () => true,
     });
     const { load, calls } = controllableLoader();
     const callers = [0, 1, 2].map(() => settled(flight.run(KEY, load)));
@@ -446,7 +446,7 @@ describe('ContextGraphLiveAuthorityCoalescer', () => {
     // classification branches.
     const flight = new ContextGraphLiveAuthorityCoalescer<Authority>({
       defer: scheduler.defer,
-      isDefinitiveError: () => { throw new Error('classifier exploded'); },
+      shouldShareError: () => { throw new Error('classifier exploded'); },
     });
     const { load, calls } = controllableLoader();
 
