@@ -43,7 +43,7 @@ describe('authority block sharing through the real provider failover loop', () =
     try {
       const results = await Promise.allSettled(Array.from({ length: 3 }, () => reader.snapshots.refresh()));
       expect(results).toEqual(Array.from({ length: 3 }, () => ({ status: 'fulfilled', value: undefined })));
-      expect(primary.getBlock).toHaveBeenCalledTimes(2);
+      expect(primary.getBlock).toHaveBeenCalledTimes(1);
       expect(backup.getBlock).toHaveBeenCalled();
       expect(backup.getLogs).toHaveBeenCalled();
     } finally { await reader.snapshots.close(); }
@@ -54,7 +54,7 @@ describe('authority block sharing through the real provider failover loop', () =
     ['deterministic provider failure', () => Object.assign(new Error('invalid block'), { code: 'INVALID_ARGUMENT' }), 'fail'],
   ] as const)('preserves %s without blaming another endpoint', async (_label, failure, disposition) => {
     const error = failure();
-    const { reader, backup } = fixture(async () => { throw error; });
+    const { reader, primary, backup } = fixture(async () => { throw error; });
     try {
       const results = await Promise.allSettled(Array.from({ length: 3 }, () => reader.snapshots.refresh()));
       for (const result of results) {
@@ -63,6 +63,7 @@ describe('authority block sharing through the real provider failover loop', () =
         expect(result.reason).toBe(error);
         expect(classifyRpcRetryDisposition(result.reason)).toBe(disposition);
       }
+      expect(primary.getBlock).toHaveBeenCalledTimes(1);
       expect(backup.getBlock).not.toHaveBeenCalled();
     } finally { await reader.snapshots.close(); }
   });

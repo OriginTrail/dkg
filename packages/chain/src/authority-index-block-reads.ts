@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { Block, JsonRpcProvider } from 'ethers';
-import { ContextGraphLiveAuthorityCoalescer, ContextGraphLiveAuthorityJoinRetryExhaustedError } from './context-graph-live-authority-coalescer.js';
+import { ContextGraphLiveAuthorityCoalescer } from './context-graph-live-authority-coalescer.js';
 import { readEvmContextGraphAuthorityIndexRpcV1 } from './evm-context-graph-authority-index-rpc.js';
 import { activeRpcRequestContext } from './rpc-request-transport.js';
 
@@ -24,7 +24,12 @@ export function createAuthorityIndexBlockReadV1(owner: {
     let providers = generations.get(lifecycle);
     if (!providers) { providers = new WeakMap(); generations.set(lifecycle, providers); }
     let flights = providers.get(provider);
-    if (!flights) { flights = new ContextGraphLiveAuthorityCoalescer(); providers.set(provider, flights); }
+    if (!flights) {
+      // The enclosing provider loop owns failure classification and failover.
+      // Share only physical work here, without a second joiner retry policy.
+      flights = new ContextGraphLiveAuthorityCoalescer({ errorDelivery: 'share-physical' });
+      providers.set(provider, flights);
+    }
     // Foreground/background partitioning belongs to the coalescer; authority
     // priority is also part of the key so an ordinary caller cannot own it.
     const key = JSON.stringify([block, context.admissionPriority ?? null]);
@@ -32,13 +37,6 @@ export function createAuthorityIndexBlockReadV1(owner: {
       // Drain the actual provider promise on close, even if its timeout/abort
       // wrapper has already rejected and the provider ignores cancellation.
       operation, () => owner.track(() => provider.getBlock(block)), physicalSignal,
-    ), { signal: waiter, requestClass: context.requestClass }).catch(error => {
-      // Exhausting a shared retry must preserve the provider loop's distinction
-      // between endpoint failure, local admission pressure and terminal errors.
-      // Caller/lifecycle cancellation always wins over a physical RPC failure.
-      waiter.throwIfAborted();
-      if (error instanceof ContextGraphLiveAuthorityJoinRetryExhaustedError) throw error.lastError;
-      throw error;
-    });
+    ), { signal: waiter, requestClass: context.requestClass });
   };
 }

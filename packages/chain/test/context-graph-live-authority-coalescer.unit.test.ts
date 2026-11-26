@@ -212,10 +212,31 @@ describe('ContextGraphLiveAuthorityCoalescer', () => {
     expect(exhausted).toMatchObject({
       name: 'ContextGraphLiveAuthorityJoinRetryExhaustedError',
       message: 'Context Graph live authority shared retry was exhausted',
-      lastError: second,
     });
     expect(exhausted).not.toBe(first);
     expect(exhausted).not.toBe(second);
+  });
+
+  it('delivers physical failures directly when the provider layer owns retry policy', async () => {
+    const scheduler = manualScheduler();
+    const flight = new ContextGraphLiveAuthorityCoalescer<Authority>({
+      defer: scheduler.defer, errorDelivery: 'share-physical',
+    });
+    const { load, calls } = controllableLoader();
+    const callers = [0, 1, 2].map(() => settled(flight.run(KEY, load)));
+    await scheduler.flush();
+    const error = Object.assign(new Error('provider unavailable'), { code: 'NETWORK_ERROR' });
+    calls[0]!.reject(error);
+    await scheduler.flush();
+    expect(callers.every(caller => caller.done && caller.error === error)).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(scheduler.pending()).toBe(0);
+    // A later read still dispatches new work: the failure is not cached.
+    const later = flight.run(KEY, load);
+    await scheduler.flush();
+    expect(calls).toHaveLength(2);
+    calls[1]!.resolve({ id: 'recovered' });
+    await expect(later).resolves.toEqual({ id: 'recovered' });
   });
 
   it('shares one read with every caller of the same turn, and every DEFINITIVE answer', async () => {

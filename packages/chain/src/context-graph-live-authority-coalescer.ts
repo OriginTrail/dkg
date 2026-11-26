@@ -35,7 +35,7 @@ import { abortError, waitForSignal } from './wait-for-signal.js';
  * owns availability: a waiter that cannot stay for the successor simply
  * detaches and fails closed, without cancelling peers.
  *
- * A JOINER ONLY EVER SHARES A DEFINITIVE ANSWER (the #2666 defect). Draft PR
+ * DEFAULT LIVE-AUTHORITY POLICY: A JOINER ONLY SHARES A DEFINITIVE ANSWER (the #2666 defect). Draft PR
  * #2666 shared the whole bounded agent resolution, so the INITIATOR's 2,500 ms
  * timeout became a VALUE — `{unavailable, chain-access-policy-timeout}` — that
  * its joiners were handed as if it were their own read's outcome. One caller's
@@ -71,10 +71,10 @@ import { abortError, waitForSignal } from './wait-for-signal.js';
  * fake timers must advance them or inject its own `defer`.
  */
 
-/** A settled flight, split by whether a joiner may take the outcome. */
+/** A settled flight, split by whether the selected policy lets joiners take it. */
 type ContextGraphLiveAuthorityFlightOutcome<V> =
   | { readonly kind: 'value'; readonly value: V }
-  | { readonly kind: 'definitive-error'; readonly error: unknown }
+  | { readonly kind: 'shared-error'; readonly error: unknown }
   | { readonly kind: 'indefinite-error'; readonly error: unknown };
 
 interface SequencedFlight<V> {
@@ -291,6 +291,13 @@ export interface ContextGraphLiveAuthorityCoalescerOptions {
    * qualify; a transient failure or an abort never does.
    */
   readonly isDefinitiveError?: (error: unknown) => boolean;
+  /**
+   * Live authority retries indefinite joiner failures by default. Physical
+   * block readers use share-physical: their enclosing provider loop alone
+   * classifies failures and owns retries/failover. Caller cancellation remains
+   * local in either mode; no failure or value is retained after a flight.
+   */
+  readonly errorDelivery?: 'retry-joiners' | 'share-physical';
 }
 
 export interface ContextGraphLiveAuthorityRunOptions {
@@ -319,12 +326,10 @@ const ABANDONED_FLIGHT_MESSAGE =
 const JOIN_RETRY_EXHAUSTED_MESSAGE =
   'Context Graph live authority shared retry was exhausted';
 
-/** Caller-local exhaustion; block readers may recover the physical retry disposition. */
-export class ContextGraphLiveAuthorityJoinRetryExhaustedError extends Error {
-  constructor(readonly lastError: unknown) {
-    super(JOIN_RETRY_EXHAUSTED_MESSAGE);
-    this.name = 'ContextGraphLiveAuthorityJoinRetryExhaustedError';
-  }
+function joinRetryExhaustedError(): Error {
+  const error = new Error(JOIN_RETRY_EXHAUSTED_MESSAGE);
+  error.name = 'ContextGraphLiveAuthorityJoinRetryExhaustedError';
+  return error;
 }
 
 export class ContextGraphLiveAuthorityCoalescer<V> {
@@ -336,6 +341,7 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
   >;
 
   readonly #isDefinitiveError: (error: unknown) => boolean;
+  readonly #sharePhysicalErrors: boolean;
 
   constructor(options: ContextGraphLiveAuthorityCoalescerOptions = {}) {
     const defer = options.defer ?? ((dispatch) => {
@@ -353,6 +359,7 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
       background: partition(),
     });
     this.#isDefinitiveError = options.isDefinitiveError ?? (() => false);
+    this.#sharePhysicalErrors = options.errorDelivery === 'share-physical';
   }
 
   /**
@@ -391,11 +398,12 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
         },
         options.signal,
       );
+      options.signal?.throwIfAborted();
       if (outcome.kind === 'value') return outcome.value;
-      if (outcome.kind === 'definitive-error') throw outcome.error;
+      if (outcome.kind === 'shared-error') throw outcome.error;
       // Indefinite: the initiator owns the failure of the read it started.
       if (initiated) throw outcome.error;
-      if (retries >= MAX_JOINER_RETRIES) throw new ContextGraphLiveAuthorityJoinRetryExhaustedError(outcome.error);
+      if (retries >= MAX_JOINER_RETRIES) throw joinRetryExhaustedError();
       options.signal?.throwIfAborted();
     }
   }
@@ -420,8 +428,9 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
    * rather than a synthetic one.
    */
   #classify(error: unknown): ContextGraphLiveAuthorityFlightOutcome<V> {
+    if (this.#sharePhysicalErrors) return { kind: 'shared-error', error };
     try {
-      if (this.#isDefinitiveError(error)) return { kind: 'definitive-error', error };
+      if (this.#isDefinitiveError(error)) return { kind: 'shared-error', error };
     } catch { /* unclassifiable: fall through */ }
     return { kind: 'indefinite-error', error };
   }
