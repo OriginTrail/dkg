@@ -4,49 +4,13 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
-### Changed
+## [10.1.2] - 2026-11-23
 
-- Nodes no longer serve the legacy publish protocol `/dkg/10.0.0/publish`,
-  which nothing has sent on since publishing moved to the V10 lifecycle and
-  StorageACK. Tentative publishes that an earlier version journaled are
-  still restored at start, and confirmed or expired as before.
-- VERIFY approvals (`dkg verify`, `POST /api/verify`) use a new signing
-  format. Approvers and proposers on earlier versions do not count each
-  other's approvals, so until every approver runs this release, a batch
-  reaches quorum only among upgraded nodes and is otherwise stamped
-  partially verified or self-attested, as when approvals are missing.
-- The daemon does not start when API authentication is off
-  (`auth.enabled: false`) and `apiHost` is not a loopback address, such as
-  `0.0.0.0`, `::`, a LAN address or a host name other than `localhost`.
-  `daemon.log` says why the node stopped: turn authentication back on, or
-  set `apiHost` to `127.0.0.1`.
-- Blazegraph setup no longer reuses or restarts an existing DKG Blazegraph
-  container that publishes its port beyond this host's loopback interface
-  (`0.0.0.0`, `::`, another address, or the host's network), as containers
-  created before 7 Aug 2026 do. Setup stops and says how to recreate the
-  container on `127.0.0.1`: with `docker rm -f <container>` and setup again
-  when the journal is in the container's named volume, and after a backup
-  otherwise. To check a running node, `docker port <container>` should list
-  only `127.0.0.1`.
-- The daemon logs a `WARNING` at start-up when `apiHost` is not a loopback
-  address, and a second one when CORS allows every origin there:
-  `apiHost: "0.0.0.0"` with `corsOrigins` unset, or `corsOrigins: "*"`.
-  Keep the API on `127.0.0.1`, reach the node from elsewhere through a
-  reverse proxy that terminates TLS, and set `corsOrigins` to the origins
-  that need the API.
-- Gossip runs on gossipsub 17.2.1 (was 16.1.1), which limits the topic
-  subscriptions it records for each peer. The node records up to 2 MiB of
-  topics per peer on the mainnets, about 1,500 to 1,850 DKG topics, and
-  8 MiB elsewhere, about 6,000 to 7,400. gossipsub's 1 MiB default holds
-  fewer than a testnet Core node subscribes to. The node leaves a peer out
-  of its publishes on topics beyond the limit. Nodes on 16.1.1 and 17.2.1
-  share one gossip mesh.
-
-## [10.1.1] - Unreleased
-
-10.1.1 is the first 10.1 release for mainnet: nodes moving from 10.0.27
-also get everything in 10.1.0 below. It fixes problems found while 10.1.0
-ran on testnet, in the Marketplace, the MCP server and the public catalog.
+10.1.2 is the first 10.1 release for mainnet: nodes moving from 10.0.27
+also get everything in 10.1.0 below. 10.1.1 was prepared but not
+published, so its changes are listed here. It fixes problems found while
+10.1.0 ran on testnet, in the Marketplace, the MCP server and the public
+catalog.
 It gives the node UI a new design system and makes a scoped query cost what
 the context graph it reads costs. It also adds merged view queries and a
 developer preview of Graph Computer Programs, both off until a node turns
@@ -120,6 +84,41 @@ no marketplace contracts yet.
 
 ### Changed
 
+- Nodes no longer serve the legacy publish protocol `/dkg/10.0.0/publish`,
+  which nothing has sent on since publishing moved to the V10 lifecycle and
+  StorageACK. Tentative publishes that an earlier version journaled are
+  still restored at start, and confirmed or expired as before.
+- VERIFY approvals (`dkg verify`, `POST /api/verify`) use a new signing
+  format. Approvers and proposers on earlier versions do not count each
+  other's approvals, so until every approver runs this release, a batch
+  reaches quorum only among upgraded nodes and is otherwise stamped
+  partially verified or self-attested, as when approvals are missing.
+- The daemon does not start when API authentication is off
+  (`auth.enabled: false`) and `apiHost` is not a loopback address, such as
+  `0.0.0.0`, `::`, a LAN address or a host name other than `localhost`.
+  `daemon.log` says why the node stopped: turn authentication back on, or
+  set `apiHost` to `127.0.0.1`.
+- Blazegraph setup no longer reuses or restarts an existing DKG Blazegraph
+  container that publishes its port beyond this host's loopback interface
+  (`0.0.0.0`, `::`, another address, or the host's network), as containers
+  created before 7 Aug 2026 do. Setup stops and says how to recreate the
+  container on `127.0.0.1`: with `docker rm -f <container>` and setup again
+  when the journal is in the container's named volume, and after a backup
+  otherwise. To check a running node, `docker port <container>` should list
+  only `127.0.0.1`.
+- The daemon logs a `WARNING` at start-up when `apiHost` is not a loopback
+  address, and a second one when CORS allows every origin there:
+  `apiHost: "0.0.0.0"` with `corsOrigins` unset, or `corsOrigins: "*"`.
+  Keep the API on `127.0.0.1`, reach the node from elsewhere through a
+  reverse proxy that terminates TLS, and set `corsOrigins` to the origins
+  that need the API.
+- Gossip runs on gossipsub 17.2.1 (was 16.1.1), which limits the topic
+  subscriptions it records for each peer. The node records up to 2 MiB of
+  topics per peer on the mainnets, about 1,500 to 1,850 DKG topics, and
+  8 MiB elsewhere, about 6,000 to 7,400. gossipsub's 1 MiB default holds
+  fewer than a testnet Core node subscribes to. The node leaves a peer out
+  of its publishes on topics beyond the limit. Nodes on 16.1.1 and 17.2.1
+  share one gossip mesh.
 - A scoped query costs what the context graph it reads costs: it finds its
   graphs in the node's graph catalog instead of listing the whole store. A
   caller's byte budget covers only the reads made for its own query.
