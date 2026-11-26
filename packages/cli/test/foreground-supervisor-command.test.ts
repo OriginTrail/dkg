@@ -16,7 +16,7 @@ import {
   maybeStartSupervisorLivenessWatcher,
   runDaemonSupervisor,
   runForegroundSupervisor,
-  runForegroundWorkerIteration,
+  runWorkerIteration,
 } from '../src/cli-supervisor.js';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 import {
@@ -46,6 +46,8 @@ interface PlannedRun {
   readonly upMs: number;
   readonly code?: number | null;
   readonly signal?: NodeJS.Signals;
+  /** The worker cannot start: its spawn emits `error` instead of `exit`. */
+  readonly spawnError?: true;
 }
 
 /**
@@ -69,7 +71,8 @@ function plannedWorkers(plan: readonly PlannedRun[]) {
       const child = Object.assign(new EventEmitter(), { pid: 100 + started, kill: () => true });
       setImmediate(() => {
         clockMs += run.upMs;
-        child.emit('exit', run.code ?? null, run.signal ?? null);
+        if (run.spawnError) child.emit('error', new Error('spawn ENOENT'));
+        else child.emit('exit', run.code ?? null, run.signal ?? null);
       });
       return child as unknown as ReturnType<typeof spawn>;
     },
@@ -265,6 +268,18 @@ describe('a supervisor says how its worker ended', () => {
         expect((await supervisorLines()).at(-1)).toBe(`[supervisor] worker N ended with signal SIGKILL; ${GIVING_UP} 1`);
       });
     });
+
+    it('counts a worker that cannot start as a crash with exit code 1', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const workers = plannedWorkers([{ upMs: 0, spawnError: true }, { upMs: 1_000, code: 0 }]);
+      await withStandInWorker('', async (_home, supervisorLines) => {
+        await expect(run(workers)).resolves.toBe(0);
+        expect(await supervisorLines()).toEqual([
+          '[supervisor] worker N ended with exit code 1; crash 1 of 5, starting a new worker',
+          '[supervisor] worker N ended with exit code 0; clean stop, the supervisor stops too',
+        ]);
+      });
+    });
   });
 
   it('a detached supervisor logs each worker that ended, in order, and keeps its restart policy', async () => {
@@ -327,11 +342,11 @@ describe('a supervisor says how its worker ended', () => {
 
   it('a foreground worker iteration reports its pid and signal, and a worker that cannot start as exit code 1', async () => {
     await withStandInWorker("process.kill(process.pid, 'SIGKILL');", async () => {
-      const killed = await runForegroundWorkerIteration({ childEnv: process.env, livenessConfig: { enabled: false, shutdownGraceMs: 0 } });
+      const killed = await runWorkerIteration({ childEnv: process.env, livenessConfig: { enabled: false, shutdownGraceMs: 0 } });
       expect(killed).toMatchObject({ rawExitCode: null, signal: 'SIGKILL', forced: false, originalExitCode: null });
       expect(killed.pid).toEqual(expect.any(Number));
     });
-    await expect(runForegroundWorkerIteration({
+    await expect(runWorkerIteration({
       childEnv: process.env,
       livenessConfig: { enabled: false, shutdownGraceMs: 0 },
       dependencies: {
@@ -514,7 +529,7 @@ describe('foreground supervisor restart command', () => {
         DKG_SHUTDOWN_HARD_TIMEOUT_MS: '60000',
       };
 
-      await expect(runForegroundWorkerIteration({
+      await expect(runWorkerIteration({
         childEnv: env,
         dependencies: {
           clearApiPort: async () => { throw new Error('stale port cleanup failed'); },
