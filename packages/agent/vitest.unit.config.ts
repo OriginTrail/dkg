@@ -198,6 +198,7 @@ export default defineConfig({
       "test/exact-batch-stream-responder-switch.test.ts",
       "test/publish-protocol-registration.test.ts",
       "test/exact-graph-content-export.test.ts",
+      "test/confirmed-operation-rdf-recovery.test.ts",
       "test/vm-recovery-local-admission.test.ts",
       "test/vm-reconcile-read-authority-wait.test.ts",
       "test/vm-reconcile-local-rpc-refusal.test.ts",
