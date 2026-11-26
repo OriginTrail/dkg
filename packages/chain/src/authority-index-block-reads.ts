@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { Block, JsonRpcProvider } from 'ethers';
-import { ContextGraphLiveAuthorityCoalescer } from './context-graph-live-authority-coalescer.js';
+import { ContextGraphLiveAuthorityCoalescer, ContextGraphLiveAuthorityJoinRetryExhaustedError } from './context-graph-live-authority-coalescer.js';
 import { readEvmContextGraphAuthorityIndexRpcV1 } from './evm-context-graph-authority-index-rpc.js';
 import { activeRpcRequestContext } from './rpc-request-transport.js';
 
@@ -32,6 +32,13 @@ export function createAuthorityIndexBlockReadV1(owner: {
       // Drain the actual provider promise on close, even if its timeout/abort
       // wrapper has already rejected and the provider ignores cancellation.
       operation, () => owner.track(() => provider.getBlock(block)), physicalSignal,
-    ), { signal: waiter, requestClass: context.requestClass });
+    ), { signal: waiter, requestClass: context.requestClass }).catch(error => {
+      // Exhausting a shared retry must preserve the provider loop's distinction
+      // between endpoint failure, local admission pressure and terminal errors.
+      // Caller/lifecycle cancellation always wins over a physical RPC failure.
+      waiter.throwIfAborted();
+      if (error instanceof ContextGraphLiveAuthorityJoinRetryExhaustedError) throw error.lastError;
+      throw error;
+    });
   };
 }

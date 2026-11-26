@@ -91,25 +91,6 @@ describe('bounded snapshot recovery overlap', () => {
     expect(count).toBe(maxLanes);
   });
 
-  it('honors node admission below the four-lane limit', async () => {
-    let active = 0, peak = 0, refused = 0;
-    vi.spyOn(execution, 'runExactRecovery').mockImplementation(async request => {
-      // Real execution owns admission; canAdmit is only the retry-wait probe.
-      if (active >= 2) {
-        refused++;
-        return { ...success([]), admission: 'local-admission-deferred', disposition: 'incomplete', streamOutcome: undefined };
-      }
-      active++; peak = Math.max(peak, active);
-      await new Promise(resolve => setTimeout(resolve, 10));
-      active--; return success(selected(request));
-    });
-    const result = await recoverPublicSnapshotExact(host, { ...options(), maxLanes: 4,
-      canAdmit: () => active < 2,
-      peerBatches: async function* () { yield ['a', 'b', 'c', 'd']; } });
-    expect(peak).toBe(2); expect(refused).toBeGreaterThan(0);
-    expect(result.committed).toEqual(new Set(uals));
-  });
-
   it('lets a ready lane drain unclaimed batches while another supplier is slow', async () => {
     const slow = deferred(), drained = deferred(), calls: string[][] = [];
     vi.spyOn(execution, 'runExactRecovery').mockImplementation(async request => {

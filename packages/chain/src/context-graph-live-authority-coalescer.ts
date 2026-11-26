@@ -319,10 +319,12 @@ const ABANDONED_FLIGHT_MESSAGE =
 const JOIN_RETRY_EXHAUSTED_MESSAGE =
   'Context Graph live authority shared retry was exhausted';
 
-function joinRetryExhaustedError(): Error {
-  const error = new Error(JOIN_RETRY_EXHAUSTED_MESSAGE);
-  error.name = 'ContextGraphLiveAuthorityJoinRetryExhaustedError';
-  return error;
+/** Caller-local exhaustion; block readers may recover the physical retry disposition. */
+export class ContextGraphLiveAuthorityJoinRetryExhaustedError extends Error {
+  constructor(readonly lastError: unknown) {
+    super(JOIN_RETRY_EXHAUSTED_MESSAGE);
+    this.name = 'ContextGraphLiveAuthorityJoinRetryExhaustedError';
+  }
 }
 
 export class ContextGraphLiveAuthorityCoalescer<V> {
@@ -393,7 +395,7 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
       if (outcome.kind === 'definitive-error') throw outcome.error;
       // Indefinite: the initiator owns the failure of the read it started.
       if (initiated) throw outcome.error;
-      if (retries >= MAX_JOINER_RETRIES) throw joinRetryExhaustedError();
+      if (retries >= MAX_JOINER_RETRIES) throw new ContextGraphLiveAuthorityJoinRetryExhaustedError(outcome.error);
       options.signal?.throwIfAborted();
     }
   }

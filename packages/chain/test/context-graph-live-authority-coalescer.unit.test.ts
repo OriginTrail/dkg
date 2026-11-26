@@ -212,6 +212,7 @@ describe('ContextGraphLiveAuthorityCoalescer', () => {
     expect(exhausted).toMatchObject({
       name: 'ContextGraphLiveAuthorityJoinRetryExhaustedError',
       message: 'Context Graph live authority shared retry was exhausted',
+      lastError: second,
     });
     expect(exhausted).not.toBe(first);
     expect(exhausted).not.toBe(second);
