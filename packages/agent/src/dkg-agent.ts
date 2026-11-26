@@ -149,7 +149,7 @@ import {
   FileWorkspacePublicSnapshotStore,
   parseWorkspacePublicSnapshotNQuads,
   type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
-  type PromoteTerminalJobClearer, type PromoteShareReconciler, type TerminalJobClearOutcome,
+  type PromoteJobRetirer, type PromoteTerminalJobClearer, type PromoteShareReconciler, type TerminalJobClearOutcome,
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
@@ -4295,7 +4295,7 @@ export class DKGAgent extends DKGAgentBase {
    * `recordCommitMarker` / `recoverOnStartup`) without the assertion
    * subsurface having to leak those methods to user-facing callers.
    */
-  get promoteQueue(): AsyncPromoteQueue & PromoteTerminalJobClearer & PromoteShareReconciler {
+  get promoteQueue(): AsyncPromoteQueue & PromoteTerminalJobClearer & PromoteShareReconciler & PromoteJobRetirer {
     if (!this._promoteQueue) {
       this._promoteQueue = new TripleStoreAsyncPromoteQueue(this.store, this._promoteQueueConfig ?? {});
     }

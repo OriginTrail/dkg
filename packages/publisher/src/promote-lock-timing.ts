@@ -3,7 +3,7 @@ import { Logger, createOperationContext, currentAsyncAdmissionDiagnosticContext 
 
 export type PromoteLockOperation =
   | 'enqueue' | 'enqueueAndClaim' | 'bindRecovery' | 'getStatus' | 'reconcileShare'
-  | 'cancel' | 'recover' | 'claimNext' | 'heartbeat' | 'recordCommitMarker' | 'succeed' | 'fail'
+  | 'retirement' | 'cancel' | 'recover' | 'claimNext' | 'heartbeat' | 'recordCommitMarker' | 'succeed' | 'fail'
   | 'recoverOnStartup' | 'clearTerminalJob' | 'retention' | 'unlabelled'
   | 'listKeys' | 'listPayloads' | 'listRetries' | 'listPage' | 'getStats' | 'listForSelector'
   | 'sweepCandidates' | 'sweepDecisions';

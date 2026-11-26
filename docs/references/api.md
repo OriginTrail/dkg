@@ -37,6 +37,7 @@ Named Knowledge Assets use the lifecycle route family below. The active publishi
 | Enqueue async WM to SWM share | `POST /api/knowledge-assets/{name}/swm/share-async` (responses: [Async Share and Publish Jobs](../build/async-jobs.md)) |
 | Inspect async share jobs | `GET /api/knowledge-assets/swm/share-jobs` (the complete list, or one page: [Listing async jobs](#listing-async-jobs)), `GET /api/knowledge-assets/swm/share-jobs/{jobId}` |
 | Cancel/recover/clear async share jobs | `DELETE /api/knowledge-assets/swm/share-jobs/{jobId}` (`queued` jobs only), `POST /api/knowledge-assets/swm/share-jobs/{jobId}/recover`, `POST /api/knowledge-assets/swm/share-jobs/{jobId}/clear` (removes one finished job; `409` while the job is not finished or still has recovery work to do; API only for now) |
+| Retire an obsolete failed share | Node operators can inspect and retire one bound job using `GET` and `POST /api/knowledge-assets/swm/share-jobs/{jobId}/retire`. See [When a failed share is obsolete](../use-dkg/async-queue-operations.md#when-a-failed-share-is-obsolete). |
 | Reconcile an async share whose replies were lost | `GET /api/knowledge-assets/swm/share-jobs/reconcile` (read-only; see [Async Share and Publish Jobs](../build/async-jobs.md)) |
 | Publish SWM to VM | `POST /api/knowledge-assets/{name}/vm/publish` |
 | Enqueue async VM publish | `POST /api/knowledge-assets/{name}/vm/publish-async` |

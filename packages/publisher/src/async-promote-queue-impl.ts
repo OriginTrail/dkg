@@ -1,3 +1,4 @@
+import { retireFailedPromote, type PromoteRetirementApproval } from './promote-job-retirement.js';
 import type { PromoteLockOperation } from './promote-lock-timing.js';
 import { bindUnstartedPromoteJob } from './bind-promote-recovery.js';
 import type { PromoteRecoveryBinding } from './promote-recovery-binding.js';
@@ -235,6 +236,17 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       .sort(comparePromoteJobs);
     for (const job of sorted) this.admissions.observe(job);
     return filter.limit && filter.limit > 0 ? sorted.slice(0, Math.floor(filter.limit)) : sorted;
+  }
+
+  async retireFailedJob(jobId: string, approval?: PromoteRetirementApproval) {
+    return this.withMutationLock('retirement', async () => {
+      if (this.admissions.hasPendingJob(jobId)) return { outcome: 'ineligible' as const };
+      try {
+        return await retireFailedPromote(this.store, this.graphUri, jobId, this.now, approval);
+      } finally {
+        if (approval) this.admissions.invalidate(jobId);
+      }
+    });
   }
 
   async cancel(jobId: string): Promise<void> {
