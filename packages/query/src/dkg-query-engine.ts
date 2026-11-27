@@ -629,7 +629,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     if (!plan) return;
     // The caller's request is over: its budget does not carry over, and the sampler gives each read its own signal.
     const sampleOptions: QueryOptions = {
-      ...options, materializationBudget: undefined, source: VIEW_SEMANTICS_DELTA_SOURCE, priority: 'background',
+      ...options, materializationBudget: undefined, workDeadline: undefined, source: VIEW_SEMANTICS_DELTA_SOURCE, priority: 'background',
     };
     sampler.offer({
       contextGraphId: options.contextGraphId, view: options.view, sparql: scope.source,

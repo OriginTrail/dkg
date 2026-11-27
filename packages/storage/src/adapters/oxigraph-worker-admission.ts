@@ -24,14 +24,11 @@ export interface WorkerAdmissionTicket {
   done(): void;
 }
 
-type Waiter =
-  | { readonly kind: 'ordinary'; readonly admit: (ticket: WorkerAdmissionTicket) => void }
-  | { readonly kind: 'exclusive'; readonly admit: (ticket: WorkerAdmissionTicket) => void; readonly owned: () => void };
+type Waiter = { readonly kind: 'ordinary' | 'exclusive'; readonly admit: (ticket: WorkerAdmissionTicket) => void };
 
 export class WorkerAdmission {
   #inflight = 0;
   #owned = false;
-  #drained: (() => void) | null = null;
   readonly #waiters: Waiter[] = [];
 
   /** Admit an operation now, or null when it must queue behind a stoppable read. */
@@ -52,7 +49,7 @@ export class WorkerAdmission {
   #wait(kind: Waiter['kind'], signal: AbortSignal | undefined, timeoutMs: number, timeoutError: () => Error): Promise<WorkerAdmissionTicket> {
     if (signal?.aborted) return Promise.reject(asAbortError(signal.reason));
     return new Promise<WorkerAdmissionTicket>((resolve, reject) => {
-      let state: 'queued' | 'draining' | 'settled' = 'queued';
+      let state: 'queued' | 'settled' = 'queued';
       let timer: ReturnType<typeof setTimeout> | undefined;
       const settle = () => {
         state = 'settled';
@@ -60,13 +57,10 @@ export class WorkerAdmission {
         signal?.removeEventListener('abort', onAbort);
       };
       const admit = (ticket: WorkerAdmissionTicket) => { settle(); resolve(ticket); };
-      const waiter: Waiter = kind === 'ordinary'
-        ? { kind, admit }
-        : { kind, admit, owned: () => { state = 'draining'; } };
+      const waiter: Waiter = { kind, admit };
       const giveUp = (error: Error) => {
         if (state === 'settled') return;
-        if (state === 'queued') this.#waiters.splice(this.#waiters.indexOf(waiter), 1);
-        else { this.#owned = false; this.#drained = null; }
+        this.#waiters.splice(this.#waiters.indexOf(waiter), 1);
         settle();
         reject(error);
         this.#pump();
@@ -84,13 +78,14 @@ export class WorkerAdmission {
 
   #pump(): void {
     while (!this.#owned && this.#waiters.length > 0) {
-      const head = this.#waiters.shift()!;
+      const head = this.#waiters[0];
+      if (head.kind === 'exclusive' && this.#inflight > 0) return;
+      this.#waiters.shift();
       if (head.kind === 'ordinary') {
         head.admit(this.#ticket());
         continue;
       }
       this.#owned = true;
-      head.owned();
       let released = false;
       const release = () => {
         if (released) return;
@@ -98,9 +93,7 @@ export class WorkerAdmission {
         this.#owned = false;
         this.#pump();
       };
-      const grant = () => { this.#drained = null; head.admit({ done: release }); };
-      if (this.#inflight === 0) grant();
-      else this.#drained = grant;
+      head.admit({ done: release });
     }
   }
 
@@ -112,7 +105,7 @@ export class WorkerAdmission {
         if (!open) return;
         open = false;
         this.#inflight -= 1;
-        if (this.#inflight === 0) this.#drained?.();
+        if (this.#inflight === 0) this.#pump();
       },
     };
   }
