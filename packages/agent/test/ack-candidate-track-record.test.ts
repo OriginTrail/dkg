@@ -46,17 +46,16 @@ describe('ACK candidate selection with the cores\' track record', () => {
     expect(plan.diagnostics.filter((d) => d.selected).map((d) => d.peerId)).toEqual(plan.peers);
   });
 
-  it('keeps the local candidate first and counts it toward the quorum floor', async () => {
+  it.each([2, 1])('counts exactly one local ACK with %s healthy remotes at quorum three', async healthyCount => {
     const coordinator = coordinatorWithCores();
-    coordinator.recordRoundOutcomes([
-      { peerId: 'non-member', outcome: { kind: 'ineligible-signer', reason: 'not-in-sharding-table' } },
-      { peerId: 'core-c', outcome: { kind: 'valid', latencyMs: 300 } },
-    ]);
-
+    const ineligible = CORES.slice(0, CORES.length - healthyCount), healthy = CORES.slice(-healthyCount);
+    coordinator.recordRoundOutcomes(ineligible.map(peerId => ({
+      peerId, outcome: { kind: 'ineligible-signer' as const, reason: 'not-in-sharding-table' },
+    })));
     const plan = await round(coordinator, 3, { peerId: 'self', available: true });
-
-    expect(plan.peers).toEqual(['self', 'core-c', 'core-a', 'core-b', 'core-d']);
+    expect(plan.peers).toEqual(['self', ...healthy, ...(healthyCount === 2 ? [] : ineligible)]);
     expect(plan.diagnostics[0]).toMatchObject({ peerId: 'self', reason: 'selected-local' });
+    expect(plan.diagnostics.filter(d => d.reason === 'ineligible-signer')).toHaveLength(healthyCount === 2 ? 3 : 0);
   });
 
   it('keeps every candidate when leaving the non-members out would leave fewer than the quorum', async () => {

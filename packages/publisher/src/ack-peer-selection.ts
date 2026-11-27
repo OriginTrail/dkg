@@ -21,7 +21,6 @@ export interface ACKCanonicalCandidatePeerSelectionInput {
   selfPeerId?: string;
   /** History filtering always carries the quorum of this round. */
   history?: { trackRecord: Pick<ACKPeerTrackRecord, 'plan'>; requiredACKs: number };
-  requiredACKs?: number;
 }
 
 type ACKCandidateTierName = 'requestedProtocol' | 'confirmedCore' | 'rest';
