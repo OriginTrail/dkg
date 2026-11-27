@@ -144,6 +144,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       publisherAddress: signer.address,
       publishEpochs: pricing.publishEpochs,
       tokenAmount: pricing.tokenAmount,
+      pcaCandidate: pricing.source === 'pca' ? pricing.pca : pricing.diagnostics.pcaCandidate,
       pcaPricing: diagnostics?.pcaProbeError !== undefined && (
         isRetryableRpcError(diagnostics.pcaProbeError)
         || errorCode(diagnostics.pcaProbeError) === 'CALL_EXCEPTION'
@@ -213,6 +214,7 @@ export class PublishMethods extends EVMChainAdapterBase {
         publisherAddress: selected.publisherAddress,
         publishEpochs: selected.publishEpochs,
         tokenAmount: selected.tokenAmount,
+        pcaCandidate: selected.pcaCandidate,
       };
     }
 
@@ -233,6 +235,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       publisherAddress: selectedPlan.publisherAddress,
       publishEpochs: selectedPlan.publishEpochs,
       tokenAmount: selectedPlan.tokenAmount,
+      pcaCandidate: selectedPlan.pcaCandidate,
     };
   }
 

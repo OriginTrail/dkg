@@ -1,3 +1,4 @@
+import { warnPcaFallthrough } from './pca-fallthrough.js';
 import { assertPromoteSeal } from './assertion-promote-seal.js';
 import { certifyPromoteNoEffectRejection } from './promote-no-effect-rejection.js';
 import { createPromoteOwnershipReader, type PromoteOwnershipReader } from './async-promote-ownership.js';
@@ -4125,6 +4126,7 @@ export class DKGPublisher implements Publisher {
 
     // Track owned entities and batch→context graph binding on confirmed publishes
     if (status === 'confirmed' && onChainResult) {
+      await warnPcaFallthrough(this.chain, finalizedPublisherPlan, explicitPublishEpochs, onChainResult, message => this.log.warn(ctx, message));
       const confirmOwnershipKey = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
       if (!this.ownedEntities.has(confirmOwnershipKey)) {
         this.ownedEntities.set(confirmOwnershipKey, new Set());

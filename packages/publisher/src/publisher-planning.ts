@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import type { ChainAdapter, PublisherPublishPlan } from '@origintrail-official/dkg-chain';
 import { resolveLegacyPublisherCandidatePricing } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
@@ -59,6 +59,7 @@ export type FinalizedPublisherPlan =
   }
   | {
     kind: 'on-chain';
+    pcaCandidate?: PublisherPublishPlan['pcaCandidate'];
     signer: PublisherSigner;
     publisherAddress: string;
     publishEpochs: number;
@@ -162,7 +163,7 @@ export class PublisherPlanner {
     explicitPublishEpochs: number | undefined;
     billableByteSize: bigint;
     ctx: OperationContext;
-  }): Promise<{ publishEpochs: number; precomputedTokenAmount: bigint }> {
+  }): Promise<{ publishEpochs: number; precomputedTokenAmount: bigint; pcaCandidate?: PublisherPublishPlan['pcaCandidate'] }> {
     const chain = this.dependencies.chain;
     const quote = typeof chain.getRequiredPublishTokenAmount === 'function'
       ? (epochs: number) => chain.getRequiredPublishTokenAmount!(input.billableByteSize, epochs)
@@ -231,6 +232,7 @@ export class PublisherPlanner {
     return {
       publishEpochs: pricing.publishEpochs,
       precomputedTokenAmount: pricing.tokenAmount,
+      pcaCandidate: pricing.source === 'pca' ? pricing.pca : pricing.diagnostics.pcaCandidate,
     };
   }
 
@@ -247,6 +249,7 @@ export class PublisherPlanner {
     publisherAddress: string;
     publishEpochs: number;
     tokenAmount: bigint;
+    pcaCandidate?: PublisherPublishPlan['pcaCandidate'];
   }> {
     const chain = this.dependencies.chain;
     if (typeof chain.resolvePublisherPublishPlan !== 'function') {
@@ -262,6 +265,7 @@ export class PublisherPlanner {
         publisherAddress: input.initialSigner.address,
         publishEpochs: pricing.publishEpochs,
         tokenAmount: pricing.precomputedTokenAmount,
+        pcaCandidate: pricing.pcaCandidate,
       };
     }
 
@@ -299,6 +303,7 @@ export class PublisherPlanner {
       publisherAddress: plannedAddress,
       publishEpochs: resolvedPlan.publishEpochs,
       tokenAmount: resolvedPlan.tokenAmount,
+      pcaCandidate: resolvedPlan.pcaCandidate,
     };
   }
 

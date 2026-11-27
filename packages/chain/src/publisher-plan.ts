@@ -1,5 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
+/** Final signer-dependent values that must be fixed before publish side effects. */
+export interface PublisherPublishPlan {
+  /** PCA eligibility observed for the selected signer while pricing; diagnostic only. */
+  pcaCandidate?: { accountId: bigint; lockDurationEpochs?: number };
+  publisherAddress: string;
+  publishEpochs: number;
+  tokenAmount: bigint;
+}
+
+
 /** The complete PCA capability required by strict adapter-owned planning. */
 export interface PublisherConvictionPlanReader {
   getAccountId(publisherAddress: string): Promise<bigint>;

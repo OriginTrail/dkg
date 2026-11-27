@@ -1,3 +1,5 @@
+import type { PublisherPublishPlan } from './publisher-plan.js';
+export type { PublisherPublishPlan } from './publisher-plan.js';
 import type { CanonicalFinalizationReceiptReadOptions } from './canonical-finalization-receipt-options.js';
 export type { CanonicalFinalizationReceiptReadOptions } from './canonical-finalization-receipt-options.js';
 import type { PreBroadcastSignal, ReplacementBroadcastSignal } from './transaction-broadcast-types.js';
@@ -75,13 +77,6 @@ export function publisherPublishPlanByteSize(
     );
   }
   return request.billableByteSize ?? request.effectiveByteSize;
-}
-
-/** Final signer-dependent values that must be fixed before publish side effects. */
-export interface PublisherPublishPlan {
-  publisherAddress: string;
-  publishEpochs: number;
-  tokenAmount: bigint;
 }
 
 /** A PCA the node relates to (GAP-1): `owned` (a node wallet holds the NFT),

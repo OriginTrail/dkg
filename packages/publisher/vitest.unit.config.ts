@@ -146,6 +146,7 @@ export default defineConfig({
       'test/multi-root-token-rows.test.ts',
       'test/access-verification.test.ts',
       'test/promote-step-tag.test.ts',
+      'test/pca-fallthrough-warn.test.ts',
       'test/promote-replay-safety.test.ts',
       'test/promote-post-commit-recovery.test.ts',
       'test/completed-vm-supersession.test.ts',
