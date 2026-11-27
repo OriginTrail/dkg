@@ -187,6 +187,10 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     const transport = build.mock.results[0]!.value as ReturnType<ReturnType<DKGAgent['createACKTransportFactory']>>;
     await transport.getConnectedCorePeers(PROTOCOL_STORAGE_ACK, 2);
     expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ requiredACKs: 2 }));
+    await transport.getConnectedCorePeers();
+    expect(resolve).toHaveBeenLastCalledWith(expect.objectContaining({ requiredACKs: 99 }));
+    await transport.getConnectedCorePeers(PROTOCOL_STORAGE_ACK);
+    expect(resolve).toHaveBeenLastCalledWith(expect.objectContaining({ requiredACKs: 99 }));
     expect(send).toHaveBeenCalledWith(path === 'factory' ? 123 : undefined, path === 'factory' ? undefined : expectedHead);
   });
 

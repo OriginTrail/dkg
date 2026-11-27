@@ -3294,7 +3294,7 @@ export class DKGAgent extends DKGAgentBase {
       publisherPeerId: this.peerId,
       gossipPublish: async (topic: string, data: Uint8Array) => { await this.gossip.publish(topic, data); },
       sendP2P: this.createACKSendP2P(options.sendTimeoutMs, options.expectedHead),
-      getConnectedCorePeers: (protocol: string, requiredACKs: number) => this.getACKCandidatePeersAfterAdmission(
+      getConnectedCorePeers: (protocol?: string, requiredACKs = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS) => this.getACKCandidatePeersAfterAdmission(
         protocol, this.ackOperationContext(protocol), requiredACKs,
       ),
       log: options.log,
