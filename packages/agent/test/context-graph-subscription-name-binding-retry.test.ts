@@ -67,6 +67,7 @@ function host(rows: ContextGraphSubscriptionRecord[], options: {
   let maxInFlight = 0;
   const state = { current: true, capHasRoom: options.capHasRoom ?? true };
   const ports: NameBindingRetryPorts = {
+    recovery: new SubscriptionRecoveryCoordinator(),
     signal: controller.signal,
     isCurrent: () => state.current,
     dormancy: (id) => dormancy.get(id),

@@ -1,3 +1,4 @@
+import { SubscriptionRecoveryCoordinator } from '../src/subscription-recovery-owner.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   STORAGE_ACK_DEMAND_IDLE_MS,
@@ -53,6 +54,7 @@ function host(rows: ContextGraphSubscriptionRecord[], options: {
   const info: string[] = [];
   const state = { current: options.current ?? true };
   const ports: StorageAckDemandActivationPorts = {
+    recovery: new SubscriptionRecoveryCoordinator(),
     signal: controller.signal,
     isCurrent: () => state.current,
     dormancy: (id) => dormancy.get(id),

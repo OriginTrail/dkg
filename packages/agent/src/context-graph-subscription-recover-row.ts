@@ -15,7 +15,7 @@ export type SubscriptionRecoveryOutcome =
 
 /** Row policy is shared by the periodic and startup-name-binding schedulers. */
 export interface SubscriptionRecoveryRowPorts {
-  readonly recovery?: SubscriptionRecoveryCoordinator;
+  readonly recovery: SubscriptionRecoveryCoordinator;
   isCurrent(): boolean;
   dormancy(id: string): ContextGraphDormancyReason | undefined;
   revision(id: string): number;
@@ -36,29 +36,15 @@ function hasIntent(row: ContextGraphSubscriptionRecord | null): row is ContextGr
   return row !== null && (row.subscribed || row.coreHosted === true);
 }
 
-/** One authority observation may commit only to the exact durable intent it checked. */
+/** The scheduler owns a ready lease until this row transaction has retired. */
 export async function recoverPersistedSubscriptionRow(
-  id: string, ports: SubscriptionRecoveryRowPorts, signal: AbortSignal,
+  id: string, ports: SubscriptionRecoveryRowPorts, owner: SubscriptionRecoveryLease,
   options: { snapshot?: { row: ContextGraphSubscriptionRecord | null; revision: number };
-    reason?: ContextGraphDormancyReason; verifiedOnChainId?: string; owner?: SubscriptionRecoveryLease } = {},
+    reason?: ContextGraphDormancyReason; verifiedOnChainId?: string } = {},
 ): Promise<SubscriptionRecoveryOutcome> {
-  const owner = options.owner ?? ports.recovery?.claim(id, 0, signal);
-  if (ports.recovery && !owner) return { kind: 'again' };
-  try {
-    await owner?.ready;
-    return await recoverOwnedSubscriptionRow(id, owner ? {
-      ...ports, isCurrent: () => owner.isCurrent() && ports.isCurrent(),
-    } : ports, owner?.signal ?? signal, options);
-  } finally { if (!options.owner) owner?.release(); }
-}
-
-async function recoverOwnedSubscriptionRow(
-  id: string, ports: SubscriptionRecoveryRowPorts, signal: AbortSignal,
-  options: { snapshot?: { row: ContextGraphSubscriptionRecord | null; revision: number };
-    reason?: ContextGraphDormancyReason; verifiedOnChainId?: string },
-): Promise<SubscriptionRecoveryOutcome> {
+  const signal = owner.signal;
   const { snapshot, reason = 'authorityUnavailable', verifiedOnChainId } = options;
-  const current = () => !signal.aborted && ports.isCurrent() && ports.dormancy(id) === reason;
+  const current = () => owner.isCurrent() && ports.isCurrent() && ports.dormancy(id) === reason;
   if (!current()) return { kind: 'done' };
   const revision = snapshot?.revision ?? ports.revision(id);
   const row = snapshot ? snapshot.row : await ports.load(id);

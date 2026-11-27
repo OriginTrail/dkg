@@ -140,7 +140,7 @@ export class StorageAckDemandActivations {
       ...this.ports,
       isCurrent: () => lease.isCurrent() && demand.onChainId === onChainId,
       resolveAuthority: saved => checkSubscriptionAuthority(lease, signal => this.ports.resolveAuthority(saved, signal)),
-    }, this.ports.signal, { reason, verifiedOnChainId: onChainId, owner: lease.owner });
+    }, lease.owner, { reason, verifiedOnChainId: onChainId });
     if (outcome.kind === 'done') return undefined;
     if (outcome.kind === 'activated') {
       this.ports.log.info(`Activated persisted context-graph subscription "${row.id}" for StorageACK requests `
