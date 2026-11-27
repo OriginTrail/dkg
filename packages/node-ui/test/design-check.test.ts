@@ -184,13 +184,15 @@ describe('design check', { timeout: 60_000 }, () => {
   it("names a token for every token's own colour, whatever the property's job", () => {
     const tokenColours = system.colours.filter((t: { alpha: number; text: string }) => t.alpha === 1 && !/var\(/.test(t.text));
     expect(tokenColours.length).toBeGreaterThan(10);
-    // Written as a literal it fails, but the fix is a token with exactly that value, never "nearest".
-    const off = tokenColours.flatMap((t: { name: string; text: string }) => ['color', 'background', 'border-color'].flatMap((prop) => (
-      checkDeclaration(system, prop, t.text, { known: new Set() })
-        .filter((f: { kind: string; use: string }) => f.kind === 'colour' && !f.use.startsWith('var('))
-        .map(() => `${prop}: ${t.text} (${t.name})`)
-    )));
-    expect(off).toEqual([]);
+    // Written as a literal it fails, with one colour finding, and the fix is a token with exactly
+    // that value, never "nearest". A pair with no finding at all is a miss, not a pass.
+    const wrong = tokenColours.flatMap((t: { name: string; text: string }) => ['color', 'background', 'border-color'].flatMap((prop) => {
+      const colours = checkDeclaration(system, prop, t.text, { known: new Set() })
+        .filter((f: { kind: string }) => f.kind === 'colour') as { offScale?: boolean; use: string }[];
+      const ok = colours.length === 1 && colours[0].offScale === true && colours[0].use.startsWith('var(');
+      return ok ? [] : [`${prop}: ${t.text} (${t.name}) → ${colours.length ? colours.map((f) => `${f.offScale ? 'fails' : 'passes'}: ${f.use}`).join('; ') : 'no finding'}`];
+    }));
+    expect(wrong).toEqual([]);
   });
 
   it('fails a colour in a format it cannot compare, instead of passing it', () => {
