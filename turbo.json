@@ -22,7 +22,8 @@
         "$TURBO_ROOT$/scripts/build-semantic-runtime.mjs",
         "$TURBO_ROOT$/scripts/semantic-runtime-rustc.mjs"
       ],
-      "outputs": ["dist/**", "generated/**"]
+      "outputs": ["dist/**", "generated/**"],
+      "env": ["DKG_SEMANTIC_RUNTIME_WASM"]
     },
     "@origintrail-official/dkg#build": {
       "dependsOn": ["^build"],

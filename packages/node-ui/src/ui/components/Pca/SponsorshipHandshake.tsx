@@ -25,13 +25,13 @@ export function SponsorshipHandshake({
   return (
     <div className={['v10-pca-handshake', className].filter(Boolean).join(' ')}>
       <section
-        className="v10-pca-handshake-half"
+        className="v10-pca-handshake-half ds-card-nested"
         data-emphasis={role === 'edge' ? 'true' : 'false'}
       >
         <header className="v10-pca-handshake-head">
           <span className="v10-pca-handshake-title">Operational wallets</span>
           <span className="v10-pca-handshake-sub">
-            The edge node shares these; the PCA owner approves them.
+            The Edge node shares these; the PCA owner approves them.
           </span>
         </header>
         {wallets.length === 0 ? (
@@ -56,7 +56,7 @@ export function SponsorshipHandshake({
       </section>
 
       <section
-        className="v10-pca-handshake-half"
+        className="v10-pca-handshake-half ds-card-nested"
         data-emphasis={role === 'core' ? 'true' : 'false'}
       >
         <header className="v10-pca-handshake-head">

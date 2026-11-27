@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { LogRecord } from '@origintrail-official/dkg-core';
 
 import {
   StoreResponseTooLargeError,
@@ -90,6 +91,35 @@ describe('worker error protocol', () => {
     expect(restored).toBeInstanceOf(StoreResponseTooLargeError);
     expect(isStoreResponseTooLargeError(restored)).toBe(true);
     expect(restored).toMatchObject({ maxBytes: 256, actualBytes: 257n });
+  });
+
+  it('warns in the parent, as the catalog alert matches, when it decodes a graph catalog limit from a worker', async () => {
+    // Fresh modules: the parent's catalog warning repeats at most hourly in one module instance.
+    vi.resetModules();
+    const { Logger } = await import('@origintrail-official/dkg-core');
+    const protocol = await import('../src/worker-error-protocol.js');
+    const limits = await import('../src/graph-catalog-internal-limit.js');
+    const records: LogRecord[] = [];
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    Logger.setSink(record => { records.push(record); });
+    try {
+      // A worker thread's log lines do not reach the parent's sink: only the parent's decode can warn.
+      const other = protocol.deserializeWorkerErrorV1(protocol.serializeWorkerErrorV1(new limits.StoreInternalLimitError('UNLISTED_LIMIT', 1, 2)));
+      expect(other).toMatchObject({ code: limits.STORE_INTERNAL_LIMIT, limitName: 'UNLISTED_LIMIT' });
+      expect(records).toEqual([]);
+      const catalog = new limits.StoreInternalLimitError(limits.STORE_GRAPH_CATALOG_LIMIT_NAME, 1000, 1500);
+      const decoded = protocol.deserializeWorkerErrorV1(protocol.serializeWorkerErrorV1(catalog));
+      expect(decoded).toBeInstanceOf(limits.StoreInternalLimitError);
+      expect(decoded).toMatchObject({ code: limits.STORE_INTERNAL_LIMIT, limitName: limits.STORE_GRAPH_CATALOG_LIMIT_NAME, limitBytes: 1000, actualBytes: 1500 });
+      expect(records).toEqual([expect.objectContaining({
+        level: 'warn', module: 'graph-catalog',
+        message: expect.stringMatching(/^The graph catalog has reached 80% of its internal limit STORE_GRAPH_CATALOG_MAX_BYTES, and is over it: at least 1500 of 1000 bytes\./),
+      })]);
+    } finally {
+      Logger.setSink(null);
+      stderr.mockRestore();
+      vi.resetModules();
+    }
   });
 
   it('routes an unknown worker method through the structured error envelope', async () => {

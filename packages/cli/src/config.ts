@@ -588,23 +588,14 @@ export interface LocalAgentIntegrationConfig {
   updatedAt?: string;
 }
 
-export interface QueryAccessConfig {
-  defaultPolicy: 'deny' | 'public';
-  contextGraphs?: Record<string, {
-    policy: 'deny' | 'public' | 'allowList';
-    allowedPeers?: string[];
-    allowedLookupTypes?: Array<'ENTITY_BY_UAL' | 'ENTITIES_BY_TYPE' | 'ENTITY_TRIPLES' | 'SPARQL_QUERY'>;
-    sparqlEnabled?: boolean;
-    sparqlTimeout?: number;
-    sparqlMaxResults?: number;
-  }>;
-  rateLimitPerMinute?: number;
-}
+export type { QueryAccessConfig } from './read-graphs-config.js';
 
 export interface GraphSetIndexConfig {
   enabled?: boolean;
   /** Revalidate the named-graph index after this many milliseconds. 0 means every read. */
   revalidateMs?: number;
+  /** `blocking` (the default) makes the caller that finds the index due wait for it; `background` answers from a warm index while it revalidates. */
+  revalidate?: 'background' | 'blocking';
 }
 
 /**
@@ -758,7 +749,8 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
   /** Local daemon logging controls. */
   logging?: LoggingConfig;
   /** Cross-agent query access policy for inbound query-remote requests. */
-  queryAccess?: QueryAccessConfig;
+  queryAccess?: import('./read-graphs-config.js').QueryAccessConfig;
+  query?: import('./read-graphs-config.js').QueryConfigInput; // OT-RFC-74 read graphs (default off) and view matching (default per-asset)
   marketplace?: { enabled?: boolean; seller?: { enabled?: boolean }; [setting: string]: unknown }; // OT-RFC-27; packages/marketplace reads it.
   autoUpdate?: AutoUpdateConfig;
   /**
@@ -771,8 +763,8 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
   entitySearch?: { embedding: import('./entity-search/types.js').EntityEmbeddingConfig };
   /** Block explorer URL for TX links (default: derived from chainId). */
   blockExplorerUrl?: string;
-  /** Triple store backend override (default: oxigraph-worker with file persistence). `controlReservedSlots`: the async queues' store control path (OT-RFC-73 P14), the values of DKG_STORE_CONTROL_RESERVED_SLOTS, which wins when set; absent = the default (on for blazegraph and oxigraph-server on more than 2 CPUs). */
-  store?: { backend: string; options?: Record<string, unknown>; graphSetIndex?: boolean | GraphSetIndexConfig; changelog?: boolean; controlReservedSlots?: string | number };
+  /** Triple store backend override (default: oxigraph-worker with file persistence). `controlReservedSlots`: the async queues' store control path (OT-RFC-73 P14), the values of DKG_STORE_CONTROL_RESERVED_SLOTS, which wins when set; absent = the default (on for blazegraph and oxigraph-server on more than 2 CPUs). `graphCatalog.maxBytes`: the graph catalog's bound, the values of DKG_STORE_GRAPH_CATALOG_MAX_BYTES, which wins when set (graph-catalog-config.ts). */
+  store?: { backend: string; options?: Record<string, unknown>; graphSetIndex?: boolean | GraphSetIndexConfig; changelog?: boolean; controlReservedSlots?: string | number; graphCatalog?: import('./graph-catalog-config.js').GraphCatalogConfig };
   /**
    * Intentional cap on how many persisted context-graph subscriptions a node
    * ACTIVATES on boot (gossip + sync). A large stale backlog otherwise fans out
@@ -888,7 +880,7 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
    * a verified agent-key signature or a Bearer token. A legacy token is
    * auto-generated on first start and stored in `<DKG_HOME>/auth.token`.
    */
-  auth?: { enabled?: boolean; tokens?: string[]; operatorAgentAddresses?: string[] };
+  auth?: { enabled?: boolean; tokens?: string[]; operatorAgentAddresses?: string[]; dashboardAutoSignIn?: boolean };
   /**
    * Opt-in telemetry streaming to a central network dashboard.
    * `enabled` is the master gate: when false, NOTHING is forwarded off the

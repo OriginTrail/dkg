@@ -42,6 +42,7 @@ import {
 } from '../prime-agent.js';
 import {
   pipeDurableLocalAgentTurnSseStream,
+  writeLocalAgentSseHead,
   type DurableLocalAgentTurn,
 } from '../local-agent-sse.js';
 import {
@@ -427,19 +428,9 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
       // Declare SSE before the first byte. Without this the browser sees an
       // untyped body, EventSource-style parsing does not engage, and the client
       // fails with "The string did not match the expected pattern" instead of
-      // reading frames.
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream; charset=utf-8',
-        'Cache-Control': 'no-cache, no-transform',
-        Connection: 'keep-alive',
-        // The keepalive comments the bridge now emits only defeat proxy idle
-        // timeouts if they are FLUSHED to the client. Cache-Control does not
-        // govern proxy buffering; this header disables it on nginx-family
-        // fronts, whose default proxy_buffering would otherwise hold small
-        // comment frames in a buffer while the client sees a silent stream.
-        'X-Accel-Buffering': 'no',
-        ...corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)),
-      });
+      // reading frames. The bridge sends its own keepalive comments, which the
+      // pump below forwards.
+      writeLocalAgentSseHead(res, corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)));
 
       await pipeDurableLocalAgentTurnSseStream(
         req,

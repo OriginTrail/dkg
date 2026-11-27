@@ -13,6 +13,7 @@ import {
   ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
   ASYNC_PUBLISH_FOREIGN_AUTHOR_CODE,
   PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
+  USER_AUTHORED_TRUST_LEVEL_CODE,
 } from '@origintrail-official/dkg-core';
 import { PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE, SUB_GRAPH_NOT_FOUND_CODE } from '@origintrail-official/dkg-publisher';
 import {
@@ -114,6 +115,7 @@ export function respondPublicationPricingPolicyError(res: RequestContext["res"],
 
 const ASSERTION_CODE_STATUS: ReadonlyMap<string, number> = new Map([
   ['KA_ASSERTION_ALREADY_FINALIZED', 409],
+  ['FINALIZE_PRECONDITION_FAILED', 409],
   ['KA_PROMOTE_ACK_REQUIREMENT_CONFLICT', 409],
   ['KA_SHARE_AUTHOR_MISMATCH', 409],
   ['KA_SHARE_INVENTORY_SIGNER_UNAVAILABLE', 422],
@@ -124,6 +126,8 @@ const ASSERTION_CODE_STATUS: ReadonlyMap<string, number> = new Map([
   ['KA_WM_LIFECYCLE_CORRUPT', 500],
   // A write into a sub-graph that neither this node nor the graph's peers it asked hold (#3293).
   [SUB_GRAPH_NOT_FOUND_CODE, 400],
+  // Trust metadata is protocol-generated; a write that carries it is the caller's error.
+  [USER_AUTHORED_TRUST_LEVEL_CODE, 400],
 ]);
 
 /** Shared typed lifecycle classification; callers retain route-specific recovery. */

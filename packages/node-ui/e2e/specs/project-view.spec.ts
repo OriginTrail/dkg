@@ -17,15 +17,15 @@ test.describe('Project View (rc.12)', () => {
   });
 
   test('Import button is visible in layer switcher', async ({ page }) => {
-    await expect(page.getByRole('button', { name: 'Import into Context Graph' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Import into context graph' })).toBeVisible();
   });
 
   test('refresh button is visible in layer switcher', async ({ page }) => {
-    await expect(page.getByRole('button', { name: 'Refresh Context Graph data' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Refresh context graph data' })).toBeVisible();
   });
 
   test('overview shows project overview card', async ({ page }) => {
-    await expect(page.locator('.v10-project-overview, .v10-po-card, .v10-memory-explorer-page[data-view="overview"]').first()).toBeVisible();
+    await expect(page.locator('.v10-memory-explorer-page[data-view="overview"]').first()).toBeVisible();
   });
 
   test('layer switcher includes Working Memory', async ({ page }) => {
@@ -33,7 +33,7 @@ test.describe('Project View (rc.12)', () => {
   });
 
   test('Import button opens import modal', async ({ page, importFilesModal }) => {
-    await page.getByRole('button', { name: 'Import into Context Graph' }).click();
+    await page.getByRole('button', { name: 'Import into context graph' }).click();
     expect(await importFilesModal.isOpen()).toBe(true);
   });
 
@@ -51,12 +51,12 @@ test.describe('Project View (rc.12)', () => {
     expect(active?.trim()).toBe('Dashboard');
   });
 
-  test('project strip has colored project dot', async ({ page }) => {
-    await expect(page.locator('.v10-project-strip-dot')).toBeVisible();
+  test('project strip shows the Context Graph mark (its identity colour and initial)', async ({ page }) => {
+    await expect(page.locator('.v10-project-strip .v10-cg-mark')).toBeVisible();
   });
 
   test('refresh button click does not crash the view', async ({ page }) => {
-    await page.getByRole('button', { name: 'Refresh Context Graph data' }).click();
+    await page.getByRole('button', { name: 'Refresh context graph data' }).click();
     await expect(page.locator('.v10-project-strip').filter({ hasText: PRIMARY_CG })).toBeVisible();
   });
 

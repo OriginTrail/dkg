@@ -1,3 +1,4 @@
+export { parseFinalizeGuard, type FinalizeGuard } from './finalize-guard.js';
 export type { ContextGraphPartitionRead, ContextGraphNamedGraphStats } from '@origintrail-official/dkg-query';
 export type { ContextGraphPartitionInventoryOptions } from './internal/context-graph-partition-query.js';
 export { ConfirmedCatalogObligationErrorV1, parseConfirmedCatalogObligationRecoveryV1, type ConfirmedCatalogTransactionEvidenceV1, type ConfirmedCatalogObligationRecoveryV1 } from './confirmed-catalog-obligation-error.js';
@@ -243,6 +244,7 @@ export type {
   ContextGraphListOnChainFacts,
   ListContextGraphsRow,
 } from './context-graph-list-authority-enrichment.js';
+export type { ContextGraphListFilter } from './context-graph-list-filter.js';
 export {
   describeContextGraphOnChainIdResolution,
   parseContextGraphOnChainIdReference,
@@ -686,3 +688,5 @@ export type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryRe
 export type { PreparedSnapshotCheckpoint, SnapshotCheckpointManifest, VerifiedNativeSnapshotCheckpoint, NativeSnapshotCheckpointReport, PublicCheckpointPreparationResult } from './snapshot-checkpoint-contract.js';
 
 export { ListContextGraphsBudgetExceeded, isListContextGraphsBudgetExceeded, type ListContextGraphsBudgetExceededLike } from './context-graph-list-budget-error.js';
+
+export { readableViewSemanticsDeltaReport } from './view-semantics-delta-report.js';

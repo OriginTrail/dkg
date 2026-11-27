@@ -108,7 +108,7 @@ The [full field reference](https://github.com/OriginTrail/dkg/blob/main/packages
 
 The daemon also logs a `resource_usage` line every five minutes, with memory and the store and sync slots in use. It includes the control path's slots while the path is on.
 
-For one investigation, two traces add detail. Start the daemon with `DKG_ASYNC_PROMOTE_ADMISSION_TRACE=1` for share admission, or `DKG_ASYNC_PUBLISH_TRACE=1` for publisher claims. Both are off by default.
+For one investigation, two traces add detail. Start the daemon with `DKG_ASYNC_PROMOTE_ADMISSION_TRACE=1` for share admission, or `DKG_ASYNC_PUBLISH_TRACE=1` for publisher claims. Both are off by default. The share admission trace also samples event-loop use, observes garbage collection and outgoing store HTTP timing, and logs several lines per share plus any share-queue lock held for a second or more, so keep it to the investigation window.
 
 ## Tuning foreground catch-up
 

@@ -47,6 +47,8 @@ export interface SemanticProgramResolution {
 }
 
 export interface SemanticInvocationResult {
+  /** Exact approval snapshot used by a bound invocation. */
+  bindingDigest?: string;
   /** Intermediate results are only returned to the executor agent, never ordinary callers. */
   trace?: ProgramExecutionTrace;
   invocationId: string;

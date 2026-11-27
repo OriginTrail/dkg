@@ -45,7 +45,7 @@ export function JsonViewer({ value, label = 'JSON' }: { value: object; label?: s
     <div className="v10-json-tree" tabIndex={0} aria-label={`${label} tree`}>
       <JsonView key={expansion.revision} value={value} collapsed={expansion.collapsed}
         displayDataTypes={false} enableClipboard={false} highlightUpdates={false}
-        shortenTextAfterLength={80} indentWidth={18} style={{ fontSize: 'var(--font-size-label)', lineHeight: 1.8 }}>
+        shortenTextAfterLength={80} indentWidth={18} className="v10-json-tree-view">
         <JsonView.Arrow render={({ style }, { keyName }) => <button type="button"
           className="v10-json-toggle" style={style} aria-label={`Toggle ${keyName ?? 'JSON'}`}>
           <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4 3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.5" /></svg>

@@ -48,7 +48,7 @@ describe('closed StorageACK ledger timestamp writer', () => {
       await original.call(this, query, opts);
     });
     expect(await writer(SUBJECT, predicate, WHEN, options)).toBe(true);
-    expect(update).toHaveBeenCalledOnce(); expect(update.mock.calls[0]![1]).toBe(options);
+    expect(update).toHaveBeenCalledOnce(); expect(update.mock.calls[0]![1]).toEqual({ ...options, writtenGraphs: [GRAPH] });
     expect(await rows(raw)).toEqual({ type: 'bindings', bindings: [
       { s: SUBJECT, p: predicate, o: '"2026-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' },
       { s: SUBJECT, p: 'urn:test:keep', o: '"keep"' },
@@ -147,7 +147,7 @@ describe('closed StorageACK ledger timestamp writer', () => {
       const revision = projection.recipientKeyRouteFence.revision;
       const update = vi.spyOn(raw, 'update');
       await agent.markStorageAckLedger(SUBJECT, LEDGER.registeredAt, WHEN.getTime());
-      expect(update).toHaveBeenCalledOnce(); expect(update.mock.calls[0]![1]).toEqual(options);
+      expect(update).toHaveBeenCalledOnce(); expect(update.mock.calls[0]![1]).toEqual({ ...options, writtenGraphs: [GRAPH] });
       expect(projection.recipientKeyRouteFence.revision).toBe(revision);
       const result = await rows(raw);
       expect(result.type === 'bindings' && result.bindings.length).toBe(1);

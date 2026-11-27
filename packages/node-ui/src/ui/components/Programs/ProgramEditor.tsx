@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { X } from 'lucide-react';
 import type { Approval, GraphComputer, PreparedInvocation, ProgramReference, Execution, MemoryLayer, ProgramExecutionTrace } from '@origintrail-official/dkg-graph-computer';
 import { createUuid } from '@origintrail-official/dkg-graph-computer';
 import { programClient, fetchProgramAgents, fetchProgramGraphs, type ProgramAgent, type ProgramGraph } from './client.js';
@@ -356,7 +357,7 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
   return <div className="program-editor-backdrop" onClick={onBackdropClick}>
     <div className="program-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="program-editor-title" ref={dialogRef} tabIndex={-1}>
       <header><div><h2 id="program-editor-title">TypeScript Program</h2><p>{name}</p></div>
-        <button type="button" onClick={close} disabled={!!busy} aria-label="Close Program editor">×</button></header>
+        <button type="button" onClick={close} disabled={!!busy} aria-label="Close Program editor"><X size={14} aria-hidden /></button></header>
       <div className="program-editor-body">
         <div className="program-editor-code">
           <label>Agent<select value={address} disabled={!!busy || !agents.length} onChange={event => {

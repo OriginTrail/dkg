@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
  * The marketplace at boot (`startMarketplace`, which the daemon's start-up
- * calls): off without its settings; a part that fails to start is logged and
- * stays off, its job stopped, and the boot goes on with the other part.
+ * calls): off without its settings, and off, logged once, on a chain without
+ * the marketplace's contracts; a part that fails to start is logged and stays
+ * off, its job stopped, and the boot goes on with the other part.
  */
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -10,7 +11,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import { MockChainAdapter, marketplaceChainOf } from '@origintrail-official/dkg-chain';
+import { HubContractNotFoundError, MockChainAdapter, marketplaceChainOf } from '@origintrail-official/dkg-chain';
 import { Buyer } from '@origintrail-official/dkg-marketplace';
 import { startMarketplace, type MarketplaceStartOptions } from '../src/daemon/marketplace-buyer.js';
 import { withNetworkMarketplaceContextGraph } from '../src/daemon/marketplace-network-default.js';
@@ -24,6 +25,8 @@ const SELLING = {
 let dir: string;
 let agent: Record<string, unknown>;
 let log: ReturnType<typeof vi.fn>;
+/** The chain the fake agent hands out: the same one on every call. */
+const chainOf = () => (agent.marketplaceChain as () => NonNullable<ReturnType<typeof marketplaceChainOf>>)();
 
 const options = (marketplace?: Record<string, unknown>): MarketplaceStartOptions => ({
   config: marketplace ? { marketplace } : {},
@@ -51,8 +54,37 @@ afterEach(async () => {
 
 describe('the marketplace at boot', () => {
   it('stays off without its settings, and says nothing', async () => {
+    const asks = vi.spyOn(chainOf(), 'getMarketplaceContracts');
     expect(await startMarketplace(options())).toEqual({ marketplace: undefined, marketplaceGateway: undefined, marketplaceSeller: undefined });
     expect(log).not.toHaveBeenCalled();
+    expect(asks).not.toHaveBeenCalled();
+  });
+
+  it('stays off, logged once, on a chain without the marketplace contracts', async () => {
+    const missing = new HubContractNotFoundError('ServiceSubscriptions', '0x0000000000000000000000000000000000000001');
+    vi.spyOn(chainOf(), 'getMarketplaceContracts').mockRejectedValue(missing);
+    const starts = vi.spyOn(Buyer.prototype, 'start');
+    const registers = vi.fn(() => () => undefined);
+    agent.registerMarketplaceHandlers = registers;
+    const parts = await startMarketplace(options({ enabled: true, tickSeconds: 3_600, seller: SELLING }));
+    expect(parts).toEqual({ marketplace: undefined, marketplaceGateway: undefined, marketplaceSeller: undefined });
+    expect(log.mock.calls).toEqual([['[marketplace] the chain has no marketplace contracts: buying and selling stay off']]);
+    expect(starts).not.toHaveBeenCalled();
+    expect(registers).not.toHaveBeenCalled();
+  });
+
+  it('starts as before when the contract check fails for another reason', async () => {
+    // An error that only reads like a Hub miss says nothing about the contracts either.
+    const lookalike = Object.assign(new Error('Contract "ServiceSubscriptions" not found in Hub'), { name: 'HubContractNotFoundError' });
+    for (const failure of [new Error('no RPC endpoint answered'), lookalike]) {
+      vi.spyOn(chainOf(), 'getMarketplaceContracts').mockRejectedValueOnce(failure);
+      const parts = await startMarketplace(options({ enabled: true, tickSeconds: 3_600 }));
+      expect(parts.marketplace).toBeInstanceOf(Buyer);
+      expect(parts.marketplaceGateway).toBeDefined();
+      await parts.marketplaceGateway!.stop();
+      await parts.marketplace!.stop();
+    }
+    expect(log).not.toHaveBeenCalledWith(expect.stringContaining('no marketplace contracts'));
   });
 
   it('leaves buying off, logged and its job stopped, when the gateway cannot read its files', async () => {

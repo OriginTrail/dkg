@@ -65,7 +65,7 @@ export function AddressCrux({
         <textarea
           id={inputId}
           data-testid={testId}
-          className="v10-form-textarea"
+          className="v10-form-textarea ds-input"
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder ?? fallbackPlaceholder}
@@ -80,7 +80,7 @@ export function AddressCrux({
           id={inputId}
           data-testid={testId}
           type="text"
-          className="v10-form-input"
+          className="v10-form-input ds-input"
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder ?? fallbackPlaceholder}
@@ -92,11 +92,11 @@ export function AddressCrux({
         />
       )}
       <p id={helpId} className="v10-pca-crux-help">
-        <abbr title="On-chain authorization to publish under this account — unrelated to the ERC-20 token approve() that grants a spending allowance.">
+        <abbr title="Lets a wallet publish under this account. It isn’t the ERC-20 approve() that lets a contract spend your tokens.">
           “Approve”
         </abbr>{' '}
-        is on-chain authorization to publish under this account — unrelated to ERC-20 token{' '}
-        <code>approve()</code>. The wallet owner doesn't sign anything.
+        here lets a wallet publish under this account. It isn’t the ERC-20{' '}
+        <code>approve()</code> that lets a contract spend your tokens. The wallet owner doesn't sign anything.
       </p>
       {error != null && (
         <p id={errorId} className="v10-pca-crux-error" role="alert">

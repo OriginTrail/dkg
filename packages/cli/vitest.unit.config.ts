@@ -13,8 +13,10 @@ export default defineConfig({
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
           'test/async-share-bound-recovery.test.ts',
+          'test/async-share-completion-lock.test.ts',
           'test/write-preflight-diagnostics.test.ts',
           'test/durable-synchronous-share.test.ts',
+          'test/durable-share-snapshot-writes.test.ts',
           'test/durable-private-payload-recovery.test.ts',
           'test/durable-gossip-signer-lookup.test.ts',
           'test/durable-share-preparation-race.test.ts',
@@ -25,6 +27,7 @@ export default defineConfig({
           'test/public-snapshot-job.test.ts',
           'test/public-checkpoint-job.test.ts',
           'test/public-checkpoint-config.test.ts',
+          'test/daemon-api-exposure-warning.test.ts',
           'test/snapshot-job-isolation.test.ts',
           'test/sync-checkpoint-command.test.ts',
           'test/core-chain-cache-config.test.ts',
@@ -75,6 +78,7 @@ export default defineConfig({
           // #1828 — daemon-boot intent-index backfill wiring (fail-open contract).
           'test/vm-publish-intent-backfill.test.ts',
           'test/agent-connect-routes.test.ts',
+          'test/agent-chat-update-term-validation.test.ts',
           'test/preferred-relays.test.ts',
           'test/lan-addresses.test.ts',
           'test/reconcile-503-mapping.test.ts',
@@ -96,6 +100,7 @@ export default defineConfig({
           'test/semantic-runtime-native-assets.test.ts',
           'test/semantic-runtime-sparql-adapter.test.ts',
           'test/semantic-runtime-configuration-api.test.ts',
+          'test/semantic-runtime-binding-pin.test.ts',
           'test/semantic-runtime-studio-authority.test.ts',
           'test/semantic-runtime-n8n-authority.test.ts',
           'test/semantic-runtime-n8n-recovery.test.ts',
@@ -112,12 +117,15 @@ export default defineConfig({
           'test/status-route-rpc.test.ts',
           // Pure: in-process status route and a chain adapter over scripted endpoints.
           'test/status-chain-rpc.test.ts',
+          // Pure: in-process balances route over a scripted endpoint and a refused port.
+          'test/wallet-balances-route-rpc.test.ts',
           'test/backpressure-route.test.ts',
           'test/notifications-route-bounded.test.ts',
       'test/status-route-store-quads.test.ts',
       'test/store-reachability.test.ts',
       'test/query-route-lifecycle.test.ts',
       'test/bounded-query.test.ts',
+      'test/query-route-unheld-context-graph.test.ts',
       'test/entity-search.test.ts',
       'test/query-catalog-profile-route.test.ts',
           'test/context-graph-route-read-authority.test.ts',
@@ -145,6 +153,7 @@ export default defineConfig({
           'test/daemon/routes/plugins.test.ts',
           'test/daemon-pca-routes.test.ts',
           'test/knowledge-assets-error-mapping.test.ts',
+          'test/share-job-retirement.test.ts',
           'test/knowledge-assets-publish-authority-route.test.ts',
           'test/promote-admission-route.test.ts',
           'test/async-share-control-busy-admission.test.ts',
@@ -164,6 +173,9 @@ export default defineConfig({
           'test/cpu-profile-command.test.ts',
           'test/cpu-profile-real.test.ts',
           'test/cpu-profile-live.test.ts',
+          // Node-admin read-graph commands: routes on a real read-graph layer, command and client.
+          'test/read-graphs-route.test.ts',
+          'test/read-graphs-command.test.ts',
           'test/private-access-route.test.ts',
           // R8 — #1085 /register policy-matrix route tests, extracted from
           // daemon-http-behavior-extra so they run here (pure route handler,
@@ -404,6 +416,8 @@ export default defineConfig({
           'test/daemon-startup-wait.test.ts',
           'test/oxigraph-server.test.ts',
           'test/oxigraph-server-native.test.ts',
+          // A peer's write with a malformed term, on the pinned real server.
+          'test/peer-write-term-validation-oxigraph-server.test.ts',
           'test/oxigraph-server-wal.test.ts',
           'test/oxigraph-managed-start-options.test.ts',
           'test/oxigraph-wal-maintenance.test.ts',
@@ -479,9 +493,12 @@ export default defineConfig({
           'test/daemon-prime-agent.test.ts',
           'test/daemon-prime-agent-persistence.test.ts',
           'test/daemon-sse-final-frame.test.ts',
+          // Proxy keepalives on the Hermes and OpenClaw chat streams (#3886).
+          'test/local-agent-sse-keepalive.test.ts',
           'test/chain-discovery-scan-mode.test.ts',
           'test/chain-discovery-scan-storage.test.ts',
           'test/context-graph-list-cli.test.ts',
+          'test/context-graph-list-filter-route.test.ts',
           'test/historical-context-graph-discovery.test.ts',
           'test/context-graph-subscriptions-route.test.ts',
           'test/context-graph-authority-route.test.ts',
@@ -496,6 +513,7 @@ export default defineConfig({
           // config type and loader, and the daemon configuring the path before any store call. No hardhat.
           'test/store-control-path-config.test.ts',
           'test/daemon-store-control-path-wiring.test.ts',
+          'test/daemon-api-bind-guard.test.ts',
         ],
     testTimeout: runsDaemonHttpBehavior ? 120_000 : 60_000,
     globalSetup: runsDaemonHttpBehavior ? ['../chain/test/hardhat-global-setup.ts'] : [],

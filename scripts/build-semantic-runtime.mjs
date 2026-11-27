@@ -147,7 +147,6 @@ export function assertPortableBuildEnvironment(env = process.env) {
 
 function buildInto(outputRoot) {
   assertPortableBuildEnvironment();
-  verifyToolchain();
   // Cargo may pass only `rustc` to RUSTC_WRAPPER (notably with Homebrew).
   // The macOS wrapper needs the selected compiler's full path for its dylibs.
   const rustc = run('rustup', ['which', '--toolchain', EXPECTED_RUST_TOOLCHAIN, 'rustc'], { capture: true });
@@ -469,6 +468,19 @@ function main() {
   if (verifyOnly) {
     verifyGenerated();
     console.log('semantic-runtime: local Wasm integrity and ABI verified');
+    return;
+  }
+
+  try {
+    verifyToolchain();
+  } catch (error) {
+    if (process.env.DKG_SEMANTIC_RUNTIME_WASM === 'required') throw error;
+    console.warn(
+      `${error instanceof Error ? error.message : String(error)}\n`
+      + 'semantic-runtime: the pinned toolchain is not installed, so the Wasm build is skipped and this build '
+      + "can't run the semantic runtime. To build it, install the toolchain (see rust/README.md) and build with "
+      + 'DKG_SEMANTIC_RUNTIME_WASM=required.',
+    );
     return;
   }
 

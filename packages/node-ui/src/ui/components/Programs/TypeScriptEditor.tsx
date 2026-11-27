@@ -53,7 +53,7 @@ export default function TypeScriptEditor({ value, onChange, disabled, filename =
       const model = monaco.editor.createModel(latest.current.value, language, monaco.Uri.parse(`file:///program-${createUuid()}/${filename}`));
       const instance = monaco.editor.create(container.current!, { model, automaticLayout: true,
         readOnly: latest.current.disabled, theme: useLayoutStore.getState().theme === 'dark' ? 'vs-dark' : 'vs',
-        minimap: { enabled: false }, wordWrap: 'on', fontSize: 13, tabSize: 2, scrollBeyondLastLine: false,
+        minimap: { enabled: false }, wordWrap: 'on', fontSize: 13 /* px: Monaco takes a number; --fs-control */, tabSize: 2, scrollBeyondLastLine: false,
         ariaLabel: 'TypeScript Program source', fixedOverflowWidgets: true });
       editor.current = instance;
       const subscription = instance.onDidChangeModelContent(() => change.current(instance.getValue()));

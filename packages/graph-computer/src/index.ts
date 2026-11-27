@@ -1,5 +1,5 @@
 import { executionTrace } from './trace.js';
-import { getAddress } from 'ethers';
+import { getAddress } from 'ethers/address';
 import { GraphComputerError } from './errors.js';
 import { canonicalInputs } from './inputs.js';
 import { createUuid } from './uuid.js';

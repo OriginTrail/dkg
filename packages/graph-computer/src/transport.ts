@@ -1,4 +1,4 @@
-import { getAddress } from 'ethers';
+import { getAddress } from 'ethers/address';
 import { GraphComputerError } from './errors.js';
 import { signHttpRequest } from './signing.js';
 import type { GraphComputerOptions, RequestOptions } from './types.js';

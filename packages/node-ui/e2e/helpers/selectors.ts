@@ -8,6 +8,7 @@ export const sel = {
     logoText: '.v10-header-ot-wordmark',
     sidebarToggle: 'button[title="Toggle sidebar"]',
     agentName: '.v10-header-agent-name',
+    status: '.v10-header-meta .ds-badge',
     meta: '.v10-header-meta',
     notifWrap: '.v10-header-notif-wrap',
     notifBadge: '.v10-header-notif-badge',
@@ -22,8 +23,6 @@ export const sel = {
     notifItemText: '.v10-notif-row-detail',
     notifItemTime: '.v10-notif-time',
     themeToggle: 'button[title*="Switch to"]',
-    observabilityBtn: 'button[title="Observability"]',
-    settingsBtn: 'button[title="Settings"]',
     rightPanelToggle: 'button[title="Toggle agent panel"]',
     actions: '.v10-header-actions',
   },
@@ -39,7 +38,7 @@ export const sel = {
     // memory-layer rows / fixture CG names — all gone for multiple
     // PRs); this PR only triages the cases its removals directly broke.
     treeContent: '.v10-tree-content',
-    dashboard: '.v10-sidebar-nav-row',
+    dashboard: '.v10-tree-dashboard',
     newProjectBtn: '.v10-sidebar-inline-actions button',
     emptyCard: '.v10-sidebar-empty',
     emptyTitle: '.v10-sidebar-empty strong',
@@ -52,9 +51,6 @@ export const sel = {
     treeItems: '.v10-tree-items',
     treeItem: '.v10-tree-item',
     itemLabel: '.v10-tree-item-label',
-    layerHeader: '.v10-tree-layer-header',
-    oraclePlaceholder: '.v10-oracle-placeholder',
-    integrationDot: '.v10-tree-integration-dot',
     // PR8 sibling-section pattern (My Context Graphs + Integrations):
     peerGroup: '.v10-peer-group',
     peerGroupHeader: '.v10-peer-group-header',
@@ -67,7 +63,9 @@ export const sel = {
     root: '.v10-panel-center',
     tabs: '.v10-center-tabs',
     tab: '.v10-center-tab',
-    tabLabel: '.v10-center-tab-label',
+    // Tab names come from each tab's `title` (the pinned Dashboard tab shows
+    // only its icon, so it has no visible `.v10-center-tab-label`).
+    activeTab: '.v10-center-tab[aria-selected="true"]',
     tabClose: '.v10-center-tab-close',
     content: '.v10-center-content',
     placeholder: '.v10-view-placeholder',
@@ -143,22 +141,13 @@ export const sel = {
 
   dashboard: {
     root: '.v10-dashboard',
-    title: '.v10-dash-title',
-    subtitle: '.v10-dash-subtitle',
+    title: '.ds-page-title',
+    subtitle: '.ds-page-desc',
     stats: '.v10-dash-stats',
     statCard: '.stat-card',
     statLabel: '.stat-label',
     statValue: '.stat-value',
-    quickAction: '.v10-quick-action',
-    quickActionIcon: '.v10-quick-action-icon',
     sectionHeader: '.v10-dash-section-header',
-    sectionLink: '.v10-dash-section-link',
-    recentOp: '.v10-recent-op',
-    recentOpType: '.v10-recent-op-type',
-    recentOpStatus: '.v10-recent-op-status',
-    projectCard: '.v10-dash-project-card',
-    projectName: '.v10-dash-project-name',
-    projectCount: '.v10-dash-project-count',
   },
 
   modal: {
@@ -182,7 +171,6 @@ export const sel = {
     advancedToggle: '.v10-form-advanced-toggle',
     advancedBody: '.v10-form-advanced-body',
     advChevron: '.v10-form-adv-chevron',
-    layerPreview: '.v10-layer-preview',
   },
 
   importModal: {
@@ -242,10 +230,10 @@ export const sel = {
 
   shareModal: {
     title: '.v10-modal-title',
-    inviteLabel: '.v10-form-label:has-text("Invite Code")',
-    allowedAgents: '.v10-form-label:has-text("Allowed Agents")',
-    pendingRequests: '.v10-form-label:has-text("Pending Join Requests")',
-    copyInviteBtn: 'button:has-text("Copy Invite")',
+    inviteLabel: '.v10-form-label:has-text("Invite code")',
+    allowedAgents: '.v10-form-label:has-text("Allowed agents")',
+    pendingRequests: '.v10-form-label:has-text("Pending join requests")',
+    copyInviteBtn: 'button:has-text("Copy invite")',
   },
 
   myContextGraphs: {
@@ -258,13 +246,13 @@ export const sel = {
   // rewritten page uses the shared `.card`/`.settings-*` design-system classes.
   // Opens as a closable center tab from the header gear button.
   settings: {
-    pageTitle: '.page-title',
+    pageTitle: '.ds-page-title',
     stack: '.settings-stack',
     card: '.settings-stack .card',
     cardTitle: '.settings-stack .card-title',
     fieldLabel: '.settings-field-label',
     fieldValue: '.settings-field-value',
-    onlinePill: '.settings-stack .card-body .mono',
+    nodeStatus: '.settings-node-status .ds-badge',
     telemetrySwitch: 'button[role="switch"][aria-label="Share telemetry with the network"]',
     telemetryDialog: '[role="dialog"][aria-label="Enable Telemetry Streaming?"]',
     retentionSelect: '#retention-select',
@@ -292,10 +280,9 @@ export const sel = {
     recheckBtn: '[data-testid="pca-recheck-btn"]',
     // S7 role-adaptive landing + S1 overview
     landing: '[data-testid="pca-landing"]',
-    trackToggle: '[data-testid="pca-track-toggle"], .v10-pca-track-toggle', // S1 collapsed "track by id" disclosure (expand first)
-    trackInput: '[data-testid="pca-track-input"]',         // S1 manual accountId paste (P0 pre-discovery)
-    trackSubmit: '[data-testid="pca-track-submit"]',
-    accountCard: '[data-testid="pca-account-card"]',        // S1/S3 PcaAccountCard
+    checkInput: '[data-testid="pca-check-input"]',         // S1 "Already have a PCA?" ID field (opens the Get added check)
+    checkSubmit: '[data-testid="pca-check-submit"]',
+    accountCard: '[data-testid="pca-account-row"]',         // S1 PCA list row
     healthChip: '[data-testid="pca-health-chip"]',          // HealthChip
     tierLadder: '[data-testid="pca-tier-ladder"]',          // DiscountTierLadder
     // S2 create
@@ -304,7 +291,7 @@ export const sel = {
     createTokensInput: '[data-testid="pca-create-tokens"]',
     createPrimaryNode: '[data-testid="pca-create-primary-node"]',
     createSubmit: '[data-testid="pca-create-submit"]',
-    createSuccess: '[data-testid="pca-create-success"]',    // invariant 11: "0/100 wallets approved — discounts nothing yet"
+    createSuccess: '[data-testid="pca-create-success"]',    // invariant 11: "No wallets are approved yet, so no publishes get the discount"
     approveOwnWalletsCta: '[data-testid="pca-approve-own-wallets"]',
     // S3 manage (conviction:<id> detail tab)
     detail: '[data-testid="pca-detail"]',                   // S3 detail root

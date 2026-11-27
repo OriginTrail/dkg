@@ -79,8 +79,15 @@ describe('DKG_STORE_CONTROL_RESERVED_SLOTS', () => {
       .toMatchObject({ slots: { share: 1, publisher: 2 }, source: 'default' });
     expect(resolveStoreControlConfig(undefined, { cpus: 2, backend: 'blazegraph' }))
       .toMatchObject({ slots: { share: 0, publisher: 0 }, source: 'default' });
-    // The caps are the hard maximum: 3 added slots in total.
-    expect(STORE_CONTROL_MAX_SLOTS).toEqual({ share: 1, publisher: 2 });
+    // The optional preflight slot is separate from the two job queues.
+    expect(STORE_CONTROL_MAX_SLOTS).toEqual({ share: 1, publisher: 2, preflight: 1 });
+  });
+
+  it('only reserves the shared preflight slot by explicit configuration and caps it at one', () => {
+    const result = resolveStoreControlConfig('share:1,publisher:2,preflight:2');
+    expect(result.slots).toEqual({ share: 1, publisher: 2, preflight: 1 });
+    expect(result.warnings).toHaveLength(1);
+    expect(resolveStoreControlConfig('share:1,publisher:2').slots.preflight).toBeUndefined();
   });
 
   it('turns the whole path off with 0', () => {

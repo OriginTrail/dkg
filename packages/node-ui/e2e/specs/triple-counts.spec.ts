@@ -34,7 +34,7 @@ test.describe('Triple counts — project overview', () => {
   });
 
   test('knowledge pipeline cards show per-layer breakdown', async ({ page }) => {
-    await expect(page.getByText('Knowledge Pipeline')).toBeVisible();
+    await expect(page.getByText('Knowledge pipeline')).toBeVisible();
     await expect(page.getByRole('button', { name: /Working Memory/i }).first()).toBeVisible();
     await expect(page.getByRole('button', { name: /Verifiable Memory/i }).first()).toBeVisible();
   });

@@ -14,7 +14,7 @@ describe('marketplace component gallery', () => {
     expect(c.textContent).toContain('Component gallery · fixture data · not live');
     for (const text of ['held', 'landed', 'missed', 'Weights verified', 'Seller-reported model', '2.16 TRAC left this epoch',
       'Epoch 664: 27% of its value landed, 3% held', 'One confirmation — this epoch\'s funding', 'Try again in 120 s',
-      'The seller\'s receipt failed this node\'s check', 'Selling is off on this node', 'The marketplace isn\'t available on this node']) {
+      'The seller\'s receipt failed this node\'s check', 'Selling is off on this node', 'The NS Marketplace isn\'t available on this node']) {
       expect(c.textContent).toContain(text);
     }
     expect(c.querySelectorAll('.mkt-bar').length).toBe(3);

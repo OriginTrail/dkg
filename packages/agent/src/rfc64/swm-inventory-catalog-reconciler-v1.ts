@@ -15,13 +15,12 @@ import {
   assertSwmAuthorInventorySnapshotBindingV1,
   canonicalizeCanonicalGraphScopedAuthorSealV1,
   canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1,
-  canonicalizeSwmAuthorInventoryRowsBytesV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeKaProjectionDigestV1,
   deriveSwmAuthorInventoryScopeFromHeadV1,
   parseCanonicalGraphScopedAuthorSealV1,
   parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1,
-  parseCanonicalSwmAuthorInventoryRowsV1,
+  detachSwmAuthorInventoryRowsV1,
   type AuthorCatalogScopeV1,
   type SwmAuthorInventoryRowV1,
   type SwmAuthorInventoryScopeV1,
@@ -209,9 +208,7 @@ function snapshotInventory(input: unknown): SwmAuthorInventorySnapshotV1 {
     const head = parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1(
       canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1(record.head as never),
     );
-    const rows = parseCanonicalSwmAuthorInventoryRowsV1(
-      canonicalizeSwmAuthorInventoryRowsBytesV1(record.rows as never),
-    );
+    const rows = detachSwmAuthorInventoryRowsV1(record.rows as SwmAuthorInventorySnapshotV1['rows']);
     const snapshot = Object.freeze({ head, rows });
     assertSwmAuthorInventorySnapshotBindingV1(snapshot);
     return snapshot;

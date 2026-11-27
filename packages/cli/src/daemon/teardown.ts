@@ -94,6 +94,11 @@ import type { PublisherLiveControl } from '../publisher-live-control.js';
  * `endCpuProfile` does the same for an operator's CPU profile, which records
  * for up to 60 s inside its request: it is stopped and written at once, and a
  * later one is refused.
+ *
+ * `endReadGraphRequests` ends an operator's read-graph check, rebuild or drop
+ * (`dkg store read-graphs`), which can run for minutes inside its request: it
+ * stops at its next store call and answers at once, and a later one is
+ * refused.
  */
 export async function beginGracefulShutdown(deps: {
   state: { catchupAcceptingJobs: boolean };
@@ -108,6 +113,8 @@ export async function beginGracefulShutdown(deps: {
   stopCatchupTriggers?: () => void;
   /** Stops a running CPU profile now and refuses later ones. */
   endCpuProfile?: () => void;
+  /** Ends the running read-graph requests now and refuses later ones. */
+  endReadGraphRequests?: () => void;
 }): Promise<void> {
   deps.state.catchupAcceptingJobs = false;
   const reportControlClose = (error: unknown) => deps.log(`Publisher control shutdown error: ${error instanceof Error ? error.message : String(error)}`);
@@ -133,6 +140,11 @@ export async function beginGracefulShutdown(deps: {
     deps.endCpuProfile?.();
   } catch (err: any) {
     deps.log(`CPU profile stop error: ${err?.message ?? String(err)}`);
+  }
+  try {
+    deps.endReadGraphRequests?.();
+  } catch (err: any) {
+    deps.log(`Read-graph request stop error: ${err?.message ?? String(err)}`);
   }
   deps.log('Shutting down...');
   await deps.removeApiPort().catch((err: any) =>
