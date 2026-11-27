@@ -64,23 +64,21 @@ describe('PeerStatusLedger round outcomes', () => {
 describe('ACKPeerTrackRecord', () => {
   const valid = (latencyMs: number) => ({ kind: 'valid' as const, latencyMs });
 
-  it('leaves out a core whose signer the chain put outside the sharding table', () => {
+  it('ranks a recently ineligible signer last without excluding it', () => {
     const record = new ACKPeerTrackRecord();
     record.record([
       { peerId: 'b', outcome: valid(400) },
       { peerId: 'n', outcome: { kind: 'ineligible-signer', reason: 'not-in-sharding-table' } },
     ]);
-    const plan = record.plan(['n', 'a', 'b', 'c'], 2);
-    expect(plan.peers).toEqual(['b', 'a', 'c']);
-    expect([...plan.ineligible]).toEqual(['n']);
+    const plan = record.plan(['n', 'a', 'b', 'c']);
+    expect(plan.peers).toEqual(['b', 'a', 'c', 'n']);
   });
 
-  it('keeps such a core while leaving it out would leave fewer candidates than the quorum', () => {
+  it('preserves a recovered candidate even in a small pool', () => {
     const record = new ACKPeerTrackRecord();
     record.record([{ peerId: 'n', outcome: { kind: 'ineligible-signer', reason: 'not-in-sharding-table' } }]);
-    const plan = record.plan(['n', 'a'], 2);
+    const plan = record.plan(['n', 'a']);
     expect(plan.peers).toEqual(['a', 'n']);
-    expect(plan.ineligible.size).toBe(0);
   });
 
   it('asks recent fast valid cores first, unknown ones next, declined or silent ones last', () => {
@@ -91,18 +89,18 @@ describe('ACKPeerTrackRecord', () => {
       { peerId: 'fast', outcome: valid(150) },
       { peerId: 'silent', outcome: { kind: 'unanswered' } },
     ]);
-    expect(record.plan(['busy', 'silent', 'unknown-1', 'slow', 'fast', 'unknown-2'], 2).peers)
+    expect(record.plan(['busy', 'silent', 'unknown-1', 'slow', 'fast', 'unknown-2']).peers)
       .toEqual(['fast', 'slow', 'unknown-1', 'unknown-2', 'busy', 'silent']);
   });
 
-  it('forgets an outcome after the TTL, so a core that joined the sharding table is asked again', () => {
+  it('forgets an outcome after the TTL and restores the original ranking', () => {
     let now = 0;
     const record = new ACKPeerTrackRecord(() => now);
     record.record([{ peerId: 'n', outcome: { kind: 'ineligible-signer', reason: 'not-in-sharding-table' } }]);
     now = ACK_PEER_TRACK_RECORD_TTL_MS - 1;
-    expect(record.plan(['n', 'a', 'b'], 2).peers).toEqual(['a', 'b']);
+    expect(record.plan(['n', 'a', 'b']).peers).toEqual(['a', 'b', 'n']);
     now = ACK_PEER_TRACK_RECORD_TTL_MS;
-    expect(record.plan(['n', 'a', 'b'], 2).peers).toEqual(['n', 'a', 'b']);
+    expect(record.plan(['n', 'a', 'b']).peers).toEqual(['n', 'a', 'b']);
     expect(record.outcome('n')).toBeUndefined();
   });
 
@@ -150,7 +148,7 @@ describe('ACK rounds with the track record', () => {
   }
 
   /** One round over the pool; `plan` stands in for the agent's candidate selection. */
-  async function round(plan: (pool: string[]) => string[], record?: ACKPeerTrackRecord, legacy?: { fails: boolean; pool: string[] }) {
+  async function round(plan: (pool: string[]) => string[], record?: ACKPeerTrackRecord, legacy?: { fails: boolean; pool: string[] }, recovered?: { pool: string[] }) {
     const sends: string[] = [];
     const checks: bigint[] = [];
     const deps: ACKCollectorDeps = {
@@ -161,11 +159,11 @@ describe('ACK rounds with the track record', () => {
         await sleep(replyAfterMs.get(peerId)!);
         return peerId === 'busy' ? decline() : signedACK(peerId);
       },
-      getConnectedCorePeers: async () => plan(legacy?.pool ?? [...wallets.keys()]),
+      getConnectedCorePeers: async () => plan(recovered?.pool ?? legacy?.pool ?? [...wallets.keys()]),
       verifyIdentityDetailed: async (_signer, identityId) => {
         checks.push(identityId);
         await sleep(20);
-        return identityId === 19n ? { valid: false, reason: 'not-in-sharding-table' } : { valid: true };
+        return identityId === 19n && !recovered ? { valid: false, reason: 'not-in-sharding-table' } : { valid: true };
       },
       ...(record ? { onPeerOutcomes: (reports: readonly ACKPeerOutcomeReport[]) => record.record(reports) } : {}),
     };
@@ -183,28 +181,42 @@ describe('ACK rounds with the track record', () => {
     return { ms: performance.now() - startedAt, sends, checks, acks: result.acks.map((a) => a.peerId) };
   }
 
-  it('stops asking the non-member after one round, and asks it every round without the record', async () => {
+  it('ranks by recorded outcomes while retaining fresh validation of every candidate', async () => {
     const asIs = (pool: string[]) => pool;
     const before = [await round(asIs), await round(asIs)];
 
     const record = new ACKPeerTrackRecord();
-    const planned = (pool: string[]) => record.plan(pool, 2).peers;
+    const planned = (pool: string[]) => record.plan(pool).peers;
     const after = [await round(planned, record), await round(planned, record)];
 
     for (const r of [...before, ...after]) expect(r.acks.sort()).toEqual(['fast-1', 'fast-2']);
     // Before: every round asks all five cores and checks the non-member's signer on chain.
     expect(before.map((r) => r.sends.length)).toEqual([5, 5]);
     expect(before.map((r) => r.checks.length)).toEqual([3, 3]);
-    // After: the first round learns; the second asks four, fast ones first, and checks only the two that count.
+    // History changes order, but never removes a core based on an old signer verdict.
     expect(after[0]).toMatchObject({ sends: ['fast-1', 'fast-2', 'non-member', 'busy', 'slow'] });
-    expect(after[1].sends).toEqual(['fast-1', 'fast-2', 'slow', 'busy']);
-    expect(after[1].checks).toEqual([3n, 4n]);
+    expect(after[1].sends).toEqual(['fast-1', 'fast-2', 'slow', 'busy', 'non-member']);
+    expect(after[1].checks).toEqual([19n, 3n, 4n]);
     expect(record.outcome('non-member')).toEqual({ kind: 'ineligible-signer', reason: 'not-in-sharding-table' });
     expect(record.outcome('busy')).toEqual({ kind: 'declined', code: 'CORE_TEMPORARILY_UNAVAILABLE' });
   });
+  it('reaches quorum with a recovered signer when another preferred candidate declines', async () => {
+    const record = new ACKPeerTrackRecord();
+    record.record([
+      { peerId: 'non-member', outcome: { kind: 'ineligible-signer', reason: 'key-not-registered' } },
+      { peerId: 'busy', outcome: { kind: 'valid', latencyMs: 1 } },
+      { peerId: 'fast-2', outcome: { kind: 'valid', latencyMs: 2 } },
+    ]);
+    const result = await round(pool => record.plan(pool).peers, record, undefined,
+      { pool: ['non-member', 'busy', 'fast-2'] });
+    expect(result.sends).toEqual(['busy', 'fast-2', 'non-member']);
+    expect(result.acks.sort()).toEqual(['fast-2', 'non-member']);
+    expect(record.outcome('non-member')?.kind).toBe('valid');
+  });
+
   it('retries a recovered core after an ambiguous legacy verification failure', async () => {
     const record = new ACKPeerTrackRecord();
-    const planned = (pool: string[]) => record.plan(pool, 2).peers;
+    const planned = (pool: string[]) => record.plan(pool).peers;
     await round(planned, record, { fails: true, pool: ['non-member', 'fast-1', 'fast-2', 'slow'] });
     expect(record.outcome('non-member')).toEqual({ kind: 'declined', code: 'ACK_VERIFY:unknown' });
     // The failed core is now healthy, and a previously successful core has left.

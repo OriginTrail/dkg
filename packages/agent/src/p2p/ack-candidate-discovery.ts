@@ -127,7 +127,7 @@ export class ACKCandidateDiscoveryCoordinator {
     return selectCanonicalACKCandidatePeersWithDiagnostics({
       ...input,
       localCandidate,
-      history: { trackRecord: this.trackRecord, requiredACKs: input.requiredACKs },
+      history: { trackRecord: this.trackRecord },
       capability: { mode: 'require', corePeers: snapshot.corePeerIds, requestedProtocolPeers },
     });
   }

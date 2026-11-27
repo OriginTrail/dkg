@@ -184,11 +184,13 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
   /** The native store for a write. A read-only store refuses before anything changes. */
   private get writable(): OxStore {
     if (this.readOnly) throw new OxigraphStoreReadOnlyError(this.persistPath);
+    // A multi-step mutation may throw after changing data, before scheduling.
+    // Track at the write boundary so an explicit barrier still persists it.
+    this.dirtyGeneration += 1;
     return this.store;
   }
 
   private scheduleFlush(): void {
-    this.dirtyGeneration += 1;
     this.armFlush();
   }
 

@@ -109,6 +109,28 @@ describe('OxigraphStore persistence', () => {
     expect(flushBarrier.snapshotWrites).toBe(1);
   });
 
+  it('persists a partial mutation even when the operation throws before scheduling a flush', async () => {
+    const path = join(dir, 'store.nq');
+    const store = new OxigraphStore(path, { flushDelayMs: 60_000 });
+    const engine = (store as unknown as { store: { delete(quad: unknown): void } }).store;
+    const remove = engine.delete.bind(engine);
+    let calls = 0;
+    try {
+      await store.insert(SAMPLE); await store.flush();
+      const failure = vi.spyOn(engine, 'delete').mockImplementation(quad => {
+        if (++calls === 2) throw new Error('injected second deletion failure');
+        remove(quad);
+      });
+      await expect(store.delete(SAMPLE)).rejects.toThrow('injected second deletion failure');
+      failure.mockRestore();
+      expect(await store.countQuads()).toBe(1);
+      await store.flush();
+      const reopened = new OxigraphStore(path, { readOnly: true });
+      try { expect(await reopened.countQuads()).toBe(1); }
+      finally { await reopened.close(); }
+    } finally { vi.restoreAllMocks(); await store.close(); }
+  });
+
   it('keeps a failed snapshot dirty for the next barrier without another mutation', async () => {
     const path = join(dir, 'store.nq');
     const store = new OxigraphStore(path, { flushDelayMs: 60_000 });

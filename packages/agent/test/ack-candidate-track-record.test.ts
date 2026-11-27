@@ -29,7 +29,7 @@ describe('ACK candidate selection with the cores\' track record', () => {
     expect(plan.peers).toEqual(CORES);
   });
 
-  it('leaves out the core whose signer is outside the sharding table and asks fast cores first', async () => {
+  it('asks fast cores first while retaining a recently ineligible signer', async () => {
     const coordinator = coordinatorWithCores();
     coordinator.recordRoundOutcomes([
       { peerId: 'non-member', outcome: { kind: 'ineligible-signer', reason: 'not-in-sharding-table' } },
@@ -40,8 +40,8 @@ describe('ACK candidate selection with the cores\' track record', () => {
 
     const plan = await round(coordinator, 2);
 
-    expect(plan.peers).toEqual(['core-b', 'core-a', 'core-c', 'core-d']);
-    expect(plan.diagnostics.find((d) => d.peerId === 'non-member')).toMatchObject({ selected: false, reason: 'ineligible-signer' });
+    expect(plan.peers).toEqual(['core-b', 'core-a', 'core-c', 'core-d', 'non-member']);
+    expect(plan.diagnostics.find((d) => d.peerId === 'non-member')).toMatchObject({ selected: true });
     // The diagnostics list the selected cores in asking order (the "Selected …" log line).
     expect(plan.diagnostics.filter((d) => d.selected).map((d) => d.peerId)).toEqual(plan.peers);
   });
@@ -53,12 +53,12 @@ describe('ACK candidate selection with the cores\' track record', () => {
       peerId, outcome: { kind: 'ineligible-signer' as const, reason: 'not-in-sharding-table' },
     })));
     const plan = await round(coordinator, 3, { peerId: 'self', available: true });
-    expect(plan.peers).toEqual(['self', ...healthy, ...(healthyCount === 2 ? [] : ineligible)]);
+    expect(plan.peers).toEqual(['self', ...healthy, ...ineligible]);
     expect(plan.diagnostics[0]).toMatchObject({ peerId: 'self', reason: 'selected-local' });
-    expect(plan.diagnostics.filter(d => d.reason === 'ineligible-signer')).toHaveLength(healthyCount === 2 ? 3 : 0);
+    expect(plan.diagnostics.filter(d => d.reason === 'ineligible-signer')).toHaveLength(0);
   });
 
-  it('keeps every candidate when leaving the non-members out would leave fewer than the quorum', async () => {
+  it('keeps every candidate even when most have old ineligible-signer records', async () => {
     const coordinator = coordinatorWithCores();
     coordinator.recordRoundOutcomes(CORES.slice(0, 4).map((peerId) => ({
       peerId, outcome: { kind: 'ineligible-signer' as const, reason: 'not-in-sharding-table' },
@@ -77,7 +77,7 @@ describe('ACK candidate selection with the cores\' track record', () => {
     const local = { peerId: 'self', available: false };
     const direct = coordinator.selectCandidates({ connectedPeers: [...CORES, 'relay-1'],
       protocol: PROTOCOL_STORAGE_ACK, requiredACKs: 2 }, local);
-    expect(direct.peers).toEqual(['core-c', 'core-d']);
+    expect(direct.peers).toEqual(['core-c', 'core-d', ...CORES.slice(0, 3)]);
     expect(await round(coordinator, 2, local)).toEqual(direct);
   });
 

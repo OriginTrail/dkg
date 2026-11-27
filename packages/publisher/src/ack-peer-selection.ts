@@ -19,8 +19,8 @@ export interface ACKCanonicalCandidatePeerSelectionInput {
   capability?: ACKCapabilitySelectionPolicy;
   protocol?: StorageACKProtocol;
   selfPeerId?: string;
-  /** History filtering always carries the quorum of this round. */
-  history?: { trackRecord: Pick<ACKPeerTrackRecord, 'plan'>; requiredACKs: number };
+  /** Preference-only history; fresh identity verification decides whether an ACK counts. */
+  history?: { trackRecord: Pick<ACKPeerTrackRecord, 'plan'> };
 }
 
 type ACKCandidateTierName = 'requestedProtocol' | 'confirmedCore' | 'rest';
@@ -135,7 +135,6 @@ function diagnosticForPeer(input: {
   capability?: ACKCapabilitySelectionPolicy;
   corePeers?: ReadonlySet<string>;
   requestedProtocolPeers?: ReadonlySet<string>;
-  ineligible: ReadonlySet<string>;
 }): ACKCanonicalCandidatePeerDiagnostic {
   const protocolMatch = input.requestedProtocolPeers
     ? input.requestedProtocolPeers.has(input.peerId)
@@ -146,7 +145,6 @@ function diagnosticForPeer(input: {
   let reason = selected ? 'selected' : 'not-selected';
   if (!input.allowlisted) reason = 'not-allowlisted';
   else if (input.capability?.mode === 'require' && !input.corePeers?.has(input.peerId)) reason = 'not-core-capable';
-  else if (input.ineligible.has(input.peerId)) reason = 'ineligible-signer';
   else if (!protocolMatch && input.requestedProtocolPeers) reason = selected ? 'selected-protocol-fallback' : 'protocol-fallback';
   return {
     peerId: input.peerId,
@@ -183,10 +181,8 @@ export function selectCanonicalACKCandidatePeersWithDiagnostics(
   });
 
   const eligibleRemote = flattenTiers(tiers, preferredACKPeers);
-  const plan = input.history?.trackRecord.plan(eligibleRemote,
-    Math.max(1, input.history.requiredACKs - Number(input.localCandidate?.available === true)));
+  const plan = input.history?.trackRecord.plan(eligibleRemote);
   const remotePeers = plan?.peers ?? eligibleRemote;
-  const ineligible = plan?.ineligible ?? new Set<string>();
   const diagnosticOrder = plan
     ? [...remotePeers, ...connected.filter(peerId => !remotePeers.includes(peerId))]
     : connected;
@@ -196,7 +192,6 @@ export function selectCanonicalACKCandidatePeersWithDiagnostics(
   const remoteDiagnostics = diagnosticOrder.map((peerId) => diagnosticForPeer({
     peerId,
     selected,
-    ineligible,
     tier: tierMap.get(peerId) ?? 'rest',
     preferred: preferredACKPeers,
     allowlisted:
