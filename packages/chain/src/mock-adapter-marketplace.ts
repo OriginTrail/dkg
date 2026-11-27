@@ -24,6 +24,7 @@
  */
 import { ethers } from 'ethers';
 import type { IdentityReadOptions, TxResult, V10PublishingConvictionAccountInfo } from './chain-adapter.js';
+import type { MockChainAdapter } from './mock-adapter.js';
 import { enrichEvmError, getErrorInterface } from './evm-adapter-errors.js';
 import {
   BUYER_GRANT_TYPES,
@@ -46,7 +47,9 @@ import {
   type EpochFunding,
   type EpochTimes,
   type EpochTotals,
+  type KnowledgeAssetExtension,
   type MarketplaceChain,
+  type MarketplaceChainAdapter,
   type MarketplaceContracts,
   type MarketplaceWriteOptions,
   type NodeEpoch,
@@ -127,6 +130,8 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
   abstract getIdentityId(options?: IdentityReadOptions): Promise<bigint>;
   abstract getEvmChainId(): Promise<bigint>;
   abstract getPublishingConvictionAccountInfo(accountId: bigint): Promise<V10PublishingConvictionAccountInfo | null>;
+  /** On MockChainAdapter, beside the Knowledge Assets it extends (mock-adapter.ts). */
+  abstract extendKnowledgeAssetLifetime(kaId: bigint, epochs: number, opts?: MarketplaceWriteOptions): Promise<KnowledgeAssetExtension>;
   abstract signTypedDataAs(
     address: string,
     domain: ethers.TypedDataDomain,
@@ -134,6 +139,11 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
     value: Record<string, unknown>,
   ): Promise<string>;
   protected abstract txResult(success: boolean): TxResult;
+
+  /** The marketplace: the mock itself, which implements all of it (mock-adapter.ts). */
+  marketplaceChain(this: MockChainAdapter): MarketplaceChainAdapter {
+    return this;
+  }
 
   private readonly marketplaceGenesis = Math.floor(Date.now() / 1000);
   private readonly marketplace = {
