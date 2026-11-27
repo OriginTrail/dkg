@@ -168,13 +168,12 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     expect((a.peerCapabilityRegistry.supportsCore(CORE[1]) && a.peerCapabilityRegistry.supports(CORE[1], PROTOCOL_STORAGE_ACK_V2))).toBe(false);
   });
 
-  it.each(['factory', 'publish', 'update'] as const)('shares quorum and history wiring for %s transport', async path => {
+  it.each(['factory', 'publish', 'update'] as const)('shares current quorum wiring for %s transport', async path => {
     const agent = await buildAgent({ confirmedCores: CORE, connected: CORE, lastKnownRequiredACKs: 99 });
     const runtime = agent as unknown as DKGAgent;
     const internal = runtime as any;
     const discovery = internal.ackCandidateDiscovery as ACKCandidateDiscoveryCoordinator;
     const resolve = vi.spyOn(discovery, 'resolveRound').mockResolvedValue({ peers: CORE, diagnostics: [] });
-    const record = vi.spyOn(discovery, 'recordRoundOutcomes');
     const build = vi.spyOn(internal, 'buildACKTransport');
     internal.router = {};
     internal.gossip = { publish: vi.fn() };
@@ -188,9 +187,6 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     const transport = build.mock.results[0]!.value as ReturnType<ReturnType<DKGAgent['createACKTransportFactory']>>;
     await transport.getConnectedCorePeers(PROTOCOL_STORAGE_ACK, 2);
     expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ requiredACKs: 2 }));
-    const outcomes = [{ peerId: CORE[0], outcome: { kind: 'valid' as const, latencyMs: 9 } }];
-    transport.onPeerOutcomes!(outcomes);
-    expect(record).toHaveBeenCalledWith(outcomes);
     expect(send).toHaveBeenCalledWith(path === 'factory' ? 123 : undefined, path === 'factory' ? undefined : expectedHead);
   });
 

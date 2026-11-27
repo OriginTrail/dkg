@@ -27,7 +27,7 @@ import { ethers } from 'ethers';
 import { QuorumUnmetError, assertACKCandidateQuorum, type PeerOutcome } from './ack-errors.js';
 import type { V10ACKMode } from './publisher.js';
 import { hasValidGraphScopedContent } from './graph-publish-envelope.js';
-import { PeerStatusLedger, type ACKPeerOutcomesObserver } from './ack-peer-status-ledger.js';
+import { PeerStatusLedger } from './ack-peer-status-ledger.js';
 import { ACKRoundDiagnostics, type ACKBackoffReason, type ACKDiagnosticSummary } from './ack-diagnostics.js';
 import { createACKRoundLifetime } from './ack-round-lifetime.js';
 
@@ -73,8 +73,6 @@ export interface ACKCollectorDeps {
     claimedIdentityId: bigint, options?: { signal?: AbortSignal },
   ) => Promise<ACKVerifyResult>;
   log?: (msg: string) => void;
-  /** Each asked core's outcome once a round is decided (ack-peer-track-record.ts keeps them). */
-  onPeerOutcomes?: ACKPeerOutcomesObserver;
   /**
    * Backoff sleep between transport-error retries and transient
    * SWM-decline retries (#887). Injectable so unit tests can exercise
@@ -962,7 +960,7 @@ export class ACKCollector {
               if (roundIsOver()) return null;
               if (!verdict.valid) {
                 const reason = sanitizeDeclineField(verdict.reason ?? 'unknown', MAX_DECLINE_CODE_CHARS) || 'unknown';
-                peerStatuses.recordSignerFailure(peerId, verdict.reason);
+                peerStatuses.recordACKValidation(peerId, `ACK_VERIFY:${reason}`);
                 getMetrics().ackPeerTotal.add(1, { result: 'rejected' });
                 log(
                   `[ACKCollector] ACK from ${peerId.slice(-8)} rejected: ${reason}` +
@@ -1150,7 +1148,7 @@ export class ACKCollector {
       // any `requestACK` loops still sleeping between retries to abandon on
       // wake rather than keep dialing after the caller has its answer.
       roundSettled = true;
-      diagnostics.finish(peerStatuses.settle(corePeers, this.deps.onPeerOutcomes));
+      diagnostics.finish(peerStatuses.counts(corePeers));
       lifetime.dispose();
     }
 

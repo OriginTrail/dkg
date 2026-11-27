@@ -1,36 +1,12 @@
-import type { ACKVerifyReason, CollectedACK } from './ack-collector.js';
+import type { CollectedACK } from './ack-collector.js';
 import type { PeerOutcome } from './ack-errors.js';
 
 type PeerStatus =
-  | { kind: 'ack'; ack: CollectedACK; latencyMs: number }
+  | { kind: 'ack'; ack: CollectedACK }
   | { kind: 'storage-decline'; code: string; message: string }
   | { kind: 'ack-validation'; reason: string }
-  | { kind: 'signer-verification'; reason: ACKVerifyReason | undefined }
   | { kind: 'protocol-unsupported'; message: string }
   | { kind: 'transport-error'; message: string };
-
-/**
- * One asked core's outcome in a finished ACK round, as the publisher keeps it
- * across rounds (ack-peer-track-record.ts). A core still unanswered when the
- * quorum settled reports nothing: it was slower, not failing.
- */
-export type ACKPeerRoundOutcome =
-  /** A counted ACK, `latencyMs` after the round started (signer check included). */
-  | { readonly kind: 'valid'; readonly latencyMs: number }
-  /** The chain said this core's ACK signer cannot count (not in the sharding table, key not registered). */
-  | { readonly kind: 'ineligible-signer'; readonly reason: Exclude<ACKVerifyReason, 'rpc-error'> }
-  /** It declined, sent an ACK that failed validation, or does not speak the protocol. */
-  | { readonly kind: 'declined'; readonly code: string }
-  /** No reply: the transport failed or timed out on every attempt. */
-  | { readonly kind: 'unanswered' };
-
-export interface ACKPeerOutcomeReport {
-  readonly peerId: string;
-  readonly outcome: ACKPeerRoundOutcome;
-}
-
-/** Receives every asked core's outcome once a round is decided. */
-export type ACKPeerOutcomesObserver = (reports: readonly ACKPeerOutcomeReport[]) => void;
 
 export interface ACKCandidateCounts {
   total: number;
@@ -43,7 +19,7 @@ export interface ACKCandidateCounts {
 }
 
 const counterByStatus = {
-  ack: 'ack', 'storage-decline': 'declined', 'ack-validation': 'invalid', 'signer-verification': 'invalid',
+  ack: 'ack', 'storage-decline': 'declined', 'ack-validation': 'invalid',
   'protocol-unsupported': 'unsupported', 'transport-error': 'transport',
 } satisfies Record<PeerStatus['kind'], Exclude<keyof ACKCandidateCounts, 'total' | 'pending'>>;
 
@@ -55,14 +31,9 @@ const counterByStatus = {
  */
 export class PeerStatusLedger {
   private readonly statuses = new Map<string, PeerStatus>();
-  private readonly startedAt: number;
-
-  constructor(private readonly now: () => number = () => performance.now()) {
-    this.startedAt = now();
-  }
 
   recordACK(ack: CollectedACK): void {
-    this.statuses.set(ack.peerId, { kind: 'ack', ack, latencyMs: Math.max(0, this.now() - this.startedAt) });
+    this.statuses.set(ack.peerId, { kind: 'ack', ack });
   }
 
   recordStorageDecline(peerId: string, code: string, message: string): void {
@@ -71,10 +42,6 @@ export class PeerStatusLedger {
 
   recordACKValidation(peerId: string, reason: string): void {
     this.statuses.set(peerId, { kind: 'ack-validation', reason });
-  }
-
-  recordSignerFailure(peerId: string, reason: ACKVerifyReason | undefined): void {
-    this.statuses.set(peerId, { kind: 'signer-verification', reason });
   }
 
   recordProtocolUnsupported(peerId: string, message: string): void {
@@ -87,49 +54,6 @@ export class PeerStatusLedger {
 
   clear(peerId: string): void {
     this.statuses.delete(peerId);
-  }
-
-  /**
-   * The round is decided: report each asked core's outcome to `observer`
-   * (when given; its errors never reach the round) and return the counts.
-   */
-  settle(corePeers: readonly string[], observer?: ACKPeerOutcomesObserver): ACKCandidateCounts {
-    if (observer) {
-      try { observer(this.outcomes(corePeers)); } catch { /* observation cannot change ACK decisions */ }
-    }
-    return this.counts(corePeers);
-  }
-
-  /** Each asked core's outcome; one with no terminal status, or only our own failed signer read, reports none. */
-  outcomes(corePeers: readonly string[]): ACKPeerOutcomeReport[] {
-    const reports: ACKPeerOutcomeReport[] = [];
-    for (const peerId of corePeers) {
-      const status = this.statuses.get(peerId);
-      if (!status) continue;
-      switch (status.kind) {
-        case 'ack':
-          reports.push({ peerId, outcome: { kind: 'valid', latencyMs: status.latencyMs } });
-          break;
-        case 'signer-verification':
-          if (status.reason === 'not-in-sharding-table' || status.reason === 'key-not-registered') {
-            reports.push({ peerId, outcome: { kind: 'ineligible-signer', reason: status.reason } });
-          }
-          break;
-        case 'ack-validation':
-          reports.push({ peerId, outcome: { kind: 'declined', code: status.reason } });
-          break;
-        case 'storage-decline':
-          reports.push({ peerId, outcome: { kind: 'declined', code: status.code } });
-          break;
-        case 'protocol-unsupported':
-          reports.push({ peerId, outcome: { kind: 'declined', code: 'PROTOCOL_UNSUPPORTED' } });
-          break;
-        case 'transport-error':
-          reports.push({ peerId, outcome: { kind: 'unanswered' } });
-          break;
-      }
-    }
-    return reports;
   }
 
   /** Aggregate the frozen candidate scope directly from typed terminal states. */
@@ -168,8 +92,6 @@ export class PeerStatusLedger {
             protocolSupported: true,
             reason: `STORAGE_ACK_DECLINE:${status.code}`,
           };
-        case 'signer-verification':
-          return { peerId, dialOk: true, protocolSupported: true, reason: `ACK_VERIFY:${status.reason ?? 'unknown'}` };
         case 'ack-validation':
           return {
             peerId,

@@ -3244,7 +3244,7 @@ export class DKGAgent extends DKGAgentBase {
       verifiedSameNetworkPeerIds: this.networkAdmissionCoordinator.enabled
         ? this.networkAdmissionCoordinator.verifiedSameNetworkPeerIds()
         : undefined,
-      protocol, requiredACKs,
+      protocol,
     }, this.localACKCandidate());
     return this.logACKCandidatePlan(selection, protocol, requiredACKs);
   }
@@ -3298,7 +3298,6 @@ export class DKGAgent extends DKGAgentBase {
         protocol, this.ackOperationContext(protocol), requiredACKs,
       ),
       log: options.log,
-      onPeerOutcomes: reports => this.ackCandidateDiscovery.recordRoundOutcomes(reports),
     };
   }
 

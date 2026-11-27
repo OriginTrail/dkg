@@ -6,7 +6,6 @@ export interface ACKTransport {
   sendP2P: ACKCollectorDeps['sendP2P'];
   getConnectedCorePeers: ACKCollectorDeps['getConnectedCorePeers'];
   log?: ACKCollectorDeps['log'];
-  onPeerOutcomes?: ACKCollectorDeps['onPeerOutcomes'];
 }
 
 export type ACKTransportFactory = () => ACKTransport;
