@@ -311,7 +311,7 @@ describe('ACKCollector identity verification', () => {
     }
   });
 
-  it('all identities rejected = storage_ack_insufficient error', async () => {
+  it('legacy unverifiable identities fail quorum without claiming a permanent rejection', async () => {
     const log = noop();
     const deps: ACKCollectorDeps = {
       gossipPublish: noop(),
@@ -325,8 +325,9 @@ describe('ACKCollector identity verification', () => {
     await expect(collector.collect(buildCollectParams()))
       .rejects.toThrow('storage_ack_insufficient');
     expect(log.calls.some(
-      (c: unknown[]) => (c[0] as string).includes('not registered'),
+      (c: unknown[]) => (c[0] as string).includes('could not be verified'),
     )).toBe(true);
+    expect(log.calls.some((c: unknown[]) => (c[0] as string).includes('not registered'))).toBe(false);
   });
 
   // Structured-verifier path: when the chain adapter implements

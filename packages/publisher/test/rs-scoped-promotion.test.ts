@@ -22,10 +22,12 @@ import { describe, it, expect } from 'vitest';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
+  DKGEvent,
   TypedEventBus,
   generateEd25519Keypair,
   contextGraphMetaUri,
   contextGraphDataUri,
+  type KnowledgeAssetConfirmedEvent,
 } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
@@ -200,6 +202,92 @@ describe('GH #1264 — publish() self-promotes a confirmed KC to the scoped grap
       ),
       'scoped data missing the published value triple',
     ).toBe(true);
+  });
+
+  it('scopes by the receipt\'s own registration event and makes no chain read for it', async () => {
+    // The EVM adapter decodes `KnowledgeAssetRegisteredToContextGraph` from the
+    // confirmed receipt (`OnChainPublishResult.contextGraphId`). The binding is
+    // written once on chain, so a live kaToContextGraph read would only repeat it.
+    class ReceiptRegistrationChain extends AdapterSigningChain {
+      readonly receiptCgId = 9n;
+      override async createKnowledgeAssets(
+        params: Parameters<MockChainAdapter['createKnowledgeAssets']>[0],
+      ): ReturnType<MockChainAdapter['createKnowledgeAssets']> {
+        return { ...(await super.createKnowledgeAssets(params)), contextGraphId: this.receiptCgId };
+      }
+    }
+    const wallet = new ethers.Wallet(TEST_KEY);
+    const chain = new ReceiptRegistrationChain(wallet);
+    const store = new OxigraphStore();
+    const CG = '5';
+    const publisher = await sealForWallet(
+      new DKGPublisher({
+        store,
+        chain,
+        eventBus: new TypedEventBus(),
+        keypair: await generateEd25519Keypair(),
+        publisherNodeIdentityId: 1n,
+      }),
+      wallet,
+      chain,
+    );
+
+    const root = 'urn:test:rs-receipt-entity';
+    const result = await publisher.publish({
+      contextGraphId: CG,
+      quads: [{ subject: root, predicate: `${DKG_ONT}name`, object: '"Receipt"', graph: `did:dkg:context-graph:${CG}` }],
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(chain.getKAContextGraphIdCalls).toBe(0);
+    const metaQuads = await quadsIn(store, contextGraphMetaUri(CG, '9'));
+    expect(hasTriple(metaQuads, result.ual, `${DKG_ONT}rootEntity`, root)).toBe(true);
+    expect((await quadsIn(store, contextGraphMetaUri(CG, chain.chainTruthCgId.toString()))).length).toBe(0);
+  });
+
+  it('announces the confirmed registration before it stores the confirmed copy', async () => {
+    const wallet = new ethers.Wallet(TEST_KEY);
+    const chain = new AdapterSigningChain(wallet);
+    const store = new OxigraphStore();
+    const eventBus = new TypedEventBus();
+    const order: string[] = [];
+    const confirmed: KnowledgeAssetConfirmedEvent[] = [];
+    eventBus.on(DKGEvent.KC_CONFIRMED, (data) => {
+      order.push('confirmed');
+      confirmed.push(data as KnowledgeAssetConfirmedEvent);
+    });
+    const insert = store.insert.bind(store);
+    store.insert = async (quads, options) => {
+      if (quads.some((q) => q.graph.includes('/_verifiable_memory/'))) order.push('vm-insert');
+      return insert(quads, options);
+    };
+    const CG = '5';
+    const publisher = await sealForWallet(
+      new DKGPublisher({
+        store,
+        chain,
+        eventBus,
+        keypair: await generateEd25519Keypair(),
+        publisherNodeIdentityId: 1n,
+      }),
+      wallet,
+      chain,
+    );
+
+    const result = await publisher.publish({
+      contextGraphId: CG,
+      quads: [{ subject: 'urn:test:rs-confirmed', predicate: `${DKG_ONT}name`, object: '"C"', graph: `did:dkg:context-graph:${CG}` }],
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(order[0]).toBe('confirmed');
+    expect(order).toContain('vm-insert');
+    expect(confirmed).toEqual([{
+      contextGraphId: CG,
+      onChainContextGraphId: 5n,
+      kaId: result.kaId,
+      txHash: result.onChainResult!.txHash,
+    }]);
   });
 
   it('multi-root publish re-emits the <ual>/<tokenId> pairing rows in scoped meta', async () => {

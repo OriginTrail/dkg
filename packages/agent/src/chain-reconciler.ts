@@ -203,7 +203,14 @@ export interface ReconcilePassTimings {
 export interface ReconcileResult {
   head: number;
   watermark: number;
+  /** Ordinals completed this pass, whether newly promoted or already in VM. */
   reconciled: number;
+  /**
+   * Newly promoted ordinals (`reconciled` outcomes), for telemetry. An `already`
+   * result can still repair metadata or follow recovery writes; this counter
+   * alone is not a durability signal. Storage owns the dirty-generation barrier.
+   */
+  materialized: number;
   pending: number;
   processed: number;
   /**
@@ -379,6 +386,7 @@ export async function reconcileContextGraph(
       head,
       watermark: before,
       reconciled: 0,
+      materialized: 0,
       pending: 0,
       processed: 0,
       hasMore: false,
@@ -410,6 +418,7 @@ export async function reconcileContextGraph(
   if (headBlock !== undefined) absorbConfirmed(state, headBlock, deps.confirmationDepth);
 
   let reconciled = 0;
+  let materialized = 0;
   let processed = 0;
   let staleTarget = false;
   let recovery: PendingOrdinalRecoveryDisposition = { kind: 'not-attempted' };
@@ -567,6 +576,7 @@ export async function reconcileContextGraph(
       if (!outcome) continue;
       if (outcome.status === 'reconciled' || outcome.status === 'already') {
         reconciled += 1;
+        if (outcome.status === 'reconciled') materialized += 1;
         // With a known head, apply the reorg-depth gate; otherwise (no chain
         // head) absorb as soon as contiguous (depth 0) using the registration
         // block as a self-consistent head.
@@ -631,6 +641,7 @@ export async function reconcileContextGraph(
     head,
     watermark: state.watermark,
     reconciled,
+    materialized,
     pending,
     processed,
     hasMore,

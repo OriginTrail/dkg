@@ -24,7 +24,7 @@ import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import { fallbackAuthorResolver, type FallbackAuthor } from './fallback-author.js';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
+import { DKGEvent, type KnowledgeAssetConfirmedEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { GraphManager, deleteByPatternWithoutCount, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
@@ -3935,6 +3935,15 @@ export class DKGPublisher implements Publisher {
             tokenAmount: tokenAmount.toString(),
           },
         });
+        // Before the copy is stored below: the agent then knows the chain event
+        // for this registration is its own publish (see handleKARegisteredNudge).
+        this.eventBus.emit(DKGEvent.KC_CONFIRMED, {
+          contextGraphId,
+          ...(options.subGraphName ? { subGraphName: options.subGraphName } : {}),
+          onChainContextGraphId: onChainResult.contextGraphId ?? v10CgId,
+          kaId,
+          txHash: onChainResult.txHash,
+        } satisfies KnowledgeAssetConfirmedEvent);
 
         for (const km of kaMetadata) {
           km.kcUal = ual;
@@ -4243,10 +4252,14 @@ export class DKGPublisher implements Publisher {
 
     // 1. Resolve the on-chain cgId from chain truth. Post-confirmation the
     //    KA→CG binding is committed, so this is lag-free (unlike the agent's
-    //    local resolver that caused the strand). Fall back to the cgId domain
-    //    the confirmed publish tx itself used.
-    let scopedCgId: bigint | undefined;
-    if (typeof this.chain.getKAContextGraphId === 'function') {
+    //    local resolver that caused the strand). The confirmed receipt's own
+    //    registration event already is that chain truth (the binding is
+    //    written once), so a live read is made only when the adapter did not
+    //    decode it. Fall back to the cgId domain the confirmed publish tx
+    //    itself used.
+    let scopedCgId: bigint | undefined = onChainResult.contextGraphId !== undefined
+      && onChainResult.contextGraphId > 0n ? onChainResult.contextGraphId : undefined;
+    if (scopedCgId === undefined && typeof this.chain.getKAContextGraphId === 'function') {
       try {
         const resolved = await this.chain.getKAContextGraphId(partitionKaId);
         if (resolved > 0n) scopedCgId = resolved;
