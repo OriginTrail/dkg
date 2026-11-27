@@ -36,7 +36,7 @@ describe('native catalog applied-head durability', () => {
     const fixture = await setupLiveReceiver();
     const snapshot = join(fixture.receiverDirectory, 'inflight.nq');
     const store = new OxigraphStore(snapshot);
-    const scheduled = vi.spyOn(store as unknown as { armFlush(): void }, 'armFlush')
+    const scheduled = vi.spyOn(store as unknown as { scheduleFlush(): void }, 'scheduleFlush')
       .mockImplementation(() => {});
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
