@@ -28,7 +28,7 @@ export interface SubscriptionRecoveryRowPorts {
   canActivate?(): boolean;
   capped(id: string): void;
   /** The activation owner atomically checks/reserves capacity before asynchronous preparation. */
-  activate(row: ContextGraphSubscriptionRecord, onChainId: string | undefined, revision: number,
+  activate(row: ContextGraphSubscriptionRecord, onChainId: string | undefined,
     isCurrent: () => boolean): Promise<void>;
 }
 
@@ -73,7 +73,7 @@ export async function recoverPersistedSubscriptionRow(
   if (ports.canActivate && !ports.canActivate()) return { kind: 'again' };
   const valid = () => current() && ports.revision(id) === revision;
   try {
-    await ports.activate(fresh, authority.onChainId?.toString() ?? bound.onChainId, revision, valid);
+    await ports.activate(fresh, authority.onChainId?.toString() ?? bound.onChainId, valid);
   } catch (error) {
     if (!current()) return { kind: 'done' };
     if (error instanceof SubscriptionActivationCapacityError) { ports.capped(id); return { kind: 'done' }; }

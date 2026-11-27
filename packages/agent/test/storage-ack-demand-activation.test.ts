@@ -70,7 +70,7 @@ function host(rows: ContextGraphSubscriptionRecord[], options: {
       const next = answers.length > 1 ? answers.shift()! : answers[0] ?? ALLOWED(BigInt(binding.onChainId!));
       return typeof next === 'function' ? next() : next;
     },
-    activate: async (row, onChainId, _revision, isCurrent) => {
+    activate: async (row, onChainId, isCurrent) => {
       if (!onChainId) throw new Error('expected verified binding');
       const subscription: ContextGraphSub = { syncMode: 'always-on', subscribed: row.subscribed, synced: false, onChainId };
       subscriptions.set(row.id, subscription);

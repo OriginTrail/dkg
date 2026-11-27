@@ -40,7 +40,7 @@ export class SubscriptionRecoveryMethods extends DKGAgentBase {
         this.transitionContextGraphSubscriptionDormancy(id, 'activationCap');
         this.requestContextGraphSubscriptionPromotion(id); touch();
       },
-      activate: (row, onChainId, revision, current) => this.activateUnavailablePersistedContextGraphSubscription(row, onChainId, revision, current),
+      activate: (row, onChainId, current) => this.activateUnavailablePersistedContextGraphSubscription(row, onChainId, current),
     };
   }
 
@@ -55,14 +55,11 @@ export class SubscriptionRecoveryMethods extends DKGAgentBase {
     this: DKGAgent,
     row: ContextGraphSubscriptionRecord,
     onChainId: string | undefined,
-    revision: number,
     isOwnerCurrent: () => boolean,
   ): Promise<void> {
     const isCurrent = (subscription: ContextGraphSub): boolean => (
       isOwnerCurrent()
       && this.subscribedContextGraphs.get(row.id) === subscription
-      && this.contextGraphSubscriptionDormancyById.get(row.id) === 'authorityUnavailable'
-      && (this.contextGraphSubscriptionPersistRevisions.get(row.id) ?? 0) === revision
     );
     await this.activatePersistedContextGraphSubscriptionRecord(row, {
       onChainId, respectActivationCap: true,
@@ -131,7 +128,7 @@ export class SubscriptionRecoveryMethods extends DKGAgentBase {
       ...shared, signal,
       resolveAuthority: (row, checkSignal) => owned(() => shared.resolveAuthority(row, checkSignal)),
       capped: () => {}, // Current publisher demand bypasses ordinary startup pacing.
-      activate: (row, binding, _revision, current) => {
+      activate: (row, binding, current) => {
         if (!binding) throw new Error('StorageACK demand activation requires a verified binding');
         return owned(() => activateRollingSubscriptionPromotion({
           activate: this.activatePersistedContextGraphSubscriptionRecord.bind(this),
