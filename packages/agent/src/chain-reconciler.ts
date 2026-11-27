@@ -208,7 +208,7 @@ export interface ReconcileResult {
   /**
    * Newly promoted ordinals (`reconciled` outcomes), for telemetry. An `already`
    * result can still repair metadata or follow recovery writes; this counter
-   * alone is not a durability signal. The host observes store mutations.
+   * alone is not a durability signal. Storage owns the dirty-generation barrier.
    */
   materialized: number;
   pending: number;
