@@ -75,6 +75,31 @@ describe('one ordinary-slot store fairness', () => {
     expect(events).toEqual(['A', 'H', ...Array.from({ length: 8 }, (_, i) => 'N' + i), 'B', 'N8']);
   });
 
+  it('admits a health probe ahead of a continuous normal backlog with two slots', async () => {
+    vi.useFakeTimers();
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 1,
+      healthReservedSlots: 0, backgroundReservedSlots: 0, queueWaitTimeoutMs: 100 });
+    const blocker = gate(), normalGate = gate();
+    const events: string[] = [];
+    const initial = scheduler.run('normal', 'health-floor.blocker', () => blocker.promise);
+    const health = scheduler.run('health', 'health-floor.probe', async () => { events.push('health'); });
+    const normals = Array.from({ length: 20 }, (_, i) => scheduler.run('normal', 'health-floor.normal', async () => {
+      events.push('normal-' + i); await normalGate.promise;
+    }));
+    try {
+      expect(scheduler.snapshot.healthQueued).toBe(1);
+      blocker.release();
+      await vi.advanceTimersByTimeAsync(99);
+      await expect(health).resolves.toBeUndefined();
+      expect(events[0]).toBe('health');
+      expect(scheduler.snapshot.normalQueued).toBeGreaterThan(0);
+    } finally {
+      blocker.release(); normalGate.release();
+      await Promise.all([initial, health, ...normals]);
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps explicit zero background reservation in strict priority order', async () => {
     const scheduler = new StorePriorityScheduler({
       maxConcurrent: 2, ackReservedSlots: 1, healthReservedSlots: 0, backgroundReservedSlots: 0,

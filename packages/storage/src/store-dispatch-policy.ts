@@ -69,7 +69,9 @@ export class StoreDispatchPolicy {
     const owed: StoreWorkPriority[] = [];
     if (backgroundOwed) owed.push('background');
     if (normalOwed) owed.push('normal');
-    return [...owed, ...STORE_WORK_PRIORITIES.filter((lane) => !owed.includes(lane))];
+    // A floor cannot consume the only ordinary slot ahead of a queued health probe.
+    const first: StoreWorkPriority[] = owed.length ? ['health', ...owed] : [];
+    return [...first, ...STORE_WORK_PRIORITIES.filter(lane => !first.includes(lane))];
   }
 
   started(priority: StoreWorkPriority, backgroundContended: boolean): void {
