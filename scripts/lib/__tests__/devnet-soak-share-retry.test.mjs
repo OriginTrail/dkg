@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { runPublisher } from '../../devnet-soak-rs-publisher.mjs';
 import { createPendingAnswer, ownerConflictAnswer, prerequisiteAnswer, sharedAnswer, standInNode } from './devnet-soak-rs-stand-ins.mjs';
 
 const PUBLISHER = fileURLToPath(new URL('../../devnet-soak-rs-publisher.sh', import.meta.url));
@@ -19,7 +20,6 @@ const SUMMARY = fileURLToPath(new URL('../../devnet-soak-rs-summary.mjs', import
 const REPO_ROOT = path.dirname(path.dirname(PUBLISHER));
 // macOS ships bash 3.2 as /bin/bash, and the soak has to run there.
 const BASH = existsSync('/bin/bash') ? '/bin/bash' : 'bash';
-const DATE = ['/bin/date', '/usr/bin/date'].find((file) => existsSync(file));
 
 // The CLI as `node "$CLI_JS" ka publish <name> ...` runs it: each call is
 // recorded with its DKG_HOME, and the n-th call gets the n-th planned answer.
@@ -31,11 +31,6 @@ const [exit, text] = answers[Math.min(seen, answers.length) - 1];
 (exit === 0 ? process.stdout : process.stderr).write(text + '\\n');
 process.exit(exit);
 `;
-// sleep records each wait and returns at once. The publish interval (7 s) ends
-// the run: after it, date +%s answers past the end of the soak.
-const standInSleep = '#!/bin/sh\necho "$1" >> "$SOAK_WAITS"\nif [ "$1" = 7 ]; then : > "$SOAK_WAITS.interval"; fi\n';
-const standInDate = `#!/bin/sh\nif [ "$1" = "+%s" ] && [ -e "$SOAK_WAITS.interval" ]; then echo 9999999999; exit 0; fi\nexec ${DATE} "$@"\n`;
-
 async function collect(child) {
   let stdout = '';
   let stderr = '';
@@ -57,22 +52,19 @@ async function publishOnce(t, plan, { publish = [[0, 'published']], apiPort = tr
   for (const directory of [bin, out, path.join(devnet, 'node1')]) mkdirSync(directory, { recursive: true });
   const node = await standInNode(t, plan);
   if (apiPort) writeFileSync(path.join(devnet, 'node1', 'api.port'), `${node.port}\n`);
-  writeFileSync(path.join(bin, 'sleep'), standInSleep, { mode: 0o755 });
-  writeFileSync(path.join(bin, 'date'), standInDate, { mode: 0o755 });
   writeFileSync(cli, standInCli);
   const files = { SOAK_CALLS: path.join(dir, 'calls.jsonl'), SOAK_WAITS: path.join(dir, 'waits.log') };
   writeFileSync(files.SOAK_CALLS, '');
   writeFileSync(files.SOAK_WAITS, '');
-  // The publisher's arguments: repo, devnet, output, CLI, interval, end, token,
-  // round. A run that never ends is stopped after a minute.
-  const child = spawn(BASH, [PUBLISHER, REPO_ROOT, devnet, out, cli, '7', '9999999998', 'fixture-token', '9'], {
-    env: {
-      ...process.env, ...files, SOAK_PUBLISH: JSON.stringify(publish), SOAK_SHARE_RECOVERY_WAIT_SEC: '20',
-      PATH: [bin, path.dirname(process.execPath), process.env.PATH].join(path.delimiter),
-    },
-    stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000,
-  });
-  const result = await collect(child);
+  let clock = Date.now();
+  const endTs = Math.floor(clock / 1000) + 10;
+  await runPublisher({ repoRoot: REPO_ROOT, devnetDir: devnet, outDir: out, cli, intervalSec: 7,
+    endTs, auth: 'fixture-token', round: 9,
+    env: { ...process.env, ...files, SOAK_PUBLISH: JSON.stringify(publish), SOAK_SHARE_RECOVERY_WAIT_SEC: '20' },
+  }, { now: () => clock, sleep: async ms => {
+    if (ms === 7000) { clock = endTs * 1000; writeFileSync(files.SOAK_WAITS, '7\n'); }
+  } });
+  const result = { status: 0, stdout: '', stderr: '' };
   return {
     result, devnet, requests: node.requests,
     rows: jsonLines(path.join(out, 'publish.jsonl')), calls: jsonLines(files.SOAK_CALLS),
@@ -122,6 +114,36 @@ test('a node whose API cannot be found fails in the CLI\'s words, with the defau
   assert.deepEqual([run.requests, run.calls], [[], []]);
   assert.deepEqual(run.rows.map((row) => [row.status, row.rc, row.share_retries, row.share_recovery]), [['fail', 1, 0, null]]);
   assert.ok(run.rows[0].out.includes(`Daemon is not running at ${path.join(run.devnet, 'node1')}.`), run.rows[0].out);
+});
+
+test('the publisher drains a share pending across END_TS and SIGTERM before exiting', { timeout: 20_000 }, async t => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'dkg-soak-drain-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const out = path.join(dir, 'out'), devnet = path.join(dir, 'devnet'), home = path.join(devnet, 'node1');
+  mkdirSync(out); mkdirSync(home, { recursive: true });
+  const node = await standInNode(t, { create: [createPendingAnswer('held-job')], jobs: { 'held-job': ['failed_retrying'] } });
+  writeFileSync(path.join(home, 'api.port'), String(node.port));
+  const end = Math.floor(Date.now() / 1000) + 3;
+  const child = spawn(BASH, [PUBLISHER, REPO_ROOT, devnet, out, 'must-not-publish.cjs', '7', String(end), 'fixture-token', '9'], {
+    env: { ...process.env, SOAK_SHARE_RECOVERY_WAIT_SEC: '4' }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000,
+  });
+  const completion = collect(child);
+  // Wait for the real node API to acknowledge that the attempt is following its job.
+  const timeout = Date.now() + 5_000;
+  while (!node.requests.some(request => request.method === 'GET') && Date.now() < timeout) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.ok(node.requests.some(request => request.method === 'GET'));
+  child.kill('SIGTERM');
+  assert.equal(readFileSync(path.join(out, 'publish.jsonl'), 'utf8'), '', 'attempt is still in flight');
+  const result = await completion;
+  assert.equal(result.status, 0, result.stderr);
+  const rows = jsonLines(path.join(out, 'publish.jsonl'));
+  assert.equal(rows.length, 1, 'every admitted attempt has a recorded outcome before parent wait returns');
+  assert.equal(rows[0].status, 'fail');
+  assert.equal(rows[0].share_recovery.state, 'failed_retrying');
+  assert.equal(rows[0].share_recovery.settled, false);
+  assert.ok(Date.now() >= end * 1000, 'the pending job crossed the soak deadline');
 });
 
 // The soak's other inputs, made up so that every other check passes: four

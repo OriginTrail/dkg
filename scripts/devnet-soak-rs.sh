@@ -567,6 +567,10 @@ cleanup_bg() {
       kill "$pid" 2>/dev/null || true
       log "Stopped background pid $pid"
     fi
+    if [ "$pf" = "$PUBLISHER_PIDFILE" ]; then
+      log "Draining the publisher and checking its exit before reading assertions"
+      wait "$pid" || PUBLISHER_FAILED=1
+    fi
     rm -f "$pf"
   done
   # Best-effort tidy-up of the per-round event-listener copy.
@@ -645,6 +649,7 @@ done
 log "Soak window elapsed; stopping background jobs"
 cleanup_bg
 trap - EXIT
+[ "${PUBLISHER_FAILED:-0}" = "0" ] || fail "Publisher exited before completing its log"
 
 snapshot_stake_state "$STAKE_AFTER"
 log "Stake snapshot AFTER soak written to $STAKE_AFTER"

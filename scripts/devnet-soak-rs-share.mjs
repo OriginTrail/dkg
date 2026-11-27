@@ -22,19 +22,9 @@
 //   explicitly, as the CLI advises, and that answer decides. It counts as
 //   the first retry.
 // - Any other answer is final.
-//
-//   node scripts/devnet-soak-rs-share.mjs <nodeHome> <contextGraphId> <name> <fixture.nt> <fieldsFile>
-//
-// The node's API port is read from <nodeHome>/api.port, as the CLI reads it,
-// and the bearer token from SOAK_API_AUTH, so it stays off the command line.
-// The publish-log fields `share_retries` and `share_recovery` are written to
-// <fieldsFile> as JSON members, also when the share fails. The exit status is
-// 0 when the asset is shared.
+// The Node publisher owns each attempt and its complete log record.
 
-import { readFileSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { pathToFileURL } from 'node:url';
 import { pollShareRecoveries } from './lib/swm-soak-accepted-writes.mjs';
 
 /** How many times a share is sent again after a retryable answer that names no share job. */
@@ -42,8 +32,6 @@ export const SHARE_RETRY_MAX = 5;
 export const RECOVERY_WAIT_ENV = 'SOAK_SHARE_RECOVERY_WAIT_SEC';
 /** Long enough for a share job's first two retries (about 60 s, then 120 s, each up to 20% later). */
 export const DEFAULT_RECOVERY_WAIT_SEC = 300;
-/** The CLI's deadline for a request that changes a Knowledge Asset. */
-const SHARE_REQUEST_TIMEOUT_MS = 240_000;
 
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -55,79 +43,6 @@ export function recoveryWaitSec(env = process.env) {
     throw new Error(`${RECOVERY_WAIT_ENV} must be a whole number of seconds, got ${JSON.stringify(value)}`);
   }
   return Number(value);
-}
-
-// The publisher's fixture lines: `<iri> <iri> "literal" .`, with no escapes.
-const FIXTURE_LINE = /^<([^<>"\s]+)> <([^<>"\s]+)> ("[^"\\]*") \.$/;
-
-/** The quads of a publisher fixture, as `dkg ka create --input-file` sends them. */
-export function fixtureQuads(text) {
-  return text.split('\n').filter((line) => line.trim() !== '').map((line) => {
-    const match = FIXTURE_LINE.exec(line.trim());
-    if (!match) throw new Error(`unsupported fixture line: ${line}`);
-    return { subject: match[1], predicate: match[2], object: match[3], graph: '' };
-  });
-}
-
-function readControlNumber(file) {
-  try {
-    const value = Number.parseInt(readFileSync(file, 'utf8').trim(), 10);
-    return Number.isSafeInteger(value) && value > 0 ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-function isRunning(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * The node's API, found as the CLI finds it: the port in <home>/api.port.
- * Without one, the error uses the CLI's words, which the soak's summary reads
- * to excuse failures on the node it stops on purpose.
- */
-export function nodeApiBase(home) {
-  const port = readControlNumber(join(home, 'api.port'));
-  if (port) return `http://127.0.0.1:${port}`;
-  const pid = readControlNumber(join(home, 'daemon.pid'));
-  if (!pid || !isRunning(pid)) throw new Error(`Daemon is not running at ${home}.`);
-  throw new Error(`Cannot read API port in ${home}.`);
-}
-
-/**
- * POSTs a JSON body and returns the answer, whatever its status, as
- * `{ status, body }` (`body` is null when it is not JSON), or `{ error }`
- * when no answer came: a refused connection, or none within the timeout.
- */
-export async function postJson(url, body, { auth = '', timeoutMs = SHARE_REQUEST_TIMEOUT_MS } = {}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error(`no answer within ${timeoutMs} ms`)), timeoutMs);
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', connection: 'close', ...(auth ? { authorization: `Bearer ${auth}` } : {}) },
-      body: JSON.stringify(body),
-      redirect: 'manual',
-      signal: controller.signal,
-    });
-    const text = await response.text();
-    let parsed = null;
-    try { parsed = JSON.parse(text); } catch { /* not JSON */ }
-    return { status: response.status, body: parsed };
-  } catch (error) {
-    if (controller.signal.aborted) return { error: controller.signal.reason?.message ?? 'aborted' };
-    // fetch names a refused or reset connection in its cause ("fetch failed: connect ECONNREFUSED ...").
-    const cause = error?.cause instanceof Error ? `: ${error.cause.message}` : '';
-    return { error: `${error instanceof Error ? error.message : String(error)}${cause}` };
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 /**
@@ -213,15 +128,15 @@ export async function followShareJob({ jobId, url }, { api, auth, budgetMs, log 
 
 /**
  * Creates and shares the draft, then follows the answers as the header says.
- * `send({ path, body })` returns an answer as postJson does, `follow(job)` a
+ * `create` and `share` return structured client answers; `follow(job)` returns a
  * share job's record as followShareJob does. `progress` holds what the publish
  * log records (`shareRetries`, `recovery`) as it happens. Returns whether the
  * asset is shared.
  */
-export async function shareWithClientRule({ contextGraphId, name, quads, send, follow, sleep = delay, log = () => {}, progress = {} }) {
+export async function shareWithClientRule({ contextGraphId, name, quads, create, share, follow, sleep = delay, log = () => {}, progress = {} }) {
   progress.shareRetries = 0;
   progress.recovery = null;
-  let answer = await send({ path: '/api/knowledge-assets', body: { contextGraphId, name, quads, alsoShareSwm: true } });
+  let answer = await create(contextGraphId, name, { quads, alsoShareSwm: true });
   log(describeAnswer('create and share', answer));
   for (let createAnswer = true; ; createAnswer = false) {
     const next = shareDisposition(answer, { createAnswer });
@@ -234,43 +149,7 @@ export async function shareWithClientRule({ contextGraphId, name, quads, send, f
     progress.shareRetries += 1;
     log(`[soak] the share is not done and no share job owns it: sharing the same draft again in ${progress.shareRetries}s (retry ${progress.shareRetries} of ${SHARE_RETRY_MAX})`);
     await sleep(progress.shareRetries * 1000);
-    answer = await send({ path: `/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, body: { contextGraphId } });
+    answer = await share(contextGraphId, name);
     log(describeAnswer(`share again, retry ${progress.shareRetries}`, answer));
   }
-}
-
-/** The publish-log fields of a share, as JSON members. */
-export function publishLogFields({ shareRetries = 0, recovery = null } = {}) {
-  return `"share_retries":${JSON.stringify(shareRetries)},"share_recovery":${JSON.stringify(recovery)}`;
-}
-
-async function main([home, contextGraphId, name, fixture, fieldsFile]) {
-  if (!home || !contextGraphId || !name || !fixture || !fieldsFile) {
-    throw new Error('usage: devnet-soak-rs-share.mjs <nodeHome> <contextGraphId> <name> <fixture.nt> <fieldsFile>');
-  }
-  const progress = {};
-  try {
-    const budgetMs = recoveryWaitSec() * 1000;
-    const quads = fixtureQuads(readFileSync(fixture, 'utf8'));
-    const api = nodeApiBase(home);
-    const auth = process.env.SOAK_API_AUTH ?? '';
-    const log = (line) => console.log(line);
-    return await shareWithClientRule({
-      contextGraphId, name, quads, log, progress,
-      send: ({ path, body }) => postJson(api + path, body, { auth }),
-      follow: (job) => followShareJob(job, { api, auth, budgetMs, log }),
-    });
-  } finally {
-    writeFileSync(fieldsFile, publishLogFields(progress));
-  }
-}
-
-const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : undefined;
-if (invokedPath === import.meta.url) {
-  main(process.argv.slice(2)).then((shared) => {
-    process.exitCode = shared ? 0 : 1;
-  }, (error) => {
-    console.error(`[soak] share step: ${error instanceof Error ? error.message : String(error)}`);
-    process.exitCode = 1;
-  });
 }

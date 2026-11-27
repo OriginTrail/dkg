@@ -1885,6 +1885,11 @@ describe('ApiClient per-route timeout classes', () => {
       expect(deadlines).toEqual([60_000, 60_000, 60_000, 30_000, 30_000, 240_000]);
     });
 
+    it('bounds a share-job read by the remaining polling budget', async () => {
+      await new ApiClient(PORT, 'test-token').knowledgeAssetShareJob('job-1', { timeoutMs: 125 });
+      expect(deadlines).toEqual([125]);
+    });
+
     it('takes the deadlines from the environment unless explicit options win', async () => {
       vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '45000');
       vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', ' 600000 ');

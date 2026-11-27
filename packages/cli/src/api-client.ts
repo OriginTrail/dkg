@@ -1066,8 +1066,8 @@ export class ApiClient {
     return this.get(shareReconciliationPath(input));
   }
 
-  async knowledgeAssetShareJob(jobId: string): Promise<KnowledgeAssetShareJobView> {
-    return this.get(`/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}`);
+  async knowledgeAssetShareJob(jobId: string, options?: { timeoutMs?: number }): Promise<KnowledgeAssetShareJobView> {
+    return this.send(`/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}`, { headers: this.authHeaders() }, options);
   }
 
   async knowledgeAssetCancelShareJob(jobId: string): Promise<{ jobId: string; state: KnowledgeAssetShareJobState }> {
