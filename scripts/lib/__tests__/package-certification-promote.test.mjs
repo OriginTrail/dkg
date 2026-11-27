@@ -54,7 +54,7 @@ function fakeNpm(f, { onVersion = [], fail = () => undefined, unshown = [] } = {
 function options(f, npm, extra = {}) {
   return {
     mode: 'promote', bundle: f.bundle, receiptFile: f.receiptFile, expected: f.expected, tags: TAGS,
-    ...releaseGitFixture(f.expected), readDist: pkg => ({ integrity: pkg.integrity }),
+    ...releaseGitFixture(f.expected), evidenceFile: 'fixture-decision.json', prepareEvidence: () => ({ recheckLocalIntegrity: () => {} }), readDist: pkg => ({ integrity: pkg.integrity }),
     readTags: npm.readTags, runner: npm.runner, otp: CODE, askOtp: null, settle: 0, log: () => {}, ...extra,
   };
 }
@@ -283,4 +283,43 @@ test('a pending tarball changed after the first write is never promoted and prog
   assert.deepEqual(pairs(error.progress.completed), moved);
   assert.equal(error.progress.remaining.length, 36 - moved.length);
   assert.equal(error.progress.remaining.filter(({ package: name }) => name === pending.name).length, 3);
+});
+
+
+test('local evidence that changes during OTP entry blocks the first parallel promotion write', async t => {
+  const f = fixture(t), npm = fakeNpm(f);
+  let valid = true, checks = 0;
+  await assert.rejects(preparedRelease(options(f, npm, {
+    otp: undefined,
+    askOtp: () => { valid = false; return CODE; },
+    prepareEvidence: () => { checks++; return { recheckLocalIntegrity: () => assert.ok(valid, 'evidence changed during OTP entry') }; },
+  })), /evidence changed during OTP entry/);
+  assert.equal(checks, 2);
+  assert.equal(npm.calls.length, 0);
+});
+
+test('delayed remote qualification finishes before OTP entry and only local checks follow it', async t => {
+  const f = fixture(t), npm = fakeNpm(f), events = [];
+  await preparedRelease(options(f, npm, {
+    otp: undefined,
+    prepareEvidence: async () => {
+      events.push('acquire');
+      await new Promise(resolve => setTimeout(resolve, 20));
+      events.push('qualified');
+      return { recheckLocalIntegrity: () => events.push('local integrity') };
+    },
+    askOtp: () => { events.push('otp'); return CODE; },
+  }));
+  assert.deepEqual(events, ['acquire', 'qualified', 'acquire', 'qualified', 'otp', 'local integrity']);
+  assert.ok(npm.calls.length > 0);
+});
+
+test('promotion says when the release evidence names no nightly run', async t => {
+  for (const [nightly, said] of [[null, true], [{ runId: '123', attempt: 1 }, false]]) {
+    const f = fixture(t), npm = fakeNpm(f), lines = [];
+    await preparedRelease(options(f, npm, { log: line => lines.push(line),
+      prepareEvidence: () => ({ result: { outcome: 'PASS', nightly }, recheckLocalIntegrity: () => {} }) }));
+    assert.equal(lines.includes('Release evidence names no nightly run: it rests on the CI run and the harness profile'), said, lines.join('\n'));
+    assert.ok(npm.calls.length > 0);
+  }
 });

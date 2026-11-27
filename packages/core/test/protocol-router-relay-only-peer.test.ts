@@ -85,6 +85,9 @@ const callers = [
   { name: 'send', invoke: (router: ProtocolRouter) => router.send(PEER, PROTOCOL, REQUEST, OPTIONS) },
   { name: 'duplex', invoke: (router: ProtocolRouter) => router.withDuplexStream(PEER, PROTOCOL, OPTIONS,
     async (stream) => { stream.send(REQUEST); return RESPONSE; }) },
+  // GH#3447: a capability probe opens its stream the same way. 'supported' stands in for the response.
+  { name: 'probe', invoke: async (router: ProtocolRouter) =>
+    (await router.probeProtocol(PEER, PROTOCOL, OPTIONS.timeoutMs) === 'supported' ? RESPONSE : undefined) },
 ];
 
 describe.each(callers)('relay-only peer with a direct address in the peer store, through $name', ({ invoke }) => {

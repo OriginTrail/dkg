@@ -13,7 +13,7 @@ export interface PromoteRecoveryContext {
 /** Seconds a client waits before repeating a share whose prerequisite was unavailable. */
 const PROMOTE_PREREQUISITE_RETRY_AFTER_SECONDS = '1';
 
-const RECIPIENT_AUTHORITY_SITES = new Set([
+export const RECIPIENT_AUTHORITY_SITES: ReadonlySet<string> = new Set([
   'transport-unavailable', 'transport-changed', 'revision-moved', 'recipient-set-changed',
 ]);
 

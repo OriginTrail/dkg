@@ -2,6 +2,9 @@ import type { Plugin } from 'vite';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { SimulationRuns, type SimulationRun } from './simulation-runs.js';
+import { SIMULATION_OPERATIONS, isSimOp, type SimOp, type SimulationSettings, type OpEvent } from '../simulation-protocol.js';
 
 const DEVNET_NUM_NODES = 6;
 const DEVNET_API_PORT_BASE = 9201;
@@ -10,49 +13,10 @@ const DEVNET_API_PORT_BASE = 9201;
 // Types
 // ---------------------------------------------------------------------------
 
-interface SimConfig {
+interface SimConfig extends SimulationSettings {
   name: string;
-  opCount: number;
-  opsPerSec: number;
-  concurrency: number;
-  kasPerPublish: number;
   contextGraph: string;
-  enabledOps: string[];
 }
-
-interface OpEvent {
-  type: 'op';
-  opType: string;
-  nodeId: number;
-  success: boolean;
-  durationMs: number;
-  detail: string;
-  phases: Record<string, number>;
-}
-
-interface StatusEvent {
-  type: 'status';
-  total: number;
-  completed: number;
-  errors: number;
-  opsPerSec: number;
-}
-
-interface DoneEvent {
-  type: 'done';
-  total: number;
-  completed: number;
-  errors: number;
-  elapsedMs: number;
-  byOp?: Record<string, OpStats>;
-}
-
-interface ErrorEvent {
-  type: 'error';
-  message: string;
-}
-
-type SimEvent = OpEvent | StatusEvent | DoneEvent | ErrorEvent;
 
 interface NodeInfo {
   id: number;
@@ -146,65 +110,7 @@ function jsonResponse(res: ServerResponse, status: number, body: unknown) {
 // Simulation state
 // ---------------------------------------------------------------------------
 
-let activeAbort: AbortController | null = null;
-let sseClients: Set<ServerResponse> = new Set();
-
-interface OpStats {
-  ok: number;
-  fail: number;
-  timeouts: number;
-  totalMs: number;
-}
-
-let stats = {
-  total: 0,
-  completed: 0,
-  errors: 0,
-  startedAt: 0,
-  recentTimestamps: [] as number[],
-  byOp: {} as Record<string, OpStats>,
-};
-
-function resetStats(total: number) {
-  stats = { total, completed: 0, errors: 0, startedAt: Date.now(), recentTimestamps: [], byOp: {} };
-}
-
-function recordOp(opType: string, success: boolean, durationMs: number, isTimeout: boolean) {
-  if (!stats.byOp[opType]) {
-    stats.byOp[opType] = { ok: 0, fail: 0, timeouts: 0, totalMs: 0 };
-  }
-  const s = stats.byOp[opType];
-  if (success) { s.ok++; } else { s.fail++; }
-  if (isTimeout) s.timeouts++;
-  if (success) s.totalMs += durationMs;
-}
-
-function currentOpsPerSec(): number {
-  const now = Date.now();
-  const window = stats.recentTimestamps.filter((t) => now - t < 10_000);
-  stats.recentTimestamps = window;
-  if (window.length < 2) return 0;
-  const span = (now - window[0]) / 1000;
-  return span > 0 ? window.length / span : 0;
-}
-
-const MAX_ERROR_LOG = 20;
-let errorLogCount = 0;
-
-function broadcast(event: SimEvent) {
-  if (event.type === 'op' && !event.success && errorLogCount < MAX_ERROR_LOG) {
-    errorLogCount++;
-    console.error(`[sim] error #${errorLogCount}: ${event.opType} node${event.nodeId} — ${event.detail}`);
-  }
-  const payload = `data: ${JSON.stringify(event)}\n\n`;
-  for (const client of sseClients) {
-    try {
-      client.write(payload);
-    } catch {
-      sseClients.delete(client);
-    }
-  }
-}
+const runs = new SimulationRuns();
 
 // ---------------------------------------------------------------------------
 // Node discovery
@@ -472,11 +378,11 @@ async function execChat(
 // Simulation runner
 // ---------------------------------------------------------------------------
 
-async function ensureContextGraph(nodes: NodeInfo[], contextGraphId: string, signal: AbortSignal): Promise<void> {
+async function ensureContextGraph(nodes: NodeInfo[], contextGraphId: string, signal: AbortSignal, report: { notice(message: string): void; fail(error: unknown): void }): Promise<void> {
   try {
     // Create context graph on every node that will be used for publish/shared-memory/query.
     // Each node checks contextGraphExists() locally, so all must have the context graph definition.
-    broadcast({ type: 'error', message: `Ensuring context graph "${contextGraphId}" exists on all nodes...` });
+    report.notice(`Ensuring context graph "${contextGraphId}" exists on all nodes...`);
     const createBody = JSON.stringify({
       id: contextGraphId,
       name: contextGraphId,
@@ -507,39 +413,44 @@ async function ensureContextGraph(nodes: NodeInfo[], contextGraphId: string, sig
     for (const r of results) {
       if (r.status === 'rejected') throw r.reason;
     }
-    broadcast({ type: 'error', message: `Context graph "${contextGraphId}" ready on all nodes.` });
+    report.notice(`Context graph "${contextGraphId}" ready on all nodes.`);
     await new Promise((r) => setTimeout(r, 500));
   } catch (err) {
-    broadcast({ type: 'error', message: `Context graph setup failed: ${err instanceof Error ? err.message : String(err)}` });
+    report.fail(`Context graph setup failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
-async function runSimulation(config: SimConfig, signal: AbortSignal) {
+async function runSimulation(config: SimConfig, run: SimulationRun) {
+  const { stats } = run;
+  const signal = run.abort.signal;
   const nodes = getNodes();
 
   await loadNodeTokens(nodes);
-
-  await ensureContextGraph(nodes, config.contextGraph, signal);
+  if (signal.aborted) return;
+  await ensureContextGraph(nodes, config.contextGraph, signal, {
+    notice: message => runs.notice(run, message), fail: error => runs.fail(run, error),
+  });
+  if (signal.aborted) return;
 
   if (config.enabledOps.includes('chat')) {
     await discoverPeerIds(nodes, signal);
   }
 
-  resetStats(config.opCount);
-  errorLogCount = 0;
-  broadcast({ type: 'status', total: config.opCount, completed: 0, errors: 0, opsPerSec: 0 });
+  if (signal.aborted) return;
+  runs.publishStatus(run);
 
   // Periodic status broadcaster
   const statusInterval = setInterval(() => {
     if (signal.aborted) return;
-    broadcast({
-      type: 'status',
-      total: config.opCount,
-      completed: stats.completed,
-      errors: stats.errors,
-      opsPerSec: Math.round(currentOpsPerSec() * 10) / 10,
-    });
+    runs.publishStatus(run);
   }, 500);
+
+  const executors: Record<SimOp, (node: NodeInfo) => Promise<OpEvent>> = {
+    publish: node => execPublish(node, config, signal),
+    query: node => execQuery(node, config, signal),
+    workspace: node => execWorkspace(node, config, signal),
+    chat: node => execChat(node, nodes, signal),
+  };
 
   let dispatched = 0;
   let inflight = 0;
@@ -549,13 +460,8 @@ async function runSimulation(config: SimConfig, signal: AbortSignal) {
 
   await new Promise<void>((resolve) => {
     function onOpDone(event: OpEvent) {
+      if (!runs.record(run, event)) return;
       inflight--;
-      stats.completed++;
-      stats.recentTimestamps.push(Date.now());
-      const isTimeout = !event.success && event.detail.startsWith('timeout');
-      if (!event.success) stats.errors++;
-      recordOp(event.opType, event.success, event.durationMs, isTimeout);
-      broadcast(event);
 
       if (stats.completed >= config.opCount) {
         resolve();
@@ -574,41 +480,12 @@ async function runSimulation(config: SimConfig, signal: AbortSignal) {
       inflight++;
       lastDispatchTime = Date.now();
 
-      let promise: Promise<OpEvent>;
-      switch (opType) {
-        case 'publish':
-          promise = execPublish(node, config, signal);
-          break;
-        case 'query':
-          promise = execQuery(node, config, signal);
-          break;
-        case 'workspace':
-          promise = execWorkspace(node, config, signal);
-          break;
-        case 'chat':
-          promise = execChat(node, nodes, signal);
-          break;
-        default:
-          promise = execPublish(node, config, signal);
-      }
+      const promise = executors[opType](node);
 
-      promise.then(onOpDone).catch(() => {
-        inflight--;
-        stats.completed++;
-        stats.errors++;
-        stats.recentTimestamps.push(Date.now());
-        broadcast({
-          type: 'op',
-          opType,
-          nodeId: node.id,
-          success: false,
-          durationMs: 0,
-          detail: 'Unexpected executor error',
-          phases: {},
-        });
-        if (stats.completed >= config.opCount) resolve();
-        else tryDispatch();
-      });
+      promise.then(onOpDone).catch(() => onOpDone({
+        type: 'op', opType, nodeId: node.id, success: false, durationMs: 0,
+        detail: 'Unexpected executor error', phases: {},
+      }));
     }
 
     function tryDispatch() {
@@ -633,21 +510,14 @@ async function runSimulation(config: SimConfig, signal: AbortSignal) {
   clearInterval(statusInterval);
 
   if (!signal.aborted) {
-    if (stats.errors > 0 && Object.keys(stats.byOp).length > 0) {
-      const byOp = Object.entries(stats.byOp)
-        .filter(([, s]) => s.fail > 0)
-        .map(([op, s]) => `${op}: ${s.fail} fail`)
+    if (stats.errors > 0 && stats.operations.size > 0) {
+      const byOp = [...stats.operations]
+        .filter(([, s]) => s.metrics.errors > 0)
+        .map(([op, s]) => `${op}: ${s.metrics.errors} fail`)
         .join(', ');
       console.error(`[sim] done: ${stats.completed} ok, ${stats.errors} errors (${byOp})`);
     }
-    broadcast({
-      type: 'done',
-      total: config.opCount,
-      completed: stats.completed,
-      errors: stats.errors,
-      elapsedMs: Date.now() - stats.startedAt,
-      byOp: stats.byOp,
-    });
+
   }
 }
 
@@ -658,14 +528,15 @@ async function runSimulation(config: SimConfig, signal: AbortSignal) {
 /** Exported for unit tests. */
 export async function handleSimRequest(req: IncomingMessage, res: ServerResponse) {
   const url = req.url ?? '';
+  const parsed = new URL(url, 'http://localhost');
+  const runId = parsed.searchParams.get('runId') ?? undefined;
+  const path = parsed.pathname;
+  if (runId !== undefined && !/^[a-zA-Z0-9_-]{1,128}$/.test(runId)) {
+    jsonResponse(res, 400, { error: 'Invalid simulation run ID' });
+    return;
+  }
 
-  // --- POST /sim/start ---
-  if (url === '/sim/start' && req.method === 'POST') {
-    if (activeAbort) {
-      jsonResponse(res, 409, { error: 'Simulation already running' });
-      return;
-    }
-
+  if (path === '/sim/start' && req.method === 'POST') {
     let config: SimConfig;
     try {
       const raw = await readBody(req);
@@ -680,84 +551,53 @@ export async function handleSimRequest(req: IncomingMessage, res: ServerResponse
       return;
     }
 
+    if (!Array.isArray(config.enabledOps) || !config.enabledOps.every(isSimOp)) {
+      jsonResponse(res, 400, { error: `enabledOps must be an array of supported operations: ${SIMULATION_OPERATIONS.join(', ')}` });
+      return;
+    }
+
     config.concurrency = config.concurrency ?? 10;
     config.kasPerPublish = config.kasPerPublish ?? 1;
     config.contextGraph = config.contextGraph ?? 'devnet-test';
     config.name = config.name ?? `Sim-${rndId()}`;
 
-    const abort = new AbortController();
-    activeAbort = abort;
-
-    jsonResponse(res, 200, { started: true, name: config.name });
-
-    runSimulation(config, abort.signal)
-      .catch((err) => {
-        broadcast({ type: 'error', message: String(err instanceof Error ? err.message : err) });
-      })
-      .finally(() => {
-        activeAbort = null;
-      });
-    return;
-  }
-
-  // --- POST /sim/stop ---
-  if (url === '/sim/stop' && req.method === 'POST') {
-    if (!activeAbort) {
-      jsonResponse(res, 200, { stopped: false, reason: 'No simulation running' });
+    const id = runId ?? randomUUID();
+    // Admission is synchronous and follows body parsing, including early cancellation.
+    const admission = runs.admit(id, config.opCount);
+    if (!admission.accepted) {
+      jsonResponse(res, 409, { error: admission.error });
       return;
     }
-    activeAbort.abort();
-    activeAbort = null;
-    broadcast({
-      type: 'done',
-      total: stats.total,
-      completed: stats.completed,
-      errors: stats.errors,
-      elapsedMs: Date.now() - stats.startedAt,
-      byOp: stats.byOp,
-    });
-    jsonResponse(res, 200, { stopped: true });
+    const { run } = admission;
+    jsonResponse(res, 200, { started: true, name: config.name, runId: id });
+    runSimulation(config, run)
+      .catch(err => runs.fail(run, err))
+      .finally(() => runs.finish(run));
     return;
   }
 
-  // --- GET /sim/events ---
-  if (url === '/sim/events' && req.method === 'GET') {
+  if (path === '/sim/stop' && req.method === 'POST') {
+    jsonResponse(res, 200, runs.cancel(runId));
+    return;
+  }
+
+  if (path === '/sim/events' && req.method === 'GET') {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
     });
     res.write('\n');
-    sseClients.add(res);
-
-    // Send current status immediately if a simulation is running
-    if (activeAbort) {
-      const payload = `data: ${JSON.stringify({
-        type: 'status',
-        total: stats.total,
-        completed: stats.completed,
-        errors: stats.errors,
-        opsPerSec: Math.round(currentOpsPerSec() * 10) / 10,
-      } satisfies StatusEvent)}\n\n`;
-      res.write(payload);
-    }
-
-    req.on('close', () => {
-      sseClients.delete(res);
-    });
+    req.on('close', () => runs.unsubscribe(res));
+    runs.subscribe(res, runId);
     return;
   }
 
-  // --- GET /sim/status ---
-  if (url === '/sim/status' && req.method === 'GET') {
-    jsonResponse(res, 200, {
-      running: !!activeAbort,
-      total: stats.total,
-      completed: stats.completed,
-      errors: stats.errors,
-      opsPerSec: Math.round(currentOpsPerSec() * 10) / 10,
-      elapsedMs: stats.startedAt ? Date.now() - stats.startedAt : 0,
-      byOp: stats.byOp,
+  if (path === '/sim/status' && req.method === 'GET') {
+    const run = runId ? runs.get(runId) : runs.latest;
+    if (runId && !run) jsonResponse(res, 404, { error: 'Simulation result is no longer available' });
+    else jsonResponse(res, 200, run ? runs.status(run) : {
+      running: false, total: 0, completed: 0, errors: 0, opsPerSec: 0, elapsedMs: 0, byOp: {},
     });
     return;
   }

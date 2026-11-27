@@ -1,0 +1,916 @@
+{
+  "provider": "n8n 2.43.8",
+  "published": {
+    "versionId": "bcf87525-f332-4c60-9a55-0fcd821e331b",
+    "nodes": [
+      {
+        "id": "Receive-input",
+        "name": "Receive input",
+        "webhookId": "bMbf81LHh10fuo0J",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2.1,
+        "position": [
+          0,
+          0
+        ],
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "dkg-capability-bMbf81LHh10fuo0J",
+          "authentication": "headerAuth",
+          "responseMode": "responseNode",
+          "options": {}
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "fixture-header-id",
+            "name": "Fixture header"
+          }
+        }
+      },
+      {
+        "id": "Execution-accepted",
+        "name": "Execution accepted",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.4,
+        "position": [
+          200,
+          0
+        ],
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ ({ executionId: String($execution.id) }) }}",
+          "options": {}
+        }
+      },
+      {
+        "id": "Prepare-input",
+        "name": "Prepare input",
+        "type": "n8n-nodes-base.set",
+        "typeVersion": 3.4,
+        "position": [
+          400,
+          0
+        ],
+        "parameters": {
+          "mode": "raw",
+          "jsonOutput": "={{ ({ records: JSON.parse($('Receive input').first().json.body.input.itemsJson) }) }}",
+          "options": {}
+        }
+      },
+      {
+        "id": "Split-input",
+        "name": "Split input",
+        "type": "n8n-nodes-base.splitOut",
+        "typeVersion": 1.1,
+        "position": [
+          600,
+          0
+        ],
+        "parameters": {
+          "fieldToSplitOut": "records",
+          "include": "noOtherFields",
+          "options": {
+            "destinationFieldName": "record"
+          }
+        }
+      },
+      {
+        "id": "Input-items",
+        "name": "Input items",
+        "type": "n8n-nodes-base.set",
+        "typeVersion": 3.4,
+        "position": [
+          800,
+          0
+        ],
+        "parameters": {
+          "mode": "raw",
+          "jsonOutput": "={{ $json.record }}",
+          "options": {}
+        }
+      },
+      {
+        "id": "Block-read-request",
+        "name": "Block read request",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.3,
+        "executeOnce": true,
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 1000,
+        "position": [
+          1000,
+          0
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://127.0.0.1:45691/spike/ka/internal/dkg-component",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ ({ effectId: $('Receive input').first().json.body.invocationId, workflowId: String($workflow.id), executionId: String($execution.id), blockId: \"read\", items: $input.all().map(i => i.json) }) }}",
+          "options": {
+            "timeout": 14000,
+            "redirect": {
+              "redirect": {
+                "followRedirects": false
+              }
+            },
+            "response": {
+              "response": {
+                "responseFormat": "json"
+              }
+            }
+          }
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "fixture-header-id",
+            "name": "Fixture header"
+          }
+        }
+      },
+      {
+        "id": "Block-read-records",
+        "name": "Block read records",
+        "type": "n8n-nodes-base.splitOut",
+        "typeVersion": 1.1,
+        "position": [
+          1200,
+          0
+        ],
+        "parameters": {
+          "fieldToSplitOut": "items",
+          "include": "noOtherFields",
+          "options": {
+            "destinationFieldName": "value"
+          }
+        }
+      },
+      {
+        "id": "Block-read",
+        "name": "Block read",
+        "type": "n8n-nodes-base.set",
+        "typeVersion": 3.4,
+        "position": [
+          1400,
+          0
+        ],
+        "parameters": {
+          "mode": "raw",
+          "jsonOutput": "={{ $json.value }}",
+          "options": {}
+        }
+      },
+      {
+        "id": "Block-read-check-0",
+        "name": "Block read check 0",
+        "type": "n8n-nodes-base.set",
+        "typeVersion": 3.4,
+        "position": [
+          1600,
+          0
+        ],
+        "parameters": {
+          "mode": "raw",
+          "jsonOutput": "={{ (() => { const resolveComponentValue = function resolveComponentValue(value, item = {}, validateOnly = false) {\n  const reference = expression => {\n    const path = expression.trim();\n    if (path.length > 256 || !/^\\$json(?:(?:\\.[A-Za-z_][A-Za-z0-9_-]*)|\\[(?:\\d+|\"[^\"\\\\\\r\\n]+\"|'[^'\\\\\\r\\n]+')\\])*$/.test(path)) {\n      throw new Error('Use an input reference to a field such as $json.current.temperature_2m.');\n    }\n    let result = item;\n    for (const match of path.slice(5).matchAll(/\\.([A-Za-z_][A-Za-z0-9_-]*)|\\[(\\d+|\"[^\"\\\\\\r\\n]+\"|'[^'\\\\\\r\\n]+')\\]/g)) {\n      const key = match[1] ?? (/^\\d+$/.test(match[2]) ? match[2] : match[2].slice(1, -1));\n      if (['__proto__', 'constructor', 'prototype'].includes(key) || key.startsWith('__nos')) throw new Error('Reserved input reference.');\n      if (validateOnly) continue;\n      if (result === null || typeof result !== 'object' || !Object.hasOwn(result, key)) throw new Error('Input field not found: ' + path);\n      result = result[key];\n    }\n    return validateOnly ? null : result;\n  };\n  if (Array.isArray(value)) return value.map(v => resolveComponentValue(v, item, validateOnly));\n  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, v]) => [key, resolveComponentValue(v, item, validateOnly)]));\n  if (typeof value !== 'string' || !value.includes('{' + '{')) return value;\n  const source = value.startsWith('=') ? value.slice(1) : value;\n  const whole = /^\\{\\{\\s*([^{}]+?)\\s*\\}\\}$/.exec(source.trim());\n  if (whole) { const result = reference(whole[1]); return validateOnly ? value : result; }\n  const remainder = source.replace(/\\{\\{\\s*([^{}]+?)\\s*\\}\\}/g, (_, path) => { reference(path); return ''; });\n  if (remainder.includes('{' + '{') || remainder.includes('}' + '}')) throw new Error('Close each input reference.');\n  if (validateOnly) return value;\n  return source.replace(/\\{\\{\\s*([^{}]+?)\\s*\\}\\}/g, (_, path) => {\n    const result = reference(path);\n    if (result !== null && typeof result === 'object') return JSON.stringify(result);\n    return String(result ?? '');\n  });\n};\nconst validateComponentUrl = function validateComponentUrl(value) {\n  if (typeof value !== 'string' || value.length > 2048 || /[\\s\\\\\\u0000-\\u001f]/.test(value)) throw new Error('Enter a valid HTTPS API URL.');\n  const match = /^https:\\/\\/([^/?#]+)(?:[/?][^#]*)?$/.exec(value);\n  const host = match?.[1]?.toLowerCase().replace(/:443$/, '');\n  if (!host || host.includes('@') || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$/.test(host)\n    || /(?:^|\\.)(?:localhost|local|internal|test|invalid|example|onion)$/.test(host)) {\n    throw new Error('Use a public HTTPS hostname without embedded credentials or a custom port.');\n  }\n  return value;\n};\nconst normalize = function normalizeComponentInput(descriptor, value) {\n  const bad = message => { throw new Error(message); };\n  const record = v => v !== null && typeof v === 'object' && !Array.isArray(v);\n  const inspect = (v, depth = 0) => {\n    if (depth > 8) bad('Input is nested too deeply.');\n    if (typeof v === 'number' && !Number.isFinite(v)) bad('Use finite JSON numbers.');\n    if (v && typeof v === 'object') for (const [key, child] of Object.entries(v)) {\n      if (['__proto__', 'constructor', 'prototype'].includes(key) || key.startsWith('__nos')) bad('Reserved input field.');\n      inspect(child, depth + 1);\n    }\n  };\n  if (!record(value) || Object.keys(value).some(key => !['itemsJson', 'paramsJson', 'executionId'].includes(key))\n    || typeof value.itemsJson !== 'string' || value.itemsJson.length > 8192\n    || typeof value.paramsJson !== 'string' || value.paramsJson.length > 2048) bad('Use bounded component input.');\n  const items = JSON.parse(value.itemsJson), supplied = JSON.parse(value.paramsJson);\n  if (!Array.isArray(items) || items.length > 20 || !items.every(record) || !record(supplied)) bad('Supply up to twenty JSON records and component parameters.');\n  inspect(items); inspect(supplied);\n  if (Object.keys(supplied).some(key => !Object.hasOwn(descriptor.parameters, key))) bad('Unexpected component parameter.');\n  const params = {};\n  for (const [key, spec] of Object.entries(descriptor.parameters)) {\n    const selected = Object.hasOwn(supplied, key) ? supplied[key] : spec.default;\n    if (spec.type === 'integer') {\n      if (!Number.isInteger(selected) || selected < spec.min || selected > spec.max) bad('Invalid ' + spec.label + '.');\n    } else if (spec.type === 'json') {\n      if (spec.shape !== 'any' && !record(selected) || JSON.stringify(selected).length > spec.maxLength) bad('Invalid ' + spec.label + '.');\n      if (descriptor.version >= 2) resolveComponentValue(selected, {}, true);\n    } else {\n      if (typeof selected !== 'string' || !selected.trim() || selected.length > spec.maxLength\n        || spec.options && !spec.options.includes(selected)) bad('Invalid ' + spec.label + '.');\n      if (spec.pattern === 'field' && !/^[A-Za-z][A-Za-z0-9_ .-]{0,63}$/.test(selected)) bad('Use a simple field name.');\n      if (spec.pattern === 'http') {\n        if (descriptor.version < 2 && selected !== 'http://127.0.0.1:4631/spike/ka/demo-data') bad('This saved HTTP revision permits only the local demo-data endpoint.');\n        if (descriptor.version >= 2) validateComponentUrl(selected);\n      }\n    }\n    params[key] = selected;\n  }\n  if (descriptor.input === 'file') {\n    if (!items.length || !items.every(item => record(item.file) && typeof item.file.base64 === 'string'\n      && item.file.base64.length <= 6000 && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(item.file.base64)\n      && typeof item.file.name === 'string' && /^[A-Za-z0-9 _.-]{1,80}$/.test(item.file.name))) bad('Supply a small file as base64 with a simple file name.');\n  }\n  const executionId = value.executionId ?? '';\n  if (typeof executionId !== 'string' || executionId && !/^\\d{1,20}$/.test(executionId)) bad('Invalid provider execution identity.');\n  if (descriptor.mode === 'schedule' && !executionId) bad('Activate this schedule from a saved workflow to receive events.');\n  if (descriptor.id === 'google-sheets' && items.length) {\n    const keys = Object.keys(items[0]);\n    if (!keys.length || keys.length > 8 || keys.some(k => !/^[A-Za-z][A-Za-z0-9 _.-]{0,63}$/.test(k))\n      || items.some(item => JSON.stringify(Object.keys(item)) !== JSON.stringify(keys)\n        || Object.values(item).some(v => !['string', 'number', 'boolean'].includes(typeof v) || String(v).length > 128))) bad('Use up to eight consistent, simply named scalar columns for Google Sheets.');\n  }\n  return { itemsJson: JSON.stringify(items), paramsJson: JSON.stringify(params), executionId };\n};\n const input = $input.all().map(i => i.json); normalize(JSON.parse(\"\\u007b\\\"id\\\":\\\"dkg-read\\\",\\\"name\\\":\\\"DKG Read\\\",\\\"category\\\":\\\"DKG\\\",\\\"nodeType\\\":\\\"n8n-nodes-base.httpRequest\\\",\\\"version\\\":2,\\\"input\\\":\\\"items\\\",\\\"outputs\\\":[\\\"main\\\"],\\\"parameters\\\":\\u007b\\\"node\\\":\\u007b\\\"type\\\":\\\"string\\\",\\\"label\\\":\\\"test-node\\\",\\\"default\\\":\\\"test-node\\\",\\\"maxLength\\\":256,\\\"options\\\":[\\\"test-node\\\"]\\u007d,\\\"contextGraph\\\":\\u007b\\\"type\\\":\\\"string\\\",\\\"label\\\":\\\"urn:test:measurements\\\",\\\"default\\\":\\\"urn:test:measurements\\\",\\\"maxLength\\\":256,\\\"options\\\":[\\\"urn:test:measurements\\\"]\\u007d,\\\"dataset\\\":\\u007b\\\"type\\\":\\\"string\\\",\\\"label\\\":\\\"set-7\\\",\\\"default\\\":\\\"set-7\\\",\\\"maxLength\\\":256,\\\"options\\\":[\\\"set-7\\\"]\\u007d,\\\"profileRevision\\\":\\u007b\\\"type\\\":\\\"string\\\",\\\"label\\\":\\\"Execution profile revision\\\",\\\"default\\\":\\\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\\\",\\\"maxLength\\\":64,\\\"options\\\":[\\\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\\\"]\\u007d\\u007d,\\\"sampleItems\\\":[\\u007b\\u007d],\\\"mode\\\":\\\"action\\\",\\\"connection\\\":\\\"httpHeaderAuth\\\"\\u007d\"), { itemsJson: JSON.stringify(input), paramsJson: JSON.parse(\"\\\"\\u007b\\\\\\\"node\\\\\\\":\\\\\\\"test-node\\\\\\\",\\\\\\\"contextGraph\\\\\\\":\\\\\\\"urn:test:measurements\\\\\\\",\\\\\\\"dataset\\\\\\\":\\\\\\\"set-7\\\\\\\",\\\\\\\"profileRevision\\\\\\\":\\\\\\\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\\\\\\\"\\u007d\\\"\"), executionId: '' }); return $json; })() }}",
+          "options": {}
+        }
+      },
+      {
+        "id": "Block-write-request",
+        "name": "Block write request",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.3,
+        "executeOnce": true,
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 1000,
+        "position": [
+          1800,
+          0
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://127.0.0.1:45691/spike/ka/internal/dkg-component",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ ({ effectId: $('Receive input').first().json.body.invocationId, workflowId: String($workflow.id), executionId: String($execution.id), blockId: \"write\", items: $input.all().map(i => i.json) }) }}",
+          "options": {
+            "timeout": 14000,
+            "redirect": {
+              "redirect": {
+                "followRedirects": false
+              }
+            },
+            "response": {
+              "response": {
+                "responseFormat": "json"
+              }
+            }
+          }
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "fixture-header-id",
+            "name": "Fixture header"
+          }
+        }
+      },
+      {
+        "id": "Block-write-records",
+        "name": "Block write records",
+        "type": "n8n-nodes-base.splitOut",
+        "typeVersion": 1.1,
+        "position": [
+          2000,
+          0
+        ],
+        "parameters": {
+          "fieldToSplitOut": "items",
+          "include": "noOtherFields",
+          "options": {
+            "destinationFieldName": "value"
+          }
+        }
+      },
+      {
+        "id": "Block-write",
+        "name": "Block write",
+        "type": "n8n-nodes-base.set",
+        "typeVersion": 3.4,
+        "position": [
+          2200,
+          0
+        ],
+        "parameters": {
+          "mode": "raw",
+          "jsonOutput": "={{ $json.value }}",
+          "options": {}
+        }
+      },
+      {
+        "id": "Block-write-check-0",
+        "name": "Block write check 0",
+        "type": "n8n-nodes-base.set",
+        "typeVersion": 3.4,
+        "position": [
+          2400,
+          0
+        ],
+        "parameters": {
+          "mode": "raw",
+          "jsonOutput": "={{ (() => { const resolveComponentValue = function resolveComponentValue(value, item = {}, validateOnly = false) {\n  const reference = expression => {\n    const path = expression.trim();\n    if (path.length > 256 || !/^\\$json(?:(?:\\.[A-Za-z_][A-Za-z0-9_-]*)|\\[(?:\\d+|\"[^\"\\\\\\r\\n]+\"|'[^'\\\\\\r\\n]+')\\])*$/.test(path)) {\n      throw new Error('Use an input reference to a field such as $json.current.temperature_2m.');\n    }\n    let result = item;\n    for (const match of path.slice(5).matchAll(/\\.([A-Za-z_][A-Za-z0-9_-]*)|\\[(\\d+|\"[^\"\\\\\\r\\n]+\"|'[^'\\\\\\r\\n]+')\\]/g)) {\n      const key = match[1] ?? (/^\\d+$/.test(match[2]) ? match[2] : match[2].slice(1, -1));\n      if (['__proto__', 'constructor', 'prototype'].includes(key) || key.startsWith('__nos')) throw new Error('Reserved input reference.');\n      if (validateOnly) continue;\n      if (result === null || typeof result !== 'object' || !Object.hasOwn(result, key)) throw new Error('Input field not found: ' + path);\n      result = result[key];\n    }\n    return validateOnly ? null : result;\n  };\n  if (Array.isArray(value)) return value.map(v => resolveComponentValue(v, item, validateOnly));\n  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, v]) => [key, resolveComponentValue(v, item, validateOnly)]));\n  if (typeof value !== 'string' || !value.includes('{' + '{')) return value;\n  const source = value.startsWith('=') ? value.slice(1) : value;\n  const whole = /^\\{\\{\\s*([^{}]+?)\\s*\\}\\}$/.exec(source.trim());\n  if (whole) { const result = reference(whole[1]); return validateOnly ? value : result; }\n  const remainder = source.replace(/\\{\\{\\s*([^{}]+?)\\s*\\}\\}/g, (_, path) => { reference(path); return ''; });\n  if (remainder.includes('{' + '{') || remainder.includes('}' + '}')) throw new Error('Close each input reference.');\n  if (validateOnly) return value;\n  return source.replace(/\\{\\{\\s*([^{}]+?)\\s*\\}\\}/g, (_, path) => {\n    const result = reference(path);\n    if (result !== null && typeof result === 'object') return JSON.stringify(result);\n    return String(result ?? '');\n  });\n};\nconst validateComponentUrl = function validateComponentUrl(value) {\n  if (typeof value !== 'string' || value.length > 2048 || /[\\s\\\\\\u0000-\\u001f]/.test(value)) throw new Error('Enter a valid HTTPS API URL.');\n  const match = /^https:\\/\\/([^/?#]+)(?:[/?][^#]*)?$/.exec(value);\n  const host = match?.[1]?.toLowerCase().replace(/:443$/, '');\n  if (!host || host.includes('@') || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$/.test(host)\n    || /(?:^|\\.)(?:localhost|local|internal|test|invalid|example|onion)$/.test(host)) {\n    throw new Error('Use a public HTTPS hostname without embedded credentials or a custom port.');\n  }\n  return value;\n};\nconst normalize = function normalizeComponentInput(descriptor, value) {\n  const bad = message => { throw new Error(message); };\n  const record = v => v !== null && typeof v === 'object' && !Array.isArray(v);\n  const inspect = (v, depth = 0) => {\n    if (depth > 8) bad('Input is nested too deeply.');\n    if (typeof v === 'number' && !Number.isFinite(v)) bad('Use finite JSON numbers.');\n    if (v && typeof v === 'object') for (const [key, child] of Object.entries(v)) {\n      if (['__proto__', 'constructor', 'prototype'].includes(key) || key.startsWith('__nos')) bad('Reserved input field.');\n      inspect(child, depth + 1);\n    }\n  };\n  if (!record(value) || Object.keys(value).some(key => !['itemsJson', 'paramsJson', 'executionId'].includes(key))\n    || typeof value.itemsJson !== 'string' || value.itemsJson.length > 8192\n    || typeof value.paramsJson !== 'string' || value.paramsJson.length > 2048) bad('Use bounded component input.');\n  const items = JSON.parse(value.itemsJson), supplied = JSON.parse(value.paramsJson);\n  if (!Array.isArray(items) || items.length > 20 || !items.every(record) || !record(supplied)) bad('Supply up to twenty JSON records and component parameters.');\n  inspect(items); inspect(supplied);\n  if (Object.keys(supplied).some(key => !Object.hasOwn(descriptor.parameters, key))) bad('Unexpected component parameter.');\n  const params = {};\n  for (const [key, spec] of Object.entries(descriptor.parameters)) {\n    const selected = Object.hasOwn(supplied, key) ? supplied[key] : spec.default;\n    if (spec.type === 'integer') {\n      if (!Number.isInteger(selected) || selected < spec.min || selected > spec.max) bad('Invalid ' + spec.label + '.');\n    } else if (spec.type === 'json') {\n      if (spec.shape !== 'any' && !record(selected) || JSON.stringify(selected).length > spec.maxLength) bad('Invalid ' + spec.label + '.');\n      if (descriptor.version >= 2) resolveComponentValue(selected, {}, true);\n    } else {\n      if (typeof selected !== 'string' || !selected.trim() || selected.length > spec.maxLength\n        || spec.options && !spec.options.includes(selected)) bad('Invalid ' + spec.label + '.');\n      if (spec.pattern === 'field' && !/^[A-Za-z][A-Za-z0-9_ .-]{0,63}$/.test(selected)) bad('Use a simple field name.');\n      if (spec.pattern === 'http') {\n        if (descriptor.version < 2 && selected !== 'http://127.0.0.1:4631/spike/ka/demo-data') bad('This saved HTTP revision permits only the local demo-data endpoint.');\n        if (descriptor.version >= 2) validateComponentUrl(selected);\n      }\n    }\n    params[key] = selected;\n  }\n  if (descriptor.input === 'file') {\n    if (!items.length || !items.every(item => record(item.file) && typeof item.file.base64 === 'string'\n      && item.file.base64.length <= 6000 && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(item.file.base64)\n      && typeof item.file.name === 'string' && /^[A-Za-z0-9 _.-]{1,80}$/.test(item.file.name))) bad('Supply a small file as base64 with a simple file name.');\n  }\n  const executionId = value.executionId ?? '';\n  if (typeof executionId !== 'string' || executionId && !/^\\d{1,20}$/.test(executionId)) bad('Invalid provider execution identity.');\n  if (descriptor.mode === 'schedule' && !executionId) bad('Activate this schedule from a saved workflow to receive events.');\n  if (descriptor.id === 'google-sheets' && items.length) {\n    const keys = Object.keys(items[0]);\n    if (!keys.length || keys.length > 8 || keys.some(k => !/^[A-Za-z][A-Za-z0-9 _.-]{0,63}$/.test(k))\n      || items.some(item => JSON.stringify(Object.keys(item)) !== JSON.stringify(keys)\n        || Object.values(item).some(v => !['string', 'number', 'boolean'].includes(typeof v) || String(v).length > 128))) bad('Use up to eight consistent, simply named scalar columns for Google Sheets.');\n  }\n  return { itemsJson: JSON.stringify(items), paramsJson: JSON.stringify(params), executionId };\n};\n const input = $input.all().map(i => i.json); normalize(JSON.parse(\"\\u007b\\\"id\\\":\\\"dkg-write\\\",\\\"name\\\":\\\"DKG Write\\\",\\\"category\\\":\\\"DKG\\\",\\\"nodeType\\\":\\\"n8n-nodes-base.httpRequest\\\",\\\"version\\\":2,\\\"input\\\":\\\"items\\\",\\\"outputs\\\":[\\\"main\\\"],\\\"parameters\\\":\\u007b\\\"node\\\":\\u007b\\\"type\\\":\\\"string\\\",\\\"label\\\":\\\"test-node\\\",\\\"default\\\":\\\"test-node\\\",\\\"maxLength\\\":256,\\\"options\\\":[\\\"test-node\\\"]\\u007d,\\\"contextGraph\\\":\\u007b\\\"type\\\":\\\"string\\\",\\\"label\\\":\\\"urn:test:results\\\",\\\"default\\\":\\\"urn:test:results\\\",\\\"maxLength\\\":256,\\\"options\\\":[\\\"urn:test:results\\\"]\\u007d,\\\"profileRevision\\\":\\u007b\\\"type\\\":\\\"string\\\",\\\"label\\\":\\\"Execution profile revision\\\",\\\"default\\\":\\\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\\\",\\\"maxLength\\\":64,\\\"options\\\":[\\\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\\\"]\\u007d\\u007d,\\\"sampleItems\\\":[\\u007b\\u007d],\\\"mode\\\":\\\"action\\\",\\\"connection\\\":\\\"httpHeaderAuth\\\",\\\"writes\\\":true\\u007d\"), { itemsJson: JSON.stringify(input), paramsJson: JSON.parse(\"\\\"\\u007b\\\\\\\"node\\\\\\\":\\\\\\\"test-node\\\\\\\",\\\\\\\"contextGraph\\\\\\\":\\\\\\\"urn:test:results\\\\\\\",\\\\\\\"profileRevision\\\\\\\":\\\\\\\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\\\\\\\"\\u007d\\\"\"), executionId: '' }); return $json; })() }}",
+          "options": {}
+        }
+      },
+      {
+        "id": "nOS-scope-cb4e77bbeb79428725b4",
+        "name": "nOS scope cb4e77bbeb79428725b4",
+        "type": "n8n-nodes-base.set",
+        "typeVersion": 3.4,
+        "position": [
+          2600,
+          0
+        ],
+        "parameters": {
+          "mode": "raw",
+          "jsonOutput": "={{ $json }}",
+          "options": {}
+        }
+      }
+    ],
+    "connections": {
+      "Block read request": {
+        "main": [
+          [
+            {
+              "node": "Block read records",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Block read records": {
+        "main": [
+          [
+            {
+              "node": "Block read",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Block read check 0": {
+        "main": [
+          [
+            {
+              "node": "Block read request",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Block write request": {
+        "main": [
+          [
+            {
+              "node": "Block write records",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Block write records": {
+        "main": [
+          [
+            {
+              "node": "Block write",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Block write check 0": {
+        "main": [
+          [
+            {
+              "node": "Block write request",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Block read": {
+        "main": [
+          [
+            {
+              "node": "Block write check 0",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Receive input": {
+        "main": [
+          [
+            {
+              "node": "Execution accepted",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Execution accepted": {
+        "main": [
+          [
+            {
+              "node": "nOS scope cb4e77bbeb79428725b4",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "nOS scope cb4e77bbeb79428725b4": {
+        "main": [
+          [
+            {
+              "node": "Prepare input",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare input": {
+        "main": [
+          [
+            {
+              "node": "Split input",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Split input": {
+        "main": [
+          [
+            {
+              "node": "Input items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Input items": {
+        "main": [
+          [
+            {
+              "node": "Block read check 0",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "saveManualExecutions": true,
+      "saveDataErrorExecution": "all",
+      "saveDataSuccessExecution": "all",
+      "executionTimeout": 50,
+      "executionOrder": "v1"
+    }
+  },
+  "execution": {
+    "workflowId": "bMbf81LHh10fuo0J",
+    "workflowVersionId": "bcf87525-f332-4c60-9a55-0fcd821e331b",
+    "workflowData": {
+      "id": "bMbf81LHh10fuo0J",
+      "name": "nOS Studio a519306e84fca331d43d5d1e87bae9806710bfcb38b18cff8b2e485f1b402077",
+      "nodes": [
+        {
+          "id": "Receive-input",
+          "name": "Receive input",
+          "webhookId": "bMbf81LHh10fuo0J",
+          "type": "n8n-nodes-base.webhook",
+          "typeVersion": 2.1,
+          "position": [
+            0,
+            0
+          ],
+          "parameters": {
+            "multipleMethods": false,
+            "httpMethod": "POST",
+            "path": "dkg-capability-bMbf81LHh10fuo0J",
+            "authentication": "headerAuth",
+            "responseMode": "responseNode",
+            "webhookNotice": "",
+            "options": {}
+          },
+          "credentials": {
+            "httpHeaderAuth": {
+              "id": "fixture-header-id",
+              "name": "Fixture header"
+            }
+          }
+        },
+        {
+          "id": "Execution-accepted",
+          "name": "Execution accepted",
+          "type": "n8n-nodes-base.respondToWebhook",
+          "typeVersion": 1.4,
+          "position": [
+            200,
+            0
+          ],
+          "parameters": {
+            "enableResponseOutput": false,
+            "generalNotice": "",
+            "respondWith": "json",
+            "webhookNotice": "",
+            "responseBody": "={{ ({ executionId: String($execution.id) }) }}",
+            "options": {}
+          }
+        },
+        {
+          "id": "Prepare-input",
+          "name": "Prepare input",
+          "type": "n8n-nodes-base.set",
+          "typeVersion": 3.4,
+          "position": [
+            400,
+            0
+          ],
+          "parameters": {
+            "mode": "raw",
+            "duplicateItem": false,
+            "jsonOutput": "={{ ({ records: JSON.parse($('Receive input').first().json.body.input.itemsJson) }) }}",
+            "includeOtherFields": false,
+            "options": {}
+          }
+        },
+        {
+          "id": "Split-input",
+          "name": "Split input",
+          "type": "n8n-nodes-base.splitOut",
+          "typeVersion": 1.1,
+          "position": [
+            600,
+            0
+          ],
+          "parameters": {
+            "fieldToSplitOut": "records",
+            "include": "noOtherFields",
+            "options": {
+              "destinationFieldName": "record"
+            }
+          }
+        },
+        {
+          "id": "Input-items",
+          "name": "Input items",
+          "type": "n8n-nodes-base.set",
+          "typeVersion": 3.4,
+          "position": [
+            800,
+            0
+          ],
+          "parameters": {
+            "mode": "raw",
+            "duplicateItem": false,
+            "jsonOutput": "={{ $json.record }}",
+            "includeOtherFields": false,
+            "options": {}
+          }
+        },
+        {
+          "id": "Block-read-request",
+          "name": "Block read request",
+          "type": "n8n-nodes-base.httpRequest",
+          "typeVersion": 4.3,
+          "executeOnce": true,
+          "retryOnFail": true,
+          "maxTries": 2,
+          "waitBetweenTries": 1000,
+          "position": [
+            1000,
+            0
+          ],
+          "parameters": {
+            "curlImport": "",
+            "method": "POST",
+            "url": "http://127.0.0.1:45691/spike/ka/internal/dkg-component",
+            "authentication": "genericCredentialType",
+            "genericAuthType": "httpHeaderAuth",
+            "provideSslCertificates": false,
+            "sendQuery": false,
+            "sendHeaders": false,
+            "sendBody": true,
+            "contentType": "json",
+            "specifyBody": "json",
+            "jsonBody": "={{ ({ effectId: $('Receive input').first().json.body.invocationId, workflowId: String($workflow.id), executionId: String($execution.id), blockId: \"read\", items: $input.all().map(i => i.json) }) }}",
+            "options": {
+              "redirect": {
+                "redirect": {
+                  "followRedirects": false
+                }
+              },
+              "response": {
+                "response": {
+                  "fullResponse": false,
+                  "neverError": false,
+                  "responseFormat": "json"
+                }
+              },
+              "timeout": 14000
+            },
+            "infoMessage": ""
+          },
+          "credentials": {
+            "httpHeaderAuth": {
+              "id": "fixture-header-id",
+              "name": "Fixture header"
+            }
+          }
+        },
+        {
+          "id": "Block-read-records",
+          "name": "Block read records",
+          "type": "n8n-nodes-base.splitOut",
+          "typeVersion": 1.1,
+          "position": [
+            1200,
+            0
+          ],
+          "parameters": {
+            "fieldToSplitOut": "items",
+            "include": "noOtherFields",
+            "options": {
+              "destinationFieldName": "value"
+            }
+          }
+        },
+        {
+          "id": "Block-read",
+          "name": "Block read",
+          "type": "n8n-nodes-base.set",
+          "typeVersion": 3.4,
+          "position": [
+            1400,
+            0
+          ],
+          "parameters": {
+            "mode": "raw",
+            "duplicateItem": false,
+            "jsonOutput": "={{ $json.value }}",
+            "includeOtherFields": false,
+            "options": {}
+          }
+        },
+        {
+          "id": "Block-read-check-0",
+          "name": "Block read check 0",
+          "type": "n8n-nodes-base.set",
+          "typeVersion": 3.4,
+          "position": [
+            1600,
+            0
+          ],
+          "parameters": {
+            "mode": "raw",
+            "duplicateItem": false,
+            "jsonOutput": "={{ (() => { const resolveComponentValue = function resolveComponentValue(value, item = {}, validateOnly = false) {\n  const reference = expression => {\n    const path = expression.trim();\n    if (path.length > 256 || !/^\\$json(?:(?:\\.[A-Za-z_][A-Za-z0-9_-]*)|\\[(?:\\d+|\"[^\"\\\\\\r\\n]+\"|'[^'\\\\\\r\\n]+')\\])*$/.test(path)) {\n      throw new Error('Use an input reference to a field such as $json.current.temperature_2m.');\n    }\n    let result = item;\n    for (const match of path.slice(5).matchAll(/\\.([A-Za-z_][A-Za-z0-9_-]*)|\\[(\\d+|\"[^\"\\\\\\r\\n]+\"|'[^'\\\\\\r\\n]+')\\]/g)) {\n      const key = match[1] ?? (/^\\d+$/.test(match[2]) ? match[2] : match[2].slice(1, -1));\n      if (['__proto__', 'constructor', 'prototype'].includes(key) || key.startsWith('__nos')) throw new Error('Reserved input reference.');\n      if (validateOnly) continue;\n      if (result === null || typeof result !== 'object' || !Object.hasOwn(result, key)) throw new Error('Input field not found: ' + path);\n      result = result[key];\n    }\n    return validateOnly ? null : result;\n  };\n  if (Array.isArray(value)) return value.map(v => resolveComponentValue(v, item, validateOnly));\n  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, v]) => [key, resolveComponentValue(v, item, validateOnly)]));\n  if (typeof value !== 'string' || !value.includes('{' + '{')) return value;\n  const source = value.startsWith('=') ? value.slice(1) : value;\n  const whole = /^\\{\\{\\s*([^{}]+?)\\s*\\}\\}$/.exec(source.trim());\n  if (whole) { const result = reference(whole[1]); return validateOnly ? value : result; }\n  const remainder = source.replace(/\\{\\{\\s*([^{}]+?)\\s*\\}\\}/g, (_, path) => { reference(path); return ''; });\n  if (remainder.includes('{' + '{') || remainder.includes('}' + '}')) throw new Error('Close each input reference.');\n  if (validateOnly) return value;\n  return source.replace(/\\{\\{\\s*([^{}]+?)\\s*\\}\\}/g, (_, path) => {\n    const result = reference(path);\n    if (result !== null && typeof result === 'object') return JSON.stringify(result);\n    return String(result ?? '');\n  });\n};\nconst validateComponentUrl = function validateComponentUrl(value) {\n  if (typeof value !== 'string' || value.length > 2048 || /[\\s\\\\\\u0000-\\u001f]/.test(value)) throw new Error('Enter a valid HTTPS API URL.');\n  const match = /^https:\\/\\/([^/?#]+)(?:[/?][^#]*)?$/.exec(value);\n  const host = match?.[1]?.toLowerCase().replace(/:443$/, '');\n  if (!host || host.includes('@') || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$/.test(host)\n    || /(?:^|\\.)(?:localhost|local|internal|test|invalid|example|onion)$/.test(host)) {\n    throw new Error('Use a public HTTPS hostname without embedded credentials or a custom port.');\n  }\n  return value;\n};\nconst normalize = function normalizeComponentInput(descriptor, value) {\n  const bad = message => { throw new Error(message); };\n  const record = v => v !== null && typeof v === 'object' && !Array.isArray(v);\n  const inspect = (v, depth = 0) => {\n    if (depth > 8) bad('Input is nested too deeply.');\n    if (typeof v === 'number' && !Number.isFinite(v)) bad('Use finite JSON numbers.');\n    if (v && typeof v === 'object') for (const [key, child] of Object.entries(v)) {\n      if (['__proto__', 'constructor', 'prototype'].includes(key) || key.startsWith('__nos')) bad('Reserved input field.');\n      inspect(child, depth + 1);\n    }\n  };\n  if (!record(value) || Object.keys(value).some(key => !['itemsJson', 'paramsJson', 'executionId'].includes(key))\n    || typeof value.itemsJson !== 'string' || value.itemsJson.length > 8192\n    || typeof value.paramsJson !== 'string' || value.paramsJson.length > 2048) bad('Use bounded component input.');\n  const items = JSON.parse(value.itemsJson), supplied = JSON.parse(value.paramsJson);\n  if (!Array.isArray(items) || items.length > 20 || !items.every(record) || !record(supplied)) bad('Supply up to twenty JSON records and component parameters.');\n  inspect(items); inspect(supplied);\n  if (Object.keys(supplied).some(key => !Object.hasOwn(descriptor.parameters, key))) bad('Unexpected component parameter.');\n  const params = {};\n  for (const [key, spec] of Object.entries(descriptor.parameters)) {\n    const selected = Object.hasOwn(supplied, key) ? supplied[key] : spec.default;\n    if (spec.type === 'integer') {\n      if (!Number.isInteger(selected) || selected < spec.min || selected > spec.max) bad('Invalid ' + spec.label + '.');\n    } else if (spec.type === 'json') {\n      if (spec.shape !== 'any' && !record(selected) || JSON.stringify(selected).length > spec.maxLength) bad('Invalid ' + spec.label + '.');\n      if (descriptor.version >= 2) resolveComponentValue(selected, {}, true);\n    } else {\n      if (typeof selected !== 'string' || !selected.trim() || selected.length > spec.maxLength\n        || spec.options && !spec.options.includes(selected)) bad('Invalid ' + spec.label + '.');\n      if (spec.pattern === 'field' && !/^[A-Za-z][A-Za-z0-9_ .-]{0,63}$/.test(selected)) bad('Use a simple field name.');\n      if (spec.pattern === 'http') {\n        if (descriptor.version < 2 && selected !== 'http://127.0.0.1:4631/spike/ka/demo-data') bad('This saved HTTP revision permits only the local demo-data endpoint.');\n        if (descriptor.version >= 2) validateComponentUrl(selected);\n      }\n    }\n    params[key] = selected;\n  }\n  if (descriptor.input === 'file') {\n    if (!items.length || !items.every(item => record(item.file) && typeof item.file.base64 === 'string'\n      && item.file.base64.length <= 6000 && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(item.file.base64)\n      && typeof item.file.name === 'string' && /^[A-Za-z0-9 _.-]{1,80}$/.test(item.file.name))) bad('Supply a small file as base64 with a simple file name.');\n  }\n  const executionId = value.executionId ?? '';\n  if (typeof executionId !== 'string' || executionId && !/^\\d{1,20}$/.test(executionId)) bad('Invalid provider execution identity.');\n  if (descriptor.mode === 'schedule' && !executionId) bad('Activate this schedule from a saved workflow to receive events.');\n  if (descriptor.id === 'google-sheets' && items.length) {\n    const keys = Object.keys(items[0]);\n    if (!keys.length || keys.length > 8 || keys.some(k => !/^[A-Za-z][A-Za-z0-9 _.-]{0,63}$/.test(k))\n      || items.some(item => JSON.stringify(Object.keys(item)) !== JSON.stringify(keys)\n        || Object.values(item).some(v => !['string', 'number', 'boolean'].includes(typeof v) || String(v).length > 128))) bad('Use up to eight consistent, simply named scalar columns for Google Sheets.');\n  }\n  return { itemsJson: JSON.stringify(items), paramsJson: JSON.stringify(params), executionId };\n};\n const input = $input.all().map(i => i.json); normalize(JSON.parse(\"\\u007b\\\"id\\\":\\\"dkg-read\\\",\\\"name\\\":\\\"DKG Read\\\",\\\"category\\\":\\\"DKG\\\",\\\"nodeType\\\":\\\"n8n-nodes-base.httpRequest\\\",\\\"version\\\":2,\\\"input\\\":\\\"items\\\",\\\"outputs\\\":[\\\"main\\\"],\\\"parameters\\\":\\u007b\\\"node\\\":\\u007b\\\"type\\\":\\\"string\\\",\\\"label\\\":\\\"test-node\\\",\\\"default\\\":\\\"test-node\\\",\\\"maxLength\\\":256,\\\"options\\\":[\\\"test-node\\\"]\\u007d,\\\"contextGraph\\\":\\u007b\\\"type\\\":\\\"string\\\",\\\"label\\\":\\\"urn:test:measurements\\\",\\\"default\\\":\\\"urn:test:measurements\\\",\\\"maxLength\\\":256,\\\"options\\\":[\\\"urn:test:measurements\\\"]\\u007d,\\\"dataset\\\":\\u007b\\\"type\\\":\\\"string\\\",\\\"label\\\":\\\"set-7\\\",\\\"default\\\":\\\"set-7\\\",\\\"maxLength\\\":256,\\\"options\\\":[\\\"set-7\\\"]\\u007d,\\\"profileRevision\\\":\\u007b\\\"type\\\":\\\"string\\\",\\\"label\\\":\\\"Execution profile revision\\\",\\\"default\\\":\\\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\\\",\\\"maxLength\\\":64,\\\"options\\\":[\\\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\\\"]\\u007d\\u007d,\\\"sampleItems\\\":[\\u007b\\u007d],\\\"mode\\\":\\\"action\\\",\\\"connection\\\":\\\"httpHeaderAuth\\\"\\u007d\"), { itemsJson: JSON.stringify(input), paramsJson: JSON.parse(\"\\\"\\u007b\\\\\\\"node\\\\\\\":\\\\\\\"test-node\\\\\\\",\\\\\\\"contextGraph\\\\\\\":\\\\\\\"urn:test:measurements\\\\\\\",\\\\\\\"dataset\\\\\\\":\\\\\\\"set-7\\\\\\\",\\\\\\\"profileRevision\\\\\\\":\\\\\\\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\\\\\\\"\\u007d\\\"\"), executionId: '' }); return $json; })() }}",
+            "includeOtherFields": false,
+            "options": {}
+          }
+        },
+        {
+          "id": "Block-write-request",
+          "name": "Block write request",
+          "type": "n8n-nodes-base.httpRequest",
+          "typeVersion": 4.3,
+          "executeOnce": true,
+          "retryOnFail": true,
+          "maxTries": 2,
+          "waitBetweenTries": 1000,
+          "position": [
+            1800,
+            0
+          ],
+          "parameters": {
+            "curlImport": "",
+            "method": "POST",
+            "url": "http://127.0.0.1:45691/spike/ka/internal/dkg-component",
+            "authentication": "genericCredentialType",
+            "genericAuthType": "httpHeaderAuth",
+            "provideSslCertificates": false,
+            "sendQuery": false,
+            "sendHeaders": false,
+            "sendBody": true,
+            "contentType": "json",
+            "specifyBody": "json",
+            "jsonBody": "={{ ({ effectId: $('Receive input').first().json.body.invocationId, workflowId: String($workflow.id), executionId: String($execution.id), blockId: \"write\", items: $input.all().map(i => i.json) }) }}",
+            "options": {
+              "redirect": {
+                "redirect": {
+                  "followRedirects": false
+                }
+              },
+              "response": {
+                "response": {
+                  "fullResponse": false,
+                  "neverError": false,
+                  "responseFormat": "json"
+                }
+              },
+              "timeout": 14000
+            },
+            "infoMessage": ""
+          },
+          "credentials": {
+            "httpHeaderAuth": {
+              "id": "fixture-header-id",
+              "name": "Fixture header"
+            }
+          }
+        },
+        {
+          "id": "Block-write-records",
+          "name": "Block write records",
+          "type": "n8n-nodes-base.splitOut",
+          "typeVersion": 1.1,
+          "position": [
+            2000,
+            0
+          ],
+          "parameters": {
+            "fieldToSplitOut": "items",
+            "include": "noOtherFields",
+            "options": {
+              "destinationFieldName": "value"
+            }
+          }
+        },
+        {
+          "id": "Block-write",
+          "name": "Block write",
+          "type": "n8n-nodes-base.set",
+          "typeVersion": 3.4,
+          "position": [
+            2200,
+            0
+          ],
+          "parameters": {
+            "mode": "raw",
+            "duplicateItem": false,
+            "jsonOutput": "={{ $json.value }}",
+            "includeOtherFields": false,
+            "options": {}
+          }
+        },
+        {
+          "id": "Block-write-check-0",
+          "name": "Block write check 0",
+          "type": "n8n-nodes-base.set",
+          "typeVersion": 3.4,
+          "position": [
+            2400,
+            0
+          ],
+          "parameters": {
+            "mode": "raw",
+            "duplicateItem": false,
+            "jsonOutput": "={{ (() => { const resolveComponentValue = function resolveComponentValue(value, item = {}, validateOnly = false) {\n  const reference = expression => {\n    const path = expression.trim();\n    if (path.length > 256 || !/^\\$json(?:(?:\\.[A-Za-z_][A-Za-z0-9_-]*)|\\[(?:\\d+|\"[^\"\\\\\\r\\n]+\"|'[^'\\\\\\r\\n]+')\\])*$/.test(path)) {\n      throw new Error('Use an input reference to a field such as $json.current.temperature_2m.');\n    }\n    let result = item;\n    for (const match of path.slice(5).matchAll(/\\.([A-Za-z_][A-Za-z0-9_-]*)|\\[(\\d+|\"[^\"\\\\\\r\\n]+\"|'[^'\\\\\\r\\n]+')\\]/g)) {\n      const key = match[1] ?? (/^\\d+$/.test(match[2]) ? match[2] : match[2].slice(1, -1));\n      if (['__proto__', 'constructor', 'prototype'].includes(key) || key.startsWith('__nos')) throw new Error('Reserved input reference.');\n      if (validateOnly) continue;\n      if (result === null || typeof result !== 'object' || !Object.hasOwn(result, key)) throw new Error('Input field not found: ' + path);\n      result = result[key];\n    }\n    return validateOnly ? null : result;\n  };\n  if (Array.isArray(value)) return value.map(v => resolveComponentValue(v, item, validateOnly));\n  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, v]) => [key, resolveComponentValue(v, item, validateOnly)]));\n  if (typeof value !== 'string' || !value.includes('{' + '{')) return value;\n  const source = value.startsWith('=') ? value.slice(1) : value;\n  const whole = /^\\{\\{\\s*([^{}]+?)\\s*\\}\\}$/.exec(source.trim());\n  if (whole) { const result = reference(whole[1]); return validateOnly ? value : result; }\n  const remainder = source.replace(/\\{\\{\\s*([^{}]+?)\\s*\\}\\}/g, (_, path) => { reference(path); return ''; });\n  if (remainder.includes('{' + '{') || remainder.includes('}' + '}')) throw new Error('Close each input reference.');\n  if (validateOnly) return value;\n  return source.replace(/\\{\\{\\s*([^{}]+?)\\s*\\}\\}/g, (_, path) => {\n    const result = reference(path);\n    if (result !== null && typeof result === 'object') return JSON.stringify(result);\n    return String(result ?? '');\n  });\n};\nconst validateComponentUrl = function validateComponentUrl(value) {\n  if (typeof value !== 'string' || value.length > 2048 || /[\\s\\\\\\u0000-\\u001f]/.test(value)) throw new Error('Enter a valid HTTPS API URL.');\n  const match = /^https:\\/\\/([^/?#]+)(?:[/?][^#]*)?$/.exec(value);\n  const host = match?.[1]?.toLowerCase().replace(/:443$/, '');\n  if (!host || host.includes('@') || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$/.test(host)\n    || /(?:^|\\.)(?:localhost|local|internal|test|invalid|example|onion)$/.test(host)) {\n    throw new Error('Use a public HTTPS hostname without embedded credentials or a custom port.');\n  }\n  return value;\n};\nconst normalize = function normalizeComponentInput(descriptor, value) {\n  const bad = message => { throw new Error(message); };\n  const record = v => v !== null && typeof v === 'object' && !Array.isArray(v);\n  const inspect = (v, depth = 0) => {\n    if (depth > 8) bad('Input is nested too deeply.');\n    if (typeof v === 'number' && !Number.isFinite(v)) bad('Use finite JSON numbers.');\n    if (v && typeof v === 'object') for (const [key, child] of Object.entries(v)) {\n      if (['__proto__', 'constructor', 'prototype'].includes(key) || key.startsWith('__nos')) bad('Reserved input field.');\n      inspect(child, depth + 1);\n    }\n  };\n  if (!record(value) || Object.keys(value).some(key => !['itemsJson', 'paramsJson', 'executionId'].includes(key))\n    || typeof value.itemsJson !== 'string' || value.itemsJson.length > 8192\n    || typeof value.paramsJson !== 'string' || value.paramsJson.length > 2048) bad('Use bounded component input.');\n  const items = JSON.parse(value.itemsJson), supplied = JSON.parse(value.paramsJson);\n  if (!Array.isArray(items) || items.length > 20 || !items.every(record) || !record(supplied)) bad('Supply up to twenty JSON records and component parameters.');\n  inspect(items); inspect(supplied);\n  if (Object.keys(supplied).some(key => !Object.hasOwn(descriptor.parameters, key))) bad('Unexpected component parameter.');\n  const params = {};\n  for (const [key, spec] of Object.entries(descriptor.parameters)) {\n    const selected = Object.hasOwn(supplied, key) ? supplied[key] : spec.default;\n    if (spec.type === 'integer') {\n      if (!Number.isInteger(selected) || selected < spec.min || selected > spec.max) bad('Invalid ' + spec.label + '.');\n    } else if (spec.type === 'json') {\n      if (spec.shape !== 'any' && !record(selected) || JSON.stringify(selected).length > spec.maxLength) bad('Invalid ' + spec.label + '.');\n      if (descriptor.version >= 2) resolveComponentValue(selected, {}, true);\n    } else {\n      if (typeof selected !== 'string' || !selected.trim() || selected.length > spec.maxLength\n        || spec.options && !spec.options.includes(selected)) bad('Invalid ' + spec.label + '.');\n      if (spec.pattern === 'field' && !/^[A-Za-z][A-Za-z0-9_ .-]{0,63}$/.test(selected)) bad('Use a simple field name.');\n      if (spec.pattern === 'http') {\n        if (descriptor.version < 2 && selected !== 'http://127.0.0.1:4631/spike/ka/demo-data') bad('This saved HTTP revision permits only the local demo-data endpoint.');\n        if (descriptor.version >= 2) validateComponentUrl(selected);\n      }\n    }\n    params[key] = selected;\n  }\n  if (descriptor.input === 'file') {\n    if (!items.length || !items.every(item => record(item.file) && typeof item.file.base64 === 'string'\n      && item.file.base64.length <= 6000 && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(item.file.base64)\n      && typeof item.file.name === 'string' && /^[A-Za-z0-9 _.-]{1,80}$/.test(item.file.name))) bad('Supply a small file as base64 with a simple file name.');\n  }\n  const executionId = value.executionId ?? '';\n  if (typeof executionId !== 'string' || executionId && !/^\\d{1,20}$/.test(executionId)) bad('Invalid provider execution identity.');\n  if (descriptor.mode === 'schedule' && !executionId) bad('Activate this schedule from a saved workflow to receive events.');\n  if (descriptor.id === 'google-sheets' && items.length) {\n    const keys = Object.keys(items[0]);\n    if (!keys.length || keys.length > 8 || keys.some(k => !/^[A-Za-z][A-Za-z0-9 _.-]{0,63}$/.test(k))\n      || items.some(item => JSON.stringify(Object.keys(item)) !== JSON.stringify(keys)\n        || Object.values(item).some(v => !['string', 'number', 'boolean'].includes(typeof v) || String(v).length > 128))) bad('Use up to eight consistent, simply named scalar columns for Google Sheets.');\n  }\n  return { itemsJson: JSON.stringify(items), paramsJson: JSON.stringify(params), executionId };\n};\n const input = $input.all().map(i => i.json); normalize(JSON.parse(\"\\u007b\\\"id\\\":\\\"dkg-write\\\",\\\"name\\\":\\\"DKG Write\\\",\\\"category\\\":\\\"DKG\\\",\\\"nodeType\\\":\\\"n8n-nodes-base.httpRequest\\\",\\\"version\\\":2,\\\"input\\\":\\\"items\\\",\\\"outputs\\\":[\\\"main\\\"],\\\"parameters\\\":\\u007b\\\"node\\\":\\u007b\\\"type\\\":\\\"string\\\",\\\"label\\\":\\\"test-node\\\",\\\"default\\\":\\\"test-node\\\",\\\"maxLength\\\":256,\\\"options\\\":[\\\"test-node\\\"]\\u007d,\\\"contextGraph\\\":\\u007b\\\"type\\\":\\\"string\\\",\\\"label\\\":\\\"urn:test:results\\\",\\\"default\\\":\\\"urn:test:results\\\",\\\"maxLength\\\":256,\\\"options\\\":[\\\"urn:test:results\\\"]\\u007d,\\\"profileRevision\\\":\\u007b\\\"type\\\":\\\"string\\\",\\\"label\\\":\\\"Execution profile revision\\\",\\\"default\\\":\\\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\\\",\\\"maxLength\\\":64,\\\"options\\\":[\\\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\\\"]\\u007d\\u007d,\\\"sampleItems\\\":[\\u007b\\u007d],\\\"mode\\\":\\\"action\\\",\\\"connection\\\":\\\"httpHeaderAuth\\\",\\\"writes\\\":true\\u007d\"), { itemsJson: JSON.stringify(input), paramsJson: JSON.parse(\"\\\"\\u007b\\\\\\\"node\\\\\\\":\\\\\\\"test-node\\\\\\\",\\\\\\\"contextGraph\\\\\\\":\\\\\\\"urn:test:results\\\\\\\",\\\\\\\"profileRevision\\\\\\\":\\\\\\\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\\\\\\\"\\u007d\\\"\"), executionId: '' }); return $json; })() }}",
+            "includeOtherFields": false,
+            "options": {}
+          }
+        },
+        {
+          "id": "nOS-scope-cb4e77bbeb79428725b4",
+          "name": "nOS scope cb4e77bbeb79428725b4",
+          "type": "n8n-nodes-base.set",
+          "typeVersion": 3.4,
+          "position": [
+            2600,
+            0
+          ],
+          "parameters": {
+            "mode": "raw",
+            "duplicateItem": false,
+            "jsonOutput": "={{ $json }}",
+            "includeOtherFields": false,
+            "options": {}
+          }
+        }
+      ],
+      "connections": {
+        "Block read request": {
+          "main": [
+            [
+              {
+                "node": "Block read records",
+                "type": "main",
+                "index": 0
+              }
+            ]
+          ]
+        },
+        "Block read records": {
+          "main": [
+            [
+              {
+                "node": "Block read",
+                "type": "main",
+                "index": 0
+              }
+            ]
+          ]
+        },
+        "Block read check 0": {
+          "main": [
+            [
+              {
+                "node": "Block read request",
+                "type": "main",
+                "index": 0
+              }
+            ]
+          ]
+        },
+        "Block write request": {
+          "main": [
+            [
+              {
+                "node": "Block write records",
+                "type": "main",
+                "index": 0
+              }
+            ]
+          ]
+        },
+        "Block write records": {
+          "main": [
+            [
+              {
+                "node": "Block write",
+                "type": "main",
+                "index": 0
+              }
+            ]
+          ]
+        },
+        "Block write check 0": {
+          "main": [
+            [
+              {
+                "node": "Block write request",
+                "type": "main",
+                "index": 0
+              }
+            ]
+          ]
+        },
+        "Block read": {
+          "main": [
+            [
+              {
+                "node": "Block write check 0",
+                "type": "main",
+                "index": 0
+              }
+            ]
+          ]
+        },
+        "Receive input": {
+          "main": [
+            [
+              {
+                "node": "Execution accepted",
+                "type": "main",
+                "index": 0
+              }
+            ]
+          ]
+        },
+        "Execution accepted": {
+          "main": [
+            [
+              {
+                "node": "nOS scope cb4e77bbeb79428725b4",
+                "type": "main",
+                "index": 0
+              }
+            ]
+          ]
+        },
+        "nOS scope cb4e77bbeb79428725b4": {
+          "main": [
+            [
+              {
+                "node": "Prepare input",
+                "type": "main",
+                "index": 0
+              }
+            ]
+          ]
+        },
+        "Prepare input": {
+          "main": [
+            [
+              {
+                "node": "Split input",
+                "type": "main",
+                "index": 0
+              }
+            ]
+          ]
+        },
+        "Split input": {
+          "main": [
+            [
+              {
+                "node": "Input items",
+                "type": "main",
+                "index": 0
+              }
+            ]
+          ]
+        },
+        "Input items": {
+          "main": [
+            [
+              {
+                "node": "Block read check 0",
+                "type": "main",
+                "index": 0
+              }
+            ]
+          ]
+        }
+      },
+      "settings": {
+        "saveManualExecutions": true,
+        "saveDataErrorExecution": "all",
+        "saveDataSuccessExecution": "all",
+        "executionTimeout": 50,
+        "executionOrder": "v1"
+      },
+      "nodeGroups": []
+    }
+  }
+}

@@ -126,3 +126,17 @@ describe('manifest writes on real temporary files', () => {
     expect(readdirSync(roots[0])).toEqual([]);
   });
 });
+
+it.each(['cursor', 'claude-code'] as const)(
+  'has no spurious warning when a %s-only manifest contains only shared templates',
+  (tool) => {
+    const ctx = context({ supportedTools: [tool], agentsMd: template('# Shared rules') });
+    // A workspace-only install does not need an explicit home-directory override.
+    delete ctx.homedir;
+    const plan = planInstall(ctx);
+    expect(plan.files.map((file) => file.absPath)).toEqual([
+      join(ctx.workspaceAbsPath, 'AGENTS.md'),
+    ]);
+    expect(plan.warnings).toEqual([]);
+  },
+);

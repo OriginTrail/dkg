@@ -1,5 +1,6 @@
+import { createQueryStoreReadContext, QueryMaterializationBudget } from '../src/query-store-read-context.js';
 import type { ScopedContentGraphDiscoverySnapshot } from '../src/scoped-content-graph-discovery-memo.js';
-import { describe, it, expect, beforeEach, expectTypeOf } from 'vitest';
+import { describe, it, expect, beforeEach, expectTypeOf, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +12,7 @@ import {
   asGraphWriteRevisionSource,
   type Quad,
   type QueryOptions as StoreQueryOptions,
+  type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -168,6 +170,7 @@ describe('DKGQueryEngine', () => {
         signal: controller.signal,
         priority: 'background',
         source: 'api.query',
+        maxResponseBytes: 10 * 1024 * 1024,
       },
     );
 
@@ -176,15 +179,79 @@ describe('DKGQueryEngine', () => {
       signal: controller.signal,
       priority: 'background',
       source: 'api.query',
+      maxResponseBytes: 10 * 1024 * 1024,
     }));
     expect(recordingStore.discoveryOptions).not.toHaveLength(0);
     for (const options of recordingStore.discoveryOptions) {
       expect(options).toMatchObject({
         priority: 'background',
         source: 'api.query',
+        maxResponseBytes: 8 * 1024 * 1024,
       });
       expect(options.signal).toBeUndefined();
     }
+  });
+
+  it('charges a shared graph catalog to each logical request budget', async () => {
+    const catalogStore = new OxigraphStore();
+    try {
+      const catalog = Array.from(
+        { length: 16 },
+        (_, index) => `${GRAPH}/_verifiable_memory/${index}-${'x'.repeat(80)}`,
+      );
+      catalogStore.listGraphsByPrefix = async () => catalog;
+      const catalogEngine = new DKGQueryEngine(catalogStore);
+
+      await expect(catalogEngine.query(
+        'SELECT ?s WHERE { ?s <urn:missing> ?o }',
+        {
+          contextGraphId: CONTEXT_GRAPH,
+          view: 'verifiable-memory',
+          maxMaterializedBytes: 128,
+        },
+      )).rejects.toMatchObject({
+        code: 'QUERY_MATERIALIZATION_TOO_LARGE',
+        maxBytes: 128,
+        actualBytes: expect.any(Number),
+      });
+    } finally {
+      await catalogStore.close();
+    }
+  });
+
+  it('charges structural JSON bytes for empty bindings', async () => {
+    let seenOptions: StoreQueryOptions | undefined;
+    const structuralStore = {
+      async query(_sparql: string, options?: StoreQueryOptions) {
+        seenOptions = options;
+        return {
+          type: 'bindings' as const,
+          bindings: Array.from({ length: 128 }, () => ({})),
+        };
+      },
+    } as unknown as TripleStore;
+    const structuralEngine = new DKGQueryEngine(structuralStore);
+
+    await expect(structuralEngine.query(
+      'SELECT ?unbound WHERE { ?s ?p ?o }',
+      { maxResponseBytes: 1_000, maxMaterializedBytes: 100 },
+    )).rejects.toMatchObject({
+      code: 'QUERY_MATERIALIZATION_TOO_LARGE',
+      maxBytes: 100,
+      actualBytes: expect.any(Number),
+    });
+    expect(seenOptions?.maxResponseBytes).toBe(1_000);
+  });
+
+  it('keeps the cumulative budget when an unscoped query withholds graphs', async () => {
+    const result = { type: 'bindings' as const, bindings: [{ value: 'x'.repeat(200) }] };
+    const query = vi.fn(async (_sparql: string, _options?: StoreQueryOptions) => result);
+    const engine = new DKGQueryEngine({ query } as unknown as TripleStore);
+    await expect(engine.query('SELECT ?value WHERE { ?s ?p ?value }', {
+      withheldGraphRoots: ['urn:hidden'], maxMaterializedBytes: 100,
+    })).rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE', maxBytes: 100,
+      actualBytes: Buffer.byteLength(JSON.stringify(result)) });
+    expect(query.mock.calls[0]?.[1]).toMatchObject({ withheldGraphRoots: ['urn:hidden'] });
   });
 
   it('keeps caller cancellation out of shared graph-discovery flights', async () => {
@@ -254,6 +321,79 @@ describe('DKGQueryEngine', () => {
     });
     expect(sharedStore.sharedOptions[0]?.signal).toBeUndefined();
     expect(secondController.signal.aborted).toBe(false);
+  });
+
+  it('coalesces bounded discovery and charges no request for its registry answer', async () => {
+    let releaseDiscovery!: () => void;
+    const discoveryGate = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
+    let discoveryStarted!: () => void;
+    const started = new Promise<void>((resolve) => { discoveryStarted = resolve; });
+
+    class BoundedFlightStore extends OxigraphStore {
+      sharedOptions: StoreQueryOptions[] = [];
+
+      async query(sparql: string, options?: StoreQueryOptions) {
+        if (sparql.includes('ontology/SubGraph')) {
+          this.sharedOptions.push(options ?? {});
+          discoveryStarted();
+          await discoveryGate;
+          return {
+            type: 'bindings' as const,
+            bindings: Array.from({ length: 64 }, () => ({})),
+          };
+        }
+        return super.query(sparql, options);
+      }
+    }
+
+    const boundedStore = new BoundedFlightStore();
+    const boundedEngine = new DKGQueryEngine(boundedStore);
+    await boundedStore.insert([q('urn:bounded:s', 'http://schema.org/name', '"Bounded"', GRAPH)]);
+    const commonOptions = {
+      contextGraphId: CONTEXT_GRAPH,
+      includeContextGraphPartitions: true,
+      priority: 'background' as const,
+      source: 'api.query',
+      maxResponseBytes: 10 * 1024 * 1024,
+    };
+    const sparql =
+      'SELECT ?sourceGraph ?name WHERE { GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name } }';
+
+    const first = boundedEngine.query(sparql, {
+      ...commonOptions,
+      maxMaterializedBytes: 10 * 1024 * 1024,
+    });
+    await started;
+    const second = boundedEngine.query(sparql, {
+      ...commonOptions,
+      maxMaterializedBytes: 10 * 1024 * 1024,
+    });
+    releaseDiscovery();
+    await expect(first).resolves.toMatchObject({ bindings: expect.any(Array) });
+    await expect(second).resolves.toMatchObject({ bindings: expect.any(Array) });
+    expect(boundedStore.sharedOptions).toHaveLength(1);
+    for (const seen of boundedStore.sharedOptions) {
+      expect(seen).toMatchObject({ maxResponseBytes: 8 * 1024 * 1024 });
+      expect(seen.signal).toBeUndefined();
+    }
+
+    const charges: number[] = [];
+    class RecordingBudget extends QueryMaterializationBudget {
+      override consumeBytes(bytes: number): void { charges.push(bytes); super.consumeBytes(bytes); }
+    }
+    await boundedEngine.query(sparql, {
+      ...commonOptions, materializationBudget: new RecordingBudget(10 * 1024 * 1024),
+    });
+    // The shared registry answer is node work: no request is charged for it, cached or fresh. Each
+    // request pays for its result and for the graph names its discovery returns.
+    const registryBytes = Buffer.byteLength(JSON.stringify({ type: 'bindings', bindings: Array.from({ length: 64 }, () => ({})) }));
+    expect(charges).not.toContain(registryBytes);
+    const chargedBytes = charges.reduce((sum, bytes) => sum + bytes, 0);
+    await expect(boundedEngine.query(sparql, { ...commonOptions, maxMaterializedBytes: chargedBytes }))
+      .resolves.toMatchObject({ bindings: expect.any(Array) });
+    await expect(boundedEngine.query(sparql, { ...commonOptions, maxMaterializedBytes: chargedBytes - 1 }))
+      .rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE', maxBytes: chargedBytes - 1 });
+    expect(boundedStore.sharedOptions).toHaveLength(1);
   });
 
   it('keeps caller cancellation out of GraphSetIndexStore refresh flights', async () => {
@@ -914,6 +1054,47 @@ describe('DKGQueryEngine', () => {
       expect(subjects).toEqual([E1, E2]);
     });
 
+    it.each(['SELECT ?s ?v', 'CONSTRUCT { ?s <urn:out> ?v }'])(
+      'charges the second content read after discovery and the first fit: %s', async form => {
+      const query = `${form} WHERE {
+        { ?s <http://ex.org/p1> ?v } UNION { ?s <http://ex.org/p2> ?v }
+      }`;
+      const originalQuery = store.query.bind(store);
+      const originalList = async (prefix: string, options?: StoreQueryOptions) => (await store.listGraphs(options)).filter(graph => graph.startsWith(prefix));
+      const content: number[] = [];
+      let discoveryBytes = 0;
+      const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
+      store.query = async (...args) => {
+        const result = await originalQuery(...args);
+        // Registry and authority answers are node work: only the slices and the content are charged.
+        if (args[0].includes('http://ex.org/p1')) content.push(size(result));
+        return result;
+      };
+      store.listGraphsByPrefix = async (...args) => {
+        const result = await originalList(...args);
+        discoveryBytes += size(result);
+        return result;
+      };
+      await new DKGQueryEngine(store).query(query, {
+        contextGraphId: CONTEXT_GRAPH, view: 'verifiable-memory',
+      });
+      expect(content).toHaveLength(2);
+      const ceiling = discoveryBytes + Math.max(...content);
+      const total = discoveryBytes + content.reduce((sum, bytes) => sum + bytes, 0);
+      expect(ceiling).toBeLessThan(total);
+      content.length = 0; discoveryBytes = 0;
+      await expect(new DKGQueryEngine(store).query(query, {
+        contextGraphId: CONTEXT_GRAPH, view: 'verifiable-memory', maxMaterializedBytes: ceiling,
+      })).rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE', maxBytes: ceiling, actualBytes: total });
+      // Neither discovery nor the first content read can be the rejection.
+      expect(content).toHaveLength(2);
+      expect(discoveryBytes + content[0]).toBeLessThanOrEqual(ceiling);
+      expect(discoveryBytes + content[1]).toBeLessThanOrEqual(ceiling);
+      await expect(new DKGQueryEngine(store).query(query, {
+        contextGraphId: CONTEXT_GRAPH, view: 'verifiable-memory', maxMaterializedBytes: total,
+      })).resolves.toBeDefined();
+    });
+
     it('SELECT with a solution-set modifier (ORDER BY) is rejected, not silently corrupted', async () => {
       await expect(
         engine.query(
@@ -956,7 +1137,7 @@ describe('DKGQueryEngine', () => {
   // ("fetch failed"). The read must now be a SINGLE `VALUES ?g { … } GRAPH ?g
   // { … }` query, with the injected graph variable hidden behind a sub-SELECT
   // so `SELECT *` and cross-graph DISTINCT keep their UNION-form semantics.
-  describe('#1596 multi-graph SWM view uses one VALUES block, not per-graph UNION', () => {
+  describe('#1596 multi-graph SWM view uses one graph-variable read, not per-graph UNION', () => {
     const SWM_CG = 'swm-1596';
     const swmGraph = (addr: string, n: number) =>
       `did:dkg:context-graph:${SWM_CG}/_shared_memory/${addr}/${n}`;
@@ -981,8 +1162,10 @@ describe('DKGQueryEngine', () => {
     const swmQuery = (sparql: string) =>
       recEngine.query(sparql, { contextGraphId: SWM_CG, view: 'shared-working-memory' });
 
+    // On Oxigraph the query's dataset (FROM NAMED) selects the read's graphs, so no graph list is written.
     const multiGraphQuery = () =>
-      recStore.queries.find((s) => s.includes('VALUES ?__dkgViewGraph'));
+      recStore.queries.find((s) => s.includes('GRAPH ?__dkgViewGraph'));
+    const multiGraphReads = () => recStore.queries.filter(s => s.includes('GRAPH ?__dkgViewGraph'));
     // Authority discovery may UNION independent metadata branches. This guard
     // concerns per-content-graph reads of the SWM view, not catalog queries.
     const hasPerGraphSwmRead = () => recStore.queries.some(
@@ -1002,12 +1185,13 @@ describe('DKGQueryEngine', () => {
       const result = await swmQuery('SELECT ?s ?p ?o WHERE { ?s ?p ?o }');
       expect(result.bindings).toHaveLength(12); // all rows, across all 6 graphs
 
-      // The multi-graph read is ONE VALUES-scoped query, never a per-graph UNION.
+      // The multi-graph read is ONE graph-variable query over its dataset, never a per-graph UNION.
       const multi = multiGraphQuery();
       expect(multi).toBeDefined();
       expect(multi).toContain('GRAPH ?__dkgViewGraph {');
-      expect(multi).toContain(swmGraph('0xowner', 0));
-      expect(recStore.queries.filter(s => s.includes('VALUES ?__dkgViewGraph'))).toHaveLength(1);
+      expect(multi).toContain(`FROM NAMED <${swmGraph('0xowner', 0)}>`);
+      expect(multi).not.toContain('VALUES ?__dkgViewGraph');
+      expect(multiGraphReads()).toHaveLength(1);
       expect(hasPerGraphSwmRead()).toBe(false);
     });
 
@@ -1021,7 +1205,7 @@ describe('DKGQueryEngine', () => {
       const result = await swmQuery('SELECT (COUNT(*) AS ?count) WHERE { ?s ?p ?o }');
       const count = Number(String(result.bindings[0]['count']).match(/^"?(\d+)"?/)?.[1]);
       expect(count).toBe(5);
-      expect(multiGraphQuery()).toBeDefined(); // still the VALUES form
+      expect(multiGraphQuery()).toBeDefined(); // still the single graph-variable read
     });
 
     it('cross-graph DISTINCT dedupes an identical triple present in two graphs', async () => {
@@ -1065,8 +1249,8 @@ describe('DKGQueryEngine', () => {
       for (const b of star.bindings) {
         expect(Object.keys(b)).not.toContain('__dkgViewGraph');
       }
-      // The var-less body must NOT have been emitted as the bare VALUES form
-      // that would project the sentinel.
+      // The var-less body must NOT have been emitted as the bare graph-variable
+      // form that would project the sentinel.
       expect(multiGraphQuery()).toBeUndefined();
     });
 
@@ -1075,7 +1259,7 @@ describe('DKGQueryEngine', () => {
     // CONSTRUCT and ASK are part of the engine contract and have had shape
     // regressions before (#789), so pin them through the new VALUES path too —
     // without an inner UNION (which would divert to the per-graph fallback).
-    it('CONSTRUCT over the SWM view uses the VALUES path and keeps the quad shape', async () => {
+    it('CONSTRUCT over the SWM view uses the single read and keeps the quad shape', async () => {
       const quads: Quad[] = [];
       for (let i = 0; i < 4; i++) {
         quads.push(q(`urn:cq:s${i}`, 'http://ex.org/p', `"v${i}"`, swmGraph('0xcq', i)));
@@ -1089,13 +1273,13 @@ describe('DKGQueryEngine', () => {
       expect((result.quads ?? []).map((qd) => qd.subject).sort())
         .toEqual(['urn:cq:s0', 'urn:cq:s1', 'urn:cq:s2', 'urn:cq:s3']);
       expect((result.quads ?? []).every((qd) => qd.predicate === 'urn:out')).toBe(true);
-      // ...and it went through the ONE VALUES query, never a per-graph UNION.
+      // ...and it went through the ONE graph-variable query, never a per-graph UNION.
       expect(multiGraphQuery()).toBeDefined();
-      expect(recStore.queries.filter(s => s.includes('VALUES ?__dkgViewGraph'))).toHaveLength(1);
+      expect(multiGraphReads()).toHaveLength(1);
       expect(hasPerGraphSwmRead()).toBe(false);
     });
 
-    it('ASK over the SWM view uses the VALUES path and returns the boolean', async () => {
+    it('ASK over the SWM view uses the single read and returns the boolean', async () => {
       await recStore.insert([
         q('urn:aq:s', 'http://ex.org/p', '"present"', swmGraph('0xaq', 2)),
       ]);
@@ -1778,8 +1962,9 @@ describe('DKGQueryEngine', () => {
     ]);
     const executed = recordingStore.queries.at(-1) ?? '';
     expect(executed.match(/VALUES\s+\?sourceGraph/gi)).toHaveLength(1);
-    expect(executed).toBe(sparql);
-    expect(executed).not.toContain(vmGraphs[5]);
+    // On Oxigraph the read's dataset is its only addition: the caller's list is not widened.
+    expect(executed).toContain(`FROM NAMED <${vmGraphs[5]}>`);
+    expect(executed.replace(/ FROM NAMED <[^>]+>/g, '')).toBe(sparql);
   });
 
   it('retains the allow-list intersection when caller VALUES contains an out-of-scope graph', async () => {
@@ -1810,8 +1995,11 @@ describe('DKGQueryEngine', () => {
     );
 
     expect(result.bindings).toEqual([{ sourceGraph: vm, name: '"allowed"' }]);
+    // On Oxigraph the read's dataset is the intersection: the caller's VALUES stays as written.
     const executed = recordingStore.queries.at(-1) ?? '';
-    expect(executed.match(/VALUES\s+\?sourceGraph/gi)).toHaveLength(2);
+    expect(executed.match(/VALUES\s+\?sourceGraph/gi)).toHaveLength(1);
+    expect(executed).toContain(`FROM NAMED <${vm}>`);
+    expect(executed).not.toContain(`FROM NAMED <${foreign}>`);
   });
 
   it('rejects a default-graph pattern even when authorized VALUES makes graph injection redundant', async () => {
@@ -2355,10 +2543,7 @@ describe('DKGQueryEngine', () => {
       discoveryCalls += 1;
       return discoveryCalls === 1 ? firstDiscovery.promise : secondDiscovery.promise;
     };
-    const reads = {
-      signal: undefined,
-      shared: { cacheKey: '["normal",null]' },
-    };
+    const reads = createQueryStoreReadContext(store, undefined);
 
     const beforeWrite = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, reads);
     expect(discoveryCalls).toBe(1);
@@ -2393,14 +2578,8 @@ describe('DKGQueryEngine', () => {
       return discoveryCalls === 1 ? laneA.promise : laneB.promise;
     };
 
-    const first = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, {
-      signal: undefined,
-      shared: { cacheKey: '["normal","dashboard.wm"]' },
-    });
-    const second = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, {
-      signal: undefined,
-      shared: { cacheKey: '["normal","dashboard.vm"]' },
-    });
+    const first = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, createQueryStoreReadContext(store, { source: 'dashboard.wm' }));
+    const second = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, createQueryStoreReadContext(store, { source: 'dashboard.vm' }));
     expect(discoveryCalls).toBe(2);
     laneA.resolve({ inventory: ['urn:graph:a'], partitions: [] });
     laneB.resolve({ inventory: ['urn:graph:b'], partitions: [] });

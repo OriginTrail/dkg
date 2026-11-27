@@ -252,6 +252,10 @@ describe('E2E: a relay-only member\'s sub-graph share while no Core subscribes a
     internals(member1).resolveCuratorPeerIdsForCg = async (graphId) => (graphId === contextGraphId
       ? { peerIds: ownerFound ? [owner.peerId] : [], curatorIsLocal: false, legacyTripleResolved: ownerFound }
       : resolveCurator(graphId));
+    const findCurrentPeers = member1.discovery.findCurrentAgentPeerIds.bind(member1.discovery);
+    member1.discovery.findCurrentAgentPeerIds = async (wallet, options) => (wallet.toLowerCase() === ownerAddress
+      ? (ownerFound ? [owner.peerId] : [])
+      : findCurrentPeers(wallet, options));
     internals(member1).ensureAgentsInOnDemandPhonebook = async () => new Set<string>();
     // White-box: the Core does not follow the graph on member 1. A Core that
     // hosts a catalog-owned graph asks each member to replay the graph's

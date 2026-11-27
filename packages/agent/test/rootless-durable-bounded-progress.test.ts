@@ -92,6 +92,12 @@ function manifest(meta: readonly Quad[]) {
   return plan;
 }
 
+/** The fixture's previously materialized copies, independent of this round's writes. */
+function contentProofs(fixtures: readonly AssetFixture[]) {
+  return { assertOwnership() {}, prove: async () => ({ held: new Set(fixtures.map(f => f.ual)),
+    retain() {}, assertCurrent() {}, close() {} }) };
+}
+
 function pageResult(
   phase: 'data' | 'meta',
   overrides: Partial<SyncPageResult>,
@@ -390,7 +396,7 @@ describe('bounded rootless durable progress', () => {
     expect(checkpoints.some(([key]) => key === `${CONTEXT_GRAPH_ID}:meta`)).toBe(false);
     expect(freshSessions).toEqual([
       ['meta', true],
-      ['data', false],
+      ['data', true],
     ]);
     expect(materialized.flatMap((entry) => entry.dataQuads)).toEqual([
       ...fixtures[0]!.payload,
@@ -482,6 +488,7 @@ describe('bounded rootless durable progress', () => {
     const continuationMaterialized: string[] = [];
     const continuationCheckpoints: Array<{ offset: number; terminal?: boolean }> = [];
     const continuationSummary = await runDurableSync({
+      contentProofs: contentProofs(selected.slice(0, 1)),
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],
@@ -915,6 +922,7 @@ describe('bounded rootless durable progress', () => {
     const checkpoints: Array<{ offset: number; terminal?: boolean }> = [];
 
     const summary = await runDurableSync({
+      contentProofs: contentProofs(fixtures.slice(0, 2)),
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],

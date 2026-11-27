@@ -13,6 +13,7 @@ export default defineConfig({
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
           'test/async-share-bound-recovery.test.ts',
+          'test/async-share-completion-lock.test.ts',
           'test/write-preflight-diagnostics.test.ts',
           'test/durable-synchronous-share.test.ts',
           'test/durable-private-payload-recovery.test.ts',
@@ -23,16 +24,29 @@ export default defineConfig({
           'test/durable-unregistered-author-process.test.ts',
           'test/promote-route-not-persisted.test.ts',
           'test/public-snapshot-job.test.ts',
+          'test/public-checkpoint-job.test.ts',
+          'test/public-checkpoint-config.test.ts',
+          'test/daemon-api-exposure-warning.test.ts',
+          'test/snapshot-job-isolation.test.ts',
+          'test/sync-checkpoint-command.test.ts',
           'test/core-chain-cache-config.test.ts',
+          'test/mcp-claude-relocated.test.ts',
+          'test/mcp-uninstall-command.test.ts',
+          'test/mcp-uninstall.test.ts',
+          'test/mcp-setup.test.ts',
           'test/mcp-config-document.test.ts',
           'test/mcp-launch-command.test.ts',
           'test/mcp-physical-config.test.ts',
           'test/mcp-config-metadata.test.ts',
+          'test/rdf-parser.test.ts',
           'test/api-client.test.ts',
+          'test/context-graph-read-model.test.ts',
           'test/finalized-publish-options.test.ts',
+          'test/confirmed-catalog-obligation-response.test.ts',
           'test/messenger-outbox-memory.test.ts',
           'test/live-daemon-isolation.test.ts',
           'test/async-vm-publish-registration.test.ts',
+          'test/catalog-publication-admission-route.test.ts',
           // #2892 — real in-memory queue and supervisor; no chain or daemon process.
           'test/async-promote-supervisor-bookkeeping.test.ts',
           'test/promote-queue-config.test.ts',
@@ -41,6 +55,8 @@ export default defineConfig({
           'test/retention-timer.test.ts',
           'test/retention-sweeps.test.ts',
           'test/retention-share-sweep.test.ts',
+          // OT-RFC-73 P11 — the publisher sweep over the daemon admission instance's own store object and claim transaction, with real publisher rows.
+          'test/retention-publisher-sweep.test.ts',
           'test/retention-runtime-scope.test.ts',
           'test/daemon-queue-retention-live.test.ts',
           'test/async-admission-usage-retention.test.ts',
@@ -48,6 +64,7 @@ export default defineConfig({
           'test/publisher-job-by-intent-route.test.ts',
           'test/publisher-journal-route.test.ts',
           'test/publisher-clear-job-route.test.ts',
+          'test/clear-job-cli.test.ts',
           // GH#2270 follow-up — who may force-clear a job whose transaction may still land.
           // A pure route-handler test, no hardhat, so it belongs in this lane.
           'test/publisher-clear-job-override-authz.test.ts',
@@ -60,20 +77,54 @@ export default defineConfig({
           // #1828 — daemon-boot intent-index backfill wiring (fail-open contract).
           'test/vm-publish-intent-backfill.test.ts',
           'test/agent-connect-routes.test.ts',
+          'test/agent-chat-update-term-validation.test.ts',
           'test/preferred-relays.test.ts',
           'test/lan-addresses.test.ts',
           'test/reconcile-503-mapping.test.ts',
           'test/sealed-create-retry-route.test.ts',
           'test/config.test.ts',
+          'test/semantic-runtime.test.ts',
+          'test/semantic-runtime-inbox.test.ts',
+          'test/semantic-runtime-bound-inbox.test.ts',
+          'test/semantic-runtime-query-adapter.test.ts',
+          'test/semantic-runtime-query-pins.test.ts',
+          'test/semantic-runtime-program-policy.test.ts',
+          'test/semantic-runtime-program-bindings.test.ts',
+          'test/semantic-runtime-graph-configuration-limits.test.ts',
+          'test/semantic-runtime-execution-output.test.ts',
+          'test/local-private-first-write.test.ts',
+          'test/write-preflight-resilience.test.ts',
+          'test/semantic-runtime-asset-program.test.ts',
+          'test/semantic-runtime-receipt-lifecycle.test.ts',
+          'test/semantic-runtime-native-assets.test.ts',
+          'test/semantic-runtime-sparql-adapter.test.ts',
+          'test/semantic-runtime-configuration-api.test.ts',
+          'test/semantic-runtime-binding-pin.test.ts',
+          'test/semantic-runtime-studio-authority.test.ts',
+          'test/semantic-runtime-n8n-authority.test.ts',
+          'test/semantic-runtime-n8n-recovery.test.ts',
+          'test/semantic-runtime-routes.test.ts',
+          'test/semantic-runtime-safe-llm-adapter.test.ts',
+          'test/semantic-runtime-local-llm-adapter.test.ts',
+          'test/semantic-runtime-n8n-adapter.test.ts',
+          'test/semantic-runtime-n8n-native.test.ts',
+          'test/semantic-runtime-n8n-wire.test.ts',
+          'test/semantic-runtime-n8n-fingerprint.test.ts',
+          'test/semantic-runtime-remote-execute-adapter.test.ts',
+          'test/daemon-log-rotation.test.ts',
+          'test/daemon-log-rotation-io.test.ts',
           'test/status-route-rpc.test.ts',
           // Pure: in-process status route and a chain adapter over scripted endpoints.
           'test/status-chain-rpc.test.ts',
+          // Pure: in-process balances route over a scripted endpoint and a refused port.
+          'test/wallet-balances-route-rpc.test.ts',
           'test/backpressure-route.test.ts',
           'test/notifications-route-bounded.test.ts',
       'test/status-route-store-quads.test.ts',
       'test/store-reachability.test.ts',
       'test/query-route-lifecycle.test.ts',
       'test/bounded-query.test.ts',
+      'test/query-route-unheld-context-graph.test.ts',
       'test/entity-search.test.ts',
       'test/query-catalog-profile-route.test.ts',
           'test/context-graph-route-read-authority.test.ts',
@@ -101,6 +152,8 @@ export default defineConfig({
           'test/daemon/routes/plugins.test.ts',
           'test/daemon-pca-routes.test.ts',
           'test/knowledge-assets-error-mapping.test.ts',
+          'test/share-job-retirement.test.ts',
+          'test/knowledge-assets-publish-authority-route.test.ts',
           'test/promote-admission-route.test.ts',
           'test/async-share-control-busy-admission.test.ts',
           'test/daemon-identity-wallet-routes.test.ts',
@@ -112,6 +165,16 @@ export default defineConfig({
           // handlers plus one live daemon on the mock chain; no hardhat.
           'test/node-admin-scope-routes.test.ts',
           'test/daemon-operator-scope-live.test.ts',
+          // Operator-only CPU profile: route, recorder and command with a fake
+          // inspector session; real profiles in a child process and in one
+          // live daemon on the mock chain.
+          'test/cpu-profile.test.ts',
+          'test/cpu-profile-command.test.ts',
+          'test/cpu-profile-real.test.ts',
+          'test/cpu-profile-live.test.ts',
+          // Node-admin read-graph commands: routes on a real read-graph layer, command and client.
+          'test/read-graphs-route.test.ts',
+          'test/read-graphs-command.test.ts',
           'test/private-access-route.test.ts',
           // R8 — #1085 /register policy-matrix route tests, extracted from
           // daemon-http-behavior-extra so they run here (pure route handler,
@@ -122,6 +185,7 @@ export default defineConfig({
           'test/context-graph-subscribe-readiness.test.ts',
           'test/approved-member-empty-graph-first-write.test.ts',
           'test/context-graph-empty-vm-readiness.test.ts',
+          'test/context-graph-empty-vm-repeat.test.ts',
           'test/context-graph-subscribe-empty-vm.test.ts',
           // A public graph its subscribe job left unproven gets the job again
           // (#3207). The real catch-up worker behind a fake thread; no hardhat.
@@ -135,6 +199,8 @@ export default defineConfig({
           // A persisted subscription restored unsynced gets a catch-up job
           // (#3251). Agent double and stub runner; no hardhat.
           'test/context-graph-activation-catchup.test.ts',
+          'test/context-graph-activation-committed.test.ts',
+      'test/context-graph-activation-provisional.test.ts',
           // A write into a graph this node is still catching up waits for the
           // catch-up, bounded; a restarted owner's first write into its own
           // registered graph goes through. Same worker and fake thread.
@@ -166,6 +232,10 @@ export default defineConfig({
           'test/pca-confirmation-wire.test.ts',
           'test/pca-command-render.test.ts',
           'test/auth.test.ts',
+          'test/agent-http-auth.test.ts',
+          'test/encryption-enrollment-routes.test.ts',
+          'test/agent-encryption-key-routes.test.ts',
+          'test/request-actor-authentication.test.ts',
           // Pure logic — no hardhat needed. Adding to the unit config means
           // contributors can run it via `pnpm test:unit` in ~2s instead of
           // paying the 2-minute hardhat-boot tax of the default config.
@@ -263,9 +333,11 @@ export default defineConfig({
           'test/rpc-usage-log.test.ts',
           'test/rpc-usage-snapshot-route.test.ts',
           'test/publisher-runner-rpc-usage.test.ts',
+          'test/publisher-runtime-cleanup.test.ts',
           'test/publisher-startup-admission.test.ts',
           'test/publisher-startup-lifecycle.test.ts',
           'test/daemon-publisher-startup-cancellation.test.ts',
+          'test/daemon-checkpoint-startup.test.ts',
           'test/publisher-availability.test.ts',
           'test/log-sink.test.ts',
           'test/log-lifecycle.test.ts',
@@ -295,6 +367,8 @@ export default defineConfig({
           // (pending vs proven-absent vs inconclusive), and the two-state
           // resolver derived from it. Pure logic over stub adapters.
           'test/publisher-chain-proof-resolution.test.ts',
+          // #3591 — the claim gate's balance reads, through each wallet's own adapter.
+          'test/publisher-wallet-balances.test.ts',
           // #1836 — publisher.maxRetries must propagate through
           // createPublisherControlFromStore (incl. a literal 0). Pure logic.
           'test/publisher-maxretries-1836.test.ts',
@@ -313,6 +387,10 @@ export default defineConfig({
           // routes (real publisher control, no hardhat), and the CLI rendering.
           'test/publisher-retry-surfacing-2270.test.ts',
           'test/publisher-retry-command-output-2270.test.ts',
+          // OT-RFC-73 P11 (AC7) and #3551: the offline inspector refuses every command while a daemon is running.
+          'test/publisher-offline-write-guard.test.ts',
+          // #3551: the offline reads open the store read-only and leave its file unchanged (real store files, no hardhat).
+          'test/publisher-offline-read-only.test.ts',
           // #1828 — daemon-boot wiring seam (runDaemonInner invokes the VM-publish
           // intent-index backfill with the admission publisher control).
           'test/publisher-backfill-wiring-1828.test.ts',
@@ -329,12 +407,16 @@ export default defineConfig({
           'test/vector-store-extra.test.ts',
           'test/memory-vector-tenant-isolation.test.ts',
           'test/snapshot-page-index-store.test.ts',
+          'test/join-policy-store.test.ts',
           // Release 2 — managed local Oxigraph server (opt-in). Pure logic
           // + injected fetch/spawn/fs; no network, no real binary.
           'test/oxigraph-binary.test.ts',
           'test/oxigraph-listen-port.test.ts',
+          'test/daemon-startup-wait.test.ts',
           'test/oxigraph-server.test.ts',
           'test/oxigraph-server-native.test.ts',
+          // A peer's write with a malformed term, on the pinned real server.
+          'test/peer-write-term-validation-oxigraph-server.test.ts',
           'test/oxigraph-server-wal.test.ts',
           'test/oxigraph-managed-start-options.test.ts',
           'test/oxigraph-wal-maintenance.test.ts',
@@ -346,6 +428,7 @@ export default defineConfig({
           'test/oxigraph-orphan-policy.test.ts',
           'test/oxigraph-reclaim-policy.test.ts',
           'test/oxigraph-orphan-native.test.ts',
+          'test/process-inventory.test.ts',
           'test/oxigraph-managed.test.ts',
           // Opt-in via BLAZEGRAPH_INTEGRATION_TEST=1. Skips silently
           // (no fetch / no docker spawn) when the env-var is unset, so
@@ -369,14 +452,18 @@ export default defineConfig({
           // at both async admission routes.
           'test/write-preflight-store-busy-route.test.ts',
           'test/http-literal-size-validation.test.ts',
+          'test/writable-quad-terms.test.ts',
           'test/http-quad-term-validation.test.ts',
           // CLI subprocess smoke with stub daemon only; no hardhat needed.
           'test/context-graph-join-policy-cli.test.ts',
           'test/context-graph-join-policy-route.test.ts',
           'test/context-graph-join-request-route.test.ts',
           'test/assertion-cli-smoke.test.ts',
-          'test/knowledge-asset-cli-smoke.test.ts',
+          'test/knowledge-asset-cli-smoke-validation.test.ts',
+          'test/knowledge-asset-cli-smoke-mapping.test.ts',
+          'test/knowledge-asset-cli-smoke-lifecycle.test.ts',
           'test/knowledge-asset-share-catalog-handoff.test.ts',
+          'test/async-job-failure-cli.test.ts',
           'test/okf-subcommands.test.ts',
           'test/okf-private-lifecycle.test.ts',
           'test/okf-subgraph-roundtrip.test.ts',
@@ -405,11 +492,15 @@ export default defineConfig({
           'test/daemon-prime-agent.test.ts',
           'test/daemon-prime-agent-persistence.test.ts',
           'test/daemon-sse-final-frame.test.ts',
+          // Proxy keepalives on the Hermes and OpenClaw chat streams (#3886).
+          'test/local-agent-sse-keepalive.test.ts',
           'test/chain-discovery-scan-mode.test.ts',
           'test/chain-discovery-scan-storage.test.ts',
           'test/context-graph-list-cli.test.ts',
+          'test/context-graph-list-filter-route.test.ts',
           'test/historical-context-graph-discovery.test.ts',
           'test/context-graph-subscriptions-route.test.ts',
+          'test/context-graph-authority-route.test.ts',
           // Daemon call-site wiring guard: runDaemonInner passes the resolved
           // syncAgentsMeta into DKGAgent.create. Fully mocked (network/agent/
           // wallets) — no hardhat.
@@ -417,6 +508,11 @@ export default defineConfig({
           'test/daemon-sync-agents-meta-wiring.test.ts',
           'test/daemon-storage-ack-timing-wiring.test.ts',
           'test/daemon-managed-boot-wiring.test.ts',
+          // OT-RFC-73 P14 — the store control path's default and its store.controlReservedSlots setting: the
+          // config type and loader, and the daemon configuring the path before any store call. No hardhat.
+          'test/store-control-path-config.test.ts',
+          'test/daemon-store-control-path-wiring.test.ts',
+          'test/daemon-api-bind-guard.test.ts',
         ],
     testTimeout: runsDaemonHttpBehavior ? 120_000 : 60_000,
     globalSetup: runsDaemonHttpBehavior ? ['../chain/test/hardhat-global-setup.ts'] : [],

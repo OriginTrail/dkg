@@ -190,6 +190,11 @@ export interface ContextGraphAutomaticApprovalRepairRecord {
   agentAddress: string;
 }
 
+export interface ContextGraphAutomaticApprovalReleaseInput extends ContextGraphAutomaticApprovalRepairInput {
+  timestamp: number;
+  reason: string;
+}
+
 type ContextGraphAutomaticApprovalLedgerState = 'reserved' | 'committed';
 
 interface ContextGraphAutomaticApprovalLedgerRow {
@@ -1968,6 +1973,47 @@ export class DashboardDB {
         AND state = 'reserved'
     `).run(input.contextGraphId, input.requestDigest, input.policyEpoch);
     return marked.changes === 1;
+  }
+
+  /**
+   * Remove an unused reservation, one still reserved and not marked for
+   * repair, with an audit row in the same transaction: an admission that
+   * ended pending before its membership mutation no longer counts toward the
+   * hourly caps. False when there was nothing to release.
+   */
+  releaseContextGraphAutomaticApproval(input: ContextGraphAutomaticApprovalReleaseInput): boolean {
+    const release = this.db.transaction((): boolean => {
+      const reservation = this.stmt('findReleasableContextGraphAutomaticApproval', `
+        SELECT actor, agent_address, policy_version
+        FROM context_graph_join_approval_ledger
+        WHERE context_graph_id = ? AND request_digest = ? AND policy_epoch = ?
+          AND state = 'reserved' AND repair_pending = 0
+        LIMIT 1
+      `).get(input.contextGraphId, input.requestDigest, input.policyEpoch) as Pick<
+        ContextGraphAutomaticApprovalLedgerRow,
+        'actor' | 'agent_address' | 'policy_version'
+      > | undefined;
+      if (!reservation) return false;
+      this.stmt('releaseContextGraphAutomaticApprovalReservation', `
+        DELETE FROM context_graph_join_approval_ledger
+        WHERE context_graph_id = ? AND request_digest = ? AND policy_epoch = ?
+          AND state = 'reserved' AND repair_pending = 0
+      `).run(input.contextGraphId, input.requestDigest, input.policyEpoch);
+      this.appendContextGraphJoinPolicyAudit({
+        timestamp: input.timestamp,
+        contextGraphId: input.contextGraphId,
+        eventType: 'join_auto_reservation',
+        actor: reservation.actor,
+        agentAddress: reservation.agent_address,
+        outcome: 'released',
+        reason: input.reason,
+        requestDigest: input.requestDigest,
+        policyVersion: reservation.policy_version,
+        details: { policyEpoch: input.policyEpoch },
+      });
+      return true;
+    });
+    return release();
   }
 
   getContextGraphAutomaticApprovalRepair(

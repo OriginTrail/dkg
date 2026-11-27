@@ -169,6 +169,41 @@ describe('control-plane refusal reporting', () => {
     expect(summaryLines).toEqual([expect.stringMatching(/ 1 time\(s\) in the last 1 s for 1 graph\(s\)/)]);
   });
 
+  it('counts durable syncs refused at once per admission source, and logs other lanes on their own', () => {
+    const summaryLines: string[] = [];
+    const infoLines: string[] = [];
+    const counted = new ControlPlaneRefusalSummary({ emit: (line) => summaryLines.push(line), now: () => clock });
+    const logInfo = (_ctx: unknown, message: string) => { infoLines.push(message); };
+    const durable = (graph: string, state?: string) => new SyncBackpressureBusyError(
+      `Sync backpressure rejected durable:${graph}:peer (global inflight=1/1, queued=0/0)`, 'queue_full', state,
+    );
+
+    for (const graph of ['urn:cg:a', 'urn:cg:b', 'urn:cg:a']) {
+      syncRefusalReporter({ label: `durable:${graph}:peer`, lane: 'durable', source: 'vm-recovery', contextGraphId: graph }, counted, logInfo)(
+        ctx, durable(graph, 'global inflight=1/1, queued=0/0'),
+      );
+    }
+    syncRefusalReporter({ label: 'durable:urn:cg:c:peer', lane: 'durable', contextGraphId: 'urn:cg:c' }, counted, logInfo)(
+      ctx, durable('urn:cg:c', 'global inflight=1/1, queued=0/0'),
+    );
+    syncRefusalReporter({ label: 'changelog:urn:cg:d:peer', lane: 'changelog', source: 'on-connect' }, counted, logInfo)(
+      ctx, new SyncBackpressureBusyError('Sync backpressure rejected changelog:urn:cg:d:peer', 'queue_full', 'global inflight=1/1, queued=0/0'),
+    );
+    syncRefusalReporter({ label: 'durable:urn:cg:e:peer', lane: 'durable', source: 'vm-recovery' }, counted, logInfo)(ctx, durable('urn:cg:e'));
+
+    expect(infoLines).toEqual([
+      'Sync backpressure rejected changelog:urn:cg:d:peer',
+      'Sync backpressure rejected durable:urn:cg:e:peer (global inflight=1/1, queued=0/0)',
+    ]);
+    counted.flush();
+    expect(summaryLines).toEqual([
+      'Sync backpressure rejected durable:vm-recovery 3 time(s) in the last 1 s for 2 graph(s), each asked again later '
+        + '(last: global inflight=1/1, queued=0/0)',
+      'Sync backpressure rejected durable:unspecified 1 time(s) in the last 1 s for 1 graph(s), each asked again later '
+        + '(last: global inflight=1/1, queued=0/0)',
+    ]);
+  });
+
   it('hands the node\'s stop signal to the summary, which logs at once when the node stops', () => {
     const summaryLines: string[] = [];
     const counted = new ControlPlaneRefusalSummary({ emit: (line) => summaryLines.push(line), now: () => clock });

@@ -28,6 +28,7 @@ import {
   type PersistedLiftJob,
 } from './lift-job.js';
 import { parseLiteral } from './async-lift-control-plane.js';
+import { LiftJobPayloadUnreadableError } from './lift-job-payload-unreadable.js';
 import { normalizePersistedLiftJobRequest } from './async-lift-publisher-utils.js';
 import { LIFT_JOB_PAYLOAD_SCHEMA_VERSION } from './lift-job-payload-version.js';
 import {
@@ -142,9 +143,9 @@ export function decodedLiftJobOrThrow(decoded: LiftJobPayloadDecodeResult): Pers
     case 'absent':
       return null;
     case 'malformed':
-      throw new Error(`Malformed persisted LiftJob payload: ${decoded.reason}`);
+      throw new LiftJobPayloadUnreadableError(`Malformed persisted LiftJob payload: ${decoded.reason}`);
     case 'unknown':
-      throw new Error(`Malformed persisted LiftJob payload: Unsupported LiftJob status: ${decoded.job.status}`);
+      throw new LiftJobPayloadUnreadableError(`Malformed persisted LiftJob payload: Unsupported LiftJob status: ${decoded.job.status}`);
     case 'canonical':
     case 'compatibility':
       return decoded.job;

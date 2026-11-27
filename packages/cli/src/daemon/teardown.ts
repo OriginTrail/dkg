@@ -90,6 +90,15 @@ import type { PublisherLiveControl } from '../publisher-live-control.js';
  * waits for its graph's catch-up (`context-graph-write-readiness.ts`) is
  * refused at once, retryable, so it does not hold the HTTP server's close,
  * which comes before the catch-up drain, until the shutdown deadline.
+ *
+ * `endCpuProfile` does the same for an operator's CPU profile, which records
+ * for up to 60 s inside its request: it is stopped and written at once, and a
+ * later one is refused.
+ *
+ * `endReadGraphRequests` ends an operator's read-graph check, rebuild or drop
+ * (`dkg store read-graphs`), which can run for minutes inside its request: it
+ * stops at its next store call and answers at once, and a later one is
+ * refused.
  */
 export async function beginGracefulShutdown(deps: {
   state: { catchupAcceptingJobs: boolean };
@@ -102,6 +111,10 @@ export async function beginGracefulShutdown(deps: {
   endWriteReadinessWaits?: () => void;
   /** Stops the triggers of later catch-up jobs. */
   stopCatchupTriggers?: () => void;
+  /** Stops a running CPU profile now and refuses later ones. */
+  endCpuProfile?: () => void;
+  /** Ends the running read-graph requests now and refuses later ones. */
+  endReadGraphRequests?: () => void;
 }): Promise<void> {
   deps.state.catchupAcceptingJobs = false;
   const reportControlClose = (error: unknown) => deps.log(`Publisher control shutdown error: ${error instanceof Error ? error.message : String(error)}`);
@@ -123,6 +136,16 @@ export async function beginGracefulShutdown(deps: {
   } catch (err: any) {
     deps.log(`Catch-up trigger stop error: ${err?.message ?? String(err)}`);
   }
+  try {
+    deps.endCpuProfile?.();
+  } catch (err: any) {
+    deps.log(`CPU profile stop error: ${err?.message ?? String(err)}`);
+  }
+  try {
+    deps.endReadGraphRequests?.();
+  } catch (err: any) {
+    deps.log(`Read-graph request stop error: ${err?.message ?? String(err)}`);
+  }
   deps.log('Shutting down...');
   await deps.removeApiPort().catch((err: any) =>
     deps.log(`Early api.port cleanup error: ${err?.message ?? String(err)}`),
@@ -133,6 +156,8 @@ export interface ProducerQuiescentTeardownSteps {
   /** Stop accepting new connections and drain in-flight callbacks while their
    * dependencies are still alive. The outer shutdown deadline bounds this. */
   closeServer: () => Promise<void>;
+  /** Retire Program intake/Workers before their model and agent dependencies. */
+  stopSemanticRuntime: () => Promise<void>;
   /** Close the daemon-owned MCP child before the DKG agent/store retires. */
   closeEntitySearch: () => Promise<void>;
   closeLocalLlm: () => Promise<void>;
@@ -179,6 +204,7 @@ export type TeardownStepName = keyof ProducerQuiescentTeardownSteps;
  */
 const TEARDOWN_ORDER = [
   'closeServer',
+  'stopSemanticRuntime',
   'closeEntitySearch',
   'closeLocalLlm',
   'drainCatchupJobs',
@@ -356,6 +382,7 @@ export async function closeDaemonBackingStoresAfterTeardown(
 export interface ProducerQuiescentTeardownDeps {
   /** HTTP-layer operation that ends permanent streams, stops admission, and drains finite callbacks. */
   closeHttpServer: () => Promise<void>;
+  stopSemanticRuntime: () => Promise<void>;
   closeEntitySearch: () => Promise<void>;
   closeLocalLlm: () => Promise<void>;
   drainCatchupJobs: (budgetMs: number, log: (message: string) => void) => Promise<unknown>;
@@ -380,6 +407,7 @@ export function buildProducerQuiescentTeardownSteps(
 ): ProducerQuiescentTeardownSteps {
   return {
     closeServer: () => deps.closeHttpServer(),
+    stopSemanticRuntime: () => deps.stopSemanticRuntime(),
     closeEntitySearch: () => deps.closeEntitySearch(),
     closeLocalLlm: () => deps.closeLocalLlm(),
     drainCatchupJobs: async () => {

@@ -25,6 +25,8 @@ import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js
 import type { PublishTransactionObservation } from '@origintrail-official/dkg-chain';
 import type { TargetedLiftJobClearOptions, TerminalJobClearOutcome } from './terminal-job-clear.js';
 import type { VmPublishJobPager } from './lift-job-page.js';
+import type { VmPublishRetentionAccess } from './async-lift-retention-access.js';
+import type { AsyncLiftWalletBalanceReader } from './async-lift-wallet-funding.js';
 
 export class AsyncLiftJobConflictError extends Error {
   readonly code = 'ASYNC_LIFT_JOB_CONFLICT';
@@ -425,6 +427,7 @@ export interface VmPublisherControl
     VmPublishAdmissionJournalReader,
     VmPublishTerminalJobClearer,
     VmPublishJobPager,
+    VmPublishRetentionAccess,
     AsyncLiftDetailedRetrier,
     AsyncLiftRetryStateReader {}
 
@@ -892,6 +895,11 @@ export interface AsyncLiftPublisherConfig {
   ) => Promise<void>;
   resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  /**
+   * #3591 — reads a publisher wallet's balances, so a wallet the chain refused for funds rejoins
+   * the claims once it is topped up. Without it a refused wallet only waits out its cooldown.
+   */
+  walletBalanceReader?: AsyncLiftWalletBalanceReader;
   /**
    * #1829 — enable append-only admission/transaction journal writes. DAEMON-ONLY:
    * left OFF for the CLI inspector and standalone `dkg publisher run` so a second

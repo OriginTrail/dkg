@@ -1,9 +1,10 @@
 // Node API token for the dashboard.
 //
 // The daemon embeds its token in the page (`window.__DKG_TOKEN__`) only when
-// the dashboard is opened on the node host itself (loopback address and
-// loopback host name). Opened from anywhere else, the page is served without
-// it and the operator enters the token once. The entered token is kept in
+// its operator turned on `auth.dashboardAutoSignIn`, and then only when the
+// dashboard is opened on the node host itself (loopback address and loopback
+// host name). Otherwise the page is served without it and the operator enters
+// the token once. The entered token is kept in
 // sessionStorage for this tab when the browser allows it, and only in memory
 // for this page otherwise. Every API client reads the token through
 // `currentApiToken()`, so no module has to run before another.

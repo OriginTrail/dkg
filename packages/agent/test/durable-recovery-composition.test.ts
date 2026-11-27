@@ -11,7 +11,7 @@ it('binds lazy verification and one reconciliation adapter at the agent boundary
   const parseAndFilter = vi.fn(async () => ({ quads: [] }));
   const worker = { parseAndFilter };
   const agent = {
-    store: {}, writeLocks: new Map(), log: {},
+    store: {  }, writeLocks: new Map(), log: {},
     getOrCreateSyncVerifyWorker: vi.fn(() => worker),
     processDurableBatchInWorker: vi.fn(async function (this: unknown) {
       expect(this).toBe(agent); return { dataQuads: [] };

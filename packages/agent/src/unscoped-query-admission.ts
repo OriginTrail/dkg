@@ -6,7 +6,8 @@ import {
   parseContextGraphUri,
   SYSTEM_CONTEXT_GRAPHS,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, storeLaneInflightLimit, type TripleStore } from '@origintrail-official/dkg-storage';
+import { QUERY_CATALOG_MAX_RESPONSE_BYTES, readWithinCatalogLimit } from '@origintrail-official/dkg-query';
 import { runBoundedOperation } from './bounded-operation.js';
 import { strip } from './dkg-agent-utils.js';
 import { everyWithConcurrency } from './map-with-concurrency.js';
@@ -27,6 +28,8 @@ export interface UnscopedQueryAdmissionDependencies {
  * Arbitrary unscoped SPARQL is safe only when every possible stored owner is
  * readable. Discover the complete candidate set before checking the
  * same read authority used for scoped queries; metadata alone grants nothing.
+ * These reads are node work: the node's limits bound them, and they are not
+ * charged to the caller.
  */
 export async function canReadUnscopedQuery(
   deps: UnscopedQueryAdmissionDependencies,
@@ -36,14 +39,18 @@ export async function canReadUnscopedQuery(
     signal.throwIfAborted();
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const [result, storedIds] = await Promise.all([
-      deps.store.query(
+      readWithinCatalogLimit(() => deps.store.query(
         `SELECT ?cg WHERE {
           GRAPH <${ontologyGraph}> {
             ?cg <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> "private"
           }
         }`,
-        { source: 'agent.query.privateGraphAccessPolicy', signal },
-      ),
+        {
+          source: 'agent.query.privateGraphAccessPolicy',
+          signal,
+          maxResponseBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES,
+        },
+      )),
       new GraphManager(deps.store).listStoredContextGraphOwnerCandidates({ signal }),
     ]);
     signal.throwIfAborted();
@@ -79,7 +86,8 @@ export async function canReadUnscopedQuery(
       ? await deps.prepareReadChecks(ids, signal)
       : deps.canReadContextGraph;
     signal.throwIfAborted();
-    return await everyWithConcurrency(ids, 4, async (id, _index, readSignal) => {
+    const readWidth = Math.min(4, storeLaneInflightLimit(deps.store) ?? 4);
+    return await everyWithConcurrency(ids, readWidth, async (id, _index, readSignal) => {
       readSignal.throwIfAborted();
       const allowed = await canRead(id, readSignal);
       readSignal.throwIfAborted();
@@ -91,3 +99,4 @@ export async function canReadUnscopedQuery(
     signal: opts.signal,
   });
 }
+

@@ -23,6 +23,7 @@ import {
   resolveAndVerifyRfc64FinalizedPolicyInSnapshotV1,
 } from './finalized-policy-verifier-v1.js';
 import type {
+  Rfc64PublicCatalogNativeAdmissionPlanV1,
   Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1,
   Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1,
 } from './public-catalog-native-receiver-v1.js';
@@ -58,10 +59,11 @@ export interface ResolvedRfc64FinalizedPolicyAgentPrecommitV1 {
  * Resolve and snapshot the shared agent/chain boundary used by both finalized
  * policy-only and VM-materializing precommits. Returning null means the
  * accepted policy is not chain-finalized and therefore needs no EVM barrier.
+ * It reads no row, so each precommit's `admit` runs it before activation too.
  */
 export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
   options: Rfc64FinalizedPolicyAgentPrecommitResolutionOptionsV1,
-  plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
+  plan: Readonly<Rfc64PublicCatalogNativeAdmissionPlanV1>,
   signal: AbortSignal,
   assertAcceptedPolicyBeforeChainResolution?: (
     acceptedPolicy: Readonly<AcceptedRfc64CatalogAccessSnapshotV1>,
@@ -182,7 +184,10 @@ export function strictFinalityConfirmationsOptionV1(
 export function createRfc64FinalizedPolicyAgentPrecommitV1(
   options: Rfc64FinalizedPolicyAgentPrecommitOptionsV1,
 ): Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1 {
-  return Object.freeze(async (plan, signal): Promise<void> => {
+  return Object.freeze(Object.assign(async (
+    plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
+    signal: AbortSignal,
+  ): Promise<void> => {
     const resolved = await resolveRfc64FinalizedPolicyAgentPrecommitV1(
       options,
       plan,
@@ -225,7 +230,16 @@ export function createRfc64FinalizedPolicyAgentPrecommitV1(
       plan,
       resolved.acceptedPolicy,
     );
-  });
+  }, {
+    // Everything before the snapshot read: the accepted policy and its
+    // binding, the trusted RPC endpoints, the chain id and the on-chain id.
+    admit: async (
+      plan: Readonly<Rfc64PublicCatalogNativeAdmissionPlanV1>,
+      signal: AbortSignal,
+    ): Promise<void> => {
+      await resolveRfc64FinalizedPolicyAgentPrecommitV1(options, plan, signal);
+    },
+  }));
 }
 
 function assertPlanPolicyAndRosterCurrentV1(

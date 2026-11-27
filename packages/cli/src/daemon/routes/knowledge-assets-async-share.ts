@@ -1,3 +1,4 @@
+import { admitShareWhileConnected } from '../share-admission-lifetime.js';
 import { classifyPromoteAdmissionError, promoteConflictResponse } from './promote-admission-response.js';
 import { PromoteJobCancellationConflictError } from '@origintrail-official/dkg-publisher';
 import { hasNodeOperatorReadAccess, requireContextGraphReadAuthority } from './context-graph-read-authority.js';
@@ -69,6 +70,7 @@ export async function handleKaShareAsyncEnqueue(ctx: RequestContext, name: strin
   const { req, res, agent, authentication } = ctx;
   const writePreflightCallerAgentAddress = authenticatedAgentAddress(authentication);
   const writePreflightContextGraphOpts = {
+    asyncAdmission: true,
     callerAgentAddress: writePreflightCallerAgentAddress,
     allowLocalExactFallback: !writePreflightCallerAgentAddress,
   };
@@ -112,15 +114,17 @@ export async function handleKaShareAsyncEnqueue(ctx: RequestContext, name: strin
     }
   }
   try {
-    const result = await agent.assertion.promoteAsync(
+    const result = await admitShareWhileConnected(res, signal => agent.assertion.promoteAsync(
       resolvedContextGraphId,
       name,
       {
+        signal,
         entities: entities ?? "all",
         subGraphName,
         ...scopedTokenPromoteLane(writePreflightCallerAgentAddress),
       },
-    );
+    ));
+    if (result === undefined) return;
     return jsonResponse(res, 200, {
       jobId: result.jobId,
       state: "queued",
@@ -210,7 +214,8 @@ export async function handleKaShareJobStatus(ctx: RequestContext, jobId: string)
 // ── DELETE /api/knowledge-assets/swm/share-jobs/:jobId ────────────────────────
 //
 // Faithful port of DELETE /api/assertion/promote-async/:jobId — cancel a
-// queued/failed_retrying job. The caller passes the already url-decoded +
+// `queued` job (any other state, or a job that still owns a durable share
+// obligation, answers 409). The caller passes the already url-decoded +
 // validated `jobId`.
 export async function handleKaShareJobCancel(ctx: RequestContext, jobId: string): Promise<void> {
   const { res, agent } = ctx;

@@ -149,6 +149,12 @@ export const WORKSPACE_RULES = Object.freeze({
     // chain: the chain scope's node-ui identity-wallet suite starts a DKGAgent.
     evmScopes: ['chain', 'agent'],
   },
+  'packages/semantic-runtime': {
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'], evmScopes: [],
+  },
+  'packages/graph-computer': {
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_supporting', 'kosava_hardhat_plugins'], evmScopes: [],
+  },
   'packages/cli': {
     // tornado_blazegraph: that job's storage conformance suite runs the CLI's
     // built Oxigraph launcher (test-systems/storage-conformance.test.ts),
@@ -156,7 +162,7 @@ export const WORKSPACE_RULES = Object.freeze({
     // registry, node-ui, graph-viz, mcp-dkg and the three agent adapters.
     // kosava_node_ui: node-ui tests scan the CLI daemon sources
     // (packages/node-ui/test/helpers/read-cli-daemon.ts).
-    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_supporting', 'kosava_node_ui', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/node-ui': {
@@ -234,6 +240,11 @@ export const WORKSPACE_RULES = Object.freeze({
     lanes: ['kosava_supporting'],
     evmScopes: [],
   },
+  'packages/marketplace': {
+    // The daemon runs the buyer: the CLI's lanes that boot it, as for local-llm.
+    lanes: ['bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    evmScopes: [],
+  },
   'packages/evm-module': {
     forceFull: true,
     lanes: [],
@@ -259,6 +270,8 @@ export const WORKSPACE_OWNING_LANES = Object.freeze({
   'packages/publisher': ['tornado_publisher'],
   'packages/random-sampling': ['kosava_hardhat_plugins'],
   'packages/agent': ['tornado_agent'],
+  'packages/semantic-runtime': ['kosava_supporting'],
+  'packages/graph-computer': ['kosava_supporting'],
   'packages/cli': ['bura_cli'],
   'packages/node-ui': ['kosava_node_ui'],
   'packages/node-store': ['kosava_node_ui'],
@@ -274,6 +287,7 @@ export const WORKSPACE_OWNING_LANES = Object.freeze({
   'packages/network-sim': ['kosava_supporting'],
   'packages/kafka-plugin': ['kosava_hardhat_plugins'],
   'packages/kafka-source': ['kosava_supporting'],
+  'packages/marketplace': ['kosava_supporting'],
   'packages/evm-module': ['contracts'],
   demo: ['kosava_supporting'],
 });
@@ -312,11 +326,11 @@ const IDENTITY_WALLET_EVM_PATTERNS = [
   /^packages\/node-ui\/src\/ui\/web3\//,
   /^packages\/node-ui\/src\/ui\/pages\/identity-wallets\//,
   /^packages\/node-ui\/src\/ui\/(?:api|agent-identity-api|assertion-identity|assertions-page|query-bindings|query-api|query-transport|http|identity-wallet-api|pca-api)\.ts$/,
-  /^packages\/node-ui\/src\/ui\/(?:lib\/(?:nativeGasSymbol|apiToken|randomUUID|read-cache)|stores\/wallet)\.ts$/,
+  /^packages\/node-ui\/src\/ui\/(?:lib\/(?:nativeGasSymbol|apiToken|randomUUID|read-cache|nodeStatusPolicy)|stores\/wallet)\.ts$/,
   /^packages\/node-ui\/integration\/identity-wallet-actions-v10\.test\.ts$/,
   // The daemon route the suite drives and the CLI modules it loads.
-  /^packages\/cli\/src\/daemon\/routes\/(?:identity-wallets|restricted-browser-wallet-rpc)\.ts$/,
-  /^packages\/cli\/src\/(?:daemon\/http-utils|daemon\/async-admission-trace|daemon\/reconcile-unavailable|daemon\/write-context-graph-preflight|daemon\/write-preflight-coalescing|daemon\/write-preflight-diagnostics|daemon\/write-preflight-attribution|daemon\/read-authority-diagnostics|daemon\/warning-gate|daemon\/context-graph-write-readiness|daemon\/context-graph-catchup-progress|context-graph-identifiers|auth|boolean-env-override|config|config-file-source|entity-search\/types|oxigraph-memory-limits|retention-config|runtime-assets)\.ts$/,
+  /^packages\/cli\/src\/daemon\/routes\/(?:identity-wallets|restricted-browser-wallet-rpc|marketplace-gateway-paths)\.ts$/,
+  /^packages\/cli\/src\/(?:daemon\/http-utils|daemon\/async-admission-trace|daemon\/async-admission-trace-diagnostics|daemon\/share-connection-timing|daemon\/share-gc-timing|daemon\/reconcile-unavailable|daemon\/write-context-graph-preflight|daemon\/write-preflight-coalescing|daemon\/write-preflight-diagnostics|daemon\/write-preflight-attribution|daemon\/read-authority-diagnostics|daemon\/warning-gate|daemon\/store-internal-limit|daemon\/context-graph-write-readiness|daemon\/context-graph-catchup-progress|context-graph-identifiers|auth|signed-http-response-guard|agent-http-(?:auth|signing)|boolean-env-override|config|config-file-source|daemon\/public-checkpoint-config|entity-search\/types|graph-catalog-config|oxigraph-memory-limits|read-graphs-config|retention-config|runtime-assets)\.ts$/,
 ];
 
 // File-level triggers: lanes or EVM scopes that specific paths select on top
@@ -434,15 +448,15 @@ export const PATH_TRIGGERS = Object.freeze([
     reason: 'the query security tests assert the query README',
   },
   {
-    patterns: [/^docs\/use-dkg\/backpressure-observability\.md$/],
+    patterns: [/^packages\/cli\/docs\/async-admission-usage-line\.md$/],
     lanes: ['bura_cli'],
     evmScopes: [],
-    reason: 'the CLI admission usage-log tests assert the backpressure observability document',
+    reason: 'the CLI admission usage-log tests assert the usage-line field reference',
   },
   // Files other packages load by relative path, outside their declared
   // dependencies.
   {
-    patterns: [/^packages\/publisher\/src\/(?:metadata|materialization-assertion-version|assertion-lifecycle-events|entity-share-metadata|graph-knowledge-asset-metadata|workspace-metadata-subjects)\.ts$/],
+    patterns: [/^packages\/publisher\/src\/(?:metadata|metadata-iri|graph-metadata-reader|graph-metadata-envelope|graph-knowledge-asset-controls|materialization-assertion-version|assertion-lifecycle-events|entity-share-metadata|graph-knowledge-asset-metadata|workspace-metadata-subjects)\.ts$/],
     lanes: ['kosava_node_ui'],
     evmScopes: [],
     reason: 'the UI reserved-UAL regression loads the publisher metadata writer and its helpers',
@@ -454,18 +468,30 @@ export const PATH_TRIGGERS = Object.freeze([
     reason: 'the Core stream transport tests import the Agent production codec',
   },
   {
+    patterns: [/^tools\/observability\/lib\/(?:alerts|profile|queries)\.mjs$/],
+    lanes: ['tornado_core', 'tornado_blazegraph'],
+    evmScopes: [],
+    reason: 'the storage graph-catalog alert contract test loads the observability alert specs',
+  },
+  {
     patterns: [/^packages\/cli\/src\/extraction\/markdown-extractor\.ts$/],
     lanes: ['tornado_agent'],
     evmScopes: [],
     reason: 'the agent memory-layer tests import the CLI markdown extractor',
   },
   {
-    patterns: [/^packages\/cli\/src\/(?:auth|boolean-env-override|config|config-file-source|entity-search\/types|oxigraph-memory-limits|retention-config|runtime-assets)\.ts$/],
+    patterns: [/^packages\/cli\/src\/publisher-chain-proof\.ts$/],
+    lanes: ['tornado_agent'],
+    evmScopes: [],
+    reason: 'the agent memory-layer tests load the CLI confirmed-publication proof helper',
+  },
+  {
+    patterns: [/^packages\/cli\/src\/(?:auth|agent-http-(?:auth|signing)|boolean-env-override|config|config-file-source|daemon\/public-checkpoint-config|daemon\/routes\/marketplace-gateway-paths|entity-search\/types|graph-catalog-config|oxigraph-memory-limits|read-graphs-config|retention-config|runtime-assets)\.ts$/],
     // The EPCIS lanes are Blazegraph and supporting; the CLI rule already
     // selects Blazegraph.
     lanes: ['kosava_supporting'],
     evmScopes: [],
-    reason: 'the EPCIS API tests import the CLI auth and config modules',
+    reason: 'the EPCIS API tests import the CLI auth and config modules, and what auth imports',
   },
   {
     patterns: [/^packages\/cli\/skills\/dkg-node\/SKILL\.md$/],
@@ -613,7 +639,7 @@ export const SUPPORT_PATH_ROUTES = Object.freeze([
   {
     // The devnet bootstrap: the browser suite's Playwright setup, the devnet
     // harnesses and the CLI's Blazegraph smoke fixture (which sources it) run it.
-    pattern: /^scripts\/devnet\.sh$/,
+    pattern: /^scripts\/(?:devnet\.sh|devnet-node-process-control\.mjs|lib\/devnet-node-process-control\.ts)$/,
     lanes: ['kosava_node_ui_e2e', 'tornado_agent', 'bura_cli'],
     reason: 'the browser suite, the devnet harnesses and the CLI Blazegraph smoke fixture run the devnet bootstrap',
   },

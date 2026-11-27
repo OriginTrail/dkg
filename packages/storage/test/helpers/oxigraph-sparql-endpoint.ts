@@ -71,7 +71,11 @@ export interface OxigraphSparqlEndpoint {
   close: () => Promise<void>;
 }
 
-export async function startOxigraphSparqlEndpoint(options: { maxRequestBytes?: number } = {}): Promise<OxigraphSparqlEndpoint> {
+export async function startOxigraphSparqlEndpoint(options: {
+  maxRequestBytes?: number;
+  onMutation?: () => void;
+  afterMutation?: (store: OxigraphSparqlEndpoint['store']) => void;
+} = {}): Promise<OxigraphSparqlEndpoint> {
   const store = new oxigraph.Store();
   const server: Server = createServer((req, res) => {
     let body = '', bytes = 0, rejected = false;
@@ -92,13 +96,17 @@ export async function startOxigraphSparqlEndpoint(options: { maxRequestBytes?: n
           ? new URLSearchParams(body)
           : undefined;
         if (contentType.includes('text/x-nquads') || contentType.includes('application/n-quads')) {
+          options.onMutation?.();
           store.load(body, { format: 'application/n-quads' });
+          options.afterMutation?.(store);
           res.writeHead(200);
           res.end();
           return;
         }
         if (req.url?.includes('/update') || contentType.includes('application/sparql-update') || form?.has('update')) {
+          options.onMutation?.();
           store.update(form?.get('update') ?? body);
+          options.afterMutation?.(store);
           res.writeHead(204);
           res.end();
           return;

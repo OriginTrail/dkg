@@ -20,6 +20,34 @@ function chunkedResponse(
 }
 
 describe('SPARQL TSV SELECT decoding', () => {
+  it('preserves mixed terminators and empty cells at every transport boundary', async () => {
+    const body = '?a\t?__proto__\t?c\r\n<urn:a>\t\t"one"\r\t"safe"\t\n\t\t\r\n<urn:b>\t\t"last"';
+    const expected = {
+      type: 'bindings', variables: ['a', '__proto__', 'c'],
+      bindings: [{ a: 'urn:a', c: '"one"' }, JSON.parse('{"__proto__":"\\"safe\\""}'), {}, { a: 'urn:b', c: '"last"' }],
+    };
+    expect(decodeSparqlTsvSelectResult(body)).toEqual(expected);
+    const bytes = new TextEncoder().encode(body);
+    for (let split = 0; split <= bytes.length; split += 1) {
+      await expect(decodeSparqlTsvSelectResponse(chunkedResponse([
+        bytes.subarray(0, split), bytes.subarray(split),
+      ]))).resolves.toEqual(expected);
+    }
+  });
+
+  it('keeps precise lazy diagnostics and validates row arity before terms', () => {
+    expect(() => decodeSparqlTsvSelectResult('?a\t?b\n<urn:ok>\t"ok"\n\t<relative>\n'))
+      .toThrow('SPARQL TSV binding 1.b URI value must be an absolute safe IRI');
+    expect(() => decodeSparqlTsvSelectResult('?a\n"7"^^<relative>\n'))
+      .toThrow('SPARQL TSV binding 0.a datatype must be an absolute safe IRI');
+    expect(() => decodeSparqlTsvSelectResult('?a\n_:bad.\n'))
+      .toThrow('SPARQL TSV binding 0.a is not a valid RDF term');
+    expect(() => decodeSparqlTsvSelectResult('?a\ninvalid\t\t\n'))
+      .toThrow('SPARQL TSV row 0 has 3 columns; expected 1');
+    expect(() => decodeSparqlTsvSelectResult('\n\t\n'))
+      .toThrow('SPARQL TSV row 0 has 2 columns; expected 0');
+  });
+
   it.each(['language', 'typed', 'escaped'] as const)(
     'decodes a 16 MB %s literal without exhausting the regex stack', async (kind) => {
       const payload = 'x'.repeat(16_000_000);
@@ -274,5 +302,37 @@ describe('SPARQL TSV SELECT decoding', () => {
       backend: 'oxigraph-server',
       operation: 'query',
     });
+  });
+});
+
+describe('SPARQL TSV SELECT decoding between chunks', () => {
+  const lines = ['?g\n<urn:a>\n', '<urn:b>\n', '<urn:c>\n'].map((chunk) => new TextEncoder().encode(chunk));
+
+  it('lets other work run between two chunks when asked to', async () => {
+    const order: string[] = [];
+    setImmediate(() => order.push('other work'));
+    const result = await decodeSparqlTsvSelectResponse(chunkedResponse(lines), { yieldBetweenChunks: true },
+      (line) => order.push(line));
+    expect(result.bindings.map((binding) => binding.g)).toEqual(['urn:a', 'urn:b', 'urn:c']);
+    expect(order).toEqual(['?g', '<urn:a>', 'other work', '<urn:b>', '<urn:c>']);
+  });
+
+  it('lets a timer that is due run between two chunks: the yield is a full turn of the event loop', async () => {
+    const order: string[] = [];
+    setTimeout(() => order.push('timer'), 0);
+    const due = Date.now() + 2;
+    while (Date.now() < due) { /* the timer is due before the decode starts */ }
+    await decodeSparqlTsvSelectResponse(chunkedResponse(lines), { yieldBetweenChunks: true }, (line) => order.push(line));
+    expect(order).toContain('timer');
+    expect(order.indexOf('timer')).toBeLessThan(order.indexOf('<urn:c>'));
+  });
+
+  it('runs straight through by default', async () => {
+    const order: string[] = [];
+    setImmediate(() => order.push('other work'));
+    await decodeSparqlTsvSelectResponse(chunkedResponse(lines), {}, (line) => order.push(line));
+    expect(order).toEqual(['?g', '<urn:a>', '<urn:b>', '<urn:c>']);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(order.at(-1)).toBe('other work');
   });
 });

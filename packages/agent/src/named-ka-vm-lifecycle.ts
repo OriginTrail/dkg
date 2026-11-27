@@ -36,6 +36,7 @@ export function createPublishedNamedKaVmLifecycleWriter({ updateStore, fallbackS
     if (typeof updateStore.update === 'function' && await executeMutation(
       () => tryUpdateWithTouchedGraphs(updateStore, plan.sparql, [plan.graph], {
         source: 'agent.publish.namedKaVmLifecycle',
+        writtenGraphs: [plan.graph],
       }),
       updated => updated,
       plan.mutation,

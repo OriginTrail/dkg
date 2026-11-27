@@ -70,20 +70,30 @@ function request(scope: StrictCurrentFinalizedEvmSnapshotScopeV1) {
 describe('registered private empty-VM proof', () => {
   it('accepts only current Hub binding, member, name, private policy, and zero inventory at one anchor', async () => {
     const view = snapshot();
-    expect(await proveRegisteredPrivateEmptyVmV1(request(view.scope))).toBe(true);
+    expect(await proveRegisteredPrivateEmptyVmV1(request(view.scope))).toBe('proven');
     expect(view.methods).toEqual([
       'getContextGraph', 'getNameHash', 'getContextGraphKaCount', 'getAssetStorageAddress',
     ]);
   });
 
+  it('names a graph with Knowledge Assets, which this proof can never hold for', async () => {
+    expect(await proveRegisteredPrivateEmptyVmV1(request(snapshot({ kaCount: 1n }).scope))).toBe('not-empty');
+  });
+
   it.each([
-    [{ kaCount: 1n }, 'nonempty VM'],
+    [{ kaCount: 1n, storageAddress: OTHER }, 'a rotated Hub binding'],
+    [{ kaCount: 1n, nameHash: ethers.ZeroHash }, 'an unrelated name'],
+  ] as const)('does not read a count as this graph\'s under %s (%s)', async (options) => {
+    expect(await proveRegisteredPrivateEmptyVmV1(request(snapshot(options).scope))).toBe('unproven');
+  });
+
+  it.each([
     [{ nameHash: ethers.ZeroHash }, 'unrelated name'],
     [{ active: false }, 'inactive graph'],
     [{ accessPolicy: 0 }, 'public graph'],
     [{ members: [OTHER] }, 'caller absent from chain roster'],
     [{ storageAddress: OTHER }, 'rotated Hub binding'],
   ] as const)('rejects %s (%s)', async (options) => {
-    expect(await proveRegisteredPrivateEmptyVmV1(request(snapshot(options).scope))).toBe(false);
+    expect(await proveRegisteredPrivateEmptyVmV1(request(snapshot(options).scope))).toBe('unproven');
   });
 });

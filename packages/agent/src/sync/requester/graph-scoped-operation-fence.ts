@@ -15,6 +15,8 @@ export interface GraphScopedPhysicalOperationControl<Subscription> {
    * written yet depends on what a stored-again row may change.
    */
   adoptEquivalentSubscription(): void;
+  /** Check ownership independently of an individual caller cancelling its wait. */
+  assertOwnershipCurrent(): void;
   /** Enforce cancellation, lifecycle, shutdown, and binding ownership. */
   assertCurrent(): void;
 }
@@ -72,13 +74,14 @@ export function runGraphScopedPhysicalOperation<T, Subscription>(
     options.captureSubscription() === subscription
     && options.isBindingGenerationCurrent(bindingGeneration)
   );
-  const assertCurrent = () => {
-    if (options.signal?.aborted) {
-      throw options.asAbortError(options.signal.reason);
-    }
+  const assertOwnershipCurrent = () => {
     options.assertLifecycleCurrent();
     if (options.isClosed()) throw options.closedError();
     if (!isBindingCurrent()) throw options.bindingChangedError();
+  };
+  const assertCurrent = () => {
+    if (options.signal?.aborted) throw options.asAbortError(options.signal.reason);
+    assertOwnershipCurrent();
   };
   const physicalRun = Promise.resolve().then(() => options.operation({
     get subscription() { return subscription; },
@@ -102,6 +105,7 @@ export function runGraphScopedPhysicalOperation<T, Subscription>(
       ) subscription = current;
     },
     assertCurrent,
+    assertOwnershipCurrent,
   })).finally(() => { active = false; });
   options.track(physicalRun);
   return physicalRun;

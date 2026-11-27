@@ -1371,7 +1371,10 @@ contract ConvictionStakingStorage is INamed, IVersioned, Guardian {
         delete positions[tokenId];
         // v10.0.3 — drop any leftover carries. `StakingV10.withdraw`
         // auto-claims first, so only current-epoch (immature) carries can
-        // remain here — forfeited like all other current-epoch score.
+        // remain here. Since StakingV10 10.1.0 it has recorded them, with the
+        // position's own score in the epoch in progress, in
+        // `ConvictionWithdrawalStorage` before this call, and
+        // `StakingV10.claimWithdrawnEpoch` pays them once the epoch has ended.
         delete rewardCarries[tokenId];
         emit PositionDeleted(tokenId);
     }

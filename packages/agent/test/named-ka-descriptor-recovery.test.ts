@@ -23,7 +23,8 @@ describe('confirmed named KA descriptor recovery [#3362]', () => {
     const agent = await DKGAgent.create({ name: 'descriptor-recovery', store, chainAdapter: seededChain(),
       rfc64CatalogActivation: { enabled: false } });
     vi.spyOn(agent, 'peerId', 'get').mockReturnValue('12D3KooWRecoveryFixture');
-    const request = { ...baseRequest(), agentAddress: lifecycleOwner };
+    // This fixture admits with catalogs disabled; persist that admission decision.
+    const request = { ...baseRequest(), agentAddress: lifecycleOwner, catalogObligationRequired: false };
     const graph = contextGraphMetaUri(request.contextGraphId);
     const subject = assertionLifecycleUri(request.contextGraphId, lifecycleOwner, request.name);
     const vmGraph = contextGraphLayerUri(request.contextGraphId, MemoryLayer.VerifiableMemory, AUTHOR, 402n);

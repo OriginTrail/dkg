@@ -1,7 +1,8 @@
+import type { LocalFirstWriteProvenance } from './context-graph-write-provenance.js';
 import type { CoreChainCacheNetwork } from './core-chain-cache-config.js';
 import type { PreparedContentCacheConfig } from './sync/responder/prepared-content-cache.js';
+import type { ContextGraphJoinPolicyReservationRelease } from './context-graph-join-policy-release.js';
 // SPDX-License-Identifier: Apache-2.0
-
 /**
  * Type and error-class surface for `DKGAgent` extracted from
  * `dkg-agent.ts` as part of a mechanical file-size reduction. Behaviour
@@ -71,7 +72,7 @@ import type {
   ExternalAuthorSigners,
   RpcRequestAdmission,
 } from '@origintrail-official/dkg-chain';
-import type { AgentChainSignerSource } from './agent-chain-signer-source.js';
+import type { AgentChainSignerSource, NodeHeldAuthorConfig } from './agent-chain-signer-source.js';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
 import type { CclFactResolutionMode } from './ccl-fact-resolution.js';
@@ -984,7 +985,7 @@ export type ContextGraphSubscriptionRehydrationInternalStatus = Omit<
   keyof ContextGraphDormancyProjection | 'dormant'
 >;
 
-export interface ContextGraphWritePreflightProbe {
+export interface ContextGraphWritePreflightProbe extends LocalFirstWriteProvenance {
   /**
    * Explicit, REQUIRED store-availability discriminant. `true` when every
    * store-backed read the probe issued answered, `false` when at least one
@@ -1165,15 +1166,12 @@ export interface ContextGraphJoinPolicyRateReservation {
  * The rate reservation must atomically count and, when allowed, append the
  * reservation row so concurrent admissions cannot overrun either ceiling.
  */
-export interface ContextGraphJoinPolicyStore {
+export interface ContextGraphJoinPolicyStore extends ContextGraphJoinPolicyReservationRelease {
   load(contextGraphId: string): Promise<ContextGraphJoinPolicyRecord | null>;
   save(record: ContextGraphJoinPolicyRecord): Promise<void>;
   appendAudit(event: ContextGraphJoinPolicyAuditEvent): Promise<void>;
   /** Atomically persist a policy transition and its security audit event. */
-  saveWithAudit(
-    record: ContextGraphJoinPolicyRecord,
-    event: ContextGraphJoinPolicyAuditEvent,
-  ): Promise<void>;
+  saveWithAudit(record: ContextGraphJoinPolicyRecord, event: ContextGraphJoinPolicyAuditEvent): Promise<void>;
   getAutomaticApprovalUsage(
     contextGraphId: string,
     timestamp: number,
@@ -1244,6 +1242,8 @@ export interface DurableSyncDiagnostics {
   metaOnlyResponses: number;
   /** Cryptographically verified V2 responses whose public graph is intentionally empty. */
   verifiedPrivateOnlyResponses: number;
+  /** Assets of a completed generation already stored here and current on chain; no DATA fetched for them. */
+  verifiedHeldAssets?: number;
   dataRejectedMissingMeta: number;
   rejectedKcs: number;
   failedPeers: number;
@@ -1263,10 +1263,8 @@ export interface DurableSyncResult extends DurableSyncDiagnostics {
   insertedTriples: number;
   deniedPhases: number;
   /**
-   * True only when every requested Context Graph reached a verified terminal
-   * state in this invocation. Committed prefixes remain observable through the
-   * counters while this stays false, so callers never have to infer whole-run
-   * completeness from per-phase progress.
+   * True only when every requested Context Graph reached a verified terminal state.
+   * Committed-prefix counters remain observable even when the whole run is incomplete.
    */
   complete: boolean;
 }
@@ -1402,7 +1400,7 @@ export interface Rfc64CatalogBootstrapConfigV1 {
 
 export type { FinalizationRecoveryStoreFactory } from './finalization-recovery-store.js';
 
-export interface DKGAgentConfig {
+export interface DKGAgentConfig extends NodeHeldAuthorConfig {
   /** Lower RPC usage by using the DKG Core chain cache. */
   DKG_Core_chain_cache?: boolean;
   /** Trusted local deployment configuration; never taken from a peer response. */
@@ -2055,8 +2053,7 @@ export type ResolvedDKGAgentConfig =
     /** Graphs the manual peer table of `rfc64Catalog.accessPolicyAuthority` covers. */
     rfc64CatalogManualTrustRootContextGraphs?: readonly string[];
     /** Sole immutable restart-stable D17/D18 runtime authority for this boot. */
-    rfc64CatalogExecutionPlan: import('./rfc64/catalog-rollout-authority-v1.js')
-      .Rfc64CatalogExecutionPlanV1;
+    rfc64CatalogExecutionPlan: import('./rfc64/catalog-rollout-authority-v1.js').Rfc64CatalogExecutionPlanV1;
     rfc64CatalogAuthoringPolicy?: ResolvedRfc64CatalogAuthoringPolicyV1;
     rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
   };

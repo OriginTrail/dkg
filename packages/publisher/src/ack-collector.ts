@@ -29,6 +29,7 @@ import type { V10ACKMode } from './publisher.js';
 import { hasValidGraphScopedContent } from './graph-publish-envelope.js';
 import { PeerStatusLedger } from './ack-peer-status-ledger.js';
 import { ACKRoundDiagnostics, type ACKBackoffReason, type ACKDiagnosticSummary } from './ack-diagnostics.js';
+import { createACKRoundLifetime } from './ack-round-lifetime.js';
 
 /**
  * Why an ACK signer pre-flight rejected a recovered signer. Mirrors
@@ -46,7 +47,7 @@ export interface ACKVerifyResult {
 
 export interface ACKCollectorDeps {
   gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
-  sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
+  sendP2P: (peerId: string, protocol: string, data: Uint8Array, options?: { signal?: AbortSignal }) => Promise<Uint8Array>;
   /**
    * Resolve the candidate pool before an ACK round freezes it. Implementers
    * may return a synchronous pool for backward compatibility or await network
@@ -59,7 +60,7 @@ export interface ACKCollectorDeps {
    * generic "ACK rejected" line without a reason. New code should
    * prefer `verifyIdentityDetailed`.
    */
-  verifyIdentity?: (recoveredAddress: string, claimedIdentityId: bigint) => Promise<boolean>;
+  verifyIdentity?: (recoveredAddress: string, claimedIdentityId: bigint, options?: { signal?: AbortSignal }) => Promise<boolean>;
   /**
    * Structured ACK signer pre-flight. When provided, the collector
    * uses this in preference to `verifyIdentity` and surfaces the
@@ -69,7 +70,7 @@ export interface ACKCollectorDeps {
    */
   verifyIdentityDetailed?: (
     recoveredAddress: string,
-    claimedIdentityId: bigint,
+    claimedIdentityId: bigint, options?: { signal?: AbortSignal },
   ) => Promise<ACKVerifyResult>;
   log?: (msg: string) => void;
   /**
@@ -104,6 +105,7 @@ export interface ACKCollectionResult {
 }
 
 export interface ACKCollectorParams {
+  signal?: AbortSignal;
   /** Bounded aggregate instrumentation; exceptions are ignored. */
   onDiagnostic?: (summary: ACKDiagnosticSummary) => void;
   merkleRoot: Uint8Array;
@@ -544,6 +546,7 @@ export class ACKCollector {
       requiredACKs: REQUIRED_ACKS,
       log,
       onDiagnostic: params.onDiagnostic,
+      signal: params.signal,
     });
   }
 
@@ -565,6 +568,7 @@ export class ACKCollector {
    * tx reverts if wrong).
    */
   async collectUpdate(params: {
+    signal?: AbortSignal;
     onDiagnostic?: (summary: ACKDiagnosticSummary) => void;
     kaId: bigint;
     /** TARGET on-chain numeric context graph id. */
@@ -700,6 +704,7 @@ export class ACKCollector {
       requiredACKs: REQUIRED_ACKS,
       log,
       onDiagnostic: params.onDiagnostic,
+      signal: params.signal,
     });
   }
 
@@ -725,6 +730,7 @@ export class ACKCollector {
     corePeers: string[];
     requiredACKs: number;
     onDiagnostic?: (summary: ACKDiagnosticSummary) => void;
+    signal?: AbortSignal;
     log: (msg: string) => void;
   }): Promise<ACKCollectionResult> {
     const {
@@ -758,25 +764,22 @@ export class ACKCollector {
     // `sanitizes and truncates peer-controlled decline messages` pins
     // a per-error length bound that double-rendering would blow past.
     const snapshotPeerOutcomes = (): PeerOutcome[] => peerStatuses.snapshot(corePeers);
+    const lifetime = createACKRoundLifetime(ACK_TIMEOUT_MS, () => new QuorumUnmetError({
+      collected: collected.length, required: REQUIRED_ACKS, dialled: corePeers.length,
+      peerOutcomes: snapshotPeerOutcomes(),
+      legacyMessage: `storage_ack_timeout: only ${collected.length}/${REQUIRED_ACKS} ACKs received within ${ACK_TIMEOUT_MS}ms.${peerStatuses.formatLegacyDetail()}`,
+    }), args.signal);
 
     try {
       assertACKCandidateQuorum(corePeers, REQUIRED_ACKS);
       const ackDigest = args.createDigest();
 
-      // PR #896 review (🟡): once the round is decided — quorum reached, timed
-      // out, or proven impossible — any `requestACK` loop still sleeping
-      // between retries must bail on wake instead of continuing to dial. With
-      // the widened #887 transient-decline budget (~31s) a losing peer could
-      // otherwise keep retrying long after `collect()` already resolved,
-      // emitting avoidable ACK traffic and log noise. `roundSettled` is set
-      // when the outer race settles; `roundIsOver()` also treats a satisfied
-      // quorum as terminal so a peer mid-backoff bails the instant the last
-      // needed ACK lands elsewhere.
-      const roundIsOver = () => roundSettled || collected.length >= REQUIRED_ACKS;
+      // Settled rounds cancel sends/backoffs and fence late replies. Physical
+      // remote work and non-cancellable identity reads retain their own owners.
+      const roundIsOver = () => roundSettled || lifetime.signal.aborted || collected.length >= REQUIRED_ACKS;
 
-      const sleepImpl = this.deps.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
       const sleep = (ms: number, reason: ACKBackoffReason) =>
-        diagnostics.measureBackoff(reason, () => sleepImpl(ms));
+        diagnostics.measureBackoff(reason, () => lifetime.sleep(ms, this.deps.sleep));
 
       const requestACK = async (peerId: string): Promise<CollectedACK | null> => {
         // #887: transient SWM declines and transport errors now have
@@ -789,15 +792,18 @@ export class ACKCollector {
         let transportAttempts = 0;
         let declineRetries = 0;
         for (;;) {
+          if (roundIsOver()) return null;
           try {
             // publisher.ack_peer_request — one per-peer sendP2P attempt.
             // Transport throw → withSpan auto-records ERROR; the catch below
             // tags ackPeerTotal{result:'transport_error'}. A decline response
             // is an expected negative (status stays OK, dkg.decline_code set).
-            const ack: StorageACKMsg = await withSpan(
+            const ack: StorageACKMsg | null = await withSpan(
               'publisher.ack_peer_request',
               async (span) => {
-                const response = await diagnostics.measureAttempt(() => this.deps.sendP2P(peerId, ackProtocolId, intentBytes));
+                const response = await diagnostics.measureAttempt(() => this.deps.sendP2P(peerId, ackProtocolId, intentBytes, { signal: lifetime.signal }));
+                lifetime.signal.throwIfAborted();
+                if (roundIsOver()) return null;
                 // A ZERO-LENGTH reply is not a StorageACK — it is what the
                 // requester reads when the responder aborts the stream
                 // mid-handler (protocol-router stream.abort → clean EOF →
@@ -845,6 +851,7 @@ export class ACKCollector {
                 },
               },
             );
+            if (!ack || roundIsOver()) return null;
 
             if (isStorageACKDecline(ack)) {
               const code = sanitizeDeclineField(
@@ -942,7 +949,7 @@ export class ACKCollector {
               const verdict = await withSpan(
                 'publisher.ack_verify_identity',
                 async (span) => {
-                  const v = await this.deps.verifyIdentityDetailed!(recoveredAddress, identityId);
+                  const v = await this.deps.verifyIdentityDetailed!(recoveredAddress, identityId, { signal: lifetime.signal });
                   // A rejected identity is an expected negative, not a span
                   // error (status stays OK). withSpan only flips ERROR on throw.
                   span.setAttribute('dkg.verify_result', v.valid ? 'valid' : (v.reason ?? 'unknown'));
@@ -953,6 +960,7 @@ export class ACKCollector {
                 },
                 { attributes: { 'dkg.identity_id': String(identityId) } },
               );
+              if (roundIsOver()) return null;
               if (!verdict.valid) {
                 const reason = sanitizeDeclineField(verdict.reason ?? 'unknown', MAX_DECLINE_CODE_CHARS) || 'unknown';
                 peerStatuses.recordACKValidation(peerId, `ACK_VERIFY:${reason}`);
@@ -967,7 +975,7 @@ export class ACKCollector {
               const valid = await withSpan(
                 'publisher.ack_verify_identity',
                 async (span) => {
-                  const ok = await this.deps.verifyIdentity!(recoveredAddress, identityId);
+                  const ok = await this.deps.verifyIdentity!(recoveredAddress, identityId, { signal: lifetime.signal });
                   // Legacy boolean verifier surfaces no structured reason; an
                   // invalid result maps to the generic registration gate.
                   span.setAttribute('dkg.verify_result', ok ? 'valid' : 'key-not-registered');
@@ -978,6 +986,7 @@ export class ACKCollector {
                 },
                 { attributes: { 'dkg.identity_id': String(identityId) } },
               );
+              if (roundIsOver()) return null;
               if (!valid) {
                 peerStatuses.recordACKValidation(peerId, 'ACK_VERIFY:key-not-registered');
                 getMetrics().ackPeerTotal.add(1, { result: 'rejected' });
@@ -1016,6 +1025,7 @@ export class ACKCollector {
               ...(subscriptionSource ? { subscriptionSource } : {}),
             };
           } catch (err) {
+            if (roundIsOver()) return null;
             const msg = err instanceof Error ? err.message : String(err);
             if (isProtocolUnsupportedError(err)) {
               getMetrics().ackPeerTotal.add(1, { result: 'protocol_unsupported' });
@@ -1115,7 +1125,7 @@ export class ACKCollector {
             }
             try {
               const ack = await requestACK(peerId);
-              if (ack && !seenPeers.has(ack.peerId) && !seenIdentityIds.has(ack.nodeIdentityId)) {
+              if (!roundIsOver() && ack && !seenPeers.has(ack.peerId) && !seenIdentityIds.has(ack.nodeIdentityId)) {
                 seenPeers.add(ack.peerId);
                 seenIdentityIds.add(ack.nodeIdentityId);
                 collected.push(ack);
@@ -1134,18 +1144,7 @@ export class ACKCollector {
           await Promise.race([Promise.allSettled(promises), quorumPromise]);
         })(),
         impossiblePromise,
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new QuorumUnmetError({
-            collected: collected.length,
-            required: REQUIRED_ACKS,
-            dialled: corePeers.length,
-            peerOutcomes: snapshotPeerOutcomes(),
-            legacyMessage:
-              `storage_ack_timeout: only ${collected.length}/${REQUIRED_ACKS} ACKs received within ${ACK_TIMEOUT_MS}ms.${peerStatuses.formatLegacyDetail()}`,
-          })),
-            ACK_TIMEOUT_MS,
-          ),
-        ),
+        lifetime.aborted,
       ]);
     } finally {
       // The round is decided (quorum, timeout, or impossible-quorum). Signal
@@ -1153,6 +1152,7 @@ export class ACKCollector {
       // wake rather than keep dialing after the caller has its answer.
       roundSettled = true;
       diagnostics.finish(peerStatuses.counts(corePeers));
+      lifetime.dispose();
     }
 
     if (collected.length < REQUIRED_ACKS) {

@@ -1,13 +1,13 @@
 /**
- * OT-RFC-73 P10b: the `queueRetention` config section. Both queues default to `off`; the bounds are the share core's; every wrong or unknown value is a startup
- * error that names its key (never a silent default).
+ * OT-RFC-73 P10b, P11: the `queueRetention` config section. Both queues default to `off`; the bounds are the cores' (the publisher core's are pinned equal to the share
+ * core's below); every wrong or unknown value is a startup error that names its key (never a silent default).
  */
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { createShareRetention } from '@origintrail-official/dkg-publisher';
+import { PUBLISHER_RETENTION_DEFAULTS, createPublisherRetention, createShareRetention, type LiftRetentionAccess } from '@origintrail-official/dkg-publisher';
 import { DkgHomeFiles } from '../src/config.js';
 import {
   RETENTION_DEFAULTS, RetentionConfigError, resolveRetentionConfig, resolveRetentionConfigOrExit,
@@ -25,7 +25,7 @@ const issuesOf = (input: unknown): Array<{ key: string; message: string }> => {
 describe('defaults', () => {
   const OFF_BY_DEFAULT = {
     share: { mode: 'off', intervalMs: 60_000, batchSize: 100, succeededMaxAgeMs: 7 * DAY, benignFailedMaxAgeMs: 7 * DAY, rescanIntervalMs: 3_600_000 },
-    publisher: { mode: 'off', intervalMs: 60_000, batchSize: 100, finalizedMaxAgeMs: 7 * DAY },
+    publisher: { mode: 'off', intervalMs: 60_000, batchSize: 100, finalizedMaxAgeMs: 7 * DAY, rescanIntervalMs: 3_600_000 },
   };
 
   it.each([['no section', undefined], ['an empty section', {}], ['empty queue sections', { share: {}, publisher: {} }]])('%s: both queues are off with the D-6 7-day windows', (_name, input) => {
@@ -44,7 +44,7 @@ describe('defaults', () => {
   it('passes every written value through', () => {
     const written = {
       share: { mode: 'delete', intervalMs: 5_000, batchSize: 250, succeededMaxAgeMs: 3 * DAY, benignFailedMaxAgeMs: 2 * DAY, rescanIntervalMs: 120_000 },
-      publisher: { mode: 'report', intervalMs: 90_000, batchSize: 7, finalizedMaxAgeMs: 9 * DAY },
+      publisher: { mode: 'report', intervalMs: 90_000, batchSize: 7, finalizedMaxAgeMs: 9 * DAY, rescanIntervalMs: 300_000 },
     };
     expect(resolveRetentionConfig(written)).toEqual(written);
   });
@@ -59,7 +59,7 @@ describe('bounds', () => {
     ['share.batchSize', 1], ['share.batchSize', 1000], ['publisher.batchSize', 1], ['publisher.batchSize', 1000],
     ['share.intervalMs', 1_000], ['share.intervalMs', 3_600_000], ['publisher.intervalMs', 1_000], ['publisher.intervalMs', 3_600_000],
     ['share.succeededMaxAgeMs', DAY], ['share.benignFailedMaxAgeMs', DAY], ['publisher.finalizedMaxAgeMs', DAY],
-    ['share.rescanIntervalMs', 60_000], ['share.rescanIntervalMs', 7 * DAY],
+    ['share.rescanIntervalMs', 60_000], ['share.rescanIntervalMs', 7 * DAY], ['publisher.rescanIntervalMs', 60_000], ['publisher.rescanIntervalMs', 7 * DAY],
   ])('%s = %d is accepted', (path, value) => {
     const [queue, key] = path.split('.') as [string, string];
     expect(() => resolveRetentionConfig({ [queue]: { [key]: value } })).not.toThrow();
@@ -73,7 +73,8 @@ describe('bounds', () => {
     ['share.succeededMaxAgeMs', DAY - 1], ['share.succeededMaxAgeMs', 0], ['share.succeededMaxAgeMs', '7d'], ['share.succeededMaxAgeMs', null], ['share.succeededMaxAgeMs', 1.5 * DAY + 0.5],
     ['share.benignFailedMaxAgeMs', DAY - 1], ['share.benignFailedMaxAgeMs', 'never'], ['share.benignFailedMaxAgeMs', false],
     ['publisher.finalizedMaxAgeMs', DAY - 1], ['publisher.finalizedMaxAgeMs', 'x'],
-    ['share.rescanIntervalMs', 59_999], ['share.rescanIntervalMs', 7 * DAY + 1],
+    ['share.rescanIntervalMs', 59_999], ['share.rescanIntervalMs', 7 * DAY + 1], ['publisher.rescanIntervalMs', 59_999], ['publisher.rescanIntervalMs', 7 * DAY + 1],
+    ['publisher.rescanIntervalMs', '3600000'], ['publisher.rescanIntervalMs', null],
     ['share.mode', 'REPORT'], ['share.mode', 'on'], ['share.mode', true], ['share.mode', 1], ['share.mode', null], ['publisher.mode', 'enabled'],
   ])('%s = %j is refused, naming the key', (path, value) => {
     const [queue, key] = path.split('.') as [string, string];
@@ -102,6 +103,28 @@ describe('bounds', () => {
     const keepBenign = resolveRetentionConfig({ share: { benignFailedMaxAgeMs: null } }).share;
     expect(core({ benignFailedMaxAgeMs: keepBenign.benignFailedMaxAgeMs })).not.toThrow();
   });
+
+  it('the publisher section follows the publisher core exactly: the same defaults and limits as the share core, and everything the resolver accepts the core accepts', () => {
+    // The resolver takes its bounds from the share core; the publisher core has its own copy of them (retention-sweep-core.ts). They must not drift apart.
+    expect(PUBLISHER_RETENTION_DEFAULTS).toMatchObject({
+      batchSize: RETENTION_DEFAULTS.batchSize, maxBatchSize: RETENTION_DEFAULTS.maxBatchSize, minWindowMs: RETENTION_DEFAULTS.minWindowMs, rescanIntervalMs: RETENTION_DEFAULTS.rescanIntervalMs,
+    });
+    const access = {} as LiftRetentionAccess;                                      // mode off: the core is built and asks for nothing
+    const core = (over: Record<string, unknown>) => () => createPublisherRetention({ access, mode: 'off', intervalMs: 60_000, ...over });
+    expect(core({ batchSize: 1000 })).not.toThrow();
+    expect(core({ batchSize: 1001 })).toThrow(/batchSize/);
+    expect(core({ finalizedMaxAgeMs: DAY })).not.toThrow();
+    expect(core({ finalizedMaxAgeMs: DAY - 1 })).toThrow(/finalizedMaxAgeMs/);
+    expect(() => resolveRetentionConfig({ publisher: { batchSize: 1000, finalizedMaxAgeMs: DAY } })).not.toThrow();
+    expect(() => resolveRetentionConfig({ publisher: { batchSize: 1001 } })).toThrow(/batchSize/);
+    expect(() => resolveRetentionConfig({ publisher: { finalizedMaxAgeMs: DAY - 1 } })).toThrow(/finalizedMaxAgeMs/);
+    for (const written of [{}, { batchSize: 1000, finalizedMaxAgeMs: DAY, intervalMs: 1_000, rescanIntervalMs: 60_000 }, { intervalMs: 3_600_000, rescanIntervalMs: 7 * DAY }]) {
+      const resolved = resolveRetentionConfig({ publisher: { mode: 'report', ...written } }).publisher;
+      expect(core({
+        batchSize: resolved.batchSize, finalizedMaxAgeMs: resolved.finalizedMaxAgeMs, intervalMs: resolved.intervalMs, rescanIntervalMs: resolved.rescanIntervalMs,
+      }), JSON.stringify(written)).not.toThrow();
+    }
+  });
 });
 
 describe('unknown keys and wrong shapes', () => {
@@ -110,6 +133,7 @@ describe('unknown keys and wrong shapes', () => {
     ['a typo in the publisher section', { publisher: { finalizedMaxAge: 1 } }, 'queueRetention.publisher.finalizedMaxAge'],
     ['a publisher key in the share section', { share: { finalizedMaxAgeMs: 7 * DAY } }, 'queueRetention.share.finalizedMaxAgeMs'],
     ['a share key in the publisher section', { publisher: { succeededMaxAgeMs: 7 * DAY } }, 'queueRetention.publisher.succeededMaxAgeMs'],
+    ['the share-only benign window in the publisher section', { publisher: { benignFailedMaxAgeMs: null } }, 'queueRetention.publisher.benignFailedMaxAgeMs'],
     ['an unknown queue', { lift: { mode: 'report' } }, 'queueRetention.lift'],
   ])('%s is refused, naming the key', (_name, input, key) => {
     const issues = issuesOf(input);

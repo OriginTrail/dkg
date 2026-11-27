@@ -2,7 +2,7 @@ import { assertSafeIri } from '@origintrail-official/dkg-core';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { ENTITY_SHARE_METADATA_PREDICATES as F } from './entity-share-metadata.js';
-import { clearDischargedStorageAckCopies } from './storage-ack-copy-cleanup.js';
+import { clearDischargedStorageAckCopies, type StorageAckCopyCleanupWriter } from './storage-ack-copy-cleanup.js';
 import { assertWorkspaceSnapshotLifecycle, withClientDeadline, type WorkspaceSnapshotLifecycle } from './workspace-snapshot-lifecycle.js';
 
 const RETIREMENT_LOOKUP_TIMEOUT_MS = 2_000;
@@ -11,7 +11,8 @@ const STORAGE_ACK_COPY_UPDATE_TIMEOUT_MS = 10_000;
 
 /** Schedule only at the durable publication boundary, before removing SWM refs. */
 export class PublishedSnapshotRetirement {
-  constructor(private readonly store: TripleStore, private readonly lifecycle?: WorkspaceSnapshotLifecycle) {
+  constructor(private readonly store: TripleStore, private readonly lifecycle?: WorkspaceSnapshotLifecycle,
+    private readonly clearCopies: StorageAckCopyCleanupWriter = input => clearDischargedStorageAckCopies(store, input)) {
     // The publisher builds this when it starts, so a lifecycle that breaks the contract fails there, loudly,
     // and not at the first publication.
     assertWorkspaceSnapshotLifecycle(lifecycle);
@@ -59,7 +60,7 @@ export class PublishedSnapshotRetirement {
     if (!this.lifecycle?.finalizedCleanupEnabled || cleanedOperations.length === 0) return;
     try {
       await withClientDeadline(
-        clearDischargedStorageAckCopies(this.store, { metaGraph, kaUal, cleanedOperations }),
+        this.clearCopies({ metaGraph, kaUal, cleanedOperations }),
         STORAGE_ACK_COPY_UPDATE_TIMEOUT_MS,
         'Storage ACK copy cleanup timed out',
       );

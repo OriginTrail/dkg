@@ -10,8 +10,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 
 import {
-  isContextGraphAuthorityUnavailableMarker,
-  isRetryableContextGraphAuthorityUnavailableReason,
+  isRetryableContextGraphAuthorityUnavailableError as isRetryableAuthorityUnavailable,
 } from '../context-graph-authority/context-graph-authority.js';
 import { isTransientInventorySignerFailure } from './share-inventory-signing-capability.js';
 import type { DKGAgent } from '../../dkg-agent.js';
@@ -51,12 +50,6 @@ type AssertionPromotePreCommitResult = {
   gossipSigner: GossipSigner;
   publisherOptions: PublisherAssertionPromoteOptions;
 };
-
-/** An authority failure that can heal on its own (the shared classification). */
-function isRetryableAuthorityUnavailable(error: unknown): boolean {
-  return isContextGraphAuthorityUnavailableMarker(error)
-    && isRetryableContextGraphAuthorityUnavailableReason(error.reason);
-}
 
 /**
  * Retry translation belongs to these concrete agent prerequisite callbacks;

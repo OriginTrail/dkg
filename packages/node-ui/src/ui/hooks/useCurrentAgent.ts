@@ -93,7 +93,7 @@ function loadCurrentAgent() {
       setState({
         data: state.data,
         loading: false,
-        error: error instanceof Error ? error.message : 'Failed to load current agent',
+        error: error instanceof Error ? error.message : 'Couldn’t load the current agent.',
       });
     })
     .finally(() => {

@@ -53,7 +53,7 @@ const BOUND_REQUEST_MARKER = 'recoveryBinding';
  * Everything else (queued, running, failed_retrying, bound failed rows, a missing or unrecognised state triple) still comes back and is
  * decoded and judged by the unchanged JS code, so an unreadable row in those classes still fails closed exactly as before.
  *
- * Narrowings accepted for corrupted rows only (OT-RFC-73 D-5; pinned by test/async-promote-bounded-lookup.test.ts, documented in docs/api/async-share-admission.md):
+ * Narrowings accepted for corrupted rows only (OT-RFC-73 D-5; pinned by test/async-promote-bounded-lookup.test.ts, documented in packages/publisher/docs/async-queue-internals.md, Duplicate check):
  *  - D1/D2: a row whose state triple says `succeeded`, or `failed` with a payload that shows no `recoveryBinding`, is no longer decoded, so an unreadable payload
  *    there no longer throws `KA_PROMOTE_RECOVERY_REQUIRED`. Such a row cannot be a conflict; the other classes still fail closed.
  *  - D3 (not producible by the queue, which writes both in one atomic replace): a state triple that disagrees with its payload is judged by the triple.

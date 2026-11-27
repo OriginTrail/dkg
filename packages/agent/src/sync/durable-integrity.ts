@@ -2,20 +2,19 @@ import { normalizeGraphScopedHex32 as normalizeHex32 } from "./graph-scoped-root
 import { createHash } from 'node:crypto';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
-  MemoryLayer,
-  createGraphKnowledgeAssetScope,
   parseGraphScopedAssertionSealCandidate,
-  knowledgeAssetLayerGraphUri,
   parseDeterministicKnowledgeAssetUal,
-  validateSubGraphName,
 } from '@origintrail-official/dkg-core';
 import {
+  parseWireGraphKnowledgeAssetStructure,
   computeFlatKCRootV10 as computeStructuredKCRoot,
   skolemizeByEntity,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 import { appendInPlace } from './append-in-place.js';
 import { compareCodePoint } from './code-point-order.js';
+import { createGraphScopedDurablePrefix } from './durable-prefix.js';
 import { prepareDurableMeta, type PreparedDurableMeta } from './durable-metadata-intake.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
@@ -24,14 +23,12 @@ const CONTENT_SCOPE_VERSION = `${DKG_NS}contentScopeVersion`;
 const KA_UAL = `${DKG_NS}kaUal`;
 const ASSERTION_VERSION = `${DKG_NS}assertionVersion`;
 const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
-const CONTEXT_GRAPH = `${DKG_NS}contextGraph`;
 const BATCH_ID = `${DKG_NS}batchId`;
 const STATUS = `${DKG_NS}status`;
 const RESERVED_UAL = `${DKG_NS}reservedUal`;
 const PUBLIC_TRIPLE_COUNT = `${DKG_NS}publicTripleCount`;
 const PRIVATE_TRIPLE_COUNT = `${DKG_NS}privateTripleCount`;
 const PRIVATE_MERKLE_ROOT = `${DKG_NS}privateMerkleRoot`;
-const SUB_GRAPH_NAME = `${DKG_NS}subGraphName`;
 const ROOT_ENTITY = `${DKG_NS}rootEntity`;
 const PART_OF = `${DKG_NS}partOf`;
 const SKOLEM_SUFFIX = '/.well-known/genid/';
@@ -97,10 +94,14 @@ export interface DurableIntegrityLogEntry {
   message: string;
 }
 
+/** Evidence passed only while the caller owns a content proof and has confirmed these descriptors on chain. */
+export type AuthenticatedHeldMetadataDescriptor = Pick<GraphScopedDescriptor, 'ual' | 'metadataDigestHex'>;
+
 export type DurableIntegrityVerificationMode =
   | { kind: 'fullSnapshot' }
   | { kind: 'sinceBatchId'; sinceBatchId: bigint }
-  | { kind: 'changelogPage'; changedDataGraphs: ReadonlySet<string> };
+  | { kind: 'changelogPage'; changedDataGraphs: ReadonlySet<string> }
+  | { kind: 'heldMetadata'; descriptors: readonly AuthenticatedHeldMetadataDescriptor[] };
 
 export interface DurableIntegritySelection {
   dataIndexes: number[];
@@ -162,7 +163,9 @@ function digestGraphScopedMetadataRows(rows: readonly Quad[]): string {
     hash.update(length);
     hash.update(bytes);
   };
-  const canonical = [...rows].sort((left, right) => (
+  // publishedAt is assigned by each receiving node. Keep content, routing,
+  // permissions and confirmation facts in the identity, but not that local clock.
+  const canonical = rows.filter(row => row.predicate !== `${DKG_NS}publishedAt`).sort((left, right) => (
     compareCodePoint(left.subject, right.subject)
     || compareCodePoint(left.predicate, right.predicate)
     || compareCodePoint(left.object, right.object)
@@ -204,7 +207,7 @@ function readOrderedGraphScopedDescriptors(
 }
 
 export const DURABLE_MANIFEST_DIGEST_DOMAIN = 'origintrail.dkg.durable-data-manifest';
-export const DURABLE_MANIFEST_DIGEST_VERSION = 2;
+export const DURABLE_MANIFEST_DIGEST_VERSION = 3;
 export const DURABLE_MANIFEST_PREFIX_DIGEST_DOMAIN = 'origintrail.dkg.durable-data-manifest-prefix';
 
 export interface GraphScopedDurableManifestPlan {
@@ -427,94 +430,16 @@ export function planBoundedGraphScopedDurableBatch(
     )
   ) return null;
 
-  const descriptors = manifest.descriptors;
-  const descriptorByGraph = new Map(
-    descriptors.map((descriptor) => [descriptor.assertionGraph, descriptor] as const),
-  );
-
-  const observedCounts = new Map<string, number>();
-  for (const quad of dataQuads) {
-    if (!descriptorByGraph.has(quad.graph)) return null;
-    observedCounts.set(quad.graph, (observedCounts.get(quad.graph) ?? 0) + 1);
-  }
-
-  let manifestOffset = 0;
-  let reachedResumeBoundary = resumedFromOffset === 0;
-  let stoppedAtIncompleteGraph = false;
-  let safeNextOffset = resumedFromOffset;
-  let completedGraphCount = 0;
-  const completeGraphs = new Set<string>();
-  const completedPositiveGraphs: Array<{ graph: string; rowCount: number }> = [];
-
-  // Zero-public V2 assets have no responder rows, but their metadata envelope
-  // is independently verifiable. Keep them in scope on every bounded round;
-  // this is idempotent and avoids an offset ambiguity for zero-width entries.
-  for (const descriptor of descriptors) {
-    if (descriptor.publicTripleCount === 0) completeGraphs.add(descriptor.assertionGraph);
-  }
-
-  for (const descriptor of descriptors) {
-    const expected = descriptor.publicTripleCount;
-    if (expected === 0) continue;
-    const graphStart = manifestOffset;
-    const graphEnd = graphStart + expected;
-    if (!Number.isSafeInteger(graphEnd)) return null;
-    manifestOffset = graphEnd;
-
-    if (!reachedResumeBoundary) {
-      if (graphEnd <= resumedFromOffset) {
-        if ((observedCounts.get(descriptor.assertionGraph) ?? 0) !== 0) return null;
-        continue;
-      }
-      if (graphStart !== resumedFromOffset) return null;
-      reachedResumeBoundary = true;
-    }
-
-    const observed = observedCounts.get(descriptor.assertionGraph) ?? 0;
-    if (stoppedAtIncompleteGraph) {
-      // The responder can fetch exact graphs through independent partitions.
-      // An interrupted round may therefore contain rows for later graphs even
-      // though an earlier graph is short. Those rows are not part of the
-      // contiguous checkpointable prefix, but their presence does not make the
-      // already-complete leading graphs ambiguous: graph-scoped metadata still
-      // gives every row an exact owner and the verifier authenticates each
-      // selected graph before storage. Drop the non-contiguous tail and replay
-      // it from the first incomplete boundary on the next round.
-      continue;
-    }
-    if (observed === expected) {
-      completeGraphs.add(descriptor.assertionGraph);
-      completedPositiveGraphs.push({
-        graph: descriptor.assertionGraph,
-        rowCount: expected,
-      });
-      safeNextOffset += expected;
-      completedGraphCount += 1;
-      continue;
-    }
-    if (observed < 0 || observed > expected) return null;
-    stoppedAtIncompleteGraph = true;
-  }
-
-  if (!reachedResumeBoundary || safeNextOffset > rawNextOffset) return null;
-
-  // A timed-out fetch can stop exactly on a graph boundary without receiving
-  // the terminal empty page. Do not checkpoint the final complete graph in
-  // that case: the next round must receive at least one verified data graph so
-  // its clean completion can serve as readiness evidence rather than an empty
-  // terminal probe after all useful rows were persisted by timed-out rounds.
-  // Filtered rows can move the raw offset past the manifest's end, so an
-  // incomplete round never checkpoints that end either: no graph starts there.
-  if (
-    !phaseCompleted
-    && (safeNextOffset === rawNextOffset || safeNextOffset === manifestOffset)
-    && completedPositiveGraphs.length > 0
-  ) {
-    const replay = completedPositiveGraphs.pop()!;
-    completeGraphs.delete(replay.graph);
-    safeNextOffset -= replay.rowCount;
-    completedGraphCount -= 1;
-  }
+  const prefix = createGraphScopedDurablePrefix(manifest, resumedFromOffset);
+  prefix.observe(dataQuads);
+  const retained = prefix.prefix(rawNextOffset, phaseCompleted);
+  if (retained === null) return null;
+  const { safeNextOffset, completedGraphCount } = retained;
+  const manifestOffset = prefix.manifestRowCount;
+  // Zero-public envelopes remain in scope in every round; they have no DATA rows.
+  const completeGraphs = new Set(manifest.descriptors
+    .filter(descriptor => descriptor.publicTripleCount === 0).map(descriptor => descriptor.assertionGraph));
+  for (let index = 0; index < completedGraphCount; index += 1) completeGraphs.add(prefix.graphs[index]!.graph);
 
   const boundedData = dataQuads.filter((quad) => completeGraphs.has(quad.graph));
   if (boundedData.length !== safeNextOffset - resumedFromOffset) return null;
@@ -631,6 +556,7 @@ export function selectVerifiedDurableSyncQuads(
   acceptUnverified = false,
   mode: DurableIntegrityVerificationMode = { kind: 'fullSnapshot' },
 ): DurableIntegritySelection {
+  if (mode.kind === 'heldMetadata' && dataQuads.length > 0) throw new Error('Held metadata evidence cannot authenticate fetched DATA');
   const logs: DurableIntegrityLogEntry[] = [];
   if (metaQuads.length === 0) {
     if (!acceptUnverified && dataQuads.length > 0) {
@@ -918,6 +844,9 @@ function verifyGraphScopedCandidates(
   let fatalUnscopedFailure = parsed.fatalUnscopedFailure;
   const logs = [...parsed.logs];
 
+  const heldMetadata = mode.kind === 'heldMetadata'
+    ? new Map(mode.descriptors.map(copy => [copy.ual, copy.metadataDigestHex])) : undefined;
+
   for (const candidate of graphScopedCandidates) {
     const { ual, descriptor } = candidate;
     let scope: ReturnType<typeof classifyGraphScopedCandidateScope>;
@@ -936,6 +865,9 @@ function verifyGraphScopedCandidates(
     // only a scoped data payload. Out-of-scope descriptors are structurally
     // valid, yet their peer-supplied rows are not authenticated by this page.
     if (scope !== 'in-scope') {
+      // Only repeated lifecycle controls gain authority from a held proof.
+      // Do not re-admit the peer's descriptor or claim any DATA was fetched.
+      if (heldMetadata?.get(ual) === descriptor.metadataDigestHex) authenticatedMetadataUals.add(ual);
       // The shared metadata record includes descriptors for unchanged assets.
       // They are structurally valid but not authenticated by this page's
       // payload, so never select their peer-supplied rows for replacement.
@@ -1082,7 +1014,7 @@ function verifyLegacyCandidates(
 
   const partitioned = skolemizeByEntity(dataQuads as Quad[]);
   for (const kcUal of legacyKcUals) {
-    if (!metadata.merkleSubjects.has(kcUal)) continue;
+    if (!metadata.merkleSubjects.has(kcUal) || mode.kind === 'heldMetadata') continue;
     if (mode.kind === 'sinceBatchId') {
       try {
         if (!candidateIsNewerThan(metadata.metaBySubject.get(kcUal) ?? [], mode.sinceBatchId)) {
@@ -1194,6 +1126,7 @@ function classifyGraphScopedCandidateScope(
   mode: DurableIntegrityVerificationMode,
 ): 'in-scope' | 'out-of-scope' | 'tentative-without-batch' {
   if (mode.kind === 'fullSnapshot') return 'in-scope';
+  if (mode.kind === 'heldMetadata') return 'out-of-scope';
   if (mode.kind === 'changelogPage') {
     return mode.changedDataGraphs.has(assertionGraph) ? 'in-scope' : 'out-of-scope';
   }
@@ -1587,105 +1520,13 @@ export function parseGraphScopedDescriptor(
   ual: string,
   rows: readonly Quad[],
 ): GraphScopedDescriptor {
-  const requireSingle = (predicate: string, field: string): string => {
-    const values = distinctObjects(rows, predicate);
-    if (values.length !== 1) {
-      throw new Error(`${values.length === 0 ? 'missing' : 'ambiguous'} ${field} metadata`);
-    }
-    return values[0]!;
-  };
-  const optionalSingle = (predicate: string, field: string): string | undefined => {
-    const values = distinctObjects(rows, predicate);
-    if (values.length > 1) throw new Error(`ambiguous ${field} metadata`);
-    return values[0];
-  };
-
-  const metadataUal = requireSingle(KA_UAL, 'kaUal');
-  if (metadataUal !== ual) throw new Error(`kaUal mismatch: found ${metadataUal}`);
-  const contentScopeVersion = parseInteger(
-    requireSingle(CONTENT_SCOPE_VERSION, 'contentScopeVersion'),
-    'contentScopeVersion',
+  const { merkleRoot, privateMerkleRoot, ...structure } = parseWireGraphKnowledgeAssetStructure(
+    rows, ual,
   );
-  const assertionVersion = parseInteger(
-    requireSingle(ASSERTION_VERSION, 'assertionVersion'),
-    'assertionVersion',
-  );
-  const scope = createGraphKnowledgeAssetScope(ual, assertionVersion);
-  if (scope.ual !== ual) throw new Error(`non-canonical kaUal: expected ${scope.ual}`);
-
-  const contextGraphUri = requireSingle(CONTEXT_GRAPH, 'contextGraph');
-  const contextGraphPrefix = 'did:dkg:context-graph:';
-  if (!contextGraphUri.startsWith(contextGraphPrefix)) {
-    throw new Error(`invalid contextGraph metadata: ${contextGraphUri}`);
-  }
-  const contextGraphId = contextGraphUri.slice(contextGraphPrefix.length);
-  if (!contextGraphId) throw new Error('empty context graph id');
-  const expectedMetaGraph = `${contextGraphUri}/_meta`;
-  for (const row of rows) {
-    if (row.graph !== expectedMetaGraph) {
-      throw new Error(`metadata graph mismatch: expected ${expectedMetaGraph}, found ${row.graph}`);
-    }
-    if (row.predicate === ROOT_ENTITY || row.predicate === PART_OF) {
-      throw new Error('graph-scoped KA metadata must not contain legacy root bindings');
-    }
-  }
-
-  const subGraphRaw = optionalSingle(SUB_GRAPH_NAME, 'subGraphName');
-  const subGraphName = subGraphRaw === undefined ? undefined : stripLiteral(subGraphRaw);
-  if (subGraphName !== undefined) {
-    const validation = validateSubGraphName(subGraphName);
-    if (!validation.valid) throw new Error(`invalid subGraphName: ${validation.reason}`);
-  }
-
-  const expectedAssertionGraph = knowledgeAssetLayerGraphUri(
-    contextGraphId,
-    MemoryLayer.VerifiableMemory,
-    scope,
-    subGraphName,
-  );
-  const assertionGraph = requireSingle(ASSERTION_GRAPH, 'assertionGraph');
-  if (assertionGraph !== expectedAssertionGraph) {
-    throw new Error(`assertionGraph mismatch: expected ${expectedAssertionGraph}, found ${assertionGraph}`);
-  }
-
-  const publicTripleCount = safeCount(
-    requireSingle(PUBLIC_TRIPLE_COUNT, 'publicTripleCount'),
-    'publicTripleCount',
-  );
-  const privateTripleCount = safeCount(
-    requireSingle(PRIVATE_TRIPLE_COUNT, 'privateTripleCount'),
-    'privateTripleCount',
-  );
-  if (publicTripleCount === 0 && privateTripleCount === 0) {
-    throw new Error('empty graph-scoped asset');
-  }
-  const privateRootValues = distinctObjects(rows, PRIVATE_MERKLE_ROOT);
-  if (privateTripleCount > 0 && privateRootValues.length !== 1) {
-    throw new Error(`${privateRootValues.length === 0 ? 'missing' : 'ambiguous'} privateMerkleRoot metadata`);
-  }
-  if (privateTripleCount === 0 && privateRootValues.length > 0) {
-    throw new Error('privateMerkleRoot present without private content');
-  }
-  const privateRootHex = privateRootValues[0]
-    ? normalizeHex32(privateRootValues[0], 'privateMerkleRoot')
-    : undefined;
-
   return {
-    ual,
-    contentScopeVersion: contentScopeVersion.toString(),
-    assertionVersion: assertionVersion.toString(),
-    contextGraphId,
-    ...(subGraphName === undefined ? {} : { subGraphName }),
-    assertionGraph,
-    publicTripleCount,
-    privateTripleCount,
-    ...(privateRootHex
-      ? {
-          privateRoot: hexToBytes(privateRootHex),
-          privateRootHex,
-        }
-      : {}),
-    claimedRootHex: normalizeHex32(requireSingle(MERKLE_ROOT, 'merkleRoot'), 'merkleRoot'),
+    ...structure,
+    ...(privateMerkleRoot ? { privateRoot: privateMerkleRoot, privateRootHex: toHex(privateMerkleRoot) } : {}),
+    claimedRootHex: toHex(merkleRoot),
     metadataDigestHex: digestGraphScopedMetadataRows(rows),
   };
 }
@@ -1699,22 +1540,12 @@ function parseInteger(raw: string, field: string): bigint {
   return BigInt(raw);
 }
 
-function safeCount(raw: string, field: string): number {
-  const value = parseInteger(raw, field);
-  if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new Error(`invalid ${field}: ${value}`);
-  }
-  return Number(value);
-}
-
-
 function hexToBytes(hex: string): Uint8Array {
   return Uint8Array.from(hex.match(/.{2}/g)!.map((pair) => Number.parseInt(pair, 16)));
 }
 
 function stripLiteral(raw: string): string {
-  const match = raw.match(/^"(.*)"(?:\^\^.*|@.*)?$/);
-  return match ? match[1]! : raw;
+  return rdfLiteralBody(raw) ?? raw;
 }
 
 function findLegacyRootOwner(subject: string, roots: ReadonlySet<string>): string | undefined {

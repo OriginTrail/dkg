@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { ethers } from 'ethers';
+import type { Rfc64CatalogResponsibilitySelectionV1 } from './catalog-responsibility-registry-v1.js';
+import type { ResolvedRfc64CatalogAuthoringPolicyV1 } from './public-catalog-activation-config-v1.js';
 
 /** Restart-stable authority selection for one explicitly selected CG. */
 export type Rfc64CatalogRolloutModeV1 = 'legacy' | 'shadow' | 'catalog';
@@ -221,6 +223,36 @@ export function resolveRfc64CatalogExecutionPlanModeV1(
   return plan.selectedAuthority[contextGraphId]?.mode
     ?? plan.contextGraphModes[contextGraphId]
     ?? plan.responsibilityDefaultMode;
+}
+
+/** Accepted private policy deliberately excludes the legacy public-only fallback. */
+export function isRfc64PublicOnlyAuthoringExclusionV1(
+  authoring: ResolvedRfc64CatalogAuthoringPolicyV1 | undefined, contextGraphId: string, acceptedAccessPolicy: number | undefined,
+): boolean {
+  return authoring?.publicDefault !== undefined && authoring.byContextGraph[contextGraphId] === undefined
+    && acceptedAccessPolicy === 1;
+}
+
+/** Desired confirmed work is independent of whether a catalog lane is ready now. */
+export function selectRfc64ConfirmedCatalogObligationV1(input: Readonly<{
+  plan: Rfc64CatalogExecutionPlanV1;
+  contextGraphId: string;
+  subGraphName: string | null;
+  authoring: ResolvedRfc64CatalogAuthoringPolicyV1 | undefined;
+  readResponsibility: () => Rfc64CatalogResponsibilitySelectionV1;
+  readServingAuthority: () => Rfc64CatalogAuthorityPolicyV1;
+  readAcceptedAccessPolicy?: () => number | undefined;
+}>): 'required' | 'excluded' {
+  const { plan, contextGraphId, authoring } = input;
+  if (input.subGraphName !== null || plan.killSwitchActive
+    || resolveRfc64CatalogExecutionPlanModeV1(plan, contextGraphId) === 'legacy') return 'excluded';
+  if (authoring?.publicDefault !== undefined && authoring.byContextGraph[contextGraphId] === undefined
+    && isRfc64PublicOnlyAuthoringExclusionV1(authoring, contextGraphId, input.readAcceptedAccessPolicy?.())) return 'excluded';
+  if (authoring?.publicDefault !== undefined || authoring?.byContextGraph[contextGraphId] !== undefined
+    || plan.selectedAuthority[contextGraphId]?.selected === true) return 'required';
+  const entry = input.readResponsibility();
+  const responsible = resolveRfc64CatalogResponsibilityAuthorityV1({ ...entry, killSwitchActive: plan.killSwitchActive }).authoringAllowed;
+  return responsible || input.readServingAuthority().authoringAllowed ? 'required' : 'excluded';
 }
 
 export interface Rfc64CatalogResponsibilityAuthorityInputV1 {

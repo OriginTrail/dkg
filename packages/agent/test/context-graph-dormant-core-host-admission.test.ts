@@ -77,7 +77,7 @@ async function fixture(mode: Mode, restore = true) {
   state.node = { peerId: '12D3KooWDormantCoreAdmission', libp2p: { getPeers: () => [] } };
   // Only network activation is inert: native authority, cap selection, identity
   // installation, persistence and both automatic custody paths remain real.
-  vi.spyOn(agent, 'subscribeToContextGraph').mockImplementation((id) => state.subscribedContextGraphs.get(id)!);
+  vi.spyOn(agent, 'installContextGraphSubscription').mockImplementation((id) => state.subscribedContextGraphs.get(id)!);
   if (restore) await agent.rehydrateContextGraphSubscriptions(null);
   const policy = vi.spyOn(chain, 'getContextGraphAccessPolicy');
   const nudge = vi.spyOn(agent, 'recordCoreHostedPublicCg');

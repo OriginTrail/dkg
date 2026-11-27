@@ -9,7 +9,6 @@ import {
   Logger,
   createOperationContext,
   assertSafeIri,
-  assertNoUserAuthoredTrustLevelQuads,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
   createGraphKnowledgeAssetScope,
@@ -20,7 +19,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
-import { validatePublishRequest } from './validation.js';
+import { assertWritableQuadTerms, validatePublishRequest } from './validation.js';
+import { assertNoReceivedProtocolMetadata } from './protocol-metadata.js';
 import { computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
 import {
   generateTentativeMetadata,
@@ -355,8 +355,8 @@ export class PublishHandler {
       await this.graphManager.ensureContextGraph(contextGraphId);
 
       const nquadsStr = new TextDecoder().decode(request.nquads);
-      const quads = parseSimpleNQuads(nquadsStr);
-      assertNoUserAuthoredTrustLevelQuads(quads);
+      const quads = assertWritableQuadTerms(parseSimpleNQuads(nquadsStr), request.kas.map((ka) => ka.rootEntity));
+      assertNoReceivedProtocolMetadata(quads);
       const graphPublish = resolveGraphScopedPublishRequest(request);
       if (graphPublish) {
         return this.handleGraphScopedPublish(request, graphPublish, quads, fromPeerId, ctx);

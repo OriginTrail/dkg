@@ -1,3 +1,4 @@
+import { decodeV9UpdateReceiptLog, decodeV10UpdateReceiptLog, type UpdateReceiptFacts } from './update-receipt-facts.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -358,159 +359,149 @@ export class PublishMethods extends EVMChainAdapterBase {
     if (!this.contracts.knowledgeAssetsStorage && !this.contracts.knowledgeAssetStorage) {
       return { verified: false };
     }
-
     try {
-      const receipt = await this.getTransactionReceiptWithFailover(txHash, {
-        signal: options.signal,
-      });
+      const receipt = await this.getTransactionReceiptWithFailover(txHash, { signal: options.signal });
       if (!receipt || receipt.status !== 1) return { verified: false };
-
-      let onChainMerkleRoot: Uint8Array | undefined;
-
-      // V9: KnowledgeBatchUpdated on KnowledgeAssetsStorage
-      if (!onChainMerkleRoot && this.contracts.knowledgeAssetsStorage) {
-        const storage = this.contracts.knowledgeAssetsStorage;
-        const storageAddress = (await storage.getAddress()).toLowerCase();
-        for (const log of receipt.logs) {
-          if (log.address.toLowerCase() !== storageAddress) continue;
-          try {
-            const parsed = storage.interface.parseLog({ topics: [...log.topics], data: log.data });
-            if (parsed?.name === 'KnowledgeBatchUpdated' && BigInt(parsed.args.batchId) === batchId) {
-              onChainMerkleRoot = ethers.getBytes(parsed.args.newMerkleRoot);
-              break;
-            }
-          } catch { /* parse failure — skip */ }
-        }
-      }
-
-      // V10: KnowledgeAssetUpdated on DKGKnowledgeAssets
-      if (!onChainMerkleRoot && this.contracts.knowledgeAssetStorage) {
-        const kas = this.contracts.knowledgeAssetStorage;
-        const kcsAddress = (await kas.getAddress()).toLowerCase();
-        for (const log of receipt.logs) {
-          if (log.address.toLowerCase() !== kcsAddress) continue;
-          try {
-            const parsed = kas.interface.parseLog({ topics: [...log.topics], data: log.data });
-            if (
-              (parsed?.name === 'KnowledgeAssetUpdated' ||
-                parsed?.name === 'KnowledgeAssetUpdated') &&
-              BigInt(parsed.args.id) === batchId
-            ) {
-              onChainMerkleRoot = ethers.getBytes(parsed.args.merkleRoot);
-              break;
-            }
-          } catch { /* parse failure — skip */ }
-        }
-      }
-
-      if (!onChainMerkleRoot) return { verified: false };
-
-      // Read the V10 root history at the receipt block, not latest. Besides
-      // producing the post-update assertion index, this prevents a later
-      // update by another publisher from making verification of this older,
-      // otherwise-valid transaction fail. The block tag excludes future
-      // blocks; matching the event root selects this update when the block
-      // contains multiple updates for the same KA.
-      let onChainPublisher: string | undefined;
-      let merkleRootCount: bigint | undefined;
-      if (this.contracts.knowledgeAssetStorage) {
-        try {
-          const roots = await this.readContractWithOptions(
-            this.contracts.knowledgeAssetStorage,
-            'kas.getMerkleRootsAtUpdateBlock',
-            'getMerkleRoots',
-            [batchId, { blockTag: receipt.blockNumber }],
-            { signal: options.signal },
-          ) as Array<{ publisher?: string; merkleRoot?: string } | readonly unknown[]>;
-          // r17 (3814893084) / r28 (🔴 3821721213) — the register entries carry no transaction
-          // hash, so a (publisher, root) match is the only link back to this receipt. r17 counted
-          // those matches across the WHOLE register, which is the asset's entire history as of
-          // this block — not this block's writes. An A -> B -> A history by one publisher in three
-          // SEPARATE blocks therefore produced two matches for A, dropped the position, and left
-          // the third update permanently held: the exact case this PR exists to settle, made
-          // unrecoverable by its own ambiguity guard.
-          //
-          // Ambiguity is a property of the RECEIPT'S BLOCK. Entries written before it cannot be
-          // this transaction's, so the pre-block count marks where its candidates begin, and only
-          // matches at or after that boundary compete. A genuinely ambiguous same-block pair still
-          // drops the position; a historical repeat no longer can.
-          let preBlockCount = 0;
-          if (receipt.blockNumber > 0) {
-            const before = await this.readContractWithOptions(
-              this.contracts.knowledgeAssetStorage,
-              'kas.getMerkleRootsBeforeUpdateBlock',
-              'getMerkleRoots',
-              [batchId, { blockTag: receipt.blockNumber - 1 }],
-              { signal: options.signal },
-            ) as ReadonlyArray<unknown>;
-            preBlockCount = before.length;
-          }
-          const entryAt = (i: number) => {
-            const root = roots[i] as { publisher?: string; merkleRoot?: string };
-            return {
-              publisher: root.publisher ?? String((root as readonly unknown[])[0] ?? ''),
-              merkleRoot: root.merkleRoot ?? String((root as readonly unknown[])[1] ?? ''),
-            };
-          };
-          const isOurs = (i: number) => {
-            const e = entryAt(i);
-            return e.publisher.toLowerCase() === publisherAddress.toLowerCase()
-              && e.merkleRoot.toLowerCase() === ethers.hexlify(onChainMerkleRoot).toLowerCase();
-          };
-          // `verified` still asks the whole register: the root IS ours somewhere in this asset's
-          // history, which is what authenticates the receipt. Only the POSITION is restricted to
-          // this block's candidates.
-          let matchedIndex = -1;
-          for (let i = roots.length - 1; i >= 0; i--) {
-            if (isOurs(i)) { matchedIndex = i; onChainPublisher = entryAt(i).publisher; break; }
-          }
-          if (matchedIndex < 0) {
-            return { verified: false };
-          }
-          let blockMatchIndex = -1;
-          let blockMatchCount = 0;
-          for (let i = preBlockCount; i < roots.length; i += 1) {
-            if (!isOurs(i)) continue;
-            if (blockMatchCount === 0) blockMatchIndex = i;
-            blockMatchCount += 1;
-          }
-          merkleRootCount = blockMatchCount === 1 ? BigInt(blockMatchIndex + 1) : undefined;
-        } catch (error) {
-          if (isChainRpcTransportError(error)) throw error;
-          // A latest-state fallback can authenticate a historical receipt with
-          // a different publisher/root after a later update. V10 verification
-          // therefore fails closed when the receipt-block view is unavailable.
-          return { verified: false };
-        }
-      }
-      if (
-        !this.contracts.knowledgeAssetStorage
-        && (!onChainPublisher || onChainPublisher === ethers.ZeroAddress)
-        && this.contracts.knowledgeAssetsStorage
-      ) {
-        try {
-          onChainPublisher = await this.readContract(
-            this.contracts.knowledgeAssetsStorage, 'kasV9.getBatchPublisher',
-            'getBatchPublisher', batchId,
-          );
-        } catch { /* not found in V9 storage */ }
-      }
-      if (!onChainPublisher || onChainPublisher.toLowerCase() !== publisherAddress.toLowerCase()) {
-        return { verified: false };
-      }
-
-      return {
-        verified: true,
-        onChainMerkleRoot,
-        blockNumber: receipt.blockNumber,
-        blockHash: receipt.blockHash,
-        txIndex: receipt.index,
-        merkleRootCount,
-      };
+      const facts = await this.firstMatchingUpdateReceiptFacts(receipt, batchId);
+      return facts ? await this.authenticateUpdateReceipt(receipt, facts, publisherAddress, options) : { verified: false };
     } catch (error) {
       if (isChainRpcTransportError(error)) throw error;
       return { verified: false };
     }
+  }
+
+  /** The legacy verifier preserves V9-first matching for the requested asset. */
+  private async firstMatchingUpdateReceiptFacts(receipt: ethers.TransactionReceipt, kaId: bigint): Promise<UpdateReceiptFacts | null> {
+    const v9 = this.contracts.knowledgeAssetsStorage;
+    if (v9) {
+      const address = await v9.getAddress();
+      for (const log of receipt.logs) {
+        const facts = decodeV9UpdateReceiptLog(log, v9, address);
+        if (facts?.kaId === kaId) return facts;
+      }
+    }
+    const v10 = this.contracts.knowledgeAssetStorage;
+    if (v10) {
+      const address = await v10.getAddress();
+      for (const log of receipt.logs) {
+        const facts = decodeV10UpdateReceiptLog(log, v10, address);
+        if (facts?.kaId === kaId) return facts;
+      }
+    }
+    return null;
+  }
+
+  /** Authenticate already-decoded facts against this receipt's history without refetching it. */
+  private async authenticateUpdateReceipt(
+    receipt: ethers.TransactionReceipt,
+    facts: UpdateReceiptFacts,
+    publisherAddress: string,
+    options: ChainReadOptions,
+  ): Promise<KAUpdateVerification> {
+    const batchId = facts.kaId;
+    const onChainMerkleRoot = facts.merkleRoot;
+    // Read the V10 root history at the receipt block, not latest. Besides
+    // producing the post-update assertion index, this prevents a later
+    // update by another publisher from making verification of this older,
+    // otherwise-valid transaction fail. The block tag excludes future
+    // blocks; matching the event root selects this update when the block
+    // contains multiple updates for the same KA.
+    let onChainPublisher: string | undefined;
+    let merkleRootCount: bigint | undefined;
+    if (this.contracts.knowledgeAssetStorage) {
+      try {
+        const roots = await this.readContractWithOptions(
+          this.contracts.knowledgeAssetStorage,
+          'kas.getMerkleRootsAtUpdateBlock',
+          'getMerkleRoots',
+          [batchId, { blockTag: receipt.blockNumber }],
+          { signal: options.signal },
+        ) as Array<{ publisher?: string; merkleRoot?: string } | readonly unknown[]>;
+        // r17 (3814893084) / r28 (🔴 3821721213) — the register entries carry no transaction
+        // hash, so a (publisher, root) match is the only link back to this receipt. r17 counted
+        // those matches across the WHOLE register, which is the asset's entire history as of
+        // this block — not this block's writes. An A -> B -> A history by one publisher in three
+        // SEPARATE blocks therefore produced two matches for A, dropped the position, and left
+        // the third update permanently held: the exact case this PR exists to settle, made
+        // unrecoverable by its own ambiguity guard.
+        //
+        // Ambiguity is a property of the RECEIPT'S BLOCK. Entries written before it cannot be
+        // this transaction's, so the pre-block count marks where its candidates begin, and only
+        // matches at or after that boundary compete. A genuinely ambiguous same-block pair still
+        // drops the position; a historical repeat no longer can.
+        let preBlockCount = 0;
+        if (receipt.blockNumber > 0) {
+          const before = await this.readContractWithOptions(
+            this.contracts.knowledgeAssetStorage,
+            'kas.getMerkleRootsBeforeUpdateBlock',
+            'getMerkleRoots',
+            [batchId, { blockTag: receipt.blockNumber - 1 }],
+            { signal: options.signal },
+          ) as ReadonlyArray<unknown>;
+          preBlockCount = before.length;
+        }
+        const entryAt = (i: number) => {
+          const root = roots[i] as { publisher?: string; merkleRoot?: string };
+          return {
+            publisher: root.publisher ?? String((root as readonly unknown[])[0] ?? ''),
+            merkleRoot: root.merkleRoot ?? String((root as readonly unknown[])[1] ?? ''),
+          };
+        };
+        const isOurs = (i: number) => {
+          const e = entryAt(i);
+          return e.publisher.toLowerCase() === publisherAddress.toLowerCase()
+            && e.merkleRoot.toLowerCase() === ethers.hexlify(onChainMerkleRoot).toLowerCase();
+        };
+        // `verified` still asks the whole register: the root IS ours somewhere in this asset's
+        // history, which is what authenticates the receipt. Only the POSITION is restricted to
+        // this block's candidates.
+        let matchedIndex = -1;
+        for (let i = roots.length - 1; i >= 0; i--) {
+          if (isOurs(i)) { matchedIndex = i; onChainPublisher = entryAt(i).publisher; break; }
+        }
+        if (matchedIndex < 0) {
+          return { verified: false };
+        }
+        let blockMatchIndex = -1;
+        let blockMatchCount = 0;
+        for (let i = preBlockCount; i < roots.length; i += 1) {
+          if (!isOurs(i)) continue;
+          if (blockMatchCount === 0) blockMatchIndex = i;
+          blockMatchCount += 1;
+        }
+        merkleRootCount = blockMatchCount === 1 ? BigInt(blockMatchIndex + 1) : undefined;
+      } catch (error) {
+        if (isChainRpcTransportError(error)) throw error;
+        // A latest-state fallback can authenticate a historical receipt with
+        // a different publisher/root after a later update. V10 verification
+        // therefore fails closed when the receipt-block view is unavailable.
+        return { verified: false };
+      }
+    }
+    if (
+      !this.contracts.knowledgeAssetStorage
+      && (!onChainPublisher || onChainPublisher === ethers.ZeroAddress)
+      && this.contracts.knowledgeAssetsStorage
+    ) {
+      try {
+        onChainPublisher = await this.readContract(
+          this.contracts.knowledgeAssetsStorage, 'kasV9.getBatchPublisher',
+          'getBatchPublisher', batchId,
+        );
+      } catch { /* not found in V9 storage */ }
+    }
+    if (!onChainPublisher || onChainPublisher.toLowerCase() !== publisherAddress.toLowerCase()) {
+      return { verified: false };
+    }
+
+    return {
+      verified: true,
+      onChainMerkleRoot,
+      blockNumber: receipt.blockNumber,
+      blockHash: receipt.blockHash,
+      txIndex: receipt.index,
+      merkleRootCount,
+    };
   }
 
   async getRequiredPublishTokenAmount(publicByteSize: bigint, epochs: number): Promise<bigint> {
@@ -768,7 +759,8 @@ export class PublishMethods extends EVMChainAdapterBase {
    */
   private projectCanonicalFinalizationReceipt(
     receipt: ethers.TransactionReceipt,
-    parsedPublish: OnChainPublishResult,
+    parsedPublish: Pick<OnChainPublishResult, 'merkleRoot' | 'publisherAddress' | 'authorAddress'
+      | 'batchId' | 'kaId' | 'startKAId' | 'endKAId' | 'knowledgeAssetsContract'>,
   ): CanonicalFinalizationReceipt | null {
     if (
       !parsedPublish.merkleRoot
@@ -826,8 +818,25 @@ export class PublishMethods extends EVMChainAdapterBase {
       return { status: 'reorged' };
     }
 
-    if (!parsedPublish) return { status: 'rejected' };
-    const canonicalReceipt = this.projectCanonicalFinalizationReceipt(receipt, parsedPublish);
+    const storage = this.contracts.knowledgeAssetStorage;
+    const updates = !parsedPublish && options.includeKnowledgeAssetUpdates === true && storage
+      ? receipt.logs.flatMap(log => { const facts = decodeV10UpdateReceiptLog(log, storage, String(storage.target)); return facts ? [facts] : []; }) : [];
+    const updateFacts = updates.length === 1 ? updates[0] : null;
+    const confirmation = parsedPublish ?? (updateFacts ? { batchId: updateFacts.kaId, kaId: updateFacts.kaId,
+      startKAId: updateFacts.kaId, endKAId: updateFacts.kaId,
+      merkleRoot: updateFacts.merkleRoot, authorAddress: updateFacts.authorAddress,
+      publisherAddress: receipt.from, knowledgeAssetsContract: updateFacts.knowledgeAssetsContract } : null);
+    if (!confirmation) return { status: 'rejected' };
+    const canonicalReceipt = this.projectCanonicalFinalizationReceipt(receipt, confirmation);
+    if (canonicalReceipt && updateFacts) {
+      const update = await this.authenticateUpdateReceipt(receipt, updateFacts, canonicalReceipt.publisherAddress, options);
+      if (!update.verified || update.merkleRootCount === undefined || update.merkleRootCount <= 1n
+        || this.contracts.knowledgeAssetStorage !== storage) return { status: 'rejected' };
+      // The existing verifier excludes prior blocks and refuses same-block duplicate matches.
+      // A latest count or repeated author signature cannot bind this receipt to its version.
+      canonicalReceipt.assertionVersion = update.merkleRootCount;
+      await this.getFinalizedBlockTimestamp(receipt.blockNumber, receipt.blockHash, options);
+    }
     return canonicalReceipt
       ? { status: 'confirmed', receipt: canonicalReceipt }
       : { status: 'rejected' };

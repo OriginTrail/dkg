@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import {
   FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD,
   type FinalizationRecoveryFailureCode,
+  type FinalizationRecoveryHealth,
   type FinalizationRecoveryReceiveInput,
 } from './finalization-recovery-store.js';
 
@@ -70,7 +71,12 @@ export interface FinalizationRecoveryCapacitySnapshot {
   liveEntries: number;
   livePayloadBytes: number;
   oldest?: number;
+  /** A node-wide live limit is reached, so no new finalization fits. */
   capacityExhausted: boolean;
+  /** Source peers at their own live quota; other sources still fit. */
+  fullSourcePeers: number;
+  /** Context Graphs at their own live quota; other graphs still fit. */
+  fullContextGraphs: number;
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {
@@ -275,28 +281,49 @@ export function readFinalizationRecoveryCapacity(
   const liveEntries = Number(live?.count ?? 0);
   const livePayloadBytes = Number(live?.bytes ?? 0);
   const oldest = typeof live?.oldest === 'number' ? live.oldest : undefined;
-  const graphCapacity = database.prepare(`
-    SELECT COALESCE(MAX(count), 0) AS count FROM (
-      SELECT COUNT(*) AS count FROM finalization_inbox_v1
+  const fullGraphs = database.prepare(`
+    SELECT COUNT(*) AS count FROM (
+      SELECT context_graph_id FROM finalization_inbox_v1
       WHERE state IN ('RECEIVED','VERIFIED','REORGED') OR publisher_upgrade_pending = 1
       GROUP BY context_graph_id
+      HAVING COUNT(*) >= ?
     )
-  `).get();
-  const peerCapacity = database.prepare(`
-    SELECT COALESCE(MAX(count), 0) AS count FROM (
-      SELECT COUNT(*) AS count FROM finalization_inbox_v1
+  `).get(policy.maxPerContextGraph);
+  const fullPeers = database.prepare(`
+    SELECT COUNT(*) AS count FROM (
+      SELECT source_peer_id FROM finalization_inbox_v1
       WHERE (state IN ('RECEIVED','VERIFIED','REORGED') OR publisher_upgrade_pending = 1)
         AND source_peer_id IS NOT NULL
       GROUP BY source_peer_id
+      HAVING COUNT(*) >= ?
     )
-  `).get();
+  `).get(policy.maxPerPeer);
   return {
     liveEntries,
     livePayloadBytes,
     ...(oldest === undefined ? {} : { oldest }),
     capacityExhausted: liveEntries >= policy.maxEntries
-      || livePayloadBytes >= policy.maxTotalBytes
-      || Number(graphCapacity?.count ?? 0) >= policy.maxPerContextGraph
-      || Number(peerCapacity?.count ?? 0) >= policy.maxPerPeer,
+      || livePayloadBytes >= policy.maxTotalBytes,
+    fullSourcePeers: Number(fullPeers?.count ?? 0),
+    fullContextGraphs: Number(fullGraphs?.count ?? 0),
+  };
+}
+
+/**
+ * Readiness of the live inbox. Only a node-wide limit makes the node not
+ * ready: a source peer or Context Graph at its own quota waits in the deferred
+ * spool while every other source and graph is still admitted, so that is
+ * reported as detail instead.
+ */
+export function finalizationRecoveryCapacityHealth(
+  capacity: FinalizationRecoveryCapacitySnapshot,
+): Pick<FinalizationRecoveryHealth, 'ready' | 'degradedReason' | 'fullQuotas'> {
+  return {
+    ready: !capacity.capacityExhausted,
+    ...(capacity.capacityExhausted ? { degradedReason: 'capacity-exhausted' } : {}),
+    fullQuotas: {
+      sourcePeers: capacity.fullSourcePeers,
+      contextGraphs: capacity.fullContextGraphs,
+    },
   };
 }

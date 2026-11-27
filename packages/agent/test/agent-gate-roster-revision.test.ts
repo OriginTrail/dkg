@@ -101,7 +101,7 @@ async function open(options: {
 }
 
 describe('agent gate: writes that cannot change its roster (GH#3069)', () => {
-  const unrelated: Array<[string, Write]> = [
+  const unrelated: Array<[string, Write, boolean?]> = [
     ['an agent is allowed into another context graph', (s) => s.insert([fact(ALLOWED, JOINER, OTHER_META, OTHER_DID)])],
     ['a member of another context graph is revoked', (s) => s.insert([fact(REVOKED, MEMBER, OTHER_META, OTHER_DID)])],
     ['the roster of another context graph is replaced', (s) => s.replaceSubject!(OTHER_META, OTHER_DID, [
@@ -118,7 +118,7 @@ describe('agent gate: writes that cannot change its roster (GH#3069)', () => {
     ['knowledge-asset metadata is deleted from its own meta graph', (s) => s.deleteByPatternWithoutCount!({
       graph: META_GRAPH, subject: KA_UAL })],
     ['an assertion layer is deleted from its own meta graph', (s) => s.deleteByPatternWithoutCount!({
-      graph: META_GRAPH, subject: KA_GRAPH, predicate: MEMORY_LAYER })],
+      graph: META_GRAPH, subject: KA_GRAPH, predicate: MEMORY_LAYER }), false],
     ['a knowledge asset and its metadata are replaced together', (s) => s.replaceGraphAndSubject!(
       `${CG_DID}/_shared_memory/b`, [quad('urn:x:doc', NAME, `${CG_DID}/_shared_memory/b`)],
       META_GRAPH, KA_UAL, [quad(KA_UAL, NAME, META_GRAPH)])],
@@ -130,7 +130,7 @@ describe('agent gate: writes that cannot change its roster (GH#3069)', () => {
       { subject: '_:b0', predicate: ALLOWED, object: literal(JOINER), graph: KA_GRAPH }])],
   ];
 
-  it.each(unrelated)('answers from one read when %s during it', async (_label, write) => {
+  it.each(unrelated)('answers from one read when %s during it', async (_label, write, changesNodeWideRevision = true) => {
     const { gate, landDuringFirstRead, rosterReads, projection } = await open();
     const rosterRevision = projection.peerGateRevision.read(CG);
     const nodeWideRevision = projection.readAuthorityFactsRevision;
@@ -140,8 +140,10 @@ describe('agent gate: writes that cannot change its roster (GH#3069)', () => {
 
     expect(rosterReads).toHaveBeenCalledTimes(1);
     expect(projection.peerGateRevision.read(CG)).toBe(rosterRevision);
-    // Each of these moves the node-wide revision, which the gate used to compare.
-    expect(projection.readAuthorityFactsRevision).not.toBe(nodeWideRevision);
+    // Most still move the broader revision. Exact non-authority lifecycle removals
+    // now retain that projection too (#3252), while the agent-gate result stays stable.
+    if (changesNodeWideRevision) expect(projection.readAuthorityFactsRevision).not.toBe(nodeWideRevision);
+    else expect(projection.readAuthorityFactsRevision).toBe(nodeWideRevision);
   });
 });
 
@@ -160,18 +162,6 @@ describe('agent gate: writes that change its roster (GH#3069)', () => {
     ['its own subject is replaced', (s) => s.replaceSubject!(META_GRAPH, CG_DID, [fact(ALLOWED, JOINER)]), available(JOINER)],
     ['its meta graph is replaced', (s) => s.replaceGraph!(META_GRAPH, [fact(ALLOWED, JOINER)]), available(JOINER)],
     ['its meta graph is dropped', (s) => s.dropGraph(META_GRAPH), { kind: 'ungated' }],
-    ['an agent is allowed in the shared agents graph', (s) => s.insert([fact(ALLOWED, JOINER, AGENTS_GRAPH)]),
-      available(MEMBER, OTHER_MEMBER, JOINER)],
-    ['a member is revoked in the shared agents graph', (s) => s.insert([fact(REVOKED, MEMBER, AGENTS_GRAPH)]),
-      available(OTHER_MEMBER)],
-    ['an agent is removed from the shared agents graph', (s) => s.deleteByPatternWithoutCount!({
-      graph: AGENTS_GRAPH, subject: CG_DID, predicate: ALLOWED }), available(MEMBER, OTHER_MEMBER), [SHARED_BEFORE]],
-    ['an agent is allowed in the shared ontology graph', (s) => s.insert([fact(ALLOWED, JOINER, ONTOLOGY_GRAPH)]),
-      available(MEMBER, OTHER_MEMBER, JOINER)],
-    ['a member is revoked in the shared ontology graph', (s) => s.insert([fact(REVOKED, MEMBER, ONTOLOGY_GRAPH)]),
-      available(OTHER_MEMBER)],
-    ['a participant is removed from the shared ontology graph by value', (s) => s.delete([
-      fact(PARTICIPANT, JOINER, ONTOLOGY_GRAPH)]), available(MEMBER, OTHER_MEMBER), [fact(PARTICIPANT, JOINER, ONTOLOGY_GRAPH)]],
     ['an update revokes a member', (s) => s.update!(
       `INSERT DATA { GRAPH <${META_GRAPH}> { <${CG_DID}> <${REVOKED}> ${literal(MEMBER)} } }`), available(OTHER_MEMBER)],
   ];
@@ -187,6 +177,31 @@ describe('agent gate: writes that change its roster (GH#3069)', () => {
 
     expect(authority).toEqual(expected);
     expect(authority).not.toEqual(before);
+    expect(rosterReads).toHaveBeenCalledTimes(2);
+    expect(projection.peerGateRevision.read(CG)).not.toBe(rosterRevision);
+  });
+
+  // The roster comes from the graph's own metadata: the gate still reads again
+  // after a fact in a shared graph, and finds the same members.
+  const sharedGraphFacts: Array<[string, Write, (readonly Quad[])?]> = [
+    ['an agent is allowed in the shared agents graph', (s) => s.insert([fact(ALLOWED, JOINER, AGENTS_GRAPH)])],
+    ['a member is revoked in the shared agents graph', (s) => s.insert([fact(REVOKED, MEMBER, AGENTS_GRAPH)])],
+    ['an agent is removed from the shared agents graph', (s) => s.deleteByPatternWithoutCount!({
+      graph: AGENTS_GRAPH, subject: CG_DID, predicate: ALLOWED }), [SHARED_BEFORE]],
+    ['an agent is allowed in the shared ontology graph', (s) => s.insert([fact(ALLOWED, JOINER, ONTOLOGY_GRAPH)])],
+    ['a member is revoked in the shared ontology graph', (s) => s.insert([fact(REVOKED, MEMBER, ONTOLOGY_GRAPH)])],
+    ['a participant is removed from the shared ontology graph by value', (s) => s.delete([
+      fact(PARTICIPANT, JOINER, ONTOLOGY_GRAPH)]), [fact(PARTICIPANT, JOINER, ONTOLOGY_GRAPH)]],
+  ];
+
+  it.each(sharedGraphFacts)('keeps its roster when %s during the read', async (_label, write, seed) => {
+    const { gate, landDuringFirstRead, rosterReads, projection } = await open({ seed });
+    await expect(gate()).resolves.toEqual(available(MEMBER, OTHER_MEMBER));
+    rosterReads.mockClear();
+    const rosterRevision = projection.peerGateRevision.read(CG);
+    landDuringFirstRead(write);
+
+    await expect(gate()).resolves.toEqual(available(MEMBER, OTHER_MEMBER));
     expect(rosterReads).toHaveBeenCalledTimes(2);
     expect(projection.peerGateRevision.read(CG)).not.toBe(rosterRevision);
   });
@@ -226,7 +241,7 @@ describe('agent gate: writes that change its roster (GH#3069)', () => {
     ['a revocation is stored in its meta graph under a name the store cleans',
       (s) => s.insert([fact(REVOKED, MEMBER, `${META_GRAPH}{}`)]), available(OTHER_MEMBER)],
     ['a revocation is stored in the shared agents graph under a name the store cleans',
-      (s) => s.insert([fact(REVOKED, MEMBER, `${AGENTS_GRAPH}|`)]), available(OTHER_MEMBER)],
+      (s) => s.insert([fact(REVOKED, MEMBER, `${AGENTS_GRAPH}|`)]), available(MEMBER, OTHER_MEMBER)],
   ];
 
   it.each(unattributed)('reads its roster again when %s', async (_label, write, expected, seed) => {

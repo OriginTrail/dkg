@@ -1,28 +1,32 @@
+import type {
+  Quad,
+  QueryOptions as StoreQueryOptions,
+} from '@origintrail-official/dkg-storage';
 import type { DraftAccessPolicy } from './content-partition-policy.js';
-import type { Quad, StoreWorkPriority } from '@origintrail-official/dkg-storage';
-import type { GetView } from '@origintrail-official/dkg-core';
+import type { GetView, ViewQuerySemantics } from '@origintrail-official/dkg-core';
 import { TrustLevel } from '@origintrail-official/dkg-core';
+import type { QueryMaterializationBudget } from './query-store-read-context.js';
 
 export interface QueryResult {
   bindings: Array<Record<string, string>>;
   quads?: Quad[];
+  /** `merged` when a view query was answered from its read graph; absent when it was matched per asset, or had no view. */
+  semantics?: ViewQuerySemantics;
 }
 
-export interface QueryOptions {
+export interface QueryOptions extends StoreQueryOptions {
+  /**
+   * Query-wide ceiling for the cumulative decoded store results retained while
+   * evaluating one logical query. Unlike the transport-level
+   * `maxResponseBytes`, this limit is charged across every internal read.
+   */
+  maxMaterializedBytes?: number;
+  /** Request-local budget shared with pre-execution admission reads. */
+  materializationBudget?: QueryMaterializationBudget;
   contextGraphId?: string;
   timeout?: number;
   /** Reject compatibility routing that would omit selected graphs. */
   requireCompleteGraphScope?: boolean;
-  /** Bound HTTP store responses before parsing; embedded stores remain post-checked. */
-  maxResponseBytes?: number;
-  /** Independent bound on hydrated literal bytes; defaults to maxResponseBytes. */
-  maxLiteralHydrationBytes?: number;
-  /** Cancel queued and in-flight store work when the caller goes away. */
-  signal?: AbortSignal;
-  /** Store admission lane. External/API reads should use `background`. */
-  priority?: StoreWorkPriority;
-  /** Bounded operation label propagated to store diagnostics and slow-query telemetry. */
-  source?: string;
   /** When set to '_shared_memory', query runs over the context graph's shared memory graph only. */
   graphSuffix?: '_shared_memory';
   /** When true and contextGraphId is set, query runs over both data and shared memory graphs (union). */
@@ -35,6 +39,9 @@ export interface QueryOptions {
    * in the same context graph (root data, registered assertion graphs, SWM,
    * VM, and registered sub-graph content). Legacy scoped routes stay limited
    * to their selected graph set unless this is true.
+   * With `view: 'working-memory'`, a query without GRAPH clauses merges only
+   * the resolved agent's WM partitions into its default dataset, allowing
+   * joins across KAs. This does not include SWM, VM, metadata or other agents.
    */
   includeContextGraphPartitions?: boolean;
   /** Include registered subgraph SWM metadata in scoped GRAPH-variable expansion; requires includeContextGraphPartitions. */
@@ -54,6 +61,12 @@ export interface QueryOptions {
   includePrivate?: boolean;
   /** V10 declared state view — determines which graph(s) the query targets. */
   view?: GetView;
+  /**
+   * How a view query matches its patterns. `merged` reads the merge of the view's asset graphs
+   * outside GRAPH; `per-asset` matches inside one asset graph at a time. Without it, the node's
+   * default for the context graph applies, `per-asset` unless configured.
+   */
+  semantics?: ViewQuerySemantics;
   /** Agent address — required when view is 'working-memory' to resolve assertion graphs. */
   agentAddress?: string;
   /**

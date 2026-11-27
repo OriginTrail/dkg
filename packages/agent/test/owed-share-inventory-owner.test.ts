@@ -123,7 +123,39 @@ describe('owed share inventory owner', () => {
     gone.owner.request();
     await gone.owner.whenIdle();
     expect(gone.drain).toHaveBeenCalledTimes(1);
+    // Written again it is a new marker: the old pause does not carry over.
+    gone.kept.set('failing', marker('failing'));
+    gone.owner.request();
+    await gone.owner.whenIdle();
+    expect(gone.drain).toHaveBeenCalledTimes(2);
     await gone.owner.close();
+  });
+
+  it('counts failures from the start again after an attempt that did not fail', async () => {
+    const failure = new Error('busy');
+    const { owner, warnings, advance } = fixture({ flaky: [failure, 'waiting', failure] });
+    owner.start(createOperationContext('system'));
+    await owner.whenIdle();
+    advance(5_000);
+    owner.request();
+    await owner.whenIdle();
+    owner.request();
+    await owner.whenIdle();
+    expect(warnings).toHaveLength(2);
+    expect(warnings[1]).toContain('attempt 1, next in 5 s');
+    await owner.close();
+  });
+
+  it('tries a paused marker at once after a restart of the owner', async () => {
+    const { owner, drain } = fixture({ failing: [new Error('busy'), 'waiting'] });
+    owner.start(createOperationContext('system'));
+    await owner.whenIdle();
+    await owner.close();
+    expect(drain).toHaveBeenCalledOnce();
+    owner.start(createOperationContext('system'));
+    await owner.whenIdle();
+    expect(drain).toHaveBeenCalledTimes(2);
+    await owner.close();
   });
 
   it('warns about unreadable markers at start and retries kept markers on the retry interval', async () => {
@@ -173,6 +205,117 @@ describe('owed share inventory owner', () => {
     release();
     await closing;
     expect(drain).toHaveBeenCalledTimes(1);
+    expect(warnings).toEqual([]);
+  });
+});
+
+describe('owed share inventory owner over a parked backlog', () => {
+  function inLane(shareOperationId: string, lane: string): Rfc64OwedShareInventoryV1 {
+    return Object.freeze({ ...marker(shareOperationId), contextGraphId: `${AUTHOR}/${lane}` }) as Rfc64OwedShareInventoryV1;
+  }
+
+  function backlog(markers: readonly Rfc64OwedShareInventoryV1[], drain: OwedShareInventoryOwnerDependenciesV1['drain']) {
+    const kept = new Set(markers);
+    const warnings: string[] = [];
+    const requestGraphSettlement = vi.fn();
+    const owner = new Rfc64OwedShareInventoryOwnerV1({
+      list: () => [...kept], unreadableAtOpen: () => 0, retryIntervalMs: () => 0, drain, requestGraphSettlement,
+      remove: async (owed) => { kept.delete(owed); },
+      warn: (_ctx, line) => { warnings.push(line); },
+    });
+    return { owner, kept, warnings, requestGraphSettlement };
+  }
+
+  /** An attempt that never reaches real I/O, as one over a closed lane, holds the main thread like this. */
+  function holdMainThread(ms: number): void {
+    const until = performance.now() + ms;
+    while (performance.now() < until) { /* no event-loop turn here */ }
+  }
+
+  it('spends one attempt a pass on a closed lane and tries its whole backlog once it opens', async () => {
+    const parked = Array.from({ length: 500 }, (_, index) => marker(`parked-${index}`));
+    const subGraph = Object.freeze({ ...marker('sub-graph'), subGraphName: 'notes' }) as Rfc64OwedShareInventoryV1;
+    const otherGraph = inLane('other-graph', 'other');
+    let open = false;
+    const drain = vi.fn(async (owed: Readonly<Rfc64OwedShareInventoryV1>) => {
+      if (owed === otherGraph) return 'written' as const;
+      return open ? 'written' as const : 'lane-closed' as const;
+    });
+    const { owner, kept, requestGraphSettlement } = backlog([...parked, subGraph, otherGraph], drain);
+    owner.start(createOperationContext('system'));
+    await owner.whenIdle();
+    // A sub-graph of the same graph is a lane of its own, and another graph is not held up.
+    expect(drain.mock.calls.map(([owed]) => owed)).toEqual([parked[0], subGraph, otherGraph]);
+    expect(kept.size).toBe(501);
+    expect(requestGraphSettlement.mock.calls).toEqual([[parked[0]!.contextGraphId]]);
+    owner.request();
+    await owner.whenIdle();
+    expect(drain).toHaveBeenCalledTimes(5);
+    open = true;
+    owner.request();
+    await owner.whenIdle();
+    expect(kept.size).toBe(0);
+    expect(drain).toHaveBeenCalledTimes(5 + 501);
+    await owner.close();
+  });
+
+  it('follows a lane that opens during a pass with a pass over its whole backlog', async () => {
+    const parked = Array.from({ length: 3 }, (_, index) => marker(`parked-${index}`));
+    let open = false;
+    const drain = vi.fn(async () => {
+      if (open) return 'written' as const;
+      // The authority is accepted while this pass still counts the lane as closed.
+      open = true;
+      fixture.owner.request();
+      return 'lane-closed' as const;
+    });
+    const fixture = backlog(parked, drain);
+    fixture.owner.start(createOperationContext('system'));
+    await fixture.owner.whenIdle();
+    expect(fixture.kept.size).toBe(0);
+    expect(drain).toHaveBeenCalledTimes(4);
+    await fixture.owner.close();
+  });
+
+  it('gives timers a turn between slices of a pass whose attempts never reach real I/O', async () => {
+    // Each marker is a lane of its own, so each one gets an attempt.
+    const lanes = Array.from({ length: 40 }, (_, index) => inLane(`marker-${index}`, `lane-${index}`));
+    let attempts = 0;
+    const drain = vi.fn(async () => {
+      attempts += 1;
+      holdMainThread(1);
+      return 'lane-closed' as const;
+    });
+    const { owner } = backlog(lanes, drain);
+    let attemptsWhenTimerRan: number | undefined;
+    const timer = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        attemptsWhenTimerRan = attempts;
+        resolve();
+      }, 0);
+    });
+    owner.start(createOperationContext('system'));
+    await owner.whenIdle();
+    await timer;
+    expect(drain).toHaveBeenCalledTimes(lanes.length);
+    expect(attemptsWhenTimerRan).toBeLessThan(lanes.length);
+    await owner.close();
+  });
+
+  it('starts no attempt after a close that arrives while the pass waits for its turn', async () => {
+    const lanes = Array.from({ length: 3 }, (_, index) => inLane(`marker-${index}`, `lane-${index}`));
+    const drain = vi.fn(async () => {
+      // Longer than a slice: the next marker waits for one event-loop turn.
+      holdMainThread(12);
+      return 'lane-closed' as const;
+    });
+    const { owner, warnings } = backlog(lanes, drain);
+    const closed = new Promise<void>((resolve) => {
+      setTimeout(() => { void owner.close().then(resolve); }, 0);
+    });
+    owner.start(createOperationContext('system'));
+    await closed;
+    expect(drain).toHaveBeenCalledOnce();
     expect(warnings).toEqual([]);
   });
 });

@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1,
   canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1,
+  compareSwmAuthorInventoryRowsV1,
   computeSwmAuthorInventoryHeadObjectDigestV1,
   computeSwmAuthorInventoryRowsDigestV1,
   computeSwmAuthorInventoryScopeDigestV1,
@@ -582,6 +583,39 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
     expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toBeNull();
   });
 
+  it.each([
+    ['assertionCoordinate', 'changed-sibling'], ['assertionVersion', '2'],
+    ['kaUal', ROW_10.kaUal], ['shareOperationId', 'changed-sibling-share'],
+    ['projectionDigest', `0x${'55'.repeat(32)}`], ['publicTripleCount', '18'],
+    ['privateTripleCount', '1'], ['sealDigest', `0x${'66'.repeat(32)}`],
+    ['sharedAt', '1700000000100'], ['expiresAt', '1700000001200'],
+  ] as const)('rejects unrelated %s drift in signed upsert, remove and merge transitions', (field, value) => {
+    for (const kind of ['upsert', 'remove', 'merge'] as const) {
+      const database = new DatabaseSync(':memory:');
+      database.exec(`PRAGMA foreign_keys = ON; ${INVENTORY_V1_DDL}`);
+      const inventory = new CandidateInventoryV1(database);
+      try {
+        const genesis = snapshot([ROW_A, ROW_B]);
+        inventory.compareAndSwapMergeSwmAuthorInventoryV1({
+          snapshot: genesis, mergeRows: genesis.rows, expectedCurrentHeadDigest: null,
+        });
+        const changedSibling = { ...ROW_A, [field]: value } as SwmAuthorInventoryRowV1;
+        const changedTarget = { ...ROW_B, assertionVersion: '2' } as SwmAuthorInventoryRowV1;
+        const rows = [changedSibling, ...(kind === 'remove' ? [] : [changedTarget])]
+          .sort(compareSwmAuthorInventoryRowsV1);
+        const next = snapshot(rows, genesis);
+        const input = { snapshot: next, expectedCurrentHeadDigest: genesis.head.objectDigest };
+        expect(() => kind === 'merge'
+          ? inventory.compareAndSwapMergeSwmAuthorInventoryV1({ ...input, mergeRows: [changedTarget] })
+          : inventory.compareAndSwapSwmAuthorInventoryV1({ ...input, mutation: kind === 'upsert'
+            ? { kind, row: changedTarget } : { kind, kaUal: ROW_B.kaUal } }))
+          .toThrowError(expect.objectContaining({ code: 'swm-inventory-input' }));
+        expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR))
+          .toEqual(genesis);
+      } finally { inventory.close(); }
+    }
+  });
+
   it('rejects a canonical EIP-191 forgery before writing either head or rows', async () => {
     const inventory = await openInventoryV1(temporaryDirectory());
     foundations.push(inventory);
@@ -951,29 +985,105 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
     expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toBeNull();
   });
 
-  it('fails closed when durable rows no longer match the signed head', async () => {
+  it('revalidates every changed column from another connection against the signed head', async () => {
     const directory = temporaryDirectory();
     const inventory = await openInventoryV1(directory);
     foundations.push(inventory);
     const genesis = snapshot([ROW_A]);
     inventory.compareAndSwapSwmAuthorInventoryV1({
-      snapshot: genesis,
-      mutation: { kind: 'upsert', row: ROW_A },
-      expectedCurrentHeadDigest: null,
+      snapshot: genesis, mutation: { kind: 'upsert', row: ROW_A }, expectedCurrentHeadDigest: null,
     });
-
-    const database = new DatabaseSync(join(directory, INVENTORY_V1_RELATIVE_PATH));
+    const read = () => inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)!;
+    const verified = read();
+    expect(read().rows).toBe(verified.rows);
+    const writer = new DatabaseSync(join(directory, INVENTORY_V1_RELATIVE_PATH));
+    const changes = {
+      ka_ual: ROW_B.kaUal,
+      assertion_coordinate: ROW_B.assertionCoordinate,
+      assertion_version_u64be: Buffer.from('0000000000000002', 'hex'),
+      share_operation_id: ROW_B.shareOperationId,
+      projection_digest: Buffer.alloc(32, 0x55),
+      public_triple_count_u64be: Buffer.from('0000000000000002', 'hex'),
+      private_triple_count_u64be: Buffer.from('0000000000000002', 'hex'),
+      seal_digest: Buffer.alloc(32, 0x55),
+      shared_at_u64be: Buffer.from('0000018bcfe56801', 'hex'),
+      expires_at_u64be: Buffer.from('0000018bcfe56801', 'hex'),
+    };
     try {
-      database.exec(`
-        UPDATE rfc64_swm_author_inventory_rows_v1
-        SET projection_digest = zeroblob(32);
-      `);
+      for (const [column, replacement] of Object.entries(changes)) {
+        const original = writer.prepare(`SELECT ${column} AS value FROM rfc64_swm_author_inventory_rows_v1`).get()!.value;
+        const update = writer.prepare(`UPDATE rfc64_swm_author_inventory_rows_v1 SET ${column} = ?`);
+        update.run(replacement);
+        expect(read, column).toThrowError(expect.objectContaining({ code: 'swm-inventory-database-corrupt' }));
+        update.run(original!);
+        expect(read().rows).toEqual(genesis.rows);
+      }
     } finally {
+      writer.close();
+    }
+  });
+
+  it.each(['UTF-8', 'UTF-16le', 'UTF-16be'])('checks full SQLite TEXT in %s on cold and warm reads', encoding => {
+    const database = new DatabaseSync(':memory:');
+    database.exec(`PRAGMA encoding='${encoding}'; PRAGMA foreign_keys=ON; ${INVENTORY_V1_DDL}`);
+    const candidate = new CandidateInventoryV1(database, () => { throw new Error('unexpected reopen'); });
+    try {
+      const unicode = { ...ROW_A, shareOperationId: 'é-�-🙂' } as SwmAuthorInventoryRowV1;
+      const genesis = snapshot([unicode]);
+      candidate.compareAndSwapSwmAuthorInventoryV1({
+        snapshot: genesis, mutation: { kind: 'upsert', row: unicode }, expectedCurrentHeadDigest: null,
+      });
+      const read = () => candidate.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)!;
+      const first = read();
+      expect(read().rows).toBe(first.rows);
+      database.exec(`UPDATE rfc64_swm_author_inventory_rows_v1 SET share_operation_id = share_operation_id || char(0) || 'hidden'`);
+      const expectCorrupt = () => {
+        const cold = new CandidateInventoryV1(database, () => { throw new Error('unexpected reopen'); });
+        try {
+          for (const probe of [read, () => cold.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)]) {
+            expect(probe).toThrowError(expect.objectContaining({ code: 'swm-inventory-database-corrupt' }));
+          }
+        } finally {
+          cold.close();
+        }
+      };
+      expectCorrupt();
+      if (encoding === 'UTF-8') {
+        // Node exposes the same JS string when an invalid byte replaces the valid U+FFFD.
+        const invalid = Buffer.concat([Buffer.from('é-'), Buffer.from([0xff]), Buffer.from('-🙂')]);
+        database.prepare('UPDATE rfc64_swm_author_inventory_rows_v1 SET share_operation_id = CAST(? AS TEXT)').run(invalid);
+        expect(database.prepare('SELECT share_operation_id AS id FROM rfc64_swm_author_inventory_rows_v1').get()!.id)
+          .toBe(unicode.shareOperationId);
+        expectCorrupt();
+      }
+    } finally {
+      candidate.close();
       database.close();
     }
+  });
 
-    expect(() => inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR))
-      .toThrowError(expect.objectContaining({ code: 'swm-inventory-database-corrupt' }));
+  it('rolls back a successor when a database trigger changed another verified row', async () => {
+    const directory = temporaryDirectory();
+    const inventory = await openInventoryV1(directory);
+    foundations.push(inventory);
+    const genesis = snapshot([ROW_A]);
+    inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: genesis, mutation: { kind: 'upsert', row: ROW_A }, expectedCurrentHeadDigest: null,
+    });
+    const writer = new DatabaseSync(join(directory, INVENTORY_V1_RELATIVE_PATH));
+    try {
+      writer.exec(`CREATE TRIGGER corrupt_prior_row AFTER INSERT ON rfc64_swm_author_inventory_rows_v1
+        BEGIN UPDATE rfc64_swm_author_inventory_rows_v1 SET projection_digest = zeroblob(32)
+          WHERE ka_ual <> NEW.ka_ual; END;`);
+      const successor = snapshot([ROW_A, ROW_B], genesis);
+      expect(() => inventory.compareAndSwapSwmAuthorInventoryV1({
+        snapshot: successor, mutation: { kind: 'upsert', row: ROW_B },
+        expectedCurrentHeadDigest: genesis.head.objectDigest,
+      })).toThrowError(expect.objectContaining({ code: 'swm-inventory-database-corrupt' }));
+      expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toEqual(genesis);
+    } finally {
+      writer.close();
+    }
   });
 
   it('preserves the latency failure and performs a verified reopen when row reads overrun', () => {
@@ -1003,6 +1113,7 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
         mutation: { kind: 'upsert', row: ROW_A },
         expectedCurrentHeadDigest: null,
       });
+      const warm = inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)!;
       injectRowLatency = true;
       const abandoned = facade;
       expect(() => inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR))
@@ -1010,6 +1121,10 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
       expect(reopen).toHaveBeenCalledOnce();
       expect(reopen.mock.calls[0]?.[0] === abandoned).toBe(true);
       expect(reopen.mock.results[0]?.value === abandoned).toBe(false);
+      injectRowLatency = false;
+      const refreshed = inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)!;
+      expect(refreshed).toEqual(warm);
+      expect(refreshed.rows[0]).not.toBe(warm.rows[0]);
     } finally {
       inventory.close();
       try { database.close(); } catch { /* inventory owns the current handle */ }

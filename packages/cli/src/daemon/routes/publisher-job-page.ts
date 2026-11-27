@@ -25,6 +25,7 @@ import {
 import { failPageFault } from './list-page-fault.js';
 import { parseListPaging, type ListPaging } from './list-paging-query.js';
 import { jsonResponse } from '../http-utils.js';
+import { publisherJobView } from './publisher-job-view.js';
 
 export interface PublisherJobsQuery {
   readonly status: LiftJobState | undefined;
@@ -58,10 +59,10 @@ export async function respondPublisherJobs(
     ...(query.status ? { status: query.status } : {}),
     ...(contextGraphId === null ? {} : { contextGraphId }),
   };
-  if (!query.paging.paged) return jsonResponse(res, 200, { jobs: await publisherControl.list(filter) });
+  if (!query.paging.paged) return jsonResponse(res, 200, { jobs: (await publisherControl.list(filter)).map(publisherJobView) });
   try {
     const page = await publisherControl.listPage({ ...filter, cursor: query.paging.cursor, limit: query.paging.pageSize });
-    return jsonResponse(res, 200, { jobs: page.jobs, nextCursor: page.nextCursor, complete: page.complete });
+    return jsonResponse(res, 200, { jobs: page.jobs.map(publisherJobView), nextCursor: page.nextCursor, complete: page.complete });
   } catch (err) {
     const rejected = err instanceof LiftJobPageError ? REQUEST_ERRORS[err.code as keyof typeof REQUEST_ERRORS] : undefined;
     if (rejected) return jsonResponse(res, 400, rejected);

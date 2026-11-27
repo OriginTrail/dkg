@@ -1,6 +1,9 @@
 import type { GraphNode, GraphEdge, HexagonConfig } from './types.js';
 import { StyleEngine } from './style-engine.js';
 import { PrefixManager } from './prefix-manager.js';
+import { agentInitials, agentInitialsColor } from '../agent-initials/index.js';
+
+export { agentInitials };
 
 const DEFAULT_HEXAGON: Required<HexagonConfig> = {
   baseSize: 36,
@@ -104,7 +107,9 @@ export class HexagonPainter {
     const ratio = node.degree / this._maxDegree;
     const range = this._config.maxSize - this._config.minSize;
     const degreeSize = this._config.minSize + ratio * range;
-    return Math.max(degreeSize, imageMinSize) * multiplier;
+    // Agents never shrink below the base size: their initials must stay legible.
+    const avatarMinSize = this._styleEngine.getAppearance(node).shape === 'avatar' ? this._config.baseSize * 1.3 : 0;
+    return Math.max(degreeSize, imageMinSize, avatarMinSize) * multiplier;
   }
 
   /**
@@ -153,19 +158,26 @@ export class HexagonPainter {
       ctx.fill();
     }
 
-    // Draw hexagon path (flat-top orientation)
+    // Draw node path: agents are circles (the avatar shape), everything
+    // else a flat-top hexagon.
+    const appearance = this._styleEngine.getAppearance(node);
+    const isAgent = appearance.shape === 'avatar';
     ctx.beginPath();
-    for (let i = 0; i < 6; i++) {
-      const angle = (Math.PI / 3) * i;
-      const hx = x + radius * Math.cos(angle);
-      const hy = y + radius * Math.sin(angle);
-      if (i === 0) ctx.moveTo(hx, hy);
-      else ctx.lineTo(hx, hy);
+    if (isAgent) {
+      ctx.arc(x, y, radius, 0, 2 * Math.PI);
+    } else {
+      for (let i = 0; i < 6; i++) {
+        const angle = (Math.PI / 3) * i;
+        const hx = x + radius * Math.cos(angle);
+        const hy = y + radius * Math.sin(angle);
+        if (i === 0) ctx.moveTo(hx, hy);
+        else ctx.lineTo(hx, hy);
+      }
     }
     ctx.closePath();
 
     // Fill with gradient or flat color
-    if (styleConfig.gradient) {
+    if (styleConfig.gradient && appearance.fill !== 'flat') {
       const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
       gradient.addColorStop(0, this._styleEngine.getGradientCenter(color));
       gradient.addColorStop(1, color);
@@ -195,8 +207,8 @@ export class HexagonPainter {
       ctx.strokeStyle = palette.info;
       ctx.lineWidth = (styleConfig.borderWidth + Math.min(3, sourceCount)) / globalScale;
     } else {
-      ctx.strokeStyle = this._styleEngine.getBorderColor(color);
-      ctx.lineWidth = styleConfig.borderWidth / globalScale;
+      ctx.strokeStyle = appearance.border?.color ?? this._styleEngine.getBorderColor(color);
+      ctx.lineWidth = (appearance.border?.width ?? styleConfig.borderWidth) / globalScale;
     }
 
     // Boundary node indicator (subtle lighter border, no dashes)
@@ -213,8 +225,18 @@ export class HexagonPainter {
       ctx.globalAlpha = 0.7;
     }
 
+    // Agent initials inside the circle, once it is big enough on screen.
+    if (isAgent && radius * globalScale >= 5) {
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = agentInitialsColor(color) ?? '#ffffff';
+      ctx.font = `700 ${radius * 0.85}px ${styleConfig.fontFamily}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(agentInitials(node.label), x, y + radius * 0.04);
+    }
+
     // Avatar image (clipped to hexagon)
-    if (node.imageUrl) {
+    if (node.imageUrl && !isAgent) {
       this.paintAvatar(ctx, node.imageUrl, x, y, radius);
     }
 

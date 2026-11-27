@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CG, MEMBER, POLICY, privateCatalogReadinessFixture as fixture, readinessApplied, readinessHead, readinessTarget } from './_helpers/private-catalog-readiness-fixture.js';
+import { Rfc64CatalogReplayConnectionRuntimeV1 } from '../src/rfc64/catalog-replay-connection-runtime-v1.js';
 import { evaluateRfc64CatalogCompletionV1 } from '../src/rfc64/catalog-completion-evidence-v1.js';
 import { rfc64CatalogTargetExactIdentityKeyV1 } from '../src/rfc64/catalog-operational-targets-v1.js';
 import { loadRfc64OperationalAppliedHeadsV1 } from '../src/rfc64/catalog-operational-applied-heads-v1.js';
@@ -25,6 +26,34 @@ describe('approved private catalog readiness handoff', () => {
     expect(f.agent.resolveContextGraphSubscriptionBootstrapAuthority).toHaveBeenCalledWith(CG, {
       callerAgentAddress: MEMBER, allowSubscriptionFallback: false,
     });
+  });
+
+  it('withholds corroborated readiness while a second peer owns deferred overflow custody', async () => {
+    const f = await fixture();
+    await expect(f.run()).resolves.toBe(true);
+    f.commit.mockClear();
+    let selected = ['unrelated-graph'];
+    const reserveDeferred = vi.fn((cg: string) => f.state.replay.reserveDeferred(cg, POLICY));
+    const reservePeer = vi.fn((cg: string, peer: string) => f.state.replay.reservePeer(cg, POLICY, peer));
+    const runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
+      admittedConnectedPeerIds: () => [], selectContextGraphIds: () => selected,
+      reserveFence: reservePeer, reserveDeferredFence: reserveDeferred,
+      schedule: () => false, wait: async () => undefined, warn: vi.fn(),
+      reannounce: async () => ({ failed: 0 }), replay: async () => ({ failed: 0 }),
+    }, 60_000, 1);
+    const occupied = runtime.prepareConnectionOpen('occupied-peer')!;
+    selected = ['unrelated-graph', CG];
+    const reservation = runtime.prepareConnectionOpen('overflow-peer')!;
+    expect(reserveDeferred).toHaveBeenCalledWith(CG);
+    expect(reservePeer.mock.calls.some(([cg]) => cg === CG)).toBe(false);
+    expect(f.state.replay.status(CG, POLICY)?.active).toBe(true);
+    await expect(f.run()).resolves.toBe(false);
+    expect(f.commit).not.toHaveBeenCalled();
+    reservation.reject();
+    expect(f.state.replay.status(CG, POLICY)?.active).toBe(false);
+    await expect(f.run()).resolves.toBe(true);
+    expect(f.commit).toHaveBeenCalledOnce();
+    occupied.reject(); runtime.reset();
   });
 
   it('cannot certify a partial restored catalog after losing a second advertised head', async () => {

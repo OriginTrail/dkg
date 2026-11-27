@@ -119,7 +119,7 @@ describe('partition rejection and caller-local discovery failures', () => {
   it('shares a failed flight, propagates the original failure, and allows a fresh retry', async () => {
     const memo = new ScopedContentGraphDiscoveryMemo({ writeRevisionCoverage: 'all-writers', getWriteRevision: () => ({ generation: 1, stable: true }) });
     const failure = new Error('store unavailable');
-    const value = { inventory: ['urn:recovered'], partitions: [] };
+    const value = { snapshot: { inventory: ['urn:recovered'], partitions: [] }, byteCount: 42 };
     const load = vi.fn().mockRejectedValueOnce(failure).mockResolvedValueOnce(value);
     const request = { contextKey: 'cg', laneKey: 'read', graphPrefix: root, load };
     const first = memo.get(request);

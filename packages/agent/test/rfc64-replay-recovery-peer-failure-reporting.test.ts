@@ -143,7 +143,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
     });
   });
 
-  it('still fails the Context Graph when the bounded worklist overflows', async () => {
+  it('reports spent transport budget as failed and unobserved', async () => {
     const churnPeer = 'peer-reconnect-churn';
     let runtime!: Rfc64CatalogReplayRecoveryRuntimeV1<Target>;
     const created = createRuntime({
@@ -162,7 +162,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
     expect(runtime.status(CG, POLICY)).toMatchObject({
       failed: true,
       unresolvedPeerCount: 0,
-      unverified: false,
+      unverified: true,
     });
   });
 
@@ -309,7 +309,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
       contextGraphId: CG,
       policyDigest: POLICY,
       kind: 'connection-demand',
-      demand: { peerId: HEALTHY_PEER, generation: 1 },
+      demand: runtime.markPeerPending(CG, POLICY, HEALTHY_PEER)!,
     });
     expect(runtime.status(CG, POLICY)?.failed).toBe(true);
   });
@@ -385,6 +385,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
     expect(runtime.status(CG, POLICY)?.unresolvedPeerCount).toBe(1);
 
     // A local fault neither attributes a new provider nor clears a retained one.
+    // With no fresh provider response, retained rows are no longer corroborated.
     localFault = true;
     await expect(fullRun(runtime, [FAILING_PEER, HEALTHY_PEER]))
       .resolves.toEqual({ requested: 0, failed: 2 });
@@ -392,7 +393,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
       active: false,
       failed: false,
       unresolvedPeerCount: 1,
-      unverified: false,
+      unverified: true,
     });
   });
 
@@ -473,7 +474,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
       contextGraphId: CG,
       policyDigest: POLICY,
       kind: 'connection-demand',
-      demand: { peerId: FAILING_PEER, generation: 1 },
+      demand: runtime.markPeerPending(CG, POLICY, FAILING_PEER)!,
     });
     expect(requestedPeers(requestPeer)).toEqual([FAILING_PEER, FAILING_PEER]);
   });

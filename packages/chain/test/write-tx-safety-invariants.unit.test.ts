@@ -253,6 +253,35 @@ describe('write-path tx-safety invariants — set-retry MULTI-PASS (S2)', () => 
     }
   });
 
+  it('INV-6 (#3591): a refusal for funds after a lost answer is an unknown outcome on either pass, never a refusal', async () => {
+    vi.useFakeTimers();
+    try {
+      const a = freshAdapter(minimalConfig());
+      let attempt = 0;
+      const provider = () => withFinality({
+        broadcastTransaction: recorder(async (_raw: string) => {
+          attempt += 1;
+          // The first endpoint may have accepted it and lost the answer; every later answer refuses it.
+          if (attempt === 1) throw Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
+          throw Object.assign(new Error('insufficient funds for gas * price + value'), { code: 'INSUFFICIENT_FUNDS' });
+        }),
+        getTransactionReceipt: recorder(async () => null),
+      });
+      (a as any).providers = [provider(), provider()];
+      const broadcastPasses = spyBroadcastPasses(a);
+
+      const settled = runDispatch(a, {}).then(() => 'ok', (e) => e);
+      await vi.advanceTimersByTimeAsync((RPC_ENDPOINT_SET_RETRIES + 1) * RPC_ENDPOINT_SET_RETRY_BACKOFF_MS + 50);
+      const outcome: any = await settled;
+
+      expect(outcome).toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED', txHash: TXHASH });
+      expect(String(outcome.message)).not.toMatch(/insufficient funds/i);
+      expect(broadcastPasses.calls).toHaveLength(RPC_ENDPOINT_SET_RETRIES + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('INV-5/C2: a mined REVERTED receipt does NOT trigger a set-retry re-broadcast (broadcast pass == 1)', async () => {
     const a = freshAdapter(minimalConfig({ rpcUrls: [] }));
     const buildSignedTx = recorder(async () => ({ signedTx: SIGNED, txHash: TXHASH }));

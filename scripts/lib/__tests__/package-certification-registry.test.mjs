@@ -48,7 +48,7 @@ for (const mode of ['publish', 'promote']) for (const [name, kind, result] of ca
     else assert.throws(() => registryDist(pkg));
     let mutations = 0;
     const options = { mode, bundle: f.bundle, receiptFile: f.receiptFile, expected: f.expected,
-      tags: ['canary'], ...releaseGitFixture(f.expected), ...fakeDistTags({ write: () => { mutations++; } }),
+      tags: ['canary'], ...releaseGitFixture(f.expected), evidenceFile: 'fixture-decision.json', prepareEvidence: () => ({ recheckLocalIntegrity: () => {} }), ...fakeDistTags({ write: () => { mutations++; } }),
       askOtp: null, settle: 0, log: () => {},
     };
     if (kind === 'error' || (kind === 'absent' && mode === 'promote')) {

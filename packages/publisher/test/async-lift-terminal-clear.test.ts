@@ -146,7 +146,10 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     });
     expect((await p.list()).map((job) => job.jobId)).toContain(jobId);
     await expect(p.recover()).resolves.toBe(0);
-    expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'cleared' });
+    // It failed from broadcast with a transaction hash, so it is held (#3573): the targeted clear
+    // reads it, and removes it only with the pending-transaction override.
+    expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'rejected', reason: 'pending_transaction' });
+    expect(await p.clearTerminalJob(jobId, { pendingTransactionOverride: { kind: 'nodeOperator' } })).toEqual({ outcome: 'cleared' });
     expect(await p.getStatus(jobId)).toBeNull();
   });
 
@@ -392,7 +395,7 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     // 🔴 3823952704 — and it is an EXPLICIT override, off by default. This route is open to
     // every registered agent token, so a default-on widening would have let one agent delete
     // another lifecycle's only chain-recovery record.
-    expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'rejected', reason: 'pending_transaction' });
     expect((await p.getStatus(jobId))?.status).toBe('failed');
 
     // 🔴 3824098476 / 🟡 3824098494 — ownership is decided HERE, under the same lock and
@@ -402,7 +405,7 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     // confusion the previous version had backwards.
     expect(await p.clearTerminalJob(jobId, {
       pendingTransactionOverride: { kind: 'agent', agentAddress: AUTHOR },
-    })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    })).toEqual({ outcome: 'rejected', reason: 'pending_transaction' });
     expect((await p.getStatus(jobId))?.status).toBe('failed');
 
     // The row that was missing: the PAYLOAD caller is not the owner either. Admission is the
@@ -410,7 +413,7 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     // what fails if ownership ever falls back to reading the payload.
     expect(await p.clearTerminalJob(jobId, {
       pendingTransactionOverride: { kind: 'agent', agentAddress: PAYLOAD_CALLER },
-    })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    })).toEqual({ outcome: 'rejected', reason: 'pending_transaction' });
     expect((await p.getStatus(jobId))?.status).toBe('failed');
 
     expect(await p.clearTerminalJob(jobId, {
@@ -433,7 +436,7 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     // An unrelated agent token is still refused...
     expect(await p.clearTerminalJob(jobId, {
       pendingTransactionOverride: { kind: 'agent', agentAddress: OTHER },
-    })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    })).toEqual({ outcome: 'rejected', reason: 'pending_transaction' });
 
     // ...while the explicit node-operator principal may clear any job in this node's queue.
     expect(await p.clearTerminalJob(jobId, {
@@ -456,7 +459,7 @@ describe('#1837 lift publisher clearTerminalJob', () => {
 
     expect(await p.clearTerminalJob(jobId, {
       pendingTransactionOverride: { kind: 'agent', agentAddress: PAYLOAD_CALLER },
-    })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    })).toEqual({ outcome: 'rejected', reason: 'pending_transaction' });
     expect((await p.getStatus(jobId))?.status).toBe('failed');
 
     expect(await p.clearTerminalJob(jobId, {

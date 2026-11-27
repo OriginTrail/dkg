@@ -1,3 +1,4 @@
+import type { MeasuredDiscovery } from './query-store-read-context.js';
 import type { ContentPartition } from './content-partition-policy.js';
 import { BoundedLruCache } from '@origintrail-official/dkg-core';
 import type { GraphWriteRevisionSource } from '@origintrail-official/dkg-storage';
@@ -19,7 +20,7 @@ export interface ScopedContentGraphDiscoveryRequest {
   laneKey: string;
   graphPrefix: string;
   signal?: AbortSignal;
-  load: () => Promise<ScopedContentGraphDiscoverySnapshot>;
+  load: () => Promise<MeasuredDiscovery<ScopedContentGraphDiscoverySnapshot>>;
 }
 
 /**
@@ -29,8 +30,8 @@ export interface ScopedContentGraphDiscoveryRequest {
  * generation cannot authorize reuse for an externally mutable SPARQL backend.
  */
 export class ScopedContentGraphDiscoveryMemo {
-  private readonly completed: BoundedLruCache<string, ScopedContentGraphDiscoverySnapshot>;
-  private readonly inFlight = new Map<string, Promise<ScopedContentGraphDiscoverySnapshot>>();
+  private readonly completed: BoundedLruCache<string, MeasuredDiscovery<ScopedContentGraphDiscoverySnapshot>>;
+  private readonly inFlight = new Map<string, Promise<MeasuredDiscovery<ScopedContentGraphDiscoverySnapshot>>>();
 
   constructor(
     private readonly revisionSource: GraphWriteRevisionSource | null,
@@ -39,7 +40,7 @@ export class ScopedContentGraphDiscoveryMemo {
     this.completed = new BoundedLruCache(options.maxEntries ?? DEFAULT_MAX_ENTRIES);
   }
 
-  get(request: ScopedContentGraphDiscoveryRequest): Promise<ScopedContentGraphDiscoverySnapshot> {
+  get(request: ScopedContentGraphDiscoveryRequest): Promise<MeasuredDiscovery<ScopedContentGraphDiscoverySnapshot>> {
     if (request.signal?.aborted) return Promise.reject(callerAbortReason(request.signal));
     if (this.revisionSource?.writeRevisionCoverage !== 'all-writers') {
       return raceAgainstCallerAbort(request.load(), request.signal);
@@ -64,8 +65,11 @@ export class ScopedContentGraphDiscoveryMemo {
       const after = this.revisionSource!.getWriteRevision(request.graphPrefix);
       if (after.stable && after.generation === before.generation) {
         const immutable = Object.freeze({
-          inventory: Object.freeze([...value.inventory]),
-          partitions: Object.freeze(value.partitions.map(partition => Object.freeze({ ...partition }))),
+          byteCount: value.byteCount,
+          snapshot: Object.freeze({
+            inventory: Object.freeze([...value.snapshot.inventory]),
+            partitions: Object.freeze(value.snapshot.partitions.map(partition => Object.freeze({ ...partition }))),
+          }),
         });
         this.completed.set(completedKey, immutable);
         return immutable;

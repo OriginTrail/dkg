@@ -1,3 +1,4 @@
+import { executeUnscopedQuery } from './unscoped-query-consistency.js';
 import type { AgentQueryOptions } from './agent-query-options.js';
 import { queryWithPublicSnapshotTrust } from './public-snapshot-evidence.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -11,7 +12,9 @@ import { queryWithPublicSnapshotTrust } from './public-snapshot-evidence.js';
 
 import { sharedMemoryAdmissionError, sharedMemoryAdmissionFailsClosed } from './swm-read-admission.js';
 import { deniedResult } from './query-denied-result.js';
-import { resolveWorkingMemoryIdentityAliases } from './working-memory-identity.js';
+import { holdsContextGraphGraphs } from './context-graph-held-graphs.js';
+import { denyUnheldContextGraphRead } from './unheld-context-graph-read.js';
+import { resolveCallerDraftAccess, resolveWorkingMemoryIdentityAliases } from './working-memory-identity.js';
 import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
 import { resolveRfc64PrivateReadRoster } from './rfc64/private-read-roster-v1.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -20,7 +23,7 @@ import {
   prepareUnscopedContextGraphReadChecks,
   type ContextGraphReadCheck,
 } from './prepare-unscoped-context-graph-read-checks.js';
-import { executeUnscopedQuery } from './unscoped-query-consistency.js';
+import { executePublicQuery, publicQueryBudget } from './public-query-execution.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -499,7 +502,10 @@ export class QueryMethods extends DKGAgentBase {
     let scopedReadAuthority: ContextGraphReadAuthorityDecision | undefined;
     if (opts.contextGraphId) {
       const scopedContextGraphId = opts.contextGraphId;
-      scopedReadAuthority = await resolveScopedContextGraphQueryReadAuthority({
+      // A context graph this node holds nothing of is refused as a private one
+      // the caller may not read, before the engine or any partition is read.
+      // A replica that has local data or join intent keeps its own answer.
+      scopedReadAuthority = await denyUnheldContextGraphRead(this, scopedContextGraphId, await resolveScopedContextGraphQueryReadAuthority({
         contextGraphId: scopedContextGraphId,
         view: opts.view,
         callerAgentAddress: callerAgentAddressStr,
@@ -508,27 +514,8 @@ export class QueryMethods extends DKGAgentBase {
         resolveAuthority: (id, options) => this.resolveContextGraphReadAuthority(id, options),
         isLocalFirstUnregistered: (id) => this.isLocalFirstUnregisteredContextGraph(id),
         readCurrentBinding: (id) => this.subscribedContextGraphs.get(id),
-      });
+      }), opts);
       if (scopedReadAuthority.outcome === 'unavailable') {
-        // An exact finalized name absence or a transient authority-circuit
-        // failure cannot expose data when this node has no local declaration,
-        // subscription, or graph. Return an empty scoped result without
-        // touching the store's graph partitions. A replica that has local
-        // data or join intent remains on the retryable authority path.
-        // The id comes straight from the caller: a malformed one never gets
-        // this answer, so the reply cannot depend on the existence check.
-        if (
-          opts.accessDenied !== 'error' && (
-            scopedReadAuthority.reason === 'finalized-name-absence-unaccepted'
-            || scopedReadAuthority.reason === 'authority-circuit-open'
-          )
-          && validateContextGraphId(scopedContextGraphId).valid
-          && !isAdmittedContextGraphSubscription(this.subscribedContextGraphs.get(scopedContextGraphId))
-          && !this.localContextGraphProvenance.hasLocalCreate(scopedContextGraphId)
-          && !await this.contextGraphExists(scopedContextGraphId, { signal: opts.signal })
-        ) {
-          return deniedResult(sparql, opts.accessDenied);
-        }
         throw new ContextGraphReadAuthorityUnavailableError(
           opts.contextGraphId,
           scopedReadAuthority,
@@ -541,6 +528,11 @@ export class QueryMethods extends DKGAgentBase {
         // instead of a SELECT-shaped `{ bindings: [] }`.
         return deniedResult(sparql, opts.accessDenied);
       }
+      // Semantics other than per asset, for a graph this node holds no graph of: a denied caller's answer, before any read-graph state.
+      if (opts.semantics !== undefined && opts.semantics !== 'per-asset' && opts.accessDenied !== 'error'
+        && validateContextGraphId(scopedContextGraphId).valid && !this.keepsContextGraphLocally(scopedContextGraphId)
+        && !await this.contextGraphExists(scopedContextGraphId, { signal: opts.signal })
+        && !await holdsContextGraphGraphs(this.store, scopedContextGraphId, opts.signal)) return deniedResult(sparql, opts.accessDenied);
     }
 
     if (opts.contextGraphId && targetsSharedMemory) {
@@ -630,10 +622,8 @@ export class QueryMethods extends DKGAgentBase {
     // `canonicaliseWmId`), so A-1 isolation is unaffected.
     const wmAddressAliases = opts.view === 'working-memory'
       ? resolveWmIdentity(effectiveWmAddress).aliases : undefined;
-    // Ordinary dashboard scans may read only the authenticated caller's drafts.
-    // Explicit exclusion (the bounded product route) grants no draft owners.
-    const partitionOwner = callerAgentAddressStr ?? this.defaultAgentAddress ?? this.peerId;
 
+    const budget = publicQueryBudget(opts.maxResponseBytes);
     const execute = () => {
       opts.signal?.throwIfAborted();
       return queryWithPublicSnapshotTrust(this.store, this.queryEngine, sparql, {
@@ -643,15 +633,15 @@ export class QueryMethods extends DKGAgentBase {
       includeSharedMemory: opts.includeSharedMemory,
       includeContextGraphPartitions: opts.includeContextGraphPartitions,
       includeSharedMemoryMeta: opts.includeSharedMemoryMeta,
-      draftAccess: opts.excludeWorkingMemoryPartitions === true || !partitionOwner ? { kind: 'none' }
-        : { kind: 'owners', owners: [partitionOwner, ...(resolveWmIdentity(partitionOwner).aliases ?? [])] },
+      draftAccess: resolveCallerDraftAccess({ defaultAgentAddress: this.defaultAgentAddress, peerId: this.peerId }, callerAgentAddressStr, opts.excludeWorkingMemoryPartitions === true),
       includePrivate: opts.includePrivate,
       signal: opts.signal,
       priority: opts.priority,
       source: opts.source,
       maxResponseBytes: opts.maxResponseBytes,
+      ...budget,
       maxLiteralHydrationBytes: opts.maxLiteralHydrationBytes,
-      view: opts.view,
+      view: opts.view, semantics: opts.semantics,
       agentAddress: effectiveWmAddress,
       agentAddressAliases: wmAddressAliases,
       verifiedGraph: opts.verifiedGraph,
@@ -664,33 +654,37 @@ export class QueryMethods extends DKGAgentBase {
       minTrust: opts.minTrust ?? opts._minTrust,
       }, opts.chainEvidenceMode, { signal: opts.signal, priority: opts.priority, source: opts.source });
     };
-    // Arbitrary unscoped SPARQL can reveal private data through aggregates or
-    // projections without a graph column. The executor owns admission and both
-    // local consistency checks, including the release of the materialized result.
-    const result = opts.contextGraphId ? await execute() : await executeUnscopedQuery({
-      store: this.store,
-      readMetadataRevision: () => this.contextGraphMetaProjection.readAuthorityFactsRevision,
-      admit: () => canReadUnscopedQuery({
+    // The executor owns admission and consistency through result release.
+    const result = await executePublicQuery(() => opts.contextGraphId ? execute() : executeUnscopedQuery({
         store: this.store,
-        knownContextGraphIds: QueryMethods.prototype.contextGraphReadAuthorityCandidateSeeds.call(this),
-        canReadContextGraph: (contextGraphId, signal) => this.canReadContextGraph(contextGraphId, {
-          callerAgentAddress: callerAgentAddressStr,
-          signal,
-        }),
-        prepareReadChecks: (ids, signal) => (
-          QueryMethods.prototype.prepareContextGraphReadAuthorityChecks.call(
-            this, ids, { callerAgentAddress: callerAgentAddressStr, signal },
-          )
-        ),
-      }, { signal: opts.signal }),
-      execute,
-      denied: () => {
-        this.log.info(ctx, 'Unscoped query denied because the caller cannot read every possible context graph');
-        return deniedResult(sparql, opts.accessDenied);
-      },
-    });
+        readMetadataRevision: () => this.contextGraphMetaProjection.readAuthorityFactsRevision,
+        admit: () => canReadUnscopedQuery({
+          store: this.store,
+          knownContextGraphIds: QueryMethods.prototype.contextGraphReadAuthorityCandidateSeeds.call(this),
+          canReadContextGraph: (contextGraphId, signal) => this.canReadContextGraph(contextGraphId, {
+            callerAgentAddress: callerAgentAddressStr,
+            signal,
+          }),
+          prepareReadChecks: (ids, signal) => (
+            QueryMethods.prototype.prepareContextGraphReadAuthorityChecks.call(
+              this, ids, { callerAgentAddress: callerAgentAddressStr, signal },
+            )
+          ),
+        }, { signal: opts.signal }),
+        execute,
+        denied: () => {
+          this.log.info(ctx, 'Unscoped query denied because the caller cannot read every possible context graph');
+          return deniedResult(sparql, opts.accessDenied);
+        },
+    }));
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
+  }
+
+  /** Whether this node keeps an admitted subscription or a local create for a context graph; neither reads the store. */
+  keepsContextGraphLocally(this: DKGAgent, contextGraphId: string): boolean {
+    return isAdmittedContextGraphSubscription(this.subscribedContextGraphs.get(contextGraphId))
+      || this.localContextGraphProvenance.hasLocalCreate(contextGraphId);
   }
 
   isAgentAddressAllowed(this: DKGAgent, agentAddress: string | undefined, agentGateAddresses: readonly string[]): boolean {

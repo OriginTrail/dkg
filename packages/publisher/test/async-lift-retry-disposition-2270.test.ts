@@ -13,7 +13,11 @@ import {
   delegatedHeldJobSettlement,
   localHeldJobSettlement,
   resolveHeldJobSettlementCapability,
+  isBulkClearableTerminalLiftJob,
+  isClearableTerminalLiftJob,
+  isHeldForChainProof,
   isTargetedClearableLiftJob,
+  needsPendingTransactionOverride,
 } from '../src/async-lift-retry-disposition.js';
 import {
   DEFAULT_CONTROL_GRAPH_URI,
@@ -279,6 +283,38 @@ describe('GH#2270 failed-job retry disposition', () => {
       agentAddress: '0xAbCdEf0000000000000000000000000000001234',
     }))).toBe(false);
     expect(isTargetedClearableLiftJob(heldJob, runtimeOptions({ kind: 'agent' }))).toBe(false);
+  });
+
+  it('clears a job held for chain proof by id only with the override, like a recovery-lane one [#3573]', async () => {
+    // The by-id clear used to share only the #1837 base predicate, which refused a `retry_recovery`
+    // failure but not a held one: a plain clear removed a job whose transaction may still land, and
+    // the next re-submit minted a second job. Both lanes now read ONE clearable set.
+    const OWNER = '0xAAaAAa00000000000000000000000000000000Aa';
+    const OTHER = '0xBBbBBb00000000000000000000000000000000Bb';
+    const publisher = createPublisher();
+    const failed = await failAfterRecordedTxHash(publisher);
+    const held = { ...failed, admission: { byAgentAddress: OWNER } } as PersistedFailedJob;
+    expect([isHeldForChainProof(held), held.failure.resolution === 'retry_recovery']).toEqual([true, false]);
+    expect([needsPendingTransactionOverride(held), isClearableTerminalLiftJob(held), isBulkClearableTerminalLiftJob(held)])
+      .toEqual([true, false, false]);
+    expect(isTargetedClearableLiftJob(held)).toBe(false);
+    expect(isTargetedClearableLiftJob(held, { pendingTransactionOverride: { kind: 'agent', agentAddress: OTHER } })).toBe(false);
+    expect(isTargetedClearableLiftJob(held, { pendingTransactionOverride: { kind: 'agent', agentAddress: OWNER } })).toBe(true);
+    expect(isTargetedClearableLiftJob(held, { pendingTransactionOverride: { kind: 'nodeOperator' } })).toBe(true);
+
+    // A failure that proves its transaction had no effect, and one that never sent any, are not
+    // held: both lanes clear them without the override, and agree on every job here.
+    const reverted = await failWithRevert(publisher, kaVmPublishRequest({
+      name: 'revert-album', shareOperationId: 'revert-op', intentKey: `sha256:${'cd'.repeat(32)}`,
+    }), { recordTxHash: true });
+    const quorum = await failWithUnmetQuorum(publisher, kaVmPublishRequest({
+      name: 'quorum-album', shareOperationId: 'quorum-op', intentKey: `sha256:${'ef'.repeat(32)}`,
+    }));
+    const recovery = { ...reverted, failure: { ...reverted.failure, resolution: 'retry_recovery' } } as PersistedFailedJob;
+    for (const job of [held, reverted, quorum, recovery]) {
+      expect([job.jobId, isTargetedClearableLiftJob(job)]).toEqual([job.jobId, isBulkClearableTerminalLiftJob(job)]);
+      expect([job.jobId, needsPendingTransactionOverride(job)]).toEqual([job.jobId, job === held || job === recovery]);
+    }
   });
 
   it('names the two settlement ROLES explicitly, without inferring either from wiring [3825614002]', () => {

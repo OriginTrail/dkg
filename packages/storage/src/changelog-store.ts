@@ -1,3 +1,4 @@
+import { filterGraphInventory, readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
 import { composeGraphEnumerationVisibility } from './graph-enumeration-visibility.js';
 import { parseIntTerm, stripIri, stripLiteral } from "./changelog-terms.js";
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
@@ -578,8 +579,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {
-    const graphs = await this.inner.listGraphs(options);
-    return graphs.filter((g) => !this.reservedGuard.isReservedGraph(g));
+    return [...(await this.readGraphInventory(undefined, options)).graphs];
   }
 
   async listGraphsSorted(options?: QueryOptions): Promise<SortedGraphCatalog> {
@@ -588,10 +588,12 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   }
 
   async listGraphsByPrefix(prefix: string, options?: QueryOptions): Promise<string[]> {
-    const graphs = this.inner.listGraphsByPrefix
-      ? await this.inner.listGraphsByPrefix(prefix, options)
-      : (await this.inner.listGraphs(options)).filter((g) => g.startsWith(prefix));
-    return graphs.filter((g) => !this.reservedGuard.isReservedGraph(g));
+    return [...(await this.readGraphInventory(prefix, options)).graphs];
+  }
+
+  async readGraphInventory(prefix: string | undefined, options?: QueryOptions): Promise<MeasuredGraphInventory> {
+    const inventory = prefix === undefined ? await readGraphInventory(this.inner, options) : await readGraphInventoryByPrefix(this.inner, prefix, options);
+    return filterGraphInventory(inventory, g => !this.reservedGuard.isReservedGraph(g));
   }
 
   async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {

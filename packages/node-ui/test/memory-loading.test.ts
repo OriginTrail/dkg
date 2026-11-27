@@ -27,15 +27,32 @@ afterEach(() => { act(() => root.unmount()); container.remove(); invalidateQuery
 const flush = async () => { await act(async () => { await Promise.resolve(); await Promise.resolve(); }); };
 
 describe('bounded graph reads', () => {
-  it('starts all three layer inventories without waiting for another layer response', async () => {
+  it('starts all three layer reads independently and stays loading until every result arrives', async () => {
     const pending: Array<(response: Response) => void> = [];
-    const fetch = vi.fn(() => new Promise<Response>(resolve => pending.push(resolve)));
+    const layerRows = (index: number) => rows(1, 'parallel-layers').map(row => ({ ...row,
+      g: `did:dkg:context-graph:parallel-layers/layer-${index}`, __g: `did:dkg:context-graph:parallel-layers/layer-${index}`,
+      s: `urn:layer:${index}`, __s: `I:urn:layer:${index}` }));
+    const fetch = vi.fn((_url: string, init: RequestInit) => {
+      const { sparql } = JSON.parse(String(init.body));
+      if (sparql.includes('SELECT DISTINCT ?g')) return new Promise<Response>(resolve => pending.push(resolve));
+      if (sparql.includes('FILTER(isBlank(?s) || isBlank(?o))')) return Promise.resolve(response([]));
+      const index = Number(/parallel-layers\/layer-(\d)/.exec(sparql)?.[1]);
+      return Promise.resolve(response(layerRows(index)));
+    });
     vi.stubGlobal('fetch', fetch);
     await act(async () => root.render(React.createElement(Probe, { id: 'parallel-layers' })));
-    expect(fetch).toHaveBeenCalledTimes(3); expect(memory.loading).toBe(true);
-    await act(async () => pending.forEach(resolve => resolve(response([]))));
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(pending).toHaveLength(3);
+    expect(memory.loading).toBe(true);
+    for (const index of [1, 2, 0]) {
+      await act(async () => pending[index]!(response(layerRows(index))));
+      if (index !== 0) expect(memory.loading).toBe(true);
+    }
     expect(memory.loading).toBe(false);
     expect(memory.layerStatus).toEqual({ wm: 'ok', swm: 'ok', vm: 'ok' });
+    expect(memory.allTriples.map(row => [row.subject, row.layer])).toEqual(expect.arrayContaining([
+      ['urn:layer:0', 'working'], ['urn:layer:1', 'shared'], ['urn:layer:2', 'verified'],
+    ]));
   });
   it('continues a clipped layer, retries the same failed page, and reuses reads after reopening', async () => {
     let pageFails = true;

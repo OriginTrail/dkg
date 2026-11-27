@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 import { registerPublisherCommand } from '../src/commands/publisher.js';
@@ -9,14 +12,23 @@ import { ApiClient } from '../src/api-client.js';
 // failed jobs at all. The command now prints the whole disposition, and `retried` keeps its
 // old sentence so the habit of reading that line still works.
 describe('dkg publisher retry output (#2270)', () => {
+  let home: string;
+  let previousHome: string | undefined;
+
   beforeEach(() => {
     vi.spyOn(process, 'exit').mockImplementation(((code?: string | number | null) => {
       throw new Error(`process.exit:${code}`);
     }) as never);
+    // The offline fallback refuses to write while the node home names a live daemon (OT-RFC-73 P11): point the command at an empty home, not the machine's.
+    previousHome = process.env.DKG_HOME;
+    home = mkdtempSync(join(tmpdir(), 'dkg-retry-command-'));
+    process.env.DKG_HOME = home;
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+    if (previousHome === undefined) delete process.env.DKG_HOME; else process.env.DKG_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
   });
 
   async function runRetry(outcome: {

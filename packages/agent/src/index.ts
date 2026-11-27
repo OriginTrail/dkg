@@ -1,12 +1,20 @@
+export { parseFinalizeGuard, type FinalizeGuard } from './finalize-guard.js';
+export type { ContextGraphPartitionRead, ContextGraphNamedGraphStats } from '@origintrail-official/dkg-query';
+export type { ContextGraphPartitionInventoryOptions } from './internal/context-graph-partition-query.js';
+export { ConfirmedCatalogObligationErrorV1, parseConfirmedCatalogObligationRecoveryV1, type ConfirmedCatalogTransactionEvidenceV1, type ConfirmedCatalogObligationRecoveryV1 } from './confirmed-catalog-obligation-error.js';
 export { normalizePublicSnapshotSyncOptions } from './public-snapshot-options.js';
+export type { PublicSnapshotSourceOptions, PublicCheckpointSourceOptions, PublicCheckpointPreparationOptions } from './public-snapshot-options.js';
 export type { PublicSnapshotSyncOptions } from './dkg-agent-public-snapshot.js';
 export { isPublicSnapshotMode, type PublicSnapshotMode } from './public-snapshot-mode.js';
+export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 export {
+  QUERY_RESULT_TOO_LARGE,
   QueryResultTooLargeError,
+  asQueryResultTooLargeError,
   isQueryResultTooLargeError,
   type QueryResultTooLargeErrorLike,
-} from '@origintrail-official/dkg-query';
-export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+} from './query-result-too-large-error.js';
+export { encryptionKeyEnrollmentPayload, type EncryptionKeyEnrollment } from './encryption-key-enrollment.js';
 export {
   authorityIndexTrustDomain,
   planAuthorityIndexBootstrap,
@@ -236,6 +244,7 @@ export type {
   ContextGraphListOnChainFacts,
   ListContextGraphsRow,
 } from './context-graph-list-authority-enrichment.js';
+export type { ContextGraphListFilter } from './context-graph-list-filter.js';
 export {
   describeContextGraphOnChainIdResolution,
   parseContextGraphOnChainIdReference,
@@ -260,6 +269,8 @@ export type {
   PublishAuthorCatalogGenesisParamsV1,
   Rfc64CatalogAuthorSignerV1,
   Rfc64CatalogRuntimeSelectionStatusV1,
+  Rfc64CatalogSelectionV1,
+  Rfc64CatalogConnectionReplayStatusV1,
 } from './dkg-agent-rfc64-catalog.js';
 export type {
   ReconcileRfc64PublicRootCatalogExactSetParamsV1,
@@ -281,6 +292,7 @@ export type {
   FinalizedPrivatePlacementQueueStatusV1,
 } from './internal/catalog-placement-timing.js';
 export { committedSharePendingCatalogHandoff, type CommittedSharePendingCatalogHandoff } from './internal/promote/inventory-recovery-failure.js';
+export { isRetryableContextGraphAuthorityUnavailableError } from './internal/context-graph-authority/context-graph-authority.js';
 export type {
   Rfc64CatalogShadowExecutionStatusV1,
 } from './rfc64/catalog-shadow-observability-v1.js';
@@ -664,3 +676,17 @@ export {
 export { resolveSyncAgentsMeta, parseBooleanEnv } from './sync/agents-meta-policy.js';
 
 export type { CoreChainCacheNetwork } from './core-chain-cache-config.js';
+
+export { createFreshPublicCheckpointEdge, openFreshPublicCheckpointEdge } from './snapshot-fresh-edge.js';
+export { preparePublicSnapshotCheckpoint } from './public-snapshot-checkpoint.js';
+export { buildNativeSnapshotCheckpoint } from './snapshot-native-build.js';
+
+export { resumePublicCheckpointEdge, openResumablePublicCheckpointEdge } from './snapshot-resume-edge.js';
+export { CatalogPublicationAdmissionError, CATALOG_PUBLICATION_ADMISSION_CODE } from './catalog-publication-admission-error.js';
+export type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryReport, SwmConnectedHostCatchupOptions, SwmConnectedHostCatchupResult } from './swm/host-catchup-types.js';
+
+export type { PreparedSnapshotCheckpoint, SnapshotCheckpointManifest, VerifiedNativeSnapshotCheckpoint, NativeSnapshotCheckpointReport, PublicCheckpointPreparationResult } from './snapshot-checkpoint-contract.js';
+
+export { ListContextGraphsBudgetExceeded, isListContextGraphsBudgetExceeded, type ListContextGraphsBudgetExceededLike } from './context-graph-list-budget-error.js';
+
+export { readableViewSemanticsDeltaReport } from './view-semantics-delta-report.js';

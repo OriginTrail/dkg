@@ -17,6 +17,7 @@ import {
   storeKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
 import { GossipPublishHandler } from '../src/gossip-publish-handler.js';
+import { buildAgentProfile } from '../src/profile.js';
 import type { ContextGraphDiscoveryMetadata, ContextGraphSub } from '../src/index.js';
 
 const CONTEXT_GRAPH = 'test-gossip-handler';
@@ -42,6 +43,26 @@ function makePublishMessage(opts: {
     publisherSignatureR: new Uint8Array(0),
     publisherSignatureVs: new Uint8Array(0),
   });
+}
+
+/**
+ * An embedded store that records the name of every store method the handler
+ * calls, so a test can tell a refusal before the store from one by the store.
+ */
+function recordingStore(): { store: OxigraphStore; calls: string[] } {
+  const calls: string[] = [];
+  const inner = new OxigraphStore();
+  const store = new Proxy(inner, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (typeof value !== 'function' || typeof property !== 'string') return value;
+      return (...args: unknown[]) => {
+        calls.push(property);
+        return value.apply(target, args);
+      };
+    },
+  });
+  return { store, calls };
 }
 
 function createHandler(store?: OxigraphStore, callbacks?: Partial<{
@@ -504,6 +525,66 @@ describe('GossipPublishHandler', () => {
     expect(bindings[0]['o']).toBe('http://example.org/o');
   });
 
+  describe('a received term the stores cannot write', () => {
+    const WELL_FORMED_LINE = '<http://example.org/s> <http://example.org/p> "kept value"@en-GB .';
+    const ROOT_MESSAGE = (rootEntity: string) => makePublishMessage({
+      ual: 'did:dkg:mock:31337/0x1/1',
+      contextGraphId: CONTEXT_GRAPH,
+      nquads: `<${rootEntity}> <http://example.org/p> "v" .`,
+      kas: [{ tokenId: 1, rootEntity, privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
+    });
+
+    it('a well-formed broadcast reaches the store (control)', async () => {
+      const { store, calls } = recordingStore();
+      const { handler } = createHandler(store);
+      await handler.handlePublishMessage(makePublishMessage({ contextGraphId: CONTEXT_GRAPH, nquads: WELL_FORMED_LINE }), CONTEXT_GRAPH);
+      expect(calls).toContain('insert');
+      expect(await store.countQuads(`did:dkg:context-graph:${CONTEXT_GRAPH}`)).toBe(1);
+    });
+
+    it.each([
+      ['a language tag with a character a tag may not hold', '<http://example.org/s> <http://example.org/p> "refused value"@en_GB .'],
+      ['a blank-node label with a character a label may not hold', '<http://example.org/s> <http://example.org/p> _:node!refused .'],
+      ['a relative object IRI', '<http://example.org/s> <http://example.org/p> <relative-object> .'],
+    ])('refuses a broadcast holding %s before it calls the store', async (_label, nquads) => {
+      const { store, calls } = recordingStore();
+      const { handler } = createHandler(store);
+      await handler.handlePublishMessage(makePublishMessage({ contextGraphId: CONTEXT_GRAPH, nquads }), CONTEXT_GRAPH);
+      expect(calls).toEqual([]);
+      expect(await store.countQuads()).toBe(0);
+    });
+
+    it('accepts a manifest root entity that is an absolute IRI (control)', async () => {
+      const { store, calls } = recordingStore();
+      const { handler } = createHandler(store);
+      await handler.handlePublishMessage(ROOT_MESSAGE('https://example.org/root'), CONTEXT_GRAPH);
+      expect(calls).toContain('insert');
+    });
+
+    // The root passes the handler's character check for root entities, so only
+    // the term check refuses it.
+    it('refuses a manifest root entity that is not an RFC 3987 IRI before it calls the store', async () => {
+      const { store, calls } = recordingStore();
+      const { handler } = createHandler(store);
+      await handler.handlePublishMessage(ROOT_MESSAGE('https://example.org/%zz'), CONTEXT_GRAPH);
+      expect(calls).toEqual([]);
+      expect(await store.countQuads()).toBe(0);
+    });
+  });
+
+  describe('received protocol metadata', () => {
+    it.each([
+      ['a trust-level row', '<http://example.org/s> <http://dkg.io/ontology/trustLevel> "3" .'],
+      ['a subject in a reserved namespace', '<urn:dkg:file:gossip> <http://example.org/p> "v" .'],
+    ])('refuses a broadcast carrying %s before it calls the store', async (_label, nquads) => {
+      const { store, calls } = recordingStore();
+      const { handler } = createHandler(store);
+      await handler.handlePublishMessage(makePublishMessage({ contextGraphId: CONTEXT_GRAPH, nquads }), CONTEXT_GRAPH);
+      expect(calls).toEqual([]);
+      expect(await store.countQuads()).toBe(0);
+    });
+  });
+
   it('registers the sub-graph of a publish once and hands the inserted rows to the metadata projection', async () => {
     const store = new OxigraphStore();
     const subscriptions = new Map<string, ContextGraphSub>();
@@ -640,6 +721,130 @@ describe('GossipPublishHandler', () => {
     // and a fresh one per peer heartbeat is what grows agents/_meta unbounded.
     const metaCount = await store.countQuads(`did:dkg:context-graph:${agentsCg}/_meta`);
     expect(metaCount, 'agents/_meta must not accumulate per-publish tentative records').toBe(0);
+  });
+
+  describe('an update of an agent profile', () => {
+    const agentsCg = SYSTEM_CONTEXT_GRAPHS.AGENTS;
+    const agentsGraph = `did:dkg:context-graph:${agentsCg}`;
+    const wallet = '0x1111111111111111111111111111111111111111';
+    const subject = `did:dkg:agent:${wallet}`;
+    const secondsAgo = (seconds: number) => new Date(Date.now() - seconds * 1_000).toISOString();
+
+    function profileMessage(peerId: string, lastSeen: string, extra: { name?: string } = {}): Uint8Array {
+      const { quads, rootEntity } = buildAgentProfile({
+        peerId,
+        name: extra.name ?? 'Agent',
+        skills: [],
+        agentAddress: wallet,
+        lastSeen,
+        relayAddress: `/dns4/relay-of-${peerId}/tcp/9090`,
+      });
+      return makePublishMessage({
+        ual: `did:dkg:mock:31337/0x1/${lastSeen}`,
+        contextGraphId: agentsCg,
+        nquads: quads
+          .map((quad) => `<${quad.subject}> <${quad.predicate}> ${quad.object.startsWith('"') ? quad.object : `<${quad.object}>`} .`)
+          .join('\n'),
+        kas: [{ tokenId: 1, rootEntity, privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
+      });
+    }
+
+    async function values(store: OxigraphStore, predicate: string): Promise<string[]> {
+      const result = await store.query(
+        `SELECT ?o WHERE { GRAPH <${agentsGraph}> { <${subject}> <https://dkg.network/ontology#${predicate}> ?o } } ORDER BY ?o`,
+      );
+      return result.type === 'bindings' ? result.bindings.map((row) => row['o']!) : [];
+    }
+
+    it('of a known agent reaches the store and dates its peer, instead of being dropped as a replay', async () => {
+      const { store, handler } = createHandler();
+      const later = secondsAgo(1);
+      await handler.handlePublishMessage(profileMessage('peer-1', secondsAgo(86_000)), agentsCg, undefined, 'peer-1');
+      expect(await values(store, 'peerId')).toEqual(['"peer-1"']);
+
+      await handler.handlePublishMessage(profileMessage('peer-1', later), agentsCg, undefined, 'peer-1');
+      expect(await values(store, 'datedPeer')).toEqual([`"peer-1 ${later}"`]);
+      expect(await values(store, 'lastSeen')).toEqual([`"${later}"`]);
+      expect(await store.countQuads(`${agentsGraph}/_meta`)).toBe(0);
+    });
+
+    it('from a peer the known agent does not list is not stored', async () => {
+      const { store, handler } = createHandler();
+      const seen = secondsAgo(60);
+      await handler.handlePublishMessage(profileMessage('peer-1', seen), agentsCg, undefined, 'peer-1');
+      await handler.handlePublishMessage(profileMessage('peer-2', secondsAgo(1)), agentsCg, undefined, 'peer-2');
+      expect(await values(store, 'peerId')).toEqual(['"peer-1"']);
+      expect(await values(store, 'lastSeen')).toEqual([`"${seen}"`]);
+      expect(await values(store, 'relayAddress')).toEqual(['"/dns4/relay-of-peer-1/tcp/9090"']);
+    });
+
+    it('brings a heartbeat of the same peer in without growing the subject', async () => {
+      const { store, handler } = createHandler();
+      await handler.handlePublishMessage(profileMessage('peer-1', secondsAgo(86_000)), agentsCg, undefined, 'peer-1');
+      const first = await store.countQuads(agentsGraph);
+      const latest = secondsAgo(1);
+      for (const seen of [secondsAgo(60_000), secondsAgo(30_000), latest]) {
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        await handler.handlePublishMessage(profileMessage('peer-1', seen), agentsCg, undefined, 'peer-1');
+      }
+      expect(await values(store, 'lastSeen')).toEqual([`"${latest}"`]);
+      expect(await values(store, 'datedPeer')).toEqual([`"peer-1 ${latest}"`]);
+      expect(await store.countQuads(agentsGraph)).toBe(first);
+    });
+
+    it('that is older changes nothing', async () => {
+      const { store, handler } = createHandler();
+      const newest = secondsAgo(1);
+      await handler.handlePublishMessage(profileMessage('peer-1', newest), agentsCg, undefined, 'peer-1');
+      await handler.handlePublishMessage(profileMessage('peer-1', secondsAgo(600)), agentsCg, undefined, 'peer-1');
+      expect(await values(store, 'lastSeen')).toEqual([`"${newest}"`]);
+      expect(await values(store, 'datedPeer')).toEqual([`"peer-1 ${newest}"`]);
+    });
+
+    it('from another peer than the one it names is not stored', async () => {
+      const { store, handler } = createHandler();
+      await handler.handlePublishMessage(profileMessage('peer-1', secondsAgo(60)), agentsCg, undefined, 'peer-1');
+      await handler.handlePublishMessage(profileMessage('peer-2', secondsAgo(1)), agentsCg, undefined, 'peer-other');
+      expect(await values(store, 'peerId')).toEqual(['"peer-1"']);
+
+      const fresh = createHandler();
+      await fresh.handler.handlePublishMessage(profileMessage('peer-2', secondsAgo(1)), agentsCg, undefined, 'peer-other');
+      expect(await fresh.store.countQuads(agentsGraph)).toBe(0);
+    });
+
+    it('stored nothing to mark when it is not newer', async () => {
+      const marked: unknown[] = [];
+      const store = new OxigraphStore();
+      const handler = new GossipPublishHandler(store, undefined, new Map(), {
+        contextGraphExists: async () => false,
+        getContextGraphOwner: async () => null,
+        setContextGraphSubscription: () => {},
+        recordDiscoveredContextGraph: () => {},
+        markCgMetaDirtyFromQuads: (quads) => { marked.push(quads); },
+      });
+      const message = profileMessage('peer-1', secondsAgo(1));
+      await handler.handlePublishMessage(message, agentsCg, undefined, 'peer-1');
+      expect(marked).toHaveLength(1);
+      await handler.handlePublishMessage(message, agentsCg, undefined, 'peer-1');
+      expect(marked).toHaveLength(1);
+    });
+  });
+
+  it('keeps the replay rule for a known entity of an ordinary graph', async () => {
+    const { store, handler } = createHandler();
+    const entity = 'did:dkg:test:known-entity';
+    const message = (name: string) => makePublishMessage({
+      ual: 'did:dkg:mock:31337/0x1/9',
+      contextGraphId: CONTEXT_GRAPH,
+      nquads: `<${entity}> <http://schema.org/name> "${name}" .`,
+      kas: [{ tokenId: 1, rootEntity: entity, privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
+    });
+    await handler.handlePublishMessage(message('First'), CONTEXT_GRAPH);
+    await handler.handlePublishMessage(message('Second'), CONTEXT_GRAPH);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <did:dkg:context-graph:${CONTEXT_GRAPH}> { <${entity}> <http://schema.org/name> ?o } }`,
+    );
+    expect(result.type === 'bindings' ? result.bindings.map((row) => row['o']) : []).toEqual(['"First"']);
   });
 
   it('DOES persist tentative _meta for a non-registry data CG (control)', async () => {

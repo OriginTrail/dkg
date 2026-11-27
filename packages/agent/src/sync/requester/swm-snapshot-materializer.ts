@@ -1,3 +1,4 @@
+import { deleteSwmOperationMetadata } from '../swm-operation-published-at.js';
 /**
  * The store adapter behind public SWM catch-up snapshot materialization.
  *
@@ -827,9 +828,9 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteHead' },
       );
       for (const operationSubject of operationSubjects) {
-        await deleteByPatternWithoutCount(
-          deps.store,
-          { graph: descriptor.metaGraph, subject: operationSubject },
+        await deleteSwmOperationMetadata(
+          deps.store, descriptor.metaGraph, operationSubject,
+          descriptor.equivalentOperationSubjects.includes(operationSubject),
           { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteOperation' },
         );
       }
@@ -839,7 +840,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       for (const asset of assets) {
         // ONE deletion-set rule with the preserving repair: the kaUal-owned
         // operation subjects linked through the head's current id rows (no
-        // exclusion — full replacement), seeded with the descriptor's own.
+        // exclusion), retaining clocks only for incoming operation identities.
         const operationSubjects = await collectOwnedHeadOperationSubjects(
           asset,
           { seed: [asset.operationSubject] },
@@ -850,9 +851,9 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           { priority: 'background', source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteHead' },
         );
         for (const operationSubject of operationSubjects) {
-          await deleteByPatternWithoutCount(
-            deps.store,
-            { graph: asset.metaGraph, subject: operationSubject },
+          await deleteSwmOperationMetadata(
+            deps.store, asset.metaGraph, operationSubject,
+            asset.equivalentOperationSubjects.includes(operationSubject),
             { priority: 'background', source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteOperation' },
           );
         }

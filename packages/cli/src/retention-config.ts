@@ -3,12 +3,12 @@
  *
  *   "queueRetention": {
  *     "share":     { "mode": "off", "intervalMs": 60000, "batchSize": 100, "succeededMaxAgeMs": 604800000, "benignFailedMaxAgeMs": 604800000, "rescanIntervalMs": 3600000 },
- *     "publisher": { "mode": "off", "intervalMs": 60000, "batchSize": 100, "finalizedMaxAgeMs": 604800000 }
+ *     "publisher": { "mode": "off", "intervalMs": 60000, "batchSize": 100, "finalizedMaxAgeMs": 604800000, "rescanIntervalMs": 3600000 }
  *   }
  *
  * Every key is optional and the mode of both queues defaults to `off`: an absent section deletes and judges nothing. The share section drives the sweep built in
- * daemon/retention-share-sweep.ts; the publisher section is declared here so its keys are validated from the start, but no publisher sweep exists yet (P11 registers
- * it in daemon/retention-sweeps.ts and adds its own keys to this module, with no further change to config.ts or the daemon lifecycle).
+ * daemon/retention-share-sweep.ts and the publisher section the one built in daemon/retention-publisher-sweep.ts (OT-RFC-73 P11, which added the publisher's own keys to
+ * this module and registered its sweep in daemon/retention-sweeps.ts, with no change to config.ts).
  *
  * Validation is loud. `resolveRetentionConfig` collects every problem and throws one `RetentionConfigError` that names each offending key; there is no silent
  * fallback to a default for a value that was written but is wrong, and an unknown key (a typo such as `queueRetention.share.mod`) is an error too, because ignoring
@@ -35,7 +35,7 @@ export const RETENTION_DEFAULTS = Object.freeze({
   /** D-6: a deletable job leaves 7 days after it finished. */
   windowMs: SHARE_RETENTION_WINDOW_MS,
   minWindowMs: SHARE_RETENTION_DEFAULTS.minWindowMs,
-  /** Share only: how often a finished pass starts again from the oldest row. */
+  /** How often a finished pass starts again from the oldest row (the same default on both queues). */
   rescanIntervalMs: SHARE_RETENTION_DEFAULTS.rescanIntervalMs,
   minRescanIntervalMs: 60_000,
   maxRescanIntervalMs: 7 * 24 * 3_600_000,
@@ -56,7 +56,7 @@ export interface ShareRetentionSettings {
   rescanIntervalMs?: number;
 }
 
-/** Declared now, run by P11: no sweep reads these until it registers one. */
+/** The publisher queue's sweep (P11) deletes one class only: a `finalized` job. Every failed job is kept until an operator clears it. */
 export interface PublisherRetentionSettings {
   /** Default `off`. */
   mode?: RetentionMode;
@@ -66,6 +66,8 @@ export interface PublisherRetentionSettings {
   batchSize?: number;
   /** Default 7 days (D-6); at least 24 hours. */
   finalizedMaxAgeMs?: number;
+  /** Default 3,600,000; from 60,000 to 7 days. How often a finished pass starts again from the oldest row, so a record that was kept (an older failed sibling an operator has since cleared) is judged again. */
+  rescanIntervalMs?: number;
 }
 
 /** The `queueRetention` section as written in config.json. */
@@ -88,6 +90,7 @@ export interface ResolvedPublisherRetention {
   readonly intervalMs: number;
   readonly batchSize: number;
   readonly finalizedMaxAgeMs: number;
+  readonly rescanIntervalMs: number;
 }
 
 export interface ResolvedRetentionConfig {
@@ -112,7 +115,7 @@ export class RetentionConfigError extends Error {
 
 const SECTION = 'queueRetention';
 const SHARE_KEYS = ['mode', 'intervalMs', 'batchSize', 'succeededMaxAgeMs', 'benignFailedMaxAgeMs', 'rescanIntervalMs'] as const;
-const PUBLISHER_KEYS = ['mode', 'intervalMs', 'batchSize', 'finalizedMaxAgeMs'] as const;
+const PUBLISHER_KEYS = ['mode', 'intervalMs', 'batchSize', 'finalizedMaxAgeMs', 'rescanIntervalMs'] as const;
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
@@ -195,6 +198,7 @@ export function resolveRetentionConfig(input: unknown): ResolvedRetentionConfig 
       intervalMs: c.integer(publisher, publisherKey, 'intervalMs', d.intervalMs, d.minIntervalMs, d.maxIntervalMs),
       batchSize: c.integer(publisher, publisherKey, 'batchSize', d.batchSize, 1, d.maxBatchSize),
       finalizedMaxAgeMs: c.window(publisher, publisherKey, 'finalizedMaxAgeMs'),
+      rescanIntervalMs: c.integer(publisher, publisherKey, 'rescanIntervalMs', d.rescanIntervalMs, d.minRescanIntervalMs, d.maxRescanIntervalMs),
     },
   };
   if (c.issues.length > 0) throw new RetentionConfigError(c.issues);

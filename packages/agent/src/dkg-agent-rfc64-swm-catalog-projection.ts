@@ -1,3 +1,4 @@
+import type { CatalogLaneV1, CatalogAuthoringLaneDecisionV1 } from './internal/catalog-lane-types.js';
 import { catalogAuthoringApplicability } from './internal/catalog-authoring-applicability.js';
 import { SwmCatalogAuthorityNotReady } from './internal/swm-inventory-write.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -11,8 +12,6 @@ import {
   assertContextGraphIdV1,
   computeSwmAuthorInventoryScopeDigestV1,
   createOperationContext,
-  type AssertionCoordinateV1,
-  type AuthorCatalogScopeV1,
   type AuthorLaneScopeV1,
   type CatalogSealDeploymentProfileV1,
   type CanonicalDeterministicUalV1,
@@ -20,7 +19,6 @@ import {
   type Digest32V1,
   type EvmAddressV1,
   type NetworkIdV1,
-  type PositiveDecimalU64V1,
   type SwmAuthorInventoryScopeV1,
   type SwmAuthorInventorySnapshotV1,
   type TimestampMsV1,
@@ -32,6 +30,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
+import { resolveFinalizedPlacementDecisionV1 } from './internal/finalized-placement-decision.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type {
@@ -42,7 +41,6 @@ import type {
   ReconcileRfc64PublicRootCatalogExactSetResultV1,
   Rfc64CatalogProjectionTargetPolicyV1,
 } from './dkg-agent-rfc64-catalog-upsert.js';
-import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
 import {
   raceRfc64AgainstAbortV1 as raceAgainstAbortV1,
   throwIfRfc64AbortedV1 as throwIfAbortedV1,
@@ -93,6 +91,13 @@ import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
 const RFC64_DEFAULT_CATALOG_DELEGATION_EXPIRES_AT_V1 =
   '253402300799000' as TimestampMsV1;
 
+/** Positive execution evidence, independent of whether the lane publishes a catalog head. */
+export type ConfirmedCatalogObligationCompletionV1 = Readonly<
+  | { status: 'applied'; action: 'private-placement' | 'public-retirement' }
+  | { status: 'already-covered'; action: 'private-placement' }
+  | { status: 'already-absent'; action: 'public-retirement' }
+>;
+
 export interface ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1 {
   readonly contextGraphId: ContextGraphIdV1;
   readonly authorAddress: EvmAddressV1;
@@ -114,34 +119,13 @@ interface ResolvedRfc64CatalogAuthoringLaneBaseV1 {
   readonly scopeBase: Readonly<Omit<AuthorLaneScopeV1, 'authorAddress'>>;
 }
 
-type ResolvedRfc64CatalogAuthoringLaneV1 =
-  | Readonly<ResolvedRfc64CatalogAuthoringLaneBaseV1 & {
-    readonly kind: 'public';
-    readonly projectionTargetPolicy: 'exact-replacement';
-    readonly acceptsFinalizedVmRepair: false;
-  }>
-  | Readonly<ResolvedRfc64CatalogAuthoringLaneBaseV1 & {
-    readonly kind: 'private';
-    readonly projectionTargetPolicy: Rfc64CatalogProjectionTargetPolicyV1;
-    readonly acceptsFinalizedVmRepair: boolean;
-  }>;
+type ResolvedRfc64CatalogAuthoringLaneV1 = ResolvedRfc64CatalogAuthoringLaneBaseV1 & CatalogLaneV1<
+  { readonly projectionTargetPolicy: 'exact-replacement' },
+  { readonly projectionTargetPolicy: Rfc64CatalogProjectionTargetPolicyV1 }
+>;
+export type Rfc64CatalogAuthoringLaneDecisionV1<Lane = ResolvedRfc64CatalogAuthoringLaneV1> = CatalogAuthoringLaneDecisionV1<Lane>;
 
-type Rfc64CatalogAuthoringLaneDecisionV1 =
-  | Readonly<{ readonly status: 'inactive' }>
-  | Readonly<{ readonly status: 'unavailable'; readonly error: Error }>
-  | Readonly<{
-    readonly status: 'active';
-    readonly lane: ResolvedRfc64CatalogAuthoringLaneV1;
-  }>;
-
-export function rfc64CatalogLaneAcceptsWorkspaceHeadV1(
-  lane: ResolvedRfc64CatalogAuthoringLaneV1,
-  accessPolicy: 'public' | 'ownerOnly' | 'allowList' | undefined,
-): boolean {
-  return lane.kind === 'public'
-    ? accessPolicy === 'public'
-    : accessPolicy === 'ownerOnly' || accessPolicy === 'allowList';
-}
+export { rfc64CatalogLaneAcceptsWorkspaceHeadV1 } from './internal/catalog-workspace-policy.js';
 
 export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
   /** Project the latest authenticated durable author inventory into its signed catalog. */
@@ -248,46 +232,35 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
    */
   protected async publishRfc64FinalizedPrivateCatalogPlacementV1(
     this: DKGAgent,
-    params: Readonly<{
-      readonly contextGraphId: ContextGraphIdV1;
-      readonly authorAddress: EvmAddressV1;
-      readonly inventoryScope: SwmAuthorInventoryScopeV1;
-      readonly assertionCoordinate: AssertionCoordinateV1;
-      readonly assertionVersion: PositiveDecimalU64V1;
-      readonly kaUal: CanonicalDeterministicUalV1;
-      readonly sealDigest: Digest32V1;
-    }>,
+    params: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
     placement: CatalogPlacementAttemptV1,
-  ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
-    const lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, null);
-    if (lane === null || !lane.acceptsFinalizedVmRepair) {
-      throw new CatalogRepairLaneInactiveErrorV1('RFC-64 finalized-private placement repair lane is inactive');
+  ): Promise<ConfirmedCatalogObligationCompletionV1> {
+    const decision = this.resolveRfc64FinalizedPlacementDecisionV1(params);
+    if (decision.status === 'unavailable') throw decision.error;
+    if (decision.status === 'inactive') throw new CatalogRepairLaneInactiveErrorV1('RFC-64 finalized-private placement repair lane is inactive');
+    const { lane, inventoryScope, action } = decision;
+    if (action === 'retire-public-row') {
+      // Public VM discovery is chain-owned; this owed transition removes only the exact SWM row.
+      const removed = await this.removeRfc64SwmAuthorInventoryRowStrictV1({
+        contextGraphId: params.contextGraphId, scope: inventoryScope, expectedRow: params,
+      });
+      if (removed.status !== 'applied' && removed.status !== 'absent') {
+        throw new Error('RFC-64 confirmed public inventory transition did not complete');
+      }
+      this.requestRfc64SwmCatalogProjectionV1({
+        contextGraphId: params.contextGraphId, authorAddress: params.authorAddress,
+      });
+      return { status: removed.status === 'applied' ? 'applied' : 'already-absent', action: 'public-retirement' };
     }
-    const currentInventoryScope = Object.freeze({
-      ...lane.scopeBase,
-      authorAddress: params.authorAddress,
-    }) as SwmAuthorInventoryScopeV1;
-    if (
-      computeSwmAuthorInventoryScopeDigestV1(currentInventoryScope)
-      !== computeSwmAuthorInventoryScopeDigestV1(params.inventoryScope)
-    ) {
-      throw new CatalogRepairConditionErrorV1('policy_conflict',
-        'RFC-64 finalized-private placement repair conflicts with a policy transition',
-      );
-    }
-    const inventoryScope = params.inventoryScope;
+    const scope = decision.capacityScope;
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new CatalogRepairConditionErrorV1('persistence_unavailable', 'RFC-64 persistence is unavailable');
-    const scope = Object.freeze({
-      ...inventoryScope,
-      bucketCount: '1',
-    }) as AuthorCatalogScopeV1;
     const covered = await placement.measure('coverage', () => this.rfc64CatalogCoversConfirmedSwmRowV1({
       scope,
       expectedRow: params,
     }));
     placement.covered(covered);
-    if (covered) return null;
+    if (covered) return { status: 'already-covered', action: 'private-placement' };
     // This placement needs one sealed asset, not a whole-author completeness claim.
     const candidate = persistence.swmAuthorInventory.readSwmAuthorInventoryRowV1(
       computeSwmAuthorInventoryScopeDigestV1(inventoryScope), params.authorAddress, params.kaUal,
@@ -302,9 +275,8 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         contextGraphId: params.contextGraphId,
         authorAddress: params.authorAddress,
         identity: params,
-        // The seal this process was handed at the confirmation, for an assertion that was
-        // re-opened more than once since and whose stored seals have moved on.
-        retainedSeal: readOwedPlacementSealV1(this, params.sealDigest),
+        // V2 owns its seal durably; legacy promotion markers retain their process-local fallback.
+        retainedSeal: params.version === 2 ? params.seal : readOwedPlacementSealV1(this, params.sealDigest),
       })
       : resolveRfc64InventoryWorkspaceCatalogAssetV1({
         store: this.store,
@@ -313,10 +285,10 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         authorAddress: params.authorAddress,
         laneKind: lane.kind,
         row,
-        retainedSeal: readOwedPlacementSealV1(this, params.sealDigest),
+        retainedSeal: params.version === 2 ? params.seal : readOwedPlacementSealV1(this, params.sealDigest),
       })));
     lane.service.acceptedPolicySnapshotForCatalogScope(scope);
-    return this.upsertObservedRfc64PublicRootCatalogAssetV1({
+    await this.upsertObservedRfc64PublicRootCatalogAssetV1({
       scope,
       author: this.createRfc64CatalogAuthorSignerV1(params.authorAddress),
       asset,
@@ -325,6 +297,16 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
       catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
     }, placement);
+    return { status: 'applied', action: 'private-placement' };
+  }
+
+  /** Current authority, action and scope shared by repair admission and execution. */
+  protected resolveRfc64FinalizedPlacementAuthorityV1(this: DKGAgent, contextGraphId: string) {
+    return this.resolveRfc64CatalogAuthoringLaneDecisionV1(contextGraphId, null);
+  }
+
+  protected resolveRfc64FinalizedPlacementDecisionV1(this: DKGAgent, repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) {
+    return resolveFinalizedPlacementDecisionV1(repair, () => this.resolveRfc64FinalizedPlacementAuthorityV1(repair.contextGraphId));
   }
 
   requiresRfc64ShareInventoryV1(this: DKGAgent, contextGraphId: string, subGraphName: string | undefined): boolean {

@@ -59,7 +59,7 @@ const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
+import { findReservedSubjectPrefix, isSkolemizedUri, jobFailureReason } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
   MetricsCollector,
@@ -483,7 +483,7 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
         ? new Date(job.timestamps.finalizedAt).toISOString()
         : null,
       error: job.status === "failed"
-        ? job.failure?.message ?? "Async capture failed"
+        ? jobFailureReason(job.failure?.message ?? "Async capture failed")
         : null,
     });
   }

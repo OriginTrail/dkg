@@ -90,6 +90,7 @@ export async function pruneTerminalJoinRequestRecords(
       }
     `, {
       touchedGraphs: [metaGraph],
+      writtenGraphs: [metaGraph],
       priority: 'background',
       source: 'join.moderationRetention.prune',
     });

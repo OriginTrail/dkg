@@ -90,16 +90,8 @@ describe('E2E: a relay-only curator that announces unreachable private addresses
   let curatorAddress: string;
   /** A custodial agent of the member's node, the one that asks to join: it signs the request. */
   let memberAddress: string;
-  let contextGraphId: string;
   /** Streams the member opened by dialing the curator (libp2p `dialProtocol`), from the link on. */
   const dialsToCurator: string[] = [];
-
-  const LINKED = 'the member reaches the curator through the relay only';
-  const APPROVED = 'the approved member holds the curator\'s metadata';
-  const completed = new Set<string>();
-  const buildsOn = (step: string): void => {
-    expect(completed.has(step), 'not evaluated: the step "' + step + '" of this scenario failed').toBe(true);
-  };
 
   /** An Edge as a daemon on a public network runs it, behind the relay. */
   async function createAgent(name: string, operationalKey: string): Promise<DKGAgent> {
@@ -138,7 +130,8 @@ describe('E2E: a relay-only curator that announces unreachable private addresses
     await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   }, 60_000);
 
-  it('1. the member reaches the curator through the relay only, and holds the curator\'s unreachable addresses', async () => {
+  /** The member reaches the curator through the relay only, and holds the curator's unreachable addresses. */
+  async function linkThroughRelayOnly(): Promise<void> {
     await connectThroughRelay(network, member, curator);
     expectRelayOnlyLink(network, member, curator, 'before the graph exists');
 
@@ -148,13 +141,11 @@ describe('E2E: a relay-only curator that announces unreachable private addresses
       expect(listed.some((address) => address.startsWith(prefix)), `the member's store lists ${prefix}…: ${listed.join(', ')}`)
         .toBe(true);
     }
-    completed.add(LINKED);
-  }, 60_000);
+  }
 
-  it('2. once approved, the member holds the curator\'s metadata naming it, and writes into the graph', async () => {
-    buildsOn(LINKED);
-    // POST /api/context-graph/create with register: true: public, with a curated publish policy.
-    contextGraphId = `${curatorAddress}/relay-only-curator-${RUN}`;
+  /** POST /api/context-graph/create with register: true: public, with a curated publish policy. */
+  async function createRegisteredGraph(): Promise<{ contextGraphId: string; onChainId: string }> {
+    const contextGraphId = `${curatorAddress}/relay-only-curator-${RUN}`;
     await curator.createContextGraph({
       id: contextGraphId, name: 'Relay-only curator E2E', description: '', accessPolicy: 0, callerAgentAddress: curatorAddress,
     });
@@ -163,7 +154,11 @@ describe('E2E: a relay-only curator that announces unreachable private addresses
     });
     const onChainId = String(registered.onChainId);
     expect(Number(onChainId)).toBeGreaterThan(0);
+    return { contextGraphId, onChainId };
+  }
 
+  /** Once approved, the member holds the curator's metadata naming it, and writes into the graph. */
+  async function joinAndWrite({ contextGraphId, onChainId }: { contextGraphId: string; onChainId: string }): Promise<void> {
     // POST /api/context-graph/subscribe: the chain admits it, and it subscribes.
     const admission = await pollUntil(
       () => member.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
@@ -205,11 +200,10 @@ describe('E2E: a relay-only curator that announces unreachable private addresses
     const written = await writeAndShare(member, contextGraphId, 'member-write');
     expect(written.promoted.sealed, 'the member\'s write was sealed and shared').toBe(true);
     expectRelayOnlyLink(network, member, curator, 'after the approval');
-    completed.add(APPROVED);
-  }, 240_000);
+  }
 
-  it('3. a sync from the curator completes over the circuit, and the curator\'s shared memory reaches the member', async () => {
-    buildsOn(APPROVED);
+  /** A sync from the curator completes over the circuit, and the curator's shared memory reaches the member. */
+  async function syncCuratorShare(contextGraphId: string): Promise<void> {
     const shared = await writeAndShare(curator, contextGraphId, 'curator-share');
     expect(shared.promoted.sealed).toBe(true);
 
@@ -225,6 +219,13 @@ describe('E2E: a relay-only curator that announces unreachable private addresses
     expect(names).toEqual(['"curator-share"']);
 
     expectRelayOnlyLink(network, member, curator, 'after the sync');
+  }
+
+  it('the member joins the graph, writes into it and syncs from the curator over the open circuit, without dialing the curator', async () => {
+    await linkThroughRelayOnly();
+    const graph = await createRegisteredGraph();
+    await joinAndWrite(graph);
+    await syncCuratorShare(graph.contextGraphId);
     expect(dialsToCurator, 'streams the member opened by dialing the curator instead of using the open circuit').toEqual([]);
-  }, 240_000);
+  }, 540_000);
 });

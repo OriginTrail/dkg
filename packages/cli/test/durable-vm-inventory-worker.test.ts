@@ -141,8 +141,10 @@ describe('bound VM share retains catalog ownership', () => {
         batchId: seal.reservedKaId!, materializedVersion: { blockNumber: 1, txIndex: 0 } } } }),
     ]);
     first.failMarkerWrite = inventoryPersistenceFailure(new Error('confirmation marker unavailable'));
-    expect(await first.agent.observeRfc64ConfirmedVmV1({ ...params, shareOperationId: binding.intent.operationId, seal: seeded.seal,
-      assertionUri: 'urn:bound-vm', publicationLabel: 'queued publish' })).toBe(false);
+    await expect(first.agent.observeRfc64ConfirmedVmV1({ ...params, shareOperationId: binding.intent.operationId, seal: seeded.seal,
+      assertionUri: 'urn:bound-vm', publicationLabel: 'queued publish' }))
+      .rejects.toMatchObject({ message: 'Confirmed publication catalog obligation was not durably recorded; recovery is required',
+        cause: expect.objectContaining({ message: 'confirmation marker unavailable' }) });
     expect(first.markers()).toHaveLength(0);
     expect(first.agent.readRfc64SwmAuthorInventorySnapshotV1({ inventoryScopeDigest: seeded.scopeDigest, authorAddress: AUTHOR })?.rows ?? []).toHaveLength(0);
     // Even the in-process VM fence cannot discharge the unowned placement.

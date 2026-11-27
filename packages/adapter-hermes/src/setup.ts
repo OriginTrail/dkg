@@ -1329,9 +1329,7 @@ interface EnsureManagedProviderBlockResult {
  * `ensureManagedProviderBlock` will produce, with `configBackupPath`
  * pre-computed using the supplied `nowMs` timestamp.
  *
- * This split exists because of the SIGINT mid-execute partial-state
- * bug surfaced by the adversarial reviewer (see
- * `agent-docs/hermes-parity/adversarial-findings.md` §6). The caller
+ * This split preserves recoverable state across a SIGINT during execution. The caller
  * (`setupHermesProfile`) writes `setup-state.json` with the intended
  * `priorMemoryProvider` BEFORE the destructive `config.yaml` rewrite,
  * so a SIGINT between the two writes leaves recoverable state on disk

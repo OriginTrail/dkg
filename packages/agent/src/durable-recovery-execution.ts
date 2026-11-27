@@ -2,12 +2,10 @@
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
 import { type DurableRecoveryAuthority } from './durable-recovery-authority.js';
 import type { ExactBatchStreamOutcome } from './sync/requester/exact-recovery-transport.js';
-import { DurableSyncAdmissionBoundary } from './sync/requester/admission-boundary.js';
 import { type OperationContext } from '@origintrail-official/dkg-core';
 import { type ChallengePinnedGraphScopedAsset } from './sync/requester/graph-scoped-materialization.js';
 import { type PhaseCallback } from '@origintrail-official/dkg-publisher';
 import { exactAssetUalsForSelection } from './sync/exact-assets.js';
-import { createDurableSyncFetchTimeoutMs, normalizeDurableSyncTimeoutMs } from './sync/requester/durable-sync-budget.js';
 import { type ExactAssetResponderCapability } from './sync/requester/durable-sync.js';
 import { mergeExactAssetResponderCapability, mergeExactDurableFetchDisposition, type ExactDurableFetchDisposition } from './sync/requester/exact-durable-fetch.js';
 import { resolveSyncAgentsMeta } from './sync/agents-meta-policy.js';
@@ -19,7 +17,7 @@ import { orderContextGraphIdsByPriority } from './sync/policy.js';
 import { runAdmittedDurableGraph } from './durable-recovery-graph.js';
 import type { DurableRecoveryOptions, AdmittedDurableSyncResult } from './durable-recovery-types.js';
 import { runSyncSingleFlight } from './sync-single-flight.js';
-import { runSerializedDurableContextGraphSync, createDurableSyncOperationBoundary, durableSyncSingleFlightKey, DURABLE_RECOVERY_HARD_TIMEOUT_MS } from './durable-recovery-scheduling.js';
+import { createDurableGraphScheduler, durableSyncSingleFlightKey, DURABLE_RECOVERY_HARD_TIMEOUT_MS } from './durable-recovery-scheduling.js';
 
 export interface DurableRecoveryRequest {
   readonly host: DurableRecoveryHost;
@@ -37,7 +35,6 @@ export interface DurableRecoveryRequest {
 export async function runDurableRecovery(request: DurableRecoveryRequest): Promise<AdmittedDurableSyncResult> {
   const { host, authority, ctx, remotePeerId, contextGraphIds, onPhase, onAccessDenied, sinceBatchIdFor, options } = request;
 
-  const admissionBoundary = new DurableSyncAdmissionBoundary(options?.onWorkStarted);
   const syncAgentsMeta = resolveSyncAgentsMeta(host.policy().syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
   const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
   const exactAssetFetchPolicy = options?.exactAssetFetchPolicy;
@@ -47,19 +44,11 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
     : exactAssetUalsForSelection(exactAssetSelection);
   const extendedRecovery = exactAssetUals !== undefined
     || options?.settlementSliceTimeoutMs !== undefined;
-  const operationBoundary = createDurableSyncOperationBoundary({
-    totalTimeoutMs: options?.totalTimeoutMs,
-    maximumTimeoutMs: extendedRecovery
-      ? DURABLE_RECOVERY_HARD_TIMEOUT_MS
-      : undefined,
-    signal: options?.signal,
-  });
-  const authenticationTimeoutMs = normalizeDurableSyncTimeoutMs(options?.totalTimeoutMs);
-  const fetchTimeoutMs = createDurableSyncFetchTimeoutMs({
-    totalTimeoutMs: options?.totalTimeoutMs,
-    exactRecovery: exactAssetUals !== undefined,
-    extendedRecovery,
-  });
+  const scheduler = createDurableGraphScheduler({ host, ctx, remotePeerId, options,
+    exactRecovery: exactAssetUals !== undefined, extendedRecovery,
+    maximumTimeoutMs: extendedRecovery ? DURABLE_RECOVERY_HARD_TIMEOUT_MS : undefined });
+  const { operation: operationBoundary, admission: admissionBoundary, graphOptions } = scheduler;
+  const { fetchTimeoutMs, authenticationTimeoutMs } = graphOptions;
   const orderedContextGraphIds = orderContextGraphIdsByPriority(
     contextGraphIds,
     host.policy().syncContextGraphPriorities,
@@ -87,22 +76,8 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
         run: async (remainingContextGraphs) => {
           const detailed = await runAdmittedDurableGraph({
             host, authority, ctx, remotePeerId, contextGraphId, remainingContextGraphs,
-            options: {
-              onPhase,
-              onAtomicCommitStarted: options?.onAtomicCommitStarted,
-              onAccessDenied,
-              sinceBatchIdFor,
-              stopOnBackoffWorthyFailure,
-              fetchTimeoutMs,
-              exactAssetFetchPolicy,
-              exactRecoveryTransportMode: options?.exactRecoveryTransportMode,
-              authenticationTimeoutMs,
-              operationFetchDeadline: operationBoundary.fetchDeadline,
-              operationDeadline: operationBoundary.deadline,
-              settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs,
-              signal: operationBoundary.signal,
-              isCurrent: options?.isCurrent,
-              durableMetaContinuation: options?.durableMetaContinuation,
+            options: { ...graphOptions, onPhase, onAccessDenied, sinceBatchIdFor,
+              exactAssetFetchPolicy, exactRecoveryTransportMode: options?.exactRecoveryTransportMode,
             },
           });
           if (detailed.exactFetchDisposition !== undefined) {
@@ -129,20 +104,7 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
       emptyResult: createDurableSyncAccumulator,
       runWithAdmission: async (item, work) => {
         try {
-          return await runSerializedDurableContextGraphSync(
-            host.owner,
-            remotePeerId,
-            item.contextGraphId,
-            () => host.admission.run({
-              ctx, contextGraphId: item.contextGraphId, lane: item.lane,
-              label: item.operationId, work,
-              priorityOverride: options?.priority,
-              operationSignal: operationBoundary.signal,
-              source: options?.source,
-              onWorkStarted: admissionBoundary.startWork,
-            }),
-            operationBoundary.signal,
-          );
+          return await scheduler.runGraph(item.contextGraphId, work);
         } catch (error) {
           if (!operationBoundary.signal?.aborted) throw error;
           markExactFetchIncomplete();
@@ -173,10 +135,11 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
         stopOnBackoffWorthyFailure
         && durableSyncAccumulatorHasPeerTransportFailure(part),
       ),
-      onDeferred: (item, error) => host.log.info(
-        ctx,
-        `Deferring durable sync at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
-      ),
+      onDeferred: (item, error) => {
+        // A refusal at once is counted in the node's refusal summary by the admission; displaced or timed-out work is not.
+        if (error.state !== undefined) return;
+        host.log.info(ctx, `Deferring durable sync at CG ${item.contextGraphId} due to local backpressure: ${error.message}`);
+      },
     });
     return {
       admission: admissionBoundary.snapshot(),

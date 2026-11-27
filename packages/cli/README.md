@@ -64,6 +64,77 @@ the effective lane once at boot. A background query that is shed before
 execution returns HTTP 503 with `Retry-After: 1` and
 `code: "STORE_SCHEDULER_BUSY"`.
 
+## Rust/Wasm semantic runtime (Phase 0)
+
+The semantic runtime is an experimental, default-off Phase 0 gate. When
+explicitly enabled, the daemon verifies the packaged Wasm hash and ABI, starts
+it in a bounded Worker Thread, and requires a successful restore handshake
+before continuing graph activation:
+
+```json
+{
+  "semanticRuntime": {
+    "enabled": true,
+    "watchdogMs": 100
+  }
+}
+```
+
+For direct Program invocation, the operator must also select one DKG-published execution policy. Tenant-approved `programBindings` use their local binding as authority and do not require a published policy or tool offer; see [tenant Program bindings](../../docs/architecture/tenant-program-bindings.md). For direct invocation:
+
+```json
+{
+  "semanticRuntime": {
+    "enabled": true,
+    "watchdogMs": 100,
+    "operatorPolicyIri": "urn:sr:policy:operator-codex"
+  }
+}
+```
+
+`GET /api/semantic-runtime/resolve?contextGraphId=...&programIri=...&programLayer=vm` exposes the
+effective authority used by the native Program panel: Program requirements,
+operator Tool offers, the selected policy, and locally installed and enabled
+adapters. `POST /api/programs/execute` requires
+`{ "contextGraphId": "...", "programIri": "...", "invocationId": "<UUID>",
+"programLayer": "wm|swm|vm", "executionLayer": "wm|swm|vm" }`.
+It loads the Program from the explicitly selected memory layer and executes its
+admitted plan in the packaged Wasm runtime. The current closed adapter registry supports
+`agent/investigate@1` through Codex or the configured OpenAI-compatible LLM;
+undeclared or unavailable effects fail closed.
+
+A successful response is returned only after the exact LLM output and its
+SHA-256 hash have been stored as an `sr:Execution` Knowledge Asset in the
+selected layer of the same Context Graph. The response contains `executionIri`,
+`executionLayer`, and `persisted: true`; `executionUal` is present only for VM.
+Reusing the same invocation UUID resumes the durable effect journal and does
+not repeat an already completed LLM call. A retry cannot change either layer.
+
+## RDF file input
+
+Commands with `--file` accept N-Quads (`.nq`), N-Triples (`.nt`), Turtle (`.ttl`),
+TriG (`.trig`), JSON quad arrays (`.json`), and JSON-LD (`.jsonld`). JSON-LD
+supports inline `@context`, lists, named graphs and typed/language literals.
+Relative identifiers resolve against the input file's `file:` URL unless an
+inline `@base` overrides it. Expansion that would discard statements fails.
+
+JSON-LD named graphs can be stored in Working Memory with `dkg ka create --no-finalize`.
+A default-finalizing create rejects them before contacting the daemon: sealing, SWM
+sharing and VM publication do not yet preserve named-graph identity. Rewrite the
+document into the default graph to use those transitions.
+
+JSON-LD ingestion does not fetch remote contexts or `@import` URLs. Embed the
+required context inline before importing a file. Existing simple quad arrays
+remain supported in both `.json` and `.jsonld` files.
+
+## Async queue settings
+
+The async share and publish queues need no changes on most nodes. The four
+settings an operator might change are the store control path, write preflight
+sharing, share retries and finished-job cleanup. Each is read once at daemon
+start. Their defaults, how to change them and the log line that confirms each
+are in [Async Queue Operations](../../docs/use-dkg/async-queue-operations.md).
+
 ## Running a Core Node (relay operator)
 
 A Core Node is a publicly-reachable host that runs a libp2p circuit-relay v2
@@ -258,6 +329,7 @@ modes auto-renewal can't recover from:
 | `dkg stop` | Graceful daemon shutdown |
 | `dkg status` | Node health, peer count, identity |
 | `dkg logs` | Tail the daemon log |
+| `dkg debug cpu-profile [--seconds <n>]` | Record a CPU profile of the running node (node-admin token; 10 s default, 60 s max) and print where the node wrote it |
 | `dkg peers` | List connected peers and transport info |
 | `dkg peer info <peer-id>` | Inspect a peer's identity and addresses |
 | `dkg send <name> <msg>` | Encrypted direct message to a peer |
@@ -273,9 +345,9 @@ modes auto-renewal can't recover from:
 | `dkg ka import-file <name> -c <cg> --input-file <file>` | Import a document into WM through extraction |
 | `dkg ka extraction-status <name> -c <cg>` | Check document extraction status |
 | `dkg ka finalize <name> -c <cg>` | Seal a WM draft; existing root-scoped SWM assets remain read-only |
-| `dkg ka share <name> -c <cg> [--entity <uri...>]` | Share finalized WM to Shared Working Memory |
+| `dkg ka share <name> -c <cg>` | Share finalized WM to Shared Working Memory (the whole Knowledge Asset) |
 | `dkg ka share-async <name> -c <cg>` | Enqueue async WM-to-SWM share |
-| `dkg ka share-jobs [--context-graph-id <cg>] [--all \| --page-size <n> [--cursor <cursor>]]` | List async SWM share jobs; `--all` or `--page-size` pages the list instead of reading it whole |
+| `dkg ka share-jobs [--context-graph-id <cg>] [--state <states>] [--limit <n>] [--json]` | List async SWM share jobs (the complete list, or up to `--limit`). `--page-size <n>` and/or `--cursor <cursor>` print one page instead, and `--all [--page-size <n>]` pages through every job; `--limit` cannot be combined with a paging flag, nor `--all` with `--cursor` ([Listing async jobs](../../docs/references/cli.md#listing-async-jobs)) |
 | `dkg ka publish <name> -c <cg>` | Synchronously publish an already finalized and fully shared KA from SWM to VM |
 | `dkg ka publish-async <name> -c <cg> [--publisher-node-identity-id 0]` | Enqueue VM publish for an already finalized and fully shared KA |
 | `dkg ka pull-from <name> -c <cg> --layer swm\|vm` | Seed WM from SWM or VM |
@@ -290,7 +362,7 @@ modes auto-renewal can't recover from:
 | `dkg subscribe <cg>` | Subscribe to a context graph and sync its data |
 | `dkg sync` | Catch up on data from peers |
 | `dkg index [directory]` | Index a code repository into the dev-coordination CG |
-| `dkg publisher ...` | Inspect/control async publisher jobs and wallets; `publisher publish-async` remains an operational alias for `ka publish-async` |
+| `dkg publisher ...` | Inspect/control async publisher jobs and wallets; `publisher publish-async` remains an operational alias for `ka publish-async`; `publisher jobs` pages with the same `--page-size`/`--cursor`/`--all` |
 | `dkg auth show` | Display the current API auth token |
 | `dkg auth rotate` | Generate a new API auth token |
 | `dkg wallet` | Show operational wallet addresses and balances |
@@ -454,6 +526,8 @@ When the daemon is running, it exposes a local HTTP API (default: `http://localh
 - `GET /api/peers`, `GET /api/connections`, `GET /api/agents` — network introspection
 - `GET /api/wallets/balances`, `GET /api/chain/rpc-health` — wallet and chain health
 - `GET /api/diagnostics/backpressure` — node-admin scheduler pressure snapshot
+- `POST /api/diagnostics/cpu-profile` — node-admin CPU profile of the daemon's main thread, written to `<DKG home>/diagnostics` ([Troubleshooting](../../docs/use-dkg/troubleshooting.md#slow-or-stalled-node-record-a-cpu-profile))
+- `POST /api/knowledge-assets/{name}/swm/share-async`, `GET /api/knowledge-assets/swm/share-jobs`, `GET /api/publisher/jobs`, `GET /api/publisher/stats` — async share and publish queues (client contract: [Async Share and Publish Jobs](../../docs/build/async-jobs.md); paging: [Listing async jobs](../../docs/references/api.md#listing-async-jobs))
 - `GET /api/events` — Server-Sent Events stream for real-time notifications
 
 `GET /api/info` retains its legacy `chain.rpcUrl`, `chain.rpcUrls`, and
@@ -470,8 +544,8 @@ credentials. The public Hub contract address remains available, while
 All endpoints (except public paths like `/api/status`, `/api/chain/rpc-health`, and `/.well-known/skill.md`) require an API token via `Authorization: Bearer <token>` header.
 
 `GET /api/diagnostics/backpressure` specifically requires the node-level admin
-token; agent-scoped tokens cannot inspect node-wide scheduler work. See the
-[backpressure observability operator guide](../../docs/use-dkg/backpressure-observability.md)
+token; agent-scoped tokens cannot inspect node-wide scheduler work. See
+[Monitor Store and Queue Pressure](../../docs/use-dkg/backpressure-observability.md)
 for state definitions, log behavior, metrics, and response safety boundaries.
 
 The full API surface — including request bodies, response shapes, and error codes — is documented in [`skills/dkg-node/SKILL.md`](./skills/dkg-node/SKILL.md).
@@ -736,3 +810,5 @@ for the design rationale, threat model, and stability guarantees.
 - `@origintrail-official/dkg-chain` — blockchain abstraction
 - `@origintrail-official/dkg-node-store` — durable protocol state (outbox, sync checkpoints, cursors, KA numbers, chain log) the daemon composes
 - `@origintrail-official/dkg-node-ui` — web dashboard serving
+
+Tenant-configured invoke-only operations can load a pinned Program from a separate Context Graph while keeping the data graph private. See [tenant Program bindings](../../docs/architecture/tenant-program-bindings.md) for setup, API calls, activation and revocation.

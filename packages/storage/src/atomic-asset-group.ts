@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri, assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
-import { assertReplacementPayload, assertSubjectReplacementPayload, formatGraphBlock } from './atomic-graph-replace.js';
+import { assertReplacementPayload, assertSubjectReplacementPayload } from './atomic-graph-replace.js';
+import { renderBoundedAtomicAssetUpdate } from './atomic-update-rendering.js';
 import type { Quad } from './triple-store.js';
+import { ATOMIC_ASSET_GROUP_MAX_ASSETS } from './atomic-asset-limits.js';
+export { ATOMIC_ASSET_GROUP_MAX_ASSETS, ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES } from './atomic-asset-limits.js';
 
 /** One atomic visibility boundary, independently bounded from a transport chunk. */
 export interface AtomicAssetReplacement {
@@ -11,8 +14,6 @@ export interface AtomicAssetReplacement {
   metadataSubject: string;
   metadataQuads: Quad[];
 }
-export const ATOMIC_ASSET_GROUP_MAX_ASSETS = 8;
-export const ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES = 32 * 1024 * 1024;
 
 /** Validate the entire group before any write; one backend transaction publishes all pairs. */
 export function validateAtomicAssetGroup(assets: readonly AtomicAssetReplacement[]): void {
@@ -38,17 +39,7 @@ export function preflightAtomicAssetGroupLiterals(assets: readonly AtomicAssetRe
 export function buildAtomicAssetGroupUpdate(assets: readonly AtomicAssetReplacement[]) {
   validateAtomicAssetGroup(assets);
   preflightAtomicAssetGroupLiterals(assets);
-  // Every caller promises whole-update atomicity; no staging is needed here.
-  const operations = assets.flatMap(a => [
-    `CLEAR SILENT GRAPH <${a.graphUri}>`,
-    `DELETE WHERE { GRAPH <${a.metaGraphUri}> { <${a.metadataSubject}> ?p ?o } }`,
-  ]);
-  const blocks = assets.flatMap(a => [
-    ...(a.graphQuads.length ? [formatGraphBlock(a.graphUri, a.graphQuads)] : []),
-    ...(a.metadataQuads.length ? [formatGraphBlock(a.metaGraphUri, a.metadataQuads)] : []),
-  ]);
-  if (blocks.length) operations.push(`INSERT DATA {\n${blocks.join('\n')}\n}`);
-  const update = operations.join(';\n');
-  if (Buffer.byteLength(update) > ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES) throw new RangeError('Atomic asset group byte allowance exceeded');
-  return { update, graphs: [...new Set(assets.flatMap(a => [a.graphUri, a.metaGraphUri]))] };
+  const plan = renderBoundedAtomicAssetUpdate(assets);
+  if (!plan) throw new RangeError('Atomic asset group byte allowance exceeded');
+  return plan;
 }

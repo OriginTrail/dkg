@@ -165,3 +165,10 @@ tool fixtures, not additional incident proofs.
 Actual case results, commands and limitations are recorded in `RESULTS.md` and
 the per-case evidence directories. Generated full logs are kept with the proof
 receipts; no historical proof is claimed until both sides validate.
+
+
+## 10.0.26 follow-through
+
+The [incident closure register](../incidents/README.md) adds three scoped mutation
+proofs and two explicit open evidence gaps. The inventory checks both registers;
+this historical-replay registry and its proof semantics remain unchanged.

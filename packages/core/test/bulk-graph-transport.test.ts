@@ -3,8 +3,14 @@ import type { Stream } from '@libp2p/interface';
 import type { DKGNode } from '../src/node.js';
 import type { Network } from '../src/network/network.js';
 import { ProtocolRouter } from '../src/protocol-router.js';
-import { BulkGraphSession, bulkGraphTransportOptions, exchangeBulkGraph, registerBulkGraphResponder } from '../src/bulk-graph-transport.js';
+import { BulkGraphSession, bulkGraphTransportOptions, exchangeBulkGraph, registerBulkGraphResponder,
+  exchangePublicCheckpoint, registerPublicCheckpointResponder, PUBLIC_CHECKPOINT_PROTOCOL } from '../src/bulk-graph-transport.js';
 import { BULK_GRAPH_KIND as K, BULK_GRAPH_PROTOCOL, encodeBulkGraphFrame, type BulkGraphFrame } from '../src/bulk-graph-wire.js';
+
+const protocols = [
+  ['bulk', BULK_GRAPH_PROTOCOL, exchangeBulkGraph, registerBulkGraphResponder],
+  ['checkpoint', PUBLIC_CHECKPOINT_PROTOCOL, exchangePublicCheckpoint, registerPublicCheckpointResponder],
+] as const;
 
 const PEER = '12D3KooWBzj7Hg2cKCdsKL6QcjC5UbLztKTvzCZQHaT4P4ZyJEAA';
 const frame = { kind: K.DATA, index: 0, sequence: 0, payload: new Uint8Array([1]) };
@@ -44,7 +50,7 @@ class ControlledStream extends EventTarget {
 function fixture() {
   vi.useFakeTimers();
   const stream = new ControlledStream();
-  const dialProtocol = vi.fn(async () => stream as unknown as Stream);
+  const dialProtocol = vi.fn(async (_peer: string, _protocol: string) => stream as unknown as Stream);
   const node = { stopSignal: new AbortController().signal,
     libp2p: { getConnections: () => [], peerStore: { get: async () => ({ addresses: [] }) } },
   } as unknown as DKGNode;
@@ -99,9 +105,9 @@ describe('bulk graph read-idle and original total deadlines', () => {
     expect(stream.returned).toHaveBeenCalledOnce();
   });
 
-  it('keeps an exchange active beyond 120 seconds while frames arrive, then closes and disposes it', async () => {
+  it.each(protocols)('%s keeps an exchange active beyond 120 seconds while frames arrive, then closes and disposes it', async (_name, protocol, exchange) => {
     const { stream, router, dialProtocol } = fixture();
-    const result = exchangeBulkGraph(router, PEER, new Uint8Array([1]), bulkGraphTransportOptions(300_000), async session => {
+    const result = exchange(router, PEER, new Uint8Array([1]), bulkGraphTransportOptions(300_000), async session => {
       const received = [];
       for (let n = 0; n < 3; n++) received.push(await session.next());
       return received;
@@ -113,15 +119,16 @@ describe('bulk graph read-idle and original total deadlines', () => {
     }
     await expect(result).resolves.toEqual([frame, frame, frame]);
     expect(dialProtocol).toHaveBeenCalledOnce();
+    expect(dialProtocol.mock.calls[0]?.[1]).toBe(protocol);
     expect(stream.send).toHaveBeenCalledOnce();
     expect(stream.close).toHaveBeenCalledOnce();
     expect(stream.returned).toHaveBeenCalledOnce();
     expect(stream.abort).not.toHaveBeenCalled();
   });
 
-  it('does not let incoming frames extend the original total exchange deadline', async () => {
+  it.each(protocols)('%s does not let incoming frames extend the original total exchange deadline', async (_name, _protocol, exchange) => {
     const { stream, router, dialProtocol } = fixture();
-    const result = exchangeBulkGraph(router, PEER, new Uint8Array([1]), bulkGraphTransportOptions(180_000), async session => {
+    const result = exchange(router, PEER, new Uint8Array([1]), bulkGraphTransportOptions(180_000), async session => {
       for (let n = 0; n < 3; n++) await session.next();
     });
     const rejected = expect(result).rejects.toMatchObject({ name: 'TimeoutError' });
@@ -142,11 +149,11 @@ describe('bulk graph read-idle and original total deadlines', () => {
   });
 });
 
-describe('bulk graph responder registration', () => {
+describe.each(protocols)('%s graph responder registration', (_name, expectedProtocol, _exchange, register) => {
   it('forwards failure diagnostics without accepting transport-limit overrides', () => {
     const registerDuplexStream = vi.fn(), onInboundFailure = vi.fn();
     const diagnostics = { onInboundFailure, timeoutMs: 9_000_000, maxRequestBytes: 9_000_000 };
-    registerBulkGraphResponder({ registerDuplexStream } as unknown as ProtocolRouter,
+    register({ registerDuplexStream } as unknown as ProtocolRouter,
       async () => undefined, async () => undefined, diagnostics);
     expect(registerDuplexStream.mock.calls[0]![3]).toEqual({ ...bulkGraphTransportOptions(3_600_000), onInboundFailure });
   });
@@ -155,7 +162,7 @@ describe('bulk graph responder registration', () => {
     const registerDuplexStream = vi.fn();
     const authorize = vi.fn(async (bytes: Uint8Array, peer: string) => ({ bytes, peer }));
     const respond = vi.fn(async () => undefined);
-    registerBulkGraphResponder({ registerDuplexStream } as unknown as ProtocolRouter, authorize, respond);
+    register({ registerDuplexStream } as unknown as ProtocolRouter, authorize, respond);
     const [protocol, readRequest, handle, options] = registerDuplexStream.mock.calls[0]!;
     return { protocol, readRequest, handle, options, authorize, respond };
   }
@@ -163,7 +170,7 @@ describe('bulk graph responder registration', () => {
   it('reads the request frame, then authorizes and answers on the same session', async () => {
     const { stream } = fixture();
     const { protocol, readRequest, handle, options, authorize, respond } = registered();
-    expect(protocol).toBe(BULK_GRAPH_PROTOCOL);
+    expect(protocol).toBe(expectedProtocol);
     expect(options).toEqual(bulkGraphTransportOptions(3_600_000));
     const signal = new AbortController().signal;
     const request = readRequest(stream, signal);

@@ -5,7 +5,7 @@ import {
   invalidateSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
 import type { EventBus } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, logKaLifecycleEvent, contextGraphDataUri, contextGraphMetaUri, DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, GRAPH_KA_CONTENT_SCOPE_VERSION, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetAgentAddressesEqual, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, logKaLifecycleEvent, contextGraphDataUri, contextGraphMetaUri, DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, GRAPH_KA_CONTENT_SCOPE_VERSION, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetAgentAddressesEqual, knowledgeAssetLayerGraphUri, MemoryLayer, isSparqlTermValidationError } from '@origintrail-official/dkg-core';
 import type { PhaseCallback } from './publisher.js';
 import {
   tryReplaceGraphWithDurableRootCompanionAtomically,
@@ -28,11 +28,11 @@ import {
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
   GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
   SWM_SENDER_KEY_MESSAGE_TYPE,
-  assertNoUserAuthoredTrustLevelQuads,
 } from '@origintrail-official/dkg-core';
 import type { EncryptedWorkspacePayloadMsg, GossipEnvelopeMsg, OperationContext, SwmSenderKeyMessageMsg, WorkspaceCASConditionMsg, WorkspacePublishRequestMsg, WorkspaceRecipientEncryptionKey } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
+import { assertNoReceivedProtocolMetadata } from './protocol-metadata.js';
 import { acceptIncomingPublicQuads } from './incoming-public-copy.js';
 import { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
 import {
@@ -1488,7 +1488,7 @@ export class SharedMemoryHandler {
       let quads: Quad[];
       try {
         quads = parseSimpleNQuads(nquadsStr);
-        assertNoUserAuthoredTrustLevelQuads(quads);
+        assertNoReceivedProtocolMetadata(quads);
       } catch (error) {
         const reason = `INVALID_KA_RDF: ${error instanceof Error ? error.message : String(error)}`;
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
@@ -1874,19 +1874,18 @@ export class SharedMemoryHandler {
         }
       }
     } catch (err) {
-      // PR-C codex R3: classify the catch path as `retryable: true`.
-      // The dominant production case here is `workspaceSenderKeyDecryptor`
-      // rejecting because the corresponding sender key package
-      // hasn't arrived for the epoch yet — once it does, the same
-      // wire bytes apply cleanly on the next attempt. Generic
-      // triple-store hiccups (`store.insert` worker timeouts,
-      // transient backend errors) similarly recover on retry.
-      // Genuinely permanent throws (malformed protobuf inside the
-      // try, etc.) will eventually exhaust the substrate outbox's
-      // retry budget and get dropped without operator action.
+      // PR-C codex R3: the catch path is retryable. The dominant production
+      // case is `workspaceSenderKeyDecryptor` rejecting because the sender key
+      // package for the epoch hasn't arrived yet; once it does, the same wire
+      // bytes apply cleanly. Store hiccups (worker timeouts, transient backend
+      // errors) recover on retry too. A term the store refuses is permanent:
+      // the same bytes are refused again. Other permanent throws (malformed
+      // protobuf inside the try, etc.) exhaust the substrate outbox's budget.
       const reason = err instanceof Error ? err.message : String(err);
       this.log.error(ctx, `SWM handle failed: ${reason}`);
-      return failedSharedMemoryOutcome(verifiedLifecycleFields, reason);
+      return isSparqlTermValidationError(err)
+        ? rejectedSharedMemoryOutcome(verifiedLifecycleFields, reason, false, true)
+        : failedSharedMemoryOutcome(verifiedLifecycleFields, reason);
     }
   }
 

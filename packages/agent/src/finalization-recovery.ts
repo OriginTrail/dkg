@@ -1,14 +1,5 @@
-import type {
-  CanonicalFinalizationReceipt,
-  CanonicalFinalizationReceiptResolution,
-  ChainAdapter,
-  EventFilter,
-} from '@origintrail-official/dkg-chain';
-import {
-  decodeFinalizationMessage,
-  getMetrics,
-  GRAPH_KA_CONTENT_SCOPE_VERSION,
-} from '@origintrail-official/dkg-core';
+import type { CanonicalFinalizationReceipt, CanonicalFinalizationReceiptResolution, ChainAdapter, EventFilter } from '@origintrail-official/dkg-chain';
+import { decodeFinalizationMessage, getMetrics, GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import {
   VerifiedGraphScopedFinalizationEvidenceCodec,
@@ -27,10 +18,8 @@ import {
   type FinalizationRecoverySettledPublisherUpgradeResult,
   type FinalizationRecoveryStore,
 } from './finalization-recovery-store.js';
-import {
-  FinalizationPublisherAuthorityObserver,
-  type FinalizationPublisherAuthorityLiveEntry,
-} from './finalization-publisher-authority-observer.js';
+import { FinalizationPublisherAuthorityObserver, type FinalizationPublisherAuthorityLiveEntry } from './finalization-publisher-authority-observer.js';
+import { supersedeEntryHeldInVerifiedMemory, type ExactVerifiedMemoryCopy, type ExactVerifiedMemoryCopyQuery } from './finalization-recovery-verified-memory.js';
 
 export type FinalizationRecoveryApplyOutcome =
   | 'applied'
@@ -209,6 +198,8 @@ export interface FinalizationRecoveryMaterializer<
     evidence: VerifiedGraphScopedFinalizationEvidence;
     reason: string;
   }): Promise<FinalizationRecoveryInvalidationOutcome>;
+  /** How Verified Memory holds this exact assertion, verified against `merkleRoot`, if it does. */
+  findExactVerifiedMemoryCopy(query: ExactVerifiedMemoryCopyQuery): Promise<ExactVerifiedMemoryCopy | undefined>;
   isRetryableError(error: unknown): boolean;
 }
 
@@ -2044,6 +2035,12 @@ export class FinalizationRecovery<
           },
           { kind: 'recovery', entry: replayEntry },
         );
+        if (await supersedeEntryHeldInVerifiedMemory({
+          entry: replayEntry, candidate, merkleRoot: input.merkleRoot,
+          failureCode: result.outcome === 'deferred' ? result.failureCode : undefined,
+          materializer: this.materializer, log: this.log,
+          supersede: (reason) => this.transition(replayEntry, 'SUPERSEDED', reason),
+        })) return deferredRetryDelay === undefined ? 'none' as const : 'recovered' as const;
       }
 
       if (result.outcome === 'deferred') {

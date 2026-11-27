@@ -106,14 +106,23 @@ export function contextGraphSubscriptionSyncPremisesEqual(
   current: ContextGraphSub | undefined,
 ): boolean {
   if (captured === undefined || current === undefined) return false;
+  return contextGraphSubscriptionAdmissionPremisesEqual(captured, current)
+    // `metaSynced === false` and an absent value are read differently.
+    && captured.metaSynced === current.metaSynced
+    && (captured.pendingMeta === true) === (current.pendingMeta === true);
+}
+
+/** Admission and chain binding, before metadata readiness has been established. */
+export function contextGraphSubscriptionAdmissionPremisesEqual(
+  captured: ContextGraphSub | undefined,
+  current: ContextGraphSub | undefined,
+): boolean {
+  if (captured === undefined || current === undefined) return false;
   return captured.subscribed === current.subscribed
     && (captured.coreHosted === true) === (current.coreHosted === true)
     && captured.syncMode === current.syncMode
     && captured.onChainId === current.onChainId
-    && captured.onChainHash === current.onChainHash
-    // `metaSynced === false` and an absent value are read differently.
-    && captured.metaSynced === current.metaSynced
-    && (captured.pendingMeta === true) === (current.pendingMeta === true);
+    && captured.onChainHash === current.onChainHash;
 }
 
 /**
@@ -139,6 +148,22 @@ export function mayAdoptContextGraphWireSubscription(
 ): boolean {
   return next.subscribed === true || next.coreHosted === true
     || (wire.subscribed !== true && wire.coreHosted !== true);
+}
+
+/** One projection owns verified wire adoption for both ordinary writes and activation. */
+export function projectContextGraphWireAdoption(
+  next: ContextGraphSubInput, wire: ContextGraphSub | undefined,
+  localWireId: string, explicitNextWireId: string | undefined,
+): { adopts: boolean; next: ContextGraphSubInput } {
+  const adopts = wire !== undefined && mayAdoptContextGraphWireSubscription(next, wire)
+    && (explicitNextWireId === undefined || explicitNextWireId === localWireId)
+    && (next.onChainId === undefined || wire.onChainId === undefined || next.onChainId === wire.onChainId);
+  return { adopts, next: {
+    ...next,
+    ...(adopts && next.onChainId === undefined ? { onChainId: wire.onChainId } : {}),
+    ...(adopts && next.onChainHash === undefined ? { onChainHash: localWireId } : {}),
+    ...(adopts && wire.coreHosted === true ? { coreHosted: true } : {}),
+  } };
 }
 
 export function resolveContextGraphSyncMode(input: {

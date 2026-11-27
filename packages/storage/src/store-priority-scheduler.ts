@@ -1,12 +1,15 @@
+import { traceShareStoreCall } from './share-store-timing.js';
 import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';
 import { performance } from 'node:perf_hooks';
 import { availableParallelism } from 'node:os';
 import {
   backpressureRegistry,
+  currentAsyncAdmissionDiagnosticContext,
   getMetrics,
   ObservableScheduler,
   type SchedulerPressureOutcome,
   type SchedulerPressureTicket,
+  type AsyncAdmissionDiagnosticContext,
 } from '@origintrail-official/dkg-core';
 import {
   isStoreWorkPriority,
@@ -23,6 +26,7 @@ import {
 } from './store-operation-outcome.js';
 import {
   createRateLimitedStoreTimeoutDiagnosticReporter,
+  activeStoreAdmissionsSnapshot,
   type StoreSchedulerPriority,
   type StoreSchedulerTimeoutDiagnostic,
 } from './store-scheduler-timeout-diagnostics.js';
@@ -31,10 +35,9 @@ import { StoreSchedulerStats, metricOperation, registerStoreSchedulerStats } fro
 const defaultStoreWorkPriority = new AsyncLocalStorage<StoreWorkPriority>();
 
 /**
- * Run `fn` with a default admission lane for store work that names none.
- * Explicit per-call priorities still win. Long background walks use this so
- * every store call they make stays out of the normal lane without threading
- * a priority through each helper.
+ * Run `fn` with a default admission lane for store work that names none. Explicit per-call priorities still
+ * win. Long background walks use this so every store call they make stays out of the normal lane without
+ * threading a priority through each helper.
  */
 export function withDefaultStoreWorkPriority<T>(priority: StoreWorkPriority, fn: () => T): T {
   return defaultStoreWorkPriority.run(priority, fn);
@@ -55,11 +58,10 @@ export function withoutDefaultStoreWorkPriority<T>(fn: () => T): T {
 }
 
 /**
- * How many operations of one shared lane `store` admits at once, or undefined
- * when the store does not say. Without `priority` it answers for the lane that
- * unprioritised work started here runs in. A caller that fans out reads uses
- * it as its width: a wider fan-out only queues the surplus behind its own
- * siblings, where each read waits against the queue deadline.
+ * How many operations of one shared lane `store` admits at once, or undefined when the store does not say.
+ * Without `priority` it answers for the lane that unprioritised work started here runs in. A caller that fans
+ * out reads uses it as its width: a wider fan-out only queues the surplus behind its own siblings, where each
+ * read waits against the queue deadline.
  */
 export function storeLaneInflightLimit(
   store: Pick<TripleStore, 'getPressureSnapshot'>,
@@ -104,10 +106,7 @@ export interface StoreSchedulerBusyErrorOptions extends ErrorOptions {
   storeOperation?: StoreOperation;
 }
 
-/**
- * A retry-safe overload rejection emitted only while work is still queued.
- * Callers may retry because the operation closure has not started.
- */
+/** A retry-safe overload rejection: emitted only while the work is queued, before its closure starts. */
 export class StoreSchedulerBusyError extends Error implements StoreOperationOutcomeTagged {
   readonly code = 'STORE_SCHEDULER_BUSY' as const;
   readonly retryable = true as const;
@@ -186,6 +185,8 @@ interface QueueEntry<T> {
   operation: string;
   storeOperation?: StoreOperation;
   queuedAt: number;
+  admission?: AsyncAdmissionDiagnosticContext;
+  timing?: ReturnType<typeof traceShareStoreCall>;
   pressureTicket: SchedulerPressureTicket;
   work: () => Promise<T>;
   resolve: (value: T) => void;
@@ -250,16 +251,20 @@ function resolveMaxConcurrentFromEnv(): number {
     'DKG_STORE_MAX_CONCURRENT',
     DEFAULT_MAX_CONCURRENT,
   );
-  // One admitted SPARQL request can use several Oxigraph/Rayon worker threads.
-  // Letting an operator's stale tuning admit more store jobs than the host has
-  // logical CPUs multiplies runnable work and can starve the reserved ACK lane
-  // even while the JS scheduler reports empty queues. Keep explicit constructor
-  // options available to tests/embedded callers, but make the process-level
-  // environment setting a hardware-aware ceiling.
-  // A one-slot automatic ceiling would normalize the default ACK reservation
-  // to zero. Keep one ordinary slot plus the default reserved ACK slot even on
-  // a single-vCPU runtime. An explicitly lower process setting is still
-  // honored because it remains the first operand of Math.min().
+  // External HTTP stores can be limited by request latency before CPU capacity.
+  // Operators may qualify a larger budget without surrendering ACK/health
+  // reservations. Keep the existing CPU ceiling unless explicitly opted out.
+  if (process.env.DKG_STORE_CONCURRENCY_POLICY?.trim() === 'configured' && Number.isSafeInteger(configured)) {
+    return configured;
+  }
+  // One admitted SPARQL request can use several Oxigraph/Rayon worker threads. Letting an operator's stale
+  // tuning admit more store jobs than the host has logical CPUs multiplies runnable work and can starve the
+  // reserved ACK lane even while the JS scheduler reports empty queues. Keep explicit constructor options
+  // available to tests/embedded callers, but make the process-level environment setting a hardware-aware
+  // ceiling.
+  // A one-slot automatic ceiling would normalize the default ACK reservation to zero. Keep one ordinary slot
+  // plus the default reserved ACK slot even on a single-vCPU runtime. An explicitly lower process setting is
+  // still honored because it remains the first operand of Math.min().
   return Math.min(
     configured,
     Math.max(MIN_ACK_SAFE_MAX_CONCURRENT, availableParallelism()),
@@ -371,6 +376,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
   private readonly shareSingleOrdinarySlot: boolean;
   private readonly controlId?: string;
   private contendedNormalDispatches = 0;
+  private readonly activeAdmissions = new Map<QueueEntry<unknown>, number>();
   // Wait and rejection figures for the periodic line. The lanes come from `queues`:
   // STORE_WORK_PRIORITIES can still be uninitialised when the singleton below is built.
   readonly stats: StoreSchedulerStats;
@@ -525,11 +531,16 @@ export class StorePriorityScheduler extends ObservableScheduler {
       ? priority ?? defaultStoreWorkPriority.getStore() ?? 'normal'
       : 'normal';
     const lane: StoreSchedulerPriority = this.controlId === undefined ? normalizedPriority : 'control';
+    const busy = this.normalInflight + this.ackInflight + this.healthInflight + this.backgroundInflight > 0;
+    const timing = traceShareStoreCall(operation, metadata?.storeOperation, lane, this.controlId,
+      busy ? () => this.getBackpressureSnapshot() : undefined);
     if (signal?.aborted) {
+      timing?.finish('aborted');
       const reason = signal.reason;
       throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
     }
     if (this.queues[normalizedPriority].length >= this.queueLimits[normalizedPriority]) {
+      timing?.finish('queue_full');
       const error = new StoreSchedulerBusyError(
         'queue_full',
         lane,
@@ -554,8 +565,9 @@ export class StorePriorityScheduler extends ObservableScheduler {
         operation,
         storeOperation: metadata?.storeOperation,
         queuedAt: this.now(),
-        pressureTicket,
-        work: AsyncResource.bind(work),
+        admission: currentAsyncAdmissionDiagnosticContext(),
+        pressureTicket, timing,
+        work: AsyncResource.bind(timing ? () => timing.run(work) : work),
         resolve,
         reject,
         signal,
@@ -563,6 +575,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
       const onAbort = () => {
         if (this.removeQueued(entry as QueueEntry<unknown>)) {
           this.cleanupQueuedEntry(entry as QueueEntry<unknown>);
+          timing?.finish('aborted');
           this.pressureCancelQueued(entry.pressureTicket, 'aborted');
           this.stats.recordQueueWait(entry.lane, this.now() - entry.queuedAt);
           const reason = signal?.reason;
@@ -584,9 +597,11 @@ export class StorePriorityScheduler extends ObservableScheduler {
           entry.storeOperation === undefined ? undefined : { storeOperation: entry.storeOperation },
         );
         this.reportTimeout?.(
-          { priority: lane, operation },
+          { priority: lane, operation, ...(entry.admission ? { admission: entry.admission } : {}) },
           () => this.getBackpressureSnapshot(),
+          () => activeStoreAdmissionsSnapshot(this.activeAdmissions, this.now()),
         );
+        timing?.finish('queue_wait_timeout');
         this.pressureRejectQueued(entry.pressureTicket, error.reason);
         this.observeRejection(error, this.now() - entry.queuedAt);
         reject(error);
@@ -652,6 +667,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
     this.cleanupQueuedEntry(entry);
     this.increment(entry.priority);
     const startedAt = this.now();
+    if (entry.admission) this.activeAdmissions.set(entry, startedAt);
     this.pressureStart(entry.pressureTicket);
     const waitMs = Math.max(0, startedAt - entry.queuedAt);
     const attributes = {
@@ -672,15 +688,18 @@ export class StorePriorityScheduler extends ObservableScheduler {
     let pressureOutcome: SchedulerPressureOutcome = 'completed';
     result
       .then((value) => {
+        entry.timing?.finish('ok');
         this.observeDuration(entry, startedAt, 'ok');
         entry.resolve(value);
       })
       .catch((err) => {
         pressureOutcome = 'failed';
+        entry.timing?.finish('error');
         this.observeDuration(entry, startedAt, 'error');
         entry.reject(err);
       })
       .finally(() => {
+        this.activeAdmissions.delete(entry);
         getMetrics().storeSchedulerActive.add(-1, attributes);
         this.pressureFinish(entry.pressureTicket, pressureOutcome);
         this.decrement(entry.priority);

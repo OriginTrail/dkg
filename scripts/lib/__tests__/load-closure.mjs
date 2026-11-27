@@ -12,6 +12,21 @@ import { traceLaneLoads } from './load-graph.mjs';
 // load-closure guard cannot follow, each with the reason it needs no route of
 // its own.
 export const UNFOLLOWED_LOADS = new Map([
+  ["examples/n8n-capability/dkg-profile.mjs: pathToFileURL(file).href", "an absolute operator-configured external profile, absent by default; repository profile fixtures and the loader share the n8n-capability support route"],
+  ["packages/semantic-runtime/src/component-supervisor.ts: this.options.workerUrl ?? new URL('./component-worker.js', import.meta.url)", "the default component-worker is semantic-runtime source with the same package route; an injected worker URL is supplied by tests"],
+  ["packages/semantic-runtime/src/component-worker.ts: pathToFileURL(artifacts.componentJsPath).href", "integrity-checked generated component glue built from semantic-runtime and Rust sources; package changes select supporting and CLI lanes, and Rust changes plan full CI"],
+  ["packages/semantic-runtime/src/typescript-programs.ts: new URL(`../typescript-runtime/${filename}`, import.meta.url)", "compiler and worker helpers under the same semantic-runtime package rule"],
+  ["packages/semantic-runtime/src/worker-supervisor.ts: this.options.workerUrl ?? new URL('./worker.js', import.meta.url)", "the default worker is semantic-runtime source covered by the same package route; tests may supply a worker fixture"],
+  ["packages/semantic-runtime/src/worker.ts: artifacts.gluePath", "integrity-checked generated Wasm glue built from semantic-runtime and Rust sources, covered by the package rule and full CI for Rust changes"],
+  ["packages/semantic-runtime/typescript-runtime/worker.mjs: pathToFileURL(join(message.directory, 'component.js')).href", "a TypeScript Program compiled into a temporary execution directory; compiler sources route with semantic-runtime"],
+  ["packages/cli/src/daemon/local-llm-service.ts: pathToFileURL(programPath).href", "an operator-configured external Program module whose source hash is pinned; no repository path is configured by default"],
+  ["packages/cli/src/semantic-runtime-investigator-adapter.ts: process.env.SEMANTIC_RUNTIME_CODEX_BIN ?? 'codex'", "the installed Codex executable or a test-supplied executable, not repository source"],
+  ["packages/cli/src/semantic-runtime-safe-llm-adapter.ts: binary", "the compiled Rust safe-LLM runner or a test fixture; Rust source and build scripts are unknown paths that plan full CI"],
+  ["packages/node-ui/browser-regressions/shell/select-placement.spec.ts: url", "the Select fixture beside the spec, select-fixture.tsx, which the browser page imports through Vite's /@fs path; it is node-ui source in the same browser-regressions directory, not a module the Node process loads"],
+  ["packages/node-ui/src/ui/components/Programs/TypeScriptEditor.tsx: scriptUrl", "the external browser editor script selected by the component, not a repository module"],
+  ["scripts/build-semantic-runtime.mjs: command", "pinned cargo, wasm-tools, wasm-bindgen and Node build executables; the repository Rust wrapper is an explicit file reference, and build-script changes plan full CI"],
+  ["scripts/semantic-runtime-rustc.mjs: compiler", "the Rust compiler selected by cargo, not repository source"],
+
   ['scripts/test-mcp-wsl-launch.mjs: execute = execFileSync',
     'injected test seam defaults to node:child_process; calls only system /usr/bin/wslpath and /usr/bin/env, while the repository Windows driver is a literal URL also loaded directly by the smoke test'],
   ['scripts/ci/run-chain-rpc-node26.mjs: vitest',
@@ -35,7 +50,7 @@ export const UNFOLLOWED_LOADS = new Map([
   ['packages/cli/src/source-worker-runner.ts: pathToFileURL(config.handlerModule).href',
     'a handler module named in the source-worker configuration'],
   ['packages/cli/test/blazegraph-image-metadata.test.ts: parserPath', "the CLI's own blazegraph-image-metadata.cjs"],
-  ['packages/mcp-dkg/src/adapters.ts: pkg', 'a third-party adapter package named at run time; ADAPTER_MAP names no workspace'],
+  ['packages/mcp-dkg/src/adapters.ts: snapshot ? pathToFileURL(snapshot).href : pkg', 'a configured external adapter snapshot or third-party package; ADAPTER_MAP names no workspace'],
   ['packages/adapter-openclaw/test/openclaw-entry.test.ts: href', 'a module the test writes to a temporary directory'],
   ['packages/agent/scripts/test-package-root.mjs: specifier',
     "the agent package's own emitted internal namespace files, imported by package name to verify export denial; agent source changes run the agent's lanes"],
@@ -52,8 +67,8 @@ export const UNFOLLOWED_LOADS = new Map([
   // Files a child-process or worker call runs that no reading resolves.
   ['scripts/lib/regressions/subprocess.mjs: invocation.command',
     'the installed pnpm CLI or recorded Node executable, not a repository script; repository-owned profiles name the tests replayed in disposable checkouts'],
-  ['scripts/lib/regressions/registry.mjs: invocation.command',
-    'the installed pnpm CLI or recorded Node executable, resolved by subprocess.mjs like every proof launch, running the named-assertion discovery; not a repository script'],
+  ['scripts/lib/regressions/named-test-discovery.mjs: invocation.command',
+    'Required-lane Vitest discovery uses the portable pnpm command resolver.'],
   ["devnet/rfc64-persistence-lifecycle/run.ts: childArguments(AGENT_PROCESS, stage ? ['--stage'] : [])",
     'agent-process.ts beside it, run under tsx (childArguments puts the script after the loader flags); a devnet file with run.ts\'s own route'],
   ['devnet/rfc64-persistence-lifecycle/run.ts: childArguments(LEASE_PROBE)',
@@ -83,6 +98,8 @@ export const UNFOLLOWED_LOADS = new Map([
     'the benchmark itself, re-run as its own worker process'],
   ['packages/storage/src/adapters/oxigraph-worker.ts: this.workerPath',
     "the storage package's own oxigraph-worker-impl (beside it, or its dist/ build), storage code its rule routes"],
+  ['packages/agent/src/snapshot-native-process.ts: command',
+    'the explicitly configured external Java executable running a locally hash-pinned Blazegraph JAR; lifecycle tests use process.execPath with inline code, not a repository entry point; the launcher and its callers already select the agent lane'],
   // Programs a child-process call runs that no reading identifies: tools, or
   // node running the file named.
   ['devnet/rfc64-gate1-public-open/agent-child.ts: options.spawn.command',

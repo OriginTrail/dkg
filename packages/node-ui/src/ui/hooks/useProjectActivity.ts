@@ -48,7 +48,6 @@ const TIMESTAMP_PREDICATES = [
   'http://dkg.io/ontology/tasks/dueDate',
 ];
 
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const PROV_WAS_ATTRIBUTED_TO = 'http://www.w3.org/ns/prov#wasAttributedTo';
 
 /**

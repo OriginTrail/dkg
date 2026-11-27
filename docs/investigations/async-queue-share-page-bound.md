@@ -2,7 +2,7 @@
 
 OT-RFC-73 plan section 5.3 asks for a measurement before the share listing is paged: "the engine scan is O(filtered rows), so time the
 page query on Blazegraph at 0, 10k and 50k, and declare its bound as part of AC5." This note is that measurement, the shape it chose
-and the bound it declares. The listing behavior it led to is in [async-share-admission.md](../api/async-share-admission.md#listing-paging-statistics-and-the-post-commit-sweep).
+and the bound it declares. The listing behavior it led to is in [async-queue-internals.md](../../packages/publisher/docs/async-queue-internals.md#listing-paging-statistics-and-the-post-commit-sweep).
 
 ## Setup
 

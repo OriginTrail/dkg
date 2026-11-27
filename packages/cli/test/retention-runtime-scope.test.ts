@@ -1,7 +1,8 @@
 /**
- * OT-RFC-73 P10b: retention runs only in the daemon's admission instance. Between the verify and the delete of a retention hold the only exclusion is the
+ * OT-RFC-73 P10b, P11: retention runs only in the daemon's admission instance. Between the verify and the delete of a retention hold the only exclusion is the
  * in-process queue lock, so no other runtime (a standalone agent or library, a worker or runner process, the offline CLI inspector, a script) may build or start a
- * sweep. This test pins who may: every reference to the sweep constructors and to the starter in shipped source, and how the daemon wires them.
+ * sweep. This test pins who may: every reference to the sweep constructors (the share core's, the publisher core's and the publisher's retention access) and to the
+ * starter in shipped source, and how the daemon wires them.
  *
  * It reads source across packages on purpose. A new caller makes this test fail; whoever adds one must say, in the allow-list below, why that runtime is safe.
  */
@@ -38,6 +39,9 @@ function shippedSources(): string[] {
 const SOURCES = shippedSources();
 const read = (file: string): string => readFileSync(join(ROOT, file), 'utf-8');
 const filesMatching = (pattern: RegExp): string[] => SOURCES.filter(file => pattern.test(read(file))).sort();
+/** The code of a file without its comments (block and line), for a rule about calls and not about prose. */
+const codeOf = (file: string): string => read(file).replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+const filesCalling = (pattern: RegExp): string[] => SOURCES.filter(file => pattern.test(codeOf(file))).sort();
 
 describe('who may build or start a sweep', () => {
   it('scans a real tree (the guard below would pass vacuously on an empty one)', () => {
@@ -55,9 +59,26 @@ describe('who may build or start a sweep', () => {
     ]);
   });
 
-  it('the factory and the registry are used by the starter only', () => {
+  it('the publisher core is constructed in one place: the daemon\'s publisher sweep factory (the definition and the package export aside)', () => {
+    expect(filesMatching(/\bcreatePublisherRetention\b/)).toEqual([
+      'packages/cli/src/daemon/retention-publisher-sweep.ts',
+      'packages/publisher/src/async-lift-retention.ts',
+      'packages/publisher/src/index.ts',
+    ]);
+  });
+
+  it('the publisher queue\'s claim transaction is opened to a sweep in one place: the factory asks the publisher instance it was given for `retentionAccess()`, nobody else does', () => {
+    expect(filesCalling(/\.retentionAccess\(/)).toEqual(['packages/cli/src/daemon/retention-publisher-sweep.ts']);
+    expect(filesCalling(/\bretentionAccess\(\)\s*[:{]/)).toEqual(['packages/publisher/src/async-lift-publisher-impl.ts', 'packages/publisher/src/async-lift-retention-access.ts']);   // the definitions
+  });
+
+  it('the factories and the registry are used by the starter only', () => {
     expect(filesMatching(/\b(?:createShareRetentionSweep|shareRetentionSweepFactory|RETENTION_SWEEP_FACTORIES)\b/)).toEqual([
       'packages/cli/src/daemon/retention-share-sweep.ts',
+      'packages/cli/src/daemon/retention-sweeps.ts',
+    ]);
+    expect(filesMatching(/\b(?:createPublisherRetentionSweep|publisherRetentionSweepFactory)\b/)).toEqual([
+      'packages/cli/src/daemon/retention-publisher-sweep.ts',
       'packages/cli/src/daemon/retention-sweeps.ts',
     ]);
   });
@@ -68,7 +89,7 @@ describe('who may build or start a sweep', () => {
       'packages/cli/src/daemon/retention-sweeps.ts',
     ]);
     for (const other of ['packages/cli/src/publisher-runner.ts', 'packages/cli/src/cli-helpers.ts', 'packages/cli/src/commands/publisher.ts']) {
-      expect(read(other), other).not.toMatch(/retention-(?:sweeps|share-sweep|timer)|createShareRetention/);
+      expect(read(other), other).not.toMatch(/retention-(?:sweeps|share-sweep|publisher-sweep|timer)|createShareRetention|createPublisherRetention|retentionAccess/);
     }
     // the in-daemon worker is not where retention lives either
     for (const file of SOURCES.filter(name => name.startsWith('packages/cli/src/daemon/worker/'))) expect(read(file), file).not.toMatch(/retention/i);
@@ -77,7 +98,7 @@ describe('who may build or start a sweep', () => {
   it('the daemon starts it as the admission instance, once, with the runtime named', () => {
     const lifecycle = read('packages/cli/src/daemon/lifecycle.ts');
     expect(lifecycle.match(/\bstartRetention\(/g)).toHaveLength(1);
-    expect(lifecycle).toMatch(/startRetention\(\{ runtime: 'daemon-admission', settings: retentionSettings, agent, log \}\)/);
+    expect(lifecycle).toMatch(/startRetention\(\{ runtime: 'daemon-admission', settings: retentionSettings, agent, publisher: publisherControl, log \}\)/);
     expect(lifecycle).not.toMatch(/runtime: '(?:standalone-agent|worker-process|publisher-runner|offline-inspector|script)'/);
   });
 });
@@ -100,6 +121,16 @@ describe('how the daemon wires it', () => {
     expect(start).toBeGreaterThan(at('const startPostApiPublishing'));
     expect(start).toBeGreaterThan(at('promoteWorkerLifecycle = startPromoteWorkerDaemonLifecycle('));
     expect(start).toBeGreaterThan(at('agent.configurePromoteQueue(promoteQueuePolicy)'));
+  });
+
+  it('hands it the daemon\'s admission instance of the publisher queue: the one built over agent.store with the journal on, before the sweep exists and not the runner\'s', () => {
+    const instance = at('const publisherControl = createPublisherControlFromStore(agent.store, {');
+    expect(at('daemonRetention = startRetention(')).toBeGreaterThan(instance);
+    // the instance is the one that serves the API and the boot backfill; the runner's own instance is made in publisher-runner.ts and is never given to the starter
+    expect(lifecycle.slice(instance, instance + 2_500)).toContain('await backfillVmPublishIntentIndexOnBoot(publisherControl, log)');
+    expect(lifecycle).toContain('publisherControl,');                                  // handed to the route context
+    expect(lifecycle).not.toMatch(/startRetention\([^)]*publisherState/);
+    expect(read('packages/cli/src/publisher-runner.ts')).toMatch(/journalWrites: true/);   // the admission instance is the one that writes the journal
   });
 
   it('stops it in the shutdown, before the producers are quiesced and the agent stops', () => {

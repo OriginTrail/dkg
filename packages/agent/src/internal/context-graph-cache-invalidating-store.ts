@@ -1,3 +1,4 @@
+import { readGraphInventory, readGraphInventoryByPrefix } from '@origintrail-official/dkg-storage';
 // SPDX-License-Identifier: Apache-2.0
 
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
@@ -11,6 +12,8 @@ import {
 import type { StoreMutation, StoreMutationObserver } from './store-mutation.js';
 import { createObservedStoreMutation, type ObservedStoreMutation, type ProjectionDirtyCallback } from './observed-store-mutation.js';
 export type { ProjectionDirtyCallback } from './observed-store-mutation.js';
+
+type MutationObservedStore = TripleStore & Partial<SortedGraphSetSource>;
 
 // A commit the canonical plan refuses is refused by the store before dispatch too; until it is,
 // it may change anything.
@@ -29,7 +32,7 @@ export function createListContextGraphsCacheInvalidatingStore(
   // names its target graph so deleted facts are fenced, not only inserted
   // ones) and the observer sees it before dispatch and again when it settles.
   observerOrCallback?: StoreMutationObserver | ProjectionDirtyCallback,
-): TripleStore & Partial<SortedGraphSetSource> {
+): MutationObservedStore {
   return createMutationObservedStore(innerStore, createObservedStoreMutation(invalidate, observerOrCallback));
 }
 
@@ -37,13 +40,12 @@ export function createListContextGraphsCacheInvalidatingStore(
 export function createMutationObservedStore(
   innerStore: TripleStore,
   invalidateAfterMutation: ObservedStoreMutation,
-): TripleStore & Partial<SortedGraphSetSource> {
+): MutationObservedStore {
   const sortedSource = typeof (innerStore as Partial<SortedGraphSetSource>).listGraphsSorted
     === 'function'
     ? innerStore as TripleStore & SortedGraphSetSource
     : null;
-  const wrapper: TripleStore
-    & Partial<SortedGraphSetSource>
+  const wrapper: MutationObservedStore
     & { readonly innerStore: TripleStore } = {
     innerStore,
     get queryCancellation() {
@@ -193,6 +195,11 @@ export function createMutationObservedStore(
           'rfc64AuthorCommitCasV1',
         )
       : undefined,
+    // Preserve the source inventory's measured cost through the outer agent boundary.
+    readGraphInventory(prefix, options) {
+      return prefix === undefined ? readGraphInventory(innerStore, options)
+        : readGraphInventoryByPrefix(innerStore, prefix, options);
+    },
     listGraphs(options) {
       return innerStore.listGraphs(options);
     },

@@ -1,3 +1,5 @@
+import { prepareGraphScopedChainViewRead, validateGraphScopedChainEvidence, type GraphScopedChainEvidence, type VerifyContextGraphBinding } from './graph-scoped-chain-views.js';
+import { packKnowledgeAssetIdFromIdentity } from '../../ka-identity.js';
 import { executeGraphScopedPublication } from './graph-scoped-publication.js';
 import {
   parseDeterministicKnowledgeAssetUal,
@@ -18,7 +20,7 @@ import {
   filterOversizedSyncQuads,
   type OversizeGuardHooks,
 } from '../oversize-filter.js';
-import { parseGraphScopedDescriptor } from '../durable-integrity.js';
+import { parseGraphScopedDescriptor, type GraphScopedDescriptor } from '../durable-integrity.js';
 import {
   exactAssetCommitmentMatchesDescriptor,
   type ExactAssetCommitment,
@@ -64,14 +66,12 @@ export interface AuthenticatedGraphScopedAsset {
   onChainContextGraphId: string | null;
 }
 
-export type VerifyContextGraphBinding = (
-  localContextGraphId: string,
-  onChainContextGraphId: bigint,
-  signal?: AbortSignal,
-) => Promise<boolean>;
+export type { VerifyContextGraphBinding } from './graph-scoped-chain-views.js';
 
 export type GraphScopedMaterializationOutcome =
   | 'applied'
+  /** The store already held exactly this version's copy, so nothing was written. */
+  | 'unchanged'
   | 'stale'
   | 'quarantined';
 
@@ -111,7 +111,7 @@ export async function authenticateChallengePinnedGraphScopedAsset(
       `Graph-scoped durable sync UAL chain ${identity.chainId} does not match local chain ${chain.chainId}`,
     );
   }
-  const kaId = (BigInt(identity.agentAddress) << 96n) | BigInt(identity.kaNumber);
+  const kaId = packKnowledgeAssetIdFromIdentity(identity);
   const boundContextGraphId = await chain.getKAContextGraphId(kaId, {
     signal: options.signal,
   });
@@ -134,6 +134,20 @@ export async function authenticateChallengePinnedGraphScopedAsset(
     asset,
     privateRoots: Object.freeze(descriptor.privateRoot ? [descriptor.privateRoot] : []),
   });
+}
+
+/** Authority-owned authentication of an already content-proven descriptor. */
+export async function authenticateHeldGraphScopedDescriptor(
+  chain: ChainAdapter, copy: GraphScopedDescriptor, requiredBinding: string | undefined,
+  verifyContextGraphBinding: VerifyContextGraphBinding, options: { signal?: AbortSignal } = {},
+): Promise<GraphScopedChainEvidence> {
+  const views = prepareGraphScopedChainViewRead(chain, copy.ual, {
+    unsupported: 'A held graph-scoped asset check requires chain root, assertion-count, and context-graph views',
+    wrongChain: () => `Held graph-scoped asset ${copy.ual} is not on local chain ${chain.chainId}`,
+  }, options.signal);
+  const evidence = await views.read();
+  return validateGraphScopedChainEvidence({ ...copy, assertionVersion: BigInt(copy.assertionVersion),
+    merkleRootHex: copy.claimedRootHex }, evidence, verifyContextGraphBinding, options.signal, requiredBinding);
 }
 
 /**
@@ -168,25 +182,11 @@ export async function authenticateVerifiedGraphScopedAsset(
       onChainContextGraphId: null,
     };
   }
-  if (
-    !chain.getLatestMerkleRoot
-    || !chain.getMerkleRootCount
-    || !chain.getKAContextGraphId
-  ) {
-    throw Object.assign(
-      new Error(
-        'Graph-scoped durable sync requires chain root, assertion-count, and context-graph verification',
-      ),
-      { code: 'VM_CHAIN_VERIFICATION_UNSUPPORTED' },
-    );
-  }
-  const identity = parseDeterministicKnowledgeAssetUal(asset.ual);
-  if (identity.chainId !== chain.chainId) {
-    throw new Error(
-      `Graph-scoped durable sync UAL chain ${identity.chainId} does not match local chain ${chain.chainId}`,
-    );
-  }
-  const kaId = (BigInt(identity.agentAddress) << 96n) | BigInt(identity.kaNumber);
+  const views = prepareGraphScopedChainViewRead(chain, asset.ual, {
+    unsupported: 'Graph-scoped durable sync requires chain root, assertion-count, and context-graph verification',
+    wrongChain: identityChainId => `Graph-scoped durable sync UAL chain ${identityChainId} does not match local chain ${chain.chainId}`,
+  }, options.signal);
+  const { kaId } = views;
   // What the asset claims as provenance is fixed by its own metadata, so the
   // receipt of a first publish is requested with the views instead of after
   // them. Only the request moves: this is awaited after the checks on the
@@ -195,53 +195,9 @@ export async function authenticateVerifiedGraphScopedAsset(
   // that leaves it unawaited, so its rejection is observed here.
   const provenance = resolveProvenance(chain, asset, options.signal);
   provenance.catch(() => undefined);
-  const [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
-    chain.getLatestMerkleRoot(kaId, { signal: options.signal }),
-    chain.getMerkleRootCount(kaId, { signal: options.signal }),
-    chain.getKAContextGraphId(kaId, { signal: options.signal }),
-  ]);
-  if (latestRoot.length !== 32 || Buffer.from(latestRoot).toString('hex') !== asset.merkleRootHex) {
-    throw Object.assign(
-      new Error(`Graph-scoped durable sync ${asset.ual} does not match the latest on-chain Merkle root`),
-      { code: 'VM_CHAIN_ROOT_MISMATCH' },
-    );
-  }
-  if (rootCount !== asset.assertionVersion) {
-    throw Object.assign(
-      new Error(
-        `Graph-scoped durable sync ${asset.ual} assertionVersion ${asset.assertionVersion} ` +
-        `does not match on-chain root count ${rootCount}`,
-      ),
-      { code: 'VM_CHAIN_ASSERTION_VERSION_MISMATCH' },
-    );
-  }
-  if (boundContextGraphId <= 0n) {
-    throw Object.assign(
-      new Error(
-        `Graph-scoped durable sync ${asset.ual} is bound to invalid context graph ${boundContextGraphId}`,
-      ),
-      { code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' },
-    );
-  }
-  if (!verifyContextGraphBinding) {
-    throw Object.assign(
-      new Error('Graph-scoped durable sync requires local-to-chain context-graph verification'),
-      { code: 'VM_CHAIN_VERIFICATION_UNSUPPORTED' },
-    );
-  }
-  if (!(await verifyContextGraphBinding(
-    asset.contextGraphId,
-    boundContextGraphId,
-    options.signal,
-  ))) {
-    throw Object.assign(
-      new Error(
-        `Graph-scoped durable sync ${asset.ual} is bound to context graph ${boundContextGraphId}, `
-        + `which does not match local context graph ${asset.contextGraphId}`,
-      ),
-      { code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' },
-    );
-  }
+  const { latestRoot, rootCount, boundContextGraphId } = await views.read();
+  const evidence = await validateGraphScopedChainEvidence(asset, { latestRoot, rootCount, boundContextGraphId }, verifyContextGraphBinding, options.signal);
+  if (evidence.kind === 'mismatch') throw Object.assign(new Error(evidence.message), { code: evidence.code });
   const claimed = await provenance;
 
   let materializedBlock: number;
@@ -348,6 +304,12 @@ export async function materializeVerifiedGraphScopedAsset(params: {
   shouldQuarantineCommitted?: () => boolean;
   /** Internal composition seam for callers that already hold this asset's shared lock. */
   lockAlreadyHeldByCaller?: boolean;
+  /**
+   * A same-version replay whose stored copy already is exactly the replacement
+   * (metadata rows and assertion graph rows) is not written again: the outcome
+   * is 'unchanged'. Any other copy, a poisoned one included, is still replaced.
+   */
+  keepHeldCopy?: boolean;
   options?: QueryOptions;
   oversizeHooks?: OversizeGuardHooks;
 }): Promise<GraphScopedMaterializationOutcome> {
@@ -357,6 +319,7 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     isCurrent,
     shouldQuarantineCommitted,
     lockAlreadyHeldByCaller = false,
+    keepHeldCopy = false,
     options = {},
     oversizeHooks,
   } = params;
@@ -384,9 +347,10 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     if (!replaced) throw Object.assign(new Error(ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1(capability)),
       { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' });
   };
-  return executeGraphScopedPublication({ store, assets: [asset], options, assertCurrent,
+  return executeGraphScopedPublication<GraphScopedMaterializationOutcome>({ store, assets: [asset], options, assertCurrent,
     shouldQuarantineCommitted, lockAlreadyHeldByCaller, requireCurrentMetadata: false,
     stale: () => 'stale', complete: () => isCurrent?.() === false ? 'quarantined' : 'applied',
+    ...(keepHeldCopy ? { unchanged: () => 'unchanged' as const } : {}),
     publish: (replacements, commitOptions) => write(replacements, commitOptions, 'atomic data/metadata replacement'),
     quarantine: (replacements, commitOptions) => write(replacements, commitOptions, 'atomic stale-binding quarantine'),
   });

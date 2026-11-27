@@ -1,5 +1,8 @@
-import type { AfterDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1, ObserveRfc64ConfirmedVmParamsV1, ConfirmedInventoryRemovalOutcomeV1 } from './internal/promote/swm-handoff-types.js';
-export type { AfterDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1, ObserveRfc64ConfirmedVmParamsV1, ConfirmedInventoryRemovalOutcomeV1, BoundDurableSwmPromotionParamsV1 } from './internal/promote/swm-handoff-types.js';
+import type { ObserveRfc64ConfirmedVmParamsV1 } from './internal/confirmed-publication-types.js';
+export type { ObserveRfc64ConfirmedVmParamsV1 } from './internal/confirmed-publication-types.js';
+import { rfc64CatalogLaneAcceptsWorkspaceHeadV1 } from './internal/catalog-workspace-policy.js';
+import type { AfterDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1, TransferRfc64ConfirmedVmParamsV1, ConfirmedInventoryRemovalOutcomeV1 } from './internal/promote/swm-handoff-types.js';
+export type { AfterDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1, TransferRfc64ConfirmedVmParamsV1, ConfirmedInventoryRemovalOutcomeV1, BoundDurableSwmPromotionParamsV1 } from './internal/promote/swm-handoff-types.js';
 import { repairConfirmedPlacement } from './internal/confirmed-placement-repair.js';
 import { requireInventoryRemovalLane, type SwmInventoryAttemptOutcome, SwmInventoryWriteFailure, type SwmInventoryWriteOutcome } from './internal/swm-inventory-write.js';
 import { finishDurableShare } from './internal/promote/durable-share-inventory.js';
@@ -50,12 +53,11 @@ import {
   resolvePublishedKnowledgeAssetWorkspaceHead,
   workspaceHeadIncludesShareOperationId,
 } from '@origintrail-official/dkg-publisher';
+import { observeConfirmedCatalogObligationV1, selectConfirmedCatalogObligationForAgentV1 } from './internal/confirmed-catalog-obligation.js';
+import { captureConfirmedCatalogRecoveryFenceV1, recoverRetainedCatalogObligationV1 } from './internal/confirmed-catalog-obligation-recovery.js';
 import { observeDurableSwmPromotionV1 } from './internal/durable-swm-promotion-observer.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
-import {
-  rfc64CatalogLaneAcceptsWorkspaceHeadV1,
-} from './dkg-agent-rfc64-swm-catalog-projection.js';
 import type {
   Rfc64CatalogSuccessorAssetInputV1,
 } from './dkg-agent-rfc64-catalog.js';
@@ -85,7 +87,7 @@ import {
 import { loadExactAppliedCatalogRowsV1 } from
   './rfc64/applied-catalog-authority-transition-v1.js';
 import type { CatalogPlacementAttemptV1 } from './internal/catalog-placement-timing.js';
-import { transferConfirmedVmCatalogV1, observeConfirmedVmTransfer, ConfirmedVmOwnershipFailure, type ConfirmedVmOwnershipOutcome } from './internal/confirmed-vm-catalog-observer.js';
+import { transferSelectedConfirmedVmCatalogV1, type ConfirmedVmOwnershipOutcome } from './internal/confirmed-vm-catalog-observer.js';
 
 export type {
   Rfc64SwmAuthorInventoryShadowMutationResultV1,
@@ -641,27 +643,31 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     });
   }
 
-  /** Legacy best-effort observer around the throwing ownership transfer. */
-  async observeRfc64ConfirmedVmV1(this: DKGAgent, params: ObserveRfc64ConfirmedVmParamsV1): Promise<boolean> {
-    return observeConfirmedVmTransfer(this.log, params, () => this.transferRfc64ConfirmedVmV1(params));
+  /** Persist owed named-publication work before allowing its confirmation tail to complete. */
+  async observeRfc64ConfirmedVmV1(this: DKGAgent, params: ObserveRfc64ConfirmedVmParamsV1): Promise<void> {
+    await observeConfirmedCatalogObligationV1(params, {
+      select: () => selectConfirmedCatalogObligationForAgentV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, params),
+      persistence: this.rfc64PersistenceV1, log: this.log,
+      owner: this,
+      request: (repair, ctx, observer) => this.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair, ctx }, observer).accepted,
+    });
   }
 
-  async transferRfc64ConfirmedVmV1(this: DKGAgent, params: ObserveRfc64ConfirmedVmParamsV1): Promise<ConfirmedVmOwnershipOutcome> {
-    let lane: ReturnType<DKGAgent['resolveRfc64CatalogAuthoringLaneV1']>;
-    try {
-      lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, params.subGraphName);
-    } catch (cause) { throw new ConfirmedVmOwnershipFailure('authority', cause); }
-    if (lane === null) return 'inactive';
-    if (params.expectedWorkspaceAccessPolicy !== undefined) {
-      if (!rfc64CatalogLaneAcceptsWorkspaceHeadV1(lane, params.expectedWorkspaceAccessPolicy)) {
-        throw Object.assign(new Error('Confirmed share catalog policy differs from its binding'), { code: 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT' });
-      }
-      if (lane.kind === 'private' && !lane.acceptsFinalizedVmRepair) return 'pending';
-    }
-    return transferConfirmedVmCatalogV1({
+  /** Validate retained confirmation evidence and retry only its catalog observer. */
+  async recoverRfc64ConfirmedCatalogObligationV1(this: DKGAgent, input: unknown): Promise<void> {
+    return recoverRetainedCatalogObligationV1(input, {
+      chain: this.chain, store: this.store, signal: () => this.workLifetime.signal,
+      captureFence: graph => captureConfirmedCatalogRecoveryFenceV1(this.contextGraphBindingState, graph),
+      resolveBinding: (graph, signal) => this.resolveContextGraphOnChainIdBinding(graph, { signal }),
+      observe: params => this.observeRfc64ConfirmedVmV1(params),
+    });
+  }
+
+  async transferRfc64ConfirmedVmV1(this: DKGAgent, params: TransferRfc64ConfirmedVmParamsV1): Promise<ConfirmedVmOwnershipOutcome> {
+    return transferSelectedConfirmedVmCatalogV1({
       owner: this,
       log: this.log,
-      finalizedPrivateScopeBase: lane.acceptsFinalizedVmRepair ? lane.scopeBase : null,
+      resolveLane: () => this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, params.subGraphName),
       storeRepair: async (repair) => {
         if (this.rfc64PersistenceV1 === undefined) throw new Error('RFC-64 persistence is unavailable');
         await this.rfc64PersistenceV1.finalizedPrivatePlacementRepairs.put(repair);
@@ -684,12 +690,8 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       () => this.publishRfc64FinalizedPrivateCatalogPlacementV1(repair, placement));
   }
 
-  readRfc64SwmAuthorInventorySnapshotV1(
-    this: DKGAgent,
-    params: Readonly<{
-      inventoryScopeDigest: Digest32V1;
-      authorAddress: EvmAddressV1;
-    }>,
+  readRfc64SwmAuthorInventorySnapshotV1(this: DKGAgent,
+    params: Readonly<{ inventoryScopeDigest: Digest32V1; authorAddress: EvmAddressV1 }>,
   ): SwmAuthorInventorySnapshotV1 | null {
     return this.rfc64PersistenceV1?.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(
       params.inventoryScopeDigest,
@@ -964,22 +966,23 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
    */
   async removeRfc64SwmAuthorInventoryRowV1(
     this: DKGAgent,
-    params: Readonly<{
-      contextGraphId: string;
-      scope: SwmAuthorInventoryScopeV1;
-      expectedRow: Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1;
-      /** A removal that its caller's cancellation ended rejects with it, uncounted. */
-      signal?: AbortSignal;
-    }>,
+    params: Parameters<DKGAgent['removeRfc64SwmAuthorInventoryRowStrictV1']>[0],
   ): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
-    const result = await this.removeRfc64SwmAuthorInventoryConfirmedRowV1(params).then(
-      (removed) => shadowResult(removed.status, 'remove', removed.attempts, removed.snapshot?.head.objectDigest ?? null, null),
-      (cause: unknown) => {
-        if (params.signal?.aborted === true) throw cause;
-        return this.failRfc64SwmAuthorInventoryShadowV1('remove', cause);
-      },
-    );
-    return this.recordRfc64SwmAuthorInventoryShadowStatsV1(result, params.contextGraphId, params.expectedRow.kaUal);
+    try { return await this.removeRfc64SwmAuthorInventoryRowStrictV1(params); }
+    catch (cause) {
+      if (params.signal?.aborted === true) throw cause;
+      return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
+        this.failRfc64SwmAuthorInventoryShadowV1('remove', cause), params.contextGraphId, params.expectedRow.kaUal);
+    }
+  }
+
+  /** Strict repair shares exact removal/accounting while preserving the original failure cause. */
+  async removeRfc64SwmAuthorInventoryRowStrictV1(this: DKGAgent,
+    params: Parameters<DKGAgent['removeRfc64SwmAuthorInventoryConfirmedRowV1']>[0] & { readonly contextGraphId: string }): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
+    const removed = await this.removeRfc64SwmAuthorInventoryConfirmedRowV1(params);
+    return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
+      shadowResult(removed.status, 'remove', removed.attempts, removed.snapshot?.head.objectDigest ?? null, null),
+      params.contextGraphId, params.expectedRow.kaUal);
   }
 
   /** Remove the exact confirmed row without requiring its transient AssertionSeal object. */
@@ -1082,10 +1085,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     });
   }
 
-  /**
-   * @deprecated Explicit compatibility alias only. Ordinary VM confirmation
-   * does not call this method; the chain remains the finalized-VM inventory.
-   */
+  /** @deprecated Compatibility alias; ordinary VM confirmation uses chain-owned inventory. */
   recordConfirmedRfc64PublicCatalogAssetV1(
     this: DKGAgent,
     params: RecordConfirmedRfc64PublicCatalogAssetParamsV1,

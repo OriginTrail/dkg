@@ -4,8 +4,636 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Changed
+
+- Nodes no longer serve the legacy publish protocol `/dkg/10.0.0/publish`,
+  which nothing has sent on since publishing moved to the V10 lifecycle and
+  StorageACK. Tentative publishes that an earlier version journaled are
+  still restored at start, and confirmed or expired as before.
+- VERIFY approvals (`dkg verify`, `POST /api/verify`) use a new signing
+  format. Approvers and proposers on earlier versions do not count each
+  other's approvals, so until every approver runs this release, a batch
+  reaches quorum only among upgraded nodes and is otherwise stamped
+  partially verified or self-attested, as when approvals are missing.
+- The daemon does not start when API authentication is off
+  (`auth.enabled: false`) and `apiHost` is not a loopback address, such as
+  `0.0.0.0`, `::`, a LAN address or a host name other than `localhost`.
+  `daemon.log` says why the node stopped: turn authentication back on, or
+  set `apiHost` to `127.0.0.1`.
+- Blazegraph setup no longer reuses or restarts an existing DKG Blazegraph
+  container that publishes its port beyond this host's loopback interface
+  (`0.0.0.0`, `::`, another address, or the host's network), as containers
+  created before 7 Aug 2026 do. Setup stops and says how to recreate the
+  container on `127.0.0.1`: with `docker rm -f <container>` and setup again
+  when the journal is in the container's named volume, and after a backup
+  otherwise. To check a running node, `docker port <container>` should list
+  only `127.0.0.1`.
+- The daemon logs a `WARNING` at start-up when `apiHost` is not a loopback
+  address, and a second one when CORS allows every origin there:
+  `apiHost: "0.0.0.0"` with `corsOrigins` unset, or `corsOrigins: "*"`.
+  Keep the API on `127.0.0.1`, reach the node from elsewhere through a
+  reverse proxy that terminates TLS, and set `corsOrigins` to the origins
+  that need the API.
+- Gossip runs on gossipsub 17.2.1 (was 16.1.1), which limits the topic
+  subscriptions it records for each peer. The node records up to 2 MiB of
+  topics per peer on the mainnets, about 1,500 to 1,850 DKG topics, and
+  8 MiB elsewhere, about 6,000 to 7,400. gossipsub's 1 MiB default holds
+  fewer than a testnet Core node subscribes to. The node leaves a peer out
+  of its publishes on topics beyond the limit. Nodes on 16.1.1 and 17.2.1
+  share one gossip mesh.
+
+## [10.1.1] - Unreleased
+
+10.1.1 is the first 10.1 release for mainnet: nodes moving from 10.0.27
+also get everything in 10.1.0 below. It fixes problems found while 10.1.0
+ran on testnet, in the Marketplace, the MCP server and the public catalog.
+It gives the node UI a new design system and makes a scoped query cost what
+the context graph it reads costs. It also adds merged view queries and a
+developer preview of Graph Computer Programs, both off until a node turns
+them on. On mainnet the marketplace stays off, as the mainnet chains have
+no marketplace contracts yet.
+
+### Node UI
+
+- The node UI has one design system, in dark and light themes: colour,
+  type, spacing and corner sizes all come from shared tokens. Each colour
+  means one thing: the memory layers are slate (Working Memory), cyan
+  (Shared Working Memory) and purple (Verifiable Memory); green, amber and
+  red mean done, needs your action and failed; and blue marks roles and
+  access.
+- Tabs behave like browser tabs, and pages share one header, breadcrumbs
+  and navigation.
+- The header says only what the node reports: Connecting, Connected with
+  its peer count, No peers, or Unavailable after three failed status checks
+  in a row.
+- The app works on small screens: below 860 px the side panels open one at
+  a time, the header fits down to 320 px, and tables scroll inside their
+  cards.
+- Every view reads a Verifiable Memory receipt's on-chain evidence through
+  one shared model, so they all show the same receipt.
+- The wording is plainer: it says what the node does for its user rather
+  than how it is built.
+- Publisher Conviction Accounts are easier to follow on the Dashboard,
+  Settings and PCA screens, and a "What is a PCA?" dialog explains them in
+  the app.
+- A reply in the agent panel finishes even when the panel is closed while
+  it streams.
+- The Marketplace section follows the light and dark themes like the rest
+  of the app.
+
+### Added
+
+- A developer preview of Graph Computer Programs: S-expression and
+  TypeScript Programs stored in a context graph, which a node runs once its
+  user approves their effects and records with RDF receipts. The node runs
+  them only when `semanticRuntime.enabled` is `true` in its config, and it
+  is off by default. Two new packages carry it:
+  `@origintrail-official/dkg-semantic-runtime`, the runtime, and
+  `@origintrail-official/dkg-graph-computer`, a TypeScript client that
+  uploads, approves and invokes Programs. The node UI adds a TypeScript
+  Program editor to each project.
+- Building the semantic runtime's Wasm takes a pinned Rust toolchain (see
+  `rust/README.md`). A node built from source without it skips the Wasm with
+  a warning and can't run the semantic runtime; set
+  `DKG_SEMANTIC_RUNTIME_WASM=required` to make that build fail instead. CI
+  and release packing require the Wasm, so the published package includes
+  it.
+- Merged view queries, opt-in. A view query can ask for
+  `semantics: "merged"` and match its patterns across all of a layer's
+  assets at once, from a read graph the node keeps. Requests without
+  `semantics` keep per-asset answers, and the response's `semantics` field
+  says which answered. `query.readGraphs` turns read graphs on per node,
+  layer or context graph (`off`, the default, `build` or `serve`), and
+  `query.viewSemantics` sets the default per context graph.
+  `dkg store read-graphs status | check | rebuild | drop` manages them, and
+  `dkg view-semantics report` shows how merged answers would differ. A node
+  keeps read graphs off while the release `dkg rollback` would activate
+  doesn't recognize them, so a node updating from 10.1.0 or 10.0.27 keeps
+  them off. See [Read graphs](docs/use-dkg/read-graphs.md).
+- A limit on the node's graph catalog, its in-memory list of the store's
+  graphs: `store.graphCatalog.maxBytes`, 256 MiB by default
+  (`DKG_STORE_GRAPH_CATALOG_MAX_BYTES` wins when set). The node warns at
+  50 % and 80 % of it, the alert set has a rule on the 80 % warning, and a
+  query that needs the catalog past its limit gets a retryable
+  `503 STORE_INTERNAL_LIMIT` rather than an answer cut short. See
+  [Graph catalog limit](docs/use-dkg/graph-catalog-limit.md).
+
+### Changed
+
+- A scoped query costs what the context graph it reads costs: it finds its
+  graphs in the node's graph catalog instead of listing the whole store. A
+  caller's byte budget covers only the reads made for its own query.
+- Core nodes send fewer RPC requests for Knowledge Assets that wait to reach
+  Verifiable Memory. The VM reconcile pass and the StorageACK promotion lanes
+  read an asset's latest Merkle root and then its publisher, a request each,
+  and an asset that stays pending is read again on every sweep. The two
+  reads now go out together, so the node's read batching sends them as one
+  request. On the mainnet Core nodes measured, that is up to about 14,000
+  fewer requests a day on Gnosis and 24,000 on Base, depending on how many
+  assets are pending.
+- The node UI build fits its 896 MB heap ceiling, which suits a 1.5 GiB
+  node service, with the Program editor bundled: icon and lodash imports
+  load only the modules they use, the Graph Computer SDK loads only the
+  parts of ethers it uses, and the build no longer gzips every chunk just to
+  report its size.
+- A request signed with an agent key (`Authorization: DKG-Agent …`) needs
+  an agent registered on the node (custodial, or self-sovereign by its
+  public key through `POST /api/agent/register`) or an address in
+  `auth.operatorAgentAddresses`; any other key gets
+  `401 AGENT_HTTP_AGENT_UNKNOWN`. The recipient of an encryption enrollment
+  the operator prepared may still sign its own activation. Register a
+  backend's agent, such as a Graph Computer SDK client's, on each node it
+  calls; its key stays with the backend. A Program invocation forwarded by
+  another node carries its own signed delegation and needs no registration
+  on the runner, but a caller's direct requests to the runner do.
+- The node sends its operator token to the OpenClaw bridge only at a
+  bridge URL on this host (localhost, 127.0.0.0/8 or ::1), as for Hermes
+  and Prime Agent. Run the OpenClaw bridge on the node host.
+- The dashboard asks for the node's token once per browser tab
+  (`dkg auth show` prints it) instead of signing in automatically. On a
+  node with no proxy in front of the API,
+  `"auth": { "dashboardAutoSignIn": true }` restores automatic sign-in for
+  a browser on the node host.
+
 ### Fixed
 
+- Graph Computer Programs stay off until the node's operator turns them on
+  with `semanticRuntime.enabled: true`, as 10.1.0 described. Managing
+  Program bindings on a node that left it unset no longer starts the
+  runtime; the request answers `409 SEMANTIC_RUNTIME_DISABLED`. A node that
+  already stored Program configuration keeps the runtime on; set
+  `semanticRuntime.enabled: false` to turn it off.
+- A seller can serve tool calls on an OpenAI reasoning model that takes
+  function tools on chat completions only with no reasoning. Set
+  `marketplace.seller.services[].backend.reasoningEffortWithTools` to
+  `none` for that service. Calls with tools then carry
+  `reasoning_effort: "none"`, and calls without tools keep the model's own
+  reasoning. A model that refuses `none` as well takes function tools only on
+  the Responses API, so it can't serve tool calls: set `tools: false` for its
+  service, and buyers then get `tools_unsupported` instead of refused calls.
+- An error from one service's backend no longer takes a seller's other
+  services away from buyers. When the backend refuses a call as made (400,
+  404, 413, 415 or 422), the seller refuses it with a code buyers don't
+  retry. Buyers then try other sellers first for ten minutes and still route
+  the seller's other services, where before they left the seller out of
+  every service for ten minutes. No answer, timeouts, and 401, 403, 408,
+  409, 429 and 5xx answers are handled as before. When a service's backend
+  refuses a call with tools, the seller checks with minimal calls with tools
+  of its own: one where the model chooses, and one that names the function.
+  If the backend refuses both, the service stops offering tools until the
+  node restarts, so buyers answer such calls with `tools_unsupported`
+  instead of sending them.
+- A node that turns the marketplace on where its chain has none of the
+  marketplace's contracts, as on the mainnets for now, keeps buying and
+  selling off with one log line. Before, the buyer's job started anyway,
+  failed on every tick and posted a "Marketplace renewal failed"
+  notification each time. The node asks its chain for the contracts once at
+  start-up, and only when the marketplace is on. A failed RPC call says
+  nothing about the contracts, so the node then starts the marketplace as
+  before.
+- A node with an endpoint in `chain.rpcUrls` that never answers no longer
+  piles up RPC requests while its node UI is open. Each
+  `GET /api/wallets/balances`, which the UI's Settings page sends every
+  60 seconds, left behind a connection that asked that endpoint for its
+  chain id once a second until the node restarted, through the same request
+  budget as the node's own chain work. On a mainnet Core node this filled
+  the budget within a day and stopped its proofs. The route now uses the
+  configured chain's network, so it asks no endpoint for it, and closes its
+  connections once it answers.
+- A Core node no longer spends a large share of its RPC on context graphs
+  that peers announced but nobody registered on chain. A Core node subscribes
+  to every graph it hears of over gossip. For one that was never registered,
+  every reconcile attempt paid for a live chain scan and then failed with
+  "has no resolved on-chain id", and the node asked about such graphs every
+  minute, up to eight a minute, for as long as it ran. On a Base mainnet Core
+  node that came to about 80,000 requests a day. The node now waits before
+  asking again about a graph whose name the chain holds no id for: a minute
+  at first, doubling up to an hour. A graph that does get registered is
+  picked up as soon as the node sees it on chain, as before.
+- An MCP server registered by hand, with no `DKG_HOME` or workspace config
+  selected, now loads the default node home's credentials, so its
+  authenticated tools no longer answer `401`. An explicit home or workspace
+  config still comes first.
+- The MCP server's default `mine` listing shows only graphs the user takes
+  part in, by the node UI's membership rule, instead of every graph the node
+  has discovered.
+- A node refuses a public catalog head it cannot apply before it writes
+  anything to shared memory, so shared memory and Verifiable Memory stay
+  untouched.
+- An agent built on a pre-built chain adapter verifies finalized public
+  catalog heads over the RPC endpoints its adapter names, as a node does.
+- Query routes answer a context graph the node holds nothing of the same
+  way as one the caller may not read.
+- Every store write path checks its terms and protocol metadata before they
+  reach the store.
+
+### Security
+
+- The Node.js release that `dkg start`, daemon start, auto-update slot
+  activation and the `node-security` check of `dkg doctor` expect is now the
+  [2026-11-11 Node.js security release](https://nodejs.org/en/blog/vulnerability/november-2026-security-releases):
+  22.23.5, 24.22.3 or 26.13.1 (was 22.23.4, 24.22.1 or 26.12.1). Older
+  releases log a `WARNING` and the node still starts. Upgrade Node.js on every
+  host that runs a node and restart the node. The README, the quickstart and
+  [Updates and rollback](docs/use-dkg/updates-and-rollback.md#nodejs-security-releases)
+  name the new releases.
+
+### Documentation
+
+- The MCP guide explains how to configure a client by hand when setup does
+  not detect it, with the supported client locations and formats, and how
+  to recover when authenticated tools answer `401`.
+
+## [10.1.0] - 2026-11-10 (testnet only)
+
+10.1.0 opens the NeuroSymbolic Marketplace on testnet, where nodes that opt
+in buy and sell inference. It also keeps publishing and recovery steady
+under load and gives the node UI a new look. It was published for testnet
+only; mainnet moves from 10.0.27 straight to 10.1.1.
+
+### Highlights
+
+- **The NeuroSymbolic Marketplace on testnet.** Nodes that opt in buy
+  inference through an OpenAI-compatible gateway, and Core Nodes sell it
+  from an inference backend they configure, with their offers in the
+  Verifiable Memory of the testnet Marketplace Context Graph.
+  Subscriptions and receipts settle on the marketplace contracts on Base
+  Sepolia. On mainnet the marketplace stays inactive until its contracts
+  are deployed there (#3645, #3720, #3721, #3738, #3742, #3747, #3756).
+- **A new look for the node UI.** A fresh theme and type across the app
+  (#3721).
+- **Correct catalog content after draft edits.** The catalog follows an
+  asset's latest draft when it is shared, edited and shared again before
+  its first publication (#3667).
+- **Less repeated work.** Catalog backlog scans yield, parked placement
+  passes reuse validated state, inventory validation encodes each value
+  once, and a graph's presence check asks the store directly (#3599,
+  #3631, #3640, #3600, #3694, #3708, #3712, #3722, #3754).
+- **Publishing that keeps going.** Settled ACK rounds retire unused
+  requests, funded wallets get work fairly, retry budgets and job cleanup
+  keep their safety bounds, seal checks at admission use the publisher's
+  control lane when it is on, and a funding read that fails before
+  anything is sent retries on its own (#3647, #3613, #3614, #3612, #3594,
+  #3595, #3699, #3728).
+- **Lower transaction fees on Gnosis.** Transactions pay the priority fee
+  the RPC suggests instead of at least 1 gwei, and the maximum fee keeps
+  its 2 gwei floor and its headroom for base-fee spikes (#3731).
+- **Private members can recover.** Approvals repair missing metadata for
+  existing participants, and an empty private graph keeps proving
+  membership until synchronization completes (#3689, #3630).
+- **No more event-loop stalls from gossip mesh tags.** Gossipsub no longer
+  tags each mesh peer with every topic it shares in the peer store. On
+  nodes with many subscriptions, those tags made each reconnect block the
+  event loop for seconds (#3755).
+- **Useful operational evidence.** Operators can record a running node's
+  CPU profile, inspect rolling prover health, see why a daemon worker
+  exited, and correlate queue admission with store waits (#3606, #2627,
+  #3653, #3698).
+
+### Before you upgrade
+
+- Nothing to set. A node that does not opt in to the marketplace needs no
+  new setting, store migration or schema change, and its `config.json`
+  works as it is.
+- The NeuroSymbolic Marketplace is available on testnet, and nodes opt in:
+  `marketplace.enabled` turns on buying, and `marketplace.seller.enabled`
+  turns on selling, which also needs a Core Node, a configured inference
+  backend and TRAC to publish its offers. Testnet nodes use the testnet
+  Marketplace Context Graph, `testnet-marketplace`, by default. On mainnet
+  the marketplace stays inactive until its contracts are deployed there.
+- Tools that read `GET /api/diagnostics/rpc-usage` and pin its consumer
+  labels should accept `consumerVocabularyVersion` 4.
+- A seller with an `openai` backend now takes tool calls for its services
+  by default. Set `marketplace.seller.services[].tools` to `false` for a
+  backend that does not support tools.
+- `dkg rollback` returns a node to 10.0.27. "Updating from 10.0.27" in
+  `docs/use-dkg/updates-and-rollback.md` has the details.
+
+The details follow.
+
+### Fixed
+
+- Daemon workers run steadily on every supported Node.js line, with or
+  without optional native addons (#3650, #3658).
+- Keep store settings when initialization rewrites the configuration, and
+  open the store read-only for offline publisher reads (#3608, #3588).
+- Rotate contended chain requests fairly, prefer recent agent peers, retry
+  unfinished catalog replay on connected peers, and respect identity-probe
+  backoff and open relay circuits (#3200, #3632, #3633, #3590, #3587).
+- End durable recovery rounds on local backpressure, give graphs turns at
+  the sync slot, and represent recovery outcomes explicitly (#3596, #3637).
+- Repeat retryable publication recipient reads, treat a busy store as no
+  membership verdict, and close finalization inbox entries whose content
+  is already verified (#3617, #3616, #3607).
+- Check read access on context graph membership reads (#3586).
+- Report the fields of failed async jobs, keep failure messages to a
+  bounded length, and log busy background poll reads as warnings (#3610,
+  #3609, #3615).
+- Answer supported filtered single-triple queries and parse RDF literals
+  with less work (#3659, #3593).
+- Return EPCIS events without document containers or unrelated resources,
+  while recognizing the supported EPCIS namespaces (#2490).
+- Close native checkpoint resources on startup failure and preserve
+  shutdown ownership during daemon startup (#3589).
+- Verify a native checkpoint's assets two at a time, so starting from a
+  checkpoint of three or more assets stays within the compression memory
+  budget (#3734).
+- Check one graph's presence with the store's exact query while the graph
+  catalog waits for its refresh (#3722).
+- Stop a share request's admission when its client disconnects before the
+  job is stored (#3727).
+- Retry a queued publication on its normal bounded lane when its funding
+  read fails and the publisher has proved that nothing was sent (#3728).
+- Set the query dataset on graph-list reads (#3684).
+- Resolve context-graph metadata from the graph's own `_meta` (#3730).
+- Skip local-content discovery in a daemon write check when fresh
+  metadata, the caller's authorization and an active synced subscription
+  already show that the target is writable (#3744).
+- Add `jobCreated: false` and `retryable: true` to the 503 answers of
+  `POST /api/knowledge-assets/:name/vm/publish-async` when its context
+  graph checks cannot run, so a client knows that no job was created and
+  can try again (#3745).
+- Cancel a Knowledge Asset descriptor read's storage queries when its
+  caller times out or disconnects (#3746).
+- Answer the buyer's funding and accounts views within a few seconds: the
+  node keeps each buyer's account list and reads only the blocks it has not
+  seen, instead of scanning the event log on every request (#3750).
+- On Windows, accept a healthy managed Oxigraph server whose socket is
+  reported as established rather than listening, so the node API starts
+  (#3701).
+- Wait up to 120 seconds in `dkg start` for a live worker and a successful
+  status answer, with `--timeout` for longer, so a slow store recovery no
+  longer looks like a failed start (#3707).
+- Keep every older daemon log when a rotation cannot list or move the log
+  files completely (#3705).
+- Answer `GET /api/context-graph/list` with 503, `retryable: true` and
+  `Retry-After` instead of 500 when a listing runs out of its time budget
+  (#3702).
+- Find Claude Desktop's relocated Windows configuration in `dkg mcp setup`
+  and `dkg mcp uninstall`, natively and through WSL (#3704).
+
+### Added
+
+- **NeuroSymbolic Marketplace contracts (OT-RFC-27).** Buyers fund a
+  subscription per epoch from a wallet or from a Conviction Account's
+  allowance; sellers land buyer-signed receipts in batches that count as
+  they land, up to the budget left; and `StakingV10` claims pay each
+  node's share of the query/inference pool. New contracts:
+  `ServiceSubscriptionsStorage`, `ServiceSubscriptions`,
+  `ServiceSubscriptionsWallet`, `QueryInferenceStorage`,
+  `QueryInferenceSettlement`, `StakingV10Ledger` and
+  `ConvictionWithdrawalStorage`; updated: `PublishingConviction` 10.2.0,
+  `StakingV10` 10.1.0 and `StakingKPI` 10.1.0. Deployed on testnet (Base
+  Sepolia); the deploy steps skip mainnet networks (#3645, #3717).
+- **The marketplace on the node, available on testnet (OT-RFC-27).** Nodes
+  opt in. The code ships in the new `@origintrail-official/dkg-marketplace`
+  package (#3720, #3738, #3742).
+  - Buying, with `marketplace.enabled`: the node buys inference through an
+    OpenAI-compatible gateway, `GET /api/marketplace/v1/models` and
+    `POST /api/marketplace/v1/chat/completions`, which takes `dkgmk_`
+    access keys only, and a renewal job funds its standing plan ahead of
+    each epoch. The gateway routes calls from the offers in the graph's
+    Verifiable Memory, checks each seller's quote and answer before using
+    them, and refuses a receipt completed outside its request's time
+    window.
+  - Selling, with `marketplace.seller.enabled`, on a Core Node with an
+    inference backend configured for each service it sells: the node sells
+    over the DKG peer protocol and lands its receipts in batches through
+    the epoch. It recovers each batch after a restart, including one it
+    recorded but did not broadcast, which it sends again as signed.
+  - Each seller publishes one signed offer per service to the Verifiable
+    Memory of the Marketplace Context Graph, which costs TRAC. A price
+    change updates the same Knowledge Asset, and an offer with two epochs
+    or fewer left is extended. Until an offer is listed, its offering's
+    `listing` in `GET /api/marketplace/seller` says why.
+  - On testnet, buyers and sellers use the testnet Marketplace Context
+    Graph, `testnet-marketplace`, by default; a node that sets
+    `marketplace.contextGraphId` keeps its own value (#3747).
+  - A busy gateway answers with `Retry-After`: 429 `budget_busy` when too
+    many calls wait on one service, or 503 `gateway_busy` when the gateway
+    holds as many calls as it takes.
+  - Subscription top-ups are idempotent per key: a top-up that carries an
+    `idempotencyKey` is sent at most once for that key, and a repeat gets
+    the first answer, also after a restart.
+  - If buying or selling fails to start, that part stays off, and the node
+    keeps running.
+  - The `/api/marketplace` routes cover the catalog, plans and funding,
+    access keys and the seller's operations; every write needs the node
+    admin token. `dkg marketplace` drives them from the CLI.
+- **A Marketplace section in the node UI, hidden by default.** Services and
+  seller storefronts with a playground, plans with a dry run before each
+  funding, access keys, and a seller's operations. Opening the node UI once
+  with `?marketplace` in its address shows the section in that browser
+  (#3721).
+- **Authors held on the node, with a remote signer.** A node whose remote
+  signer holds payer accounts only can set `chain.signer.nodeHeldAuthor` to
+  `true`: the node's own agent key then authors and owns its Knowledge
+  Assets and signs its graph traffic, and the remote signer signs payer
+  transactions only. It is off by default and cannot be combined with
+  `chain.signer.author` (#3729).
+- JSON-LD document ingestion with inline contexts, named graphs, blank nodes,
+  lists, language tags and datatypes. Remote contexts and imports are
+  rejected without network access. Default-finalizing asset creation rejects
+  named-graph documents with guidance to use `--no-finalize` (#2506).
+- Experimental native public snapshot bootstrap for an explicitly configured
+  fresh Edge, with a pinned Java runtime, complete journal verification and
+  authenticated catch-up. Automatic/default activation remains disabled;
+  existing data directories are not migrated (#3566).
+- **Tool calls through the marketplace gateway.** Calls carry `tools`,
+  `tool_choice` and the tool results, and answers carry the model's tool
+  calls. A seller says in its quote whether a service takes tool calls, the
+  router sends such calls only to sellers that do, and the gateway answers
+  400 `tools_unsupported` before anything is reserved or sent when none
+  does. Answers report prompt and completion tokens separately when the
+  seller provides the split. New access keys get 64-bit ids, and existing
+  keys keep working (#3756).
+- `dkg publisher clear-job <job-id>` and `dkg ka clear-share-job <job-id>`
+  remove one finished job from a running node's queue (#3709).
+
+### Changed
+
+- The node UI has a new look: a new theme and type scale across the app
+  frame, the panels, the agent composer, the views, and the Publisher
+  Conviction and wallet pages (#3721).
+- `GET /api/diagnostics/rpc-usage` reports `consumerVocabularyVersion` 4:
+  its consumer labels include the marketplace's contract lookups and views
+  (#3720).
+
+### Validation and tooling
+
+- Pin browser CI to Ubuntu 24.04, stabilize live-store timing fixtures and
+  offline-read startup synchronization, and add RDF ingestion floor
+  benchmarks (#3687, #3649, #3626, #3138).
+- Remove internal working plans from the published source tree and document
+  sustained monitoring after mainnet rollout (#3665, #3620).
+- Rehearse the marketplace contract deployment on a local fork of the
+  testnet chain, add a testnet smoke test, give the Solidity coverage job
+  60 minutes, and extend three dated test exceptions (#3691, #3693, #3719,
+  #3725).
+- Share one registered-signer fallback between rotated sends, and move the
+  RPC-usage consumer vocabulary into a module of its own, with no change in
+  behaviour (#3739, #3740).
+
+### Before promotion
+
+- There are no smart-contract source or deployment registry changes in this
+  candidate relative to `main` at `689dd4b540`, which already holds the
+  marketplace contracts (#3645); #3720 vendors their ABIs into
+  `packages/chain`. They are deployed on testnet only; mainnet needs its own
+  deployment before the marketplace can run there.
+- Keep native snapshot bootstrap opt-in. Its default rollout still needs a
+  mainnet cold/warm/restart comparison, including rule sampling and RPC use.
+- Catalog cache measurements establish CPU savings, not faster end-to-end
+  publication or resolution of every storage queue timeout. Validate the
+  combined candidate under representative load.
+- Smoke-test buying and selling on testnet nodes that use the testnet
+  Marketplace Context Graph by default, with the sellers' offers listed in
+  its Verifiable Memory, before mainnet promotion.
+- Qualify the final candidate commit and package bytes through the release
+  procedure, including the new `@origintrail-official/dkg-marketplace`
+  package, a runtime dependency of the CLI that is published with it.
+  Earlier canary CI and per-PR tests do not certify this release commit.
+  Verify upgrade/rollback from 10.0.27, private graph recovery, publication
+  settlement and testnet smoke before mainnet promotion.
+- After promotion, verify the running build through `/api/status` and monitor
+  catch-up and resource use through the rollout observation period in
+  `RELEASE_PROCESS.md`.
+
+## [10.0.27] - 2026-10-29
+
+10.0.27 makes nodes steadier and faster under load. Core nodes settle
+quickly after a restart, queries and syncs do less work for the same
+answers, and the queues that share and publish knowledge get store
+capacity of their own, with a clear view of where their time goes.
+
+### Highlights
+
+- **Steady after a restart.** A node catches up each context graph once
+  and then settles: it keeps verified shared memory as it is, ends a
+  context graph's readiness checks when they stop finding anything new,
+  and resumes an interrupted recovery where it stopped (#3401, #3413,
+  #3510, #3526, #3558).
+- **Faster queries.** Limited selects stop early inside the store,
+  single-pattern reads over many verified context graphs skip a per-match
+  duplicate check, and query authorization leaves room for other queries
+  (#3144, #3415, #3550, #3552, #3553).
+- **Publishing that keeps up.** The share and publish queues get store
+  slots of their own, their admission checks stay fast however long their
+  history grows, and their job lists come a page at a time (#3527, #3528,
+  #3529, #3535, #3536, #3537, #3538, #3548, #3564, #3567).
+- **A clear view of the queues.** Every five minutes a node logs one
+  `async_admission_usage` line that shows how admission, the store and the
+  queue workers spend their time (#3511, #3512, #3513).
+- **Members stay in step.** After a context graph's owner restarts, its
+  members receive the change they missed within seconds, and a share made
+  while a node is still starting gets its inventory entry as soon as the
+  node is ready (#3377, #3502, #3541).
+- **Syncs that scale.** Nodes build snapshots from small context graph
+  partitions in batches, replay their catalogs in bounded rounds when they
+  reconnect, and fetch fresh public snapshots from two Core nodes at once
+  (#3173, #3556, #3558).
+- **Safer data.** Nodes that host shared memory for other members write it
+  crash-safely, and a publication confirmed on chain completes its catalog
+  step even when the node could not store it straight away (#2937,
+  #3174).
+- **Easier to operate.** `dkg doctor` checks nodes configured in
+  `config.yaml`, the API and CLI page through large job lists, and
+  operators can size the store's concurrency themselves (#3247, #3410,
+  #3548).
+
+### Before you upgrade
+
+- Check `config.json` for a `queueRetention` block. This release reads it:
+  a cleanup mode set there starts at the first start, and a wrong value
+  stops the node from starting. Leave cleanup `off` on production nodes.
+- On Blazegraph and managed Oxigraph stores on hosts with more than 2
+  CPUs, the share and publish queues use store slots of their own, and the
+  node logs `Store control path: on (...)` at start. If share or publish
+  jobs get slower, set `"controlReservedSlots": 0` in the `store` block and
+  restart.
+- API clients: handle HTTP 413 from `/api/query` for a response above
+  10 MiB, and retry a share or publish answered with 503 and
+  `Retry-After`.
+- Nothing changes on chain. "Updating from 10.0.26" in
+  `docs/use-dkg/updates-and-rollback.md` has the same steps.
+
+The details follow: compatibility, the full upgrade table, and every
+change.
+
+### Compatibility
+
+**No smart-contract, ABI or deployment registry changes, and no new
+network protocols.** The RFC-64 inventory database stays on schema 6. Its
+confirmed catalog placements (#3174) are rows that 10.0.26 cannot read, so
+`dkg rollback` to 10.0.26 removes them first; see the upgrade table.
+Owed-inventory markers (#3377) are small files in a new directory under
+the RFC-64 persistence directory. The async share and publish queues keep
+their jobs in the store, and the paging parameters are optional, so
+clients that do not send them get the lists as before (#3548).
+
+### Upgrading from 10.0.26
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| The async queues get store slots of their own by default (#3527, #3535, #3536, #3564, #3567) | On for Blazegraph and managed Oxigraph (`oxigraph-server`, the `dkg init` default) on hosts with more than 2 CPUs; off for `sparql-http`, the embedded store and hosts with 2 CPUs or fewer. The share queue gets 1 slot and the publisher queue 2, beside the shared store scheduler. The daemon logs `Store control path: on (...)` or `off (...)` once at start; offline `dkg publisher` commands and in-process agents keep them off unless the environment variable is set | None. If share or publish jobs get slower, set `"controlReservedSlots": 0` in the `store` block of `config.json`, or `DKG_STORE_CONTROL_RESERVED_SLOTS=0`, which wins, and restart. See `docs/use-dkg/async-queue-operations.md` |
+| Finished-job cleanup ships for evaluation, off by default (#3539, #3549, #3555) | 10.0.26 ignored `queueRetention` in `config.json`; this release reads it. A `report` or `delete` mode set there starts at the first start, and an invalid value or unknown key stops `dkg start` and the daemon. `delete` cannot be undone | Leave it `off` on production nodes. Check `config.json` for `queueRetention` before you update |
+| Publisher clear keeps related jobs, and offline commands wait for the daemon (#3555) | Bulk clear (`POST /api/publisher/clear`, `dkg publisher clear finalized\|failed`) keeps a finalized job while an older failed job of the same asset remains, so the count it returns can be smaller. `dkg publisher cancel`, `retry` and `clear` exit 1 with `DKG_DAEMON_RUNNING` while a daemon runs, and leave the store to it | Read the returned count. Use the running daemon's API, or run `dkg stop` first |
+| Job lists can be paged (#3537, #3538, #3548) | `GET /api/knowledge-assets/swm/share-jobs` and `GET /api/publisher/jobs` take `pageSize` (1 to 1,000) and `cursor` and answer `{ jobs, nextCursor, complete }`; `dkg ka share-jobs` and `dkg publisher jobs` take `--page-size`, `--cursor` and `--all`. Without them the routes answer as before, except that an unknown publisher `status` answers `400 PUBLISHER_LIST_STATUS_INVALID`. `GET /api/publisher/stats` counts in the store | Page large queues and stop on `complete`. Do not combine `limit` with paging |
+| Concurrent write checks share one store read (#3530) | Concurrent share or publish requests from one caller to one context graph share one write-preflight check, and store pressure in its follow-up reads answers a retryable 503 with `Retry-After: 1`. The daemon logs `Write preflight coalescing: on, result cache: off` at start | Retry a 503 that carries `Retry-After`. `DKG_WRITE_PREFLIGHT_COALESCING=0` turns the sharing off |
+| A usage line every five minutes (#3511, #3512, #3513) | `async_admission_usage`, at start, every five minutes and when idle, with matching OpenTelemetry instruments; it costs one background count per interval. The store's rejection metric gains an `operation_family` label | None. The fields are described in `packages/cli/docs/async-admission-usage-line.md` |
+| Public queries have a response budget (#2911) | `/api/query` reads at most 10 MiB of a public query's store response and answers HTTP 413 above it; the bounded v1 route keeps its 422 | Narrow or page a query that returns more |
+| `dkg doctor` reads `config.yaml` (#3247) | On a node configured in `config.yaml` the doctor runs every config check, and `dkg update` on such a Core runs the Core checks. A malformed config file makes the doctor warn, report the file and exit 2 | Fix what the doctor reports |
+| Shared memory hosting writes crash-safely (#2937) | A node that hosts shared memory for other members syncs each acknowledged append to disk before it answers | None |
+| An optional store concurrency policy (#3410) | `DKG_STORE_CONCURRENCY_POLICY=configured` lets `DKG_STORE_MAX_CONCURRENT` go above the CPU count, with one slot each kept for acknowledgements and health checks. The default stays `cpu` | None |
+| `dkg rollback` to 10.0.26 removes confirmed catalog placements (#3174) | A publication confirmed on chain whose catalog step the node has not stored yet is kept as a confirmed catalog placement, a new kind of row in the RFC-64 inventory database. 10.0.26 does not start on a database that holds one. `dkg rollback`, and `dkg rollback --stores-for` for a version installed by hand, remove these rows and their failure diagnostics for any release before 10.0.27, and name the assets; 10.0.26 does not finish their catalog step | Roll back with `dkg rollback`, or ready the stores with `dkg rollback --stores-for <version>` before starting an older version installed by hand |
+
+### Fixed
+
+- **A node settles after a restart** (#3510): catch-up counts finalized
+  shared memory that Verified Memory already holds with the same bytes as
+  held, and remembers up to 20,000 such snapshots for 6 hours in memory.
+  A context graph's readiness checks end after two attempts in a row that
+  resolve nothing new.
+- **One `publishedAt` per shared memory operation** (#3526): each operation
+  keeps its earliest valid stamp, so conflicting, malformed or oversized
+  older stamps leave a context graph's sync running. Duplicate stamps
+  already stored are cleaned up on stores that support SPARQL UPDATE.
+- **Recovery resumes where it stopped** (#3401, #3413): an interrupted
+  full-graph recovery resumes from the part it already verified, also for
+  assets over 100,000 rows or 10 MiB. After a restart, recovery skips
+  unchanged context graphs and fetches only the assets the store lacks,
+  with a bounded full recovery where it cannot.
+- **Fresh public snapshot sync keeps up with a changing context graph**
+  (#3558, bringing in #3523): it fetches from two Core nodes at once, one
+  transfer per node, and recovers by itself after a restart, a cancelled
+  subscription activation or a failed save. A holdings check that stalls
+  for 30 s hands over to normal recovery.
+- **Members receive the change they missed after an owner restart**
+  (#3502): a member that reconnects to the restarted owner of a public
+  context graph is told of the latest change at once. The owner logs
+  `SWM change notice for … sub-graph "…" (…) to new follower …: reached`.
+- **Shares admitted before the catalog authority is ready get their
+  inventory entry** (#3377, #3541): such a share leaves a durable marker,
+  and the node writes the owed inventory row once the authority is ready,
+  also across restarts. Pending markers leave shares in other context
+  graphs to go ahead, and recovery wakes by itself when periodic retries
+  are turned off. A waiting replay logs
+  `causeCode: SWM_INVENTORY_HANDOFF_PENDING`.
+- **A publication confirmed on chain completes its catalog step** (#3174):
+  the node keeps the obligation and completes it later without a new
+  transaction. Empty sub-graph names are refused up front.
+- **Private publishing stays steady while other agents update their keys**
+  (#3547): recipient checks hold while an unrelated agent updates its key
+  or peer route.
+- **Catalog replay on reconnect runs in bounded rounds** (#3173): two peer
+  streams and at most eight context graphs per round, with each context
+  graph's backoff kept.
+- **The node UI reads context graph statistics in bounded batches**
+  (#3015): at most eight graph partitions at a time, with the caller's
+  read access checked for each batch.
+- **Nodes that host shared memory write it crash-safely** (#2937): a
+  temporary file, fsync and rename, so an acknowledged write survives a
+  crash, and a torn tail is repaired before the next write.
 - **`dkg doctor` checks a node configured in `config.yaml`** (#3247): the
   daemon loads `config.yaml` when there is no `config.json`, but the doctor
   read only `config.json`. On such a node it reported "No config file" and
@@ -15,6 +643,84 @@ All notable changes to the DKG V10 node are documented here. The format is based
   error as malformed YAML. A malformed `config.json` or `config.yaml` no
   longer stops `dkg doctor` with a stack trace: it warns, runs its checks
   and reports the file.
+
+### Changed
+
+- **The async queues have a control path** (#3527, #3535, #3536, #3564,
+  #3567): the schedulers `store-control-share` (1 slot) and
+  `store-control-publisher` (2 slots) carry the queues' bookkeeping, that
+  is admission checks, job writes, claims, leases and job-state reads,
+  beside the shared store scheduler and without taking its capacity. The
+  slots show in `/api/status`, `/api/diagnostics/backpressure`, the
+  `resource_usage` line and the `"priority": "control"` field of a 503.
+  A refusal on a slot answers a retryable 503 with `Retry-After: 1`. See
+  the upgrade table for the defaults.
+- **Queue admission costs stay flat as history grows** (#3528, #3529): the
+  share duplicate check reads only its selector's unfinished jobs, and the
+  `vm/publish-async` admission reads only the asset's own key after one
+  scan for older unindexed jobs per process.
+- **Job lists and statistics read the store in bounded steps** (#3537,
+  #3538, #3548): the share queue's list, statistics and recovery sweep and
+  the publisher queue's list read a bounded number of rows at a time, and
+  the list routes accept paging; see the upgrade table. A list without a
+  cursor logs a warning above 5,000 rows.
+- **Write preflight checks are shared** (#3530): see the upgrade table.
+  `DKG_WRITE_PREFLIGHT_CACHE` (off by default) adds a short result cache,
+  with `DKG_WRITE_PREFLIGHT_CACHE_TTL_MS` (2,000 ms, 100 to 10,000).
+- **Query plans do less work** (#3144, #3415, #3550, #3552, #3553): a plain
+  `SELECT … LIMIT n` applies its limit inside the store; a single-pattern
+  select over many verified context graphs skips a per-match duplicate
+  check; exact graph verification makes two store calls; managed Oxigraph
+  results decode with fewer allocations; and query authorization caps its
+  parallel metadata reads at the store lane's capacity.
+- **Snapshot building reads small partitions together** (#3556): up to 64
+  partitions per store request when the store is idle, 32 under background
+  load and 8 while interactive work waits, so a snapshot build holds more
+  partitions in memory at once (41 to 57 MiB more at its peak in the
+  benchmark).
+- **Publication keeps its authority caches** (#3397) when their inputs
+  have not changed.
+- **Releases move every npm dist-tag on one one-time code, and stable
+  promotion checks the candidate's evidence first** (#3507, #3525, #3571):
+  for maintainers; see `RELEASE_PROCESS.md`.
+
+### Added
+
+- **`async_admission_usage`** (#3511, #3512, #3513): a logfmt line and
+  OpenTelemetry instruments for store rejections and waits, HTTP admission
+  by route, phase and code, share-queue heartbeats and publisher pick-up
+  and queue depth; see `packages/cli/docs/async-admission-usage-line.md`.
+- **`store.controlReservedSlots`** (#3564) and
+  **`DKG_STORE_CONTROL_RESERVED_SLOTS`** (#3527): `0` turns the queue
+  slots off, `share:1,publisher:2` sets them.
+- **Finished-job cleanup, off by default** (#3539, #3549, #3555):
+  `queueRetention.share` and `queueRetention.publisher` in `config.json`,
+  with `mode` (`off`, `report` or `delete`), `intervalMs`, `batchSize`,
+  `rescanIntervalMs` and age windows of at least 24 hours. With a mode on,
+  the daemon logs an `async_promote_retention_pass` summary. See
+  `docs/use-dkg/async-queue-operations.md` before you turn it on.
+- **`DKG_STORE_CONCURRENCY_POLICY`** (#3410), **`DKG_WRITE_PREFLIGHT_COALESCING`**,
+  **`DKG_WRITE_PREFLIGHT_CACHE`** and **`DKG_WRITE_PREFLIGHT_CACHE_TTL_MS`**
+  (#3530).
+- **A Kafka source handler for the DKG Source Worker** (#3392): each Kafka
+  record becomes a private Working Memory knowledge asset, acknowledged
+  after a sealed readback. It is a workspace package and is not published
+  to npm.
+- **Async queue documentation** (#3570): `docs/use-dkg/async-queue-operations.md`,
+  `docs/build/async-jobs.md` and "Updating from 10.0.26" in
+  `docs/use-dkg/updates-and-rollback.md`; and the OKF to RDF mapping as
+  ADR 0009 (#3237).
+
+### Tests and tooling
+
+- Broader tests for the MCP server, EPCIS, the graph viewer, the Kafka
+  plugin, the prime agent bridge, shared memory retention, Node 26 RPC
+  dispatch and script temp repositories (#3238, #3491, #3508, #3509,
+  #3522, #3534, #3546, #3560, #3561), the devnet member-sharing suite
+  (#3500), the network simulator (#3490, #3559), the async queue
+  contention benchmark (#3514, #3531, #3545), installed-package
+  certification on `main` and nightly campaigns on `testnet-canary`
+  (#3499, #3542).
 
 ## [10.0.26] - 2026-10-25
 

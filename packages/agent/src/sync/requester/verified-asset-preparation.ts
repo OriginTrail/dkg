@@ -6,8 +6,10 @@ import {
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
+  GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES,
   readGraphKnowledgeAssetConfirmationKindV1,
 } from '@origintrail-official/dkg-publisher';
+import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 import { parseGraphScopedDescriptor } from '../durable-integrity.js';
 import { packKnowledgeAssetIdFromIdentity } from '../../ka-identity.js';
 import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
@@ -23,9 +25,7 @@ const TRANSACTION_HASH = `${DKG_NS}transactionHash`;
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 const PEER_UNTRUSTED_METADATA_PREDICATES = new Set([
   MATERIALIZED_VERSION,
-  `${DKG_NS}accessPolicy`,
-  `${DKG_NS}allowedPeer`,
-  `${DKG_NS}publisherPeerId`,
+  ...GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES,
   `${DKG_NS}status`,
 ]);
 const GRAPH_SCOPED_SYNC_METADATA_PREDICATES = new Set([
@@ -222,6 +222,5 @@ export function assertNoLegacyRfc64ControlGraphs(
 }
 
 function stripLiteral(raw: string): string {
-  const match = raw.match(/^"(.*)"(?:\^\^.*|@.*)?$/);
-  return match ? match[1]! : raw;
+  return rdfLiteralBody(raw) ?? raw;
 }

@@ -1,3 +1,4 @@
+import { samePublicRdfTriples } from './same-public-rdf-triples.js';
 import {
   computeFlatKCRootV10,
   workspacePublicQuadsDigest,
@@ -6,6 +7,7 @@ import {
   ExactGraphReadError,
   readExactGraph,
   type Quad,
+  type QueryOptions,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 
@@ -13,7 +15,10 @@ export type ExactGraphContentVerification =
   | {
       status: 'verified';
       graphUri: string;
+      /** Exact rows observed in this layer, in the store's spelling. */
       quads: Quad[];
+      /** Original operation digest when its RDF spelling differs from the verified store rows. */
+      equivalentOperationDigest?: string;
       merkleRoot: Uint8Array;
     }
   | {
@@ -44,16 +49,21 @@ export async function verifyExactGraphContent(
     privateMerkleRoot?: Uint8Array;
     expectedMerkleRoot: Uint8Array;
     expectedPublicQuadsDigest?: string;
+    operationQuads?: Quad[];
     source: string;
+    /** Caller-owned whole-asset limits; physical query pages remain storage-bounded. */
+    readLimits?: { maxQuadCount: number; maxNQuadsBytes: number };
+    queryOptions?: Omit<QueryOptions, 'source'>;
   },
 ): Promise<ExactGraphContentVerification> {
   let quads: Quad[];
   try {
     quads = await readExactGraph(store, input.graphUri, {
       profile: 'bounded-single-result',
+      ...input.readLimits,
       expectedQuadCount: input.publicTripleCount,
       outputGraph: '',
-      queryOptions: { source: input.source },
+      queryOptions: { ...input.queryOptions, source: input.source },
     });
   } catch (error) {
     if (
@@ -76,16 +86,28 @@ export async function verifyExactGraphContent(
   if (!equalBytes(merkleRoot, input.expectedMerkleRoot)) {
     return { status: 'merkle-mismatch', graphUri: input.graphUri };
   }
+  let equivalentOperationDigest: string | undefined;
   if (
     input.expectedPublicQuadsDigest !== undefined
     && workspacePublicQuadsDigest(quads) !== input.expectedPublicQuadsDigest
   ) {
-    return { status: 'head-mismatch', graphUri: input.graphUri };
+    // A store may return decoded Unicode where the original operation used escapes.
+    // The chain root alone also equates some *different* RDF literals (e.g. 01 and 1).
+    const original = input.operationQuads;
+    if (!original || original.length !== input.publicTripleCount
+      || workspacePublicQuadsDigest(original) !== input.expectedPublicQuadsDigest
+      || !samePublicRdfTriples(original, quads)
+      || !equalBytes(computeFlatKCRootV10(original, input.privateMerkleRoot ? [input.privateMerkleRoot] : []), merkleRoot)
+    ) {
+      return { status: 'head-mismatch', graphUri: input.graphUri };
+    }
+    equivalentOperationDigest = input.expectedPublicQuadsDigest;
   }
   return {
     status: 'verified',
     graphUri: input.graphUri,
     quads,
+    ...(equivalentOperationDigest === undefined ? {} : { equivalentOperationDigest }),
     merkleRoot,
   };
 }

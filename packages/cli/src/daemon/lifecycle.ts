@@ -1,3 +1,7 @@
+import { getBoundListenMultiaddrs } from './bound-listen-addresses.js';
+import { PublicCheckpointStartup } from './public-checkpoint-startup.js';
+import { apiBindRefusal } from './api-bind-guard.js';
+import { checkDaemonCheckpointEligibility, bindCheckpointNetwork } from './public-checkpoint-config.js';
 import { buildCoreChainCacheConfig } from './core-chain-cache-config.js';
 // daemon/lifecycle.ts
 //
@@ -84,7 +88,7 @@ import {
   type ContextGraphOnChainIdResolution,
   type DKGAgentConfig,
 } from '@origintrail-official/dkg-agent';
-import { isExternalBackend, logStoreControlPathGeometry } from '@origintrail-official/dkg-storage';
+import { configureStoreControlPath, isExternalBackend, logStoreControlPathGeometry } from '@origintrail-official/dkg-storage';
 import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
   DEFAULT_REQUIRED_ACKS,
@@ -165,6 +169,11 @@ import {
   formatMetricsCollectorStartupLog,
   resolveMetricsCollectorConfig,
 } from '../metrics-collector-config.js';
+import { startDaemonSemanticRuntime } from '../semantic-runtime.js';
+import {
+  registerSemanticRuntimeInboxSkill,
+  SEMANTIC_RUNTIME_INBOX_SKILL_IRI,
+} from '../semantic-runtime-inbox.js';
 import { assertNodeRuntimeSupported } from '../node-runtime-preflight.js';
 import { refuseBrotliOnDaemonFetch } from './outbound-brotli-refusal.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
@@ -190,6 +199,7 @@ export {
   createChainDiscoveryScanRunner,
 } from './chain-discovery-scan.js';
 import { createDaemonLocalLlmService } from './local-llm-service.js';
+import { startMarketplace } from './marketplace-buyer.js';
 import { appendBoundedDaemonLogDiagnostic } from './daemon-log-diagnostics.js';
 import {
   createTelemetrySettings,
@@ -202,6 +212,7 @@ import { handleSharedMemoryTtlSettingsRequest } from './shared-memory-ttl-route.
 import { nodeUiTokenForRequest } from './node-ui-access.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
 import { createProtocolStores } from './protocol-persistence.js';
+import { createContextGraphJoinPolicyStore } from './join-policy-store.js';
 
 import { createAdmissionRecoveryCapabilityProbe, createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
 import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill.js';
@@ -217,9 +228,14 @@ import { registerJoinMetadataEmptyVmSettlement } from '../context-graph-empty-vm
 import { startActivationCatchups } from './context-graph-activation-catchup.js';
 import { cancelContextGraphReadinessRepeats } from './context-graph-readiness-repeat.js';
 import { endContextGraphWriteReadinessWaits } from './context-graph-write-readiness.js';
+import { daemonCpuProfiles } from './cpu-profile.js';
+import { daemonReadGraphRequests } from './routes/read-graphs.js';
 import { startContextGraphCatchupProgress } from './context-graph-catchup-progress-sources.js';
+import { observeShareConnections } from './share-connection-timing.js';
 import { beginAsyncAdmissionTrace } from './async-admission-trace.js';
 import { authenticateHttpRequest, canAdministerNode, loadTokens } from '../auth.js';
+import { AGENT_HTTP_HEADERS, isKnownAgentKeySigner, normalizeOperatorAgentAddresses } from '../agent-http-auth.js';
+import { SqliteAgentHttpNonceStore } from '../agent-http-nonce-store.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -320,6 +336,7 @@ import {
   raceShutdownWithTimeout,
 } from './shutdown.js';
 import { resolveShutdownPolicy, type ShutdownPolicy } from './shutdown-policy.js';
+import { apiExposureWarnings } from './api-exposure-warning.js';
 import {
   daemonRuntimeState,
 } from './shutdown-wait.js';
@@ -469,6 +486,9 @@ import { configureApiQueryPriority } from './api-query-priority.js';
 import { configureWritePreflightCoalescing } from './write-preflight-coalescing.js';
 import { startRetention, type RetentionHandle } from './retention-sweeps.js';
 import { resolveRetentionConfig } from '../retention-config.js';
+import { readGraphStoreSettings, resolveQueryConfig } from '../read-graphs-config.js';
+import { assertQueryConfigFitsNode } from '../update/read-graph-rollback-target.js';
+import { applyGraphCatalogConfig } from '../graph-catalog-config.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
 import { buildChatMemoryStack } from './memory-tool-context.js';
@@ -477,68 +497,6 @@ import {
   type PromoteWorkerConfig,
   type PromoteWorkerSupervisor,
 } from './worker/async-promote-worker.js';
-
-type MultiaddrLike = { toString: () => string };
-
-function stringifyMultiaddrList(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((ma) => {
-      try {
-        return (ma as MultiaddrLike).toString();
-      } catch {
-        return '';
-      }
-    })
-    .filter((addr) => addr.length > 0);
-}
-
-function listenerMultiaddrs(listener: unknown): string[] {
-  const candidate = listener as {
-    getAddrs?: () => unknown;
-    getMultiaddrs?: () => unknown;
-    addrs?: unknown;
-    multiaddrs?: unknown;
-  };
-  if (typeof candidate?.getAddrs === 'function') {
-    const addrs = stringifyMultiaddrList(candidate.getAddrs());
-    if (addrs.length > 0) return addrs;
-  }
-  if (typeof candidate?.getMultiaddrs === 'function') {
-    const addrs = stringifyMultiaddrList(candidate.getMultiaddrs());
-    if (addrs.length > 0) return addrs;
-  }
-  const addrs = stringifyMultiaddrList(candidate?.addrs);
-  if (addrs.length > 0) return addrs;
-  return stringifyMultiaddrList(candidate?.multiaddrs);
-}
-
-function getBoundListenMultiaddrs(libp2p: unknown): string[] | null {
-  const node = libp2p as {
-    components?: { transportManager?: unknown };
-    services?: { transportManager?: unknown };
-    transportManager?: unknown;
-    getMultiaddrs?: () => unknown;
-  };
-  const managers = [
-    node.components?.transportManager,
-    node.services?.transportManager,
-    node.transportManager,
-  ];
-  for (const manager of managers) {
-    const getListeners = (manager as { getListeners?: () => unknown } | undefined)?.getListeners;
-    if (typeof getListeners !== 'function') continue;
-    const listeners = getListeners.call(manager);
-    if (!Array.isArray(listeners)) continue;
-    const addrs = listeners.flatMap((listener) => listenerMultiaddrs(listener));
-    if (addrs.length > 0) return Array.from(new Set(addrs));
-  }
-
-  // If this libp2p shape does not expose transport listeners, prefer an
-  // indeterminate result over treating advertised self-addresses as bound
-  // listener evidence.
-  return null;
-}
 
 /**
  * Resolve the WM agentAddress the daemon hands to `ChatMemoryManager`.
@@ -1212,6 +1170,8 @@ async function runDaemonInnerWithStartupOwnership(
   // trust before allocating startup resources; it always wins. Without it an
   // edge seeds from the network file's relays, planned below from the
   // finished agent config.
+  const checkpointMode = await checkDaemonCheckpointEligibility(dkgDir(), config);
+  let checkpointStartup: PublicCheckpointStartup | undefined;
   assertAuthorityIndexConfigPlacement(config);
   const authorityIndex = resolveAuthorityIndexConfig(config.authorityIndex, config.nodeRole ?? 'edge');
   configureKaPublishLifecycleDebugLogging(config);
@@ -1275,7 +1235,11 @@ async function runDaemonInnerWithStartupOwnership(
   let startupUnhandledRejectionHandler: NodeJS.UnhandledRejectionListener | undefined;
   // Stops what would start catch-up jobs later; replaced once they exist.
   let stopCatchupTriggers = (): void => {};
-  registerStartupFailureCleanup(async () => {
+  let startupCleanup: Promise<void> | undefined;
+  const cleanupStartup = () => startupCleanup ??= (async () => {
+    // A failed native shutdown must not prevent the daemon writer from retiring.
+    const stopped = await Promise.allSettled([checkpointStartup?.close()]);
+    for (const result of stopped) if (result.status === 'rejected') log(`[bootstrap] Cleanup failed: ${String(result.reason)}`);
     try {
       stopCatchupTriggers();
     } catch {
@@ -1292,7 +1256,8 @@ async function runDaemonInnerWithStartupOwnership(
     }
     detachDaemonLogTee();
     await daemonLogFileWriter.shutdown();
-  });
+  })();
+  registerStartupFailureCleanup(cleanupStartup);
 
   function log(msg: string) {
     const line = `[${new Date().toISOString()}] ${msg}`;
@@ -1301,6 +1266,12 @@ async function runDaemonInnerWithStartupOwnership(
   }
   if (!assertNodeRuntimeSupported(log)) {
     throw new Error('Node runtime preflight failed; see the preceding fatal message.');
+  }
+  // Before anything listens on apiHost: the public-checkpoint status server and the API both do.
+  const apiRefusal = apiBindRefusal(config);
+  if (apiRefusal !== null) {
+    log(`FATAL: ${apiRefusal}`);
+    throw new Error(`Refusing to start: ${apiRefusal}`);
   }
   refuseBrotliOnDaemonFetch(log);
   const backpressureMonitor = new BackpressureMonitor({
@@ -1311,6 +1282,9 @@ async function runDaemonInnerWithStartupOwnership(
     info: log,
     warn: log,
   });
+  // The store control path's default and config setting depend on the configured backend (OT-RFC-73 P14). This
+  // runs before any store call can build the path; a later configuration would be refused with a warning.
+  configureStoreControlPath({ backend: config.store?.backend ?? 'oxigraph-worker', configured: config.store?.controlReservedSlots }, { warn: log });
   logStoreControlPathGeometry({ info: log, warn: log });
   const writePreflightCoalescing = configureWritePreflightCoalescing(process.env, { info: log, warn: log });
 
@@ -1439,6 +1413,11 @@ async function runDaemonInnerWithStartupOwnership(
   }
   // OT-RFC-73 P10b: a bad queue-retention value fails the boot here and the error names the key (the default is off for both queues).
   const retentionSettings = resolveRetentionConfig(config.queueRetention);
+  // OT-RFC-74: a bad `query` value fails the boot here, and so do read graphs that the rollback target would not recognize.
+  const queryConfig = resolveQueryConfig(config.query);
+  await assertQueryConfigFitsNode(queryConfig, role, Boolean(checkpointMode));
+  // A bad `store.graphCatalog` or DKG_STORE_GRAPH_CATALOG_MAX_BYTES fails the boot here; a good value bounds every catalog read of this process.
+  const graphCatalog = applyGraphCatalogConfig(config.store?.graphCatalog);
   const { name: selectedNetworkConfig, network } = await loadResolvedNetworkConfig(
     config,
     loadNetworkConfig,
@@ -1517,7 +1496,7 @@ async function runDaemonInnerWithStartupOwnership(
   // silently would look like data loss to the operator.
   const backendSwitch = detectBackendSwitch({
     dataDir: dkgDir(),
-    currentBackend: config.store?.backend ?? 'oxigraph-worker',
+    currentBackend: checkpointMode ? 'public-checkpoint' : config.store?.backend ?? 'oxigraph-worker',
     acceptStoreReset: process.env.DKG_ACCEPT_STORE_RESET === '1',
     log,
   });
@@ -1587,7 +1566,8 @@ async function runDaemonInnerWithStartupOwnership(
   // For the directory-backed blob/snapshot stores we use the managed
   // defaults (the rewritten sparql-http backend has no `options.path` to
   // infer a directory from, unlike the local Oxigraph backend).
-  const runtimeStore = managed?.storeConfig ?? config.store;
+  // A store section that holds only settings (no backend) keeps the default store.
+  const runtimeStore = managed?.storeConfig ?? (config.store?.backend ? config.store : undefined);
   const runtimeLargeLiteralStorage =
     managed?.largeLiteralStorage ?? config.largeLiteralStorage;
   const runtimeSnapshotStorage =
@@ -1610,7 +1590,12 @@ async function runDaemonInnerWithStartupOwnership(
       }
     : config;
 
-  await runPreAgentStoreBootSteps({
+  // Native journals are deployment-bound by the completion record and fresh authority.
+  // A chain reset must fail that binding, never wipe or reuse a checkpoint implicitly.
+  if (checkpointMode) await bindCheckpointNetwork(dkgDir(), checkpointMode, {
+    networkId, networkConfig: selectedNetworkConfig, chainResetMarker: network?.chainResetMarker,
+  });
+  if (!checkpointMode) await runPreAgentStoreBootSteps({
     managedOxigraph, runtimeStore, runtimeStoreConfig,
     dataDir: dkgDir(), chainResetMarker: network?.chainResetMarker,
     randomSamplingWalPath: config.randomSampling?.walPath,
@@ -1830,6 +1815,11 @@ async function runDaemonInnerWithStartupOwnership(
     managedStore: managed?.storeConfig,
     changelogEnabled: Boolean(config.store?.changelog),
     changelogEraGuard: protocolStores.changelogEraGuard,
+    // Only a written `query` section is carried, so a node without one builds its stores exactly as before. A node
+    // that starts from a public checkpoint gets its store from the checkpoint.
+    readGraphs: config.query === undefined || checkpointMode ? undefined : readGraphStoreSettings(queryConfig),
+    dataDir: dkgDir(),
+    graphCatalog,
   });
 
   const agentConfig: DKGAgentConfig = {
@@ -1926,6 +1916,7 @@ async function runDaemonInnerWithStartupOwnership(
     // network supplies one of them; the agent expects rpcUrl + hubAddress.
     chainConfig: runtimeEvmChainConfig ? { ...runtimeEvmChainConfig, ...evmSigning.chainSigning } : undefined,
     authorSigners: evmSigning.authorSigners,
+    nodeHeldAuthor: evmSigning.nodeHeldAuthor,
     sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
     // RFC ka-metadata-trim P3.3 — lifecycle PROV event writes (default true).
     metadataProvenanceEvents: config.metadata?.provenanceEvents,
@@ -2083,28 +2074,7 @@ async function runDaemonInnerWithStartupOwnership(
         dashDb.deleteContextGraphMember(contextGraphId, principalType, principalId);
       },
     },
-    contextGraphJoinPolicyStore: {
-      load: async (contextGraphId) => dashDb.getContextGraphJoinPolicy(contextGraphId),
-      save: async (record) => {
-        dashDb.setContextGraphJoinPolicy(record);
-      },
-      appendAudit: async (event) => {
-        dashDb.appendContextGraphJoinPolicyAudit(event);
-      },
-      saveWithAudit: async (record, event) => {
-        dashDb.setContextGraphJoinPolicyWithAudit(record, event);
-      },
-      getAutomaticApprovalUsage: async (contextGraphId, timestamp) =>
-        dashDb.getContextGraphAutomaticApprovalUsage(contextGraphId, timestamp),
-      reserveAutomaticApproval: async (input) =>
-        dashDb.reserveContextGraphAutomaticApproval(input),
-      markAutomaticApprovalRepairPending: async (input) =>
-        dashDb.markContextGraphAutomaticApprovalRepairPending(input),
-      getAutomaticApprovalRepair: async (contextGraphId, requestDigest) =>
-        dashDb.getContextGraphAutomaticApprovalRepair(contextGraphId, requestDigest),
-      commitAutomaticApproval: async (input) =>
-        dashDb.commitContextGraphAutomaticApproval(input),
-    },
+    contextGraphJoinPolicyStore: createContextGraphJoinPolicyStore(dashDb),
     messengerOutboxDrain: config.messengerOutboxDrain,
     messengerStores: {
       idempotencyStore: protocolStores.messengerStores.idempotencyStore,
@@ -2143,7 +2113,18 @@ async function runDaemonInnerWithStartupOwnership(
   }
   log(formatAuthorityIndexStartupLine(authorityIndexPlan));
   const promoteQueuePolicy = resolveDaemonPromoteQueueConfig(config.promoteQueue);
-  const agent = await DKGAgent.create(agentConfig);
+  // Before anything listens on apiHost: the public-checkpoint status server and the API both do.
+  for (const warning of apiExposureWarnings(config)) log(`WARNING: ${warning}`);
+  let checkpointAgent: DKGAgent | undefined;
+  if (checkpointMode) {
+    checkpointStartup = new PublicCheckpointStartup(async () => {
+      try { await cleanupStartup(); } finally { process.exit(1); }
+    });
+    log(`[bootstrap] ${checkpointMode === 'fresh' ? 'Preparing verified public data' : 'Opening retained native journal'}`);
+    checkpointAgent = await checkpointStartup.open(agentConfig, config.publicSnapshotBootstrap!, checkpointMode,
+      config.apiPort, config.apiHost, writeApiPort);
+  }
+  const agent = checkpointAgent ?? await DKGAgent.create(agentConfig);
   agent.configurePromoteQueue(promoteQueuePolicy);
   const publicSnapshotStore = agent.publicSnapshotStore;
 
@@ -2215,7 +2196,14 @@ async function runDaemonInnerWithStartupOwnership(
   {
     const openSkills = config.messaging?.openSkills === true;
     const allowedSkillPeers = new Set(config.messaging?.skillAllowedPeers ?? []);
-    agent.setSkillAcl((senderPeerId: string) => {
+    agent.setSkillAcl((senderPeerId: string, skillUri: string) => {
+      // The semantic handler verifies wallet signatures, then live graph membership
+      // for Programs or tenant approval for bound operations. Let only it reach its
+      // stronger application-level gate without opening unrelated skills.
+      if (
+        config.semanticRuntime?.enabled === true
+        && skillUri === SEMANTIC_RUNTIME_INBOX_SKILL_IRI
+      ) return { accept: true };
       if (openSkills) return { accept: true };
       if (allowedSkillPeers.has(senderPeerId)) return { accept: true };
       return {
@@ -2292,6 +2280,73 @@ async function runDaemonInnerWithStartupOwnership(
   registerJoinMetadataEmptyVmSettlement({ agent, dashboard: dashDb, log });
 
   await agent.start();
+  if (checkpointStartup) {
+    const coverage = await checkpointStartup.complete();
+    log(`[bootstrap] Current public coverage: ${coverage.committed}/${coverage.assets}`);
+  }
+
+
+  const localLlm = createDaemonLocalLlmService({
+    dkgHome: dkgDir(), cwd: process.cwd(),
+    stderr: (line) => log(`[dkg-mcp] ${line}`),
+  });
+
+  // The runtime starts when `semanticRuntime.enabled` is true, or when this
+  // node already stored Program configuration. A management request never
+  // turns it on; an explicit enabled:false remains the operator's kill switch.
+  config.semanticRuntime ??= {};
+  type SemanticRuntimeService = Awaited<ReturnType<typeof startDaemonSemanticRuntime>>;
+  let semanticRuntimeHost: SemanticRuntimeService = null;
+  let semanticRuntimeStarting: Promise<SemanticRuntimeService> | undefined;
+  const ensureSemanticRuntime = async (): Promise<SemanticRuntimeService> => {
+    if (semanticRuntimeHost) return semanticRuntimeHost;
+    if (semanticRuntimeStarting) return semanticRuntimeStarting;
+    semanticRuntimeStarting = (async () => {
+      const started = await startDaemonSemanticRuntime(config.semanticRuntime, {
+        log, dataDirectory: dkgDir(), localLlmProvider: localLlm.programProvider,
+      });
+      if (started) {
+        try { registerSemanticRuntimeInboxSkill(agent, started, config.semanticRuntime, config.llm); }
+        catch (error) { await started.stop(); throw error; }
+      }
+      semanticRuntimeHost = started;
+      return started;
+    })();
+    try { return await semanticRuntimeStarting; }
+    finally { semanticRuntimeStarting = undefined; }
+  };
+  try {
+    semanticRuntimeHost = await ensureSemanticRuntime();
+  } catch (err) {
+    await localLlm.close();
+    await semanticRuntimeHost?.stop().catch((stopErr: any) =>
+      log(`Semantic runtime startup rollback could not stop runtime: ${stopErr?.message ?? String(stopErr)}`),
+    );
+    semanticRuntimeHost = null;
+    await agent.stop().catch((stopErr: any) =>
+      log(`Semantic runtime startup rollback could not stop agent: ${stopErr?.message ?? String(stopErr)}`),
+    );
+    await managedOxigraph
+      ?.stop()
+      .catch((stopErr: any) =>
+        log(`Semantic runtime startup rollback could not stop managed Oxigraph: ${stopErr?.message ?? String(stopErr)}`),
+      );
+    try {
+      dashDb.close();
+    } catch (closeErr: any) {
+      log(`Semantic runtime startup rollback could not close dashboard DB: ${closeErr?.message ?? String(closeErr)}`);
+    }
+    throw new Error(
+      `Semantic runtime startup failed: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
+    );
+  }
+
+  // The marketplace (OT-RFC-27), when enabled: the buyer, whose job keeps the standing plan funded, its gateway, and
+  // the seller. A part that fails to start is logged and stays off; the node boots on.
+  const { marketplace, marketplaceGateway, marketplaceSeller } = await startMarketplace({
+    config, network, agent, wallets: evmSigning.addresses.wallets.map((w) => w.address), dataDir: dkgDir(), dashDb, log,
+  });
 
   // Classify configured graphs before migrating legacy readiness. Explicit
   // local-bootstrap targets receive current provenance here; configured
@@ -2305,6 +2360,8 @@ async function runDaemonInnerWithStartupOwnership(
     readinessStore: dashDb,
     log,
   });
+
+  checkpointStartup?.assertActive();
 
   // Rows written before per-plane provenance existed cannot distinguish a
   // complete catch-up from v10.0.6's clean-empty false-ready state. Migrate
@@ -2457,8 +2514,8 @@ async function runDaemonInnerWithStartupOwnership(
         postCommitRecoveryIntervalMs: promoteWorkerConfig?.postCommitRecoveryIntervalMs,
       },
     });
-    // Queue retention (off by default) runs only here, in the daemon's admission instance, over the queue's own store object.
-    daemonRetention = startRetention({ runtime: 'daemon-admission', settings: retentionSettings, agent, log });
+    // Queue retention (off by default) runs only here, in the daemon's admission instance, over each queue's own store object (the share queue's, and `publisherControl`'s).
+    daemonRetention = startRetention({ runtime: 'daemon-admission', settings: retentionSettings, agent, publisher: publisherControl, log });
 
     publisherStartupTimer = setTimeout(() => {
       if (publisherStartupController.signal.aborted) return;
@@ -2479,6 +2536,7 @@ async function runDaemonInnerWithStartupOwnership(
           }),
           publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
           knowledgeAssetVmPublishHandler: createKnowledgeAssetVmPublishHandler(agent),
+          storageAckCopyCleanup: agent.storageAckCopyCleanup,
           publicSnapshotStore,
           log,
           startupSignal: publisherStartupController.signal,
@@ -3264,6 +3322,8 @@ async function runDaemonInnerWithStartupOwnership(
   // --- Authentication ---
 
   const authEnabled = config.auth?.enabled !== false;
+  const operatorAgentAddresses = normalizeOperatorAgentAddresses(config.auth?.operatorAgentAddresses);
+  const agentHttpNonces = new SqliteAgentHttpNonceStore(dashDb.db);
   const validTokens = await loadTokens(config.auth);
   const bridgeAuthToken =
     (await loadBridgeAuthToken()) ??
@@ -3351,12 +3411,6 @@ async function runDaemonInnerWithStartupOwnership(
   // (version counters or ETag-like compare-and-swap) to close the race
   // across processes — out of scope for Round 6.
   const assertionImportLocks = new Map<string, Promise<void>>();
-  const localLlm = createDaemonLocalLlmService({
-    dkgHome: dkgDir(),
-    cwd: process.cwd(),
-    stderr: (line) => log(`[dkg-mcp] ${line}`),
-  });
-
   // --- HTTP API ---
 
   const rateLimiter = new HttpRateLimiter(
@@ -3464,7 +3518,7 @@ async function runDaemonInnerWithStartupOwnership(
             ? { "Access-Control-Allow-Origin": reqCorsOrigin }
             : {}),
           "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+          "Access-Control-Allow-Headers": AGENT_HTTP_HEADERS,
         });
         res.end();
         return;
@@ -3477,6 +3531,12 @@ async function runDaemonInnerWithStartupOwnership(
         authEnabled,
         validTokens,
         resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
+        agentKey: {
+          targetPeerId: agent.peerId,
+          operatorAgentAddresses,
+          isRegisteredAgent: (address) => isKnownAgentKeySigner(agent, address, reqUrl.pathname),
+          nonces: agentHttpNonces,
+        },
         corsOrigin: resolveCorsOrigin(req, corsAllowed),
       });
       if (!authentication.allowed) return;
@@ -3548,10 +3608,12 @@ async function runDaemonInnerWithStartupOwnership(
       })) return;
 
       // Node UI routes (metrics, operations, logs, saved queries, chat, static UI).
-      // The dashboard shell is served with the node-operator token only for a
-      // trusted local request (loopback socket and loopback Host).
+      // The dashboard shell carries the node-operator token only when the
+      // operator turned on auth.dashboardAutoSignIn, and then only for a trusted
+      // local request (loopback socket, loopback Host, no proxy headers).
       const uiToken = nodeUiTokenForRequest(req, {
         authEnabled,
+        autoSignIn: config.auth?.dashboardAutoSignIn === true,
         validTokens,
         resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
       });
@@ -3614,6 +3676,11 @@ async function runDaemonInnerWithStartupOwnership(
         eventLoopDelay: eventLoopDelayView,
         localLlm,
         routeRpcTransport: daemonRpcRuntime?.routeTransport,
+        semanticRuntimeHost,
+        ensureSemanticRuntime,
+        marketplace,
+        marketplaceGateway,
+        marketplaceSeller: marketplaceSeller?.seller,
         emitMemoryGraphChanged,
         emitNotification,
       });
@@ -3640,13 +3707,14 @@ async function runDaemonInnerWithStartupOwnership(
   // Resolution + assignment live in applyServerLimits (unit-tested); tunable via
   // DKG_MAX_CONNECTIONS / DKG_HEADERS_TIMEOUT_MS, with malformed/empty values
   // falling back to defaults rather than becoming NaN.
+  observeShareConnections(server);
   applyServerLimits(server, {
     maxConnectionsEnv: process.env.DKG_MAX_CONNECTIONS,
     maxConnectionsConfig: config.maxConnections,
     headersTimeoutEnv: process.env.DKG_HEADERS_TIMEOUT_MS,
   });
 
-  const apiPort = config.apiPort || 0;
+  const apiPort = checkpointStartup?.port ?? (config.apiPort || 0);
   const apiHost = config.apiHost || "127.0.0.1";
 
   // Route plugins: loaded before listen() so requests can't race the array; fail-soft per ADR 0001.
@@ -3664,6 +3732,9 @@ async function runDaemonInnerWithStartupOwnership(
     `route-plugins-loaded loaded=${routePlugins.length} configured=${configuredCount}`,
   );
 
+  checkpointStartup?.assertActive();
+  await checkpointStartup?.closeStatus();
+  checkpointStartup?.assertActive();
   await new Promise<void>((resolve) => {
     server.listen(apiPort, apiHost, () => resolve());
   });
@@ -3712,6 +3783,8 @@ async function runDaemonInnerWithStartupOwnership(
       endShareAdmissionWaits: () => agent.endLegacySwmShareAdmissionWaits(),
       endWriteReadinessWaits: endContextGraphWriteReadinessWaits,
       stopCatchupTriggers,
+      endCpuProfile: () => daemonCpuProfiles.end(),
+      endReadGraphRequests: () => daemonReadGraphRequests.end(),
     });
     const cleanupStateFiles = async () => {
       await removeOwnedDaemonRuntimeState().catch((err: any) =>
@@ -3734,6 +3807,9 @@ async function runDaemonInnerWithStartupOwnership(
           log(`Chain discovery scan drain error: ${err instanceof Error ? err.message : String(err)}`);
         });
         logVolumePruner.stop();
+        void marketplace?.stop();
+        void marketplaceGateway?.stop();
+        void marketplaceSeller?.stop();
         backpressureMonitor.stop();
         eventLoopDelayMonitor.stop();
         rateLimiter.destroy();
@@ -3756,6 +3832,11 @@ async function runDaemonInnerWithStartupOwnership(
         const teardown = await runProducerQuiescentTeardown(
           buildProducerQuiescentTeardownSteps({
             closeHttpServer: () => closeDaemonHttpServer(server, detachedHttpResponses),
+            stopSemanticRuntime: async () => {
+              const runtimeToStop = semanticRuntimeHost;
+              semanticRuntimeHost = null;
+              await runtimeToStop?.stop();
+            },
             closeEntitySearch: async () => { entitySearch?.close(); },
             closeLocalLlm: () => localLlm.close(),
             drainCatchupJobs,
@@ -3830,6 +3911,8 @@ async function runDaemonInnerWithStartupOwnership(
     process.exit(forced ? encodeForcedShutdownExitCode(exitCode) : exitCode);
   }
 
+  checkpointStartup?.assertActive();
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));
+  checkpointStartup?.handoff();
 }

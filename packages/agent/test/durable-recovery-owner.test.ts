@@ -8,22 +8,27 @@ const ctx = createOperationContext('sync');
 const contextGraphId = 'serialized-graph';
 afterEach(() => vi.restoreAllMocks());
 
-it('serializes non-coalesced operations across separately bound recovery hosts', async () => {
+it.each(['ordinary', 'owned'])('serializes %s operations across separately bound recovery hosts', async kind => {
   let release!: () => void;
   let entered!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
   const started = new Promise<void>(resolve => { entered = resolve; });
   let active = 0;
   let maximumActive = 0;
-  vi.spyOn(recoveryGraph, 'runAdmittedDurableGraph').mockImplementation(async () => {
+  const execute = async () => {
     active += 1;
     maximumActive = Math.max(maximumActive, active);
     entered();
     await held;
     active -= 1;
-    return { result: {} as Awaited<ReturnType<typeof runDurableSync>> };
-  });
+    return {} as Awaited<ReturnType<typeof runDurableSync>>;
+  };
+  vi.spyOn(recoveryGraph, 'runAdmittedDurableGraph').mockImplementation(async () => ({ result: await execute() }));
+  vi.spyOn(recoveryGraph, 'runAdmittedGraphOwnedDurableGraph').mockImplementation(async () => ({
+    result: await execute(), decision: { strategy: 'full', continuation: 'full-graph' },
+  }));
   const agentLike = {
+    store: {  },
     config: {},
     runContextGraphSyncWithBackpressure: async (
       _ctx: unknown, _graph: string, _lane: string, _label: string,
@@ -31,7 +36,11 @@ it('serializes non-coalesced operations across separately bound recovery hosts',
     ) => work(),
     log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
   } as any;
-  const run = () => LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed.call(
+  const run = () => kind === 'owned'
+    ? LifecycleSyncMethods.prototype.runGraphOwnedDurableRecoveryRound.call(agentLike, {
+      ctx, remotePeerId: 'serialized-peer', contextGraphId, recovery: { meta: {}, holdings: {} },
+      options: { signal: new AbortController().signal },
+    }) : LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed.call(
     agentLike, ctx, 'serialized-peer', [contextGraphId], undefined, undefined, undefined,
     { signal: new AbortController().signal },
   );

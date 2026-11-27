@@ -34,13 +34,6 @@ import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js'
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
 import {
-  runDaemon,
-  performNpmUpdateEdge,
-  getCurrentCliVersion,
-  DAEMON_EXIT_CODE_RESTART,
-  decodeForcedExitCode,
-} from '../daemon.js';
-import {
   isLivenessProbeEnabled,
   startLivenessWatcher,
   LIVENESS_CONSECUTIVE_FAILURES_TO_KILL,
@@ -144,6 +137,7 @@ program
     'Only ready the stopped node\'s local stores for <version>, without switching versions',
   )
   .action(async (opts: { storesFor?: string }) => {
+    const { getCurrentCliVersion, performNpmUpdateEdge } = await import('../daemon.js');
     const currentVersion = getCurrentCliVersion();
     if (opts.storesFor !== undefined) {
       const stores = await prepareRollbackStores(

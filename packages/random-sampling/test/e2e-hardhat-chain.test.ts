@@ -338,6 +338,14 @@ describe('Random Sampling E2E (Hardhat)', () => {
       const challenge = await proverAdapter.getNodeChallenge!(proverIdentityId);
       expect(challenge?.solved).toBe(true);
 
+      // The submission and both solved-period paths below (live read, then
+      // reused record) report this challenge's on-chain period identity.
+      const challengePeriod = {
+        epoch: challenge!.epoch,
+        periodStartBlock: challenge!.activeProofPeriodStartBlock,
+      };
+      expect(outcome).toMatchObject({ kind: 'submitted', period: challengePeriod });
+
       const period = await proverAdapter.getActiveProofPeriodStatus!();
       const duration = period.proofingPeriodDurationInBlocks;
       if (duration === undefined) {
@@ -361,11 +369,11 @@ describe('Random Sampling E2E (Hardhat)', () => {
       // adapter still supplies the binding/head/Chronos guards, while the two
       // expensive status/challenge reads do not run again.
       const second = await prover.tick();
-      expect(second).toEqual({ kind: 'already-solved' });
+      expect(second).toEqual({ kind: 'already-solved', period: challengePeriod });
       expect({ statusReads, challengeReads }).toEqual({ statusReads: 1, challengeReads: 1 });
 
       const third = await prover.tick();
-      expect(third).toEqual({ kind: 'already-solved' });
+      expect(third).toEqual({ kind: 'already-solved', period: challengePeriod });
       expect({ statusReads, challengeReads }).toEqual({ statusReads: 1, challengeReads: 1 });
 
       // Cross the real contract's proof-period boundary. The cached solved

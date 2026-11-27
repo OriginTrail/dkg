@@ -53,7 +53,7 @@ export async function sweepPostCommitFailures(host: PromoteListingHost, ops: Pos
   const found = new Map<string, PromoteReadyOrder>();
   let cursor: PromoteJobCursor | undefined;
   do {
-    cursor = await host.locked(async () => {
+    cursor = await host.locked('sweepCandidates', async () => {
       const page = await readPromoteJobPage(host, FAILED, { cursor, pageSize, sources: { keys: SWEEP_SOURCES.keys }, payloadContainsAny: POST_COMMIT_MARKERS });
       for (const job of page.jobs) {
         if (!found.has(job.jobId) && isAutomaticallyRecoverablePostCommitFailure(job)) {
@@ -68,7 +68,7 @@ export async function sweepPostCommitFailures(host: PromoteListingHost, ops: Pos
   const events: PromotePostCommitRecoveryEvent[] = [];
   for (let at = 0; at < candidates.length; at += pageSize) {
     const turn = candidates.slice(at, at + pageSize);
-    await host.locked(async () => {
+    await host.locked('sweepDecisions', async () => {
       const now = host.now();
       for (const job of await readPromoteJobPayloads(host, FAILED, turn, SWEEP_SOURCES.payloads)) {
         if (!isAutomaticallyRecoverablePostCommitFailure(job)) continue;

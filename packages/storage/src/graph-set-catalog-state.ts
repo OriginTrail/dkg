@@ -1,3 +1,6 @@
+import type { MeasuredGraphInventory } from './graph-inventory-materialization.js';
+import { measureGraphCatalogBytes } from './graph-catalog-response-limit.js';
+import { assertMeasuredGraphCatalogWithinInternalLimit } from './graph-catalog-internal-limit.js';
 import {
   createSortedUniqueStringCatalog,
   insertSortedUniqueStringCatalog,
@@ -12,6 +15,7 @@ import type { SortedGraphCatalog } from './graph-set-index-store.js';
  */
 export class GraphSetCatalogState {
   private members: Set<string> | null = null;
+  private measuredBytes: number | null = null;
   private ordered: SortedGraphCatalog | null = null;
 
   get initialized(): boolean {
@@ -29,6 +33,7 @@ export class GraphSetCatalogState {
   clear(): void {
     this.members = null;
     this.ordered = null;
+    this.measuredBytes = null;
   }
 
   replace(next: Set<string>): { added: string[]; removed: string[] } {
@@ -36,7 +41,7 @@ export class GraphSetCatalogState {
     const added = [...next].filter((graph) => !previous.has(graph)).sort();
     const removed = [...previous].filter((graph) => !next.has(graph)).sort();
     this.members = next;
-    if (added.length > 0 || removed.length > 0) this.ordered = null;
+    if (added.length > 0 || removed.length > 0) { this.ordered = null; this.measuredBytes = null; }
     return { added, removed };
   }
 
@@ -60,6 +65,7 @@ export class GraphSetCatalogState {
         removed.push(graph);
       }
     }
+    if (added.length > 0 || removed.length > 0) this.measuredBytes = null;
     if (this.ordered) {
       const mutationCount = added.length + removed.length;
       if (mutationCount === 1) {
@@ -77,10 +83,28 @@ export class GraphSetCatalogState {
    * Return the ordered view only when it still describes the membership set
    * observed by the caller. An invalidation between an async cache read and
    * enumeration must be retried, not represented as an ordinary empty catalog.
+   * The complete catalog is node state: only the internal ceiling bounds it.
    */
   sortedFor(members: ReadonlySet<string>): SortedGraphCatalog | null {
     if (this.members !== members) return null;
     this.ordered ??= createSortedUniqueStringCatalog(this.members);
+    assertMeasuredGraphCatalogWithinInternalLimit(this.projectionBytes(this.ordered));
     return this.ordered;
+  }
+
+  /** The current catalog's size, measured once per membership; no ceiling check. */
+  measure(): { graphs: number; bytes: number } | null {
+    if (!this.members) return null;
+    this.ordered ??= createSortedUniqueStringCatalog(this.members);
+    return { graphs: this.members.size, bytes: this.projectionBytes(this.ordered) };
+  }
+
+  private projectionBytes(graphs: SortedGraphCatalog): number {
+    return this.measuredBytes ??= measureGraphCatalogBytes(graphs);
+  }
+
+  measuredFor(members: ReadonlySet<string>): MeasuredGraphInventory<SortedGraphCatalog> | null {
+    const graphs = this.sortedFor(members);
+    return graphs && { graphs, materializedBytes: this.projectionBytes(graphs) };
   }
 }

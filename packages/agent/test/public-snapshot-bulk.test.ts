@@ -27,6 +27,22 @@ vi.mock('@origintrail-official/dkg-core', async importOriginal => ({
 }));
 
 describe('public bulk snapshot recovery', () => {
+  it('tries the next compatible supplier after transfer refusal before any materialization', async () => {
+    const exchange = vi.fn(async (_peer: string) => { throw new Error('empty/refusing core'); });
+    const probe = vi.fn(async () => 'supported' as const);
+    const ensure = vi.fn(async (_peer: string) => {});
+    const signal = new AbortController().signal;
+    await expect(recoverPublicSnapshotBulk({ ...unusedRecoveryCapabilities, ensurePeerConnected: ensure,
+      router: { probeProtocol: probe, withDuplexStream: exchange } }, {
+      contextGraphId: cg, peerBatches: async function* () { yield ['first', 'second']; },
+      uals: ['urn:nonempty'], evidence: { snapshot: { snapshotDigest: 'digest' } } as PublicSnapshotEvidence,
+      signal, assertCurrent: () => {}, deadline: Date.now() + 30_000, dataDir: '/unused',
+      shouldQuarantineCommitted: () => false, onCommitted: () => {}, log: () => {},
+    })).rejects.toThrow('Configured cores did not supply bulk graph v1 content');
+    expect(ensure.mock.calls.map(call => call[0])).toEqual(['first', 'second']);
+    expect(probe).toHaveBeenCalledTimes(2);
+    expect(exchange.mock.calls.map(call => call[0])).toEqual(['first', 'second']);
+  });
   it.each(['connect', 'probe', 'cached-advertisement', 'delayed-identify', 'reconciliation', 'terminal-reconciliation'] as const)('preserves chunked recovery and supplier-failure behavior (%s)', async failure => {
     let release!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; });

@@ -89,7 +89,7 @@ The [Node Skill](../references/node-skill.md) is the complete operational refere
 | `429` / retryable `503` | Follow the operation's backoff/recovery contract; preserve its identity |
 | Network timeout | Outcome may be unknown; inspect the KA or job before repeating a mutation |
 
-For async sharing, store the returned job ID and poll `/api/knowledge-assets/swm/share-jobs/{jobId}`. `queued`, `running`, and `failed_retrying` are not success; completion requires `succeeded`. Inspect terminal failures before recovery. For publication, use the distinct [publisher job contract](../use-dkg/async-publisher-wallets.md); its states and transaction recovery are not the share queue's states.
+For async sharing, store the returned job ID and poll `/api/knowledge-assets/swm/share-jobs/{jobId}`. `queued`, `running`, and `failed_retrying` are not success; completion requires `succeeded`. Inspect terminal failures before recovery. For publication, use the distinct [publisher job contract](../use-dkg/async-publisher-wallets.md); its states and transaction recovery are not the share queue's states. What each async response means, and how to retry or recover safely, is in [Async Share and Publish Jobs](async-jobs.md).
 
 ## Extend the example
 

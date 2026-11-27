@@ -1,4 +1,5 @@
 import { handlePrivatePlacementRetry } from './private-placement-retry.js';
+import { handleContextGraphMembers } from './context-graph-members.js';
 // daemon/routes/status.ts
 //
 // Route handlers for status, info, connections, host, wallet, chain, identity, integrations, shutdown.
@@ -74,7 +75,7 @@ import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
 import { parseStatusQuery, type StoreQuadsStatusFields } from '../../status-store-quads-wire.js';
 import { requestExternalStoreQuads, peekCachedExternalStoreQuads } from '../store-quads-cache.js';
 import { probeExternalStore } from '../store-reachability.js';
-import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -447,15 +448,16 @@ function buildPublicInfoChainSummary(
   };
 }
 
-function createRouteEvmProvider(
+async function withRouteEvmProvider<T>(
   rpcUrl: string,
   rpcUrls: string[] | undefined,
-  routeTransport?: DaemonRouteRpcTransport,
-): ethers.JsonRpcProvider | ethers.FallbackProvider {
+  routeTransport: DaemonRouteRpcTransport | undefined,
+  read: (provider: ethers.JsonRpcProvider | ethers.FallbackProvider) => Promise<T>,
+): Promise<T> {
   if (routeTransport === undefined) {
     throw new Error('Daemon RPC transport unavailable');
   }
-  return routeTransport.createProvider(rpcUrl, rpcUrls);
+  return routeTransport.withProvider(rpcUrl, rpcUrls, read);
 }
 
 async function getRegistryCacheSnapshot(): Promise<RegistryCacheSnapshot> {
@@ -570,7 +572,6 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     publisherState,
     config,
     startedAt,
-    dashDb,
     opWallets,
     network,
     tracker,
@@ -661,17 +662,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
 
   // GET /api/context-graph/{id}/members — local SQL membership cache.
   // Kept in this early route group so the cache has a lightweight read path.
-  const contextGraphMembersMatch = path.match(/^\/api\/context-graph\/([^/]+)\/members$/);
-  if (req.method === "GET" && contextGraphMembersMatch) {
-    const contextGraphId = decodeURIComponent(contextGraphMembersMatch[1]);
-    if (!validateContextGraphId(contextGraphId).valid) {
-      return jsonResponse(res, 400, { error: 'Invalid context graph id' });
-    }
-    return jsonResponse(res, 200, {
-      contextGraphId,
-      members: dashDb.listContextGraphMembers(contextGraphId),
-    });
-  }
+  if (await handleContextGraphMembers(ctx)) return;
 
   // GET/HEAD /api/status — HEAD claims early so liveness probes never reach plugins.
   if ((req.method === "GET" || req.method === "HEAD") && path === "/api/status") {
@@ -1093,39 +1084,46 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       });
     }
     try {
-      const provider = createRouteEvmProvider(rpcUrl, chain?.rpcUrls, routeRpcTransport);
-      const tokenAddr = chain?.tokenAddress
-        ?? (await new ethers.Contract(
-          hubAddress,
-          ["function getContractAddress(string) view returns (address)"],
-          provider,
-        ).getContractAddress("Token").catch(() => null));
-      let token: ethers.Contract | null = null;
-      let tokenSymbol = "TRAC";
-      if (tokenAddr && tokenAddr !== ethers.ZeroAddress) {
-        token = new ethers.Contract(
-          tokenAddr,
-          [
-            "function balanceOf(address) view returns (uint256)",
-            "function symbol() view returns (string)",
-          ],
-          provider,
-        );
-        tokenSymbol = await token.symbol().catch(() => "TRAC");
-      }
-      const balances = await Promise.all(
-        opWallets.wallets.map(async (w) => {
-          const [ethBal, tracBal] = await Promise.all([
-            provider.getBalance(w.address),
-            token ? token.balanceOf(w.address) : Promise.resolve(0n),
-          ]);
-          return {
-            address: w.address,
-            eth: ethers.formatEther(ethBal),
-            trac: ethers.formatEther(tracBal),
-            symbol: tokenSymbol,
-          };
-        }),
+      const { balances, tokenSymbol } = await withRouteEvmProvider(
+        rpcUrl,
+        chain?.rpcUrls,
+        routeRpcTransport,
+        async (provider) => {
+          const tokenAddr = chain?.tokenAddress
+            ?? (await new ethers.Contract(
+              hubAddress,
+              ["function getContractAddress(string) view returns (address)"],
+              provider,
+            ).getContractAddress("Token").catch(() => null));
+          let token: ethers.Contract | null = null;
+          let tokenSymbol = "TRAC";
+          if (tokenAddr && tokenAddr !== ethers.ZeroAddress) {
+            token = new ethers.Contract(
+              tokenAddr,
+              [
+                "function balanceOf(address) view returns (uint256)",
+                "function symbol() view returns (string)",
+              ],
+              provider,
+            );
+            tokenSymbol = await token.symbol().catch(() => "TRAC");
+          }
+          const balances = await Promise.all(
+            opWallets.wallets.map(async (w) => {
+              const [ethBal, tracBal] = await Promise.all([
+                provider.getBalance(w.address),
+                token ? token.balanceOf(w.address) : Promise.resolve(0n),
+              ]);
+              return {
+                address: w.address,
+                eth: ethers.formatEther(ethBal),
+                trac: ethers.formatEther(tracBal),
+                symbol: tokenSymbol,
+              };
+            }),
+          );
+          return { balances, tokenSymbol };
+        },
       );
       return jsonResponse(res, 200, {
         wallets: opWallets.wallets.map((w) => w.address),

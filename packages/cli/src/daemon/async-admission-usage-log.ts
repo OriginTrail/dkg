@@ -44,21 +44,22 @@ import type { RetentionQueueName, RetentionUsageView } from './retention-timer.j
  * count), and `store/ack` is the storage-ACK queue-wait P95. P95s of single lines cannot be merged, so the line
  * also prints `store_wait_buckets`, the lane's wait counts as `<upper bound ms>x<count>` for each bucket that
  * holds a wait, ascending, joined by `|` (`infx<count>` past 10000 ms, `-` for none). Adding those counts over
- * the lines of a test cell or a monitoring window gives that window's P95 (docs/use-dkg/backpressure-observability.md).
+ * the lines of a test cell or a monitoring window gives that window's P95 (packages/cli/docs/async-admission-usage-line.md).
  *
  * `preflight_*` are cumulative counts of the write preflight's coalescing (`write-preflight-coalescing.ts`): probes
  * started, calls that joined one, calls served from the result cache, probes kept in it, and calls probed outright.
  * `-` when the sample carries none.
  *
- * Queue retention (OT-RFC-73 P10b) appends fields only while a retention sweep runs (a queue whose mode is not `off`), so the line is unchanged by default. Per
- * sweep, with the prefix `share_retention` (the publisher's, when P11 adds it, is `lift_retention`):
+ * Queue retention (OT-RFC-73 P10b, P11) appends fields only while a retention sweep runs (a queue whose mode is not `off`), so the line is unchanged by default. Per
+ * sweep, with the prefix `share_retention` (the publisher's is `lift_retention`, with the single class `finalized` and the publisher's own reasons):
  *     share_retention=report share_retention_ticks=12 share_retention_deleted=cancelled:0,retired_no_effect:0,succeeded:0
  *     share_retention_kept=failed_retained:2,too_recent:40 share_retention_skipped=clock_jump:1 share_retention_errors=scan:1
  *     share_retention_pass_scanned=300 share_retention_pass_would_delete=cancelled:1,retired_no_effect:0,succeeded:240 share_retention_pass_deleted=cancelled:0,...
  * `_deleted`, `_kept` (judgments by reason), `_skipped` (ticks not run, by reason) and `_errors` (by phase, `tick` for a batch that threw) are cumulative since the
  * process started; `_kept`, `_skipped` and `_errors` list only what is not zero. The `_pass_` fields are a gauge of the latest COMPLETE pass, not cumulative (`-`
- * until one completed): in report mode `_pass_would_delete` is what the plan's delete gate reads. The `cancelled` class counts only jobs whose every attempt is proven
- * unstarted at an integer format of 2 or more; docs/promote-queue-operations.md states that rule and its two limits.
+ * until one completed): in report mode `_pass_would_delete` counts what the latest pass would remove (see "Before you switch to delete" in
+ * docs/use-dkg/async-queue-operations.md). The `cancelled` class counts only jobs whose every attempt is proven
+ * unstarted at an integer format of 2 or more; packages/publisher/docs/async-queue-internals.md states that rule and its two limits.
  *
  * `http=` counts every admission request, 2xx included: `<route>/<phase>/<status>/<code>`, where
  * the phase is the step that answered (`request`, `write_preflight`, `intent_resolution`,

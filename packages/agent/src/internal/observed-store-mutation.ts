@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { isStoreOperationNotStarted, type Quad, type StoreOperation } from '@origintrail-official/dkg-storage';
+import { readStoreOperationExecutionGeneration, isStoreOperationNotStarted, type Quad, type StoreOperation } from '@origintrail-official/dkg-storage';
 import type { StoreMutation, StoreMutationObserver } from './store-mutation.js';
 
 /**
@@ -54,9 +54,13 @@ export function createObservedStoreMutation(
       // A mutation may have committed before its response was lost. Only an
       // outcome-tagged pre-dispatch refusal proves cache/authority state did
       // not change; every indeterminate outcome must invalidate fail-closed.
-      const indeterminate = operation !== undefined && !isStoreOperationNotStarted(error, operation);
+      const indeterminate = operation === undefined
+        ? mutation !== undefined : !isStoreOperationNotStarted(error, operation);
       if (indeterminate) invalidate();
-      settle?.(indeterminate ? 'indeterminate' : 'unchanged');
+      const generation = operation === undefined ? undefined : readStoreOperationExecutionGeneration(error, operation);
+      const outcome = indeterminate ? 'indeterminate' : 'unchanged';
+      if (generation === undefined) settle?.(outcome);
+      else settle?.(outcome, { generation });
       throw error;
     }
     const didChange = changed(result);

@@ -54,6 +54,7 @@ export interface PublicSnapshotPacingOptions {
 export class PublicSnapshotRecoveryPacing {
   private readonly setbacks = new VmRecoveryStreamSetbackPolicy();
   private refusals = 0;
+  private admissionBarrier?: { wait?: Promise<boolean> };
 
   constructor(private readonly options: PublicSnapshotPacingOptions) {}
 
@@ -62,6 +63,7 @@ export class PublicSnapshotRecoveryPacing {
     if (committed === 0 && (attempt.admission === 'local-admission-deferred'
       || (attempt.result?.deferredBackpressure ?? 0) > 0)) {
       this.refusals += 1;
+      this.admissionBarrier ??= {};
       return 'local-refusal';
     }
     if (attempt.admission === 'work-started') this.refusals = 0;
@@ -79,6 +81,11 @@ export class PublicSnapshotRecoveryPacing {
     return this.setbacks.heldOff(this.options.contextGraphId, peerId, Date.now());
   }
 
+  /** A queued worker must honor a refusal already observed by this job. */
+  localAdmissionDeferred(): boolean {
+    return this.admissionBarrier !== undefined;
+  }
+
   /** The bound of the next attempt, which never runs past the job's limit. */
   attemptTimeoutMs(): number {
     return Math.max(0, Math.min(PUBLIC_SNAPSHOT_ATTEMPT_TIMEOUT_MS, this.options.deadline - Date.now()));
@@ -88,7 +95,14 @@ export class PublicSnapshotRecoveryPacing {
    * Wait until local sync admission would take the attempt. False when that
    * cannot happen in time; the job's cancellation or loss of its graph throws.
    */
-  async waitForAdmission(): Promise<boolean> {
+  waitForAdmission(): Promise<boolean> {
+    const barrier = this.admissionBarrier ??= {};
+    return barrier.wait ??= this.waitForLocalCapacity().finally(() => {
+      if (this.admissionBarrier === barrier) this.admissionBarrier = undefined;
+    });
+  }
+
+  private async waitForLocalCapacity(): Promise<boolean> {
     const hold = Math.min(PUBLIC_SNAPSHOT_MAX_HOLD_MS, PUBLIC_SNAPSHOT_RETRY_MS * 2 ** (this.refusals - 1));
     if (!(await this.sleep(jitter(hold)))) return false;
     while (!this.admissionAvailable()) {
@@ -121,14 +135,9 @@ export class PublicSnapshotRecoveryPacing {
    * cancellation at once.
    */
   private async sleep(ms: number): Promise<boolean> {
-    const { deadline, signal, assertCurrent } = this.options;
     const until = Date.now() + ms;
-    if (until > deadline - PUBLIC_SNAPSHOT_FINAL_READ_RESERVE_MS) return false;
-    assertCurrent();
-    while (!signal.aborted && Date.now() < until) {
-      await vmRecoveryRetryDelay(Math.min(PUBLIC_SNAPSHOT_RETRY_MS, until - Date.now()), signal);
-      assertCurrent();
-    }
+    if (until > this.options.deadline - PUBLIC_SNAPSHOT_FINAL_READ_RESERVE_MS) return false;
+    await waitForPublicSnapshotRetry(until, this.options.signal, this.options.assertCurrent);
     return true;
   }
 }
@@ -136,4 +145,14 @@ export class PublicSnapshotRecoveryPacing {
 /** Half the delay plus a random share of the other half, so waiting jobs do not retry in step. */
 function jitter(ms: number): number {
   return Math.round(ms / 2 + Math.random() * (ms / 2));
+}
+
+
+/** Wait to an already bounded instant, retaining cancellation and ownership fences. */
+export async function waitForPublicSnapshotRetry(until: number, signal: AbortSignal, assertCurrent: () => void): Promise<void> {
+  assertCurrent(); signal.throwIfAborted();
+  while (Date.now() < until) {
+    await vmRecoveryRetryDelay(Math.min(PUBLIC_SNAPSHOT_RETRY_MS, until - Date.now()), signal);
+    assertCurrent(); signal.throwIfAborted();
+  }
 }

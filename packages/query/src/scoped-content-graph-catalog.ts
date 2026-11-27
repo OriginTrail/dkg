@@ -1,5 +1,6 @@
+import { registeredAssertionGraphPattern, CHILD_CONTEXT_GRAPH_PREDICATES, decodePartitionMetadataFact } from './partition-metadata-facts.js';
 import { registeredSubGraphPattern, registeredSubGraphBranches, decodeRegisteredSubGraphName } from './registered-sub-graphs.js';
-import { assertSafeIri, contextGraphDataUri, contextGraphMetaUri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
+import { assertSafeIri, contextGraphDataUri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 import { nonEmptyNamedGraphEnumerationPattern, type QueryResult } from '@origintrail-official/dkg-storage';
 
 /** One fresh store admission for scope authority and optional physical inventory.
@@ -17,7 +18,6 @@ export async function readScopedContentGraphCatalog(
   childContextGraphs: Set<string>;
 }> {
   const root = assertSafeIri(contextGraphDataUri(contextGraphId));
-  const meta = assertSafeIri(contextGraphMetaUri(contextGraphId));
   const prefix = escapeSparqlLiteral(`${root}/`);
   // Keep UNION branches flat: Blazegraph 2.1.5 cannot lower a nested UNION
   // introduced by graph-scope lifting, even though the nested form is valid SPARQL.
@@ -27,7 +27,7 @@ export async function readScopedContentGraphCatalog(
       FILTER(?graph = <${root}> || STRSTARTS(STR(?graph), "${prefix}"))
     `] : []),
     ...registeredSubGraphBranches(contextGraphId),
-    `GRAPH <${meta}> { ?assertion <http://dkg.io/ontology/assertionGraph> ?assertionGraph . }`,
+    registeredAssertionGraphPattern(contextGraphId),
     ...childContextGraphBranches(root),
   ];
   const result = await query(`SELECT DISTINCT ${includeInventory ? '?graph ' : ''}?name ?assertionGraph ?ctxGraph WHERE {
@@ -40,9 +40,10 @@ export async function readScopedContentGraphCatalog(
   if (result.type !== 'bindings') return catalog;
   for (const row of result.bindings) {
     if (row.graph && (row.graph === root || row.graph.startsWith(`${root}/`))) catalog.graphs.add(row.graph);
-    if (row.assertionGraph) catalog.assertionGraphs.add(row.assertionGraph);
-    if (row.ctxGraph) catalog.childContextGraphs.add(row.ctxGraph);
-    const name = decodeRegisteredSubGraphName(row.name);
+    const fact = decodePartitionMetadataFact(row);
+    if (fact.assertionGraph) catalog.assertionGraphs.add(fact.assertionGraph);
+    if (fact.childContextGraph) catalog.childContextGraphs.add(fact.childContextGraph);
+    const name = fact.subGraphName;
     if (name !== undefined) catalog.subGraphs.add(name);
   }
   return catalog;
@@ -72,7 +73,7 @@ export async function readChildContextGraphAuthority(contextGraphId: string,
 
 function childContextGraphBranches(root: string): string[] {
   const prefix = escapeSparqlLiteral(`${root}/`);
-  return ['a <https://dkg.network/ontology#ContextGraph>', '<https://dkg.network/ontology#registrationStatus> ?status'].map(pattern => `
+  return CHILD_CONTEXT_GRAPH_PREDICATES.map(pattern => `
     GRAPH ?g { ?ctxGraph ${pattern} . }
     FILTER(STR(?g) = CONCAT(STR(?ctxGraph), "/_meta"))
     FILTER(STRSTARTS(STR(?ctxGraph), "${prefix}"))

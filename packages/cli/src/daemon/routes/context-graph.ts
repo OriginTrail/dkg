@@ -1,5 +1,7 @@
 import { handlePublicSnapshotJob } from './public-snapshot-job.js';
+import { handlePublicCheckpointJob } from './public-checkpoint-job.js';
 import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
+import { parseContextGraphListQuery } from './context-graph-list-query.js';
 // daemon/routes/context-graph.ts
 //
 // Route handlers for context-graph (+ contextGraph, sub-graph) CRUD, participants, join flow, manifest publish/install.
@@ -667,6 +669,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // Node-wide gates consume the principal established by authentication; route code must not
   // reinterpret token storage or agent-token resolution.
   const isNodeAdminCaller = (): boolean => canAdministerNode(authentication);
+  if (path === '/api/context-graph/snapshot-checkpoint') {
+    if (!isNodeAdminCaller()) { jsonResponse(res,403,{error:'Node administrator required'}); return; }
+    await handlePublicCheckpointJob(ctx);
+    return;
+  }
   if (path === '/api/context-graph/snapshot-sync') {
     if (!isNodeAdminCaller()) { jsonResponse(res,403,{error:'Node administrator required'}); return; }
     await handlePublicSnapshotJob(ctx);
@@ -1049,54 +1056,41 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const qs = new URL(req.url ?? "", "http://localhost").searchParams;
     const contextGraphId = qs.get("contextGraphId");
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    const lifecycle = createStoreQueryRequestLifecycle(req, res, 'node-ui.sub-graph-stats');
     try {
       if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
       const registered = await agent.listSubGraphs(contextGraphId!);
-      // One pass enumerates *all* named graphs in the project + their
-      // distinct-subject and triple counts. Sub-graph ownership is inferred
-      // from the named-graph path segment after the context-graph id:
+      // Enumerate named graphs through the graph-set index, then aggregate
+      // exact-IRI query batches. Sub-graph ownership is inferred from the
+      // named-graph path segment after the context-graph id:
       //   did:dkg:context-graph:<cg>/<subGraph>/assertion/<author>/<name>
       //   did:dkg:context-graph:<cg>/<subGraph>   (committed sub-graph view)
-      // This is one SPARQL round-trip regardless of how many sub-graphs exist.
+      // Unlike the old GRAPH ?g aggregate, this never creates a giant VALUES
+      // allow-list or an unbounded CartesianProductJoinIterator in Oxigraph.
       const counts = new Map<string, { entityCount: number; tripleCount: number }>();
       try {
         const prefix = `did:dkg:context-graph:${contextGraphId}/`;
-        const sparql = `
-          SELECT ?g (COUNT(DISTINCT ?s) AS ?entities) (COUNT(*) AS ?triples)
-          WHERE {
-            GRAPH ?g { ?s ?p ?o }
-            FILTER(STRSTARTS(STR(?g), ${JSON.stringify(prefix)}))
-          }
-          GROUP BY ?g
-        `;
-        const result = await agent.query(sparql, {
-          contextGraphId: contextGraphId!,
-          includeContextGraphPartitions: true,
-          callerAgentAddress: actorFromRequestContext(ctx).authenticatedAgentAddress,
+        const graphStats = await agent.readContextGraphNamedGraphStats(contextGraphId!, {
+          callerAgentAddress: actor.authenticatedAgentAddress,
+          signal: lifecycle.signal, priority: lifecycle.priority, source: lifecycle.source,
         });
-        const parseCount = (v: any) => {
-          if (v === undefined || v === null) return 0;
-          const s = typeof v === 'string' ? v : (v && typeof v === 'object' && 'value' in v ? (v as any).value : '');
-          const m = String(s).match(/^"?(\d+)/);
-          return m ? Number(m[1]) : 0;
-        };
-        for (const row of (result?.bindings ?? []) as Array<Record<string, any>>) {
-          const g = typeof row.g === 'string' ? row.g : (row.g && typeof row.g === 'object' && 'value' in row.g ? row.g.value : undefined);
-          if (!g || !g.startsWith(prefix)) continue;
-          const tail = g.slice(prefix.length);
+        for (const row of graphStats) {
+          if (!row.graph.startsWith(prefix)) continue;
+          const tail = row.graph.slice(prefix.length);
           // tail starts with either "<subGraphName>/..." or "_meta" or "_shared_memory".
           // Only care about the first segment, but skip daemon-internal graphs.
           const firstSlash = tail.indexOf('/');
           const seg = firstSlash >= 0 ? tail.slice(0, firstSlash) : tail;
           if (!seg || seg.startsWith('_')) continue;
           const entry = counts.get(seg) ?? { entityCount: 0, tripleCount: 0 };
-          entry.entityCount += parseCount(row.entities);
-          entry.tripleCount += parseCount(row.triples);
+          entry.entityCount += row.entityCount;
+          entry.tripleCount += row.tripleCount;
           counts.set(seg, entry);
         }
       } catch {
         // Counts are best-effort — UI degrades to zeros on query failure.
       }
+      if (lifecycle.signal.aborted || res.destroyed) return;
       const items = registered.map((sg) => ({
         name: sg.name,
         uri: sg.uri,
@@ -1112,7 +1106,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         return jsonResponse(res, 400, { error: err.message });
       }
       throw err;
-    }
+    } finally { lifecycle.dispose(); }
   }
 
   // POST /api/context-graph/{id}/add-participant
@@ -1162,6 +1156,46 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // GET /api/context-graph/{id}/authority — targeted owner/operator diagnostics.
+  // Monitoring needs the current policy before and after each write. Do not
+  // enumerate unrelated graphs or turn a metadata lookup failure into public
+  // access. The native getters retain their write-invalidated authority view.
+  const authorityMatch = path.match(/^\/api\/context-graph\/([^/]+)\/authority$/);
+  if (req.method === "GET" && authorityMatch) {
+    const nodeAdmin = isNodeAdminCaller();
+    const caller = actor.authenticatedAgentAddress;
+    if (!nodeAdmin && !caller) {
+      return jsonResponse(res, 403, { error: 'Requires the graph owner or a node-level admin token' });
+    }
+    let contextGraphId: string;
+    try {
+      contextGraphId = decodeURIComponent(authorityMatch[1]);
+    } catch {
+      return jsonResponse(res, 400, { code: 'INVALID_CONTEXT_GRAPH_ID' });
+    }
+    try {
+      const signal = AbortSignal.timeout(10_000);
+      // An agent may inspect only a graph it curates. Check ownership before
+      // disclosing existence, policy, registration or membership. No inference
+      // from the graph's name or allowlist can grant this diagnostic access.
+      const ownerCurator = nodeAdmin ? undefined : await agent.getContextGraphCurator(contextGraphId, { signal });
+      if (!nodeAdmin && ownerCurator?.toLowerCase() !== 'did:dkg:agent:' + caller!.toLowerCase()) {
+        return jsonResponse(res, 403, { error: 'Requires the graph owner or a node-level admin token' });
+      }
+      if (!await agent.contextGraphExists(contextGraphId, { signal })) {
+        return jsonResponse(res, 404, { code: 'CONTEXT_GRAPH_NOT_FOUND' });
+      }
+      const accessPolicy = await agent.getExplicitAccessPolicy(contextGraphId, { signal });
+      const curator = ownerCurator ?? await agent.getContextGraphCurator(contextGraphId, { signal });
+      const onChainId = await agent.getContextGraphOnChainId(contextGraphId, { signal });
+      const allowedAgents = await agent.getContextGraphAllowedAgents(contextGraphId);
+      signal.throwIfAborted();
+      return jsonResponse(res, 200, { contextGraphId, accessPolicy, curator, onChainId, allowedAgents });
+    } catch {
+      return jsonResponse(res, 503, { code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE' });
     }
   }
 
@@ -2386,10 +2420,16 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     }
   }
 
-  // GET /api/context-graph/list
+  // GET /api/context-graph/list — `named`, `system` and `onChain` are opt-in
+  // filters (#3919); without them the answer is the one it always was.
   if (req.method === "GET" && path === "/api/context-graph/list") {
+    const listQuery = parseContextGraphListQuery(url.searchParams);
+    if (!listQuery.ok) {
+      return jsonResponse(res, 400, { error: listQuery.error, code: listQuery.code });
+    }
     const contextGraphs = await agent.listContextGraphs({
       callerAgentAddress: requestAgentAddress ?? null,
+      ...(listQuery.filter ? { filter: listQuery.filter } : {}),
     });
     return jsonResponse(res, 200, {
       contextGraphs,

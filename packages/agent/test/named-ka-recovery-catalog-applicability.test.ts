@@ -14,7 +14,7 @@ type RecoveryInternals = {
   _resolveRecoveredKnowledgeAssetVmLifecycleAuthor(): Promise<{ author: string; incomplete: boolean } | false>;
 };
 
-async function fixture(legacy: boolean, evidence: AsyncKnowledgeAssetVmPublishRecoveryEvidence = legacyEvidence()) {
+async function fixture(legacy: boolean, evidence: AsyncKnowledgeAssetVmPublishRecoveryEvidence = legacyEvidence(), selection: boolean | null = false) {
   const store = new OxigraphStore();
   const chain = seededChain();
   const agent = await DKGAgent.create({
@@ -24,7 +24,7 @@ async function fixture(legacy: boolean, evidence: AsyncKnowledgeAssetVmPublishRe
   // Recovery records this local identity, but the test does not start networking.
   vi.spyOn(agent, 'peerId', 'get').mockReturnValue('12D3KooWRecoveryFixture');
   const original = baseRequest();
-  const request = { ...original, contextGraphId: '0x1111111111111111111111111111111111111111/legacy-recovery', agentAddress: AUTHOR,
+  const request = { ...original, ...(selection === null ? {} : { catalogObligationRequired: selection }), contextGraphId: '0x1111111111111111111111111111111111111111/legacy-recovery', agentAddress: AUTHOR,
     seal: { ...original.seal, ...(legacy ? { reservedKaId: undefined } : {}) } };
   // Model already-materialized VM data: the regression is the required catalog tail,
   // not the separate chain-to-VM materializer. Normalization and observer remain real.
@@ -93,56 +93,46 @@ describe('named KA recovery catalog applicability', () => {
     } finally { await h.agent.stop(); }
   });
 
-  it.each(['authority-unavailable', 'active-public-legacy-seal', 'active-private-legacy-seal', 'public-removal-failure', 'private-marker-failure'] as const)(
-    'keeps the canonical transaction held for an actual catalog failure (%s)', async failure => {
-      const h = await fixture(failure === 'active-public-legacy-seal' || failure === 'active-private-legacy-seal');
+  it.each(['disabled', 'unavailable', 'public', 'private'] as const)(
+    'holds required confirmation until its durable marker commits with %s authoring', async lane => {
+      const h = await fixture(false, legacyEvidence(), true);
       const markerFailure = new Error('durable marker write failed');
       const put = vi.fn(async () => { throw markerFailure; });
       const originalPersistence = Reflect.get(h.agent, 'rfc64PersistenceV1');
-      type CatalogLaneHost = {
-        resolveRfc64CatalogAuthoringLaneV1: DKGAgent['resolveRfc64CatalogAuthoringLaneV1'];
-      };
-      const resolveLane = vi.spyOn(h.agent as unknown as CatalogLaneHost, 'resolveRfc64CatalogAuthoringLaneV1');
+      const resolveLane = vi.spyOn(h.agent as any, 'resolveRfc64CatalogAuthoringLaneV1').mockImplementation(() => {
+        if (lane === 'unavailable') throw new Error('catalog authority unavailable');
+        return lane === 'disabled' ? null : { kind: lane, acceptsFinalizedVmRepair: lane === 'private' };
+      });
+      const requestPlacement = vi.spyOn(h.agent as any, 'requestRfc64FinalizedPrivateCatalogPlacementRepairV1')
+        .mockReturnValue({ accepted: false, whenAttempted: Promise.resolve() });
       const remove = vi.spyOn(h.agent, 'commitRfc64ConfirmedInventoryRemovalV1');
-      const warn = vi.spyOn(h.agent.log, 'warn');
       try {
-        if (failure === 'authority-unavailable') {
-          resolveLane.mockImplementation(() => { throw new Error('catalog authority unavailable'); });
-        } else {
-          // Active-lane selection is the seam here; the facade and canonical observer stay real.
-          // Only the fields the observer consumes are needed; no signing authority is fabricated.
-          resolveLane.mockReturnValue({
-            acceptsFinalizedVmRepair: failure === 'private-marker-failure' || failure === 'active-private-legacy-seal',
-            scopeBase: { networkId: 'otp:20430', contextGraphId: h.request.contextGraphId,
-              governanceChainId: null, governanceContractAddress: null,
-              ownershipTransitionDigest: null, subGraphName: null, era: '1' },
-          } as ReturnType<CatalogLaneHost['resolveRfc64CatalogAuthoringLaneV1']>);
-        }
-        if (failure === 'public-removal-failure') {
-          remove.mockRejectedValue(new Error('inventory removal unavailable'));
-        }
-        if (failure === 'private-marker-failure') {
-          expect(Reflect.set(h.agent, 'rfc64PersistenceV1', { finalizedPrivatePlacementRepairs: { put } })).toBe(true);
-        }
+        Reflect.set(h.agent, 'rfc64PersistenceV1', { finalizedPrivatePlacementRepairs: { put } });
         expect(await h.queue.recover()).toBe(0);
-        const held = await h.queue.getStatus(h.jobId);
-        expect(held?.status).toBe('broadcast');
-        expect(held && 'broadcast' in held ? held.broadcast?.txHash : undefined).toBe(TX_HASH);
+        expect((await h.queue.getStatus(h.jobId))?.status).toBe('broadcast');
         expect(h.materialize).toHaveBeenCalledOnce();
         expect(h.observer).toHaveBeenCalledOnce();
-        expect(resolveLane).toHaveBeenCalledOnce();
-        expect(await h.observer.mock.results[0]?.value).toBe(false);
+        await expect(h.observer.mock.results[0].value).rejects.toThrow('not durably recorded');
+        expect(put).toHaveBeenCalledOnce();
+        expect(resolveLane).not.toHaveBeenCalled();
+        expect(requestPlacement).not.toHaveBeenCalled();
+        expect(remove).not.toHaveBeenCalled();
+        put.mockImplementation(async () => undefined);
+        expect(await h.queue.recover()).toBe(1);
+        expect((await h.queue.getStatus(h.jobId))?.status).toBe('finalized');
+        expect(put).toHaveBeenLastCalledWith(expect.objectContaining({ version: 2, contextGraphId: h.request.contextGraphId }));
+        expect(requestPlacement).toHaveBeenCalledOnce();
         expect(h.executor).not.toHaveBeenCalled();
-        if (failure === 'public-removal-failure') expect(remove).toHaveBeenCalledOnce();
-        else expect(remove).not.toHaveBeenCalled();
-        if (failure === 'private-marker-failure') {
-          expect(put).toHaveBeenCalledOnce();
-          expect(warn.mock.calls.some(([, line]) => line.includes(markerFailure.message))).toBe(true);
-        } else expect(put).not.toHaveBeenCalled();
-      } finally {
-        Reflect.set(h.agent, 'rfc64PersistenceV1', originalPersistence);
-        await h.agent.stop();
-      }
+      } finally { Reflect.set(h.agent, 'rfc64PersistenceV1', originalPersistence); await h.agent.stop(); }
     },
   );
+  it('conservatively retains a confirmed older request without selection evidence', async () => {
+    const h = await fixture(false, legacyEvidence(), null);
+    try {
+      expect(await h.queue.recover()).toBe(0);
+      expect((await h.queue.getStatus(h.jobId))?.status).toBe('broadcast');
+      expect(h.observer.mock.calls[0][0].catalogObligationRequired).toBe(true);
+      expect(h.executor).not.toHaveBeenCalled();
+    } finally { await h.agent.stop(); }
+  });
 });

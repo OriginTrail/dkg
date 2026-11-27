@@ -525,6 +525,25 @@ describe('exact-asset rolling-upgrade filter', () => {
       return { ...harness, warnings, debugs };
     }
 
+    it('rejects a graph asset lazily when materialization is unsupported', async () => {
+      const { context, calls, warnings } = retiredAssetContext();
+      const summary = await runDurableSync(context);
+      expect(calls.map(call => call.phase)).toEqual(['meta', 'data']);
+      expect(summary.failedPeers).toBe(0);
+      expect(summary.failedPhases).toBe(1);
+      expect(summary.complete).toBe(false);
+      expect(summary.insertedTriples).toBe(0);
+      expect(warnings.some(message => message.includes('requires an exact materialization store path'))).toBe(true);
+    });
+
+    it('allows empty pages without a materialization capability', async () => {
+      const { context, calls } = makeContext({ pageQuads: { data: [], meta: [] } });
+      const summary = await runDurableSync(context);
+      expect(calls.map(call => call.phase)).toEqual(['meta', 'data']);
+      expect(summary.failedPeers).toBe(0);
+      expect(summary.insertedTriples).toBe(0);
+    });
+
     it('stops the durable store quietly when authentication finds the id superseded', async () => {
       const storeGraphScopedAsset = vi.fn(async () => {
         throw new SyncTargetSupersededError(retired, cleartext);

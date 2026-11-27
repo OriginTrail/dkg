@@ -27,7 +27,12 @@ export interface StoreMutation {
  */
 export type StoreMutationOutcome = 'changed' | 'unchanged' | 'indeterminate';
 
+/** Backend dispatch evidence is optional: generic/queued failures retain conservative settlement-time fencing. */
+export interface StoreMutationExecution {
+  readonly generation: number;
+}
+
 export interface StoreMutationObserver {
   /** Called before a write is dispatched. The returned function is called exactly once, when the write settles. */
-  begin(mutation: StoreMutation): (outcome: StoreMutationOutcome) => void;
+  begin(mutation: StoreMutation): (outcome: StoreMutationOutcome, execution?: StoreMutationExecution) => void;
 }

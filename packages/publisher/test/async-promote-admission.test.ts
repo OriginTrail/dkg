@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Logger, createAsyncAdmissionDiagnosticTrace } from '@origintrail-official/dkg-core';
 import { OxigraphStore, StoreSchedulerBusyError, StorePriorityScheduler, type TripleStore } from '@origintrail-official/dkg-storage';
 import { jobSubject, literal, PROMOTE_PAYLOAD } from '../src/async-promote-queue-utils.js';
 import { isAutomaticallyRecoverablePostCommitFailure } from '../src/async-promote-recovery-policy.js';
@@ -36,6 +37,46 @@ const bounded = <T>(promise: Promise<T>) => Promise.race([
 ]);
 
 describe('async promote admission under store pressure (#3331)', () => {
+  it('cancels disconnected admission before persistence without writing a late job', async () => {
+    const delay = gate(); let armed = true;
+    const { queue } = fixture(async (method, args, run) => {
+      if (armed && method === 'query' && (args[1] as { source?: string })?.source === 'publisher.asyncPromote.findActiveConflict') {
+        armed = false; delay.enter(); await delay.held;
+      }
+      return run();
+    }, { admissionTimeoutMs: 1000 });
+    const controller = new AbortController();
+    const pending = bounded(queue.enqueue(request, { signal: controller.signal }));
+    await delay.entered;
+    controller.abort();
+    try {
+      expect(await pending).toMatchObject({ error: { admissionOutcome: 'not_admitted', phase: 'conflict' } });
+    } finally { delay.release(); }
+    await tick();
+    expect(await queue.list()).toEqual([]);
+  });
+
+  it('preserves the original indeterminate job when disconnected after persistence starts', async () => {
+    const delay = gate(); let armed = true;
+    const { queue } = fixture(async (method, _args, run) => {
+      if (armed && method === 'replaceSubject') { armed = false; delay.enter(); await delay.held; }
+      return run();
+    }, { admissionTimeoutMs: 1000 });
+    const controller = new AbortController();
+    const pending = bounded(queue.enqueue(request, { signal: controller.signal }));
+    await delay.entered;
+    controller.abort();
+    let jobId: string;
+    try {
+      const result = await pending as { error: { jobId: string } };
+      expect(result).toMatchObject({ error: { admissionOutcome: 'indeterminate', phase: 'persist', jobId: expect.any(String) } });
+      jobId = result.error.jobId;
+    } finally { delay.release(); }
+    await tick();
+    expect((await queue.list()).map(job => ({ jobId: job.jobId, state: job.state })))
+      .toEqual([{ jobId: jobId!, state: 'queued' }]);
+  });
+
   it('expires during conflict lookup and never admits later after the caller has a no-admission verdict', async () => {
     const delay = gate(); let armed = true;
     const { queue } = fixture(async (method, args, run) => {
@@ -606,4 +647,39 @@ describe('retained admission settlement by statistics, the sweep and the job rea
     await expectOwner(queue, request, ids[0]!);
     expect(trace.writes).toBe(2); // the admission and the sweep's one requeue; the retry dispatched nothing
   });
+});
+
+it('keeps the original share identity on abort and late write settlement outside the caller context', async () => {
+  const trace = createAsyncAdmissionDiagnosticTrace('share_async');
+  const controller = new AbortController();
+  const writing = gate();
+  const messages: string[] = [];
+  const sink = vi.spyOn(Logger.prototype, 'info').mockImplementation((_context, message) => { messages.push(message); });
+  try {
+    vi.stubEnv('DKG_ASYNC_PROMOTE_ADMISSION_TRACE', '1');
+    const result = trace.run('enqueue', () => new PromoteAdmissionCoordinator().run(request, async attempt => {
+      attempt.enter('graph');
+      attempt.enter('conflict');
+      attempt.beginPersistence('private-job-id');
+      writing.enter();
+      await writing.held;
+      return 'private-job-id';
+    }, 5000, undefined, controller.signal));
+    await writing.entered;
+    controller.abort();
+    await expect(result).rejects.toMatchObject({ admissionOutcome: 'indeterminate' });
+    writing.release();
+    await vi.waitFor(() => expect(messages).toHaveLength(5));
+    const events = messages.map(message => JSON.parse(message.replace('async_promote_admission ', '')));
+    expect(events.map(event => [event.phase, event.event])).toEqual([
+      ['lock', 'phase_settled'], ['graph', 'phase_settled'], ['conflict', 'phase_settled'],
+      ['persist', 'caller_aborted'], ['persist', 'phase_settled'],
+    ]);
+    expect(events.every(event => event.requestId === trace.requestId)).toBe(true);
+    expect(messages.join('')).not.toContain('private-job-id');
+  } finally {
+    writing.release();
+    sink.mockRestore();
+    vi.unstubAllEnvs();
+  }
 });

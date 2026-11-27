@@ -11,6 +11,7 @@ import {
 } from './async-promote-queue-types.js';
 import { isPromotePostCommitAttemptError } from './async-promote-queue-utils.js';
 import { PROMOTE_RETRYABLE_FAILURE_CODE } from './promote-replay-safety.js';
+import { jobFailureReason } from './job-failure-reason.js';
 
 /**
  * Counts one expired-lease transition as soon as its write has committed, so a
@@ -96,6 +97,8 @@ export function promoteFailureTransition(
   backoff: (attemptCount: number) => number,
 ): { job: PromoteJob; transition: PromoteFailureTransition } {
   job = recordUnstartedPromoteAttempt(job);
+  // The stored attempt error and the job view carry a short reason; the worker logs the full text.
+  error = { ...error, message: jobFailureReason(error.message) };
   const attemptCount = Math.max(1, job.attempt.count);
   const swmInserted = job.commitMarker?.swmInserted === true;
   const bound = isBoundPromoteJob(job);

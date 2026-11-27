@@ -139,6 +139,76 @@ describe('ProtocolRouter.probeProtocol', () => {
     expect(dialProtocol).toHaveBeenCalledOnce();
   });
 
+  describe('on an open connection (GH#3447)', () => {
+    const refusal = () => Object.assign(new Error('protocol selection failed'), { name: 'UnsupportedProtocolError' });
+    const connection = (limits?: object) => ({
+      status: 'open',
+      ...(limits ? { limits } : {}),
+      remotePeer: { toString: () => PEER_ID, equals: (other: unknown) => String(other) === PEER_ID },
+      newStream: vi.fn(async (): Promise<unknown> => { throw refusal(); }),
+    });
+    function fixture(connections: unknown[], directAddresses: readonly string[] = []) {
+      const dialProtocol = vi.fn(async (): Promise<unknown> => { throw new Error('All multiaddr dials failed'); });
+      const resolve = vi.fn(async () => []);
+      const router = new ProtocolRouter({
+        stopSignal: new AbortController().signal,
+        libp2p: {
+          getConnections: () => connections,
+          peerStore: { get: async () => ({ addresses: directAddresses.map((address) => ({ multiaddr: { toString: () => address } })) }) },
+        },
+      } as unknown as ConstructorParameters<typeof ProtocolRouter>[0], {
+        network: { dialProtocol } as unknown as Network,
+        peerResolver: { resolve } as unknown as NonNullable<ConstructorParameters<typeof ProtocolRouter>[1]>['peerResolver'],
+      });
+      return { router, dialProtocol, resolve };
+    }
+
+    it('negotiates on an open connection, with no resolver call or dial', async () => {
+      const direct = connection();
+      const abort = vi.fn();
+      direct.newStream.mockResolvedValueOnce({ abort });
+      const f = fixture([direct]);
+
+      expect(await f.router.probeProtocol(PEER_ID, ACK_PROTOCOL)).toBe('supported');
+      expect(abort).toHaveBeenCalledOnce();
+      expect(f.resolve).not.toHaveBeenCalled();
+      expect(f.dialProtocol).not.toHaveBeenCalled();
+    });
+
+    it('ends on a refusal from an open connection, with no resolver call or dial', async () => {
+      const direct = connection();
+      const f = fixture([direct]);
+
+      expect(await f.router.probeProtocol(PEER_ID, ACK_PROTOCOL)).toBe('unsupported');
+      expect(direct.newStream).toHaveBeenCalledOnce();
+      expect(f.resolve).not.toHaveBeenCalled();
+      expect(f.dialProtocol).not.toHaveBeenCalled();
+    });
+
+    it('answers unsupported, not unavailable, for a refusal over the open circuit after a failed dial', async () => {
+      const circuit = connection({});
+      const f = fixture([circuit], ['/ip4/192.168.1.20/tcp/4001']);
+
+      expect(await f.router.probeProtocol(PEER_ID, ACK_PROTOCOL)).toBe('unsupported');
+      expect(f.dialProtocol).toHaveBeenCalledOnce();
+      expect(circuit.newStream).toHaveBeenCalledOnce();
+      expect(circuit.newStream).toHaveBeenCalledWith(ACK_PROTOCOL, expect.objectContaining({ runOnLimitedConnection: true }));
+    });
+
+    it('takes the next route after any other stream failure', async () => {
+      const direct = connection();
+      direct.newStream.mockRejectedValueOnce(new Error('stream reset'));
+      const f = fixture([direct]);
+      const abort = vi.fn();
+      f.dialProtocol.mockResolvedValueOnce({ abort });
+
+      expect(await f.router.probeProtocol(PEER_ID, ACK_PROTOCOL)).toBe('supported');
+      expect(f.resolve).toHaveBeenCalledOnce();
+      expect(f.dialProtocol).toHaveBeenCalledOnce();
+      expect(abort).toHaveBeenCalledOnce();
+    });
+  });
+
   it('discovers a handler registered after an existing libp2p connection', async () => {
     const a = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
     const b = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });

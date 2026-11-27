@@ -48,6 +48,12 @@ export type AgentsPhonebookFetchTrigger = 'subscribe' | 'vm-reconcile' | 'share-
 
 export type AgentsPhonebookAccessPolicy = 'public' | 'not-public' | 'unknown';
 
+/**
+ * What a wallet's entry must give a caller that waits for the phonebook: `key`,
+ * a usable encryption key for a private share; `peer`, a peer to route to.
+ */
+export type AgentsPhonebookWalletNeed = 'key' | 'peer';
+
 export interface OnDemandAgentsPhonebookPolicyOptions extends AutomaticSystemContextGraphSyncOptions {
   /** `DKGAgentConfig.onDemandAgentsPhonebook`. */
   onDemandConfigValue?: boolean;
@@ -165,7 +171,12 @@ export interface OnDemandAgentsPhonebookDeps {
   remoteCuratorWallet(contextGraphId: string): string | null;
   /** The graph is still an active subscription (or hosting obligation). */
   isActiveSubscription(contextGraphId: string): boolean;
-  /** The local phonebook maps the wallet to at least one peer. */
+  /**
+   * The local phonebook maps the wallet to at least one current peer: a
+   * connected one, or one whose `dkg:lastSeen` is within the staleness bound and
+   * to which a connection did not fail lately. A wallet listed only with others
+   * is not resolved.
+   */
   phonebookHasWallet(wallet: string, signal: AbortSignal): Promise<boolean>;
   /**
    * The local store holds a usable authenticated encryption key for the
@@ -268,11 +279,13 @@ export class OnDemandAgentsPhonebookFetcher {
   #partialsInRow = 0;
   /** Graph -> first trigger that wanted it; drained by the next fetch. */
   readonly #wants = new Map<string, AgentsPhonebookFetchTrigger>();
-  /** Lower-cased wallets a waiting share needs; drained by the next fetch. */
-  readonly #wantedWallets = new Set<string>();
+  /** Lower-cased wallets a waiting caller needs; drained by the next fetch. */
+  readonly #wantedWallets = new Map<string, AgentsPhonebookWalletNeed>();
   readonly #evaluating = new Set<string>();
   readonly #evaluations = new Set<Promise<void>>();
   readonly #curatorMissUntil = new Map<string, number>();
+  /** The same for a wallet a caller wants a peer of. */
+  readonly #walletPeerMissUntil = new Map<string, number>();
   readonly #policyVerdicts = new Map<string, { publicPolicy: boolean; expiresAt: number }>();
   #recheckTimer: ReturnType<typeof setTimeout> | undefined;
   #rechecks = 0;
@@ -341,34 +354,30 @@ export class OnDemandAgentsPhonebookFetcher {
    * fetches nothing and only reports, so the cost stays within the existing
    * cooldowns. The share is judged on the keys it then finds, never on this
    * answer alone. Never throws; aborting `signal` stops the wait, not a fetch
-   * other callers share.
+   * other callers share. With `need` at `peer` the same holds for a current peer
+   * of each wallet, and a complete Core phonebook that gave none stops the wallet
+   * from asking for {@link AGENTS_PHONEBOOK_CURATOR_MISS_SUPPRESSION_MS}.
    */
   async ensureWallets(
     wallets: readonly string[],
     signal?: AbortSignal,
+    need: AgentsPhonebookWalletNeed = 'key',
   ): Promise<ReadonlySet<string>> {
     const wanted = [...new Set(wallets.map((wallet) => wallet.toLowerCase()))];
     const known = new Set<string>();
     const refresh = async (): Promise<void> => {
       for (const wallet of wanted) {
         if (known.has(wallet)) continue;
-        const present = await this.#deps
-          .recipientKeyKnown(wallet, signal ?? this.#lifetime.signal)
-          .catch(() => false);
-        if (present) known.add(wallet);
+        if (await this.#walletResolved(wallet, need, signal ?? this.#lifetime.signal)) known.add(wallet);
       }
     };
     try {
       await refresh();
       if (known.size === wanted.length || this.#closed || !this.#deps.isEnabled()) return known;
+      const now = this.#now();
       for (const wallet of wanted) {
-        if (known.has(wallet)) continue;
-        this.#wantedWallets.add(wallet);
-        while (this.#wantedWallets.size > this.#maxStateEntries) {
-          const oldest = this.#wantedWallets.values().next().value;
-          if (oldest === undefined) break;
-          this.#wantedWallets.delete(oldest);
-        }
+        if (known.has(wallet) || (need === 'peer' && (this.#walletPeerMissUntil.get(wallet) ?? 0) > now)) continue;
+        setBounded(this.#wantedWallets, wallet, need, this.#maxStateEntries);
       }
       this.#maybeStart();
       const inFlight = this.#inFlight;
@@ -570,7 +579,7 @@ export class OnDemandAgentsPhonebookFetcher {
     // Graphs that asked while this fetch ran are served by the same phonebook.
     const wanted = [...this.#wants.keys()];
     this.#wants.clear();
-    const wantedWallets = [...this.#wantedWallets];
+    const wantedWallets = new Map(this.#wantedWallets);
     this.#wantedWallets.clear();
     const unresolved = new Set(await this.#unresolvedWantsOf(wanted, lifetime));
     const unresolvedWallets = await this.#unresolvedWalletsOf(wantedWallets, lifetime);
@@ -596,6 +605,10 @@ export class OnDemandAgentsPhonebookFetcher {
           this.#maxStateEntries,
         );
       }
+      for (const wallet of unresolvedWallets) {
+        if (wantedWallets.get(wallet) !== 'peer') continue;
+        setBounded(this.#walletPeerMissUntil, wallet, now + this.#curatorMissSuppressionMs, this.#maxStateEntries);
+      }
     }
     const durationMs = now - startedAt;
     this.#recordMetrics(trigger, outcome, resolved.length > 0, durationMs);
@@ -607,8 +620,8 @@ export class OnDemandAgentsPhonebookFetcher {
         + `durationMs=${durationMs} `
         + `curatorResolved=${resolved.length}/${wanted.length} outcome=${outcome} `
         + `nextFetchInMs=${this.#nextEligibleAt - now}`
-        + (wantedWallets.length > 0
-          ? ` recipientsResolved=${wantedWallets.length - unresolvedWallets.length}/${wantedWallets.length}`
+        + (wantedWallets.size > 0
+          ? ` recipientsResolved=${wantedWallets.size - unresolvedWallets.length}/${wantedWallets.size}`
           : ''),
     );
     if (resolved.length > 0) this.#deps.onCuratorsResolved(resolved);
@@ -636,19 +649,23 @@ export class OnDemandAgentsPhonebookFetcher {
   }
 
   async #unresolvedWallets(signal: AbortSignal): Promise<string[]> {
-    return this.#unresolvedWalletsOf([...this.#wantedWallets], signal);
+    return this.#unresolvedWalletsOf(this.#wantedWallets, signal);
   }
 
   async #unresolvedWalletsOf(
-    wallets: readonly string[],
+    wallets: ReadonlyMap<string, AgentsPhonebookWalletNeed>,
     signal: AbortSignal,
   ): Promise<string[]> {
     const unresolved: string[] = [];
-    for (const wallet of wallets) {
-      const known = await this.#deps.recipientKeyKnown(wallet, signal).catch(() => false);
-      if (!known) unresolved.push(wallet);
+    for (const [wallet, need] of wallets) {
+      if (!await this.#walletResolved(wallet, need, signal)) unresolved.push(wallet);
     }
     return unresolved;
+  }
+
+  #walletResolved(wallet: string, need: AgentsPhonebookWalletNeed, signal: AbortSignal): Promise<boolean> {
+    const read = need === 'key' ? this.#deps.recipientKeyKnown(wallet, signal) : this.#deps.phonebookHasWallet(wallet, signal);
+    return read.catch(() => false);
   }
 
   async #unresolvedWants(signal: AbortSignal): Promise<string[]> {

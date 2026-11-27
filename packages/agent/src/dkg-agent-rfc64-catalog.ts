@@ -1,3 +1,8 @@
+import type { Rfc64CatalogSelectionV1, Rfc64CatalogRuntimeSelectionStatusV1 } from './rfc64/catalog-selection-types-v1.js';
+export type { Rfc64CatalogSelectionV1, Rfc64CatalogConnectionReplayStatusV1, Rfc64CatalogRuntimeSelectionStatusV1 } from './rfc64/catalog-selection-types-v1.js';
+import { selectCatalogReplayGraphsV1, resolveCatalogReplayRolesV1, type CatalogReplayRolesV1 } from './rfc64/catalog-replay-selection-v1.js';
+import { createCatalogReplayTransportV1, type CatalogReplayTransportV1 } from './rfc64/catalog-replay-transport-v1.js';
+import { Rfc64CatalogReplayRunReporterV1 } from './rfc64/catalog-replay-run-reporter-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 import { waitForRfc64ScheduledResponsibilityDelayV1 } from './rfc64/abort-v1.js';
 
@@ -19,215 +24,82 @@ import { waitForRfc64ScheduledResponsibilityDelayV1 } from './rfc64/abort-v1.js'
  * admits candidate rows or activates KA / SWM / VM state.
  */
 
+// SPDX-License-Identifier: Apache-2.0
+/**
+ * RFC-64 Gate 1 public author-catalog wiring, extracted as a DKGAgent mixin
+ * holder. Methods take `this: DKGAgent` so cross-mixin calls resolve against
+ * the composed class.
+ *
+ * Responsibilities:
+ *   - construct + start {@link Rfc64PublicCatalogServiceV1} on the production
+ *     router during `start()` (dormant when no `dataDir` opened the RFC-64
+ *     persistence), and drain + close it during `stop()`;
+ *   - expose the author path (sign + durably stage the direct-author issuer
+ *     delegation, produce + durably stage + best-effort announce its bound
+ *     genesis head) and the accepted-open-policy seed used by both sides;
+ *   - expose read-only observability for tests / evidence.
+ *
+ * Gate-1 boundary: staging a fetched head is the terminal step. Nothing here
+ * admits candidate rows or activates KA / SWM / VM state.
+ */
 import { type Rfc64CatalogTargetLeaseV1, Rfc64CatalogTargetTrackerV1, rfc64CatalogTargetExactIdentityKeyV1 } from './rfc64/catalog-operational-targets-v1.js';
 import { evaluateRfc64CatalogCompletionV1 } from './rfc64/catalog-completion-evidence-v1.js';
 export { RFC64_CATALOG_TARGET_MAX_ENTRIES_V1, RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1, type Rfc64CatalogTargetLeaseV1, Rfc64CatalogTargetTrackerV1, rfc64CatalogTargetExactIdentityKeyV1, projectRfc64OperationalRowCountsV1 } from './rfc64/catalog-operational-targets-v1.js';
-import {
-  SYSTEM_CONTEXT_GRAPHS,
-  DKGEvent,
-  ZERO_DIGEST32_V1,
-  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
-  contextGraphDataGraphUri,
-  contextGraphMetaGraphUri,
-  assertContextGraphIdV1,
-  assertNetworkIdV1,
-  assertSignedAuthorCatalogBucketEnvelopeV1,
-  assertSignedAuthorCatalogDirectoryNodeEnvelopeV1,
-  assertSignedAuthorCatalogHeadEnvelopeV1,
-  assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
-  computeAuthorCatalogScopeDigestV1,
-  computeControlSignatureVariantDigestHex,
-  createOperationContext,
-  deriveAuthorCatalogScopeFromHeadV1,
-  type AssertionCoordinateV1,
-  type ByteLengthV1,
-  type CanonicalGraphScopedAuthorSealV1,
-  type CatalogSealDeploymentProfileV1,
-  type OperationContext,
-  type ContextGraphIdV1,
-  type Digest32V1,
-  type EvmAddressV1,
-  type KaIdV1,
-  type NetworkIdV1,
-  type SubGraphNameV1,
-  type TimestampMsV1,
-  type DecimalU64V1,
-  type AuthorCatalogScopeV1,
-  type CountV1,
-  type SignedAuthorCatalogBucketEnvelopeV1,
-  type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
-  type SignedAuthorCatalogHeadEnvelopeV1,
-} from '@origintrail-official/dkg-core';
-import {
-  assertContextGraphAuthorityIndexId,
-  resolveRpcUrls,
-  verifyControlEnvelopeIssuerSignatureV1,
-  withRpcRequestContext,
-  type ContextGraphAuthorityIndexId,
-  type ContextGraphAuthorityIndexRevisionReader,
-  type ContextGraphAuthoritySnapshot,
-  type ContextGraphAuthorityReader,
-  type ContextGraphAuthorityReaderCapability,
-} from '@origintrail-official/dkg-chain';
+import { SYSTEM_CONTEXT_GRAPHS, DKGEvent, ZERO_DIGEST32_V1, MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1, contextGraphDataGraphUri, contextGraphMetaGraphUri, assertContextGraphIdV1, assertNetworkIdV1, assertSignedAuthorCatalogBucketEnvelopeV1, assertSignedAuthorCatalogDirectoryNodeEnvelopeV1, assertSignedAuthorCatalogHeadEnvelopeV1, assertSignedAuthorCatalogIssuerDelegationEnvelopeV1, computeAuthorCatalogScopeDigestV1, computeControlSignatureVariantDigestHex, createOperationContext, deriveAuthorCatalogScopeFromHeadV1, type AssertionCoordinateV1, type ByteLengthV1, type CanonicalGraphScopedAuthorSealV1, type CatalogSealDeploymentProfileV1, type OperationContext, type ContextGraphIdV1, type Digest32V1, type EvmAddressV1, type KaIdV1, type NetworkIdV1, type SubGraphNameV1, type TimestampMsV1, type DecimalU64V1, type AuthorCatalogScopeV1, type CountV1, type SignedAuthorCatalogBucketEnvelopeV1, type SignedAuthorCatalogDirectoryNodeEnvelopeV1, type SignedAuthorCatalogHeadEnvelopeV1 } from '@origintrail-official/dkg-core';
+import { assertContextGraphAuthorityIndexId, verifyControlEnvelopeIssuerSignatureV1, withRpcRequestContext, type ContextGraphAuthorityIndexId, type ContextGraphAuthorityIndexRevisionReader, type ContextGraphAuthoritySnapshot, type ContextGraphAuthorityReader, type ContextGraphAuthorityReaderCapability } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { resolveChainFinalityConfirmationsV1 } from './chain-finality-confirmations-v1.js';
+import { resolveChainRpcEndpointsV1 } from './chain-rpc-endpoints-v1.js';
 import type { DKGAgent } from './dkg-agent.js';
-import {
-  answerRfc64CatalogHeadReplayRequestV1,
-  rfc64CatalogReplayPeerFailureV1,
-} from './internal/catalog-head-replay-peers.js';
+import { answerRfc64CatalogHeadReplayRequestV1, rfc64CatalogReplayPeerFailureV1 } from './internal/catalog-head-replay-peers.js';
 import { yieldMainThread } from './main-thread-time-slice.js';
-import {
-  isApprovedPrivateReplicaDelegationActive,
-  resolveApprovedPrivateReplicaAuthority,
-} from './approved-private-replica.js';
-import {
-  Rfc64CatalogReplayConnectionRuntimeV1,
-  type Rfc64CatalogReplayConnectionReservationV1,
-} from './rfc64/catalog-replay-connection-runtime-v1.js';
-import {
-  Rfc64CatalogReplayRecoveryRuntimeV1,
-  type Rfc64CatalogReplayPeerDemandV1,
-  type Rfc64CatalogReplayPeerFenceLeaseV1,
-} from './rfc64/catalog-replay-recovery-runtime-v1.js';
+import { isApprovedPrivateReplicaDelegationActive, resolveApprovedPrivateReplicaAuthority, } from './approved-private-replica.js';
+import { Rfc64CatalogReplayConnectionRuntimeV1, type Rfc64CatalogReplayConnectionReservationV1, } from './rfc64/catalog-replay-connection-runtime-v1.js';
+import { createRfc64CatalogReplayConnectionRuntimeV1 } from './rfc64/catalog-replay-connection-adapter-v1.js';
+import { Rfc64CatalogReplayRecoveryRuntimeV1, type Rfc64CatalogReplayRecoveryRequestV1, type Rfc64CatalogReplayPeerFenceLeaseV1, } from './rfc64/catalog-replay-recovery-runtime-v1.js';
 export { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from
   './rfc64/catalog-limits-v1.js';
-import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from
-  './rfc64/catalog-limits-v1.js';
+import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from './rfc64/catalog-limits-v1.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
-import type { Rfc64CatalogShadowExecutionStatusV1 } from
-  './rfc64/catalog-shadow-observability-v1.js';
-import {
-  RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1,
-  snapshotRfc64CatalogDeploymentProfileV1,
-} from './rfc64/catalog-authority-config-v1.js';
+import type { Rfc64CatalogShadowExecutionStatusV1 } from './rfc64/catalog-shadow-observability-v1.js';
+import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1, snapshotRfc64CatalogDeploymentProfileV1 } from './rfc64/catalog-authority-config-v1.js';
 import type { AcceptedOpenCatalogPolicyV1 } from './rfc64/open-catalog-policy-v1.js';
 import { rfc64CatalogLookupFailedAsV1 } from './rfc64/catalog-policy-decision-probe-v1.js';
-import {
-  resolveRfc64CatalogAuthorizationRosterV1,
-  type AcceptRfc64CatalogAccessSnapshotInputV1,
-  type AcceptedRfc64CatalogAccessSnapshotV1,
-  type Rfc64CatalogAccessPolicyRegistryOptionsV1,
-  type Rfc64CatalogLocalAuthorizationScopeV1,
-} from './rfc64/catalog-access-policy-v1.js';
+import { resolveRfc64CatalogAuthorizationRosterV1, type AcceptRfc64CatalogAccessSnapshotInputV1, type AcceptedRfc64CatalogAccessSnapshotV1, type Rfc64CatalogAccessPolicyRegistryOptionsV1, type Rfc64CatalogLocalAuthorizationScopeV1 } from './rfc64/catalog-access-policy-v1.js';
 import { scopeRfc64CatalogAccessAuthorityV1 } from './rfc64/manual-catalog-authority-scope-v1.js';
-import type {
-  Rfc64PublicCatalogCurrentReceiverReconcilerV1,
-} from './rfc64/public-catalog-receiver-v1.js';
+import type { Rfc64PublicCatalogCurrentReceiverReconcilerV1 } from './rfc64/public-catalog-receiver-v1.js';
 import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
-import {
-  RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1,
-  Rfc64PublicCatalogServiceV1,
-  snapshotRfc64PublicCatalogAnnouncementPeersV1,
-  type PublishAuthorCatalogGenesisResultV1,
-  type PublishOpenAuthorCatalogGenesisResultV1,
-  type AnnounceRfc64PublicCatalogHeadInputV1,
-  type AnnounceRfc64PublicCatalogHeadResultV1,
-  type Rfc64PublicCatalogReconcilerClientsV1,
-  type Rfc64PublicCatalogServiceNativeOptionsV1,
-  type Rfc64PublicCatalogServiceStatsV1,
-} from './rfc64/public-catalog-service-v1.js';
-import {
-  Rfc64PublicCatalogNativeReceiverErrorV1,
-  Rfc64PublicCatalogNativeReceiverV1,
-} from './rfc64/public-catalog-native-receiver-v1.js';
+import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1, Rfc64PublicCatalogServiceV1, snapshotRfc64PublicCatalogAnnouncementPeersV1, type PublishAuthorCatalogGenesisResultV1, type PublishOpenAuthorCatalogGenesisResultV1, type AnnounceRfc64PublicCatalogHeadInputV1, type AnnounceRfc64PublicCatalogHeadResultV1, type Rfc64PublicCatalogReconcilerClientsV1, type Rfc64PublicCatalogServiceNativeOptionsV1, type Rfc64PublicCatalogServiceStatsV1 } from './rfc64/public-catalog-service-v1.js';
+import { Rfc64PublicCatalogNativeReceiverErrorV1, Rfc64PublicCatalogNativeReceiverV1 } from './rfc64/public-catalog-native-receiver-v1.js';
 import { createRfc64FinalizedPolicyAgentPrecommitV1 } from './rfc64/finalized-policy-agent-precommit-v1.js';
 import { createRfc64FinalizedVmAgentPrecommitV1 } from './rfc64/finalized-vm-agent-precommit-v1.js';
-import {
-  createRfc64CatalogAppliedHeadCoordinatorV1,
-} from './rfc64/catalog-applied-head-coordinator-v1.js';
-import type { Rfc64CatalogAppliedHeadEvidenceV1 } from
-  './rfc64/finalized-swm-retirement-lifecycle-receipt-v1.js';
-import {
-  reduceRfc64CatalogSynchronizationEvidenceReplayV1,
-  snapshotRfc64CatalogSynchronizationEvidenceV1,
-  type Rfc64CatalogSynchronizationEvidenceV1,
-} from './rfc64/catalog-synchronization-evidence-v1.js';
-import {
-  createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
-  createRfc64VerifiedStagedCatalogHeadMemoV1,
-  type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1,
-  type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
-} from './rfc64/public-catalog-native-reconciler-v1.js';
+import { createRfc64CatalogAppliedHeadCoordinatorV1 } from './rfc64/catalog-applied-head-coordinator-v1.js';
+import type { Rfc64CatalogAppliedHeadEvidenceV1 } from './rfc64/finalized-swm-retirement-lifecycle-receipt-v1.js';
+import { reduceRfc64CatalogSynchronizationEvidenceReplayV1, snapshotRfc64CatalogSynchronizationEvidenceV1, type Rfc64CatalogSynchronizationEvidenceV1 } from './rfc64/catalog-synchronization-evidence-v1.js';
+import { createRfc64BoundedPublicRootCatalogNativeReconcilerV1, createRfc64VerifiedStagedCatalogHeadMemoV1, type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1, type Rfc64BoundedPublicRootCatalogDeploymentResolverV1 } from './rfc64/public-catalog-native-reconciler-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
-import {
-  loadRfc64OperationalAppliedHeadsV1,
-  rfc64CatalogTargetScopeKeyV1,
-  type Rfc64OperationalAppliedHeadV1,
-} from './rfc64/catalog-operational-applied-heads-v1.js';
+import { loadRfc64OperationalAppliedHeadsV1, rfc64CatalogTargetScopeKeyV1, type Rfc64OperationalAppliedHeadV1 } from './rfc64/catalog-operational-applied-heads-v1.js';
 import { groupRfc64OperationalAppliedHeadsV1, loadRfc64OperationalPromisedRowCountsV1 } from './rfc64/catalog-operational-reads-v1.js';
 import { verifyPrivateCatalogSubscriptionReadinessV1 } from './rfc64/private-catalog-subscription-readiness-v1.js';
-import {
-  type Rfc64PublicCatalogReconciliationFailureV1,
-} from './rfc64/public-catalog-reconciliation-failure-v1.js';
-import type { Rfc64PublicCatalogReceiverCompletionOutcomeV1 } from
-  './rfc64/public-catalog-reconciliation-outcome-v1.js';
-import {
-  Rfc64PublicCatalogSuccessorProducerV1,
-  type Rfc64PublicCatalogIssuerAuthorizationV1,
-  type Rfc64PublicCatalogSuccessorAssetInputV1,
-} from './rfc64/public-catalog-successor-producer-v1.js';
-import {
-  RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
-  RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
-  Rfc64PublicCatalogTransportErrorV1,
-  type Rfc64PublicCatalogHeadAnnouncementV1,
-  type Rfc64PublicCatalogHeadReplayRequestV1,
-} from './rfc64/public-catalog-transport-v1.js';
+import { type Rfc64PublicCatalogReconciliationFailureV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
+import type { Rfc64PublicCatalogReceiverCompletionOutcomeV1 } from './rfc64/public-catalog-reconciliation-outcome-v1.js';
+import { Rfc64PublicCatalogSuccessorProducerV1, type Rfc64PublicCatalogIssuerAuthorizationV1, type Rfc64PublicCatalogSuccessorAssetInputV1 } from './rfc64/public-catalog-successor-producer-v1.js';
+import { RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1, RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1, Rfc64PublicCatalogTransportErrorV1, type Rfc64PublicCatalogHeadAnnouncementV1, type Rfc64PublicCatalogHeadReplayRequestV1 } from './rfc64/public-catalog-transport-v1.js';
 import { createRfc64CatalogNativeScopedReadProviderV1 } from './rfc64/catalog-native-scoped-read-provider-v1.js';
-import {
-  projectRfc64CatalogReceiverAuthorityV1,
-  resolveRfc64CatalogResponsibilityAuthorityV1,
-  type Rfc64CatalogAuthorityPolicyV1,
-  type Rfc64CatalogExecutionPlanV1,
-} from './rfc64/public-catalog-activation-config-v1.js';
-import {
-  Rfc64CatalogResponsibilityRegistryV1,
-  type Rfc64CatalogResponsibilitySelectionV1,
-} from './rfc64/catalog-responsibility-registry-v1.js';
+import { projectRfc64CatalogReceiverAuthorityV1, resolveRfc64CatalogResponsibilityAuthorityV1, type Rfc64CatalogAuthorityPolicyV1, type Rfc64CatalogExecutionPlanV1, } from './rfc64/public-catalog-activation-config-v1.js';
+import { Rfc64CatalogResponsibilityRegistryV1, projectRfc64CatalogRuntimeSelectionV1, type Rfc64CatalogResponsibilitySelectionV1, } from './rfc64/catalog-responsibility-registry-v1.js';
 import { Rfc64CatalogResponsibilityRosterV1 } from './internal/rfc64-catalog-responsibility-roster-v1.js';
-import {
-  projectRfc64CatalogTransportStateV1,
-  rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1,
-  type Rfc64CatalogRolloutModeV1,
-} from './rfc64/catalog-rollout-authority-v1.js';
-import {
-  isRfc64AuthorityRpcCircuitOpenErrorV1,
-  type Rfc64AuthorityReadCoordinatorSnapshotV1,
-  type Rfc64AuthorityReadRunOptionsV1,
-} from './rfc64/authority-rpc-circuit-breaker-v1.js';
-import {
-  composeRfc64FinalizedCatalogAuthorityV1,
-  composeRfc64RegisteredRosterVersionV1,
-  composeRfc64UnregisteredCatalogAuthorityV1,
-  parseRfc64AuthoritySnapshotV1,
-  type Rfc64ReleaseNativeAuthoritySnapshotV1,
-} from './rfc64/release-native-catalog-authority-v1.js';
-import {
-  acquireRfc64LegacySwmBoundaryReceiverLeaseV1,
-  readRfc64LegacySwmBoundaryCountV1,
-} from
-  './rfc64/legacy-swm-boundary-v1.js';
-import type { Rfc64CatalogMutationCoordinatorV1 } from
-  './rfc64/catalog-mutation-runtime-v1.js';
-import {
-  Rfc64CatalogReplaySnapshotRuntimeV1,
-} from './rfc64/catalog-replay-snapshot-runtime-v1.js';
-import {
-  assertRfc64ReplayManifestScopesUniqueV1,
-  isRfc64CatalogHeadOfAcceptedGenerationV1,
-} from './rfc64/catalog-replay-generation-v1.js';
-import {
-  Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1,
-  type Rfc64FinalizedAuthoritySnapshotEvidenceV1,
-} from './rfc64/finalized-authority-snapshot-batch-runtime-v1.js';
-import {
-  isRfc64SharedStorePressureFailureV1,
-  type Rfc64CatalogAuthorityRefreshRequestV1,
-} from './rfc64/catalog-authority-refresh-loop-v1.js';
-import { loadRfc64UnregisteredReplicaAuthorityV1 } from
-  './rfc64/unregistered-replica-authority-v1.js';
+import { projectRfc64CatalogTransportStateV1, rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1, type Rfc64CatalogRolloutModeV1 } from './rfc64/catalog-rollout-authority-v1.js';
+import { isRfc64AuthorityRpcCircuitOpenErrorV1, type Rfc64AuthorityReadCoordinatorSnapshotV1, type Rfc64AuthorityReadRunOptionsV1 } from './rfc64/authority-rpc-circuit-breaker-v1.js';
+import { composeRfc64FinalizedCatalogAuthorityV1, composeRfc64RegisteredRosterVersionV1, composeRfc64UnregisteredCatalogAuthorityV1, parseRfc64AuthoritySnapshotV1, type Rfc64ReleaseNativeAuthoritySnapshotV1 } from './rfc64/release-native-catalog-authority-v1.js';
+import { acquireRfc64LegacySwmBoundaryReceiverLeaseV1, readRfc64LegacySwmBoundaryCountV1 } from './rfc64/legacy-swm-boundary-v1.js';
+import type { Rfc64CatalogMutationCoordinatorV1 } from './rfc64/catalog-mutation-runtime-v1.js';
+import { Rfc64CatalogReplaySnapshotRuntimeV1 } from './rfc64/catalog-replay-snapshot-runtime-v1.js';
+import { assertRfc64ReplayManifestScopesUniqueV1, isRfc64CatalogHeadOfAcceptedGenerationV1 } from './rfc64/catalog-replay-generation-v1.js';
+import { Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1, type Rfc64FinalizedAuthoritySnapshotEvidenceV1 } from './rfc64/finalized-authority-snapshot-batch-runtime-v1.js';
+import { isRfc64SharedStorePressureFailureV1, type Rfc64CatalogAuthorityRefreshRequestV1 } from './rfc64/catalog-authority-refresh-loop-v1.js';
+import { loadRfc64UnregisteredReplicaAuthorityV1 } from './rfc64/unregistered-replica-authority-v1.js';
 import type { ContextGraphSub } from './dkg-agent-types.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
@@ -239,8 +111,7 @@ export interface Rfc64CatalogAuthorSignerV1 {
 /** Compatibility name retained for the legacy public/open authoring surface. */
 export type Rfc64OpenCatalogAuthorSignerV1 = Rfc64CatalogAuthorSignerV1;
 
-import { RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1, RFC64_PRIVATE_ROSTER_VERSION_RADIX_V1,
-  readPrivateRosterGeneration } from './private-roster-version.js';
+import { RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1, RFC64_PRIVATE_ROSTER_VERSION_RADIX_V1, readPrivateRosterGeneration } from './private-roster-version.js';
 
 export interface AcceptOpenContextGraphPolicyInputV1 {
   readonly networkId: NetworkIdV1;
@@ -320,10 +191,7 @@ export {
   snapshotRfc64PublicCatalogAutoPublishConfigV1,
   snapshotRfc64PublicCatalogBootstrapConfigV1,
 } from './rfc64/catalog-authority-config-v1.js';
-import {
-  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
-  withRpcUsageSite,
-} from '@origintrail-official/dkg-chain';
+import { CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcUsageSite } from '@origintrail-official/dkg-chain';
 import { AuthorityAcceptedCatchupBatch } from './sync/on-connect/graph-scope.js';
 
 export interface PublishOpenAuthorCatalogSuccessorParamsV1 {
@@ -417,11 +285,6 @@ export type PublishOpenAuthorCatalogSuccessorAssetResultV1 =
 export type PublishOpenAuthorCatalogExactSetSuccessorResultV1 =
   PublishAuthorCatalogExactSetSuccessorResultV1;
 
-export interface Rfc64CatalogRuntimeSelectionStatusV1 {
-  readonly subscriptionDriven: boolean;
-  readonly eligibleContextGraphs: readonly string[];
-  readonly selectedContextGraphs: readonly string[];
-}
 
 export type Rfc64CatalogOperationalPhaseV1 =
   | 'inactive'
@@ -693,6 +556,7 @@ type Rfc64CatalogReplayAdmissionV1 = Readonly<{
 const rfc64CatalogReplayRuntimesV1 = new WeakMap<DKGAgent, Rfc64CatalogReplayRuntimeV1>();
 const rfc64CatalogReplaySnapshotRuntimesV1 =
   new WeakMap<DKGAgent, Rfc64CatalogReplaySnapshotRuntimeOwnerV1>();
+const rfc64CatalogReplayTransportsV1 = new WeakMap<DKGAgent, CatalogReplayTransportV1<Rfc64PublicCatalogHeadAnnouncementV1>>();
 const rfc64CatalogReplayConnectionRuntimesV1 =
   new WeakMap<DKGAgent, Rfc64CatalogReplayConnectionRuntimeV1>();
 const rfc64CatalogReplayRecoveryRuntimesV1 = new WeakMap<
@@ -1021,13 +885,11 @@ export function isRfc64UnregisteredOwnerUnresolvedErrorV1(error: unknown): boole
 }
 
 export class Rfc64CatalogMethods extends DKGAgentBase {
-  /** Stable recovery capabilities are captured once per agent-owned runtime. */
-  private rfc64CatalogReplayRecoveryRuntimeV1(
-    this: DKGAgent,
-  ): Rfc64CatalogReplayRecoveryRuntimeV1<Rfc64PublicCatalogHeadAnnouncementV1> {
-    let runtime = rfc64CatalogReplayRecoveryRuntimesV1.get(this);
-    if (runtime !== undefined) return runtime;
-    runtime = new Rfc64CatalogReplayRecoveryRuntimeV1({
+  /** Composition owns both bounded transport operations; recovery only owns evidence. */
+  private rfc64CatalogReplayTransportV1(this: DKGAgent): CatalogReplayTransportV1<Rfc64PublicCatalogHeadAnnouncementV1> {
+    let transport = rfc64CatalogReplayTransportsV1.get(this);
+    if (transport) return transport;
+    transport = createCatalogReplayTransportV1<Rfc64PublicCatalogHeadAnnouncementV1>({
       requestPeer: async (contextGraphId, remotePeerId, signal) => {
         const service = this.rfc64PublicCatalogServiceV1;
         const networkId = (
@@ -1060,6 +922,20 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           throw rfc64CatalogReplayPeerFailureV1(this.log, contextGraphId, remotePeerId, error);
         }
       },
+      reannounce: (peer, scope, signal) => this.reannounceRfc64CatalogHeadsToPeerV1(peer, scope, signal),
+    });
+    rfc64CatalogReplayTransportsV1.set(this, transport);
+    return transport;
+  }
+
+  /** Stable recovery capabilities are captured once per agent-owned runtime. */
+  private rfc64CatalogReplayRecoveryRuntimeV1(
+    this: DKGAgent,
+  ): Rfc64CatalogReplayRecoveryRuntimeV1<Rfc64PublicCatalogHeadAnnouncementV1> {
+    let runtime = rfc64CatalogReplayRecoveryRuntimesV1.get(this);
+    if (runtime !== undefined) return runtime;
+    runtime = new Rfc64CatalogReplayRecoveryRuntimeV1({
+      requestPeer: this.rfc64CatalogReplayTransportV1().requestPeer,
       whenReceiverIdleForContextGraph: async (contextGraphId, signal) => {
         await this.rfc64PublicCatalogServiceV1
           ?.whenReceiverIdleForContextGraph(contextGraphId, signal);
@@ -1091,40 +967,48 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     return runtime;
   }
 
-  /**
-   * Prepare one catalog-owned replay transition before asynchronous network
-   * admission. The returned composite is the lifecycle listener's only RFC-64
-   * responsibility: admit it or reject it.
-   */
-  prepareRfc64CatalogConnectionReplayV1(
-    this: DKGAgent,
-    peerId: string,
-  ): Rfc64CatalogReplayConnectionReservationV1 | null {
+  /** The connection event alone advances the replay connection generation. */
+  prepareRfc64CatalogConnectionReplayV1(this: DKGAgent, peerId: string): Rfc64CatalogReplayConnectionReservationV1 | null {
+    return this.rfc64CatalogConnectionReplayRuntimeV1().prepareConnectionOpen(peerId);
+  }
+
+  /** Graph activation selects one scope without changing connection generations. */
+  prepareRfc64CatalogGraphActivationReplayV1(this: DKGAgent, peerId: string, contextGraphId: string): Rfc64CatalogReplayConnectionReservationV1 | null {
+    return this.rfc64CatalogConnectionReplayRuntimeV1().prepareGraphActivation(peerId, contextGraphId);
+  }
+
+  private rfc64CatalogConnectionReplayRuntimeV1(this: DKGAgent): Rfc64CatalogReplayConnectionRuntimeV1 {
     let runtime = rfc64CatalogReplayConnectionRuntimesV1.get(this);
     if (runtime === undefined) {
-      runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
-        selectContextGraphIds: () => this.listActiveRfc64CatalogReplayContextGraphIdsV1(),
-        acquireFence: (contextGraphId, replayPeerId) =>
-          this.markRfc64CatalogReplayPeerPendingV1(contextGraphId, replayPeerId),
-        reannounce: (replayPeerId) =>
-          this.reannounceRfc64CatalogHeadsToPeerV1(replayPeerId),
-        replay: (contextGraphId, replayDemand) =>
-          this.requestRfc64CatalogHeadReplayV1(contextGraphId, { kind: 'connection-demand', replayDemand }),
-        replayStatus: (contextGraphId) => this.rfc64CatalogReplayRecoveryRuntimeV1().status(
-          contextGraphId, this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId)?.policyDigest ?? ''),
+      const reporter = new Rfc64CatalogReplayRunReporterV1({
+        replayStatus: id => this.rfc64CatalogReplayRecoveryRuntimeV1().status(id,
+          this.readAcceptedRfc64CatalogAccessSnapshotV1(id)?.policyDigest ?? ''),
         log: (level, message) => this.log[level](createOperationContext('system'), message),
+      });
+      runtime = createRfc64CatalogReplayConnectionRuntimeV1({ capabilities: {
+        listActiveRfc64CatalogReplayContextGraphIdsV1: () => this.listActiveRfc64CatalogReplayContextGraphIdsV1(),
+        listServingRfc64CatalogReplayContextGraphIdsV1: () => this.listServingRfc64CatalogReplayContextGraphIdsV1(),
+        readAcceptedRfc64CatalogAccessSnapshotV1: id => this.readAcceptedRfc64CatalogAccessSnapshotV1(id),
+        resolveRfc64CatalogReplayRolesV1: id => this.resolveRfc64CatalogReplayRolesV1(id),
+      },
+        reserveDeferred: contextGraphId => {
+          const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
+          return accepted ? this.rfc64CatalogReplayRecoveryRuntimeV1()
+            .reserveDeferred(contextGraphId, accepted.policyDigest) : null;
+        },
+        admittedConnectedPeerIds: () => this.node.libp2p.getPeers().map(peer => peer.toString())
+          .filter(peer => this.networkAdmissionCoordinator.isAcceptedPeer(peer)),
+        reannounce: this.rfc64CatalogReplayTransportV1().reannounce,
+        reportRun: (id, peer, result) => reporter.report(id, peer, result),
+        reservePeer: (id, digest, peer) => this.rfc64CatalogReplayRecoveryRuntimeV1().reservePeer(id, digest, peer),
+        replay: (contextGraphId, demand, signal) => this.requestRfc64CatalogHeadReplayV1(contextGraphId, { kind: 'connection-demand', demand }, signal),
+        schedule: (slot, work) => this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(`catalog-connection-replay:${slot}`, work),
+        wait: waitForRfc64ScheduledResponsibilityDelayV1,
+        warn: (message) => this.log.warn(createOperationContext('system'), message),
       });
       rfc64CatalogReplayConnectionRuntimesV1.set(this, runtime);
     }
-    return runtime.prepare(peerId);
-  }
-
-  /** Release live-session replay debounce after the peer is fully disconnected. */
-  closeRfc64CatalogConnectionReplaySessionV1(
-    this: DKGAgent,
-    peerId: string,
-  ): void {
-    rfc64CatalogReplayConnectionRuntimesV1.get(this)?.peerDisconnected(peerId);
+    return runtime;
   }
 
   /** Forget process-local operational targets when receiver ownership ends. */
@@ -1170,18 +1054,23 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     ).snapshot();
   }
 
+  /** Replay roles combine lifecycle selection with unchanged canonical authorities. */
+  resolveRfc64CatalogReplayRolesV1(this: DKGAgent, contextGraphId: string): CatalogReplayRolesV1 {
+    return resolveCatalogReplayRolesV1(Object.hasOwn(this.config.rfc64CatalogExecutionPlan.selectedAuthority, contextGraphId)
+      || this.readRfc64CatalogResponsibilityV1(contextGraphId).responsible, rfc64DirectAcceptedCompatibilityV1.get(this)?.has(contextGraphId) === true,
+    this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId), this.resolveRfc64CatalogServingAuthorityV1(contextGraphId));
+  }
+
   /** Canonical connection-replay targets after responsibility and authority policy. */
   listActiveRfc64CatalogReplayContextGraphIdsV1(this: DKGAgent): readonly string[] {
-    const responsibilityIds = this.readRfc64CatalogResponsibilitiesV1()
-      .filter((selection) => selection.active && selection.mode !== 'legacy')
-      .map((selection) => selection.contextGraphId);
-    const configuredIds = Object.keys(
-      this.config.rfc64CatalogExecutionPlan.selectedAuthority,
-    ).filter((contextGraphId) => {
-      const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
-      return authority.active && authority.mode !== 'legacy';
-    });
-    return Object.freeze([...new Set([...responsibilityIds, ...configuredIds])].sort());
+    return selectCatalogReplayGraphsV1([...this.readRfc64CatalogResponsibilitiesV1().map(selection => selection.contextGraphId),
+      ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority)], id => this.resolveRfc64CatalogReplayRolesV1(id), 'receiving');
+  }
+
+  listServingRfc64CatalogReplayContextGraphIdsV1(this: DKGAgent): readonly string[] {
+    return selectCatalogReplayGraphsV1([...this.readRfc64CatalogResponsibilitiesV1().map(selection => selection.contextGraphId),
+      ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority),
+      ...(rfc64DirectAcceptedCompatibilityV1.get(this) ?? [])], id => this.resolveRfc64CatalogReplayRolesV1(id), 'serving');
   }
 
   /** Constant-time point lookup for rollout-owned hot-path classification. */
@@ -1697,11 +1586,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         : null;
     }
 
-    const localAgents = new Set<EvmAddressV1>();
-    for (const { agentAddress } of this.listLocalAgents()) {
+    const registeredAgents = new Set<EvmAddressV1>();
+    const nodeAgents = new Set<EvmAddressV1>();
+    for (const { agentAddress, mode } of this.listLocalAgents()) {
       const normalized = agentAddress.toLowerCase();
       if (ethers.isAddress(normalized) && normalized !== ethers.ZeroAddress) {
-        localAgents.add(normalized as EvmAddressV1);
+        registeredAgents.add(normalized as EvmAddressV1);
+        // Registration of an external caller stores its public identity and
+        // bearer mapping, not custody of its wallet. Counting it here can
+        // both invent node membership and deactivate the real local member.
+        if (mode === 'custodial') nodeAgents.add(normalized as EvmAddressV1);
       }
     }
     const defaultAgentAddress = this.defaultAgentAddress?.toLowerCase();
@@ -1710,17 +1604,18 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       && ethers.isAddress(defaultAgentAddress)
       && defaultAgentAddress !== ethers.ZeroAddress
     ) {
-      localAgents.add(defaultAgentAddress as EvmAddressV1);
+      registeredAgents.add(defaultAgentAddress as EvmAddressV1);
+      nodeAgents.add(defaultAgentAddress as EvmAddressV1);
     }
 
     const approvedAgent = this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase();
     if (
       approvedAgent !== undefined
-      && localAgents.has(approvedAgent as EvmAddressV1)
+      && registeredAgents.has(approvedAgent as EvmAddressV1)
       && rosterSet.has(approvedAgent as EvmAddressV1)
     ) return approvedAgent as EvmAddressV1;
 
-    const matching = [...localAgents].filter((address) => rosterSet.has(address));
+    const matching = [...nodeAgents].filter((address) => rosterSet.has(address));
     return matching.length === 1 ? matching[0]! : null;
   }
 
@@ -1919,7 +1814,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       WHERE { OPTIONAL { GRAPH <${metaGraph}> {
         <${contextGraphUri}> <${RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1}> ?oldVersion .
       } } }
-    `, { touchedGraphs: [metaGraph], source: 'agent.rfc64.privateRosterRotate' });
+    `, { touchedGraphs: [metaGraph], writtenGraphs: [metaGraph], source: 'agent.rfc64.privateRosterRotate' });
     return next.toString(10);
   }
 
@@ -3950,25 +3845,22 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     });
   }
 
+  /** Authority selection excludes connection-replay operational diagnostics. */
+  readRfc64CatalogSelectionV1(this: DKGAgent): Rfc64CatalogSelectionV1 {
+    return projectRfc64CatalogRuntimeSelectionV1({ nodeRole: this.config.nodeRole ?? 'edge',
+      configuredContextGraphIds: Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority),
+      responsibilities: this.readRfc64CatalogResponsibilitiesV1(), subscriptions: this.subscribedContextGraphs });
+  }
+
   /** Safe runtime selection projection for daemon status and release harnesses. */
-  readRfc64CatalogRuntimeSelectionV1(
-    this: DKGAgent,
-  ): Readonly<Rfc64CatalogRuntimeSelectionStatusV1> {
-    const responsibilities = this.readRfc64CatalogResponsibilitiesV1();
-    const eligibleContextGraphs = Object.freeze([...new Set([
-      ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority),
-      ...responsibilities.map(({ contextGraphId }) => contextGraphId),
-    ])].sort());
-    const subscriptionDriven = (this.config.nodeRole ?? 'edge') === 'edge';
-    return Object.freeze({
-      subscriptionDriven,
-      eligibleContextGraphs,
-      selectedContextGraphs: subscriptionDriven
-        ? Object.freeze(eligibleContextGraphs.filter((contextGraphId) => (
-          this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true
-        )))
-        : eligibleContextGraphs,
-    });
+  readRfc64CatalogRuntimeSelectionV1(this: DKGAgent): Readonly<Rfc64CatalogRuntimeSelectionStatusV1> {
+    return Object.freeze({ ...this.readRfc64CatalogSelectionV1(),
+      connectionReplay: rfc64CatalogReplayConnectionRuntimesV1.get(this)?.status() });
+  }
+
+  /** Connection lifetime owns the last-close boundary; cooldown state is retained. */
+  noteRfc64CatalogReplayPeerDisconnectedV1(this: DKGAgent, peerId: string): void {
+    rfc64CatalogReplayConnectionRuntimesV1.get(this)?.disconnected(peerId);
   }
 
   /** Start the complete agent-owned RFC-64 catalog runtime. */
@@ -4279,6 +4171,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       rfc64CatalogReplaySnapshotRuntimesV1.delete(this);
       rfc64CatalogReplayRecoveryRuntimesV1.get(this)?.reset();
       rfc64CatalogReplayRecoveryRuntimesV1.delete(this);
+      rfc64CatalogReplayTransportsV1.delete(this);
       rfc64CatalogReplayConnectionRuntimesV1.get(this)?.reset();
       rfc64CatalogReplayConnectionRuntimesV1.delete(this);
       rfc64CatalogTargetAnnouncementsV1.get(this)?.resetAll();
@@ -4504,7 +4397,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     peerId: string,
     requestedScope?: Readonly<Rfc64PublicCatalogHeadReplayRequestV1>,
+    signal?: AbortSignal,
   ): Promise<Readonly<Rfc64CatalogReplayResultV1>> {
+    signal?.throwIfAborted();
     const service = this.rfc64PublicCatalogServiceV1;
     const persistence = this.rfc64PersistenceV1;
     if (service === undefined || persistence === undefined) {
@@ -4592,10 +4487,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       deliver: async (manifest) => {
         const completedManifest: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
         for (const announcement of manifest) {
+          signal?.throwIfAborted();
           try {
             const delivery = await service.announceCatalogHead({
               announcement,
-              peers: [peerId],
+              peers: [peerId], signal,
             });
             announced += delivery.announcedPeers.length;
             failed += delivery.failedPeers.length;
@@ -4686,7 +4582,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     signal?: AbortSignal,
   ): Promise<Readonly<{ requested: number; failed: number }>> {
     return this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
-      kind: 'connected-peers',
+      kind: 'full-connected-peers',
     }, signal);
   }
 
@@ -4704,14 +4600,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   private async requestRfc64CatalogHeadReplayV1(
     this: DKGAgent,
     contextGraphId: string,
-    request: Readonly<
-      | { kind: 'connected-peers' }
-      | { kind: 'pending-recovery' }
-      | {
-          kind: 'connection-demand';
-          replayDemand: Rfc64CatalogReplayPeerDemandV1;
-        }
-    >,
+    request: Rfc64CatalogReplayRecoveryRequestV1,
     signal?: AbortSignal,
   ): Promise<Readonly<{ requested: number; failed: number }>> {
     signal?.throwIfAborted();
@@ -4745,28 +4634,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       this.eventBus.emit(DKGEvent.CATALOG_READINESS_CHECK_REQUESTED, { contextGraphId });
       return result;
     };
-    switch (request.kind) {
-      case 'connected-peers':
-        return settle(this.rfc64CatalogReplayRecoveryRuntimeV1().request({
-          ...scope,
-          ...(signal === undefined ? {} : { signal }),
-          kind: 'full-connected-peers',
-          connectedPeerIds: this.node.libp2p.getPeers().map((peer) => peer.toString()),
-        }));
-      case 'pending-recovery':
-        return settle(this.rfc64CatalogReplayRecoveryRuntimeV1().request({
-          ...scope,
-          ...(signal === undefined ? {} : { signal }),
-          kind: 'pending-recovery',
-        }));
-      case 'connection-demand':
-        return settle(this.rfc64CatalogReplayRecoveryRuntimeV1().request({
-          ...scope,
-          ...(signal === undefined ? {} : { signal }),
-          kind: 'connection-demand',
-          demand: request.replayDemand,
-        }));
-    }
+    return settle(this.rfc64CatalogReplayRecoveryRuntimeV1().request(
+      request.kind === 'full-connected-peers'
+        ? { ...scope, executionOwner: { signal }, ...request, connectedPeerIds: this.node.libp2p.getPeers().map(peer => peer.toString()) }
+        : { ...scope, executionOwner: { signal }, ...request },
+    ));
   }
 
   /**
@@ -5158,9 +5030,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             .acceptedPolicySnapshotForCatalogScope(scope);
         const finalizedPolicyPrecommit = createRfc64FinalizedPolicyAgentPrecommitV1({
           acceptedPolicySnapshotForCatalogScope,
-          rpcEndpoints: chainConfig === undefined
-            ? null
-            : resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls),
+          rpcEndpoints: resolveChainRpcEndpointsV1(this.chain, chainConfig),
           // The ADAPTER's resolved depth, not the raw config: `DKGAgent`
           // accepts a pre-built `chainAdapter`, and in that mode
           // `chainConfig` is ignored, so reading it here would pin the
@@ -5174,9 +5044,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         });
         const finalizedVmPrecommit = createRfc64FinalizedVmAgentPrecommitV1({
           acceptedPolicySnapshotForCatalogScope,
-          rpcEndpoints: chainConfig === undefined
-            ? null
-            : resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls),
+          rpcEndpoints: resolveChainRpcEndpointsV1(this.chain, chainConfig),
           // The ADAPTER's resolved depth, not the raw config: `DKGAgent`
           // accepts a pre-built `chainAdapter`, and in that mode
           // `chainConfig` is ignored, so reading it here would pin the

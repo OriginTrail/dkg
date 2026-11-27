@@ -1,3 +1,5 @@
+import type { CanonicalFinalizationReceiptReadOptions } from './canonical-finalization-receipt-options.js';
+export type { CanonicalFinalizationReceiptReadOptions } from './canonical-finalization-receipt-options.js';
 import type { PreBroadcastSignal, ReplacementBroadcastSignal } from './transaction-broadcast-types.js';
 export type { PreBroadcastSignal, ReplacementBroadcastSignal } from './transaction-broadcast-types.js';
 import type { ChainEvent } from './knowledge-asset-update-identity.js';
@@ -12,6 +14,7 @@ import type { KnowledgeAssetVersionSnapshotReadOptions } from './ka-version-snap
 import type { ethers } from 'ethers';
 import type { RpcRequestClass } from './rpc-request-transport.js';
 import type { RpcUsageWindow } from './rpc-usage.js';
+import type { MarketplaceChain } from './marketplace.js';
 import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-authority-index-snapshot.js';
 import type { ContextGraphAuthorityProjectionServedEvidence } from
   './context-graph-authority-index-projection.js';
@@ -347,6 +350,8 @@ export interface CanonicalFinalizationReceipt {
   startKAId: bigint;
   endKAId: bigint;
   knowledgeAssetsContract?: string;
+  /** Receipt-block root-history position; opt-in V10 updates require an unambiguous append. */
+  assertionVersion?: bigint;
 }
 
 export type CanonicalFinalizationReceiptResolution =
@@ -428,11 +433,6 @@ export function isPendingPublishTransactionStatus(status: string): boolean {
   return status === 'pending-mempool' || status === 'pending-awaiting-confirmation';
 }
 
-export interface CanonicalFinalizationReceiptReadOptions extends ChainReadOptions {
-  /** Persisted block identity supplied during replay canonicality checks. */
-  expectedBlockHash?: string;
-  expectedBlockNumber?: number;
-}
 
 export interface UpdateKAParams {
   batchId: bigint;
@@ -1525,7 +1525,7 @@ export function operationalSigningOf(
  * V9 introduces publisher-namespaced UALs: did:dkg:{chainId}/{publisherAddress}/{localKAId}
  * Publishers reserve ID ranges via their signer address, then batch-mint KAs from those ranges.
  */
-export interface ChainAdapter {
+export interface ChainAdapter extends MarketplaceChain {
   /** Complete coherent public chain evidence for explicit snapshot recovery. */
   readPublicGraphSnapshot?(contextGraphId: string, onChainId: string, options?: ChainReadOptions): Promise<import('./public-graph-snapshot.js').PublicGraphSnapshot>;
 
@@ -1876,7 +1876,7 @@ export interface ChainAdapter {
   registerPublishingConvictionAgents?(accountId: bigint, agents: string[]): Promise<TxResult>;
   isPublishingConvictionAgent?(accountId: bigint, agent: string): Promise<boolean>;
   settlePublishingConvictionAccount?(accountId: bigint): Promise<TxResult>;
-  getPublishingConvictionAccountInfo?(accountId: bigint, opts?: { extended?: boolean }): Promise<V10PublishingConvictionAccountInfo | null>;
+  getPublishingConvictionAccountInfo?(accountId: bigint, opts?: { extended?: boolean; strict?: boolean }): Promise<V10PublishingConvictionAccountInfo | null>;
 
   /**
    * OT-RFC-51 designated primary node for a PCA — `accounts(accountId).primaryNode`.
@@ -2272,19 +2272,19 @@ export interface ChainAdapter {
   getEvmChainId(): Promise<bigint>;
 
   /**
-   * The RESOLVED `chain.finalityConfirmations` this adapter is using — the
-   * node's single definition of finality (see evm-finality-anchor.ts).
-   *
-   * Exposed because callers that hold an adapter must not re-derive the depth
-   * from a raw config they may not have. `DKGAgent` accepts a PRE-BUILT
-   * `chainAdapter`, in which case `chainConfig` is ignored entirely, so an
-   * RFC-64 precommit reading `chainConfig?.finalityConfirmations` would anchor
-   * at the default while the adapter's own authority reads honoured the
-   * operator — two anchors in one process, with no error anywhere. Optional so
-   * out-of-tree and mock adapters need not implement it; absent means "no
-   * opinion", and the caller falls back to its configured value.
+   * The RESOLVED `chain.finalityConfirmations` this adapter is using — the node's single
+   * definition of finality (see evm-finality-anchor.ts). Exposed because callers that hold an
+   * adapter must not re-derive the depth from a raw config they may not have. `DKGAgent` accepts
+   * a PRE-BUILT `chainAdapter`, in which case `chainConfig` is ignored entirely, so an RFC-64
+   * precommit reading `chainConfig?.finalityConfirmations` would anchor at the default while the
+   * adapter's own authority reads honoured the operator — two anchors in one process, with no
+   * error anywhere. Optional so out-of-tree and mock adapters need not implement it; absent
+   * means "no opinion", and the caller falls back to its configured value.
    */
   getFinalityConfirmations?(): number;
+
+  /** The RPC endpoints this adapter reads through, primary first; optional for the same reason. */
+  getRpcUrls?(): readonly string[];
 
   // V8 backward compatibility (used by mock adapter, will be removed)
   createKnowledgeAsset?(params: CreateKCParams): Promise<TxResult>;
