@@ -47,9 +47,9 @@ describe('ACK rounds verify every candidate afresh', () => {
     });
   }
 
-  async function round(options: { pool?: string[]; recovered?: boolean; legacy?: boolean } = {}) {
-    const sends: string[] = [];
-    const checks: bigint[] = [];
+  function createRounds(legacy = false) {
+    let options: { pool?: string[]; recovered?: boolean } = {};
+    const sends: string[] = [], checks: bigint[] = [];
     const deps: ACKCollectorDeps = {
       gossipPublish: async () => {},
       sleep: async () => { await sleep(1_000); },
@@ -65,21 +65,29 @@ describe('ACK rounds verify every candidate afresh', () => {
         return identityId === 19n && !options.recovered ? { valid: false, reason: 'not-in-sharding-table' } : { valid: true };
       },
     };
-    if (options.legacy) {
+    if (legacy) {
       delete deps.verifyIdentityDetailed;
-      // Legacy adapter wrappers return false when the underlying RPC throws.
-      deps.verifyIdentity = async (_signer, identityId) => !(!options.recovered && identityId === 19n);
+      deps.verifyIdentity = async (_signer, identityId) => {
+        checks.push(identityId);
+        return !(!options.recovered && identityId === 19n);
+      };
     }
-    const startedAt = performance.now();
-    const result = await new ACKCollector(deps).collect({
-      merkleRoot, contextGraphId: CG_ID, contextGraphIdStr: CG_STR, publisherPeerId: 'edge', publicByteSize: 100n,
-      isPrivate: false, kaCount: 1, rootEntities: ['urn:a'], chainId: CHAIN_ID, kav10Address: KAV10,
-      merkleLeafCount, ackMode: { kind: 'public' }, requiredACKs: 2,
-    });
-    return { ms: performance.now() - startedAt, sends, checks, acks: result.acks.map((a) => a.peerId) };
+    // Production providers retain their collector. Reuse it across changed authority answers.
+    const collector = new ACKCollector(deps);
+    return async (next: typeof options = {}) => {
+      options = next;
+      const sendOffset = sends.length, checkOffset = checks.length;
+      const result = await collector.collect({
+        merkleRoot, contextGraphId: CG_ID, contextGraphIdStr: CG_STR, publisherPeerId: 'edge', publicByteSize: 100n,
+        isPrivate: false, kaCount: 1, rootEntities: ['urn:a'], chainId: CHAIN_ID, kav10Address: KAV10,
+        merkleLeafCount, ackMode: { kind: 'public' }, requiredACKs: 2,
+      });
+      return { sends: sends.slice(sendOffset), checks: checks.slice(checkOffset), acks: result.acks.map(a => a.peerId) };
+    };
   }
 
   it('requests the same complete pool and freshly verifies signers in consecutive rounds', async () => {
+    const round = createRounds();
     const rounds = [await round(), await round()];
     for (const result of rounds) {
       expect(result.sends).toEqual([...wallets.keys()]);
@@ -89,10 +97,13 @@ describe('ACK rounds verify every candidate afresh', () => {
   });
 
   it.each([false, true])('counts a recovered signer after an earlier rejection (legacy=%s)', async legacy => {
-    await round({ legacy });
-    const result = await round({ legacy, recovered: true, pool: ['non-member', 'busy', 'fast-2'] });
+    const round = createRounds(legacy);
+    const first = await round();
+    expect(first.checks).toContain(19n);
+    expect(first.acks).not.toContain('non-member');
+    const result = await round({ recovered: true, pool: ['non-member', 'busy', 'fast-2'] });
     expect(result.sends).toEqual(['non-member', 'busy', 'fast-2']);
-    expect(result.checks).toEqual(legacy ? [] : [19n, 4n]);
+    expect(result.checks).toEqual([19n, 4n]);
     expect(result.acks.sort()).toEqual(['fast-2', 'non-member']);
   });
 });
