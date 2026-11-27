@@ -68,6 +68,10 @@ export function createRollingPromotionFixture(
     log: { warn: vi.fn<RollingSubscriptionPromotionPorts['log']['warn']>(), info: vi.fn<RollingSubscriptionPromotionPorts['log']['info']>(), debug: vi.fn<RollingSubscriptionPromotionPorts['log']['debug']>() },
     touchStatus: vi.fn(),
     activated: vi.fn<(id: string) => void>(),
+    commitLiveIntent: (id: string, subscription: ContextGraphSub) => {
+      host.subscribedContextGraphs.set(id, subscription);
+      activations.replaceLiveIntent(id, subscription);
+    },
     transitionDormancy: (id: string, reason: ContextGraphDormancyReason | undefined) => activations.transition({ id, kind: 'dormancy', reason }),
     recordContextGraphSubscriptionClear: vi.fn<RollingSubscriptionPromotionPorts['recordContextGraphSubscriptionClear']>((removed, revoked = []) => activations.transitionBatch([
       ...removed.map(id => ({ id, kind: 'cleared' as const })), ...revoked.map(id => ({ id, kind: 'deactivated' as const })),

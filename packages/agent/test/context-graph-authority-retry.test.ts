@@ -1,3 +1,4 @@
+import { recoverDeferredContextGraphSubscriptionAuthorities } from './_helpers/deferred-authority-recovery.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
@@ -11,7 +12,6 @@ import { DKGAgent } from '../src/index.js';
 import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
 import {
   DEFERRED_AUTHORITY_RECOVERY_RETRY_MS,
-  recoverDeferredContextGraphSubscriptionAuthorities,
   wakeDeferredContextGraphSubscriptionAuthorityRecovery,
 } from
   '../src/context-graph-subscription-authority-recovery.js';
@@ -2371,7 +2371,15 @@ describe('Context Graph subscription rehydration startup authority budget (#2815
       updatedAt: 1,
     };
     const capped = vi.fn();
-    const activate = vi.fn();
+    const subscriptions = new Map([['already-active', { subscribed: true, synced: true, syncMode: 'always-on' }]]);
+    const owner = createTestSubscriptionActivations({ subscribedContextGraphs: subscriptions,
+      contextGraphSubscriptionDormancyById: dormancyById, contextGraphSubscriptionRehydrationStatus: status,
+      contextGraphSubscriptionRehydrationAccountedIds: new Set([row.id, 'already-active']) });
+    const install = vi.fn(() => { throw new Error('A capped row must not be installed'); });
+    const activate = vi.fn(async () => { await owner.activate(row, {
+      install, remove: vi.fn(), rollbackNetworkEffects: vi.fn(), trackSync: vi.fn(), subscribe: vi.fn(),
+      persistMembership: vi.fn(), persistBinding: async () => undefined, commit: vi.fn(),
+    }, { respectActivationCap: true }); });
 
     await recoverDeferredContextGraphSubscriptionAuthorities(new AbortController().signal, {
       store: {
@@ -2383,7 +2391,7 @@ describe('Context Graph subscription rehydration startup authority budget (#2815
       dormancyById,
       transitionDormancy: (id: string, reason: any) => { if (reason === undefined) dormancyById.delete(id); else dormancyById.set(id, reason); },
       persistRevisions: new Map(),
-      subscriptions: new Map(),
+      subscriptions,
       getStatus: () => status,
       isCurrent: () => true,
       touchStatus: () => undefined,
@@ -2395,7 +2403,8 @@ describe('Context Graph subscription rehydration startup authority budget (#2815
       capped,
     });
 
-    expect(activate).not.toHaveBeenCalled();
+    expect(activate).toHaveBeenCalledTimes(1);
+    expect(install).not.toHaveBeenCalled();
     expect(dormancyById.get(row.id)).toBe('activationCap');
     expect(capped).toHaveBeenCalledWith(row.id);
   });

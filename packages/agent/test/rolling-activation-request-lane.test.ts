@@ -370,7 +370,7 @@ describe('rolling activation and the chain request lane', () => {
     it('does not mark a row dormant that was activated while a refusal was on its way', async () => {
       const host = hostWithRowReadAs(DENIED, (h) => {
         // An explicit subscribe: the row is active and no longer waits.
-        h.subscribedContextGraphs.set(ID, promotionSubscription({ subscribed: true, onChainId: '7' }));
+        h.commitLiveIntent(ID, promotionSubscription({ subscribed: true, onChainId: '7' }));
       });
 
       await expect(runPass(host)).resolves.toBe('idle');

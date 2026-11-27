@@ -202,6 +202,8 @@ export class VmPromotionMethods extends DKGAgentBase {
       case 'already-recorded':
         // While the definition is missing, a requester the owner tied to the graph is asked for it.
         noteCoreHostedStorageAck(this, localCgId, request.publisherPeerId);
+        // A graph publishers write to now is brought back first after a restart.
+        this.storageAckRecentGraphs().note(localCgId, request.contextGraphId);
         return { ok: true };
       case 'curated':
         // A curated graph's plaintext never belongs in a core's VM; curated
@@ -227,7 +229,10 @@ export class VmPromotionMethods extends DKGAgentBase {
         this.storageAckDormantSince.set(localCgId, since);
         const selfClearing = reason === 'authorityUnavailable' || reason === 'activationCap';
         if (selfClearing && now - since < STORAGE_ACK_DORMANT_TRANSIENT_MS) {
-          if (reason === 'activationCap') this.requestContextGraphSubscriptionPromotion(localCgId);
+          // Activate the row now with the binding checked above; the paced owners stay the fallback.
+          this.storageAckRecentGraphs().note(localCgId, request.contextGraphId);
+          if (!this.requestStorageAckDemandActivation(localCgId, request.contextGraphId)
+            && reason === 'activationCap') this.requestContextGraphSubscriptionPromotion(localCgId);
           return unavailable(`the graph subscription on this core is not active yet (${reason})`);
         }
         return disabled(
