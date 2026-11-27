@@ -282,6 +282,57 @@ describe('graph-scoped finalization recovery admission', () => {
     );
   });
 
+  it('warns when the inbox refuses to settle an entry without verified evidence', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-settle-refusal-'));
+    let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;
+    try {
+      store = await openSqliteFinalizationRecoveryStore(directory);
+      const warn = vi.fn();
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain(),
+        { info: () => {}, warn },
+        recoveryMaterializer(),
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+      const [entry] = await store.list();
+      expect(entry).toMatchObject({ state: 'RECEIVED' });
+      expect(entry.verifiedEvidence).toBeUndefined();
+
+      await expect(recovery.settleEntry(entry, 'applied')).resolves.toBe(false);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(`refused to settle ${entry.ual}`),
+      );
+    } finally {
+      await store?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['advanced', 'closed'] as const)('does not diagnose missing evidence after %s settlement refusal', async mode => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-settle-race-'));
+    const store = await openSqliteFinalizationRecoveryStore(directory);
+    try {
+      const warn = vi.fn();
+      const recovery = new FinalizationRecovery(store, recoveryChain(), { info: () => {}, warn }, recoveryMaterializer());
+      await recovery.receive({ rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH, sourcePeerId: '12D3KooWPublisher', candidate: parsedMessage() });
+      const [entry] = await store.list();
+      if (mode === 'closed') await store.close();
+      else {
+        // A newer generation owns the durable entry; this stale caller cannot settle it.
+        await expect(store.markReorged(entry.key, entry.generation, 'new canonical generation')).resolves.toBe(true);
+      }
+      await expect(recovery.settleEntry(entry, 'applied')).resolves.toBe(false);
+      expect(warn).not.toHaveBeenCalled();
+    } finally { await store.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
   it('preserves publisher authority when a trusted duplicate arrives while deferred', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-pending-publisher-'));
     let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;

@@ -10,6 +10,7 @@ import {
   type FinalizationRecoveryReceiveResult,
   type FinalizationRecoverySettledPublisherUpgradeResult,
   type FinalizationRecoveryState,
+  type FinalizationRecoveryTransitionResult,
   type FinalizationRecoveryStore,
   type FinalizationRecoveryVerifyResult,
   planFinalizationRecoveryVerifiedEvidenceTransition,
@@ -253,7 +254,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       let promoted = 0;
       this.transaction(() => {
         const now = this.#policy.now();
-        this.pruneWithinTransaction(now);
+        pruneFinalizationRecoveryRowsWithinTransaction(this.database, this.#policy, now);
         const rows = this.database.prepare(`
           SELECT * FROM finalization_pending_v2
           ORDER BY created_at ASC, key ASC
@@ -355,7 +356,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       publisherPeerId.length === 0
       || publisherPeerId.trim() !== publisherPeerId
     ) return Promise.resolve({ status: 'conflict' });
-    return this.mutate(() => {
+    return this.mutate(() => this.transaction<FinalizationRecoverySettledPublisherUpgradeResult>(() => {
       if (this.#closed) return { status: 'closed' };
       const row = this.database.prepare(
         'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
@@ -373,6 +374,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       if (current.publisherUpgradePending) {
         return { status: 'existing', entry: current };
       }
+      const now = this.#policy.now();
       const result = this.database.prepare(`
         UPDATE finalization_inbox_v1
         SET trusted_publisher_peer_id = ?,
@@ -386,21 +388,18 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
           )
       `).run(
         publisherPeerId,
-        this.#policy.now(),
+        now,
         key,
         generation,
         publisherPeerId,
       );
       if (result.changes === 0) return { status: 'conflict' };
-      const updated = this.database.prepare(
-        'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
-      ).get(key);
-      if (!updated) return { status: 'missing' };
       return {
         status: 'recorded',
-        entry: finalizationRecoveryRowToEntry(updated),
+        entry: { ...current, trustedPublisherPeerId: publisherPeerId,
+          publisherUpgradePending: true, updatedAt: now },
       };
-    });
+    }));
   }
 
   rearmSettledWithTrustedPublisher(
@@ -543,8 +542,8 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       }
       const entry = finalizationRecoveryRowToEntry(updated);
       if (
-        entry.generation === fields.generation
-        && entry.verifiedEvidence
+        (entry.state === 'VERIFIED' || entry.state === 'SETTLED')
+        && entry.generation === fields.generation
         && VerifiedGraphScopedFinalizationEvidenceCodec.same(
           entry.verifiedEvidence,
           fields.verifiedEvidence,
@@ -621,7 +620,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
           WHERE key = ? AND generation = ? AND state = 'SETTLED'
         `).run(lastError, now, key, generation);
         changed = result.changes > 0;
-        this.pruneWithinTransaction(now);
+        pruneFinalizationRecoveryRowsWithinTransaction(this.database, this.#policy, now);
       });
       return changed;
     });
@@ -690,31 +689,35 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     generation: number,
     state: 'SETTLED' | 'SUPERSEDED' | 'REJECTED' | 'UNSUPPORTED',
     lastError?: string,
-  ): Promise<boolean> {
-    if (this.#closed || this.#closing) return Promise.resolve(false);
-    return this.mutate(() => {
-      if (this.#closed) return false;
-      let changed = false;
-      this.transaction(() => {
-        const now = this.#policy.now();
-        const result = this.database.prepare(`
-          UPDATE finalization_inbox_v1
-          SET state = ?,
-              publisher_upgrade_pending = 0,
-              attempt_count = CASE WHEN ? = 'SETTLED' THEN 0 ELSE attempt_count END,
-              failure_signature = NULL,
-              failure_streak = 0,
-              last_error = ?,
-              next_attempt_at = NULL,
-              updated_at = ?
-          WHERE key = ? AND generation = ?
-            AND state IN ('RECEIVED','VERIFIED','REORGED')
-        `).run(state, state, lastError ?? null, now, key, generation);
-        changed = result.changes > 0;
-        this.pruneWithinTransaction(now);
-      });
-      return changed;
-    });
+  ): Promise<FinalizationRecoveryTransitionResult> {
+    if (this.#closed || this.#closing) return Promise.resolve({ status: 'closed' });
+    return this.mutate(() => this.transaction<FinalizationRecoveryTransitionResult>(() => {
+      if (this.#closed) return { status: 'closed' };
+      if (state === 'SETTLED') {
+        const row = this.database.prepare('SELECT * FROM finalization_inbox_v1 WHERE key = ?').get(key);
+        if (!row) return { status: 'stale' };
+        const current = finalizationRecoveryRowToEntry(row);
+        if (current.generation !== generation) return { status: 'stale' };
+        if (current.state === 'RECEIVED' || current.state === 'REORGED') return { status: 'missing-evidence' };
+        if (current.state !== 'VERIFIED') return { status: 'stale' };
+      }
+      const now = this.#policy.now();
+      const result = this.database.prepare(`
+        UPDATE finalization_inbox_v1
+        SET state = ?,
+            publisher_upgrade_pending = 0,
+            attempt_count = CASE WHEN ? = 'SETTLED' THEN 0 ELSE attempt_count END,
+            failure_signature = NULL,
+            failure_streak = 0,
+            last_error = ?,
+            next_attempt_at = NULL,
+            updated_at = ?
+        WHERE key = ? AND generation = ?
+          AND state IN ('RECEIVED','VERIFIED','REORGED')
+      `).run(state, state, lastError ?? null, now, key, generation);
+      pruneFinalizationRecoveryRowsWithinTransaction(this.database, this.#policy, now);
+      return { status: result.changes > 0 ? 'changed' : 'stale' };
+    }));
   }
 
   recordAttempt(
@@ -858,14 +861,15 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     return run;
   }
 
-  private transaction(operation: () => void): void {
+  private transaction<T>(operation: () => T): T {
     let open = false;
     try {
       this.database.exec('BEGIN IMMEDIATE');
       open = true;
-      operation();
+      const result = operation();
       this.database.exec('COMMIT');
       open = false;
+      return result;
     } catch (error) {
       if (open) {
         try { this.database.exec('ROLLBACK'); } catch { /* retain transaction failure */ }
@@ -877,17 +881,10 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
   private prune(): void {
     const now = this.#policy.now();
     this.transaction(() => {
-      this.pruneWithinTransaction(now);
+      pruneFinalizationRecoveryRowsWithinTransaction(this.database, this.#policy, now);
     });
   }
 
-  private pruneWithinTransaction(now: number): void {
-    pruneFinalizationRecoveryRowsWithinTransaction(
-      this.database,
-      this.#policy,
-      now,
-    );
-  }
 }
 
 export async function openSqliteFinalizationRecoveryStore(

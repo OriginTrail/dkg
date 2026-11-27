@@ -66,7 +66,7 @@ describe('SQLite finalization recovery store', () => {
       const store = await openSqliteFinalizationRecoveryStore(directory);
       await store.receive(received());
       await expect(store.transition('entry-1', 0, 'REJECTED', 'terminal'))
-        .resolves.toBe(true);
+        .resolves.toEqual({ status: 'changed' });
 
       await expect(store.recordAttempt(
         'entry-1',
@@ -171,7 +171,7 @@ describe('SQLite finalization recovery store', () => {
       const store = await openSqliteFinalizationRecoveryStore(directory);
       expect((await store.receive(received())).status).toBe('inserted');
       expect((await commitOriginalEvidence(store, 'entry-1', 0, evidence())).status).toBe('verified');
-      expect(await store.transition('entry-1', 0, 'SETTLED')).toBe(true);
+      expect(await store.transition('entry-1', 0, 'SETTLED')).toEqual({ status: 'changed' });
       await store.close();
 
       const reopened = await openSqliteFinalizationRecoveryStore(directory);
@@ -187,6 +187,42 @@ describe('SQLite finalization recovery store', () => {
       await reopened.close();
       expect((await readFile(join(directory, FINALIZATION_INBOX_DATABASE_FILENAME))).length)
         .toBeGreaterThan(100);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a VERIFIED entry readable after it is downgraded to UNSUPPORTED', async () => {
+    // `transition()` admits UNSUPPORTED from VERIFIED and clears only
+    // `publisher_upgrade_pending`, so the row keeps the evidence it had
+    // acquired. Classifying UNSUPPORTED as evidence-free made every later read
+    // throw — and because open sweeps every row through the codec, the whole
+    // inbox became permanently unopenable. Reachable on any restart with no
+    // chain adapter, chainId 'none', or an adapter without
+    // `resolveCanonicalFinalizationReceipt`.
+    const directory = await temporaryDirectory();
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      expect((await store.receive(received())).status).toBe('inserted');
+      expect((await commitOriginalEvidence(store, 'entry-1', 0, evidence())).status)
+        .toBe('verified');
+      expect(await store.transition('entry-1', 0, 'UNSUPPORTED')).toEqual({ status: 'changed' });
+
+      // The audit evidence is deliberately retained, not nulled.
+      await expect(store.get('entry-1')).resolves.toMatchObject({
+        state: 'UNSUPPORTED',
+        verifiedEvidence: { blockHash: BLOCK_HASH, txIndex: 4 },
+      });
+      await expect(store.list()).resolves.toBeDefined();
+      await store.close();
+
+      // The open-time sweep must not throw on that row.
+      const reopened = await openSqliteFinalizationRecoveryStore(directory);
+      await expect(reopened.get('entry-1')).resolves.toMatchObject({
+        state: 'UNSUPPORTED',
+        verifiedEvidence: { blockHash: BLOCK_HASH },
+      });
+      await reopened.close();
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -319,7 +355,7 @@ describe('SQLite finalization recovery store', () => {
         nextAttemptAt: expect.any(Number),
       }]);
 
-      expect(await store.transition('entry-1', 0, 'SETTLED')).toBe(true);
+      expect(await store.transition('entry-1', 0, 'SETTLED')).toEqual({ status: 'changed' });
       expect(await store.list()).toMatchObject([{
         state: 'SETTLED',
         attemptCount: 0,
@@ -432,7 +468,7 @@ describe('SQLite finalization recovery store', () => {
         sourcePeerId: '12D3KooWUntrustedRelay',
       }))).status).toBe('inserted');
       expect((await commitOriginalEvidence(store, 'entry-1', 0, evidence())).status).toBe('verified');
-      expect(await store.transition('entry-1', 0, 'SETTLED')).toBe(true);
+      expect(await store.transition('entry-1', 0, 'SETTLED')).toEqual({ status: 'changed' });
       await store.recordAttempt('entry-1', 0, 'old settled retry', {
         mode: 'ordinary', retryDelayMs: 1_000,
       });
@@ -507,7 +543,7 @@ describe('SQLite finalization recovery store', () => {
         accessPolicy: 'allowList',
         allowedPeers: ['12D3KooWReader'],
       }))).status).toBe('verified');
-      expect(await store.transition('entry-1', 1, 'SETTLED')).toBe(true);
+      expect(await store.transition('entry-1', 1, 'SETTLED')).toEqual({ status: 'changed' });
       expect(await store.list()).toMatchObject([{
         state: 'SETTLED',
         generation: 1,
@@ -702,7 +738,7 @@ describe('SQLite finalization recovery store', () => {
       const store = await openSqliteFinalizationRecoveryStore(directory);
       await store.receive(received());
       await expect(store.transition('entry-1', 0, 'SUPERSEDED', 'newer assertion'))
-        .resolves.toBe(true);
+        .resolves.toEqual({ status: 'changed' });
       const entries = await store.list();
       expect(entries).toMatchObject([{ state: 'SUPERSEDED' }]);
       expect(entries[0]).not.toHaveProperty('verifiedEvidence');

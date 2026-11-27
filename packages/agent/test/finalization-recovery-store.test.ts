@@ -148,7 +148,7 @@ describe('finalization recovery verified-evidence transition planner', () => {
     ],
     [
       'terminal source state',
-      entry({ state: 'SETTLED' }),
+      entry({ state: 'SUPERSEDED' }),
       0,
       { evidence: evidence(), placement: 'original' },
     ],
@@ -177,6 +177,22 @@ describe('finalization recovery verified-evidence transition planner', () => {
       current,
       generation,
       commit,
+    )).toEqual({ status: 'conflict' });
+  });
+
+  it.each(['SUPERSEDED', 'REJECTED', 'UNSUPPORTED'] as const)(
+    'rejects retained evidence in terminal %s', state => {
+      expect(planFinalizationRecoveryVerifiedEvidenceTransition(
+        entry({ state, verifiedEvidence: evidence() }), 0,
+        { evidence: evidence(), placement: 'original' },
+      )).toEqual({ status: 'conflict' });
+    },
+  );
+
+  it.each(['VERIFIED', 'SETTLED'] as const)('rejects malformed %s without evidence', state => {
+    expect(planFinalizationRecoveryVerifiedEvidenceTransition(
+      entry({ state, verifiedEvidence: undefined }), 0,
+      { evidence: evidence(), placement: 'original' },
     )).toEqual({ status: 'conflict' });
   });
 

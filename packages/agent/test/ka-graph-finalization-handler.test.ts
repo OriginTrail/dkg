@@ -1557,7 +1557,7 @@ describe('graph-scoped finalization handler', () => {
         deferredEntries: 1,
         dueEntries: 1,
       });
-      await expect(inbox.transition(fillerKey, 0, 'SUPERSEDED')).resolves.toBe(true);
+      await expect(inbox.transition(fillerKey, 0, 'SUPERSEDED')).resolves.toEqual({ status: 'changed' });
 
       recoveryHandler.startRecoveryWorker();
       await vi.waitFor(async () => {
@@ -1692,7 +1692,7 @@ describe('graph-scoped finalization handler', () => {
         isAttemptDue: () => true,
         listDue: async () => [],
         listForKnowledgeAsset: async () => [],
-        transition: async () => false,
+        transition: async () => ({ status: 'stale' }),
         recordAttempt: async () => ({ status: 'stale' }),
         health: async () => ({
           available: true,

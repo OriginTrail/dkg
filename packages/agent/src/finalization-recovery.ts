@@ -1,3 +1,4 @@
+import { transitionFinalizationRecoveryEntry } from './finalization-recovery-transition.js';
 import type { CanonicalFinalizationReceipt, CanonicalFinalizationReceiptResolution, ChainAdapter, EventFilter } from '@origintrail-official/dkg-chain';
 import { decodeFinalizationMessage, getMetrics, GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
@@ -887,7 +888,7 @@ export class FinalizationRecovery<
         ? {
             kind: 'persisted',
             evidence: entry.verifiedEvidence,
-            placement: entry.state === 'REORGED' ? 'canonical-moved' : 'original',
+            placement: 'original',
           }
         : entry.state === 'REORGED'
           ? { kind: 'reorg-recovery' }
@@ -1690,17 +1691,7 @@ export class FinalizationRecovery<
     state: 'SETTLED' | 'SUPERSEDED' | 'REJECTED' | 'UNSUPPORTED',
     reason?: string,
   ): Promise<boolean> {
-    const store = this.getStore();
-    if (!store) return false;
-    try {
-      return await store.transition(entry.key, entry.generation, state, reason);
-    } catch (error) {
-      this.log.warn(
-        `Finalization recovery transition to ${state} failed for ${entry.ual}: `
-          + `${error instanceof Error ? error.message : String(error)}`,
-      );
-      return false;
-    }
+    return transitionFinalizationRecoveryEntry(this.getStore(), entry, state, reason, this.log);
   }
 
   private async replaySettled(
@@ -1938,7 +1929,12 @@ export class FinalizationRecovery<
     if (!entry || (!this.isLiveEntry(entry) && entry.state !== 'SETTLED')) {
       return 'none';
     }
-    let activeEntry = entry;
+    // `isLiveEntry` is a type predicate, so `entry` is narrowed to the live
+    // states here. `activeEntry` is later reassigned from
+    // `ensureVerifiedReplayEntry`, which returns the broad union, and it is
+    // only ever read for `.ual` and handed to `recordDeferred`, which accepts
+    // the broad union too.
+    let activeEntry: FinalizationRecoveryEntry = entry;
     try {
       // Only autonomous replay observes its persisted deadline. Chain
       // reconciliation remains an immediate, authoritative recovery trigger.
