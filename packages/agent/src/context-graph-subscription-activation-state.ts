@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { AgentWorkLifetime } from './agent-work-lifetime.js';
+import { SubscriptionActivationCapacityError } from './context-graph-subscription-activation-capacity.js';
 import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { accountSubscriptionChanges, type SubscriptionAccountingChange } from './context-graph-subscription-accounting.js';
 import { rehydratedSubscriptionReachedSafeState, type PersistedContextGraphSubscriptionActivationOptions, type PersistedContextGraphSubscriptionActivationPorts } from './context-graph-subscription-authority-recovery.js';
 import type { ContextGraphSub, ContextGraphSubscriptionRecord, ContextGraphSubscriptionRehydrationInternalStatus } from './dkg-agent-types.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
-import { contextGraphSubscriptionAdmissionPremisesEqual, isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
+import { sameSubscriptionIntent, sameDurableSubscriptionIntent, contextGraphSubscriptionAdmissionPremisesEqual, isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
 
 type Dormancy = ReadonlyMap<string, ContextGraphDormancyReason>;
 function applyDormancy(dormancy: Map<string, ContextGraphDormancyReason>, id: string, after: ContextGraphDormancyReason | undefined): void {
@@ -19,13 +20,6 @@ export function isCommittedSubscription(
   return Boolean((row?.subscribed || row?.coreHosted) && !dormancy.has(id));
 }
 
-function sameIntent(left: ContextGraphSubscriptionRecord, right: ContextGraphSubscriptionRecord): boolean {
-  return left.id === right.id && left.subscribed === right.subscribed
-    && (left.coreHosted === true) === (right.coreHosted === true) && left.syncScoped === right.syncScoped;
-}
-function sameDurableIntent(left: ContextGraphSubscriptionRecord, right: ContextGraphSubscriptionRecord): boolean {
-  return sameIntent(left, right) && left.onChainId === right.onChainId && left.onChainHash === right.onChainHash;
-}
 type ActivationOutcome = { kind: 'committed'; subscription: ContextGraphSub } | { kind: 'cancelled' };
 type ActivationPhase = { kind: 'queued' } | { kind: 'installing'; subscription: ContextGraphSub }
   | { kind: 'settled'; outcome: ActivationOutcome };
@@ -117,6 +111,7 @@ export interface SubscriptionActivationPorts {
 export class ContextGraphSubscriptionActivations {
   constructor(private readonly ports: SubscriptionActivationPorts) {}
   private readonly pending = new Map<string, ActivationAttempt>();
+  private readonly recoveryReservations = new Set<string>();
   // Startup uses the same incremental transitions as retries, but only publishes
   // the completed report once the startup lifecycle finishes its authority pass.
   private startupAccounting: ContextGraphSubscriptionRehydrationInternalStatus | null = null;
@@ -179,8 +174,8 @@ export class ContextGraphSubscriptionActivations {
   }
   private attemptFor(row: ContextGraphSubscriptionRecord): ActivationAttempt {
     const current = this.pending.get(row.id);
-    if (current && (sameDurableIntent(current.intent, row)
-      || (current.repaired && sameDurableIntent(current.repaired, row)))) return current;
+    if (current && (sameDurableSubscriptionIntent(current.intent, row)
+      || (current.repaired && sameDurableSubscriptionIntent(current.repaired, row)))) return current;
     this.cancel(row.id);
     const attempt: ActivationAttempt = { intent: { ...row }, phase: { kind: 'queued' }, listeners: new Set() };
     this.pending.set(row.id, attempt);
@@ -266,6 +261,32 @@ export class ContextGraphSubscriptionActivations {
   /** One retry owns installation, repair, network effects, rollback and commit. */
   async activate(row: ContextGraphSubscriptionRecord, ports: PersistedContextGraphSubscriptionActivationPorts,
     options: PersistedContextGraphSubscriptionActivationOptions = {}): Promise<ContextGraphSub> {
+    const reserved = options.respectActivationCap === true && row.coreHosted !== true;
+    if (reserved) {
+      if (this.recoveryReservations.has(row.id)) throw changed();
+      const status = this.startupAccounting ?? this.ports.getStatus();
+      // Capacity is the union of committed rows and in-flight ownership. A
+      // just-committed attempt may still hold its lease until its promise retires.
+      const occupied = new Set(this.recoveryReservations);
+      for (const id of this.ports.contextGraphSubscriptionRehydrationAccountedIds) {
+        if (!this.ports.contextGraphSubscriptionDormancyById.has(id)) occupied.add(id);
+      }
+      for (const attempt of this.pending.values()) {
+        if (attempt.phase.kind === 'installing') occupied.add(attempt.intent.id);
+      }
+      for (const id of occupied) {
+        if (this.ports.subscribedContextGraphs.get(id)?.coreHosted === true) occupied.delete(id);
+      }
+      if (status && status.activationCap > 0 && occupied.size >= status.activationCap) {
+        throw new SubscriptionActivationCapacityError();
+      }
+      this.recoveryReservations.add(row.id);
+    }
+    try { return await this.activateOwned(row, ports, options); }
+    finally { if (reserved) this.recoveryReservations.delete(row.id); }
+  }
+  private async activateOwned(row: ContextGraphSubscriptionRecord, ports: PersistedContextGraphSubscriptionActivationPorts,
+    options: PersistedContextGraphSubscriptionActivationOptions): Promise<ContextGraphSub> {
     const attempt = this.attemptFor(row);
     if (attempt.phase.kind !== 'queued') throw changed();
     const previous = this.ports.subscribedContextGraphs.get(row.id);
@@ -330,7 +351,7 @@ export class ContextGraphSubscriptionActivations {
     // Preserving independent Core custody can add hosting to the saved row.
     // That is not a binding repair of this attempt's member intent; canonical
     // commit still validates the custody transfer before applying it.
-    if (sameIntent(attempt.intent, record)) attempt.repaired = { ...record };
+    if (sameSubscriptionIntent(attempt.intent, record)) attempt.repaired = { ...record };
   }
   /** One owner commits bookkeeping, settles waiters, then publishes activation. */
   private commit(attempt: ActivationAttempt, write: (id: string) => ContextGraphSub): ContextGraphSub {

@@ -538,6 +538,12 @@ import {
   projectContextGraphDormancy,
 } from './context-graph-subscription-dormancy.js';
 import {
+  isChainNameBindingUnavailable,
+  peekPersistedSubscriptionNameBindingRetry,
+  PersistedSubscriptionNameBindingRetry,
+  persistedSubscriptionNameBindingRetryOf,
+} from './context-graph-subscription-name-binding-retry.js';
+import {
   activateRollingSubscriptionPromotion,
   createRollingSubscriptionPromotionRuntime,
   DEFERRED_AUTHORITY_RECOVERY_RETRY_MS,
@@ -3440,6 +3446,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         closingMessage: 'Context Graph subscription authority recovery closing',
       });
     this.contextGraphSubscriptionAuthorityRecoveryRuntime = authorityRecovery;
+    // Before recovery's first pass, which leaves the rows taken here alone.
+    this.retryPersistedSubscriptionNameBindings();
     if (this.getContextGraphSubscriptionRehydrationStatus()
       ?.dormantReasons.authorityUnavailable.length) {
       authorityRecovery.schedule();
@@ -8801,82 +8809,60 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
     if (!store || !isCurrentRetry()) return;
     const ctx = createOperationContext('init');
+    const row = this.subscriptionRecoveryRowPorts(isCurrentRetry);
+    if (!row) return;
     await recoverDeferredContextGraphSubscriptionAuthorities(signal, {
-      store,
-      dormancyById: this.contextGraphSubscriptionDormancyById,
-      transitionDormancy: this.transitionContextGraphSubscriptionDormancy.bind(this),
-      persistRevisions: this.contextGraphSubscriptionPersistRevisions,
-      subscriptions: this.subscribedContextGraphs,
-      coldCursor,
+      store, dormancyById: this.contextGraphSubscriptionDormancyById, coldCursor,
       getStatus: () => this.contextGraphSubscriptionRehydrationStatus,
-      isCurrent: isCurrentRetry,
-      touchStatus: () => {
-        const current = this.contextGraphSubscriptionRehydrationStatus;
-        if (current !== null) {
-          this.contextGraphSubscriptionRehydrationStatus = {
-            ...current,
-            updatedAt: Date.now(),
-          };
-        }
-      },
-      clearStatus: (contextGraphId) => {
-        this.recordContextGraphSubscriptionClear([contextGraphId]);
-      },
-      resolveAuthority: (row, retrySignal) => (
-        this.resolveContextGraphSubscriptionBootstrapAuthority(row.id, {
-          allowSubscriptionFallback: false,
-          signal: retrySignal,
-          durableSubscriptionBinding: {
-            contextGraphId: row.id,
-            onChainId: row.onChainId,
-            onChainHash: row.onChainHash,
-          },
-        }).catch((error: unknown) => unavailableContextGraphReadAuthorityDecision(
-          'legacy-local',
-          'unexpected-authority-error',
-          contextGraphReadAuthorityDependencyOf(error),
-        ))
-      ),
-      activate: async (row, onChainId, revision) => {
-        await this.activatePersistedContextGraphSubscriptionRecord(row, {
-          onChainId,
-          updateRehydrationStatus: false,
-          prepare: async (subscription, persistRepair) => {
-            // Cold registration discovery is the binding proof. Make RFC-64
-            // responsibility and the healed durable row visible atomically
-            // before any sync or gossip side effect is restored.
-            await this.reconcileRfc64CatalogResponsibilityV1(row.id);
-            if (!isCurrentRetry()) throw new Error('Authority recovery retired');
-            await persistRepair(() => (
-                isCurrentRetry()
-                && this.subscribedContextGraphs.get(row.id) === subscription
-                && this.contextGraphSubscriptionDormancyById.get(row.id)
-                  === 'authorityUnavailable'
-                && (this.contextGraphSubscriptionPersistRevisions.get(row.id) ?? 0)
-                  === revision
-              ),
-            );
-          },
-          isCurrent: (subscription) => (
-            isCurrentRetry()
-            && this.subscribedContextGraphs.get(row.id) === subscription
-            && this.contextGraphSubscriptionDormancyById.get(row.id)
-              === 'authorityUnavailable'
-            && (this.contextGraphSubscriptionPersistRevisions.get(row.id) ?? 0)
-              === revision
-          ),
-        });
-      },
-      warn: (contextGraphId, error) => {
-        this.log.warn(
-          ctx,
-          `Deferred persisted context-graph subscription "${contextGraphId}" after authority recovery: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      },
-      capped: (contextGraphId) => {
-        this.requestContextGraphSubscriptionPromotion(contextGraphId);
-      },
+      row: { ...row, activate: async (...args) => {
+        await row.activate(...args);
+        this.log.info(ctx, `Activated persisted context-graph subscription "${args[0].id}" after authority recovery`);
+      } },
+      warn: (id, error) => this.log.warn(ctx,
+        `Deferred persisted context-graph subscription "${id}" after authority recovery: ${error instanceof Error ? error.message : String(error)}`),
+      heldElsewhere: id => peekPersistedSubscriptionNameBindingRetry(this)?.holds(id) === true,
     });
+  }
+
+  /**
+   * Activate a saved row left dormant as `authorityUnavailable` once its read
+   * authority answered allowed. Cold registration discovery is the binding
+   * proof: RFC-64 responsibility and the healed durable row become visible
+   * atomically before any sync or gossip side effect is restored. Background
+   * authority recovery and the name-binding retry both activate through it.
+   */
+  /**
+   * Hand the rows the startup pass left dormant because their chain name
+   * binding could not be read to the retry that asks them again within
+   * seconds (context-graph-subscription-name-binding-retry.ts).
+   */
+  retryPersistedSubscriptionNameBindings(this: DKGAgent): void {
+    const ids = [...this.contextGraphSubscriptionNameBindingRetryIds];
+    this.contextGraphSubscriptionNameBindingRetryIds.clear();
+    const store = this.config.contextGraphSubscriptionStore;
+    if (ids.length === 0 || !store || !this.started) return;
+    const lifetime = this.workLifetime;
+    const signal = lifetime.signal;
+    const ctx = createOperationContext('init');
+    const row = this.subscriptionRecoveryRowPorts(() => this.started && this.workLifetime.signal === signal
+      && this.contextGraphSubscriptionRehydrationStatus?.rehydrationEnabled === true);
+    if (!row) return;
+    const retry = persistedSubscriptionNameBindingRetryOf(this, signal, () => new PersistedSubscriptionNameBindingRetry({
+      ...row, signal,
+      resolveAuthority: (record, checkSignal) => withOwnedRpcRequestContext(
+        { requestClass: 'foreground', admissionPriority: 'authority', signal: checkSignal },
+        () => row.resolveAuthority(record, checkSignal)),
+      activate: (...args) => withOwnedRpcRequestContext({ requestClass: 'foreground', signal }, () => row.activate(...args)),
+      track: run => { lifetime.track(run); },
+      log: { info: message => this.log.info(ctx, message), warn: message => this.log.warn(ctx, message) },
+    }));
+    const taken = retry.take(ids);
+    if (taken.length === 0) return;
+    this.log.info(
+      ctx,
+      `Asking again within seconds for ${taken.length} persisted context-graph subscription(s) ` +
+        `whose chain name binding could not be read at start: ${taken.map((id) => `"${id}"`).join(', ')}`,
+    );
   }
 
   /**
@@ -8975,6 +8961,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     const store = this.config.contextGraphSubscriptionStore;
     this.contextGraphSubscriptionActivations.resetScheduler();
+    this.contextGraphSubscriptionNameBindingRetryIds.clear();
     if (!store) return;
     const ctx = createOperationContext('init');
     let authorityBudget: RehydrationAuthorityBudget | undefined;
@@ -9253,6 +9240,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             row.id,
             readAuthority.outcome === 'denied' ? 'authorityDenied' : 'authorityUnavailable',
           );
+          // Its name lookup did not answer in time: asked again within seconds once started.
+          if (isChainNameBindingUnavailable(readAuthority)) this.contextGraphSubscriptionNameBindingRetryIds.add(row.id);
           this.log.warn(
             ctx,
             `Left persisted context-graph subscription "${row.id}" dormant: ` +
@@ -9342,7 +9331,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (unavailableAtStartup > 0) {
         this.log.warn(
           ctx,
-          `${unavailableAtStartup} context-graph subscription(s) left dormant because current read authority was unavailable; retry after restoring the authority source.`,
+          `${unavailableAtStartup} context-graph subscription(s) left dormant because current read authority was unavailable; they are asked again after start.`,
         );
       }
       if (deferredIds.length > 0) {

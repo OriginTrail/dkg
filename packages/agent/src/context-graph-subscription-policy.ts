@@ -357,3 +357,12 @@ export async function projectContextGraphSubscriptionPersistenceWithSavedHosting
   });
   return record.coreHosted === true ? { ...hosted, record } : projection;
 }
+
+/** Readiness is transient; these fields identify the persisted membership intent. */
+export function sameSubscriptionIntent(left: ContextGraphSubscriptionRecord, right: ContextGraphSubscriptionRecord): boolean {
+  return left.id === right.id && left.subscribed === right.subscribed
+    && (left.coreHosted === true) === (right.coreHosted === true) && left.syncScoped === right.syncScoped;
+}
+export function sameDurableSubscriptionIntent(left: ContextGraphSubscriptionRecord, right: ContextGraphSubscriptionRecord): boolean {
+  return sameSubscriptionIntent(left, right) && left.onChainId === right.onChainId && left.onChainHash === right.onChainHash;
+}
