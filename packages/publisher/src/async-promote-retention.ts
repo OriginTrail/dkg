@@ -417,7 +417,7 @@ class ShareRetentionImpl implements ShareRetention {
           }
         }
         this.noteHold(b, this.mono() - startedAt, slice.length, deferred.length > 0 ? entries.length : undefined);
-      });
+      }, 'retention');
     } finally {
       this.logJobs(entries, now);
     }

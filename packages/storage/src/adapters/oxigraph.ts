@@ -76,6 +76,7 @@ type OxQuad = oxigraph.Quad;
 const DEFAULT_FLUSH_DELAY_MS = 50;
 
 export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
+  readonly atomicSparqlModify = true as const;
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly graphEnumerationVisibility = storeGraphEnumerationVisibility;
   readonly sparqlEngine = 'oxigraph' as const;

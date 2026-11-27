@@ -6,6 +6,17 @@ import { DKGEvent, TypedEventBus } from '../src/event-bus.js';
 import { PeerDiscoveryManager } from '../src/discovery.js';
 import { multiaddr } from '@multiformats/multiaddr';
 import { peerIdFromString } from '@libp2p/peer-id';
+import { readdirSync, readFileSync } from 'node:fs';
+import {
+  DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER,
+  DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER_MAINNET,
+  gossipMaxTopicBytesPerPeer,
+  contextGraphAppTopic,
+  contextGraphFinalizationTopic,
+  contextGraphSharedMemoryTopic,
+  contextGraphUpdateTopic,
+  wireTopicForNetwork,
+} from '../src/constants.js';
 
 async function connectNodes(a: DKGNode, b: DKGNode): Promise<void> {
   const bAddr = b.multiaddrs[0];
@@ -559,5 +570,141 @@ describe('GossipSubManager', () => {
       { peerId: 'peer-a', topic: logicalTopic },
       { peerId: 'peer-b', topic: logicalTopic },
     ]);
+  });
+
+  describe('per-peer topic budget', () => {
+    // gossipsub charges each topic it records for a peer the topic's length plus
+    // 1024 bytes (GossipsubTopicEntryOverhead), and decodes at most 5,000
+    // subscriptions per RPC (decodeRpcLimits.maxSubscriptions). It exports neither.
+    const topicEntryOverhead = 1024;
+    const maxSubscriptionsPerRpc = 5_000;
+    const networkDir = new URL('../../../network/', import.meta.url);
+    const networks = readdirSync(networkDir)
+      .filter((file) => file.endsWith('.json'))
+      .map((file) => JSON.parse(readFileSync(new URL(file, networkDir), 'utf8')) as {
+        networkId: string;
+        chain: { chainId: string };
+      });
+    const namespaceLength = ({ networkId, chain }: (typeof networks)[number]) =>
+      wireTopicForNetwork(networkId, 'dkg/', chain.chainId).length;
+    const longestNetwork = networks.reduce((a, b) => (namespaceLength(b) > namespaceLength(a) ? b : a));
+    const graphTopics = (contextGraphId: string) => [
+      contextGraphFinalizationTopic(contextGraphId),
+      contextGraphAppTopic(contextGraphId),
+      contextGraphUpdateTopic(contextGraphId),
+      contextGraphSharedMemoryTopic(contextGraphId),
+    ];
+
+    async function startPair() {
+      const node1 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
+      const node2 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
+      nodes.push(node1, node2);
+      await node1.start();
+      await node2.start();
+      const options = { networkId: longestNetwork.networkId, chainId: longestNetwork.chain.chainId };
+      const gossip1 = new GossipSubManager(node1, new TypedEventBus(), options);
+      const gossip2 = new GossipSubManager(node2, new TypedEventBus(), options);
+      return { node1, node2, gossip1, gossip2 };
+    }
+
+    // Subscribes node 1 to fresh probe topics until node 2 records one. Node 1's
+    // gossip stream to node 2 is then open, and node 2 has handled every RPC that
+    // node 1 sent before that probe.
+    async function probeUntilRecorded(pair: Awaited<ReturnType<typeof startPair>>, label: string): Promise<void> {
+      const probes: string[] = [];
+      await vi.waitFor(() => {
+        if (probes.some((probe) => pair.gossip2.getSubscribers(probe).includes(pair.node1.peerId))) return;
+        const probe = contextGraphSharedMemoryTopic(`${label}-${probes.length}`.padEnd(256, 'p'));
+        probes.push(probe);
+        pair.gossip1.subscribe(probe);
+        throw new Error('node 2 has not recorded a probe yet');
+      }, { timeout: 10_000, interval: 250 });
+    }
+
+    it('holds 5,000 of the longest wire topics a bundled network uses', () => {
+      const longest = Math.max(...networks.flatMap(({ networkId, chain }) =>
+        graphTopics('c'.repeat(256)).map((topic) => wireTopicForNetwork(networkId, topic, chain.chainId).length)));
+      expect(longest, 'the length the constant\'s comment gives').toBe(375);
+      expect(maxSubscriptionsPerRpc * (longest + topicEntryOverhead)).toBeLessThanOrEqual(DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER);
+    });
+
+    it('gives the mainnet network configs the smaller cap', () => {
+      for (const name of ['mainnet-base', 'mainnet-gnosis', 'mainnet-neuroweb']) {
+        expect(gossipMaxTopicBytesPerPeer(name), name).toBe(DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER_MAINNET);
+      }
+      expect(gossipMaxTopicBytesPerPeer('testnet')).toBe(DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER);
+      expect(gossipMaxTopicBytesPerPeer(undefined)).toBe(DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER);
+      // Still twice what gossipsub's default holds: 1,499 of the longest wire topics, 374 context graphs.
+      expect(Math.floor(DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER_MAINNET / (375 + topicEntryOverhead))).toBe(1_499);
+    });
+
+    it('gives gossipsub the cap of the node\'s network config', async () => {
+      const identity = { networkId: longestNetwork.networkId, chainId: longestNetwork.chain.chainId };
+      const mainnet = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false,
+        networkIdentity: { ...identity, networkConfigName: 'mainnet-base' } });
+      const other = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false,
+        networkIdentity: { ...identity, networkConfigName: 'testnet' } });
+      nodes.push(mainnet, other);
+      await mainnet.start();
+      await other.start();
+      const cap = (node: DKGNode) => (node.libp2p.services.pubsub as unknown as { maxTopicBytesPerPeer: number }).maxTopicBytesPerPeer;
+      expect(cap(mainnet)).toBe(DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER_MAINNET);
+      expect(cap(other)).toBe(DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER);
+    });
+
+    it('records every topic of a peer with more of them than gossipsub keeps by default', async () => {
+      const { node1, node2, gossip1, gossip2 } = await startPair();
+      // 300 context graphs with four topics each. The 1 MiB default records 881
+      // of these 1,200 topics and drops the rest.
+      const topics = Array.from({ length: 300 }, (_, i) => graphTopics(`0x${'ab'.repeat(20)}/graph-${i}`)).flat();
+      for (const topic of topics) gossip1.subscribe(topic);
+      await connectNodes(node1, node2);
+
+      await vi.waitFor(() => {
+        const missing = topics.filter((topic) => !gossip2.getSubscribers(topic).includes(node1.peerId));
+        expect(missing.length, 'topics node 2 does not record node 1 on').toBe(0);
+      }, { timeout: 10_000, interval: 250 });
+      // Flood publishing sends to every peer recorded on the topic.
+      const last = topics[topics.length - 1];
+      await expect(gossip2.publish(last, new TextEncoder().encode('last'))).resolves.toEqual([node1.peerId]);
+    }, 30_000);
+
+    it('hears none of the topics a peer announces in one RPC of more than 5,000', async () => {
+      const pair = await startPair();
+      // Node 1 announces all of its topics in one RPC when its stream opens, and
+      // node 2 drops an RPC with more subscriptions than it decodes. The 8 MiB cap
+      // holds at least that many topics; later subscriptions can go past it.
+      const topics = Array.from({ length: maxSubscriptionsPerRpc + 1 }, (_, i) => contextGraphUpdateTopic(`announced-${i}`));
+      for (const topic of topics) pair.gossip1.subscribe(topic);
+      await connectNodes(pair.node1, pair.node2);
+      await probeUntilRecorded(pair, 'after-announcement');
+
+      const recorded = topics.filter((topic) => pair.gossip2.getSubscribers(topic).includes(pair.node1.peerId));
+      expect(recorded.length, 'announced topics node 2 records').toBe(0);
+    }, 30_000);
+
+    it('still bounds the topics it records for one peer', async () => {
+      const pair = await startPair();
+      const { node1, gossip1, gossip2 } = pair;
+      await connectNodes(node1, pair.node2);
+      // From here on, each subscribe reaches node 2 as an RPC of its own.
+      await probeUntilRecorded(pair, 'stream-open');
+      // Each wire topic is 375 characters long, so the budget records 5,996 of
+      // them, the probes included.
+      const topics = Array.from({ length: 6_100 }, (_, i) => contextGraphSharedMemoryTopic(String(i).padStart(256, 'c')));
+      for (const topic of topics) gossip1.subscribe(topic);
+      // Node 2 handles the RPCs in order. Dropping the first topic frees one
+      // place, and the marker takes it once node 2 has handled every RPC before it.
+      gossip1.unsubscribe(topics[0]);
+      const marker = contextGraphSharedMemoryTopic('m'.repeat(256));
+      gossip1.subscribe(marker);
+      await vi.waitFor(() => {
+        expect(gossip2.getSubscribers(marker)).toContain(node1.peerId);
+      }, { timeout: 30_000, interval: 250 });
+
+      const recorded = [...topics, marker].filter((topic) => gossip2.getSubscribers(topic).includes(node1.peerId)).length;
+      expect(recorded).toBeGreaterThanOrEqual(maxSubscriptionsPerRpc);
+      expect(recorded).toBeLessThan(topics.length);
+    }, 60_000);
   });
 });

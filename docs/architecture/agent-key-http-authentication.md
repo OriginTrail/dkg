@@ -4,6 +4,8 @@ An agent authenticates by signing each HTTP request directly with its existing E
 
 The shared daemon boundary verifies the signature before dispatching any protected route. The recovered agent address becomes the request actor, whether or not it has an operator role. It must match the public address in the signed request. No default wallet is substituted. Public endpoints remain public when no proof is supplied; invalid or incomplete signature headers cannot downgrade to public, bearer or auth-disabled admission.
 
+Only agents the node knows may sign: an agent registered on the node (custodial, or self-sovereign by its public key through `POST /api/agent/register`, so the key stays with the backend) or an address listed in `auth.operatorAgentAddresses`. One more signer is admitted, on one route only: the recipient of an unexpired encryption enrollment that an explicit node operator prepared may sign `POST /api/agent/encryption-enrollments/activate`, and activation records it as an agent. The claimed address is checked before the body is read, so a request from any other key is refused with `AGENT_HTTP_AGENT_UNKNOWN` without buffering its body or claiming its nonce. Register a backend's agent on each node it calls before it signs requests there.
+
 ## Signature profile
 
 Use [EIP-191 personal_sign](https://eips.ethereum.org/EIPS/eip-191), version 0x45, over this exact UTF-8 JSON array, with no whitespace outside string values:
@@ -27,7 +29,7 @@ The 60-second window protects request freshness. It does **not** expire the agen
 
 The body is bounded to 10 MiB and 30 seconds before routing; endpoint-specific limits still apply. Compressed request bodies are rejected. Live nonces are retained in the daemon's SQLite database across restarts; concurrent replay fails atomically. Expired records may be removed, but live records are never evicted to admit new requests. Store unavailability/capacity exhaustion returns 503 and fails closed.
 
-Authentication failures return 401 with `AGENT_HTTP_HEADERS_INVALID`, `AGENT_HTTP_SIGNATURE_INVALID`, `AGENT_HTTP_TARGET_MISMATCH`, `AGENT_HTTP_EXPIRED` or `AGENT_HTTP_REPLAY`. Modified method, path, body or signed headers invalidate the signature. Authorization failures remain governed by each route and graph policy.
+Authentication failures return 401 with `AGENT_HTTP_HEADERS_INVALID`, `AGENT_HTTP_SIGNATURE_INVALID`, `AGENT_HTTP_AGENT_UNKNOWN`, `AGENT_HTTP_TARGET_MISMATCH`, `AGENT_HTTP_EXPIRED` or `AGENT_HTTP_REPLAY`. Modified method, path, body or signed headers invalidate the signature. Authorization failures remain governed by each route and graph policy.
 
 ## Configure a backend once
 

@@ -27,6 +27,7 @@
  */
 
 import { assertSafeIri, compareCodePoint, contextGraphDataUri, escapeSparqlLiteral, getMetrics, MemoryLayer, parseReadGraphIri } from '@origintrail-official/dkg-core';
+import { BLAZEGRAPH_GRAPH_LIST_QUERY } from '../adapters/blazegraph-graph-list.js';
 import { BlazegraphStore } from '../adapters/blazegraph.js';
 import { nonEmptyNamedGraphEnumerationPattern } from '../adapters/graph-enumeration-query.js';
 import { readCompleteGraphCatalog } from '../graph-catalog-internal-limit.js';
@@ -294,8 +295,9 @@ async function storedMemberGraphs(context: CheckContext): Promise<string[]> {
 export function memberGraphListingQuery(target: TripleStore, root: string): string {
   const under = `FILTER(?g = <${assertSafeIri(root)}> || STRSTARTS(STR(?g), "${escapeSparqlLiteral(`${root}/`)}"))`;
   if (findTripleStoreCapability(target, (candidate): candidate is BlazegraphStore => candidate instanceof BlazegraphStore)) {
-    // sparql-scan-allow: R2 -- Blazegraph's own graph listing (as its listGraphs), narrowed to one context graph, on the background lane
-    return `SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } ${under} }`;
+    // Materialize distinct graph names before filtering. Filtering the quad pattern
+    // directly prevents Blazegraph from using its fast distinct graph enumeration.
+    return `SELECT ?g WITH { ${BLAZEGRAPH_GRAPH_LIST_QUERY} } AS %names WHERE { INCLUDE %names . ${under} }`;
   }
   return `SELECT ?g WHERE { ${nonEmptyNamedGraphEnumerationPattern('g')} ${under} }`;
 }

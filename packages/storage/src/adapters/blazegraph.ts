@@ -240,6 +240,7 @@ function createStoreOperationDeadline(
  * plus Blazegraph's N-Quads bulk-insert endpoint.
  */
 export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapability, ReadGraphCapableAdapter {
+  readonly atomicSparqlModify = true as const;
   private readonly queryAdmission = new QueryReadAdmission<AdmittedReadDeadline>();
 
   withQueryReadAdmission<T>(work: () => Promise<T>, options?: QueryOptions): Promise<T> {

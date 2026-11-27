@@ -23,7 +23,7 @@ it.each([false, true])('overlaps bounded preparation and drains every read befor
       entered[index]!.resolve(); await release[index]!.promise;
       if (reject && index === 0) throw failure;
     }
-    return replacements[index]!;
+    return { replacement: replacements[index]!, held: false };
   });
   const publish = vi.fn(async () => {});
   const pending = run(publish);
@@ -44,4 +44,32 @@ it.each([false, true])('overlaps bounded preparation and drains every read befor
     else expect(publish).toHaveBeenCalledWith(replacements, {});
     expect(await next).toBe('applied');
   } finally { release.forEach(x => x.resolve()); await Promise.allSettled([pending, ...(next ? [next] : [])]); }
+});
+it('skips the write only when the caller allows it, every member is held, and the binding is unchanged', async () => {
+  const heldIndexes = new Set([0, 1]);
+  vi.mocked(prepareGraphScopedReplacementUnderLock).mockImplementation(async ({ asset, detectHeldCopy }) => {
+    const index = assets.findIndex(a => a.ual === asset.ual);
+    return { replacement: replacements[index]!, held: detectHeldCopy === true && heldIndexes.has(index) };
+  });
+  const base = { store: { getPressureSnapshot: () => ({ normalInflightLimit: 2 }) } as TripleStore, assets, options: {},
+    assertCurrent: () => {}, requireCurrentMetadata: true, stale: () => 'stale' as const, complete: () => 'applied' as const };
+  const publish = vi.fn(async () => {});
+  const quarantine = vi.fn(async () => {});
+  const unchanged = () => 'unchanged' as const;
+
+  await expect(executeGraphScopedPublication({ ...base, publish, quarantine, unchanged })).resolves.toBe('unchanged');
+  expect(publish).not.toHaveBeenCalled();
+  // Without the caller's leave the stored copies are not even compared.
+  await expect(executeGraphScopedPublication({ ...base, publish, quarantine })).resolves.toBe('applied');
+  expect(publish).toHaveBeenCalledTimes(1);
+  // One member that is not held writes every member, as before.
+  heldIndexes.delete(1);
+  await expect(executeGraphScopedPublication({ ...base, publish, quarantine, unchanged })).resolves.toBe('applied');
+  expect(publish).toHaveBeenLastCalledWith(replacements, {});
+  // A binding that changed meanwhile is written and quarantined, as before.
+  heldIndexes.add(1);
+  await expect(executeGraphScopedPublication({ ...base, publish, quarantine, unchanged, shouldQuarantineCommitted: () => true }))
+    .resolves.toBe('quarantined');
+  expect(publish).toHaveBeenCalledTimes(3);
+  expect(quarantine).toHaveBeenCalledOnce();
 });

@@ -55,6 +55,7 @@ export { hexToBytes } from './oracle-verify.js';
 
 export {
   computeACKDigest,
+  computeVerifyApprovalDigest,
   computePublishACKDigest,
   computeUpdateACKDigest,
   computePublishPublisherDigest,
