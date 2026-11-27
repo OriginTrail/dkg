@@ -39,12 +39,12 @@ describe('SQLite finalization recovery transitions', () => {
       await store.commitVerifiedEvidence('entry-1', 0, { evidence: evidence(), placement: 'original' });
       const entry = await store.get('entry-1');
       if (!entry) throw new Error('fixture entry missing');
-      control.exec(`CREATE TRIGGER reject_settlement BEFORE UPDATE OF state ON finalization_inbox_v1
-        WHEN NEW.state = 'SETTLED' BEGIN SELECT RAISE(ABORT, 'settlement write rejected'); END`);
+      control.exec(`CREATE TRIGGER reject_settlement AFTER UPDATE OF state ON finalization_inbox_v1
+        WHEN NEW.state = 'SETTLED' BEGIN SELECT RAISE(FAIL, 'settlement write rejected'); END`);
       const warn = vi.fn();
       await expect(transitionFinalizationRecoveryEntry(store, entry, 'SETTLED', undefined, { warn })).resolves.toBe(false);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('settlement write rejected'));
-      await expect(store.get(entry.key)).resolves.toMatchObject({ state: 'VERIFIED', generation: 0, verifiedEvidence: evidence() });
+      await expect(store.get(entry.key)).resolves.toEqual(entry);
       control.exec('DROP TRIGGER reject_settlement');
       await expect(transitionFinalizationRecoveryEntry(store, entry, 'SETTLED', undefined, { warn })).resolves.toBe(true);
       await expect(store.get(entry.key)).resolves.toMatchObject({ state: 'SETTLED', verifiedEvidence: evidence() });
