@@ -113,7 +113,7 @@ The MCP server resolves config from two places, in priority order:
 1. **`.dkg/config.yaml`** — walked upwards from the working directory (the spec-canonical workspace config; see `dkgv10-spec / 22_AGENT_ONBOARDING §2.1`)
 2. **environment variables** — `DKG_API`, `DKG_TOKEN`, `DKG_PROJECT`, `DKG_AGENT_URI`
 
-Env values win over the file; tool-call arguments (`projectId`, `view`, …) win over both.
+Values in the file win over the environment variables, which only fill what the file leaves unset; tool-call arguments (`projectId`, `view`, …) win over both. A node home's `config.json` (from `DKG_HOME`, or the local node home when there is no workspace file) works the other way: non-empty environment variables win over it. [Connection settings and precedence](../../docs/integrations/mcp.md#connection-settings-and-precedence) is the full reference for these rules.
 
 #### Minimal `.dkg/config.yaml`
 
@@ -137,6 +137,12 @@ autoShare: true
 ```
 
 `.dkg/` is gitignored repo-wide so this file stays local to each operator. The `tokenFile` path is resolved relative to the YAML; default of `~/.dkg/auth.token` matches what `dkg start` writes on first boot.
+
+### Manual client authentication
+
+When neither `DKG_HOME` nor a workspace `.dkg/config.yaml` is present, the MCP server resolves the default local node home and its token. Explicit workspace/home configuration keeps precedence. Prefer the entry from `dkg mcp setup --print-only` for GUI clients. A `missing-token` status or 401 hint means the client needs `DKG_HOME` or `DKG_TOKEN`; `token-configured` does not prove the daemon accepted the credential. An explicit API endpoint different from the discovered local node uses only explicit credentials and graph selection (`DKG_TOKEN`, `DKG_PROJECT`, or tool arguments), without importing the local token or graph defaults.
+
+CLI `status --daemon` and `join --daemon` resolve the selected endpoint before loading automatic credentials. For a remote daemon, supply `--token`, `DKG_TOKEN`, or an explicit `--token-file` for join. The legacy implicit token-file fallback is restricted to a token-only home at its recorded local port (9200 when unrecorded); configured homes use normal configuration resolution. `join` takes `--token`, `DKG_TOKEN` or an explicit `--token-file` first, then a workspace or `DKG_HOME` binding, then automatically discovered credentials. The generated `.dkg/config.yaml` records the file its token was read from; after a literal token it records the `--token-file` value or its default `~/.dkg/auth.token`, because a literal token is never written.
 
 ## Tool surface (33 tools)
 
@@ -325,3 +331,7 @@ Ten V9-era and coding-project tools were dropped from the V10 surface during con
 ### Large tool responses
 
 The stdio server limits each serialized JSON-RPC response to 8 MiB, below the MCP SDK client's default 10 MiB receive buffer. JSON escaping can make an artifact response larger than its original file. An oversized result returns an error without closing the session: narrow/paginate a query, or retrieve large artifacts through the daemon HTTP API. Markdown reads return the whole file; `maxBytes` is an acceptance cap, so lowering it returns HTTP 413 rather than a smaller result. For partial artifact retrieval outside MCP, use the daemon `/api/knowledge-assets/import-artifact/read` endpoint with `offset` and `maxBytes`. The daemon's 5 MiB artifact-read maximum is a source-byte limit, not a guarantee that the fully formatted result fits over MCP.
+
+### Relocated Claude Desktop data on Windows
+
+Setup also detects `%LOCALAPPDATA%\Claude-Data\claude_*\claude_desktop_config.json`, including Windows-side profiles from WSL. With several existing configs, it selects the most recently modified one; check the displayed path with `--dry-run`. Uninstall inspects all supported profiles to remove older DKG registrations too. For a custom location, use Claude Desktop **Settings → Developer → Edit Config** and the entry from `dkg mcp setup --print-only`; preserve `env.DKG_HOME` and restart the client.

@@ -6,6 +6,7 @@ import {
   type ContextGraphCallerReadAdmission,
   unavailableContextGraphReadAuthorityDecision,
 } from './context-graph-read-authority.js';
+import { denyUnheldContextGraphRead } from './unheld-context-graph-read.js';
 
 const AGENT_NUMBER_RE = /^0x[0-9a-fA-F]{40}:[0-9]+$/;
 
@@ -79,7 +80,9 @@ export async function resolveKnowledgeAssetRead(
   const { callerAgentAddress: caller, signal } = options;
   const { cg, name } = input;
   signal?.throwIfAborted();
-  let decision = await agent.resolveContextGraphReadAuthority(cg, { callerAgentAddress: caller, signal });
+  // A context graph this node holds nothing of is refused as a private one the caller may not read.
+  let decision = await denyUnheldContextGraphRead(agent, cg,
+    await agent.resolveContextGraphReadAuthority(cg, { callerAgentAddress: caller, signal }), { accessDenied: 'error', signal });
   signal?.throwIfAborted();
   const { identifier, readLiteral, resolveTarget } = createKnowledgeAssetTargetLookup(agent, input, signal);
   const { agentAddress } = input;
@@ -135,7 +138,9 @@ function createKnowledgeAssetTargetLookup(
   const { cg, name, subGraphName, agentAddress } = input;
   const identifier = input.kind === 'literal' ? { kind: 'name' as const } : classifyKaIdentifier(name);
   let literalLookup: Promise<AssertionHistoryDescriptor | null> | undefined;
-  const readLiteral = () => literalLookup ??= agent.assertion.history(cg, name, { agentAddress, subGraphName });
+  const readLiteral = () => literalLookup ??= agent.assertion.history(cg, name, {
+    agentAddress, subGraphName, ...(signal ? { signal } : {}),
+  });
   const resolveTarget = async (): Promise<KnowledgeAssetReadTarget> => {
     const target: KnowledgeAssetReadTarget = { kind: identifier.kind, cg, name, subGraphName, agentAddress, descriptor: null };
     if (input.lookup === 'none' || (identifier.kind === 'name' && input.lookup === 'quads')) return target;
@@ -143,7 +148,9 @@ function createKnowledgeAssetTargetLookup(
     if (identifier.kind === 'kaId') {
       const literal = AGENT_NUMBER_RE.test(name) ? await readLiteral() : null;
       signal?.throwIfAborted();
-      descriptor = literal ?? await agent.assertion.resolveByKaId?.(cg, identifier.kaId, { subGraphName }) ?? null;
+      descriptor = literal ?? await agent.assertion.resolveByKaId?.(cg, identifier.kaId, {
+        subGraphName, ...(signal ? { signal } : {}),
+      }) ?? null;
     } else {
       descriptor = await readLiteral();
     }

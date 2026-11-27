@@ -37,6 +37,17 @@ export interface ContextGraphAuthorityIndexAdmissionInput {
   readonly lifecycleSignal: AbortSignal;
   /** Evict remotely servable observations as soon as a durable row is rejected. */
   readonly onRejectedCheckpoint?: () => void;
+  /**
+   * Whether a checkpoint whose cursor sits out of reach of this scan's anchor
+   * may be rebuilt now. Asked only in that case; absent means yes.
+   *
+   * One anchor below the cursor proves little. It may come from an endpoint
+   * that lags, or from a scan that waited behind another one, and a bound in
+   * BLOCKS is a few seconds of lag on a fast chain. A rebuild walks the whole
+   * history again from the deployment block, so the owner can answer no and
+   * the scan is refused for retry against another anchor instead.
+   */
+  readonly rebuildOutOfReach?: (record: ContextGraphAuthorityIndexRepositoryRecord) => boolean;
   readonly readBlockHash: (
     blockNumber: number,
     lifecycleSignal: AbortSignal,
@@ -65,11 +76,15 @@ export async function admitContextGraphAuthorityIndexCheckpoint(
       const checkpoint = record.checkpoint;
       if (checkpoint.cursor.deploymentBlockNumber === input.deploymentBlockNumber) {
         const cursorSkew = checkpoint.cursor.throughBlockNumber - input.finalized.number;
-        if (cursorSkew > MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_CURSOR_SKEW_BLOCKS) {
+        if (
+          cursorSkew > MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_CURSOR_SKEW_BLOCKS
+          && input.rebuildOutOfReach?.(record) !== false
+        ) {
           // Unreachable by skew: fall through to invalidation and rebuild
           // rather than retrying a cursor no endpoint will ever catch up to.
           // The cursor only ever moves FORWARD (`commitOrReloadWinner` has no
-          // lowering path), so without this the wedge is permanent.
+          // lowering path), so without this the wedge is permanent. The owner
+          // decides when one out-of-reach anchor is enough (`rebuildOutOfReach`).
         } else if (cursorSkew > 0) {
           throw new ContextGraphAuthorityIndexRetryableError(
             `Context Graph authority index finalized head ${input.finalized.number} is behind `

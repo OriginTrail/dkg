@@ -51,7 +51,7 @@ async function main(): Promise<void> {
     const descriptor = () => powershell('(Get-Acl -LiteralPath $env:DKG_NATIVE_FIXTURE_PATH).Sddl');
     const before = descriptor();
     assert.equal(powershell('(Get-Acl -LiteralPath $env:DKG_NATIVE_FIXTURE_PATH).AreAccessRulesProtected'), 'True');
-    const aliasedClients = detectClients(name => name === 'USERPROFILE' ? directory : null)
+    const aliasedClients = detectClients({ resolveWslWindowsEnvPath: name => name === 'USERPROFILE' ? directory : null })
       .filter(target => target.id === 'cursor');
     assert.deepEqual(aliasedClients.map(target => target.location), ['native', 'windows-wsl']);
     assert(aliasedClients.every(target => target.configPath === path));
@@ -103,7 +103,7 @@ async function main(): Promise<void> {
     const linuxCursorDirectory = join(linuxHome, '.cursor');
     mkdirSync(linuxCursorDirectory);
     const linuxCursorPath = join(linuxCursorDirectory, 'mcp.json');
-    const clients = detectClients(name => name === 'USERPROFILE' ? directory : null)
+    const clients = detectClients({ resolveWslWindowsEnvPath: name => name === 'USERPROFILE' ? directory : null })
       .filter(target => target.id === 'cursor');
     assert.deepEqual(clients.map(target => target.configPath), [linuxCursorPath, path]);
     const separateDeps = { ...setupDeps, detectClients: () => clients };
@@ -167,7 +167,7 @@ async function main(): Promise<void> {
     const codexDirectory = join(directory, '.codex');
     mkdirSync(codexDirectory);
     const codexPath = join(codexDirectory, 'config.toml');
-    const codexTargets = detectClients(() => null).filter(target => target.id === 'codex-cli');
+    const codexTargets = detectClients({ resolveWslWindowsEnvPath: () => null }).filter(target => target.id === 'codex-cli');
     assert.equal(codexTargets.length, 1);
     assert.equal(codexTargets[0]!.location, 'native');
     assert.equal(existsSync(codexPath), false);
@@ -185,7 +185,7 @@ async function main(): Promise<void> {
     symlinkSync(codexPath, codexLink);
     for (const home of [directory, linuxHome]) {
       process.env.HOME = home;
-      const targets = detectClients(() => null).filter(target => target.id === 'codex-cli');
+      const targets = detectClients({ resolveWslWindowsEnvPath: () => null }).filter(target => target.id === 'codex-cli');
       assert.equal(targets.length, 1);
       assert.equal(targets[0]!.location, 'native');
       await mcpSetupAction(setupOptions, { ...setupDeps, detectClients: () => targets });
@@ -204,7 +204,7 @@ async function main(): Promise<void> {
     writeFileSync(linuxConfig, '{"mcpServers":{"sibling":{"command":"keep"}}}');
     chmodSync(linuxConfig, 0o640);
     const { uid, gid, mode } = statSync(linuxConfig);
-    const linuxTargets = detectClients(() => null).filter(target => target.id === 'claude-code');
+    const linuxTargets = detectClients({ resolveWslWindowsEnvPath: () => null }).filter(target => target.id === 'claude-code');
     await mcpSetupAction(setupOptions, { ...setupDeps, detectClients: () => linuxTargets });
     await mcpUninstallAction({ yes: true }, { detectClients: () => linuxTargets, log: () => {} });
     const after = statSync(linuxConfig);

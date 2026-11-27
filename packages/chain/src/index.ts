@@ -274,6 +274,13 @@ export {
 } from './evm-adapter.js';
 export { NoChainAdapter } from './no-chain-adapter.js';
 export {
+  HubBindingNotFoundError,
+  HubContractNotFoundError,
+  HubAssetStorageNotFoundError,
+  isHubBindingNotFoundError,
+} from './hub-contract-not-found-error.js';
+export * from './marketplace.js';
+export {
   OperationalKeyUnavailableError,
   isExternalEvmSigner,
   type AuthorSigner,

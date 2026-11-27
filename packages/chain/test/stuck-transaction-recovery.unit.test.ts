@@ -179,7 +179,7 @@ describe('StuckTransactionRecovery', () => {
       expect(replaced[field]).toEqual(before[field]);
     }
     expect(replaced.maxFeePerGas).toBe(2n * GWEI);
-    expect(replaced.maxPriorityFeePerGas).toBe(GWEI);
+    expect(replaced.maxPriorityFeePerGas).toBe(113n);
     expect(replaced.maxFeePerGas!).toBeGreaterThan(36_000_000n);
     expect(logs.join('\n')).toContain('is below the base fee 4900000');
 
@@ -291,7 +291,7 @@ describe('StuckTransactionRecovery', () => {
     expect(logs.join('\n')).toContain('chain.maxFeePerGasWei 650 leaves no room');
   });
 
-  it('caps a replacement at the operator fee cap', async () => {
+  it('caps a replacement without inflating its lower market tip', async () => {
     const original = await strandedPublish();
     const chain = { latestNonce: 6722, baseFeePerGas: 4_900_000n };
     const { port, signedRequests } = fakePort(chain);
@@ -300,7 +300,7 @@ describe('StuckTransactionRecovery', () => {
 
     clock.now = 30_000;
     await recovery.onPending({ deadlineMs: 600_000, deadlineReached: false });
-    expect(signedRequests[0]).toMatchObject({ maxFeePerGas: 100_000_000n, maxPriorityFeePerGas: 100_000_000n });
+    expect(signedRequests[0]).toMatchObject({ maxFeePerGas: 100_000_000n, maxPriorityFeePerGas: 113n });
   });
 
   it('treats a failed chain read as nothing to do', async () => {

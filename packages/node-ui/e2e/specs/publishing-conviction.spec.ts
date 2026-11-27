@@ -83,13 +83,13 @@ test.describe('Publisher Conviction tab (PCA) — P0', () => {
     await page.screenshot({ path: `${SHOT_DIR}/503-gate.png`, fullPage: true });
   });
 
-  test('S1: core overview shows the owner Create-PCA affordance + track-by-id discovery', async ({ conviction, page }) => {
+  test('S1: core overview shows the owner Create-PCA affordance + the PCA ID check', async ({ conviction, page }) => {
     await conviction.open();
     // A fresh CORE node owns no PCAs → the role-adaptive landing (S7) leads with
-    // the owner Create-PCA CTA and the manual track-by-id discovery disclosure
-    // (no enumeration API yet). Read-only, deterministic on an empty node.
+    // the owner Create-PCA CTA, and "Already have a PCA?" offers the ID check.
+    // Read-only, deterministic on an empty node.
     await expect(conviction.createBtn).toBeVisible();          // core/owner-capable
-    await expect(conviction.trackToggle.first()).toBeVisible(); // S1 manual discovery
+    await expect(conviction.checkInput.first()).toBeVisible(); // S1 ID check
     await page.screenshot({ path: `${SHOT_DIR}/s1-core-overview.png`, fullPage: true });
   });
 
@@ -133,7 +133,7 @@ test.describe('Publisher Conviction tab (PCA) — P0', () => {
     // free); the local testnet-core config grepInverts /@mutating/ so it never
     // spends on the real network. CI is its first verification (devnet can't boot
     // on this Windows box).
-    test('INVARIANT 11: a fresh PCA leads with "0/100 wallets approved" + self-approve CTA @mutating', async ({ conviction }) => {
+    test('INVARIANT 11: a fresh PCA says no wallets are approved and no publishes get the discount, + self-approve CTA @mutating', async ({ conviction }) => {
       // A fresh PCA grants ZERO self-discount until the owner approves its own
       // wallets (agentToAccountId[owner]==0 at mint). The success state must NOT
       // be a generic "Done — discounted" and MUST surface the approve-own-wallets CTA.
@@ -143,8 +143,11 @@ test.describe('Publisher Conviction tab (PCA) — P0', () => {
       await prepareDaemonCreateForm(conviction); // CI devnet signs through the daemon hot wallet.
       await conviction.createSubmit.click();
       await expect(conviction.createSuccess).toBeVisible({ timeout: 120_000 }); // on-chain createAccount
-      await expect(conviction.createSuccess).toContainText(/0\s*\/\s*100 wallets approved/i);
+      // The zero-approved state, in the success copy's words: no wallet is on it yet, so nothing is discounted.
+      await expect(conviction.createSuccess).toContainText(/No wallets are approved yet/i);
+      await expect(conviction.createSuccess).toContainText(/no publishes get the discount/i);
       await expect(conviction.approveOwnWalletsCta).toBeVisible();
+      await expect(conviction.approveOwnWalletsCta).toContainText(/Approve this node’s publishing \(operational\) wallets/);
     });
   });
 
@@ -213,8 +216,11 @@ test.describe('Publisher Conviction tab (PCA) — P0', () => {
     const cgName = list[0]!.name;
 
     // Track a PCA so the chip is expected to render (gate: trackedIds.length > 0).
+    // Seeded browser-locally, so this test needs no PCA on chain and doesn't depend on
+    // another test having minted one. (Get added still rejects an ID that doesn't exist.)
     await conviction.open();
-    await conviction.trackAccount('1');
+    test.skip(await conviction.isUnavailable(), 'PCA not deployed on this network');
+    await conviction.seedTrackedIds(['1']);
 
     // Navigate to the CG project → SWM layer (the SWM→VM publish CTA; chip is !isWm).
     await expect(async () => {

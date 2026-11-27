@@ -54,6 +54,16 @@ export interface RemoteChainSignerConfig extends RemoteSignerCredentialConfig {
   timeoutMs?: number;
   /** Author keys (owners of published assets), kept apart from the paying accounts. */
   author?: RemoteChainSignerAuthorConfig;
+  /**
+   * The signer serves payer accounts only, and the authors are agent keys held
+   * on the node (custodial agents). The first such key registered becomes the
+   * node's default agent, authors what node and admin tokens publish, may curate
+   * a context graph backed by a Publishing Conviction Account (the first payer
+   * sends the registration) and sends the shared-memory sender keys of the
+   * private graphs it is a member of. Cannot be combined with `author`.
+   * Off (`false` or omitted) the node behaves as without this setting.
+   */
+  nodeHeldAuthor?: boolean;
 }
 
 export type ChainSignerConfig = LocalChainSignerConfig | RemoteChainSignerConfig;
@@ -72,7 +82,7 @@ export type ResolvedRemoteSignerConfig = Readonly<RemoteChainSignerConfig & {
 }>;
 
 const REMOTE_KEYS = new Set([
-  'type', 'url', 'socketPath', 'authTokenFile', 'authTokenEnv', 'api', 'addresses', 'timeoutMs', 'author',
+  'type', 'url', 'socketPath', 'authTokenFile', 'authTokenEnv', 'api', 'addresses', 'timeoutMs', 'author', 'nodeHeldAuthor',
 ]);
 const AUTHOR_KEYS = new Set(['address', 'url', 'socketPath', 'authTokenFile', 'authTokenEnv']);
 const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
@@ -133,6 +143,13 @@ export function resolveChainSignerConfig(
       throw configError(authorLabel, 'needs an address, or its own url, socketPath or auth token');
     }
     resolved.author = Object.freeze(author);
+  }
+  if (raw.nodeHeldAuthor !== undefined) {
+    if (typeof raw.nodeHeldAuthor !== 'boolean') throw configError(label, 'nodeHeldAuthor must be true or false');
+    if (raw.nodeHeldAuthor && resolved.author !== undefined) {
+      throw configError(label, 'nodeHeldAuthor (authors held on the node) cannot be combined with author (authors in the signer)');
+    }
+    if (raw.nodeHeldAuthor) resolved.nodeHeldAuthor = true;
   }
   return Object.freeze(resolved);
 }

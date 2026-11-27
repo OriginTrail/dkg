@@ -237,6 +237,8 @@ async function getWorkspaceAccessMetadata(
   // Flattened UNION: Blazegraph rejects nested UnionNode inside a
   // GRAPH block that is itself a UNION branch. Semantically identical
   // rewrite with one GRAPH-per-branch instead of UNION-inside-GRAPH.
+  // The recipients come from the graph's own `_meta`; the other graphs can only
+  // say that it is private.
   const result = await store.query(
     `SELECT ?agent ?policy ?revoked WHERE {
       {
@@ -249,12 +251,6 @@ async function getWorkspaceAccessMetadata(
         GRAPH <${cgMeta}> { <${cgData}> <${ACCESS.policy}> ?policy }
       } UNION {
         GRAPH <${ontologyGraph}> { <${cgData}> <${ACCESS.policy}> ?policy }
-      } UNION {
-        GRAPH <${agentsGraph}> { <${cgData}> <${ACCESS.allowedAgent}> ?agent }
-      } UNION {
-        GRAPH <${agentsGraph}> { <${cgData}> <${ACCESS.participantAgent}> ?agent }
-      } UNION {
-        GRAPH <${agentsGraph}> { <${cgData}> <${ACCESS.revokedAgent}> ?revoked }
       } UNION {
         GRAPH <${agentsGraph}> { <${cgData}> <${ACCESS.policy}> ?policy }
       } UNION {

@@ -7,6 +7,7 @@ import {
   snapshotMcpConfigSource,
   writeMcpConfigAtomic,
   type McpConfigSourceSnapshot,
+  type McpConfigWriteOptions,
 } from './mcp-config-file.js';
 
 export type McpPhysicalConfigPath = Readonly<{
@@ -73,7 +74,7 @@ export class McpPhysicalConfig {
     });
   }
 
-  write(content: string, source: McpPhysicalConfigSourceSnapshot): void {
+  write(content: string, source: McpPhysicalConfigSourceSnapshot, options: McpConfigWriteOptions = {}): void {
     if (source[MCP_PHYSICAL_CONFIG_OWNER] !== this.ownerToken) {
       throw new Error('MCP config source belongs to a different physical config owner');
     }
@@ -81,6 +82,6 @@ export class McpPhysicalConfig {
     const persistence = mcpConfigPersistenceStrategy(this.destination);
     const directory = dirname(this.destination);
     if (!existsSync(directory)) mkdirSync(directory, { recursive: true });
-    writeMcpConfigAtomic(this.destination, content, persistence, source);
+    writeMcpConfigAtomic(this.destination, content, persistence, source, options);
   }
 }

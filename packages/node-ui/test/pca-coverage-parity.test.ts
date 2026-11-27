@@ -155,7 +155,7 @@ const SCENARIOS: Scenario[] = [
     // #1356 — an all-adapterSupported:false probe is a CAPABILITY GAP: S6 says "not
     // supported here" (retrying is futile), NOT a false "not approved"/"0 of N", never
     // Ready, and NOT the transient "chain lookup failed" copy.
-    s6: { wait: 'not supported here', ready: false, notText: ['0 of 1', 'the chain lookup failed'] },
+    s6: { wait: 'This node can’t check PCA approval', ready: false, notText: ['0 of 1', 'right now.'] },
   },
   {
     name: 'requested extended budget missing → inconclusive (never base-allowance GREEN)',
@@ -171,7 +171,7 @@ const SCENARIOS: Scenario[] = [
     overview: { registered: null, approvedCount: 0, inconclusive: true, covered: false, bestBps: null },
     s5Verdict: 'unknown',
     s5Wait: 'PCA status unknown',
-    s6: { wait: 'the chain lookup failed', ready: false, notText: ['0 of 1', 'Ready'] },
+    s6: { wait: 'right now.', ready: false, notText: ['0 of 1', 'Ready'] },
   },
   {
     name: 'zero-budget approved → uncovered (hasBudget:false)',
@@ -191,7 +191,7 @@ const SCENARIOS: Scenario[] = [
     overview: { registered: true, approvedCount: 1, inconclusive: false, covered: false, bestBps: null },
     s5Verdict: 'fallthrough',
     s5Wait: 'No PCA discount',
-    s6: { wait: 'publishes will not get the discount', ready: false },
+    s6: { wait: 'has expired, so publishes pay the full fee', ready: false },
   },
   {
     name: 'swept approved → uncovered (dead:true)',
@@ -201,7 +201,7 @@ const SCENARIOS: Scenario[] = [
     overview: { registered: true, approvedCount: 1, inconclusive: false, covered: false, bestBps: null },
     s5Verdict: 'fallthrough',
     s5Wait: 'No PCA discount',
-    s6: { wait: 'publishes will not get the discount', ready: false },
+    s6: { wait: 'has expired, so publishes pay the full fee', ready: false },
   },
 ];
 
@@ -217,7 +217,7 @@ describe('#1344 coverage parity (table-driven) — S5 / S6 / overview agree via 
       // 1. usePcaOverview
       const ov = await renderOverview();
       const a = latestOverview!.accounts.find((x) => x.accountId === ACCOUNT)!;
-      expect(a.walletProbes[0]?.registered).toBe(s.overview.registered);
+      expect(a.walletProbes[0]?.coverage.registered).toBe(s.overview.registered);
       expect(a.approvedCount).toBe(s.overview.approvedCount);
       expect(a.probesInconclusive).toBe(s.overview.inconclusive);
       expect(latestOverview!.covered).toBe(s.overview.covered);
@@ -233,7 +233,7 @@ describe('#1344 coverage parity (table-driven) — S5 / S6 / overview agree via 
 
       // 3. S6 panel (GetSponsoredPanel) — run the approval check
       const s6 = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
-      await waitForText(s6.container, "Can't find it automatically?");
+      await waitForText(s6.container, "Have a PCA ID?");
       const accountIdInput = s6.container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement | null;
       expect(accountIdInput).toBeTruthy();
       await act(async () => { setInputValue(accountIdInput!, ACCOUNT); });

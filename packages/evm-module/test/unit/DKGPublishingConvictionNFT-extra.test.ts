@@ -8,7 +8,7 @@
  *     covered. The spec is clear: the V10 flow-through model fixes expiry
  *     at creation (12 epochs) and forbids extension. Once expired, the
  *     account must NOT accept top-ups (would dilute a closed allocation)
- *     and must NOT authorize further publishing cost draws.
+ *     and must NOT authorize further publishing cost spends.
  *
  * Uses the real Chronos/EpochStorage/StakingStorage deploys. No mocks.
  */
@@ -359,8 +359,8 @@ describe('@unit DKGPublishingConvictionNFT — extra audit coverage (E-6)', func
 
       const baseCost = hre.ethers.parseEther('10');
       // Pin the exact event payload so a future change to the discount
-      // formula, drawnFromEpoch, or arg list fails loudly. CostCovered(id,
-      // epoch, baseCost, discountedCost, drawnFromEpoch, drawnFromTopUp).
+      // formula, spentFromEpoch, or arg list fails loudly. CostCovered(id,
+      // epoch, baseCost, discountedCost, spentFromEpoch, spentFromTopUp).
       const BPS_DENOMINATOR = 10_000n;
       const discountBps = BigInt(info.discountBps);
       const expectedDiscounted =

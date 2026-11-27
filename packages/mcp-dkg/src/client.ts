@@ -1,4 +1,7 @@
+import { normalizeProjectRows, type ProjectRow } from './project-row.js';
+export type { ProjectRow } from './project-row.js';
 import type { QueryArgs } from './query-args.js';
+import type { KnowledgeAssetShareResult } from './knowledge-asset-share.js';
 /**
  * Thin HTTP client for the DKG daemon. Mirrors the shape of
  * `scripts/lib/dkg-daemon.mjs` (so error messages / payload shapes stay
@@ -7,6 +10,9 @@ import type { QueryArgs } from './query-args.js';
  * `/api/context-graph/*`).
  */
 import type { DkgConfig } from './config.js';
+import { missingTokenHttpHint } from './auth-diagnostics.js';
+import { DkgHttpError } from './http-error.js';
+export { DkgHttpError } from './http-error.js';
 import {
   classifySparqlOperation,
   serializeAgentListOptions,
@@ -104,15 +110,6 @@ function normalizeDaemonQueryResult(result: unknown, sparql: string): SparqlResu
     };
   }
   return { type: 'bindings', bindings };
-}
-
-export interface ProjectRow {
-  id: string;
-  name?: string;
-  description?: string;
-  role?: string;
-  layer?: string;
-  [k: string]: unknown;
 }
 
 export interface SubGraphRow {
@@ -407,16 +404,6 @@ export interface PeerInfo {
   remoteAddrs: Array<string | null>;
 }
 
-export class DkgHttpError extends Error {
-  readonly status: number;
-  readonly body: unknown;
-  constructor(status: number, body: unknown, message: string) {
-    super(message);
-    this.name = 'DkgHttpError';
-    this.status = status;
-    this.body = body;
-  }
-}
 
 /**
  * A long Knowledge Asset mutation reached the daemon but no response arrived
@@ -501,7 +488,7 @@ export class DkgClient {
         throw new DkgHttpError(
           res.status,
           parsed,
-          `${method} ${route} → ${res.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`,
+          `${method} ${route} → ${res.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}${missingTokenHttpHint(res.status, this.token)}`,
         );
       }
       return parsed as T;
@@ -534,11 +521,11 @@ export class DkgClient {
 
   // ── Listing endpoints ──────────────────────────────────────────
   async listProjects(): Promise<ProjectRow[]> {
-    const response = await this.request<{ contextGraphs?: ProjectRow[] }>(
+    const response = await this.request<{ contextGraphs?: unknown }>(
       'GET',
       '/api/context-graph/list',
     );
-    return response.contextGraphs ?? [];
+    return normalizeProjectRows(response.contextGraphs);
   }
 
   async listSubGraphs(contextGraphId: string): Promise<SubGraphRow[]> {
@@ -548,8 +535,7 @@ export class DkgClient {
   }
 
   // ── Query ──────────────────────────────────────────────────────
-  /**
-   * Memory-layer routing is controlled by `view` + `graphSuffix`:
+  /** Memory-layer routing is controlled by `view` + `graphSuffix`:
    *   view=undefined, graphSuffix=undefined  — WM (default, private)
    *   graphSuffix="_shared_memory"           — SWM
    *   graphSuffix="_shared_memory_meta"      — SWM metadata (UAL, owner, publisher)
@@ -573,6 +559,7 @@ export class DkgClient {
     if (args.includeContextGraphPartitions != null) body.includeContextGraphPartitions = args.includeContextGraphPartitions;
     if (args.includeSharedMemoryMeta != null) body.includeSharedMemoryMeta = args.includeSharedMemoryMeta;
     if (args.view != null) body.view = args.view;
+    if (args.semantics != null) body.semantics = args.semantics;
     if (args.verifiedGraph != null) body.verifiedGraph = args.verifiedGraph;
     if (args.assertionName) body.assertionName = args.assertionName;
     if (args.agentAddress) body.agentAddress = args.agentAddress;
@@ -1480,7 +1467,7 @@ export class DkgClient {
     entities?: string[] | 'all';
     /** @deprecated Unsealed Knowledge Asset shares are unsupported. */
     skipSeal?: boolean;
-  }): Promise<{ swmShared: boolean; promotedCount: number; sealed: boolean; publishReady: boolean }> {
+  }): Promise<KnowledgeAssetShareResult> {
     if (Array.isArray(args.entities)) {
       throw Object.assign(new Error('Knowledge Assets are shared atomically; root-entity selection is not supported'), {
         code: 'KA_ATOMIC_SHARE_REQUIRED',
@@ -1503,7 +1490,7 @@ export class DkgClient {
       contextGraphId: normalizeContextGraphId(args.contextGraphId),
     };
     if (args.subGraphName) body.subGraphName = args.subGraphName;
-    return this.request<{ swmShared: boolean; promotedCount: number; sealed: boolean; publishReady: boolean }>(
+    return this.request<KnowledgeAssetShareResult>(
       'POST',
       `/api/knowledge-assets/${encodeURIComponent(args.name)}/swm/share`,
       body,

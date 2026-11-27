@@ -65,7 +65,7 @@ export function retainedAuthorityReaderFixture() {
     index, deploymentId: deployment, initialize,
     requireContextGraphStorage: () => new ethers.Contract(storage, abi),
     readTipProvider: async (_label, read) => read(provider),
-    resolveContractDeployBlockNumber: async () => 10,
+    resolveContractDeployBlock: async () => ({ blockNumber: 10, pinned: true }),
     pageSize: () => 2000, finalityConfirmations: () => 1, chainEventLogAuthority: () => source,
   });
   reader.snapshots.open();

@@ -31,6 +31,12 @@ import {
   q,
 } from './graph-set-index-store-harness.js';
 import { ATOMIC_GRAPH_REPLACE_STAGING_PREFIX } from '../src/atomic-graph-replace.js';
+import { DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES } from '../src/graph-catalog-internal-limit.js';
+
+const INTERNAL_CATALOG_LIMITS = {
+  maxResponseBytes: DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES,
+  maxLiteralHydrationBytes: DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES,
+};
 
 class FailingMaintenanceStore extends CountingStore {
   failHasGraph = false;
@@ -281,7 +287,7 @@ describe('GraphSetIndexStore', () => {
     await inner.close();
   });
 
-  it('rejects an oversized full catalog even when the requested prefix matches one graph', async () => {
+  it('serves a one-graph prefix from a full catalog larger than the caller limit, warm and cold', async () => {
     const inner = new OxigraphStore();
     const target = 'did:dkg:context-graph:target';
     await inner.insert([
@@ -291,12 +297,10 @@ describe('GraphSetIndexStore', () => {
     try {
       const warm = new GraphSetIndexStore(inner);
       await expect(warm.listGraphs()).resolves.toHaveLength(81);
-      await expect(warm.listGraphsByPrefix(target, { maxResponseBytes: 256 }))
-        .rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE' });
+      await expect(warm.listGraphsByPrefix(target, { maxResponseBytes: 256 })).resolves.toEqual([target]);
 
       const cold = new GraphSetIndexStore(inner);
-      await expect(cold.listGraphsByPrefix(target, { maxResponseBytes: 256 }))
-        .rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE' });
+      await expect(cold.listGraphsByPrefix(target, { maxResponseBytes: 256 })).resolves.toEqual([target]);
     } finally {
       await inner.close();
     }
@@ -317,13 +321,13 @@ describe('GraphSetIndexStore', () => {
     }
   });
 
-  it('rejects a large worker graph catalog before it crosses the worker boundary', async () => {
+  it("returns a worker's complete graph catalog whatever a caller's own byte limit", async () => {
     const worker = new OxigraphWorkerStore();
     try {
       await worker.insert(Array.from({ length: 80 }, (_, index) =>
         q(`did:dkg:context-graph:worker-${index}`)));
-      await expect(worker.listGraphs({ maxResponseBytes: 256 }))
-        .rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE' });
+      // The complete list is node work, bounded by the internal catalog ceiling.
+      await expect(worker.listGraphs({ maxResponseBytes: 256 })).resolves.toHaveLength(80);
     } finally {
       await worker.close();
     }
@@ -674,6 +678,83 @@ describe('GraphSetIndexStore', () => {
     expect(counting.listGraphsCalls).toBe(2);
   });
 
+  it('answers exact presence while a dirty full inventory is unavailable', async () => {
+    const removed = 'did:dkg:context-graph:dirty-removed';
+    const retained = 'did:dkg:context-graph:dirty-retained';
+    const counting = new CountingStore(new OxigraphStore());
+    const store = new GraphSetIndexStore(counting);
+    await store.insert([q(removed, 'urn:remove'), q(retained, 'urn:keep')]);
+    await store.listGraphs();
+    await store.deleteByPattern({ subject: 'urn:remove' });
+    counting.failListGraphs = true;
+    const options = { priority: 'normal' as const, source: 'presence-test', signal: new AbortController().signal };
+
+    await expect(store.hasGraph(removed, options)).resolves.toBe(false);
+    await expect(store.hasGraph(retained, options)).resolves.toBe(true);
+    expect(counting.hasGraphOptions.slice(-2)).toEqual([options, options]);
+    expect(counting.listGraphsCalls).toBe(1);
+    // Point answers cannot certify or clear an otherwise dirty catalog.
+    await expect(store.listGraphs()).rejects.toThrow('listGraphs failed');
+    counting.failListGraphs = false;
+    await expect(store.listGraphs()).resolves.toEqual([retained]);
+  });
+
+  it('propagates exact presence failures while the catalog is dirty', async () => {
+    const inner = new FailingMaintenanceStore(new OxigraphStore());
+    const store = new GraphSetIndexStore(inner);
+    const graph = 'did:dkg:context-graph:dirty-presence-error';
+    await store.insert([q(graph)]);
+    await store.listGraphs();
+    await store.deleteByPattern({ predicate: 'urn:p' });
+    inner.failHasGraph = true;
+
+    await expect(store.hasGraph(graph)).rejects.toThrow('hasGraph failed');
+    expect(inner.listGraphsCalls).toBe(1);
+    inner.failHasGraph = false;
+    await expect(store.listGraphs()).resolves.toEqual([]);
+  });
+
+  it('rejects an aborted dirty presence probe without starting backend work', async () => {
+    const counting = new CountingStore(new OxigraphStore());
+    const store = new GraphSetIndexStore(counting);
+    const graph = 'did:dkg:context-graph:dirty-aborted';
+    await store.insert([q(graph)]);
+    await store.listGraphs();
+    await store.deleteByPattern({ predicate: 'urn:p' });
+    const controller = new AbortController();
+    const reason = new Error('caller stopped');
+    controller.abort(reason);
+
+    await expect(store.hasGraph(graph, { signal: controller.signal })).rejects.toBe(reason);
+    expect(counting.hasGraphOptions).toEqual([]);
+    expect(counting.listGraphsCalls).toBe(1);
+  });
+
+  it('cancels a dirty presence wait without trusting a late backend answer', async () => {
+    const inner = new ControlledProbeStore(new OxigraphStore());
+    const store = new GraphSetIndexStore(inner);
+    const graph = 'did:dkg:context-graph:dirty-late-answer';
+    await store.insert([q(graph)]);
+    await store.listGraphs();
+    await store.deleteByPattern({ predicate: 'urn:p' });
+    inner.enableProbeGates();
+    const controller = new AbortController();
+    const probe = store.hasGraph(graph, { signal: controller.signal });
+    await inner.waitForProbe();
+    const reason = new Error('caller stopped waiting');
+    const rejected = expect(probe).rejects.toBe(reason);
+    controller.abort(reason);
+    try {
+      await rejected;
+      expect(inner.listGraphsCalls).toBe(1);
+    } finally {
+      inner.releaseProbe();
+      inner.disableProbeGates();
+    }
+    await expect(store.listGraphs()).resolves.toEqual([]);
+    expect(inner.listGraphsCalls).toBe(2);
+  });
+
   it('preserves deferred mutation source when hasGraph reads before listGraphs', async () => {
     const graph = 'did:dkg:context-graph:has-before-list';
     const counting = new CountingStore(new OxigraphStore());
@@ -687,7 +768,7 @@ describe('GraphSetIndexStore', () => {
     expect(counting.listGraphsCalls).toBe(1);
 
     await expect(store.hasGraph(graph)).resolves.toBe(false);
-    expect(counting.listGraphsCalls).toBe(2);
+    expect(counting.listGraphsCalls).toBe(1);
     await expect(store.listGraphs()).resolves.toEqual([]);
     expect(counting.listGraphsCalls).toBe(2);
     expect(events).toContainEqual({
@@ -725,7 +806,8 @@ describe('GraphSetIndexStore', () => {
     let now = 1_000;
     const inner = new OxigraphStore();
     const counting = new CountingStore(inner);
-    const store = new GraphSetIndexStore(counting, { revalidateMs: 100, now: () => now });
+    // The caller that finds the catalog due waits for the refresh: the behaviour kept for one release.
+    const store = new GraphSetIndexStore(counting, { revalidateMs: 100, revalidate: 'blocking', now: () => now });
 
     await expect(store.listGraphs()).resolves.toEqual([]);
     await inner.insert([q('did:dkg:context-graph:external')]);
@@ -748,6 +830,7 @@ describe('GraphSetIndexStore', () => {
     const counting = new CountingStore(inner);
     const store = new GraphSetIndexStore(counting, {
       revalidateMs: 100,
+      revalidate: 'blocking',
       revalidateFailureBackoffMs: 10,
       revalidateFailureMaxBackoffMs: 40,
       now: () => now,
@@ -918,14 +1001,17 @@ describe('GraphSetIndexStore', () => {
       await Promise.resolve();
 
       expect(scheduled.listGraphsCalls).toBe(2);
+      // Each scan keeps its caller's lane and label and runs under the internal catalog ceiling.
       expect(scheduled.listGraphsOptions).toEqual([
         {
           priority: 'background',
           source: 'agent.finalization.sharedMemorySlice',
+          ...INTERNAL_CATALOG_LIMITS,
         },
         {
           priority: 'ack',
           source: 'publisher.storageACK.sharedMemorySlice',
+          ...INTERNAL_CATALOG_LIMITS,
         },
       ]);
       expect(scheduler.snapshot).toMatchObject({
@@ -1005,14 +1091,17 @@ describe('GraphSetIndexStore', () => {
       await Promise.resolve();
 
       expect(scheduled.listGraphsCalls).toBe(2);
+      // Each scan keeps its caller's lane and label and runs under the internal catalog ceiling.
       expect(scheduled.listGraphsOptions).toEqual([
         {
           priority: 'background',
           source: 'agent.finalization.sharedMemorySlice',
+          ...INTERNAL_CATALOG_LIMITS,
         },
         {
           priority: 'normal',
           source: 'agent.query.sharedMemorySlice',
+          ...INTERNAL_CATALOG_LIMITS,
         },
       ]);
       expect(scheduler.snapshot).toMatchObject({
@@ -1063,6 +1152,7 @@ describe('GraphSetIndexStore', () => {
     scheduled.listGraphsResults.normal = [cachedGraph];
     const store = new GraphSetIndexStore(scheduled, {
       revalidateMs: 100,
+      revalidate: 'blocking',
       revalidateFailureBackoffMs: 1_000,
       now: () => now,
     });
@@ -1593,6 +1683,22 @@ describe('GraphSetIndexStore', () => {
     await optedInStore.close();
   });
 
+  it('indexes a Blazegraph configured by hand only when graphSetIndex switches it on', async () => {
+    const url = 'http://example.invalid/blazegraph/namespace/kb/sparql';
+    const byHand = await createTripleStore({ backend: 'blazegraph', options: { url, managedByDkg: false } });
+    expect(byHand).not.toBeInstanceOf(GraphSetIndexStore);
+    expect(byHand.listGraphsByPrefix).toBeUndefined();
+    await byHand.close();
+
+    const soleWriter = await createTripleStore({ backend: 'blazegraph', options: { url }, graphSetIndex: true });
+    expect(soleWriter).toBeInstanceOf(GraphSetIndexStore);
+    await soleWriter.close();
+
+    const managed = await createTripleStore({ backend: 'blazegraph', options: { url, managedByDkg: true } });
+    expect(managed).toBeInstanceOf(GraphSetIndexStore);
+    await managed.close();
+  });
+
   it('preserves atomic graph replacement when a managed SPARQL store is index-wrapped', async () => {
     let updateRequests = 0;
     const server = createServer((request, response) => {
@@ -1645,18 +1751,4 @@ describe('GraphSetIndexStore', () => {
     expect(typeof optedInStore.listGraphsByPrefix).toBe('function');
     await optedInStore.close();
   });
-});
-
-it('rejects an oversized periodic refresh instead of returning its smaller stale catalog', async () => {
-  let now = 1_000;
-  const inner = new OxigraphStore();
-  const store = new GraphSetIndexStore(inner, { revalidateMs: 100, now: () => now });
-  try {
-    await inner.insert([q('urn:small')]);
-    expect(await store.listGraphs({ maxResponseBytes: 64 })).toEqual(['urn:small']);
-    await inner.insert([q(`urn:${'large'.repeat(30)}`)]);
-    now += 100;
-    await expect(store.listGraphsByPrefix('urn:small', { maxResponseBytes: 64 }))
-      .rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE', maxBytes: 64 });
-  } finally { await store.close(); }
 });

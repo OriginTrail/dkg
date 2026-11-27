@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { ViewQuerySemantics } from '@origintrail-official/dkg-core';
 
 /** Options forwarded by the CLI client to the daemon query endpoint. */
 export interface QueryOptions {
@@ -7,6 +8,8 @@ export interface QueryOptions {
   includeContextGraphPartitions?: boolean;
   includeSharedMemoryMeta?: boolean;
   view?: 'working-memory' | 'shared-working-memory' | 'verifiable-memory';
+  /** How a view query matches its patterns; the node's default when absent. */
+  semantics?: ViewQuerySemantics;
   agentAddress?: string;
   assertionName?: string;
   subGraphName?: string;

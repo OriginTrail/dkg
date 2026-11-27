@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { PromoteAdmissionError, TripleStoreAsyncPromoteQueue } from '@origintrail-official/dkg-publisher';
@@ -17,8 +18,8 @@ function context(promoteAsync: (...args: any[]) => Promise<unknown>) {
   const url = new URL('http://localhost/api/knowledge-assets/asset/swm/share-async');
   const ctx = {
     req: { method: 'POST', __dkgPrebufferedBody: Buffer.from(JSON.stringify({ contextGraphId: 'admission-cg' })) },
-    res: { writeHead(status: number, headers: Record<string, string>) { record.status = status; Object.assign(record.headers, headers); },
-      end(body: string) { record.body = body; } },
+    res: Object.assign(new EventEmitter(), { writeHead(status: number, headers: Record<string, string>) { record.status = status; Object.assign(record.headers, headers); },
+      end(body: string) { record.body = body; } }),
     url, path: url.pathname, authentication: requestAuthentication({ kind: 'nodeOperator' }),
     agent: {
       probeContextGraphWritePreflight: vi.fn(async () => ({ storeAvailable: true, exists: true,

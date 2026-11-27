@@ -21,6 +21,9 @@ export async function verifySnapshotCheckpoint(options: {
 }): Promise<VerifiedSnapshotCheckpointAsset[]> {
   const { directory, entries, evidence, signal } = options;
   signal.throwIfAborted(); options.assertCurrent();
+  const maxWorkers = options.maxWorkers ?? 2;
+  if (!Number.isSafeInteger(maxWorkers) || maxWorkers < 1 || maxWorkers > 4)
+    throw new RangeError('Invalid snapshot verifier count');
   const expected = evidence.snapshot.assets.map(a => buildKnowledgeAssetUalFromOnChainIdV1(
     evidence.snapshot.chainId, evidence.snapshot.assetStorage, BigInt(a.id)));
   if (entries.length !== expected.length || entries.some((e, i) => e.ual !== expected[i]))
@@ -32,7 +35,11 @@ export async function verifySnapshotCheckpoint(options: {
   let next = 0;
   const verified: VerifiedSnapshotCheckpointAsset[] = [];
   await withSnapshotVerificationPool({ contextGraphId: evidence.snapshot.contextGraphId, signal,
-    maxWorkers: options.maxWorkers,
+    // A lane owns at most one codec, reserving up to 16 MiB of input plus
+    // twice its 16 MiB output ceiling. Two lanes fit the 96 MiB process
+    // budget; three can exceed it even for tiny inputs. Keep the shared
+    // pool's host limits and the codec's fail-fast overload protection.
+    maxWorkers: Math.min(maxWorkers, 2),
     run: async lane => {
       for (;;) {
         signal.throwIfAborted(); options.assertCurrent();

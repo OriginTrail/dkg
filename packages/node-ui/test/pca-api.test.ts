@@ -91,7 +91,7 @@ describe('describePcaError', () => {
       new HttpError(400, 'PrimaryNodeNotInShardingTable', { error: 'PrimaryNodeNotInShardingTable' }),
     );
     expect(out!.code).toBe('PrimaryNodeNotInShardingTable');
-    expect(out!.message.toLowerCase()).toContain('sharding table');
+    expect(out!.message).toBe("That primary node isn't an active Core node.");
   });
 
   it('maps 403 NotAccountOwner from the daemon sentence form and names PCA #N', () => {

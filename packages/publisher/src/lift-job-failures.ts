@@ -126,6 +126,10 @@ export interface LiftJobFailurePolicy {
    * via `BuiltInLiftJobFailurePolicy`: `autoRetry: false` is an explicit
    * policy decision (manual-only), never an omission a reader must interpret.
    *
+   * Typed inconclusive PCA funding reads follow the same proof-gated workspace retry lane:
+   * persisted validated state and the publisher's never-dispatched evidence are both required.
+   * The funding error code alone never establishes that no publication was sent.
+   *
    * EXCLUDED, and why — `rpc_unavailable`/`nonce_conflict`/`wallet_unavailable` are allowed
    * from 'broadcast' with no pre-send producer guarantee, and `rpc_unavailable` is additionally
    * the broadcast-phase CATCH-ALL, so a transaction that landed and merely failed to record

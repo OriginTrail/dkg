@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { contextGraphLayerUri, createGraphKnowledgeAssetScope, MemoryLayer } from '@origintrail-official/dkg-core';
-import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
+import { lifecycleFields } from './lifecycle-fields.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { readAssertionLifecycleCandidates, type KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
 
@@ -32,21 +32,7 @@ export async function incompleteNamedKaLifecycleOwner(
   }
   if (candidates.length !== 1) return refuse('missing or ambiguous lifecycle identity; retain the original job evidence');
   const candidate = candidates[0]!;
-  const bindings = candidate.record.bindings;
-  const one = (predicate: string): string | undefined => {
-    const values = bindings.filter(row => row.p === predicate).map(row => row.o);
-    if (values.length > 1) return refuse(`conflicting ${predicate} values`);
-    return values[0];
-  };
-  const literal = (predicate: string): string | undefined => {
-    const value = one(DKG + predicate);
-    if (value === undefined) return undefined;
-    const parsed = parseRdfLiteralTerm(value);
-    if (!parsed || parsed.kind === 'language' || (parsed.kind === 'typed'
-      && parsed.datatype !== (['kaId', 'assertionVersion'].includes(predicate)
-        ? 'http://www.w3.org/2001/XMLSchema#integer' : 'http://www.w3.org/2001/XMLSchema#string'))) return refuse(`invalid ${predicate} literal`);
-    return parsed.value;
-  };
+  const { one, literal } = lifecycleFields(candidate.record.bindings, refuse);
   const state = literal('state');
   if (state !== undefined && !(options.allowPublishedState && state === 'published')) {
     return refuse('state exists but the descriptor could not be resolved');
@@ -70,7 +56,7 @@ export async function incompleteNamedKaLifecycleOwner(
     || !matchesOwner
     || candidate.record.number?.toString() !== request.kaNumber
     || literal('reservedUal') !== request.kaUal
-    || literal('assertionVersion') !== request.assertionVersion) {
+    || literal('assertionVersion', 'integer') !== request.assertionVersion) {
     return refuse('retained name, author, reservation or version does not match the confirmed request');
   }
   const root = (value?: string) => value?.toLowerCase().replace(/^0x/, '');

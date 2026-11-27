@@ -1,4 +1,5 @@
 import type { QueryReadAdmissionCapability } from '@origintrail-official/dkg-storage';
+import { hasDefaultGraphRead } from './sparql-default-graph-pattern.js';
 import type { QueryOptions } from './query-engine.js';
 import { type PreparedGraphScope } from './sparql-graph-scope.js';
 import { createScopedContentGraphRoutePolicy, scopedRouteContentPrefixes } from './scoped-content-graph-policy.js';
@@ -26,7 +27,7 @@ export function resolveQueryReadPlan(scope: PreparedGraphScope, options: QueryOp
   if (!options?.contextGraphId) return { kind: 'unscoped' };
   const policy = createScopedContentGraphRoutePolicy(options.contextGraphId, options);
   const allowed = [...policy.staticContentGraphs, ...policy.metaAllowList, ...policy.staticPrivateAllowList];
-  const needsDiscovery = !scope.hasGraphClause
+  const needsDiscovery = !scope.hasGraphClause || hasDefaultGraphRead(scope)
     || scope.graphTargets.some(target => target.kind !== 'iri' || !allowed.includes(target.iri));
   const expandGraphVariables = options.includeContextGraphPartitions === true
     && scope.graphVariables.length > 0 && !policy.isSwmOnlyRoute;

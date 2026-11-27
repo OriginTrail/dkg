@@ -113,8 +113,9 @@ missing immutable snapshot independently of the production provenance window.
    execution, and all four required assertion names exactly once with status
    `passed`, including the fresh-process first request. Inspect the accompanying
    Vitest JSON report as well as the job's conclusion.
-3. Open `CI gate` and confirm its trusted-controller checkout is
-   `8af04a376332c17527ce0f7dffaac8432ba1a9b3` and the aggregate validation passes.
+3. Open `CI gate` and confirm its trusted-controller checkout is the configured
+   pin (`TRUSTED_CI_CONTROLLER_SHA` in `ci-plan-fixtures.mjs`; at activation,
+   `8af04a376332c17527ce0f7dffaac8432ba1a9b3`) and the aggregate validation passes.
    A green transport job under the legacy pin proves execution; it does not prove
    skipped/missing assertion enforcement. The activation PR tests the new pin on
    its candidate; a successful post-activation protected full/merge-group run

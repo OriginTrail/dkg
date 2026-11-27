@@ -1,3 +1,4 @@
+import { admitShareWhileConnected } from '../share-admission-lifetime.js';
 import { handleKnowledgeAssetPullFrom } from './knowledge-asset-pull-from.js';
 import { handleShareJobCollection } from './share-job-collection.js';
 import { handlePublishedDescriptorRepair } from './published-descriptor-repair.js';
@@ -19,6 +20,7 @@ import { requireKnowledgeAssetRead } from './context-graph-read-authority.js';
 //   GET  /api/knowledge-assets/:name/{wm,swm,vm}     per-layer status
 //   POST /api/knowledge-assets/:name/wm/write        append quads to the draft
 //   POST /api/knowledge-assets/:name/wm/finalize     seal the draft (git commit)
+//   POST /api/knowledge-assets/:name/wm/finalize-guarded seal a matching existing draft
 //   POST /api/knowledge-assets/:name/wm/discard      throw the draft away
 //   POST /api/knowledge-assets/:name/wm/pull-from    seed or verify draft from SWM/VM
 //   POST /api/knowledge-assets/:name/swm/share       advance the SWM pointer
@@ -34,7 +36,7 @@ import { requireKnowledgeAssetRead } from './context-graph-read-authority.js';
 // `(agent, number)` addressing is layered on by Option 1 later, on these same
 // routes, as an additional accepted identifier form.
 import { actorFromRequestContext, type RequestContext } from "./context.js";
-import { reportBatchRejectionWithLifecycle } from "@origintrail-official/dkg-agent";
+import { parseFinalizeGuard, reportBatchRejectionWithLifecycle, type FinalizeGuard } from "@origintrail-official/dkg-agent";
 import {
   jsonResponse,
   oversizedRdfLiteralResponseBody,
@@ -53,6 +55,7 @@ import {
   noFundedPublisherWalletBody,
   respondIfPcaFundingUnknown,
   SMALL_BODY_BYTES,
+  type UnavailableResponseRenderer,
 } from "../http-utils.js";
 import { validateWritableQuads } from "../knowledge-asset-quad-validation.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
@@ -559,6 +562,11 @@ function rejectSelectedAuthorOnCreate(
   });
   return false;
 }
+
+/** Only used by the common preflight before this request can create a publisher job. */
+const renderPublishPreflightUnavailable: UnavailableResponseRenderer = (res, body, headers) => {
+  jsonResponse(res, 503, { ...body, jobCreated: false, retryable: true }, undefined, headers);
+};
 
 export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<void> {
   const {
@@ -1126,7 +1134,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     agent,
     parsed.contextGraphId,
     res,
-    writePreflightContextGraphOpts,
+    {
+      ...writePreflightContextGraphOpts,
+      asyncAdmission: (layer === 'swm' && verb === 'share-async') || (layer === 'vm' && verb === 'publish-async'),
+      // This common preflight precedes every mutation and the publish enqueue fence.
+      ...(layer === 'vm' && verb === 'publish-async' ? { renderUnavailable: renderPublishPreflightUnavailable } : {}),
+    },
   );
   if (!contextGraphId) return;
 
@@ -1172,7 +1185,14 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm"], subGraphName, operation: "assertion_written", source: "api", counts: { triples: parsed.quads.length } });
         return jsonResponse(res, 200, { written: parsed.quads.length });
       }
-      if (verb === "finalize") {
+      if (verb === "finalize" || verb === "finalize-guarded") {
+        let guard: FinalizeGuard | undefined;
+        if (verb === "finalize-guarded") {
+          if (segs.length !== 3) return jsonResponse(res, 404, { error: 'Unknown knowledge asset operation' });
+          try { guard = parseFinalizeGuard(parsed); }
+          catch { return jsonResponse(res, 400, { error: 'Invalid finalize preconditions' }); }
+          if (!authorizeAgentScopedAuthorClaim(res, writePreflightCallerAgentAddress, guard.expectedAuthorAddress, "expectedAuthorAddress")) return;
+        }
         const finalizeOptions = resolveFinalizeOptions(parsed, res, writePreflightCallerAgentAddress);
         if (finalizeOptions === null) return;
         const finalizeStorageLane = await resolveFinalizeStorageLane(
@@ -1185,10 +1205,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         const seal = await agent.assertion.finalize(contextGraphId, name, {
           ...finalizeOptions,
           ...finalizeStorageLane,
+          ...(guard ? { guard } : {}),
         });
         emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm"], subGraphName, operation: "assertion_finalized", source: "api" });
         // Full seal payload (PR #971) — clients inspect the attestation.
-        return jsonResponse(res, 200, {
+        const payload = {
           assertionUri: seal.assertionUri,
           merkleRoot: hex(seal.merkleRoot),
           authorAddress: seal.authorAddress,
@@ -1200,7 +1221,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           // (the same fields the vm/publish-async 202 reports once the share has closed).
           ...(seal.assertionVersion !== undefined ? { assertionVersion: seal.assertionVersion } : {}),
           ...(seal.kaUal !== undefined ? { kaUal: seal.kaUal } : {}),
-        });
+        };
+        return jsonResponse(res, 200, guard
+          ? { outcome: seal.guardedOutcome, seal: payload, publicTripleCount: seal.publicTripleCount, privateTripleCount: seal.privateTripleCount }
+          : payload);
       }
       if (verb === "discard") {
         await agent.assertion.discard(contextGraphId, name, {
@@ -1309,11 +1333,13 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         }
       }
       try {
-        const result = await admissionStep(res, 'enqueue', () => agent.assertion.promoteAsync(contextGraphId, name, {
+        const result = await admitShareWhileConnected(res, signal => admissionStep(res, 'enqueue', () => agent.assertion.promoteAsync(contextGraphId, name, {
+          signal,
           entities: entities ?? "all",
           subGraphName,
           ...promoteStorageLane,
-        }));
+        })));
+        if (result === undefined) return;
         return jsonResponse(res, 200, { jobId: result.jobId, state: "queued" });
       } catch (err: any) {
         if (err instanceof PromoteJobConflictError) {

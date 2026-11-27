@@ -581,6 +581,28 @@ export class RpcFailoverClient {
   }
 
   /**
+   * A wallet's pending nonce, read where a write's preparation reads its nonce: in the 'nonceWrite' order, so on a
+   * write-proven backend first. A caller deciding whether a nonce is still free sees the mempool its writes reach.
+   * Read only: no outcome is recorded, so it never moves the preference.
+   */
+  async pendingNonce(address: string, label: string): Promise<number> {
+    const attempts = this.stickiness.attempts(this.getEndpoints(), 'nonceWrite');
+    let lastRetryable: unknown = new Error(`${label}: no RPC endpoint`);
+    for (let i = 0; i < attempts.length; i += 1) {
+      const { endpoint } = attempts[i];
+      try {
+        await this.validateEndpointForAttempt(endpoint, RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS, `${label} chainId validation via RPC #${i + 1}`);
+        return await withRpcRequestTimeout<number>(RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS, `${label} via RPC #${i + 1}`,
+          () => endpoint.provider.getTransactionCount(address, 'pending'));
+      } catch (err) {
+        if (!isRpcEndpointFailoverEligible(err)) throw err;
+        lastRetryable = err;
+      }
+    }
+    throw lastRetryable;
+  }
+
+  /**
    * Per-endpoint broadcast of an ALREADY-SIGNED tx (signer-free — never
    * re-signs). IDEMPOTENT: an `isKnownTransactionError` (the tx is already
    * known/pending/mined) is treated as success (`return`) so a set-retry

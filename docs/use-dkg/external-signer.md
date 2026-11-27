@@ -42,6 +42,7 @@ Only the static parts are required: `type`, one of `url` or `socketPath`, and us
 | `addresses` | Optional. Use only these payer accounts, in this order; each must be served by the signer. |
 | `timeoutMs` | Optional per-request deadline in milliseconds (default `30000`). |
 | `author` | Optional. Where the author keys come from; see below. |
+| `nodeHeldAuthor` | Optional, `false` by default. `true`: the signer serves payer accounts only, and the authors are agent keys held on the node; see [Authors held on the node](#authors-held-on-the-node). Cannot be combined with `author`. |
 
 When the node starts with an external signer it:
 
@@ -74,6 +75,26 @@ Who signs the author attestation:
 - A request made with an **agent token** is authored by that agent. If the agent was registered by address (below), its attestation is signed by the external signer with `eth_signTypedData_v4`. A custodial agent, whose key you chose to keep on the node, still signs with that key; if you move that key into the signer as an author key and remove it from the node's agent keystore, the agent keeps its token and signs through the signer.
 - A request made with the **node or admin token** is authored by the **default author**, through the signer. Without a default author such a publish fails with a clear error; the node never falls back to a payer.
 - The node's default agent is the default author, else the signer's first author account. Node-token requests act as it where they need an agent, for example as the curator of the context graphs they create and register, while their publishes are still authored by the default author as above. It is registered by address on first start, like the agents below, so the node holds no key for it; with payer accounts only, the node has no default agent. When the default author changes, or a node that signed with a local wallet moves to the signer, the node makes the default author its default agent on the next start, so the drafts it opens with the node token belong to the author that publishes them. The previous default agent stays registered, and its drafts and assets keep their author.
+
+### Authors held on the node
+
+With `"nodeHeldAuthor": true` (and no `author` block) the signer only pays, and the node's own agent keys author:
+
+```json
+"signer": {
+  "type": "remote",
+  "socketPath": "/run/signer/signer.sock",
+  "authTokenFile": "/etc/dkg/signer.token",
+  "nodeHeldAuthor": true
+}
+```
+
+- The node starts with no default agent. Register an agent with a name only, `POST /api/agent/register` with `{"name": "…"}` and the node token: the node generates and keeps its key (`mode: "custodial"`). The first such key becomes the node's default agent at once, is marked so across restarts, and the node republishes its profile with that agent's encryption keys. A later key leaves the default agent as it is; a name can be registered once.
+- Requests made with the node or admin token act as that agent and are authored by it, signed with its key on the node: the author attestation at finalize and every later update attestation, the RFC-64 inventory and catalog objects, the shared-memory envelopes, sender keys and sync requests. The signer is asked for payer transactions only.
+- That agent may curate a context graph backed by a Publishing Conviction Account, public or private: the first payer sends the registration and receives the Context Graph NFT, as for an agent registered by address above, and the agent is the graph's participant agent.
+- A VM publish into a curated graph sends its shared-memory sender keys as the author or default agent when it is on the graph's roster, else as another agent key of the node that is, as a share signs its gossip.
+- The keys live in the node's agent keystore: a knowledge asset can only ever be updated by its author, so keep the node's data directory safe.
+- Assets authored earlier by author keys of the signer can no longer be updated through the node once their author connection is gone.
 
 ### Registering an agent whose key the signer holds
 

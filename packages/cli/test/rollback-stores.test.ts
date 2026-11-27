@@ -1,21 +1,24 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Command } from 'commander';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openInventoryV1 } from '@origintrail-official/dkg-agent/dist/rfc64/inventory-v1/index.js';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 
 const wiring = vi.hoisted(() => ({
   root: '',
   role: 'core' as 'core' | 'edge',
+  store: undefined as Record<string, unknown> | undefined,
   install: 'updated' as string,
   stops: true,
   calls: [] as string[],
 }));
 
 function leaseState(): string {
+  if (!existsSync(join(wiring.root, 'rfc64-sync'))) return 'no inventory';
   const lease = new DatabaseSync(join(wiring.root, 'rfc64-sync', 'inventory-v1.lease.sqlite3'));
   try {
     lease.exec('PRAGMA busy_timeout = 0');
@@ -33,7 +36,7 @@ vi.mock('../src/config.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/config.js')>();
   return {
     ...actual,
-    loadConfig: async () => ({ nodeRole: wiring.role }),
+    loadConfig: async () => ({ nodeRole: wiring.role, ...(wiring.store ? { store: wiring.store } : {}) }),
     activeSlot: async () => 'a',
     releasesDir: () => `${wiring.root}/releases`,
     dkgDir: () => wiring.root,
@@ -80,6 +83,7 @@ import {
   readSlotVersion,
   readsOnlyLegacyPlacementRepairs,
 } from '../src/update/rollback-stores.js';
+import { dropReadGraphsForRollback } from '../src/update/rollback-read-graphs.js';
 
 class ProcessExit extends Error {
   constructor(readonly code: number | undefined) {
@@ -148,6 +152,7 @@ async function rollback(...args: string[]): Promise<number | undefined> {
 beforeEach(async () => {
   wiring.root = await mkdtemp(join(tmpdir(), 'dkg-rollback-stores-'));
   wiring.role = 'core';
+  wiring.store = undefined;
   wiring.install = 'updated';
   wiring.stops = true;
   wiring.calls.length = 0;
@@ -363,6 +368,145 @@ describe('dkg rollback readies the local stores for the target version', () => {
       'Stop the node first. If a service manager restarts it, stop the service, then run "dkg rollback" again.',
       'Nothing was changed.',
     ]);
+  });
+});
+
+const MEMBER = 'did:dkg:context-graph:rollback/_verifiable_memory/0xab/1';
+const READ_GRAPH = 'did:dkg:context-graph:rollback/_~read/cg/_verifiable_memory';
+const READ_STATE = 'did:dkg:context-graph:rollback/_~read/state';
+// A graph of a context graph whose ID has a `_read` segment, named like a read graph would be under it.
+const LEGACY = 'did:dkg:context-graph:rollback/_read/cg/_shared_memory';
+
+/** An embedded store file holding member graphs and a read-graph partition. */
+async function writeStoreWithReadGraphs(): Promise<string> {
+  const path = join(wiring.root, 'store.nq');
+  const store = new OxigraphStore(path);
+  await store.insert([MEMBER, LEGACY, READ_GRAPH, READ_STATE].map((graph) => ({ graph, subject: 'urn:s', predicate: 'urn:p', object: '"v"' })));
+  await store.close();
+  wiring.store = { backend: 'oxigraph-persistent', options: { path } };
+  return path;
+}
+
+async function storedGraphs(path: string): Promise<string[]> {
+  const store = new OxigraphStore(path);
+  try {
+    const result = await store.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
+    return result.type === 'bindings' ? result.bindings.map((row) => row.g!).sort() : [];
+  } finally {
+    await store.close();
+  }
+}
+
+describe('dkg rollback drops read-graph partitions', () => {
+  it('drops them after the inventory is held when the data directory notes them', async () => {
+    const path = await writeStoreWithReadGraphs();
+    await writeFile(join(wiring.root, 'read-graph-partitions'), 'note\n');
+    await writeInventoryV6();
+    await writeTargetSlot('10.0.26');
+
+    expect(await rollback()).toBeUndefined();
+
+    expect(wiring.calls).toEqual(['stop', 'swap:b', 'lease held']);
+    expect(await storedGraphs(path)).toEqual([LEGACY, MEMBER].sort());
+    expect(existsSync(join(wiring.root, 'read-graph-partitions'))).toBe(false);
+    expect(output.log).toContain(
+      'Dropped 2 read-graph partition graph(s) for 10.0.26; read graphs are rebuilt from the stored data.',
+    );
+  });
+
+  it('drops them when there is no inventory to hold', async () => {
+    const path = await writeStoreWithReadGraphs();
+    await writeFile(join(wiring.root, 'read-graph-partitions'), 'note\n');
+    await writeTargetSlot('10.0.26');
+
+    expect(await rollback()).toBeUndefined();
+
+    expect(wiring.calls).toEqual(['stop', 'swap:b', 'no inventory']);
+    expect(await storedGraphs(path)).toEqual([LEGACY, MEMBER].sort());
+    expect(existsSync(join(wiring.root, 'read-graph-partitions'))).toBe(false);
+  });
+
+  it('does not open the triple store without the note', async () => {
+    const path = await writeStoreWithReadGraphs();
+    await writeInventoryV6();
+    await writeTargetSlot('10.0.26');
+
+    expect(await rollback()).toBeUndefined();
+
+    expect(await storedGraphs(path)).toEqual([MEMBER, LEGACY, READ_STATE, READ_GRAPH].sort());
+    expect(output.log.join('\n')).not.toContain('read-graph');
+  });
+
+  it('keeps the current slot, the note and the inventory when the read graphs cannot be dropped', async () => {
+    wiring.store = { backend: 'no-such-backend' };
+    await writeFile(join(wiring.root, 'read-graph-partitions'), 'note\n');
+    await writeInventoryV6();
+    // 10.0.25 cannot read confirmed placements; they are removed only once the read graphs are gone.
+    addConfirmedPlacement();
+    await writeTargetSlot('10.0.25');
+
+    expect(await rollback()).toBe(1);
+    expect(confirmedPlacementCount()).toBe(1);
+
+    expect(wiring.calls).toEqual(['stop']);
+    expect(leaseState()).toBe('lease free');
+    expect(existsSync(join(wiring.root, 'read-graph-partitions'))).toBe(true);
+    expect(output.error[0]).toMatch(/^Rollback stopped: the read graphs could not be dropped: Unknown TripleStore backend/);
+    expect(output.error[1]).toBe('The version was not switched. Run "dkg rollback" again once the triple store can be '
+      + 'opened, or "dkg start" to start 10.0.26 again.');
+  });
+
+  it('keeps the note when the store cannot persist the drop', async () => {
+    await writeFile(join(wiring.root, 'read-graph-partitions'), 'note\n');
+    const store = new OxigraphStore();
+    await store.insert([{ graph: READ_GRAPH, subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
+    try {
+      await expect(dropReadGraphsForRollback(wiring.root, () => undefined, async () => ({
+        store, close: async () => { throw new Error('could not write the store file'); },
+      }))).rejects.toThrow('could not write the store file');
+      expect(existsSync(join(wiring.root, 'read-graph-partitions'))).toBe(true);
+    } finally { await store.close(); }
+  });
+
+  it('closes the store and keeps the note when the store cannot list its graphs', async () => {
+    await writeFile(join(wiring.root, 'read-graph-partitions'), 'note\n');
+    const closed: string[] = [];
+    const store = new OxigraphStore();
+    store.query = async () => { throw new Error('store went away'); };
+    await expect(dropReadGraphsForRollback(wiring.root, () => undefined, async () => ({
+      store, close: async () => { closed.push('closed'); throw new Error('close failed too'); },
+    }))).rejects.toThrow('store went away');
+    expect(closed).toEqual(['closed']);
+    expect(existsSync(join(wiring.root, 'read-graph-partitions'))).toBe(true);
+  });
+
+  it('keeps the note when the drop fails part-way, and a second run drops the rest', async () => {
+    const note = join(wiring.root, 'read-graph-partitions');
+    await writeFile(note, 'note\n');
+    const store = new OxigraphStore();
+    await store.insert([MEMBER, READ_GRAPH, READ_STATE].map((graph) => ({ graph, subject: 'urn:s', predicate: 'urn:p', object: '"v"' })));
+    const dropGraph = store.dropGraph.bind(store);
+    let drops = 0;
+    store.dropGraph = async (graph, options) => {
+      drops += 1;
+      if (drops === 2) throw new Error('store went away');
+      return dropGraph(graph, options);
+    };
+    const closed: string[] = [];
+    const open = async () => ({ store, close: async () => { closed.push('closed'); } });
+    try {
+      await expect(dropReadGraphsForRollback(wiring.root, () => undefined, open)).rejects.toThrow('store went away');
+      expect(closed).toEqual(['closed']);
+      expect(existsSync(note)).toBe(true);
+      // The state graph went first; the read graph is still there.
+      expect(await store.hasGraph(READ_STATE)).toBe(false);
+      expect(await store.hasGraph(READ_GRAPH)).toBe(true);
+      expect(await dropReadGraphsForRollback(wiring.root, () => undefined, open)).toBe(1);
+      expect(closed).toEqual(['closed', 'closed']);
+      expect(existsSync(note)).toBe(false);
+      expect(await store.hasGraph(READ_GRAPH)).toBe(false);
+      expect(await store.hasGraph(MEMBER)).toBe(true);
+    } finally { await store.close(); }
   });
 });
 

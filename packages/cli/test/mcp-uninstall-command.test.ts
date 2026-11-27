@@ -128,13 +128,13 @@ it('assigns one stable Cursor ID to real native and Windows-side detection candi
   writeFileSync(windowsCursor, '{"mcpServers":{"dkg":{"command":"dkg"}}}');
   const { detectClients } = await import('../src/mcp-client-registry.js');
   const resolver = (name: string) => name === 'USERPROFILE' ? windowsHome : null;
-  const both = detectClients(resolver).filter((target) => target.id === 'cursor');
+  const both = detectClients({ resolveWslWindowsEnvPath: resolver }).filter((target) => target.id === 'cursor');
   expect(both).toMatchObject([
     { id: 'cursor', location: 'native', configPath: cursor },
     { id: 'cursor', location: 'windows-wsl', configPath: windowsCursor },
   ]);
   rmSync(join(fixture.home, '.cursor'), { recursive: true });
-  expect(detectClients(resolver).filter((target) => target.id === 'cursor'))
+  expect(detectClients({ resolveWslWindowsEnvPath: resolver }).filter((target) => target.id === 'cursor'))
     .toMatchObject([{ id: 'cursor', location: 'windows-wsl', configPath: windowsCursor }]);
 });
 
@@ -144,6 +144,7 @@ function seedNativeClients(selectedPlatform: string) {
   const appData = join(fixture.home, 'roaming');
   const xdg = join(fixture.home, 'xdg-config');
   vi.stubEnv('APPDATA', appData);
+  vi.stubEnv('LOCALAPPDATA', join(fixture.home, 'local'));
   vi.stubEnv('XDG_CONFIG_HOME', xdg);
   vi.stubEnv('WSL_DISTRO_NAME', undefined);
   vi.stubEnv('WSL_INTEROP', undefined);
@@ -212,13 +213,13 @@ it.each(['cursor', 'claude-desktop', 'windsurf', 'vscode', 'cline'])(
     const { detectClients } = await import('../src/mcp-client-registry.js');
     const { mcpUninstallAction } = await import('../src/mcp-uninstall.js');
     const resolver = (name: string) => name === 'USERPROFILE' ? windowsHome : appData;
-    const targets = detectClients(resolver);
+    const targets = detectClients({ resolveWslWindowsEnvPath: resolver });
     expect(targets.filter((target) => target.location === 'windows-wsl')
       .map(({ id, location, configPath, format, serverContainer }) => ({ id, location, configPath, format, serverContainer })))
       .toEqual(expected.map((spec) => ({ ...spec, location: 'windows-wsl', format: spec.id === 'vscode' ? 'jsonc' : 'json' })));
     expect(targets).toHaveLength(12);
     const before = targets.map((target) => readFileSync(target.configPath, 'utf8'));
-    await mcpUninstallAction({ yes: true, client: `${id}:windows-wsl` }, { detectClients: () => detectClients(resolver), log: () => {} });
+    await mcpUninstallAction({ yes: true, client: `${id}:windows-wsl` }, { detectClients: () => detectClients({ resolveWslWindowsEnvPath: resolver }), log: () => {} });
     targets.forEach((target, index) => {
       const raw = readFileSync(target.configPath, 'utf8');
       if (target.id === id && target.location === 'windows-wsl') {
@@ -239,14 +240,14 @@ it.each(['cursor:native', 'cursor:windows-wsl', 'cursor', undefined])(
     // A WSL shell may use its Windows profile as HOME. Both real resolver
     // candidates then describe the same file, but retain different selectors.
     const resolver = (name: string) => name === 'USERPROFILE' ? fixture.home : null;
-    expect(detectClients(resolver).filter((target) => target.id === 'cursor'))
+    expect(detectClients({ resolveWslWindowsEnvPath: resolver }).filter((target) => target.id === 'cursor'))
       .toMatchObject([
         { location: 'native', configPath: cursor },
         { location: 'windows-wsl', configPath: cursor },
       ]);
     const messages: string[] = [];
     await mcpUninstallAction({ yes: true, client }, {
-      detectClients: () => detectClients(resolver),
+      detectClients: () => detectClients({ resolveWslWindowsEnvPath: resolver }),
       log: (message) => messages.push(message),
     });
     expect(JSON.parse(readFileSync(cursor, 'utf8'))).toEqual({ mcpServers: { other: { command: 'keep' } } });

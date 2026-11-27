@@ -179,7 +179,7 @@ export function MarkdownMessage({ content, streaming }: MarkdownMessageProps) {
           blockquote: ({ children }) => <blockquote className="v10-md-blockquote">{children}</blockquote>,
           hr: () => <hr className="v10-md-hr" />,
           table: ({ children }) => (
-            <div className="v10-md-table-scroll">
+            <div className="v10-md-table-scroll ds-card-nested">
               <table className="v10-md-table">{children}</table>
             </div>
           ),
@@ -193,7 +193,7 @@ export function MarkdownMessage({ content, streaming }: MarkdownMessageProps) {
           tbody: ({ children, node: _node, ...props }) => <tbody className="v10-md-tbody" {...props}>{children}</tbody>,
           tr: ({ children, node: _node, ...props }) => <tr className="v10-md-tr" {...props}>{children}</tr>,
           // Spread remaining props so remark-gfm's column-alignment metadata
-          // (`style={{ textAlign: 'right' | 'center' }}` derived from
+          // (a `textAlign` style of right or center, derived from
           // `|:---|---:|:---:|` syntax) survives our wrapper.
           th: ({ children, node: _node, ...props }) => <th className="v10-md-th" {...props}>{children}</th>,
           td: ({ children, node: _node, ...props }) => <td className="v10-md-td" {...props}>{children}</td>,
