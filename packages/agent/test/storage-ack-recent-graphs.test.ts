@@ -86,6 +86,26 @@ describe('recently ACK-requested graphs', () => {
     expect(writes).toHaveBeenCalledTimes(2);
   });
 
+  it('refreshes in-memory recency inside the write throttle and evicts the quiet graph', async () => {
+    let now = 0;
+    const write = vi.fn(async (_path: string, _data: string) => {});
+    const list = new StorageAckRecentGraphs({ path: '/virtual/recent.json', maxGraphs: 2, now: () => now,
+      io: { readFile: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); },
+        mkdir: async () => {}, rename: async () => {}, writeFile: write },
+    });
+    list.note('A', '1'); await list.whenWritten();
+    now = 10 * 60_000; list.note('B', '2'); await list.whenWritten();
+    expect(write).toHaveBeenCalledTimes(2);
+    now = 20 * 60_000; list.note('A', '1'); await list.whenWritten();
+    expect(list.recent().map(entry => entry.contextGraphId)).toEqual(['A', 'B']);
+    expect(write).toHaveBeenCalledTimes(2);
+    now = 21 * 60_000; list.note('C', '3'); await list.whenWritten();
+    expect(list.recent().map(entry => entry.contextGraphId)).toEqual(['C', 'A']);
+    expect(write).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(write.mock.calls.at(-1)![1]).graphs.map((entry: { contextGraphId: string }) => entry.contextGraphId))
+      .toEqual(['C', 'A']);
+  });
+
   it('keeps the most recent graphs within its bound and forgets old ones', async () => {
     const path = await tempPath();
     let now = STORAGE_ACK_RECENT_GRAPH_TTL_MS;

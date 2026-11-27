@@ -95,6 +95,7 @@ export class StorageAckRecentGraphs {
   readonly #ttlMs: number;
   readonly #io: StorageAckRecentGraphsIo;
   readonly #entries = new Map<string, StorageAckRecentGraph>();
+  readonly #persisted = new Map<string, StorageAckRecentGraph>();
   #loaded: Promise<void> | undefined;
   readonly #writer: CoalescingRecurringTask;
   #warnedWrite = false;
@@ -125,15 +126,14 @@ export class StorageAckRecentGraphs {
   note(contextGraphId: string, onChainId: string): void {
     if (contextGraphId.length === 0 || !isCanonicalId(onChainId)) return;
     const now = this.#now();
-    const saved = this.#entries.get(contextGraphId);
+    const saved = this.#persisted.get(contextGraphId);
     const changed = saved === undefined
       || saved.onChainId !== onChainId
       || now - saved.at >= STORAGE_ACK_RECENT_GRAPH_REFRESH_MS;
-    if (!changed) return;
     this.#entries.delete(contextGraphId);
     this.#entries.set(contextGraphId, { contextGraphId, onChainId, at: now });
     this.#trim(now);
-    this.#scheduleWrite();
+    if (changed) this.#scheduleWrite();
   }
 
   /** The graphs on the list, most recently requested first. */
@@ -151,10 +151,12 @@ export class StorageAckRecentGraphs {
     for (const [id, entry] of this.#entries) {
       if (now - entry.at >= this.#ttlMs || entry.at > now + this.#ttlMs) this.#entries.delete(id);
     }
+    for (const id of this.#persisted.keys()) if (!this.#entries.has(id)) this.#persisted.delete(id);
     if (this.#entries.size <= this.#maxGraphs) return;
     const oldestFirst = [...this.#entries.values()].sort((a, b) => a.at - b.at);
     for (const entry of oldestFirst.slice(0, this.#entries.size - this.#maxGraphs)) {
       this.#entries.delete(entry.contextGraphId);
+      this.#persisted.delete(entry.contextGraphId);
     }
   }
 
@@ -182,6 +184,7 @@ export class StorageAckRecentGraphs {
     }
     // A request noted before the file was read is newer than the file.
     for (const entry of saved) {
+      this.#persisted.set(entry.contextGraphId, entry);
       const current = this.#entries.get(entry.contextGraphId);
       if (current === undefined || current.at < entry.at) this.#entries.set(entry.contextGraphId, entry);
     }
@@ -206,6 +209,8 @@ export class StorageAckRecentGraphs {
       await this.#io.mkdir(dirname(path));
       await this.#io.writeFile(staged, `${JSON.stringify({ version: FILE_VERSION, graphs })}\n`);
       await this.#io.rename(staged, path);
+      this.#persisted.clear();
+      for (const entry of graphs) if (this.#entries.has(entry.contextGraphId)) this.#persisted.set(entry.contextGraphId, entry);
       this.#warnedWrite = false;
     } catch (error) {
       await this.#io.remove?.(staged).catch(() => undefined);

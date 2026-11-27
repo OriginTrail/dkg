@@ -540,8 +540,6 @@ import {
 import {
   isChainNameBindingUnavailable,
   peekPersistedSubscriptionNameBindingRetry,
-  PersistedSubscriptionNameBindingRetry,
-  persistedSubscriptionNameBindingRetryOf,
 } from './context-graph-subscription-name-binding-retry.js';
 import {
   activateRollingSubscriptionPromotion,
@@ -8822,40 +8820,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         `Deferred persisted context-graph subscription "${id}" after authority recovery: ${error instanceof Error ? error.message : String(error)}`),
       heldElsewhere: id => peekPersistedSubscriptionNameBindingRetry(this)?.holds(id) === true,
     });
-  }
-
-  /**
-   * Hand the rows the startup pass left dormant because their chain name
-   * binding could not be read to the retry that asks them again within
-   * seconds (context-graph-subscription-name-binding-retry.ts).
-   */
-  retryPersistedSubscriptionNameBindings(this: DKGAgent): void {
-    const ids = [...this.contextGraphSubscriptionNameBindingRetryIds];
-    this.contextGraphSubscriptionNameBindingRetryIds.clear();
-    const store = this.config.contextGraphSubscriptionStore;
-    if (ids.length === 0 || !store || !this.started) return;
-    const lifetime = this.workLifetime;
-    const signal = lifetime.signal;
-    const ctx = createOperationContext('init');
-    const row = this.subscriptionRecoveryRowPorts(() => this.started && this.workLifetime.signal === signal
-      && this.contextGraphSubscriptionRehydrationStatus?.rehydrationEnabled === true);
-    if (!row) return;
-    const retry = persistedSubscriptionNameBindingRetryOf(this, signal, () => new PersistedSubscriptionNameBindingRetry({
-      ...row, signal,
-      resolveAuthority: (record, checkSignal) => withOwnedRpcRequestContext(
-        { requestClass: 'foreground', admissionPriority: 'authority', signal: checkSignal },
-        () => row.resolveAuthority(record, checkSignal)),
-      activate: (...args) => withOwnedRpcRequestContext({ requestClass: 'foreground', signal }, () => row.activate(...args)),
-      track: run => { lifetime.track(run); },
-      log: { info: message => this.log.info(ctx, message), warn: message => this.log.warn(ctx, message) },
-    }));
-    const taken = retry.take(ids);
-    if (taken.length === 0) return;
-    this.log.info(
-      ctx,
-      `Asking again within seconds for ${taken.length} persisted context-graph subscription(s) ` +
-        `whose chain name binding could not be read at start: ${taken.map((id) => `"${id}"`).join(', ')}`,
-    );
   }
 
   /**
