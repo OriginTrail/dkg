@@ -6,8 +6,9 @@ Use affected-lane CI for pull-request feedback, then run every Node/EVM lane
 against the exact merge candidate in GitHub's merge queue. Keep full CI on
 protected-branch pushes and manual dispatches. Solidity remains independently
 path-gated on pull requests: contract-relevant PRs run the four Hardhat shards,
-merge candidates rerun them against the exact combined commit, and protected
-pushes run the full coverage ratchet after merge. Do not add a `develop` branch
+merge candidates rerun them against the exact combined commit, protected
+pushes rerun them on the merged commit, and manual runs (the nightly
+included) run the full coverage ratchet. Do not add a `develop` branch
 solely for CI: that would postpone integration failures and collect unrelated
 changes into a large `develop -> main` batch.
 
@@ -39,7 +40,8 @@ CI whenever it cannot prove that a smaller plan is safe.
 | More than 100 production files | Full CI |
 | PR with `ci:full` label | Full Node/EVM CI; Solidity remains path-gated |
 | Merge queue | Every Node/EVM lane plus sharded Solidity on the exact candidate |
-| Protected-branch push or manual dispatch | Full CI, including Solidity coverage |
+| Protected-branch push | Full CI with the four Hardhat shards |
+| Manual dispatch, the nightly included | Full CI, including Solidity coverage |
 
 Each changed path gets one routing decision, first match wins: global CI inputs
 (full CI), then its package workspace, then a repository support area, then a
@@ -170,8 +172,9 @@ on planted workflows, runs and install hooks, sharing `load-closure.mjs`),
   job is presented as a fail-closed policy gate. A future merge prerequisite
   requires an independently protected check or attestation mechanism.
 - The merge queue tests every Node/EVM lane and the sharded Solidity suite
-  against the exact combined commit before it lands. Protected-branch Solidity
-  coverage remains the post-merge safety net.
+  against the exact combined commit before it lands. Protected-branch pushes
+  rerun the four Hardhat shards on the merged commit, and the nightly runs
+  Solidity coverage and its ratchet.
 - The controller must stay loadable from its sparse checkout: its files may
   import only `node:` builtins and each other. A test runs `plan-ci.mjs` and
   `assert-ci-results.mjs` from a copy of exactly `CONTROLLER_POLICY_FILES`,
@@ -265,9 +268,10 @@ total increased from 87.9 to 109.0 minutes. Delta routing is what reduces
 runner use on ordinary leaf/documentation PRs; full global/high-risk changes
 pay the extra parallel compute to keep feedback near six minutes.
 
-Protected-branch pushes and manual runs additionally retain the unsharded
-Solidity coverage ratchet. That post-merge safety net currently takes about
-25 minutes and is intentionally outside the PR feedback target. Safely
+Manual runs, the nightly included, additionally run the unsharded Solidity
+coverage ratchet. It takes about 40 minutes, so protected-branch pushes run
+the four Hardhat shards instead, which the trusted controller accepts for a
+push. Safely
 parallelizing it requires merging raw coverage counters and proving the merged
 result equals the full baseline; concatenating LCOV files would be incorrect.
 
