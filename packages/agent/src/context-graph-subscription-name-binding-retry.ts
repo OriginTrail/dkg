@@ -40,11 +40,9 @@ import {
   unavailableContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityDecision,
 } from './context-graph-read-authority.js';
-import {
-  contextGraphDormancyAfterAuthority,
-  type ContextGraphDormancyReason,
-} from './context-graph-subscription-dormancy.js';
-import type { ContextGraphSub, ContextGraphSubscriptionRecord } from './dkg-agent-types.js';
+import { runBoundedOperation, isBoundedOperationTimeoutError } from './bounded-operation.js';
+import { recoverUnavailableSubscriptionRow, type SubscriptionRecoveryOutcome, type SubscriptionRecoveryRowPorts } from './context-graph-subscription-recover-row.js';
+import type { ContextGraphSubscriptionRecord } from './dkg-agent-types.js';
 
 /** Pause after the first unanswered check, and the shortest a wake-up leaves. */
 export const NAME_BINDING_RETRY_FIRST_PAUSE_MS = 1_000;
@@ -64,37 +62,11 @@ export function isChainNameBindingUnavailable(
   return authority.outcome === 'unavailable' && authority.reason === 'chain-name-binding-unavailable';
 }
 
-export interface NameBindingRetryPorts {
+export interface NameBindingRetryPorts extends SubscriptionRecoveryRowPorts {
   /** Aborts when the node stops. */
   readonly signal: AbortSignal;
-  /** This node run still owns subscription state. */
-  isCurrent(): boolean;
-  dormancy(contextGraphId: string): ContextGraphDormancyReason | undefined;
-  revision(contextGraphId: string): number;
-  subscription(contextGraphId: string): ContextGraphSub | undefined;
-  load(contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null>;
-  resolveAuthority(
-    row: ContextGraphSubscriptionRecord,
-    signal: AbortSignal,
-  ): Promise<ContextGraphReadAuthorityDecision>;
-  /** Whether the activation cap has room for one more user row now. */
-  capHasRoom(): boolean;
-  /** No room under the cap: the row waits for rolling activation as `activationCap`. */
-  capped(contextGraphId: string): void;
-  /** Activate the row; `isCurrent` says whether this retry still owns it. */
-  activate(
-    row: ContextGraphSubscriptionRecord,
-    onChainId: string | undefined,
-    revision: number,
-    isCurrent: () => boolean,
-  ): Promise<void>;
-  /** Record the dormancy a final answer leaves the row in. */
-  retire(contextGraphId: string, reason: ContextGraphDormancyReason): void;
   track(run: Promise<unknown>): void;
-  readonly log: {
-    info(message: string): void;
-    warn(message: string): void;
-  };
+  readonly log: { info(message: string): void; warn(message: string): void };
 }
 
 export interface NameBindingRetryOptions {
@@ -121,29 +93,6 @@ interface HeldRow {
   last: string;
   /** Set while the row waits out a pause a wake-up may shorten. */
   cutPause?: () => void;
-}
-
-type AttemptOutcome =
-  | { kind: 'activated' }
-  /** Still unavailable, or the activation failed: ask again after the pause. */
-  | { kind: 'retry'; why: string; activationFailed?: true }
-  /** The row moved under the check: ask again without growing the pause. */
-  | { kind: 'again' }
-  | { kind: 'done' };
-
-function sameRow(
-  left: ContextGraphSubscriptionRecord,
-  right: ContextGraphSubscriptionRecord,
-): boolean {
-  return left.id === right.id
-    && left.onChainId === right.onChainId
-    && left.onChainHash === right.onChainHash
-    && left.subscribed === right.subscribed
-    && (left.coreHosted === true) === (right.coreHosted === true);
-}
-
-function hasIntent(row: ContextGraphSubscriptionRecord | null): row is ContextGraphSubscriptionRecord {
-  return row !== null && (row.subscribed || row.coreHosted === true);
 }
 
 /** The name-binding retries of one node run. */
@@ -259,10 +208,10 @@ export class PersistedSubscriptionNameBindingRetry {
         );
         return;
       }
-      if (!(await this.#acquire())) return;
-      let outcome: AttemptOutcome;
+      if (!(await this.#acquire(held))) return;
+      let outcome: SubscriptionRecoveryOutcome;
       try {
-        if (!this.#current() || ports.dormancy(id) !== 'authorityUnavailable') {
+        if (!this.#current() || this.#remaining(held) <= 0 || ports.dormancy(id) !== 'authorityUnavailable') {
           outcome = { kind: 'done' };
         } else {
           held.checks += 1;
@@ -303,7 +252,7 @@ export class PersistedSubscriptionNameBindingRetry {
     const pauseMs = held.checks === 0
       ? 0
       : Math.min(this.#maxPauseMs, this.#firstPauseMs * 2 ** Math.min(Math.max(0, held.unanswered - 1), 16));
-    let notBefore = held.lastCheckAt + pauseMs;
+    let notBefore = Math.min(held.lastCheckAt + pauseMs, held.since + this.#windowMs);
     // A check a wake-up brought forward is not followed by another one.
     let wakeable = !held.wokenCheck;
     held.wokenCheck = false;
@@ -331,24 +280,31 @@ export class PersistedSubscriptionNameBindingRetry {
     }
   }
 
-  /** Take a check slot; false when the node stops first. */
-  #acquire(): Promise<boolean> {
+  #remaining(held: HeldRow): number { return held.since + this.#windowMs - this.#now(); }
+
+  /** Take a check slot only within this row's remaining ownership window. */
+  #acquire(held: HeldRow): Promise<boolean> {
     const signal = this.#ports.signal;
-    if (signal.aborted) return Promise.resolve(false);
+    if (signal.aborted || this.#remaining(held) <= 0) return Promise.resolve(false);
     if (this.#checking < this.#maxConcurrent) {
       this.#checking += 1;
       return Promise.resolve(true);
     }
     return new Promise((resolve) => {
       const grant = (): void => {
+        clearTimeout(timer);
         signal.removeEventListener('abort', cancel);
         resolve(true);
       };
       const cancel = (): void => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', cancel);
         const index = this.#waiting.indexOf(grant);
         if (index >= 0) this.#waiting.splice(index, 1);
         resolve(false);
       };
+      const timer = setTimeout(cancel, this.#remaining(held));
+      timer.unref?.();
       this.#waiting.push(grant);
       signal.addEventListener('abort', cancel, { once: true });
     });
@@ -361,91 +317,29 @@ export class PersistedSubscriptionNameBindingRetry {
     else this.#checking -= 1;
   }
 
-  async #attempt(held: HeldRow): Promise<AttemptOutcome> {
-    const ports = this.#ports;
-    const id = held.contextGraphId;
-    const row = await ports.load(id);
-    if (!this.#current()) return { kind: 'done' };
-    // No saved intent any more: the owners that clear rows have it.
-    if (!hasIntent(row)) return { kind: 'done' };
-    const revision = ports.revision(id);
-    const authority = await this.#check(row);
-    if (!this.#current()) return { kind: 'done' };
-    if (authority === undefined) {
-      return { kind: 'retry', why: `no answer within ${this.#checkTimeoutMs} ms` };
-    }
-    // The answer belongs to the row as it was read; if it moved, decide again.
-    const fresh = await ports.load(id);
-    if (!this.#current() || ports.dormancy(id) !== 'authorityUnavailable') return { kind: 'done' };
-    if (!hasIntent(fresh)) return { kind: 'done' };
-    if (ports.revision(id) !== revision || !sameRow(row, fresh)) return { kind: 'again' };
-    const live = ports.subscription(id);
-    if (live?.subscribed === true || live?.coreHosted === true) return { kind: 'done' };
-    if (authority.outcome !== 'allowed') {
-      const next = contextGraphDormancyAfterAuthority(authority);
-      if (next === 'authorityUnavailable') {
-        return { kind: 'retry', why: `${authority.outcome} by ${authority.source} (${authority.reason})` };
-      }
-      ports.retire(id, next);
-      ports.log.info(
-        `Left persisted context-graph subscription "${id}" dormant: ` +
-        `${authority.outcome} by ${authority.source} (${authority.reason})`,
-      );
-      return { kind: 'done' };
-    }
-    if (fresh.coreHosted !== true && !ports.capHasRoom()) {
-      ports.capped(id);
-      ports.log.info(
-        `Persisted context-graph subscription "${id}" answered after its chain name binding could not be read, ` +
-        'but the activation cap is full; it waits for rolling activation',
-      );
-      return { kind: 'done' };
-    }
-    const isCurrent = (): boolean => this.#current() && this.#rows.get(id) === held;
-    try {
-      await ports.activate(fresh, authority.onChainId?.toString() ?? fresh.onChainId, revision, isCurrent);
-    } catch (error) {
-      if (!this.#current() || ports.dormancy(id) !== 'authorityUnavailable') return { kind: 'done' };
-      // Another owner may be activating the same row; the next check sees it.
-      return { kind: 'retry', why: error instanceof Error ? error.message : String(error), activationFailed: true };
-    }
-    return { kind: 'activated' };
+  async #attempt(held: HeldRow): Promise<SubscriptionRecoveryOutcome> {
+    return recoverUnavailableSubscriptionRow(held.contextGraphId, {
+      ...this.#ports,
+      isCurrent: () => this.#current() && this.#rows.get(held.contextGraphId) === held && this.#remaining(held) > 0,
+      resolveAuthority: row => this.#check(row, held),
+    }, this.#ports.signal);
   }
 
-  /**
-   * One read of the row's authority under the check's own deadline; undefined
-   * when the read gave no answer by then. A read that does not end at its
-   * signal is left behind: it cannot hold the check slot.
-   */
-  #check(row: ContextGraphSubscriptionRecord): Promise<ContextGraphReadAuthorityDecision | undefined> {
-    const deadline = new AbortController();
-    const timer = setTimeout(() => {
-      deadline.abort(new Error(`no answer within ${this.#checkTimeoutMs} ms`));
-    }, this.#checkTimeoutMs);
-    timer.unref?.();
-    const signal = AbortSignal.any([this.#ports.signal, deadline.signal]);
-    if (signal.aborted) {
-      clearTimeout(timer);
-      return Promise.resolve(undefined);
+  /** One canonical deadline owner consumes late results from non-cooperative reads. */
+  async #check(row: ContextGraphSubscriptionRecord, held: HeldRow): Promise<ContextGraphReadAuthorityDecision | undefined> {
+    const timeoutMs = Math.min(this.#checkTimeoutMs, this.#remaining(held));
+    if (timeoutMs <= 0 || this.#ports.signal.aborted) return undefined;
+    try {
+      return await runBoundedOperation(signal => this.#ports.resolveAuthority(row, signal), {
+        timeoutMs, signal: this.#ports.signal, label: 'Persisted subscription authority',
+      });
+    } catch (error) {
+      if (this.#ports.signal.aborted || isBoundedOperationTimeoutError(error)) return undefined;
+      return unavailableContextGraphReadAuthorityDecision('legacy-local', 'unexpected-authority-error',
+        contextGraphReadAuthorityDependencyOf(error));
     }
-    return new Promise<ContextGraphReadAuthorityDecision | undefined>((resolve) => {
-      const settle = (answer: ContextGraphReadAuthorityDecision | undefined): void => {
-        clearTimeout(timer);
-        signal.removeEventListener('abort', onAbort);
-        resolve(answer);
-      };
-      const onAbort = (): void => settle(undefined);
-      signal.addEventListener('abort', onAbort, { once: true });
-      this.#ports.resolveAuthority(row, signal).then(
-        (answer) => settle(signal.aborted ? undefined : answer),
-        (error: unknown) => settle(signal.aborted ? undefined : unavailableContextGraphReadAuthorityDecision(
-          'legacy-local',
-          'unexpected-authority-error',
-          contextGraphReadAuthorityDependencyOf(error),
-        )),
-      );
-    });
   }
+
 }
 
 const owners = new WeakMap<object, PersistedSubscriptionNameBindingRetry>();

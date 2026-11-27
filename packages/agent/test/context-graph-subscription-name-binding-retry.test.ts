@@ -5,6 +5,7 @@ import {
   isChainNameBindingUnavailable,
   type NameBindingRetryPorts,
 } from '../src/context-graph-subscription-name-binding-retry.js';
+import { SubscriptionActivationCapacityError } from '../src/context-graph-subscription-activation-capacity.js';
 import { recoverDeferredContextGraphSubscriptionAuthorities } from '../src/context-graph-subscription-authority-recovery.js';
 import type { ContextGraphDormancyReason } from '../src/context-graph-subscription-dormancy.js';
 import type { ContextGraphReadAuthorityDecision } from '../src/context-graph-read-authority.js';
@@ -85,12 +86,13 @@ function host(rows: ContextGraphSubscriptionRecord[], options: {
         inFlight -= 1;
       }
     },
-    capHasRoom: () => state.capHasRoom,
+    clear: id => { dormancy.delete(id); },
     capped: (id) => {
       dormancy.set(id, 'activationCap');
       capped.push(id);
     },
     activate: async (r, onChainId, revision, isCurrent) => {
+      if (r.coreHosted !== true && !state.capHasRoom) throw new SubscriptionActivationCapacityError();
       if (!isCurrent() || (revisions.get(r.id) ?? 0) !== revision) throw new Error('stale');
       subscriptions.set(r.id, { syncMode: 'always-on', subscribed: r.subscribed, synced: r.synced, onChainId });
       saved.set(r.id, { ...r, ...(onChainId === undefined ? {} : { onChainId }) });
@@ -312,6 +314,22 @@ describe('asking again for a row left dormant without its chain name binding', (
       ['a', 0], ['b', 0], ['a', 21_000], ['b', 21_000],
     ]);
     expect(h.activations.map((activation) => activation.id)).toEqual(['a', 'b']);
+  });
+
+  it('releases queued rows at their original window without starting late checks', async () => {
+    const h = host([row('a'), row('b'), row('c')], {
+      answers: { a: [() => new Promise(() => {})], b: [() => new Promise(() => {})] },
+    });
+    const retry = new PersistedSubscriptionNameBindingRetry(h.ports, {
+      checkTimeoutMs: CHECK_TIMEOUT_MS, windowMs: 50, maxConcurrent: 2,
+    });
+    retry.take(['a', 'b', 'c']);
+    await vi.advanceTimersByTimeAsync(50);
+    await retry.whenIdle();
+    expect(h.checks.map(check => check.id)).toEqual(['a', 'b']);
+    expect(retry.size).toBe(0);
+    expect(h.activations).toEqual([]);
+    expect([...h.dormancy.values()]).toEqual(['authorityUnavailable', 'authorityUnavailable', 'authorityUnavailable']);
   });
 
   it('records a denial and a graph the chain does not know as final', async () => {

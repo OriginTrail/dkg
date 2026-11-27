@@ -8885,7 +8885,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       && (this.contextGraphSubscriptionPersistRevisions.get(row.id) ?? 0) === revision
     );
     await this.activatePersistedContextGraphSubscriptionRecord(row, {
-      onChainId,
+      onChainId, respectActivationCap: true,
       updateRehydrationStatus: false,
       prepare: async (subscription, persistRepair) => {
         await this.reconcileRfc64CatalogResponsibilityV1(row.id);
@@ -8933,11 +8933,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           durableSubscriptionBinding: { contextGraphId: row.id, onChainId: row.onChainId, onChainHash: row.onChainHash },
         }),
       ),
-      capHasRoom: () => {
-        const status = this.contextGraphSubscriptionRehydrationStatus;
-        return status === null || status.activationCap <= 0
-          || Math.max(0, status.activated - status.hostedActivated) < status.activationCap;
-      },
+      clear: id => this.recordContextGraphSubscriptionClear([id]),
       capped: (id) => {
         this.transitionContextGraphSubscriptionDormancy(id, 'activationCap');
         this.requestContextGraphSubscriptionPromotion(id);
