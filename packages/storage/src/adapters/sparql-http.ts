@@ -111,11 +111,11 @@ import {
 } from '../rfc64-exact-bindings-read-capability.js';
 import { CANCEL_ON_ABORT, ABANDONED_READ_DRAIN_BUDGET_BYTES, raceCallerAbandon,
   snapshotManagedRecoveryCapability, normalizeManagedSparqlRecoveryV1, type SparqlHttpReadPolicy,
-  type SparqlHttpManagedRecoveryV1, SparqlHttpLogicalMutationScopeV1, runSparqlHttpCountedDeleteV1 } from './managed-sparql-recovery.js';
+  type SparqlHttpManagedRecoveryV1, SparqlHttpLogicalMutationScopeV1, runSparqlHttpCountedDeleteV1, errorAfterManagedQueryRecovery } from './managed-sparql-recovery.js';
 export { ABANDONED_READ_DRAIN_BUDGET_BYTES } from './managed-sparql-recovery.js';
 export type { SparqlHttpRecoveryState, SparqlHttpManagedRecoveryV1 } from './managed-sparql-recovery.js';
 import { ManagedWorkRecoveryCoordinatorV1 } from '../managed-work-recovery-coordinator.js';
-import { boundByWorkDeadline, errorAfterManagedQueryRecovery } from '../query-work-stop.js';
+import { boundByWorkDeadline } from '../query-work-stop.js';
 import { runSparqlHttpAuthorCommitV1 } from './sparql-http-author-commit.js';
 
 /** Every SPARQL statement this adapter builds by interpolation. */

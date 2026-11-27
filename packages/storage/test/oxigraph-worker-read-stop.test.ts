@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Worker } from 'node:worker_threads';
 import { OxigraphWorkerStore, type Quad } from '../src/index.js';
+import { raceStoreWorkAgainstAbort } from '../src/abortable-store-work-lifecycle.js';
+import { createOxigraphWorkerTimeoutError } from '../src/adapters/oxigraph-worker-timeout.js';
 import { WorkerAdmission, runStoppableRead, type StoppableReadHost } from '../src/adapters/oxigraph-worker-admission.js';
 
 // A time-limited read on the embedded worker store must stop the WORK, not only
@@ -307,11 +309,8 @@ describe('stoppable read cancellation during its persistence barrier', () => {
     const replaceWorker = vi.fn(async () => true);
     const methods: string[] = [];
     const host: StoppableReadHost = { admission, operationTimeoutMs: 0, replaceWorker,
-      async post<T>(method: string): Promise<T> {
-        methods.push(method); began();
-        await barrier; return undefined as T;
-      } };
-    const read = runStoppableRead(host, 'query', ['SELECT * WHERE {}'], {
+      async persist() { methods.push('persistBarrier'); began(); await barrier; } };
+    const read = runStoppableRead(host, async () => { methods.push('query'); }, {
       signal: controller.signal, workDeadline: performance.now() + (end === 'deadline' ? 30 : 10_000),
     });
     const outcome = expect(read).rejects.toMatchObject({ code: 'QUERY_WORK_STOPPED', outcome: 'not_started' });
@@ -326,5 +325,37 @@ describe('stoppable read cancellation during its persistence barrier', () => {
     finish(); (await queued).done();
     expect(admitted).toBe(true); expect(methods).toEqual(['persistBarrier']);
     expect(replaceWorker).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('one operation deadline across worker admission, persistence and execution', () => {
+  it('rejects at 200 ms when each individual phase fits but their combined time does not', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    try {
+      const admission = new WorkerAdmission();
+      const earlier = admission.tryEnter()!;
+      const replaceWorker = vi.fn(async () => true);
+      const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+      const host: StoppableReadHost = { admission, operationTimeoutMs: 200, replaceWorker,
+        persist: () => delay(80) };
+      let beganRead = false;
+      const running = runStoppableRead(host, (timeoutMs, signal) => {
+        beganRead = true;
+        return raceStoreWorkAgainstAbort(delay(120), signal, { timeout: {
+          timeoutMs, timeoutError: () => createOxigraphWorkerTimeoutError('query', timeoutMs),
+        } });
+      }, { workDeadline: performance.now() + 5_000 });
+      const outcome = expect(running).rejects.toMatchObject({ code: 'QUERY_WORK_STOPPED', outcome: 'stopped' });
+      await vi.advanceTimersByTimeAsync(80);
+      earlier.done();
+      await vi.advanceTimersByTimeAsync(119);
+      expect(beganRead).toBe(true);
+      expect(replaceWorker).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await outcome;
+      expect(replaceWorker).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(120);
+    } finally { vi.useRealTimers(); }
   });
 });

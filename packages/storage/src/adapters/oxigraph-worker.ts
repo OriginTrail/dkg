@@ -784,7 +784,8 @@ export class OxigraphWorkerStore implements TripleStore, ReadGraphCapableAdapter
     // Replacing the worker is a safe stop only for a writable store on disk: an
     // in-memory one would lose its data, a read-only one could load a newer file.
     if (options?.workDeadline !== undefined && this.persistPath !== undefined && !this.readOnly) {
-      return runStoppableRead<QueryResult>(this.stoppableReadHost(), 'query', args, options);
+      return runStoppableRead(this.stoppableReadHost(), (timeoutMs, signal) =>
+        this.callAfterRespawn<QueryResult>(timeoutMs, timeoutMs > 0 ? performance.now() + timeoutMs : undefined, signal, 'query', args), options);
     }
     return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', ...args);
   }
@@ -793,8 +794,7 @@ export class OxigraphWorkerStore implements TripleStore, ReadGraphCapableAdapter
     return {
       admission: this.admission,
       operationTimeoutMs: this.operationTimeoutMs,
-      post: <T>(method: string, args: unknown[], timeoutMs: number, signal: AbortSignal | undefined) =>
-        this.callAfterRespawn<T>(timeoutMs, timeoutMs > 0 ? performance.now() + timeoutMs : undefined, signal, method, args),
+      persist: () => this.callAfterRespawn<void>(0, undefined, undefined, 'persistBarrier', []),
       replaceWorker: async () => {
         if (this.lifecycle !== 'live' || this.workerExited || this.respawnPromise) return false;
         this.stoppedWorker = this.worker;

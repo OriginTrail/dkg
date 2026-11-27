@@ -116,8 +116,8 @@ export interface StoppableReadHost {
   readonly admission: WorkerAdmission;
   /** The store's own read bound in ms (0 = none). */
   readonly operationTimeoutMs: number;
-  /** Post without admission, after any crash replacement in progress: only the owner calls it. */
-  post<T>(method: string, args: unknown[], timeoutMs: number, signal: AbortSignal | undefined): Promise<T>;
+  /** Complete the durability barrier without a caller deadline interrupting it. */
+  persist(): Promise<void>;
   /** End the worker to stop the read it runs; false when the store must keep it (closing). */
   replaceWorker(): Promise<boolean>;
 }
@@ -127,15 +127,18 @@ const BACKEND = 'oxigraph-worker';
 /** Run one read alone in the worker, and replace the worker if its limit ends it. */
 export async function runStoppableRead<T>(
   host: StoppableReadHost,
-  method: string,
-  args: unknown[],
+  read: (timeoutMs: number, signal: AbortSignal | undefined) => Promise<T>,
   options: { readonly signal?: AbortSignal; readonly workDeadline?: number },
 ): Promise<T> {
   const { signal } = options;
-  const boundMs = (): number => boundByWorkDeadline(host.operationTimeoutMs, options.workDeadline);
-  const timeoutError = () => createOxigraphWorkerTimeoutError(method, boundMs());
+  const operationDeadline = host.operationTimeoutMs > 0 ? performance.now() + host.operationTimeoutMs : Infinity;
+  const deadline = Math.min(operationDeadline, Number.isFinite(options.workDeadline) ? options.workDeadline! : Infinity);
+  const boundMs = (): number => boundByWorkDeadline(0, deadline);
+  const timeoutError = () => createOxigraphWorkerTimeoutError('query', boundMs());
+  const checkDeadline = () => { if (performance.now() >= deadline) throw timeoutError(); };
   let lease: WorkerAdmissionTicket;
   try {
+    checkDeadline();
     lease = await host.admission.own(signal, boundMs(), timeoutError);
   } catch (cause) {
     throw new QueryWorkStoppedError(BACKEND, 'not_started', cause);
@@ -147,15 +150,16 @@ export async function runStoppableRead<T>(
     let stoppable = true;
     // A write that cannot be made durable must not be lost to a stop: such a
     // read still runs, but only its wait ends at the limit.
-    const barrier = host.post<void>('persistBarrier', [], 0, undefined).catch(() => { stoppable = false; });
+    const barrier = host.persist().catch(() => { stoppable = false; });
     try {
       await raceStoreWorkAgainstAbort(barrier, signal, { timeout: { timeoutMs: boundMs(), timeoutError } });
+      checkDeadline();
     } catch (cause) {
       releaseAfter = barrier;
       throw new QueryWorkStoppedError(BACKEND, 'not_started', cause);
     }
     try {
-      return await host.post<T>(method, args, boundMs(), signal);
+      return await read(boundMs(), signal);
     } catch (error) {
       const ended = signal?.aborted === true
         || (error as { code?: unknown } | null)?.code === 'OXIGRAPH_WORKER_OP_TIMEOUT';
