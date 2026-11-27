@@ -333,6 +333,10 @@ describe('design check', () => {
     expect(kinds('900 var(--fs-control)/1.9 var(--font-sans)')).toEqual(['weight 900', 'line height 1.9']);
     expect(kinds('600 var(--fs-control)/var(--lh-body) var(--font-sans)')).toEqual([]);
     expect(kinds('500 var(--fs-micro) var(--font-mono)')).toEqual([]);
+    // A px line height isn't the size: swapping the size for its token leaves nothing to flag.
+    expect(kinds('500 13px/20px var(--font-sans)')).toEqual(['type size 13px']);
+    expect(kinds('500 var(--fs-control)/20px var(--font-sans)')).toEqual([]);
+    expect(kinds('500 15px/20px var(--font-sans)')).toEqual(['type size 15px']);
     expect(kinds('italic 300 13px/1 sans-serif')).toEqual(['type size 13px', 'weight 300']);
     expect(kinds('inherit')).toEqual([]);
   });
@@ -515,6 +519,14 @@ describe('design check', () => {
 
   // --changed against a git repository of its own: a tracked stylesheet with a value off
   // the system on an old line and on a new one, and an untracked stylesheet.
+  it('reports CSS it cannot read when any line of it changed, wherever the parser points', () => {
+    // The closing brace replaced by a new line: PostCSS reports the unclosed block on line 1.
+    const css = '.a {\n  gap: var(--space-8);\n  padding: 10px;\n';
+    const kinds = (keep: (line: number) => boolean) => checkText(system, css, 'x.css', { keepLine: keep }).map((f: { line: number; kind: string }) => `${f.line} ${f.kind}`);
+    expect(kinds((l) => l === 3)).toEqual(['1 css']);
+    expect(kinds(() => false)).toEqual([]);
+  });
+
   it('checks only added lines and untracked files with --changed', () => {
     const repo = mkdtempSync(join(tmpdir(), 'design-check-git-'));
     try {

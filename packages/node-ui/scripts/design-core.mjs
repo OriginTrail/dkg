@@ -435,9 +435,14 @@ export function checkText(system, text, file, { known, mockup = false, keepLine 
     decls = declarations(text, ext);
   } catch (error) {
     if (!(error instanceof CssReadError)) throw error;
-    // CSS the parser can't read can't be checked: say where, so it gets fixed first.
+    // CSS the parser can't read can't be checked: say where, so it gets fixed first. The
+    // parser may point at an unchanged line (an unclosed block is reported where it opens),
+    // so with --changed any edit to the file reports it.
     const line = lineIndex(text)(error.index);
-    return keepLine(line) ? [{ line, kind: 'css', value: error.reason, use: `${error.message}. Fix it so the design can be checked`, offScale: true }] : [];
+    const lines = text.split('\n').length;
+    let edited = false;
+    for (let l = 1; l <= lines && !edited; l++) edited = keepLine(l);
+    return edited ? [{ line, kind: 'css', value: error.reason, use: `${error.message}. Fix it so the design can be checked`, offScale: true }] : [];
   }
   // A mock-up's own variables (`--gap: 10px`) are checked where they're used, against the
   // scale of the property that uses them: `gap: var(--gap)` is a gap of 10px. Every

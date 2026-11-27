@@ -204,22 +204,27 @@ export function classify(prop, value, nodes) {
     for (const n of px()) if (n > 1) out.push({ kind: 'spacing', value: `${n}px`, n, up: p.startsWith('padding') });
     // Negative margins pull back by a known amount in any unit, as in px.
     for (const w of others()) if (parseFloat(w) > 0) out.push({ kind: 'spacing', value: w, unit: true });
-  } else if (p === 'font-size' || p === 'font') {
-    for (const n of p === 'font' ? px().slice(0, 1) : px()) out.push({ kind: 'type size', value: `${n}px`, n });
+  } else if (p === 'font') {
+    // The shorthand is `[style] [weight] size[/line-height] family`. The size is the term just
+    // before the "/", or with no "/" the first length or function (`var(--fs-*)`, `calc()`).
+    // Only that term is a type size: a px line height after the "/" is not one.
+    const slash = tree.findIndex((n) => n.type === 'div' && n.value === '/');
+    const before = (slash === -1 ? tree : tree.slice(0, slash)).filter((n) => n.type !== 'space');
+    const size = slash === -1
+      ? before.find((n) => n.type === 'function' || (n.type === 'word' && /^-?\d*\.?\d+[a-z%]+$/i.test(n.value)))
+      : before[before.length - 1];
+    if (size && size.type === 'word') out.push(...classify('font-size', size.value));
+    // The weight (a number before the size) and line height (after the "/") follow the
+    // same rules as font-weight and line-height.
+    const weight = before.find((n) => n !== size && n.type === 'word' && /^\d+$/.test(n.value));
+    if (weight) out.push(...classify('font-weight', weight.value));
+    const lineHeight = slash === -1 ? undefined : tree.slice(slash + 1).find((n) => n.type !== 'space');
+    if (lineHeight && lineHeight.type === 'word') out.push(...classify('line-height', lineHeight.value));
+  } else if (p === 'font-size') {
+    for (const n of px()) out.push({ kind: 'type size', value: `${n}px`, n });
     // 1em is the parent's own size; anything else relative or in another unit can't be checked.
-    // In a `font` shorthand, only the size counts (the first length), not a weight or line height.
-    const lengths = words.filter((w) => /^-?\d*\.?\d+[a-z%]+$/i.test(w));
-    for (const w of p === 'font' ? lengths.slice(0, 1) : lengths) {
+    for (const w of words.filter((x) => /^-?\d*\.?\d+[a-z%]+$/i.test(x))) {
       if ((OTHER_LENGTH.test(w) || w.endsWith('%')) && parseFloat(w) !== 0 && w.toLowerCase() !== '1em') out.push({ kind: 'type size', value: w, unit: true });
-    }
-    if (p === 'font') {
-      // The shorthand's weight (a number before the size) and line height (after the "/")
-      // follow the same rules as font-weight and line-height.
-      const slash = tree.findIndex((n) => n.type === 'div' && n.value === '/');
-      const weight = (slash === -1 ? tree : tree.slice(0, slash)).find((n) => n.type === 'word' && /^\d+$/.test(n.value));
-      if (weight) out.push(...classify('font-weight', weight.value));
-      const lineHeight = slash === -1 ? undefined : tree.slice(slash + 1).find((n) => n.type !== 'space');
-      if (lineHeight && lineHeight.type === 'word') out.push(...classify('line-height', lineHeight.value));
     }
   } else if (p === 'font-weight') {
     if (/^\d+$/.test(v) && !WEIGHTS.includes(v)) out.push({ kind: 'weight', value: v });
