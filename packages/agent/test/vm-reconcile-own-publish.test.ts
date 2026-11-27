@@ -18,7 +18,7 @@ import { DKGEvent, createGraphKnowledgeAssetScope, createOperationContext, type 
 import { ethers } from 'ethers';
 import { wrapPublisherForTest, mockSealCtx } from '../../publisher/test/_helpers/seal.js';
 import { mockChainStubACKProvider } from '../../publisher/test/_helpers/acks.js';
-import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
+import { computeFlatKCRootV10, parseSimpleNQuads } from '@origintrail-official/dkg-publisher';
 import { packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
 import { knowledgeAssetSharedMemoryGraph, knowledgeAssetVerifiedMemoryGraph, stageKnowledgeAssetInSharedMemory } from './_helpers/staged-knowledge-asset.js';
 import { DKGAgent } from '../src/index.js';
@@ -86,8 +86,10 @@ describe('reconcileContextGraph — what a pass wrote', () => {
 
 describe('VM reconcile after this node\'s own publish', () => {
   let agent: DKGAgent | null = null;
+  const ackPeers: DKGAgent[] = [];
   afterEach(async () => {
     if (agent) { await agent.stop().catch(() => undefined); agent = null; }
+    for (const peer of ackPeers.splice(0)) await peer.stop().catch(() => undefined);
     vi.restoreAllMocks();
   });
 
@@ -226,6 +228,7 @@ describe('VM reconcile after this node\'s own publish', () => {
     const saveCursor = vi.fn(async () => undefined);
     agent = await DKGAgent.create({ name: 'OwnFailedVmWrite', listenHost: '127.0.0.1', chainAdapter: chain,
       syncContextGraphs: [selected], rfc64CatalogActivation: { enabled: false }, syncReconcilerEnabled: true,
+      syncOnConnectEnabled: false,
       selectedVmReconcileCursorStore: { loadSelectedVmReconcileCursor: async () => null, saveSelectedVmReconcileCursor: saveCursor },
     });
     const internal = agent as any;
@@ -250,9 +253,33 @@ describe('VM reconcile after this node\'s own publish', () => {
       }
       return insert(quads, options);
     });
+    const ackPeer = await DKGAgent.create({ name: 'OwnFailedVmWriteAckPeer', listenHost: '127.0.0.1',
+      listenPort: 0, chainAdapter: chain, syncContextGraphs: [selected],
+      rfc64CatalogActivation: { enabled: false }, syncReconcilerEnabled: false, syncOnConnectEnabled: false,
+    });
+    ackPeers.push(ackPeer);
+    const peerInternal = ackPeer as any;
+    peerInternal.config.rfc64PublicCatalogBootstrap = internal.config.rfc64PublicCatalogBootstrap;
+    await ackPeer.start();
+    clearTimeout(peerInternal.vmReconcileStartupTimer); clearInterval(peerInternal.vmReconcileTimer);
+    peerInternal.vmReconcileStartupTimer = null; peerInternal.vmReconcileTimer = null;
+    peerInternal.subscribedContextGraphs.set(selected, { subscribed: true, onChainId: '1217' });
+    const stubAck = mockChainStubACKProvider();
     const publisher = wrapPublisherForTest(internal.publisher, { author: wallet,
       ctx: mockSealCtx({ chainId: await chain.getEvmChainId(), kav10Address: await chain.getKnowledgeAssetsLifecycleAddress() }),
-      v10ACKProvider: mockChainStubACKProvider(),
+      v10ACKProvider: async params => {
+        // The ACK peer retains exactly the publish's staging payload, before
+        // confirmation. Never manufacture a replacement copy on the publisher.
+        expect(events).toHaveLength(0);
+        expect(params.stagingQuads).toBeDefined();
+        await stageKnowledgeAssetInSharedMemory({ store: peerInternal.store, contextGraphId: selected,
+          scope: createGraphKnowledgeAssetScope(
+            buildKnowledgeAssetUal(chain.chainId, wallet.address, BigInt(params.assetUal!.split('/').at(-1)!) & ((1n << 96n) - 1n)), '1'),
+          triples: parseSimpleNQuads(new TextDecoder().decode(params.stagingQuads)),
+          shareOperationId: 'failed-own-publish-ack', publisherPeerId: agent!.peerId,
+        });
+        return (await stubAck(params)).map(ack => ({ ...ack, peerId: ackPeer.peerId }));
+      },
     });
     const triple = { subject: 'urn:own-failed:asset', predicate: 'http://schema.org/name', object: '"recover me"' };
     await expect(publisher.publish({ contextGraphId: selected, onChainContextGraphId: 1217n,
@@ -267,9 +294,18 @@ describe('VM reconcile after this node\'s own publish', () => {
     await internal.handleKARegisteredNudge('1217', kaId, createOperationContext('system'));
     await internal.vmReconcileScheduling.waitForIdle();
     expect(execute).not.toHaveBeenCalled();
-    // The shared assertion is available to the periodic materializer, as from a successful share.
-    await stageKnowledgeAssetInSharedMemory({ store, contextGraphId: selected, scope, triples: [triple], shareOperationId: 'failed-own-publish-share' });
+    // A core promotes its retained ACK payload using the confirmed chain record.
+    await expect(ackPeer.reconcileChainOrdinal(selected, 1217n, 0, head.block))
+      .resolves.toMatchObject({ status: 'reconciled' });
+    await agent.connectTo(ackPeer.multiaddrs[0]!);
+    expect(await internal.waitForSyncProtocol({ toString: () => ackPeer.peerId })).toBe(true);
+    internal.preferredSyncPeers.set(selected, ackPeer.peerId);
+    const recover = vi.spyOn(agent, 'syncExactKnowledgeAssetsFromPeerDetailed');
     await agent.runVmReconcileSweep();
+    expect(recover).toHaveBeenCalledWith(ackPeer.peerId, selected, [scope.ual], expect.any(Object));
+    const recovered = await recover.mock.results[0]!.value;
+    expect(recovered.disposition).toBe('found');
+    expect(recovered.result.fetchedDataTriples).toBeGreaterThan(0);
     await expect(hasCopy()).resolves.toMatchObject({ type: 'boolean', value: true });
     expect(execute).toHaveBeenCalled();
     head.block = 106;
