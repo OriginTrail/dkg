@@ -1,3 +1,4 @@
+import { NODE_STATUS_POLL_MS } from './lib/nodeStatusPolicy.js';
 import { randomUUID } from './lib/randomUUID.js';
 import { executeQuery, invalidateQueryCache, fetchContextGraphs } from './query-api.js';
 export * from './query-api.js';
@@ -94,7 +95,26 @@ export class LocalAgentApiError extends Error {
 }
 
 // --- Status ---
-export const fetchStatus = () => get<any>('/api/status');
+/** The fields of `/api/status` the UI reads. Every field is optional: older nodes omit some. */
+export interface NodeStatus {
+  name?: string;
+  peerId?: string;
+  nodeRole?: string;
+  networkId?: string | number;
+  networkName?: string;
+  storeBackend?: string;
+  /** Unique remote peers; older nodes report `peerCount` instead. */
+  connectedPeers?: number;
+  peerCount?: number;
+  /** libp2p connections: one peer can hold both a direct and a relayed link. */
+  connections?: { direct?: number; relayed?: number };
+  uptimeMs?: number;
+  blockExplorerUrl?: string | null;
+  hasIdentity?: boolean;
+  identityId?: string;
+}
+
+export const fetchStatus = () => getWithTimeout<NodeStatus>('/api/status', NODE_STATUS_POLL_MS);
 
 // --- DKG-native semantic runtime ---
 export interface SemanticToolResolution {
@@ -961,12 +981,12 @@ export interface AtomicShareResult {
 function normalizeAtomicShareOptions(raw: AtomicShareOptions): AtomicShareOptions {
   const opts = raw as LegacyAtomicShareOptions;
   if (Array.isArray(opts.entities)) {
-    throw Object.assign(new Error('Knowledge Assets are shared atomically; root-entity selection is not supported'), {
+    throw Object.assign(new Error('A Knowledge Asset is shared whole, so you can’t share only some of its entities.'), {
       code: 'KA_ATOMIC_SHARE_REQUIRED',
     });
   }
   if (opts.entities !== undefined && opts.entities !== 'all') {
-    throw Object.assign(new Error('Knowledge Assets are shared atomically; omit entities to share the complete asset'), {
+    throw Object.assign(new Error('A Knowledge Asset is shared whole. Clear the entity selection to share it.'), {
       code: 'KA_ATOMIC_SHARE_REQUIRED',
     });
   }
@@ -1208,12 +1228,12 @@ export const promoteAssertion = (
   legacySubGraphName?: string,
 ) => {
   if (Array.isArray(optionsOrLegacyEntities)) {
-    throw Object.assign(new Error('Knowledge Assets are shared atomically; root-entity selection is not supported'), {
+    throw Object.assign(new Error('A Knowledge Asset is shared whole, so you can’t share only some of its entities.'), {
       code: 'KA_ATOMIC_SHARE_REQUIRED',
     });
   }
   if (typeof optionsOrLegacyEntities === 'string' && optionsOrLegacyEntities !== 'all') {
-    throw Object.assign(new Error('Knowledge Assets are shared atomically; omit entities to share the complete asset'), {
+    throw Object.assign(new Error('A Knowledge Asset is shared whole. Clear the entity selection to share it.'), {
       code: 'KA_ATOMIC_SHARE_REQUIRED',
     });
   }
@@ -1282,7 +1302,7 @@ export function describePromoteError(
         kind: 'payload-too-large',
         actualBytes: typeof body.actualBytes === 'number' ? body.actualBytes : undefined,
         limitBytes: typeof body.limitBytes === 'number' ? body.limitBytes : undefined,
-        message: `${assertionName} is too large to share atomically. Split its content into smaller Knowledge Assets before sharing.`,
+        message: `${assertionName} is too large to share in one go. Split its content into smaller Knowledge Assets before sharing.`,
       };
     }
   }
@@ -2561,11 +2581,11 @@ async function mapLocalAgentIntegrationRecord(
   let detail: string;
   if (persistentChat && degraded) {
     status = 'degraded';
-    statusLabel = 'Degraded';
+    statusLabel = 'Partial';
     detail = hermesRuntimeDetail
       ?? health?.error
       ?? record.runtime?.lastError
-      ?? `${record.name} is attached to this node, but one capability is degraded.`;
+      ?? 'One capability is unavailable.';
   } else if (persistentChat && record.runtime?.status === 'connecting') {
     status = 'connecting';
     statusLabel = 'Connecting';
@@ -2573,7 +2593,7 @@ async function mapLocalAgentIntegrationRecord(
       ?? `${record.name} is registered and still starting up.`;
   } else if (bridgeOnline) {
     status = 'chat_ready';
-    statusLabel = primeTurnDetached ? 'Still working' : health?.busy ? 'Working' : 'Chat ready';
+    statusLabel = primeTurnDetached ? 'Still working' : health?.busy ? 'Working' : 'Ready';
     detail = primeTurnDetached
       ? `${record.name} is still working after the browser stream disconnected. Wait for it to finish before sending another message.`
       : health?.busy
@@ -2606,7 +2626,7 @@ async function mapLocalAgentIntegrationRecord(
     : status === 'connecting'
       ? 'Connecting'
       : status === 'degraded'
-        ? 'Degraded'
+        ? 'Partial'
       : persistentChat
         ? 'Unavailable'
         : connectSupported

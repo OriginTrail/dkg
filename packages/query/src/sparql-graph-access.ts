@@ -1,7 +1,12 @@
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import type { VariableAllocator } from './sparql-rewrite-names.js';
 
-export type GraphAccessMode = 'values' | 'dataset';
+/**
+ * values: the graphs are listed in the query. dataset: the query's dataset selects them,
+ * with a conditional read for repeated paths. named: the query's FROM NAMED holds exactly
+ * the read's graphs, so a graph variable ranges over them and no list is written.
+ */
+export type GraphAccessMode = 'values' | 'dataset' | 'named';
 
 interface FilterBindings {
   readonly pattern: string;
@@ -19,8 +24,10 @@ export interface GraphAccess {
 export function createGraphAccess(mode: GraphAccessMode, graphs: readonly string[], allocate: VariableAllocator): GraphAccess {
   const values = graphs.map(graph => `<${assertSafeIri(graph)}>`).join(' ');
   const viewGraph = allocate('__dkgViewGraph');
-  if (mode === 'values') {
-    const candidate = (inner: string, graph: string) => `VALUES ${graph} { ${values} } GRAPH ${graph} { ${inner} }`;
+  if (mode === 'values' || mode === 'named') {
+    const candidate = mode === 'named'
+      ? (inner: string, graph: string) => `GRAPH ${graph} { ${inner} }`
+      : (inner: string, graph: string) => `VALUES ${graph} { ${values} } GRAPH ${graph} { ${inner} }`;
     return {
       candidate,
       replay: (inner, graph, _variables, bindings) => `OPTIONAL { GRAPH ${graph} { ${inner} ${bindings.pattern} } }`,

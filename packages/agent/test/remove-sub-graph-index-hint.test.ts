@@ -62,6 +62,7 @@ describe('removeSubGraph graph-set maintenance', () => {
     expect(updateCalls[0].options).toEqual({
       source: 'agent.cg.removeSubGraph.registration',
       touchedGraphs: ['did:dkg:context-graph:review-cg/_meta'],
+      writtenGraphs: ['did:dkg:context-graph:review-cg/_meta'],
     });
   });
 

@@ -425,8 +425,13 @@ class DKGClient:
         verified_graph: Optional[str] = None,
         graph_suffix: Optional[str] = None,
         min_trust: Optional[Any] = None,
+        semantics: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """POST /api/query — run SPARQL on local triple store."""
+        """POST /api/query — run SPARQL on local triple store.
+
+        ``semantics`` ("merged" or "per-asset") sets how a view query matches its
+        patterns; the response states the semantics it was answered with.
+        """
         payload: Dict[str, Any] = {"sparql": sparql}
         if context_graph_id:
             payload["contextGraphId"] = _normalize_context_graph_id(context_graph_id)
@@ -434,6 +439,8 @@ class DKGClient:
             payload["graphSuffix"] = graph_suffix
         if view:
             payload["view"] = view
+        if semantics:
+            payload["semantics"] = semantics
         if assertion_name:
             payload["assertionName"] = assertion_name
         if agent_address:

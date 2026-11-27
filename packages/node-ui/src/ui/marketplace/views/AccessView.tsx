@@ -3,12 +3,13 @@
 // its rate, expiry and last use, and which service its calls mostly went to.
 // Minting shows the secret once; revoking stops the key at its next call.
 // Keys are the node admin's alone.
+import { Badge } from '../../components/ds/Badge.js';
 import React, { useMemo, useState } from 'react';
 import { copy } from '../copy.generated.js';
 import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi, needsNodeAdmin } from '../api/client.js';
 import type { Key, MadeKey } from '../api/types.js';
 import { fmtTrac, modelName, pctOf, usdOf, weiOfTrac } from '../amounts.js';
-import { AdminCard, ErrorCard, OffCard, relAt, useLoad } from '../shared.js';
+import { AdminCard, ErrorCard, MarketplacePage, OffCard, relAt, useLoad } from '../shared.js';
 import { KeyOnce } from '../purchase/KeyStep.js';
 
 type Expiry = 'never' | '7' | '30' | '90';
@@ -64,17 +65,17 @@ export function AccessView(): React.ReactElement {
     marketplaceApi.revokeKey(keyId).then(() => keys.reload()).catch((err: unknown) => setRevokeErr({ keyId, err })).finally(() => setBusy(null));
   };
 
-  if (isMarketplaceOff(keys.err)) return <div className="mkt-frame" data-testid="mkt-access" data-state="off"><OffCard /></div>;
-  if (isMarketplaceAbsent(keys.err)) return <div className="mkt-frame" data-testid="mkt-access" data-state="absent"><OffCard absent /></div>;
-  if (needsNodeAdmin(keys.err)) return <div className="mkt-frame" data-testid="mkt-access" data-state="admin"><AdminCard what="admin.access" /></div>;
+  if (isMarketplaceOff(keys.err)) return <MarketplacePage page="access" state="off"><OffCard /></MarketplacePage>;
+  if (isMarketplaceAbsent(keys.err)) return <MarketplacePage page="access" state="absent"><OffCard absent /></MarketplacePage>;
+  if (needsNodeAdmin(keys.err)) return <MarketplacePage page="access" state="admin"><AdminCard what="admin.access" /></MarketplacePage>;
   if (keys.err && !keys.data) {
     return (
-      <div className="mkt-frame" data-testid="mkt-access" data-state="error">
-        <div className="mkt-card"><div data-copy="empty.error">{copy('empty.error')}</div><ErrorCard err={keys.err} onRetry={keys.reload} /></div>
-      </div>
+      <MarketplacePage page="access" state="error">
+        <div className="ds-card mkt-card"><div data-copy="empty.error">{copy('empty.error')}</div><ErrorCard err={keys.err} onRetry={keys.reload} /></div>
+      </MarketplacePage>
     );
   }
-  if (!keys.data) return <div className="mkt-frame" data-testid="mkt-access" data-state="loading"><div className="mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></div>;
+  if (!keys.data) return <MarketplacePage page="access" state="loading"><div className="ds-card mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></MarketplacePage>;
 
   const scopeOf = (k: Key) => [
     k.services ? copy('access.scope.models', { n: k.services.length }) : copy('access.models.all'),
@@ -84,24 +85,23 @@ export function AccessView(): React.ReactElement {
   ].join(' · ');
 
   return (
-    <div className="mkt-frame" data-testid="mkt-access" data-state="ok">
-      <div className="mkt-card">
+    <MarketplacePage page="access" state="ok">
+      <div className="ds-card mkt-card">
         <div className="mkt-planhead">
-          <h1 data-copy="access.title">{copy('access.title')}</h1>
-          <button type="button" className="mkt-btn mkt-btn--primary" data-testid="mkt-mint-open" data-copy="access.mint" aria-expanded={formOpen} onClick={() => setFormOpen((o) => !o)}>{copy('access.mint')}</button>
+          <button type="button" className="ds-btn" data-testid="mkt-mint-open" data-copy="access.mint" aria-expanded={formOpen} onClick={() => setFormOpen((o) => !o)}>{copy('access.mint')}</button>
         </div>
         {keys.err ? <ErrorCard err={keys.err} onRetry={keys.reload} /> : null}
         {funded.length === 0 && subs.data && <div className="mkt-muted mkt-xs" data-copy="access.nomodels">{copy('access.nomodels')}</div>}
 
         {formOpen && (
-          <div className="mkt-card mkt-form" data-testid="mkt-mint-form">
+          <div className="ds-card mkt-card mkt-form" data-testid="mkt-mint-form">
             <h2 data-copy="key.mint.title">{copy('key.mint.title')}</h2>
-            <label className="mkt-field"><span data-copy="access.label">{copy('access.label')}</span><input className="mkt-input" data-testid="mkt-mint-label" value={label} onChange={(e) => setLabel(e.target.value)} /></label>
+            <label className="mkt-field"><span data-copy="access.label">{copy('access.label')}</span><input className="ds-input mkt-input" data-testid="mkt-mint-label" value={label} onChange={(e) => setLabel(e.target.value)} /></label>
             <label className="mkt-field"><span data-copy="access.budget">{copy('access.budget')}</span>
-              <span><input className="mkt-input mkt-mono" data-testid="mkt-mint-budget" inputMode="decimal" value={budget} onChange={(e) => setBudget(e.target.value)} />{' '}<span data-copy="composer.budget.trac">{copy('composer.budget.trac')}</span>
+              <span><input className="ds-input mkt-input mkt-mono" data-testid="mkt-mint-budget" inputMode="decimal" value={budget} onChange={(e) => setBudget(e.target.value)} />{' '}<span data-copy="composer.budget.trac">{copy('composer.budget.trac')}</span>
                 {' '}<span className="mkt-muted mkt-xs" data-copy="catalog.fx.reference.short">{wei && cat.data?.fx.tracUsd != null ? `${usdOf(wei, cat.data.fx.tracUsd)} · ${copy('catalog.fx.reference.short')}` : ''}</span></span></label>
             <label className="mkt-field"><span data-copy="access.expiry">{copy('access.expiry')}</span>
-              <select className="mkt-input" data-testid="mkt-mint-expiry" value={expiry} onChange={(e) => setExpiry(e.target.value as Expiry)}>
+              <select className="ds-input mkt-input" data-testid="mkt-mint-expiry" value={expiry} onChange={(e) => setExpiry(e.target.value as Expiry)}>
                 <option value="never">{copy('access.expiry.never')}</option>
                 <option value="7">{copy('access.expiry.days', { n: 7 })}</option>
                 <option value="30">{copy('access.expiry.days', { n: 30 })}</option>
@@ -116,14 +116,14 @@ export function AccessView(): React.ReactElement {
                   onChange={(e) => setServices((m) => (e.target.checked ? [...m, id] : m.filter((x) => x !== id)))} />{' '}<span data-copy="_data">{label_(id)}</span></label>
               ))}
             </fieldset>
-            <label className="mkt-field"><span data-copy="access.rps">{copy('access.rps')}</span><input className="mkt-input mkt-mono" data-testid="mkt-mint-rps" inputMode="numeric" value={rps} onChange={(e) => setRps(e.target.value)} /></label>
+            <label className="mkt-field"><span data-copy="access.rps">{copy('access.rps')}</span><input className="ds-input mkt-input mkt-mono" data-testid="mkt-mint-rps" inputMode="numeric" value={rps} onChange={(e) => setRps(e.target.value)} /></label>
             {mintErr ? <ErrorCard err={mintErr} onRetry={mint}><span data-copy="access.error.mint" className="mkt-muted mkt-xs">{copy('access.error.mint')}</span></ErrorCard> : null}
             <div className="mkt-fork">
-              <button type="button" className="mkt-btn mkt-btn--primary" data-testid="mkt-mint" data-copy="access.mint.cta" onClick={mint} disabled={!!mintDisabledKey || busy === 'mint'} title={mintDisabledKey ? copy(mintDisabledKey) : undefined}>
+              <button type="button" className="ds-btn ds-primary" data-testid="mkt-mint" data-copy="access.mint.cta" onClick={mint} disabled={!!mintDisabledKey || busy === 'mint'} title={mintDisabledKey ? copy(mintDisabledKey) : undefined}>
                 {busy === 'mint' ? copy('state.working') : copy('access.mint.cta')}
               </button>
               {mintDisabledKey && <span className="mkt-muted mkt-xs" data-copy={mintDisabledKey}>{copy(mintDisabledKey)}</span>}
-              <button type="button" className="mkt-btn" data-copy="ctl.cancel" onClick={() => setFormOpen(false)}>{copy('ctl.cancel')}</button>
+              <button type="button" className="ds-btn" data-copy="ctl.cancel" onClick={() => setFormOpen(false)}>{copy('ctl.cancel')}</button>
             </div>
           </div>
         )}
@@ -153,16 +153,16 @@ export function AccessView(): React.ReactElement {
                 <div className="mkt-muted mkt-xs" data-copy="access.scopes">{scopeOf(k)}</div>
                 {revokeErr?.keyId === k.keyId ? <ErrorCard err={revokeErr.err} onRetry={() => revoke(k.keyId)}><span className="mkt-muted mkt-xs" data-copy="access.error.revoke">{copy('access.error.revoke')}</span></ErrorCard> : null}
               </span>
-              <span className="mkt-chipleft" data-copy="access.cap">{copy('access.cap', { pct: Math.round(pctOf(committed, k.budget)) })}</span>
+              <Badge tone="success" data-copy="access.cap">{copy('access.cap', { pct: Math.round(pctOf(committed, k.budget)) })}</Badge>
               {k.revoked
-                ? <span className="mkt-chipblock" data-copy="key.revoked">{copy('key.revoked')}</span>
-                : <button type="button" className="mkt-btn" data-testid={`mkt-revoke-${k.keyId}`} data-copy="access.revoke.btn" onClick={() => revoke(k.keyId)} disabled={busy === k.keyId}>{busy === k.keyId ? copy('state.working') : copy('access.revoke.btn')}</button>}
+                ? <Badge tone="danger" data-copy="key.revoked">{copy('key.revoked')}</Badge>
+                : <button type="button" className="ds-btn ds-danger" data-testid={`mkt-revoke-${k.keyId}`} data-copy="access.revoke.btn" onClick={() => revoke(k.keyId)} disabled={busy === k.keyId}>{busy === k.keyId ? copy('state.working') : copy('access.revoke.btn')}</button>}
             </div>
           );
         })}
         {keys.data.keys.some((k) => reservedOf(k) > 0n) && <p className="mkt-muted mkt-xs" data-testid="mkt-reserved-note" data-copy="access.reserved.note">{copy('access.reserved.note')}</p>}
         <p className="mkt-muted mkt-xs" data-copy="access.revoke">{copy('access.revoke')}</p>
       </div>
-    </div>
+    </MarketplacePage>
   );
 }

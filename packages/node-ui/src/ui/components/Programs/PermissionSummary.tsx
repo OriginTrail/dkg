@@ -1,4 +1,5 @@
 import React from 'react';
+import { formatNumber, truncateAddress } from '../../lib/format.js';
 import type { Approval, RequestedToolPermissions, ProgramReference } from '@origintrail-official/dkg-graph-computer';
 import type { DraftChild } from './program-drafts.js';
 import type { ProgramAgent, ProgramGraph } from './client.js';
@@ -48,7 +49,7 @@ export default function PermissionSummary({ scope, previous, checked, graphs, ag
   scope: Scope; previous?: Approval | null; checked: boolean; graphs: ProgramGraph[]; agents: ProgramAgent[]; invalid?: string;
 }) {
   const graphName = (id: string) => graphs.find(g => g.id.replace(/^did:dkg:context-graph:/, '') === id)?.name ?? 'Selected graph';
-  const agentName = (id: string) => agents.find(a => a.address.toLowerCase() === id.toLowerCase())?.name ?? `${id.slice(0, 8)}…${id.slice(-4)}`;
+  const agentName = (id: string) => agents.find(a => a.address.toLowerCase() === id.toLowerCase())?.name ?? truncateAddress(id);
   const now = facts(scope), before = previous ? facts(previousScope(previous)) : null;
   const changed = before ? Object.keys(now).filter(key => stable(now[key]) !== stable(before[key])) : [];
   const p = scope.permissions;
@@ -68,7 +69,7 @@ export default function PermissionSummary({ scope, previous, checked, graphs, ag
     <h4>Permission summary</h4>
     {invalid ? <p role="alert">{invalid}</p> : <ul>
       <li>Data access: <strong>{graphName(scope.graphId)}</strong>.</li>
-      {p?.sparqlRead && <li>Read SPARQL in {p.sparqlRead.layer.toUpperCase()}: up to {p.sparqlRead.maxResultItems} results, {p.sparqlRead.maxOutputBytes.toLocaleString()} bytes, {p.sparqlRead.timeoutMs / 1000}s per read.</li>}
+      {p?.sparqlRead && <li>Read SPARQL in {p.sparqlRead.layer.toUpperCase()}: up to {p.sparqlRead.maxResultItems} results, {formatNumber(p.sparqlRead.maxOutputBytes)} bytes, {p.sparqlRead.timeoutMs / 1000}s per read.</li>}
       {p?.query && <li>Run one selected saved query, with its approved output schema.</li>}
       {p?.assetCreation && <li>Create Knowledge Assets in {(p.executionLayer ?? 'wm').toUpperCase()} on this graph.</li>}
       {!p?.sparqlRead && !p?.query && !p?.assetCreation && <li>No direct tool access requested.</li>}

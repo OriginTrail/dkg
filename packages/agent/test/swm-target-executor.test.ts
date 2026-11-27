@@ -277,7 +277,7 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
    */
   async function finalizedTwinRounds(
     contextGraphId: string,
-    options: { readonly retireMarker?: () => Promise<void> } = {},
+    options: { readonly retireMarker?: () => Promise<void>; readonly requestReadGraphBuild?: () => void } = {},
   ) {
     const store = new OxigraphStore();
     stores.push(store);
@@ -398,6 +398,7 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
       ensureOwnedMap: () => new Map(),
       retireFinalizedSwmTwin,
       ...(options.retireMarker === undefined ? {} : { retireLegacySwmAfterVerifiedVmTwin: options.retireMarker }),
+      ...(options.requestReadGraphBuild === undefined ? {} : { requestReadGraphBuild: options.requestReadGraphBuild }),
       logInfo,
       logWarn,
       logDebug: () => undefined,
@@ -535,6 +536,17 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
     expect(loggedTimes(rounds.logInfo, 'already retired here as finalized Verified Memory twins')).toBe(0);
     expect(await rounds.store.countQuads(rounds.swmGraph)).toBe(rounds.payload.length);
     expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
+  });
+
+  it('asks the read-graph builder for a pass after a round that wrote a snapshot graph, and not after one that wrote none', async () => {
+    const requestReadGraphBuild = vi.fn();
+    const rounds = await finalizedTwinRounds('public-snapshot-read-graph-pass', { requestReadGraphBuild });
+    await rounds.round();
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledTimes(1);
+    expect(requestReadGraphBuild).toHaveBeenCalledTimes(1);
+    // The next round holds the retired copy and writes nothing.
+    expect((await rounds.round()).alreadyHeldAssets).toBe(1);
+    expect(requestReadGraphBuild).toHaveBeenCalledTimes(1);
   });
 
   it('takes the snapshot the usual way when the proof that would hold it cannot run', async () => {

@@ -142,7 +142,7 @@ describe('useMemoryEntities live updates', () => {
     expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('2');
   });
 
-  it('ignores memory_graph_changed events for other context graphs', async () => {
+  it('ignores memory_graph_changed events for other Context Graphs', async () => {
     await act(async () => {
       root.render(React.createElement(Probe, { contextGraphId: 'project-a' }));
     });

@@ -8,13 +8,19 @@
  *   - md  : default pill for timeline / cross-ref links
  *   - lg  : prominent header pill — name + framework + operator subtitle
  *
+ * `AgentTitle` is the same identity as a page title: the page is the agent,
+ * so it has no pill and no click-through.
+ *
  * Colors come from useAgents (hash(URI) -> HSL hue), so the same agent
  * is the same color in every view. Framework glyph is the tiny icon on
  * the avatar corner: ⦿ claude-code, ◈ openclaw, ⬡ hermes, ● gemini,
  * 👤 human, ◉ generic AI. Click takes you to the agent's entity detail.
  */
 import React from 'react';
+import { agentInitials, agentInitialsColor } from '@origintrail-official/dkg-graph-viz/agent-initials';
 import { useAgentsContext, type AgentSummary } from '../hooks/useAgents.js';
+import { Bot, Cpu, Feather, Sparkles, Terminal, User, type LucideIcon } from 'lucide-react';
+import { truncateAddress } from '../lib/format.js';
 
 export interface AgentChipProps {
   agent: AgentSummary | null | undefined;
@@ -26,41 +32,63 @@ export interface AgentChipProps {
   className?: string;
 }
 
-const FRAMEWORK_GLYPH: Record<string, string> = {
-  'claude-code': '⦿',
-  'openclaw':    '◈',
-  'hermes':      '⬡',
-  'gemini':      '✧',
-  'human':       '👤',
+// A Map, so a framework name from the graph only finds an icon registered here. An object
+// would hand back inherited properties: "constructor" would find Object, which can't render.
+const FRAMEWORK_GLYPH = new Map<string, LucideIcon>([
+  ['claude-code', Terminal],
+  ['openclaw', Cpu],
+  ['hermes', Feather],
+  ['gemini', Sparkles],
+  ['human', User],
+]);
+
+export function framedGlyph(framework: string | undefined, kind: 'human' | 'ai'): LucideIcon {
+  return (framework && FRAMEWORK_GLYPH.get(framework)) || (kind === 'human' ? User : Bot);
+}
+
+// Compact initials shown inside the avatar disc: the same rule as AgentDot
+// and the graph's agent nodes.
+const initials = agentInitials;
+
+const agentColorVar = (color: string) => ({ '--agent-color': color }) as React.CSSProperties;
+
+function agentIdentity(agent: AgentSummary | null | undefined, fallbackUri?: string) {
+  // With no resolved profile, a peer id or address stands in for the name, shortened so it
+  // fits the pill. Short ids stay whole.
+  const name = agent?.name
+    ?? (fallbackUri ? truncateAddress(fallbackUri.split(':').pop() ?? fallbackUri) : 'unknown');
+  const kind = agent?.kind ?? 'ai';
+  const framework = agent?.framework;
+  return { name, kind, framework, Glyph: framedGlyph(framework, kind), color: agent?.color ?? 'var(--identity-fallback)' };
+}
+
+const AgentAvatar: React.FC<{ identity: ReturnType<typeof agentIdentity>; glyphSize: number }> = ({ identity, glyphSize }) => {
+  const { name, kind, framework, Glyph, color } = identity;
+  return (
+    <span className="v10-agent-chip-avatar" style={{ background: color, color: agentInitialsColor(color) }}>
+      <span className="v10-agent-chip-initials">{initials(name)}</span>
+      <span className="v10-agent-chip-glyph" title={framework ?? kind}><Glyph size={glyphSize} /></span>
+    </span>
+  );
 };
 
-function framedGlyph(framework: string | undefined, kind: 'human' | 'ai'): string {
-  if (framework && FRAMEWORK_GLYPH[framework]) return FRAMEWORK_GLYPH[framework];
-  return kind === 'human' ? '👤' : '◉';
-}
-
-// Compact initials shown inside the avatar disc for quick scanning.
-function initials(name: string): string {
-  const trimmed = name.trim();
-  if (!trimmed) return '?';
-  const parts = trimmed.split(/[\s_-]+/).filter(Boolean);
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + (parts[1][0] ?? '')).toUpperCase();
-}
-
-/**
- * N6 polish (item 4) — when we fall back to a raw identifier (no
- * resolved agent profile available), truncate so libp2p peer ids
- * (`12D3K…b9a3`) and eth addresses (`0xaaaa…bbbb`) don't blow the
- * pill layout. Use head 6 + ellipsis + tail 4. Short
- * identifiers (<= head+tail+1) render unchanged so we never insert
- * an ellipsis that hides nothing.
- */
-function truncateFallbackId(raw: string): string {
-  const trimmed = raw.trim();
-  if (trimmed.length <= 11) return trimmed;
-  return `${trimmed.slice(0, 6)}…${trimmed.slice(-4)}`;
-}
+/** Framework and operator, under the name. Renders nothing when neither is known. */
+const AgentSubline: React.FC<{ agent: AgentSummary | null | undefined; identity: ReturnType<typeof agentIdentity> }> = ({ agent, identity }) => {
+  const { kind, framework } = identity;
+  if (!agent?.operatorName && !framework) return null;
+  return (
+    <span className="v10-agent-chip-sub">
+      {framework && kind === 'ai' && <span className="v10-agent-chip-fw">{framework}</span>}
+      {agent?.operatorName && kind === 'ai' && (
+        <>
+          {framework && <span className="v10-agent-chip-sep">·</span>}
+          <span className="v10-agent-chip-op">driven by {agent.operatorName}</span>
+        </>
+      )}
+      {kind === 'human' && <span className="v10-agent-chip-fw">human</span>}
+    </span>
+  );
+};
 
 export const AgentChip: React.FC<AgentChipProps> = ({
   agent,
@@ -82,12 +110,8 @@ export const AgentChip: React.FC<AgentChipProps> = ({
   // N6 polish (item 4) — only truncate the FALLBACK path. Resolved
   // agents already have a human-readable `name`; truncating that
   // would hide useful display info.
-  const name = agent?.name
-    ?? (fallbackUri ? truncateFallbackId(fallbackUri.split(':').pop() ?? fallbackUri) : 'unknown');
-  const kind = agent?.kind ?? 'ai';
-  const framework = agent?.framework;
-  const glyph = framedGlyph(framework, kind);
-  const color = agent?.color ?? 'hsl(0, 0%, 55%)';
+  const identity = agentIdentity(agent, fallbackUri);
+  const { name, framework, color } = identity;
   const title = [
     name,
     framework ? `framework: ${framework}` : null,
@@ -104,36 +128,42 @@ export const AgentChip: React.FC<AgentChipProps> = ({
   return (
     <span
       className={`v10-agent-chip v10-agent-chip-${size}${interactive ? ' interactive' : ''} ${className}`}
-      style={{ '--agent-color': color } as React.CSSProperties}
+      style={agentColorVar(color)}
       onClick={handle ? (e) => { e.stopPropagation(); handle(); } : undefined}
+      onKeyDown={handle ? (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        e.stopPropagation();
+        handle();
+      } : undefined}
       title={title}
       role={interactive ? 'button' : undefined}
       tabIndex={interactive ? 0 : undefined}
     >
-      <span className="v10-agent-chip-avatar" style={{ background: color }}>
-        <span className="v10-agent-chip-initials">{initials(name)}</span>
-        <span className="v10-agent-chip-glyph" title={framework ?? kind}>{glyph}</span>
-      </span>
+      <AgentAvatar identity={identity} glyphSize={size === 'sm' ? 8 : 10} />
       <span className="v10-agent-chip-body">
         <span className="v10-agent-chip-name">{name}</span>
-        {size === 'lg' && (agent?.operatorName || framework) && (
-          <span className="v10-agent-chip-sub">
-            {framework && kind === 'ai' && <span className="v10-agent-chip-fw">{framework}</span>}
-            {agent?.operatorName && kind === 'ai' && (
-              <>
-                {framework && <span className="v10-agent-chip-sep">·</span>}
-                <span className="v10-agent-chip-op">driven by {agent.operatorName}</span>
-              </>
-            )}
-            {kind === 'human' && <span className="v10-agent-chip-fw">human</span>}
-          </span>
-        )}
-        {size === 'md' && showOperator && agent?.operatorName && kind === 'ai' && (
+        {size === 'lg' && <AgentSubline agent={agent} identity={identity} />}
+        {size === 'md' && showOperator && agent?.operatorName && identity.kind === 'ai' && (
           <span className="v10-agent-chip-sub">
             <span className="v10-agent-chip-op">· {agent.operatorName}</span>
           </span>
         )}
       </span>
     </span>
+  );
+};
+
+/** An agent as the title of its own page: avatar, the page's h1, then framework and operator. */
+export const AgentTitle: React.FC<{ agent: AgentSummary | null | undefined; fallbackUri: string }> = ({ agent, fallbackUri }) => {
+  const identity = agentIdentity(agent, fallbackUri);
+  return (
+    <div className="v10-agent-title" style={agentColorVar(identity.color)}>
+      <AgentAvatar identity={identity} glyphSize={10} />
+      <div className="v10-agent-title-text">
+        <h1 className="ds-page-title" title={identity.name}>{identity.name}</h1>
+        <AgentSubline agent={agent} identity={identity} />
+      </div>
+    </div>
   );
 };

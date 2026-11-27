@@ -36,7 +36,7 @@ WHERE { GRAPH ${sparqlIri(catalogGraph)} {
   ?s ?p ?o
 } }`,
     [catalogGraph],
-    options),
+    { ...options, writtenGraphs: [catalogGraph] }),
     (used) => used,
   );
 

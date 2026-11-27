@@ -64,7 +64,7 @@ the writer, but do not encrypt GossipSub payload bytes.
 
 ## Quick Start
 
-**Prerequisites:** Node.js 22.23.4+, 24.22.1+ or 26.12.1+, npm 10+. DKG starts on Node.js 22.13+ (or 23.4+), but older releases miss the [2026-10-21 Node.js security fixes](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases), and `dkg start` and `dkg doctor` warn about them. macOS, Linux, and Windows (PowerShell 5.1+ or WSL2) all supported.
+**Prerequisites:** Node.js 22.23.5+, 24.22.3+ or 26.13.1+, npm 10+. DKG starts on Node.js 22.13+ (or 23.4+), but older releases miss the [2026-11-11 Node.js security fixes](https://nodejs.org/en/blog/vulnerability/november-2026-security-releases), and `dkg start` and `dkg doctor` warn about them. macOS, Linux, and Windows (PowerShell 5.1+ or WSL2) all supported.
 
 ### Hermes adapter
 
@@ -512,7 +512,9 @@ TOKEN=$(dkg auth show)
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9200/api/agents
 ```
 
-The dashboard signs in with this token automatically only when it is opened on the node host itself (`http://127.0.0.1:9200/ui` or `http://localhost:9200/ui`). Opened from another machine or under another host name, it asks for the token instead; an SSH tunnel to the API port keeps the automatic sign-in. A reverse proxy that adds forwarding headers (`Forwarded`, any `X-Forwarded-*`, `X-Real-IP`, `X-Client-IP`, `True-Client-IP`, `CF-Connecting-IP`, `Via`) is treated as remote. One on the node host that forwards with a loopback `Host` and adds none of them (e.g. nginx's default `proxy_set_header Host $proxy_host`) still looks like a local caller, so keep authentication in front of any proxy that exposes the dashboard beyond the node host.
+The dashboard asks for this token once per browser tab: paste the output of `dkg auth show`. It does not sign in automatically unless you turn that on.
+
+On a node with no reverse proxy in front of the API, you can set `"auth": { "dashboardAutoSignIn": true }` in `~/.dkg/config.json`. The dashboard then signs in without asking when it is opened on the node host itself (`http://127.0.0.1:9200/ui` or `http://localhost:9200/ui`), including through an SSH tunnel to the API port. A request under another host name, or one carrying proxy forwarding headers (`Forwarded`, any `X-Forwarded-*`, `X-Real-IP`, `X-Client-IP`, `True-Client-IP`, `CF-Connecting-IP`, `Via`), still has to enter the token.
 
 Operations that act on the whole node (node settings and logs, shutdown, agent registration, local agent integrations, bulk publisher-queue changes) require this node-level token. Agent-scoped tokens receive `403` there.
 
@@ -584,7 +586,7 @@ This is a pnpm + Turborepo monorepo.
 
 ## Development
 
-Clone the repo and use pnpm (v10+) with Node.js 22.23.4+ (22.13+ or 23.4+ still runs, without the 2026-10-21 security fixes) to work across all workspace packages:
+Clone the repo and use pnpm (v10+) with Node.js 22.23.5+ (22.13+ or 23.4+ still runs, without the 2026-11-11 security fixes) to work across all workspace packages:
 
 ```bash
 pnpm install                                     # install all workspace deps

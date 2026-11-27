@@ -1,4 +1,8 @@
-import { AbiCoder, getAddress, getBytes, keccak256, verifyMessage, hexlify, randomBytes } from 'ethers';
+import { AbiCoder } from 'ethers/abi';
+import { getAddress } from 'ethers/address';
+import { keccak256, randomBytes } from 'ethers/crypto';
+import { verifyMessage } from 'ethers/hash';
+import { getBytes, hexlify } from 'ethers/utils';
 import type { AgentSigner, PreparedInvocation } from './types.js';
 import { AGENT_DELEGATION_ABI_TYPES, agentDelegationAbiValues, agentHttpRequestSigningMessage, boundOperationInvocationScope, protocolSha256 } from '@origintrail-official/dkg-core/graph-computer-protocol';
 

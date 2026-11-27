@@ -1,5 +1,6 @@
 import { getBoundListenMultiaddrs } from './bound-listen-addresses.js';
 import { PublicCheckpointStartup } from './public-checkpoint-startup.js';
+import { apiBindRefusal } from './api-bind-guard.js';
 import { checkDaemonCheckpointEligibility, bindCheckpointNetwork } from './public-checkpoint-config.js';
 import { buildCoreChainCacheConfig } from './core-chain-cache-config.js';
 // daemon/lifecycle.ts
@@ -168,7 +169,7 @@ import {
   formatMetricsCollectorStartupLog,
   resolveMetricsCollectorConfig,
 } from '../metrics-collector-config.js';
-import { startConfiguredSemanticRuntime } from '../semantic-runtime.js';
+import { startDaemonSemanticRuntime } from '../semantic-runtime.js';
 import {
   registerSemanticRuntimeInboxSkill,
   SEMANTIC_RUNTIME_INBOX_SKILL_IRI,
@@ -228,10 +229,12 @@ import { startActivationCatchups } from './context-graph-activation-catchup.js';
 import { cancelContextGraphReadinessRepeats } from './context-graph-readiness-repeat.js';
 import { endContextGraphWriteReadinessWaits } from './context-graph-write-readiness.js';
 import { daemonCpuProfiles } from './cpu-profile.js';
+import { daemonReadGraphRequests } from './routes/read-graphs.js';
 import { startContextGraphCatchupProgress } from './context-graph-catchup-progress-sources.js';
+import { observeShareConnections } from './share-connection-timing.js';
 import { beginAsyncAdmissionTrace } from './async-admission-trace.js';
 import { authenticateHttpRequest, canAdministerNode, loadTokens } from '../auth.js';
-import { AGENT_HTTP_HEADERS, normalizeOperatorAgentAddresses } from '../agent-http-auth.js';
+import { AGENT_HTTP_HEADERS, isKnownAgentKeySigner, normalizeOperatorAgentAddresses } from '../agent-http-auth.js';
 import { SqliteAgentHttpNonceStore } from '../agent-http-nonce-store.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
@@ -333,6 +336,7 @@ import {
   raceShutdownWithTimeout,
 } from './shutdown.js';
 import { resolveShutdownPolicy, type ShutdownPolicy } from './shutdown-policy.js';
+import { apiExposureWarnings } from './api-exposure-warning.js';
 import {
   daemonRuntimeState,
 } from './shutdown-wait.js';
@@ -482,6 +486,9 @@ import { configureApiQueryPriority } from './api-query-priority.js';
 import { configureWritePreflightCoalescing } from './write-preflight-coalescing.js';
 import { startRetention, type RetentionHandle } from './retention-sweeps.js';
 import { resolveRetentionConfig } from '../retention-config.js';
+import { readGraphStoreSettings, resolveQueryConfig } from '../read-graphs-config.js';
+import { assertQueryConfigFitsNode } from '../update/read-graph-rollback-target.js';
+import { applyGraphCatalogConfig } from '../graph-catalog-config.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
 import { buildChatMemoryStack } from './memory-tool-context.js';
@@ -1260,6 +1267,12 @@ async function runDaemonInnerWithStartupOwnership(
   if (!assertNodeRuntimeSupported(log)) {
     throw new Error('Node runtime preflight failed; see the preceding fatal message.');
   }
+  // Before anything listens on apiHost: the public-checkpoint status server and the API both do.
+  const apiRefusal = apiBindRefusal(config);
+  if (apiRefusal !== null) {
+    log(`FATAL: ${apiRefusal}`);
+    throw new Error(`Refusing to start: ${apiRefusal}`);
+  }
   refuseBrotliOnDaemonFetch(log);
   const backpressureMonitor = new BackpressureMonitor({
     emit: (level, message) => log(`[${level}] ${message}`),
@@ -1400,6 +1413,11 @@ async function runDaemonInnerWithStartupOwnership(
   }
   // OT-RFC-73 P10b: a bad queue-retention value fails the boot here and the error names the key (the default is off for both queues).
   const retentionSettings = resolveRetentionConfig(config.queueRetention);
+  // OT-RFC-74: a bad `query` value fails the boot here, and so do read graphs that the rollback target would not recognize.
+  const queryConfig = resolveQueryConfig(config.query);
+  await assertQueryConfigFitsNode(queryConfig, role, Boolean(checkpointMode));
+  // A bad `store.graphCatalog` or DKG_STORE_GRAPH_CATALOG_MAX_BYTES fails the boot here; a good value bounds every catalog read of this process.
+  const graphCatalog = applyGraphCatalogConfig(config.store?.graphCatalog);
   const { name: selectedNetworkConfig, network } = await loadResolvedNetworkConfig(
     config,
     loadNetworkConfig,
@@ -1548,7 +1566,8 @@ async function runDaemonInnerWithStartupOwnership(
   // For the directory-backed blob/snapshot stores we use the managed
   // defaults (the rewritten sparql-http backend has no `options.path` to
   // infer a directory from, unlike the local Oxigraph backend).
-  const runtimeStore = managed?.storeConfig ?? config.store;
+  // A store section that holds only settings (no backend) keeps the default store.
+  const runtimeStore = managed?.storeConfig ?? (config.store?.backend ? config.store : undefined);
   const runtimeLargeLiteralStorage =
     managed?.largeLiteralStorage ?? config.largeLiteralStorage;
   const runtimeSnapshotStorage =
@@ -1796,6 +1815,11 @@ async function runDaemonInnerWithStartupOwnership(
     managedStore: managed?.storeConfig,
     changelogEnabled: Boolean(config.store?.changelog),
     changelogEraGuard: protocolStores.changelogEraGuard,
+    // Only a written `query` section is carried, so a node without one builds its stores exactly as before. A node
+    // that starts from a public checkpoint gets its store from the checkpoint.
+    readGraphs: config.query === undefined || checkpointMode ? undefined : readGraphStoreSettings(queryConfig),
+    dataDir: dkgDir(),
+    graphCatalog,
   });
 
   const agentConfig: DKGAgentConfig = {
@@ -2089,6 +2113,8 @@ async function runDaemonInnerWithStartupOwnership(
   }
   log(formatAuthorityIndexStartupLine(authorityIndexPlan));
   const promoteQueuePolicy = resolveDaemonPromoteQueueConfig(config.promoteQueue);
+  // Before anything listens on apiHost: the public-checkpoint status server and the API both do.
+  for (const warning of apiExposureWarnings(config)) log(`WARNING: ${warning}`);
   let checkpointAgent: DKGAgent | undefined;
   if (checkpointMode) {
     checkpointStartup = new PublicCheckpointStartup(async () => {
@@ -2265,19 +2291,19 @@ async function runDaemonInnerWithStartupOwnership(
     stderr: (line) => log(`[dkg-mcp] ${line}`),
   });
 
-  // Persisted API permissions restore the service on boot. With no records,
-  // only an authenticated management request may lazily activate it; an
-  // explicit enabled:false remains the operator's service kill switch.
+  // The runtime starts when `semanticRuntime.enabled` is true, or when this
+  // node already stored Program configuration. A management request never
+  // turns it on; an explicit enabled:false remains the operator's kill switch.
   config.semanticRuntime ??= {};
-  type SemanticRuntimeService = Awaited<ReturnType<typeof startConfiguredSemanticRuntime>>;
+  type SemanticRuntimeService = Awaited<ReturnType<typeof startDaemonSemanticRuntime>>;
   let semanticRuntimeHost: SemanticRuntimeService = null;
   let semanticRuntimeStarting: Promise<SemanticRuntimeService> | undefined;
-  const ensureSemanticRuntime = async (activate = true): Promise<SemanticRuntimeService> => {
+  const ensureSemanticRuntime = async (): Promise<SemanticRuntimeService> => {
     if (semanticRuntimeHost) return semanticRuntimeHost;
     if (semanticRuntimeStarting) return semanticRuntimeStarting;
     semanticRuntimeStarting = (async () => {
-      const started = await startConfiguredSemanticRuntime(config.semanticRuntime, {
-        log, dataDirectory: dkgDir(), activate, localLlmProvider: localLlm.programProvider,
+      const started = await startDaemonSemanticRuntime(config.semanticRuntime, {
+        log, dataDirectory: dkgDir(), localLlmProvider: localLlm.programProvider,
       });
       if (started) {
         try { registerSemanticRuntimeInboxSkill(agent, started, config.semanticRuntime, config.llm); }
@@ -2290,7 +2316,7 @@ async function runDaemonInnerWithStartupOwnership(
     finally { semanticRuntimeStarting = undefined; }
   };
   try {
-    semanticRuntimeHost = await ensureSemanticRuntime(false);
+    semanticRuntimeHost = await ensureSemanticRuntime();
   } catch (err) {
     await localLlm.close();
     await semanticRuntimeHost?.stop().catch((stopErr: any) =>
@@ -3505,7 +3531,12 @@ async function runDaemonInnerWithStartupOwnership(
         authEnabled,
         validTokens,
         resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
-        agentKey: { targetPeerId: agent.peerId, operatorAgentAddresses, nonces: agentHttpNonces },
+        agentKey: {
+          targetPeerId: agent.peerId,
+          operatorAgentAddresses,
+          isRegisteredAgent: (address) => isKnownAgentKeySigner(agent, address, reqUrl.pathname),
+          nonces: agentHttpNonces,
+        },
         corsOrigin: resolveCorsOrigin(req, corsAllowed),
       });
       if (!authentication.allowed) return;
@@ -3577,10 +3608,12 @@ async function runDaemonInnerWithStartupOwnership(
       })) return;
 
       // Node UI routes (metrics, operations, logs, saved queries, chat, static UI).
-      // The dashboard shell is served with the node-operator token only for a
-      // trusted local request (loopback socket and loopback Host).
+      // The dashboard shell carries the node-operator token only when the
+      // operator turned on auth.dashboardAutoSignIn, and then only for a trusted
+      // local request (loopback socket, loopback Host, no proxy headers).
       const uiToken = nodeUiTokenForRequest(req, {
         authEnabled,
+        autoSignIn: config.auth?.dashboardAutoSignIn === true,
         validTokens,
         resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
       });
@@ -3674,6 +3707,7 @@ async function runDaemonInnerWithStartupOwnership(
   // Resolution + assignment live in applyServerLimits (unit-tested); tunable via
   // DKG_MAX_CONNECTIONS / DKG_HEADERS_TIMEOUT_MS, with malformed/empty values
   // falling back to defaults rather than becoming NaN.
+  observeShareConnections(server);
   applyServerLimits(server, {
     maxConnectionsEnv: process.env.DKG_MAX_CONNECTIONS,
     maxConnectionsConfig: config.maxConnections,
@@ -3750,6 +3784,7 @@ async function runDaemonInnerWithStartupOwnership(
       endWriteReadinessWaits: endContextGraphWriteReadinessWaits,
       stopCatchupTriggers,
       endCpuProfile: () => daemonCpuProfiles.end(),
+      endReadGraphRequests: () => daemonReadGraphRequests.end(),
     });
     const cleanupStateFiles = async () => {
       await removeOwnedDaemonRuntimeState().catch((err: any) =>

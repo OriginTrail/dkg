@@ -103,7 +103,9 @@ async function request(n: Node, identity: Identity, method: string, path: string
       body: bytes, contentType: 'application/json', timestamp: String(Date.now()), nonce: randomUUID().replaceAll('-', '') }, signing.wallet.signingKey);
     req = Object.assign(Readable.from([bytes]), { method, url: path, headers, rawHeaders: [] });
     const result = await authenticateHttpRequest({ req, res, authEnabled: true, validTokens: new Set(), resolveAgentByToken: () => undefined,
-      agentKey: { targetPeerId: n.agent.peerId, nonces: { claim: () => true }, operatorAgentAddresses: signing.operator ? [signing.wallet.address] : [] } });
+      // These route tests start after authentication, so every signer counts as registered here. A
+      // real node admits only its registered and operator agents (see agent-http-auth.test.ts).
+      agentKey: { targetPeerId: n.agent.peerId, nonces: { claim: () => true }, operatorAgentAddresses: signing.operator ? [signing.wallet.address] : [], isRegisteredAgent: () => true } });
     if (!result.allowed) return { status: res.statusCode as number, body: res.body as any };
     auth = result;
   }

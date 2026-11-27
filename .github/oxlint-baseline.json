@@ -74,7 +74,7 @@
       "packages/node-ui/src/ui/components/Modals/cgNameValidation.ts": {
         "{\"message\":\"Unexpected control characters\",\"evidence\":[{\"label\":\"'U+0000' is a control character.\",\"source\":\"\\\\u0000\"},{\"label\":\"'U+0008' is a control character.\",\"source\":\"\\\\u0008\"},{\"label\":\"'U+000B' is a control character.\",\"source\":\"\\\\u000B\"},{\"label\":\"'U+000C' is a control character.\",\"source\":\"\\\\u000C\"},{\"label\":\"'U+000E' is a control character.\",\"source\":\"\\\\u000E\"},{\"label\":\"'U+001F' is a control character.\",\"source\":\"\\\\u001F\"}]}": 1
       },
-      "packages/node-ui/src/ui/components/Shell/PanelRight/format.ts": {
+      "packages/node-ui/src/ui/conversations/format.ts": {
         "{\"message\":\"Unexpected control characters\",\"evidence\":[{\"label\":\"'U+0000' is a control character.\",\"source\":\"\\\\u0000\"},{\"label\":\"'U+001F' is a control character.\",\"source\":\"\\\\u001F\"}]}": 1
       },
       "packages/node-ui/test/ontology-install.test.ts": {

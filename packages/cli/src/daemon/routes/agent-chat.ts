@@ -49,6 +49,7 @@ export const daemonRequire = createRequire(import.meta.url);
 
 export const execAsync = promisify(exec);
 export const execFileAsync = promisify(execFile);
+import { validateUpdateQuadFields } from "../knowledge-asset-quad-validation.js";
 
 export const ROOTLESS_UPDATE_HTTP_STATUS = {
   ROOTLESS_UPDATE_INVALID_KA_ID: 422,
@@ -652,12 +653,8 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     const body = await readBody(req);
     const parsed = JSON.parse(body);
     const { kaId } = parsed;
-    if (parsed.quads !== undefined && !Array.isArray(parsed.quads)) {
-      return jsonResponse(res, 400, { error: '"quads" must be an array when provided' });
-    }
-    if (parsed.privateQuads !== undefined && !Array.isArray(parsed.privateQuads)) {
-      return jsonResponse(res, 400, { error: '"privateQuads" must be an array when provided' });
-    }
+    const invalidQuads = validateUpdateQuadFields(parsed);
+    if (invalidQuads) return jsonResponse(res, 400, invalidQuads);
     const quads = Array.isArray(parsed.quads) ? parsed.quads : [];
     const privateQuads = Array.isArray(parsed.privateQuads) ? parsed.privateQuads : [];
     const contextGraphId = parsed.contextGraphId;

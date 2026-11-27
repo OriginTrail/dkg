@@ -13,7 +13,9 @@ import {
   encodePublishIntent,
   isStorageACKDecline,
   knowledgeAssetLayerGraphUri,
+  SPARQL_TERM_VALIDATION_ERROR_CODE,
   STORAGE_ACK_DECLINE_CODES,
+  SparqlTermValidationError,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore, readExactGraphPaged, type Quad } from '@origintrail-official/dkg-storage';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
@@ -169,6 +171,81 @@ describe('graph-scoped publish storage ACKs', () => {
       type: 'boolean',
       value: throwAfterCommit,
     });
+  });
+
+  it.each([
+    {
+      label: 'refuses the request when the store refuses a term',
+      failure: () => new SparqlTermValidationError('oxigraph.replaceGraphAndSubject: invalid literal in SPARQL object position', 'literal'),
+      refused: true,
+    },
+    {
+      label: 'refuses the request when the store worker passes back a refused term',
+      failure: () => Object.assign(new Error('oxigraph.replaceGraphAndSubject: invalid literal in SPARQL object position'), {
+        name: 'SparqlTermValidationError',
+        code: SPARQL_TERM_VALIDATION_ERROR_CODE,
+      }),
+      refused: true,
+    },
+    {
+      label: 'declines a store failure as transient (control)',
+      failure: () => new Error('store worker unavailable'),
+      refused: false,
+    },
+  ])('$label, and neither signs nor persists', async ({ failure, refused }) => {
+    const base = new OxigraphStore();
+    const quads: Quad[] = [{
+      subject: 'urn:asset:refused-term',
+      predicate: 'urn:p:value',
+      object: '"refused-term"',
+      graph: SWM_GRAPH,
+    }];
+    await base.insert(quads);
+    const store = new Proxy(base, {
+      get(target, property, receiver) {
+        // The ACK's first write under the store wrapper is its metadata insert.
+        if (property === 'insert' || property === 'replaceGraphAndSubject' || property === 'replaceGraph') {
+          return async () => { throw failure(); };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const wallet = ethers.Wallet.createRandom();
+    const signMessage = vi.spyOn(wallet, 'signMessage');
+    const handler = new StorageACKHandler(store, handlerConfig(wallet, false), new TypedEventBus());
+    const intent = encodePublishIntent({
+      merkleRoot: computeFlatKCRootV10(quads, []),
+      contextGraphId: CONTEXT_GRAPH_ID,
+      publisherPeerId: 'publisher-peer',
+      publicByteSize: byteSizeFloor(quads),
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: [],
+      merkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: '1',
+      publicTripleCount: quads.length,
+      privateTripleCount: 0,
+      accessPolicy: 'public',
+      allowedPeers: [],
+    });
+
+    if (refused) {
+      await expect(handler.handler(intent, PEER)).rejects.toThrow('invalid literal');
+    } else {
+      const decoded = decodeStorageACK(await handler.handler(intent, PEER));
+      expect(isStorageACKDecline(decoded)).toBe(true);
+      expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+    }
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(await resolveKnowledgeAssetWorkspaceHead({
+      store: base,
+      graphManager: new GraphManager(base),
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+    })).toBeUndefined();
   });
 
   it('serializes workspace persistence in the shared per-KA lock domain', async () => {

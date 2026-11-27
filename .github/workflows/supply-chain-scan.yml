@@ -684,10 +684,9 @@ jobs:
           # corresponds to. Parse the comment for drift comparison.
           # The SHA itself is the source of truth on the runner; the
           # comment is the source of truth for THIS freshness check.
-          # Aderyn (@cyfrin/aderyn) and solhint are npm devDeps in
-          # packages/evm-module/package.json — Dependabot's npm
-          # ecosystem covers their drift, so they're intentionally
-          # not duplicated here.
+          # solhint remains an npm devDependency covered by Dependabot.
+          # Aderyn's source revision and Rust toolchain are explicit
+          # pins in the tornado-static-analysis lane.
           if [ -f "${GITHUB_WORKSPACE}/.github/workflows/ci.yml" ]; then
             SLITHER_PINNED=$(grep -oE 'crytic/slither-action@[a-f0-9]+ # v[0-9.]+' "${GITHUB_WORKSPACE}/.github/workflows/ci.yml" | head -1 | sed -E 's/.*# v//')
             SLITHER_LATEST=$(gh api repos/crytic/slither-action/releases/latest --jq '.tag_name' | sed 's/^v//')

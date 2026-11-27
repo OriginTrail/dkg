@@ -99,7 +99,7 @@ export function registerSemanticRuntimeInboxSkill(
         // checks the signer and the tenant executor's graph access independently.
         const result = await invokeBoundSemanticProgram(
           agent, runtime, invocation.contextGraphId, invocation.operationIri,
-          invocation.invocationId, config, callerAgentAddress, invocation.inputs,
+          invocation.invocationId, config, callerAgentAddress, { inputs: invocation.inputs },
         );
         return { success: true, outputData: encodeJson(result), ...(result.executionUal ? { resultUal: result.executionUal } : {}) };
       }

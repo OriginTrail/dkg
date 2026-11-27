@@ -1,12 +1,13 @@
 import { isExplicitNodeOperator, authenticatedAgentAddress } from '../../auth.js';
+import { ENCRYPTION_ENROLLMENT_ACTIVATION_PATH } from '../../agent-http-auth.js';
 import { readBody, jsonResponse, SMALL_BODY_BYTES } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 
 /** Key custody is node-admin prepared and agent approved; neither action grants graph membership. */
 export async function handleEncryptionEnrollment(ctx: RequestContext): Promise<boolean> {
   const { req, res, path, authentication, agent } = ctx;
-  if (req.method !== 'POST' || !['/api/agent/encryption-enrollments', '/api/agent/encryption-enrollments/activate'].includes(path)) return false;
-  const activation = path.endsWith('/activate');
+  if (req.method !== 'POST' || !['/api/agent/encryption-enrollments', ENCRYPTION_ENROLLMENT_ACTIVATION_PATH].includes(path)) return false;
+  const activation = path === ENCRYPTION_ENROLLMENT_ACTIVATION_PATH;
   if (!activation && !isExplicitNodeOperator(authentication)) {
     jsonResponse(res, 403, { error: 'Preparing encryption custody requires an explicitly authenticated node operator' });
     return true;

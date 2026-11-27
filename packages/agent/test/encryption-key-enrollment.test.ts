@@ -23,6 +23,29 @@ async function signed(challenge: EncryptionKeyEnrollment, wallet: ethers.HDNodeW
   };
 }
 
+describe('pending encryption enrollments', () => {
+  it('reports an unexpired enrollment for its recipient on this node only, until it is activated', async () => {
+    const path = join(await directory(), 'pending.json');
+    const wallet = ethers.Wallet.createRandom();
+    let now = 1_000_000;
+    const enrollments = new EncryptionKeyEnrollments(path, 'receiver', () => now);
+    await expect(enrollments.hasPending(wallet.address)).resolves.toBe(false);
+
+    const challenge = await enrollments.prepare(wallet.address);
+    await expect(enrollments.hasPending(wallet.address)).resolves.toBe(true);
+    await expect(enrollments.hasPending(wallet.address.toLowerCase())).resolves.toBe(true);
+    await expect(enrollments.hasPending(ethers.Wallet.createRandom().address)).resolves.toBe(false);
+    await expect(new EncryptionKeyEnrollments(path, 'another-node', () => now).hasPending(wallet.address)).resolves.toBe(false);
+
+    now = challenge.expiresAt;
+    await expect(enrollments.hasPending(wallet.address)).resolves.toBe(false);
+
+    now = 1_000_000;
+    await enrollments.activate(await signed(challenge, wallet), async () => undefined);
+    await expect(enrollments.hasPending(wallet.address)).resolves.toBe(false);
+  });
+});
+
 describe('encryption-only node custody for external agents', () => {
   it('survives pending restart, verifies both proofs, consumes once and never returns private keys', async () => {
     const path = join(await directory(), 'pending.json');

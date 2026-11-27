@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BlazegraphStore,
+  GraphSetIndexStore,
+  OxigraphStore,
+  SparqlHttpStore,
   deleteByPatternWithoutCount,
+  supportsAtomicSparqlModify,
   UnsupportedTripleStoreCapabilityError,
   tryUpdateWithTouchedGraphs,
   type TripleStore,
@@ -45,6 +50,22 @@ describe('deleteByPatternWithoutCount', () => {
 
     expect(noCountCalls).toBe(1);
     expect(countedCalls).toBe(0);
+  });
+});
+
+describe('supportsAtomicSparqlModify', () => {
+  it('recognizes certified backends through decorators and refuses generic SPARQL updates', () => {
+    const endpoint = 'http://store.test/query';
+    const blazegraph = new BlazegraphStore(endpoint);
+    expect(supportsAtomicSparqlModify(blazegraph)).toBe(true);
+    expect(supportsAtomicSparqlModify(new GraphSetIndexStore(new OxigraphStore()))).toBe(true);
+    expect(supportsAtomicSparqlModify(new GraphSetIndexStore(new SparqlHttpStore({ queryEndpoint: endpoint })))).toBe(false);
+  });
+
+  it.each(['update', 'flush'] as const)('refuses a decorator that hides the required %s operation', method => {
+    const outer = new GraphSetIndexStore(new OxigraphStore());
+    Object.defineProperty(outer, method, { value: undefined });
+    expect(supportsAtomicSparqlModify(outer)).toBe(false);
   });
 });
 

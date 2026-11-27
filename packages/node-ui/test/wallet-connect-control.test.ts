@@ -14,7 +14,7 @@ describe('feature-owned wallet connection guidance', () => {
   it('keeps the shared identity-wallet surface free of PCA publishing language', () => {
     const html = renderToStaticMarkup(React.createElement(WalletConnectControl));
     expect(html).toContain('Verify every transaction on the signing device');
-    expect(html).not.toContain('Hot publishing wallets');
+    expect(html).not.toContain('Publishing wallets sign automatically');
     expect(html).not.toContain('per-epoch allowance');
   });
 
@@ -24,7 +24,7 @@ describe('feature-owned wallet connection guidance', () => {
     // must fail this test.
     expect(PcaSurfaceWalletConnectControl).toBe(PcaWalletConnectControl);
     const html = renderToStaticMarkup(React.createElement(PcaSurfaceWalletConnectControl));
-    expect(html).toContain('Hot publishing wallets');
-    expect(html).toContain('per-epoch allowance');
+    expect(html).toContain('Publishing wallets sign automatically');
+    expect(html).toContain('allowance, plus any top-up balance');
   });
 });

@@ -15,6 +15,7 @@ export * from './context-graph-join-policy.js';
 export * from './catalog.js';
 export { parseDotenvValue } from './dotenv.js';
 export * from './memory-model.js';
+export * from './read-graph-names.js';
 export * from './ka-content-scope.js';
 export * from './rfc64-shared-projection-address-v1.js';
 export * from './graph-knowledge-asset-metadata.js';
@@ -136,6 +137,7 @@ export {
   getTracer, withSpan, linkedSpan, currentTraceIds, activeSpanContext,
   getMetrics, rebuildMetrics, type WithSpanOpts, type DkgMetrics,
 } from './telemetry-api.js';
+export { recordViewSemanticsDelta } from './view-semantics-delta-metric.js';
 export * from './crypto/index.js';
 export * from './proto/index.js';
 export {
@@ -407,6 +409,8 @@ export {
 export {
   formatIriPrefix,
   formatSparqlTerm,
+  isSparqlTermValidationError,
+  SPARQL_TERM_VALIDATION_ERROR_CODE,
   SparqlTermValidationError,
   unwrapIri,
   type SparqlTermContext,

@@ -32,6 +32,16 @@ describe('AgentChip — fallback id truncation', () => {
     return container.querySelector('.v10-agent-chip-name')?.textContent ?? '';
   }
 
+  it('renders a "?" avatar instead of crashing for a separator-only name', () => {
+    act(() => {
+      root.render(React.createElement(AgentChip, {
+        agent: { uri: 'did:dkg:agent:_', name: '_', kind: 'ai', color: '#888888' },
+      }));
+    });
+    expect(container.querySelector('.v10-agent-chip-avatar')?.textContent).toContain('?');
+    expect(nameOf()).toBe('_');
+  });
+
   it('truncates a long libp2p peer id to head6+ellipsis+tail4', () => {
     const peer = '12D3KooWAbcdefghijklmnopqrstuvwxyz1234567890b9a3';
     act(() => {
@@ -90,5 +100,45 @@ describe('AgentChip — fallback id truncation', () => {
       }));
     });
     expect(nameOf()).toBe('Alice Researcher');
+  });
+
+  it('draws a registered framework icon, and the person or bot icon for any other framework name', () => {
+    const glyph = (framework: string | undefined, kind: 'human' | 'ai' = 'ai') => {
+      act(() => {
+        root.render(React.createElement(AgentChip, {
+          agent: { uri: 'did:dkg:agent:x', name: 'X', kind, color: '#888888', framework } as never,
+        }));
+      });
+      return container.querySelector('.v10-agent-chip-glyph svg')?.getAttribute('class') ?? '';
+    };
+    expect(glyph('hermes')).toContain('lucide-feather');
+    // Names from the graph that an object would resolve through its prototype.
+    for (const name of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf', 'unknown-framework']) {
+      expect(glyph(name), name).toContain('lucide-bot');
+      expect(glyph(name, 'human'), name).toContain('lucide-user');
+    }
+    expect(glyph(undefined)).toContain('lucide-bot');
+  });
+
+  it('opens the agent from Enter and Space when it can open one, and not from other keys', () => {
+    const opened: string[] = [];
+    act(() => {
+      root.render(React.createElement(AgentChip, {
+        agent: { uri: 'did:dkg:agent:alice', name: 'Alice', kind: 'ai', color: '#888888' },
+        onOpenAgent: (uri: string) => opened.push(uri),
+      }));
+    });
+    const chip = container.querySelector<HTMLElement>('.v10-agent-chip')!;
+    expect(chip.getAttribute('role')).toBe('button');
+    expect(chip.tabIndex).toBe(0);
+    const press = (key: string) => {
+      const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+      act(() => { chip.dispatchEvent(event); });
+      return event.defaultPrevented;
+    };
+    expect(press('Enter')).toBe(true);
+    expect(press(' ')).toBe(true);
+    expect(press('a')).toBe(false);
+    expect(opened).toEqual(['did:dkg:agent:alice', 'did:dkg:agent:alice']);
   });
 });
