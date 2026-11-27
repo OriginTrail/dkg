@@ -188,6 +188,49 @@ test('an unanswered status request is cut at the deadline rather than after the 
   ]);
 });
 
+// A clock the polling reads, and a request that ends `leftMs` before its own
+// time is up, as a timer can by the wall clock. The clock never goes back.
+function clockedPoll(leftMs) {
+  let clock = 0;
+  const sent = [];
+  return {
+    sent,
+    options: {
+      api: 'http://127.0.0.1:9', auth: TOKEN, budgetMs: 800, pollIntervalMs: 20,
+      now: () => clock,
+      sleep: async (ms) => { clock += ms; },
+      getJson: async (_url, { timeoutMs }) => {
+        sent.push(timeoutMs);
+        clock += Math.max(0, timeoutMs - leftMs);
+        throw new Error(`no answer within ${timeoutMs} ms`);
+      },
+    },
+  };
+}
+
+test('no status request starts with less than 50 ms of the wait left', { timeout: 10_000 }, async () => {
+  const jobs = shareRecoveryJobs([partial('cg-a', 1, 'job-1'), partial('cg-a', 2, 'job-2')]);
+  const { sent, options } = clockedPoll(1);
+  await pollShareRecoveries(jobs, options);
+  assert.deepEqual(sent, [800], 'a request was started in the last millisecond of the wait');
+  assert.deepEqual(outcome(jobs), [
+    { jobId: 'job-1', state: 'unknown', settled: false },
+    { jobId: 'job-2', state: 'unknown', settled: false },
+  ]);
+  const short = shareRecoveryJobs([partial('cg-a', 1, 'job-1')]);
+  const { sent: none, options: shortOptions } = clockedPoll(1);
+  await pollShareRecoveries(short, { ...shortOptions, budgetMs: 49 });
+  assert.deepEqual(none, []);
+});
+
+test('a status request still starts with 50 ms of the wait left, capped at what is left', { timeout: 10_000 }, async () => {
+  const jobs = shareRecoveryJobs([partial('cg-a', 1, 'job-1'), partial('cg-a', 2, 'job-2')]);
+  const { sent, options } = clockedPoll(50);
+  await pollShareRecoveries(jobs, options);
+  assert.deepEqual(sent, [800, 50]);
+  assert.equal(jobs[1].pollError, 'no answer within 50 ms');
+});
+
 // When the server saw each path's connection close.
 async function closedWithin(closedAt, route, since, limitMs) {
   while (!closedAt.has(route) && Date.now() - since < 1000) await delay(10);
