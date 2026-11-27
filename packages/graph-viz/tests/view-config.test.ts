@@ -467,3 +467,65 @@ describe('applyViewConfig', () => {
     });
   });
 });
+
+
+describe('ViewConfig decoration boundaries', () => {
+  const type = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+  const property = (model: GraphModel, id: string, key: string, value: string) => model.addTriple({ subject: id, predicate: 'https://schema.org/' + key, object: value });
+
+  it('chooses platform edges before URL fallbacks and preserves existing application images', () => {
+    const model = new GraphModel();
+    for (const id of ['urn:post', 'https://site.invalid/post', 'urn:existing']) model.addTriple({ subject: id, predicate: type, object: 'https://schema.org/SocialMediaPosting' });
+    model.addTriple({ subject: 'urn:post', predicate: 'https://schema.org/platform', object: 'https://platform.invalid/unknown' });
+    model.addTriple({ subject: 'urn:post', predicate: 'https://schema.org/platform', object: 'https://platform.invalid/video' });
+    model.getNode('urn:existing')!.imageUrl = 'application.png';
+    applyViewConfig({ name: 'platforms', platformIcons: { icons: { video: 'video.svg', web: 'web.svg' }, urlFallbacks: { 'missing': 'unknown', 'site.invalid': 'web' } } }, model);
+    expect(model.getNode('urn:post')!.imageUrl).toBe('video.svg');
+    expect(model.getNode('https://site.invalid/post')!.imageUrl).toBe('web.svg');
+    expect(model.getNode('urn:existing')!.imageUrl).toBe('application.png');
+  });
+  it.each(['https://schema.org/Person', 'schema:Person', 'vocab:Person', 'Person'])('assigns node type icons using %s aliases', key => {
+    const model = new GraphModel();
+    model.addTriple({ subject: 'urn:a', predicate: type, object: 'https://schema.org/Person' });
+    model.addTriple({ subject: 'urn:b', predicate: type, object: 'https://schema.org/Unknown' });
+    applyViewConfig({ name: 'types', nodeTypes: { [key]: { icon: 'person.svg' }, Unknown: { color: 'red' } } }, model);
+    expect(model.getNode('urn:a')?.imageUrl).toBe('person.svg');
+    expect(model.getNode('urn:b')?.imageUrl).toBeNull();
+    model.getNode('urn:a')!.imageUrl = 'app.png';
+    applyViewConfig({ name: 'types', nodeTypes: { [key]: { icon: 'person.svg' } } }, model);
+    expect(model.getNode('urn:a')?.imageUrl).toBe('app.png');
+  });
+  it.each([false, true])('scores negative sentiment by magnitude with inversion %s and ignores invalid values', invert => {
+    const model = new GraphModel();
+    for (const [id, value] of [['low', '-.2'], ['high', '-.8'], ['invalid', 'not numeric'], ['zero', '0']]) property(model, 'urn:' + id, 'score', value);
+    applyViewConfig({ name: 'risk', focal: { uri: 'urn:high', sizeMultiplier: 5 }, highlight: { property: 'score', threshold: .5, color: 'red', invert } }, model);
+    expect(model.getNode('urn:low')?.isHighRisk).toBe(invert ? true : undefined);
+    expect(model.getNode('urn:high')?.isHighRisk).toBe(invert ? undefined : true);
+    expect(model.getNode('urn:high')?.riskScore).toBe(.8);
+    expect(model.getNode('urn:high')?.sizeMultiplier).toBe(5);
+    expect(model.getNode('urn:invalid')?.riskScore).toBeUndefined();
+  });
+  it.each(['linear', 'log'] as const)('scales %s values at endpoints and gives equal values a middle size', scale => {
+    const model = new GraphModel();
+    for (const [id, value] of [['min', '10'], ['max', '100'], ['negative', '-1'], ['zero', '0'], ['invalid', 'oops']]) property(model, 'urn:' + id, 'count', value);
+    applyViewConfig({ name: 'sizes', sizeBy: { property: 'count', scale } }, model);
+    expect(model.getNode('urn:min')?.sizeMultiplier).toBe(.5);
+    expect(model.getNode('urn:max')?.sizeMultiplier).toBe(3);
+    expect(model.getNode('urn:negative')?.sizeMultiplier).toBeUndefined();
+    expect(model.getNode('urn:zero')?.sizeMultiplier).toBeUndefined();
+    expect(model.getNode('urn:invalid')?.sizeMultiplier).toBeUndefined();
+    const same = new GraphModel();
+    property(same, 'urn:a', 'count', '10');
+    property(same, 'urn:b', 'count', '10');
+    applyViewConfig({ name: 'equal', sizeBy: { property: 'count', scale } }, same);
+    expect([...same.nodes.values()].map(n => n.sizeMultiplier)).toEqual([1.75, 1.75]);
+  });
+  it('finds a focal entity across namespace variants and ignores linked entities without a score', () => {
+    const model = new GraphModel();
+    property(model, 'https://umanitek.ai/dkg/person/alice', 'name', 'Alice');
+    model.addTriple({ subject: 'urn:post', predicate: 'urn:hasScore', object: 'urn:unscored' });
+    applyViewConfig({ name: 'aliases', focal: { uri: 'https://other.invalid/person/alice' }, highlight: { source: 'linked', linkedVia: 'hasScore', property: 'score', threshold: 1, color: 'red' } }, model);
+    expect(model.getNode('https://umanitek.ai/dkg/person/alice')?.sizeMultiplier).toBe(1.5);
+    expect(model.getNode('urn:post')?.isHighRisk).toBeUndefined();
+  });
+});

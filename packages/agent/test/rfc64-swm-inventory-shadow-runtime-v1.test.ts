@@ -1,0 +1,280 @@
+import { describe, expect, it } from 'vitest';
+import {
+  activeDefaultStoreWorkPriority, StorePriorityScheduler, withDefaultStoreWorkPriority,
+  type StoreWorkPriority,
+} from '@origintrail-official/dkg-storage';
+
+import {
+  RFC64_SWM_INVENTORY_MAX_CONFIRMED_TOMBSTONES_V1,
+  RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1,
+  Rfc64SwmInventoryShadowRuntimeV1,
+} from '../src/rfc64/swm-inventory-shadow-runtime-v1.js';
+
+describe('RFC-64 SWM inventory shadow runtime', () => {
+  it('executes every queued observer while running at most 16 concurrently', async () => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    let observerCalls = 0;
+    let active = 0;
+    let maximumActive = 0;
+
+    for (let index = 0; index < RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1; index += 1) {
+      expect(runtime.schedule(`asset-${index}`, async () => {
+        observerCalls += 1;
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        await blocked;
+        active -= 1;
+      })).toBe(true);
+    }
+    expect(runtime.schedule('overflow', async () => {
+      observerCalls += 1;
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await blocked;
+      active -= 1;
+    })).toBe(true);
+    expect(observerCalls).toBe(RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1);
+    expect(runtime.inFlightCount).toBe(RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1 + 1);
+
+    const drain = runtime.drain();
+    release();
+    await drain;
+    expect(observerCalls).toBe(RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1 + 1);
+    expect(maximumActive).toBe(RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1);
+    expect(runtime.inFlightCount).toBe(0);
+  });
+
+  it.each([
+    ['runExclusive', 'normal', 'background'],
+    ['runExclusive', 'background', 'normal'],
+    ['schedule', 'normal', 'background'],
+    ['schedule', 'background', 'normal'],
+  ] as const)('%s preserves %s-to-%s queued caller priority at actual store admission', async (entrypoint, blockerPriority, queuedPriority) => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    const scheduler = new StorePriorityScheduler();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const blockers = withDefaultStoreWorkPriority(blockerPriority, () => Array.from(
+      { length: RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1 },
+      (_, index) => runtime.runExclusive(`blocker-${index}`, async () => { await gate; }),
+    ));
+    const admissions: Array<{
+      before: StoreWorkPriority | undefined;
+      after: StoreWorkPriority | undefined;
+      normalInflight: number;
+      backgroundInflight: number;
+    }> = [];
+    const work = async (): Promise<void> => {
+      const before = activeDefaultStoreWorkPriority();
+      await Promise.resolve();
+      const after = activeDefaultStoreWorkPriority();
+      await scheduler.run(undefined, 'queued-catalog-read', async () => {
+        const { normalInflight, backgroundInflight } = scheduler.snapshot;
+        admissions.push({ before, after, normalInflight, backgroundInflight });
+      });
+    };
+    const queued = withDefaultStoreWorkPriority(queuedPriority, () => entrypoint === 'runExclusive'
+      ? runtime.runExclusive('queued', work)
+      : runtime.schedule('queued', work));
+    try {
+      expect(runtime.inFlightCount).toBe(RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1 + 1);
+      expect(admissions).toEqual([]);
+    } finally {
+      release();
+      await Promise.all(blockers);
+      await runtime.drain();
+      await queued;
+    }
+    expect(admissions).toEqual([{
+      before: queuedPriority,
+      after: queuedPriority,
+      normalInflight: queuedPriority === 'normal' ? 1 : 0,
+      backgroundInflight: queuedPriority === 'background' ? 1 : 0,
+    }]);
+    expect(runtime.inFlightCount).toBe(0);
+  });
+
+  it('serializes one asset and lets a VM tombstone suppress a delayed SWM upsert', async () => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    const assetKey = 'public-cg\0author\0assertion';
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const durableRows = new Set<string>();
+
+    expect(runtime.schedule(assetKey, async () => {
+      entered();
+      await gate;
+      if (!runtime.isVmConfirmed(assetKey, '1', 'share-1')) durableRows.add('ka-v1');
+    })).toBe(true);
+    await started;
+    runtime.markVmConfirmed(assetKey, '1', 'share-1');
+    const removal = runtime.runExclusive(assetKey, async () => {
+      durableRows.delete('ka-v1');
+    });
+    release();
+    await removal;
+    await runtime.drain();
+
+    expect(durableRows).toEqual(new Set());
+    expect(runtime.inFlightCount).toBe(0);
+    expect(runtime.isVmConfirmed(assetKey, '1', 'share-1')).toBe(true);
+    expect(runtime.schedule(assetKey, async () => {
+      if (!runtime.isVmConfirmed(assetKey, '1', 'share-1')) durableRows.add('late-ka-v1');
+    })).toBe(true);
+    await runtime.drain();
+    expect(durableRows).toEqual(new Set());
+    expect(runtime.isVmConfirmed(assetKey, '1', 'share-2')).toBe(false);
+    expect(runtime.isVmConfirmed(assetKey, '2', 'share-1')).toBe(false);
+  });
+
+  it('returns each exclusive result and rejection without releasing the asset early', async () => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    const events: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const firstResult = { status: 'committed' } as const;
+    const first: Promise<typeof firstResult> = runtime.runExclusive('asset', async () => {
+      events.push('first-enter');
+      await gate;
+      events.push('first-exit');
+      return firstResult;
+    });
+    const failure = new Error('second failed');
+    const second = runtime.runExclusive('asset', async () => {
+      events.push('second');
+      throw failure;
+    });
+    const rejected = expect(second).rejects.toBe(failure);
+    const third: Promise<boolean> = runtime.runExclusive('asset', async () => {
+      events.push('third');
+      return false;
+    });
+    const unrelated = runtime.runExclusive('other-asset', async () => {
+      events.push('unrelated');
+      return 7;
+    });
+    await expect(unrelated).resolves.toBe(7);
+    expect(events).toEqual(['first-enter', 'unrelated']);
+    release();
+    await expect(first).resolves.toBe(firstResult);
+    await rejected;
+    await expect(third).resolves.toBe(false);
+    await runtime.drain();
+    expect(events).toEqual(['first-enter', 'unrelated', 'first-exit', 'second', 'third']);
+    expect(runtime.inFlightCount).toBe(0);
+  });
+
+  it('bounds retained VM tombstones while keeping the newest replay fence', () => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    for (
+      let index = 0;
+      index <= RFC64_SWM_INVENTORY_MAX_CONFIRMED_TOMBSTONES_V1;
+      index += 1
+    ) runtime.markVmConfirmed(`asset-${index}`, '1', `share-${index}`);
+
+    expect(runtime.isVmConfirmed('asset-0', '1', 'share-0')).toBe(false);
+    expect(runtime.isVmConfirmed(
+      `asset-${RFC64_SWM_INVENTORY_MAX_CONFIRMED_TOMBSTONES_V1}`,
+      '1',
+      `share-${RFC64_SWM_INVENTORY_MAX_CONFIRMED_TOMBSTONES_V1}`,
+    )).toBe(true);
+  });
+
+  it('serializes one author scope while leaving unrelated scopes concurrent', async () => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    let markFirstEntered!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const firstEntered = new Promise<void>((resolve) => { markFirstEntered = resolve; });
+
+    const first = runtime.runScopeExclusive('scope-a', async () => {
+      events.push('first-enter');
+      markFirstEntered();
+      await firstGate;
+      events.push('first-exit');
+      return 1;
+    });
+    await firstEntered;
+    const second = runtime.runScopeExclusive('scope-a', async () => {
+      events.push('second');
+      return 2;
+    });
+    const unrelated = runtime.runScopeExclusive('scope-b', async () => {
+      events.push('unrelated');
+      return 3;
+    });
+    await expect(unrelated).resolves.toBe(3);
+    expect(events).toEqual(['first-enter', 'unrelated']);
+
+    releaseFirst();
+    await expect(first).resolves.toBe(1);
+    await expect(second).resolves.toBe(2);
+    expect(events).toEqual(['first-enter', 'unrelated', 'first-exit', 'second']);
+  });
+
+  it('fences new observers and drains admitted work before close completes', async () => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    let release!: () => void;
+    let markEntered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    expect(runtime.schedule('asset', async () => {
+      markEntered();
+      await gate;
+    })).toBe(true);
+    await entered;
+
+    let closed = false;
+    const close = runtime.closeAndDrain().then(() => { closed = true; });
+    await Promise.resolve();
+    expect(closed).toBe(false);
+    expect(runtime.schedule('late', async () => undefined)).toBe(false);
+    await expect(runtime.runExclusive('late', async () => undefined))
+      .rejects.toThrow('observer runtime is closed');
+
+    release();
+    await close;
+    expect(closed).toBe(true);
+    expect(runtime.inFlightCount).toBe(0);
+  });
+
+  it('reopens asset and scope admission after a complete restart drain', async () => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    const firstShutdownSignal = runtime.shutdownSignal;
+    await runtime.closeAndDrain();
+    expect(firstShutdownSignal.aborted).toBe(true);
+    expect(runtime.schedule('closed', async () => undefined)).toBe(false);
+    await expect(runtime.runScopeExclusive('closed', async () => undefined))
+      .rejects.toThrow('runtime is closed');
+
+    runtime.reopen();
+    expect(runtime.shutdownSignal).not.toBe(firstShutdownSignal);
+    expect(runtime.shutdownSignal.aborted).toBe(false);
+    expect(runtime.schedule('asset', async () => undefined)).toBe(true);
+    await runtime.drain();
+    await expect(runtime.runScopeExclusive('scope', async () => 'ok')).resolves.toBe('ok');
+  });
+
+  it('aborts admitted lifecycle waits so shutdown can drain promptly', async () => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    let settled: boolean | undefined;
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+
+    expect(runtime.schedule('settling-asset', async () => {
+      const signal = runtime.shutdownSignal;
+      markEntered();
+      settled = await runtime.waitForResponsibilitySettlement(8_000, signal);
+    })).toBe(true);
+    await entered;
+
+    await runtime.closeAndDrain();
+    expect(settled).toBe(false);
+    expect(runtime.inFlightCount).toBe(0);
+  });
+});

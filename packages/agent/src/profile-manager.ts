@@ -1,4 +1,8 @@
-import type { Publisher, PublishOptions, PublishResult } from '@origintrail-official/dkg-publisher';
+import type {
+  BasePublicationOptions,
+  Publisher,
+  PublishResult,
+} from '@origintrail-official/dkg-publisher';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { contextGraphDataGraphUri } from '@origintrail-official/dkg-core';
 import {
@@ -96,7 +100,7 @@ export class ProfileManager {
       await this.store.deleteBySubjectPrefix(dataGraph, prefix);
     }
 
-    const options: PublishOptions = {
+    const options: BasePublicationOptions = {
       contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH,
       quads,
     };

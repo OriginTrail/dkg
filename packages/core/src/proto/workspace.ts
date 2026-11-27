@@ -40,6 +40,20 @@ export const WorkspacePublishRequestSchema = new Type('WorkspacePublishRequest')
   // OT-RFC-46 — per-KA SWM identity: receivers/sync target …/_shared_memory/{addr}/{number}
   .add(new Field('agentAddress', 10, 'string'))
   .add(new Field('kaNumber', 11, 'string'))
+  // Rootless KA scope. Messages on the graph-scope protocol MUST set version
+  // 2 and leave the legacy per-root manifest empty.
+  .add(new Field('contentScopeVersion', 12, 'uint32'))
+  .add(new Field('kaUal', 13, 'string'))
+  .add(new Field('assertionVersion', 14, 'string'))
+  .add(new Field('publicTripleCount', 15, 'uint32'))
+  .add(new Field('privateMerkleRoot', 16, 'bytes'))
+  .add(new Field('privateTripleCount', 17, 'uint32'))
+  .add(new Field('accessPolicy', 18, 'string'))
+  .add(new Field('allowedPeers', 19, 'string', 'repeated'))
+  // The author's seal of this exact assertion, so a receiver that is not the
+  // author (a curator) can publish it as the author's KA.
+  .add(new Field('assertionName', 20, 'string'))
+  .add(new Field('authorSeal', 21, 'bytes'))
   .add(WorkspaceManifestEntrySchema)
   .add(WorkspaceCASConditionSchema);
 
@@ -75,6 +89,31 @@ export interface WorkspacePublishRequestMsg {
   agentAddress?: string;
   /** OT-RFC-46 — the KA number (bigint as string); the per-KA SWM graph key. */
   kaNumber?: string;
+  /** Rootless KA graph-scope discriminator. New writers emit exactly 2. */
+  contentScopeVersion?: number;
+  /** Canonical deterministic UAL; authoritative over agentAddress/kaNumber. */
+  kaUal?: string;
+  /** One-based assertion/Merkle-root index encoded as a decimal string. */
+  assertionVersion?: string;
+  /** Number of public RDF triples in this complete KA assertion. */
+  publicTripleCount?: number;
+  /** Optional single KA-level private commitment (never private plaintext). */
+  privateMerkleRoot?: Uint8Array;
+  /** Number of private RDF triples committed by privateMerkleRoot. */
+  privateTripleCount?: number;
+  /** Immutable graph-scoped access policy. */
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  /** Canonical peer allow-list when accessPolicy is allowList. */
+  allowedPeers?: string[];
+  /** The author's lifecycle name of this assertion. Sent with `authorSeal`. */
+  assertionName?: string;
+  /**
+   * The author's seal of this assertion: the canonical graph-scoped author
+   * seal bytes (`canonicalizeCanonicalGraphScopedAuthorSealBytesV1`). The
+   * signature in it is the author's, so a receiver verifies it, and its
+   * content binding, before it keeps it.
+   */
+  authorSeal?: Uint8Array;
 }
 
 export function encodeWorkspacePublishRequest(msg: WorkspacePublishRequestMsg): Uint8Array {

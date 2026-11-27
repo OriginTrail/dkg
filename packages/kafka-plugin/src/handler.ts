@@ -1,6 +1,8 @@
 import { z } from 'zod';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import { randomUUID } from 'node:crypto';
+import type { ServerResponse } from 'node:http';
 import { jsonResponse, readBody } from '@origintrail-official/dkg/daemon/plugin-api';
+import type { RequestContext } from '@origintrail-official/dkg/daemon/plugin-api';
 import { coreSchema, CORE_FIELDS, type CoreFields } from './schema.js';
 import { buildKa, mergeAugmentFragment } from './ka-builder.js';
 import type { KafkaPluginExtension } from './extension.js';
@@ -9,43 +11,30 @@ import {
   buildListQuery,
   buildCountQuery,
   buildSingleByUalQuery,
+  buildPageContentQuery,
   bindingsToKa,
 } from './discovery.js';
 
-export interface KafkaPluginCtx {
-  req: IncomingMessage;
-  res: ServerResponse;
-  agent: {
-    publishAsync(
-      contextGraphId: string,
-      content: Record<string, unknown>,
-      opts?: Record<string, unknown>,
-    ): Promise<{ captureID: string }>;
-    query(
-      sparql: string,
-      opts?: { contextGraphId?: string; [k: string]: unknown },
-    ): Promise<{ bindings: Array<Record<string, unknown>> }>;
-  };
-  publisherControl: {
-    getStatus(captureID: string): Promise<KafkaJobStatus | null>;
-  };
-  publisherRuntime: { walletIds: string[] } | null;
-  config: {
-    kafka?: { contextGraphId?: string };
-    [k: string]: unknown;
-  };
-  requestAgentAddress: string;
-  url?: URL;
-  path?: string;
-}
-
-export interface KafkaJobStatus {
-  status: string;
-  request?: unknown;
-  timestamps: { acceptedAt: number; finalizedAt?: number };
-  finalization?: { ual?: string };
-  failure?: { message?: string };
-}
+/**
+ * The canonical daemon request context, refined only where this plugin genuinely differs.
+ *
+ * Not a parallel shape. A hand-written context stays correct only while someone remembers to
+ * sync it, and the boundary cast that fed it hid every mismatch — which is how this plugin's
+ * copy of `publishAsync` went stale and its jobs became node-owned (GH#2270, fixed in #2304).
+ * Deriving it means a daemon-side change breaks the build here instead of at runtime, and the
+ * dispatcher can hand its context over with no cast at all.
+ *
+ * The single refinement is `config`: plugins carry their own namespaced configuration, which
+ * the canonical `DkgConfig` has no member for. Intersecting adds it without widening the
+ * daemon's own type.
+ */
+export type KafkaPluginCtx = Pick<
+  RequestContext,
+  'req' | 'res' | 'agent' | 'publisherControl' | 'publisherState' | 'requestAgentAddress'
+  | 'url' | 'path'
+> & {
+  config: RequestContext['config'] & { kafka?: { contextGraphId?: string } };
+};
 
 interface KafkaJobScope {
   contextGraphId?: string;
@@ -55,6 +44,11 @@ interface KafkaJobScope {
 export interface CreateHandlerOptions {
   basePath: string;
   contextGraphId?: string;
+  /**
+   * Forwarded to the agent as-is: not validated, unknown keys accepted. This is the published
+   * contract. `admittedByAgentAddress` may be present and is IGNORED -- the handler overwrites
+   * it with the authenticated requester. Deriving and narrowing needs a major (#2305).
+   */
   publishOptions?: Record<string, unknown>;
   extension?: KafkaPluginExtension<Record<string, unknown>>;
 }
@@ -72,7 +66,7 @@ export function createHandler(opts: CreateHandlerOptions) {
     : coreSchema;
 
   return async function handle(ctx: KafkaPluginCtx): Promise<void> {
-    const path = ctx.path ?? new URL(ctx.req.url ?? '/', `http://${ctx.req.headers.host ?? 'localhost'}`).pathname;
+    const path = ctx.path;
 
     if (ctx.req.method === 'POST' && path === registerPath) {
       return handlePostRegister(ctx, opts, mergedSchema, loggedCollisionKeys);
@@ -106,7 +100,10 @@ async function handlePostRegister(
       message: 'kafka-plugin has no configured contextGraphId',
     });
   }
-  if (!ctx.publisherRuntime || ctx.publisherRuntime.walletIds.length === 0) {
+  // `publisherState.runtime`, not the dispatcher's deprecated `publisherRuntime` alias: the
+  // canonical context should not be built out of a compatibility projection.
+  const runtime = ctx.publisherState.runtime;
+  if (!runtime || runtime.walletIds.length === 0) {
     return jsonResponse(ctx.res, 503, {
       error: 'PublisherUnavailable',
       message: 'kafka-plugin requires the publisher runtime to be running with at least one configured publisher wallet',
@@ -144,6 +141,8 @@ async function handlePostRegister(
   const parsedData = result.data as Record<string, unknown>;
   const coreFields = pickCoreFields(parsedData);
   const baseKa = buildKa(coreFields);
+  const streamId = `urn:dkg:kafka-stream:${randomUUID()}`;
+  baseKa['@id'] = streamId;
   let ka: Record<string, unknown> = baseKa as unknown as Record<string, unknown>;
   if (opts.extension) {
     const extensionFields = pickExtensionFields(parsedData);
@@ -161,10 +160,32 @@ async function handlePostRegister(
       unknown
     >;
   }
-  const publishContent = { private: ka } as unknown as Record<string, unknown>;
+  // Keep connection details private while exposing one application-level
+  // discovery/challenge triple on the same subject. V2 metadata points to the
+  // exact public and private graphs, so no rootEntity rows are required.
+  const publishContent = {
+    public: {
+      '@context': { dkg: 'http://dkg.io/ontology/' },
+      '@id': streamId,
+      'dkg:privateDataAnchor': 'true',
+    },
+    private: ka,
+  } as unknown as Record<string, unknown>;
   let publishResult: { captureID: string };
   try {
-    publishResult = await ctx.agent.publishAsync(cgId, publishContent, opts.publishOptions);
+    // A Kafka stream request is EXTERNALLY AUTHENTICATED, so
+    // the job it enqueues belongs to the agent that submitted it. Without this the agent's
+    // publish path treats it as an internal producer and assigns it to the node's default
+    // agent: the submitter loses the by-id force clear that is the only manual exit for a held
+    // job, and the node owner gains a destructive capability over a job it never submitted.
+    //
+    // Stamped AFTER the spread, and here that ordering IS the guard: unlike the EPCIS lane,
+    // `publishOptions` is an unfiltered client-supplied record, so a request body could
+    // otherwise name its own owner.
+    publishResult = await ctx.agent.publishAsync(cgId, publishContent, {
+      ...opts.publishOptions,
+      admittedByAgentAddress: ctx.requestAgentAddress,
+    });
   } catch (err) {
     const code = (err as { code?: string; name?: string })?.code ?? (err as { name?: string })?.name;
     if (code === 'ContextGraphNotFound') {
@@ -247,7 +268,8 @@ async function handleGetList(ctx: KafkaPluginCtx, opts: CreateHandlerOptions): P
     });
   }
 
-  const searchParams = parseSearchParams(ctx);
+  // The daemon parses `url` before dispatch, so the query is always available here.
+  const searchParams = ctx.url.searchParams;
   let pagination;
   try {
     pagination = parsePagination(searchParams);
@@ -283,16 +305,30 @@ async function handleGetList(ctx: KafkaPluginCtx, opts: CreateHandlerOptions): P
   const queryOptions = discoveryQueryOptions(ctx, cgId, subGraphName);
   let countBindings: Array<Record<string, unknown>>;
   let pageBindings: Array<Record<string, unknown>>;
+  let contentBindings: Array<Record<string, unknown>> = [];
   try {
-    countBindings = (await ctx.agent.query(countQuery, queryOptions)).bindings;
-    pageBindings = (await ctx.agent.query(listQuery, queryOptions)).bindings;
+    const fetchBindings = async (sparql: string): Promise<Array<Record<string, unknown>>> =>
+      (await ctx.agent.query(sparql, queryOptions)).bindings;
+    [countBindings, pageBindings] = await Promise.all([
+      fetchBindings(countQuery),
+      fetchBindings(listQuery),
+    ]);
+    const targets = pageBindings.flatMap((row) => {
+      const ual = unwrapBindingValue(row.ual);
+      const root = unwrapBindingValue(row.root);
+      const contentGraph = unwrapBindingValue(row.contentGraph);
+      return ual && root && contentGraph ? [{ ual, root, contentGraph }] : [];
+    });
+    if (targets.length > 0) {
+      contentBindings = await fetchBindings(buildPageContentQuery(targets));
+    }
   } catch (err) {
     return queryFailedResponse(ctx.res, err);
   }
   const total = extractCount(countBindings);
 
   const grouped = new Map<string, Array<Record<string, unknown>>>();
-  for (const row of pageBindings) {
+  for (const row of contentBindings) {
     const subject = unwrapBindingValue(row.ual);
     if (!subject) continue;
     const arr = grouped.get(subject) ?? [];
@@ -300,7 +336,11 @@ async function handleGetList(ctx: KafkaPluginCtx, opts: CreateHandlerOptions): P
     grouped.set(subject, arr);
   }
   const items: Array<Record<string, unknown>> = [];
-  for (const subjectBindings of grouped.values()) {
+  const orderedUals = [...new Set(
+    pageBindings.map((row) => unwrapBindingValue(row.ual)).filter((ual): ual is string => Boolean(ual)),
+  )];
+  for (const ual of orderedUals) {
+    const subjectBindings = grouped.get(ual) ?? [];
     const ka = bindingsToKa(subjectBindings);
     if (ka) items.push(ka as Record<string, unknown>);
   }
@@ -355,16 +395,6 @@ async function handleGetSingle(
     });
   }
   return jsonResponse(ctx.res, 200, ka);
-}
-
-function parseSearchParams(ctx: KafkaPluginCtx): URLSearchParams {
-  if (ctx.url) return ctx.url.searchParams;
-  const rawUrl = ctx.req.url ?? '/';
-  try {
-    return new URL(rawUrl, `http://${ctx.req.headers.host ?? 'localhost'}`).searchParams;
-  } catch {
-    return new URLSearchParams();
-  }
 }
 
 function discoveryQueryOptions(

@@ -271,4 +271,21 @@ describe('DKGPublisher: warns on silent PCA full-price fall-through (#1411)', ()
     expect(result.status).toBe('confirmed');
     expect(pcaFallthroughWarns(warnSpy)).toHaveLength(0);
   });
+  it('reuses the selected adapter plan’s PCA evidence without another eligibility read', async () => {
+    const wallet = new ethers.Wallet(TEST_KEY);
+    class PlannedPcaChain extends PcaProbeChain {
+      async resolvePublisherPublishPlan() {
+        return { publisherAddress: wallet.address, publishEpochs: 12, tokenAmount: 12n,
+          pcaCandidate: { accountId: 77n, lockDurationEpochs: 24 } };
+      }
+    }
+    const chain = new PlannedPcaChain(wallet);
+    const eligibility = vi.spyOn(chain, 'getConvictionAgentAccountId').mockRejectedValue(new Error('must reuse plan'));
+    const publisher = await makePublisher(chain, wallet);
+    const warn = spyPublisherWarn(publisher);
+    expect((await publisher.publish({ contextGraphId: '1', quads: quads('planned-pca') })).status).toBe('confirmed');
+    expect(eligibility).not.toHaveBeenCalled();
+    expect(pcaFallthroughWarns(warn)).toEqual([expect.stringContaining('accountId=77')]);
+  });
+
 });

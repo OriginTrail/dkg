@@ -1,16 +1,19 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
+import { createStorageAckLifecycleObserver } from '../src/storage-ack-lifecycle-observer.js';
+import { replaceCatalogQuads } from '../src/catalog-persistence.js';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
   computeFlatKCMerkleLeafCountV10,
   computePrivateRootV10,
 } from '../src/merkle.js';
 import {
-  encodePublishIntent, decodeStorageACK, computePublishACKDigest,
-  isStorageACKDecline, STORAGE_ACK_DECLINE_CODES, computeCatalogRoot,
+  encodePublishIntent, decodePublishIntent, encodeStorageACK, decodeStorageACK, computePublishACKDigest,
+  isStorageACKDecline, STORAGE_ACK_DECLINE_CODES, computeCatalogRoot, Logger, SparqlTermValidationError,
 } from '@origintrail-official/dkg-core';
+import { parseSimpleNQuads } from '../src/publish-handler.js';
 import { TypedEventBus, rebuildMetrics } from '@origintrail-official/dkg-core';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { GraphSetIndexStore, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { metrics } from '@opentelemetry/api';
@@ -27,6 +30,7 @@ import {
 // (production guard), so the test CG id is a plain numeric string.
 const TEST_CHAIN_ID = 31337n;
 const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
+const TEST_ASSET_UAL = `did:dkg:evm:${TEST_CHAIN_ID}/${TEST_KAV10_ADDR}/7`;
 
 function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -38,12 +42,12 @@ function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
  * hitting the live store. Mirrors `storeWithFailingOps` in
  * storage-ack-core-unavailable.test.ts — the curated-catalog store-failure
  * regressions below need the SAME real-store-with-armed-failure model so
- * they exercise the actual persist path (parse → verify → deleteByPattern →
+ * they exercise the actual persist path (parse → verify → targeted update →
  * insert) up to the failing store call.
  */
 function storeWithFailingOps(
   base: OxigraphStore,
-  failingOps: readonly ('query' | 'insert' | 'dropGraph' | 'deleteByPattern' | 'flush')[],
+  failingOps: readonly ('query' | 'insert' | 'dropGraph' | 'deleteByPattern' | 'update' | 'flush')[],
 ): TripleStore {
   return new Proxy(base as unknown as TripleStore, {
     get(target, prop, receiver) {
@@ -59,6 +63,10 @@ function storeWithFailingOps(
 }
 
 describe('StorageACKHandler', () => {
+  afterEach(() => {
+    Logger.setSink(null);
+  });
+
   const contextGraphId = '42';
   const cgIdBigInt = 42n;
 
@@ -152,6 +160,181 @@ describe('StorageACKHandler', () => {
         ? ack.coreNodeSignatureVS : new Uint8Array(ack.coreNodeSignatureVS)),
     });
     expect(recovered.toLowerCase()).toBe(coreWallet.address.toLowerCase());
+  });
+
+  it('does not emit a canonical lifecycle assetUal from an unverified PublishIntent field', async () => {
+    const handler = await createHandler(swmQuads, {
+      ackHandlerDeadlineMs: 0,
+    });
+    const entries: string[] = [];
+    Logger.setSink((entry) => entries.push(entry.message));
+    const spoofedAssetUal = `did:dkg:evm:${TEST_CHAIN_ID}/${TEST_KAV10_ADDR}/999`;
+
+    await handler.handler(encodePublishIntent({
+      merkleRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 300,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: ['urn:entity:1', 'urn:entity:2'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: swmMerkleLeafCount,
+      assetUal: spoofedAssetUal,
+    } as any), fakePeerId);
+
+    expect(entries.some((message) => message.includes(`assetUal=${spoofedAssetUal}`))).toBe(false);
+    expect(entries.some((message) => message.includes('stage=storage_ack'))).toBe(false);
+  });
+
+  it('emits receiver ACK lifecycle logs from the same ACK decision path', async () => {
+    const resolveAssetUalForPublishIntent = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return TEST_ASSET_UAL;
+    });
+    const handler = await createHandler(swmQuads, {
+      ackHandlerDeadlineMs: 0,
+      onStorageAckDecision: createStorageAckLifecycleObserver({
+        localPeerId: 'receiver-peer',
+        localNodeIdentityId: coreIdentityId,
+        resolveAssetUalForPublishIntent,
+        detail: 'summary',
+      }),
+    } as any);
+    const entries: string[] = [];
+    Logger.setSink((entry) => entries.push(entry.message));
+    const spoofedAssetUal = `did:dkg:evm:${TEST_CHAIN_ID}/${TEST_KAV10_ADDR}/999`;
+
+    const response = await handler.handler(encodePublishIntent({
+      merkleRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 300,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: ['urn:entity:1', 'urn:entity:2'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: swmMerkleLeafCount,
+      assetUal: spoofedAssetUal,
+    } as any), fakePeerId);
+
+    expect(resolveAssetUalForPublishIntent).toHaveBeenCalled();
+    expect(isStorageACKDecline(decodeStorageACK(response))).toBe(false);
+    expect(entries).toContainEqual(expect.stringContaining(`assetUal=${TEST_ASSET_UAL}`));
+    expect(entries.some((message) => message.includes(`assetUal=${spoofedAssetUal}`))).toBe(false);
+  });
+
+  it('bounds lifecycle assetUal resolution and still returns a valid ACK', async () => {
+    const resolveAssetUalForPublishIntent = vi.fn(() => new Promise<string>(() => {}));
+    const handler = await createHandler(swmQuads, {
+      ackHandlerDeadlineMs: 0,
+      onStorageAckDecision: createStorageAckLifecycleObserver({
+        localPeerId: 'receiver-peer',
+        localNodeIdentityId: coreIdentityId,
+        resolveAssetUalForPublishIntent,
+      }),
+    } as any);
+
+    const response = await Promise.race<Uint8Array | 'timed-out'>([
+      handler.handler(encodePublishIntent({
+        merkleRoot,
+        contextGraphId,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: 300,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: ['urn:entity:1', 'urn:entity:2'],
+        epochs: 1,
+        tokenAmountStr: '1000',
+        merkleLeafCount: swmMerkleLeafCount,
+      }), fakePeerId),
+      new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 1_000)),
+    ]);
+
+    expect(response).not.toBe('timed-out');
+    expect(resolveAssetUalForPublishIntent).toHaveBeenCalled();
+    const ack = decodeStorageACK(response as Uint8Array);
+    expect(isStorageACKDecline(ack)).toBe(false);
+  });
+
+  it('skips unobserved signed ACK lifecycle decisions before resolving assetUal', async () => {
+    const observer = createStorageAckLifecycleObserver({
+      localPeerId: 'receiver-peer',
+      localNodeIdentityId: coreIdentityId,
+      shouldObserve: () => false,
+      resolveAssetUalForPublishIntent: vi.fn(() => {
+        throw new Error('must not resolve assetUal for skipped ACK decisions');
+      }),
+    });
+
+    await observer({
+      encoded: new Uint8Array(0),
+      ack: {
+        contextGraphId,
+        merkleRoot,
+        nodeIdentityId: coreIdentityId,
+        coreNodeSignatureR: new Uint8Array(32),
+        coreNodeSignatureVS: new Uint8Array(32),
+      },
+      intent: decodePublishIntent(encodePublishIntent({
+        merkleRoot,
+        contextGraphId,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: 300,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: ['urn:entity:1'],
+        epochs: 1,
+        tokenAmountStr: '1000',
+        merkleLeafCount: swmMerkleLeafCount,
+      })),
+      peerId: 'publisher-0',
+    });
+  });
+
+  it('logs declined ACK lifecycle decisions as summary when debug logging is off', async () => {
+    const entries: string[] = [];
+    Logger.setSink((entry) => entries.push(entry.message));
+    const observer = createStorageAckLifecycleObserver({
+      localPeerId: 'receiver-peer',
+      localNodeIdentityId: coreIdentityId,
+      shouldObserve: (decision) => isStorageACKDecline(decision.ack),
+      detailForDecision: (decision) => isStorageACKDecline(decision.ack) ? 'summary' : 'debug',
+      resolveAssetUalForPublishIntent: vi.fn(() => TEST_ASSET_UAL),
+    });
+    const ack = decodeStorageACK(encodeStorageACK({
+      merkleRoot: new Uint8Array(0),
+      coreNodeSignatureR: new Uint8Array(0),
+      coreNodeSignatureVS: new Uint8Array(0),
+      contextGraphId,
+      nodeIdentityId: 0,
+      declineCode: STORAGE_ACK_DECLINE_CODES.NO_DATA_IN_SWM,
+      declineMessage: 'missing shared working memory data',
+    }));
+
+    await observer({
+      encoded: new Uint8Array(0),
+      ack,
+      intent: decodePublishIntent(encodePublishIntent({
+        merkleRoot,
+        contextGraphId,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: 300,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: ['urn:entity:1'],
+        epochs: 1,
+        tokenAmountStr: '1000',
+        merkleLeafCount: swmMerkleLeafCount,
+      })),
+      peerId: 'publisher-0',
+    });
+
+    expect(entries).toContainEqual(expect.stringContaining('stage=storage_ack'));
+    expect(entries).toContainEqual(expect.stringContaining('event=storage_ack_declined'));
+    expect(entries).toContainEqual(expect.stringContaining(`assetUal=${TEST_ASSET_UAL}`));
   });
 
   it('emits ackHandlerTotal{outcome} through the REAL handler (ack + decline paths)', async () => {
@@ -504,6 +687,87 @@ describe('StorageACKHandler', () => {
     await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(/unsafe|empty|iri/i);
   });
 
+  it.each([
+    ['a language tag with a character a tag may not hold', '"refused value"@en_GB'],
+    ['a blank-node label with a character a label may not hold', '_:node!refused'],
+  ])('refuses inline staging quads holding %s before persisting or signing', async (_label, object) => {
+    const nquadsStr = `<urn:entity:1> <urn:p> ${object} <did:dkg:context-graph:42> .`;
+    const stagingBytes = new TextEncoder().encode(nquadsStr);
+    const parsed = parseSimpleNQuads(nquadsStr);
+    const store = new OxigraphStore();
+    const signMessage = vi.spyOn(coreWallet, 'signMessage');
+    try {
+      const handler = new StorageACKHandler(store as any, {
+        nodeRole: 'core',
+        nodeIdentityId: coreIdentityId,
+        signerWallet: coreWallet,
+        contextGraphSharedMemoryUri: (cgId: string) => `did:dkg:context-graph:${cgId}/_shared_memory`,
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
+        isCgCurated: async () => true,
+      }, new TypedEventBus() as any);
+      const intent = encodePublishIntent({
+        merkleRoot: computeFlatKCRoot(parsed, []),
+        contextGraphId,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: stagingBytes.length,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: ['urn:entity:1'],
+        epochs: 1,
+        tokenAmountStr: '1000',
+        merkleLeafCount: computeFlatKCMerkleLeafCountV10(parsed, []),
+        stagingQuads: stagingBytes,
+      });
+
+      await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(SparqlTermValidationError);
+      expect(signMessage).not.toHaveBeenCalled();
+      expect(await store.countQuads()).toBe(0);
+    } finally {
+      signMessage.mockRestore();
+    }
+  });
+
+  it.each([
+    ['a trust-level row', '<urn:entity:1> <http://dkg.io/ontology/trustLevel> "3"^^<http://www.w3.org/2001/XMLSchema#integer> <did:dkg:context-graph:42> .', 'urn:entity:1'],
+    ['a subject in a reserved namespace', '<urn:dkg:file:staged> <urn:p> "v" <did:dkg:context-graph:42> .', 'urn:dkg:file:staged'],
+  ])('refuses inline staging quads carrying %s before persisting or signing', async (_label, nquadsStr, rootEntity) => {
+    const stagingBytes = new TextEncoder().encode(nquadsStr);
+    const parsed = parseSimpleNQuads(nquadsStr);
+    const store = new OxigraphStore();
+    const signMessage = vi.spyOn(coreWallet, 'signMessage');
+    try {
+      const handler = new StorageACKHandler(store as any, {
+        nodeRole: 'core',
+        nodeIdentityId: coreIdentityId,
+        signerWallet: coreWallet,
+        contextGraphSharedMemoryUri: (cgId: string) => `did:dkg:context-graph:${cgId}/_shared_memory`,
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
+        isCgCurated: async () => true,
+      }, new TypedEventBus() as any);
+      const intent = encodePublishIntent({
+        merkleRoot: computeFlatKCRoot(parsed, []),
+        contextGraphId,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: stagingBytes.length,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: [rootEntity],
+        epochs: 1,
+        tokenAmountStr: '1000',
+        merkleLeafCount: computeFlatKCMerkleLeafCountV10(parsed, []),
+        stagingQuads: stagingBytes,
+      });
+
+      await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(/trustLevel|reserved namespace/);
+      expect(signMessage).not.toHaveBeenCalled();
+      expect(await store.countQuads()).toBe(0);
+    } finally {
+      signMessage.mockRestore();
+    }
+  });
+
   it('declines (SIGNER_NOT_REGISTERED) when the signer is no longer confirmed registered', async () => {
     // PR #557: this used to throw, which the publisher saw as a libp2p
     // stream reset; now the handler returns a typed decline so the
@@ -753,6 +1017,18 @@ describe('StorageACKHandler', () => {
       expect(recovered.toLowerCase()).toBe(coreWallet.address.toLowerCase());
     });
 
+    it('accepts zero assertion leaves because curated sampling uses the catalog tree', async () => {
+      const handler = await createHandler([]);
+      const response = await handler.handler(
+        curatedIntent({ merkleLeafCount: 0 }),
+        fakePeerId,
+      );
+      const ack = decodeStorageACK(response);
+
+      expect(isStorageACKDecline(ack)).toBe(false);
+      expect(ethers.hexlify(ack.merkleRoot)).toBe(ethers.hexlify(claimedRoot));
+    });
+
     it('DECLINEs CATALOG_ROOT_MISMATCH when the rebuilt root != the claimed catalogRoot', async () => {
       const handler = await createHandler([]);
       const wrongRoot = ethers.getBytes(ethers.keccak256(new TextEncoder().encode('wrong-catalog-root')));
@@ -823,13 +1099,12 @@ describe('StorageACKHandler', () => {
     // throw the classic 'store is closed' mid-restart error, reusing the
     // curated fixtures above. The catalog is VALID (root/leaf/byteSize all
     // check out) so the handler reaches the `<cg>/_catalog` persist —
-    // deleteByPattern + insert — which is the store-outage catch path this
+    // targeted update + insert — which is the store-outage catch path this
     // regression pins (otReviewAgent #1408:650).
-    async function curatedHandlerWithFailingStore(
-      failingOps: readonly ('deleteByPattern' | 'insert' | 'flush')[],
+    function curatedHandlerWithStore(
+      store: TripleStore,
       configOverrides: Partial<StorageACKHandlerConfig> = {},
     ) {
-      const base = new OxigraphStore();
       const config: StorageACKHandlerConfig = {
         nodeRole: 'core',
         nodeIdentityId: coreIdentityId,
@@ -841,20 +1116,198 @@ describe('StorageACKHandler', () => {
         isCgCurated: async () => true,
         ...configOverrides,
       };
-      return new StorageACKHandler(
+      return new StorageACKHandler(store as any, config, new TypedEventBus() as any);
+    }
+
+    async function curatedHandlerWithFailingStore(
+      failingOps: readonly ('deleteByPattern' | 'update' | 'insert' | 'flush')[],
+      configOverrides: Partial<StorageACKHandlerConfig> = {},
+    ) {
+      const base = new OxigraphStore();
+      return curatedHandlerWithStore(
         storeWithFailingOps(base, failingOps) as any,
-        config,
-        new TypedEventBus() as any,
+        configOverrides,
       );
     }
 
-    it('curated catalog persist / deleteByPattern throws → CORE_TEMPORARILY_UNAVAILABLE ("store unavailable"), NO signed ACK', async () => {
+    it('uses one targeted update with graph hints, avoids deleteByPattern counts, and preserves unrelated subjects', async () => {
+      const catalogGraph = `${cgDid}/_catalog`;
+      const unrelatedSubject = 'urn:test:unrelated-catalog-subject';
+      const stalePredicate = 'urn:test:stale-catalog-predicate';
+      const base = new OxigraphStore();
+      await base.insert([
+        { subject: cgDid, predicate: stalePredicate, object: '"stale"', graph: catalogGraph },
+        { subject: unrelatedSubject, predicate: 'urn:test:kept', object: '"yes"', graph: catalogGraph },
+      ]);
+      const updates: Array<{ sparql: string; options?: { source?: string; priority?: string; touchedGraphs?: readonly string[] } }> = [];
+      let deleteByPatternCalls = 0;
+      const store = new Proxy(base as unknown as TripleStore, {
+        get(target, prop, receiver) {
+          if (prop === 'update') {
+            return async (sparql: string, options?: { source?: string; priority?: string; touchedGraphs?: readonly string[] }) => {
+              updates.push({ sparql, options });
+              return target.update!.call(target, sparql, options);
+            };
+          }
+          if (prop === 'deleteByPattern') {
+            return async (...args: Parameters<TripleStore['deleteByPattern']>) => {
+              deleteByPatternCalls += 1;
+              return target.deleteByPattern.call(target, ...args);
+            };
+          }
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const handler = curatedHandlerWithStore(store);
+
+      const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
+
+      expect(isStorageACKDecline(decoded)).toBe(false);
+      expect(deleteByPatternCalls).toBe(0);
+      expect(updates).toHaveLength(1);
+      expect(updates[0]?.sparql).toContain(`VALUES ?s { <${cgDid}> }`);
+      expect(updates[0]?.options).toMatchObject({
+        source: 'storage-ack.persistCatalog.update',
+        priority: 'ack',
+        touchedGraphs: [catalogGraph],
+      });
+      const stale = await base.query(`ASK { GRAPH <${catalogGraph}> { <${cgDid}> <${stalePredicate}> ?o } }`);
+      expect(stale).toMatchObject({ type: 'boolean', value: false });
+      const unrelated = await base.query(`ASK { GRAPH <${catalogGraph}> { <${unrelatedSubject}> ?p ?o } }`);
+      expect(unrelated).toMatchObject({ type: 'boolean', value: true });
+    });
+
+    it('falls back to per-subject no-count delete when update() is unavailable', async () => {
+      const base = new OxigraphStore();
+      let deleteWithoutCountCalls = 0;
+      const store = new Proxy(base as unknown as TripleStore, {
+        get(target, prop, receiver) {
+          if (prop === 'update') return undefined;
+          if (prop === 'deleteByPatternWithoutCount') {
+            return async (...args: Parameters<NonNullable<TripleStore['deleteByPatternWithoutCount']>>) => {
+              deleteWithoutCountCalls += 1;
+              return target.deleteByPatternWithoutCount!.call(target, ...args);
+            };
+          }
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const handler = curatedHandlerWithStore(store);
+
+      const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
+
+      expect(isStorageACKDecline(decoded)).toBe(false);
+      expect(deleteWithoutCountCalls).toBe(1);
+    });
+
+    it('falls back through a decorator whose inner store does not support update()', async () => {
+      const base = new OxigraphStore();
+      let deleteWithoutCountCalls = 0;
+      const innerWithoutUpdate = new Proxy(base as unknown as TripleStore, {
+        get(target, prop, receiver) {
+          if (prop === 'update') return undefined;
+          if (prop === 'deleteByPatternWithoutCount') {
+            return async (...args: Parameters<NonNullable<TripleStore['deleteByPatternWithoutCount']>>) => {
+              deleteWithoutCountCalls += 1;
+              return target.deleteByPatternWithoutCount!.call(target, ...args);
+            };
+          }
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const decoratedStore = new GraphSetIndexStore(innerWithoutUpdate);
+      expect(typeof decoratedStore.update).toBe('function');
+      const handler = curatedHandlerWithStore(decoratedStore);
+
+      const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
+
+      expect(isStorageACKDecline(decoded)).toBe(false);
+      expect(deleteWithoutCountCalls).toBe(1);
+      await expect(base.countQuads(`${cgDid}/_catalog`)).resolves.toBe(catalogTriples.length);
+    });
+
+    it('declines a blank-node catalog subject before anything is persisted', async () => {
+      // A curated catalog must be the Context Graph DID's catalog partition, so
+      // a blank-node subject never reaches `<cg>/_catalog` through the handler.
+      const blankCatalogTriples = [{
+        subject: '_:catalog',
+        predicate: 'urn:test:catalog-predicate',
+        object: '"blank-subject"',
+      }];
+      const blankCatalogBytes = new TextEncoder().encode(
+        '_:catalog <urn:test:catalog-predicate> "blank-subject" .',
+      );
+      const blankCatalogRoot = computeCatalogRoot(blankCatalogTriples);
+      const store = new OxigraphStore();
+      const handler = curatedHandlerWithStore(store);
+
+      const decoded = decodeStorageACK(await handler.handler(curatedIntent({
+        stagingQuads: blankCatalogBytes,
+        publicByteSize: blankCatalogBytes.length,
+        catalogRoot: blankCatalogRoot.root,
+        catalogLeafCount: blankCatalogRoot.leafCount,
+      }), fakePeerId));
+
+      expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH);
+      await expect(store.countQuads(`${cgDid}/_catalog`)).resolves.toBe(0);
+    });
+
+    it('catalog persistence skips targeted update and deletes by pattern for a blank-node subject', async () => {
+      const blankCatalogTriples = [{
+        subject: '_:catalog',
+        predicate: 'urn:test:catalog-predicate',
+        object: '"blank-subject"',
+      }];
+      const base = new OxigraphStore();
+      let updateCalls = 0;
+      const deletedPatterns: Array<Partial<Quad>> = [];
+      const store = new Proxy(base as unknown as TripleStore, {
+        get(target, prop, receiver) {
+          if (prop === 'update') {
+            return async (...args: Parameters<NonNullable<TripleStore['update']>>) => {
+              updateCalls += 1;
+              return target.update!.call(target, ...args);
+            };
+          }
+          if (prop === 'deleteByPatternWithoutCount') {
+            return async (...args: Parameters<NonNullable<TripleStore['deleteByPatternWithoutCount']>>) => {
+              deletedPatterns.push(args[0]);
+              // This regression targets the ACK routing policy. Blank-node
+              // labels are operation-local, so the spy records the requested
+              // no-count delete without asking the embedded backend to resolve
+              // that label in a separate operation.
+              if (args[0].subject?.startsWith('_:')) return;
+              return target.deleteByPatternWithoutCount!.call(target, ...args);
+            };
+          }
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      await replaceCatalogQuads(
+        store,
+        `${cgDid}/_catalog`,
+        blankCatalogTriples.map((triple) => ({ ...triple, graph: '' })),
+      );
+
+      expect(updateCalls).toBe(0);
+      expect(deletedPatterns).toEqual([{
+        graph: `${cgDid}/_catalog`,
+        subject: '_:catalog',
+      }]);
+      await expect(base.countQuads(`${cgDid}/_catalog`)).resolves.toBe(1);
+    });
+
+    it('curated catalog persist / targeted update throws → CORE_TEMPORARILY_UNAVAILABLE ("store unavailable"), NO signed ACK', async () => {
       // Dead-air regression: a curated encrypted publish with a VALID catalog
-      // root whose `<cg>/_catalog` REPLACE (deleteByPattern) hits a closed
+      // root whose `<cg>/_catalog` targeted DELETE update hits a closed
       // store used to throw out of the handler → stream reset → publisher
       // no_response. It must instead reply with the transient decline.
       const onDecline = vi.fn();
-      const handler = await curatedHandlerWithFailingStore(['deleteByPattern'], { onDecline });
+      const handler = await curatedHandlerWithFailingStore(['update'], { onDecline });
       const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
 
       expect(isStorageACKDecline(decoded)).toBe(true);

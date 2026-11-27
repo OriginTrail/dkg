@@ -18,6 +18,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const CG_ID = 'no-funded-wallet-cg';
 const ASSERTION_NAME = 'paid-asset';
@@ -62,7 +63,8 @@ describe('POST /api/knowledge-assets/:name/vm/publish — NO_FUNDED_PUBLISHER_WA
           catchupTracker: { jobs: new Map(), latestByContextGraph: new Map() },
           extractionRegistry: {}, fileStore: {}, extractionStatus: new Map(), assertionImportLocks: new Map(),
           vectorStore: {}, embeddingProvider: null, validTokens: new Set(), apiHost: '127.0.0.1', apiPortRef: { value: 0 },
-          url, path: url.pathname, requestToken: undefined, requestAgentAddress: 'did:dkg:agent:test',
+          url, path: url.pathname, requestAgentAddress: 'did:dkg:agent:test',
+          authentication: requestAuthentication({ kind: 'anonymous' }),
           emitMemoryGraphChanged: () => {}, emitNotification: () => {},
         } as any);
         if (!res.writableEnded) { res.statusCode = 404; res.end(); }
@@ -109,5 +111,28 @@ describe('POST /api/knowledge-assets/:name/vm/publish — NO_FUNDED_PUBLISHER_WA
     expect(res.status).toBe(400);
     expect(res.body?.code).toBe('NO_FUNDED_PUBLISHER_WALLET');
     expect(res.body?.error).toContain('No operational wallet has enough funds');
+  });
+
+  it('maps inconclusive PCA funding to a sanitized retryable 503', async () => {
+    await startWithPublishImpl(async () => {
+      throw Object.assign(new Error('RPC at https://private.example failed'), {
+        code: 'PCA_FUNDING_UNKNOWN', readCode: 'RPC_ENDPOINTS_EXHAUSTED',
+      });
+    });
+    const res = await postPublish();
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({
+      code: 'PCA_FUNDING_UNKNOWN',
+      error: 'PCA funding verification is inconclusive; retry when chain reads recover.',
+      retryable: true,
+    });
+  });
+
+  it('keeps a genuine on-chain revert as 500', async () => {
+    await startWithPublishImpl(async () => {
+      throw Object.assign(new Error('execution reverted'), { code: 'CALL_EXCEPTION' });
+    });
+    const res = await postPublish();
+    expect(res.status).toBe(500);
   });
 });

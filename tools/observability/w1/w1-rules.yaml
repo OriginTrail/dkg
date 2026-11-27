@@ -1,0 +1,211 @@
+# GENERATED FILE — do not edit. Source: tools/observability/lib/w1.mjs
+# Regenerate with: node tools/observability/generate-observability.mjs
+#
+# A Prometheus rule group carrying the EXACT expressions of w1-queries.md,
+# so `promtool check rules` parses every W1 decision query. This is a
+# parser fixture, not a deployment artifact: nothing provisions it, and
+# verify-w1-render.mjs asserts it is expression-identical to the report so
+# it can never drift into a hand-maintained second copy.
+groups:
+  - name: w1-stable-window
+    rules:
+      # Completed durable/changelog sync operations (I4 count)
+      - record: w1:stable:completed_durable_operations
+        expr: "sum(increase({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_count\", lane=~\"durable|changelog\", instance=~\"${node:regex}\"}[2h]))"
+      # Attributed durable payload bytes (I2 + I3)
+      - record: w1:stable:attributed_durable_payload_bytes
+        expr: "(sum(increase({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[2h])) or vector(0)) + (sum(increase({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[2h])) or vector(0))"
+      # Cross-family single-flight joins (I6)
+      - record: w1:stable:cross_family_singleflight_joins
+        expr: "(sum(increase(dkg_sync_singleflight_joins_total{owner_source=~\"catchup-foreground\", joiner_source!~\"catchup-foreground\", instance=~\"${node:regex}\"}[2h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source=~\"on-connect|reconcile\", joiner_source!~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[2h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source=~\"catchup-background|vm-recovery|swm-recovery|control-plane\", joiner_source!~\"catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[2h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source!~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", joiner_source=~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[2h])) or vector(0))"
+      # Samples carrying an unclassified source
+      - record: w1:stable:invalidating_source_samples
+        expr: "(sum(increase(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", source!~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[2h])) or vector(0)) + (sum(increase({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_count\", lane=~\"durable|changelog\", source!~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[2h])) or vector(0)) + (sum(increase(dkg_sync_operation_rejected_total{lane=~\"durable|changelog\", source!~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[2h])) or vector(0))"
+      # Counter resets inside the window
+      - record: w1:stable:counter_resets
+        expr: "max(resets(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[2h]))"
+      # Export coverage — fewest samples on any read series
+      - record: w1:stable:export_coverage_min_samples
+        expr: "min(count_over_time(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[2h]))"
+      # ALL-SOURCE durable active ms/hour (I4 sum, no family filter)
+      - record: w1:stable:all_source_durable_active_ms_per_hour
+        expr: "3600 * sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", instance=~\"${node:regex}\"}[2h]))"
+      # ALL-SOURCE durable bytes/hour (I2 + I3, no family filter)
+      - record: w1:stable:all_source_durable_bytes_per_hour
+        expr: "3600 * ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[2h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[2h])) or vector(0)))"
+      # ALL-SOURCE durable attempts/hour (I1, no family filter)
+      - record: w1:stable:all_source_durable_attempts_per_hour
+        expr: "3600 * sum(rate(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[2h]))"
+      # Eligible (foreground + recurring) durable active ms/hour
+      - record: w1:stable:eligible_durable_active_ms_per_hour
+        expr: "3600 * sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[2h]))"
+      # Eligible (foreground + recurring) durable bytes/hour
+      - record: w1:stable:eligible_durable_bytes_per_hour
+        expr: "3600 * ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[2h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[2h])) or vector(0)))"
+      # Eligible completed durable operations (I4 count)
+      - record: w1:stable:eligible_durable_operations
+        expr: "sum(increase({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_count\", lane=~\"durable|changelog\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[2h]))"
+      # Strain floor — eligible active ms ÷ ALL-SOURCE active ms
+      - record: w1:stable:eligible_active_share_of_all_source
+        expr: "sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[2h])) / sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", instance=~\"${node:regex}\"}[2h]))"
+      # user-triggered catch-up — durable bytes/hour (I2 + I3)
+      - record: w1:stable:foreground_durable_bytes_per_hour
+        expr: "3600 * ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground\", instance=~\"${node:regex}\"}[2h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground\", instance=~\"${node:regex}\"}[2h])) or vector(0)))"
+      # user-triggered catch-up — durable attempts/hour (I1)
+      - record: w1:stable:foreground_durable_attempts_per_hour
+        expr: "3600 * sum(rate(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground\", instance=~\"${node:regex}\"}[2h]))"
+      # user-triggered catch-up — durable active ms/hour (I4 sum)
+      - record: w1:stable:foreground_durable_active_ms_per_hour
+        expr: "3600 * sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground\", instance=~\"${node:regex}\"}[2h]))"
+      # user-triggered catch-up — share of eligible durable bytes
+      - record: w1:stable:foreground_share_of_eligible_durable_bytes
+        expr: "((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground\", instance=~\"${node:regex}\"}[2h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground\", instance=~\"${node:regex}\"}[2h])) or vector(0))) / ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[2h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[2h])) or vector(0)))"
+      # user-triggered catch-up — share of eligible durable active ms
+      - record: w1:stable:foreground_share_of_eligible_durable_active_ms
+        expr: "sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground\", instance=~\"${node:regex}\"}[2h])) / sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[2h]))"
+      # recurring peer contact — durable bytes/hour (I2 + I3)
+      - record: w1:stable:recurring_durable_bytes_per_hour
+        expr: "3600 * ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[2h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[2h])) or vector(0)))"
+      # recurring peer contact — durable attempts/hour (I1)
+      - record: w1:stable:recurring_durable_attempts_per_hour
+        expr: "3600 * sum(rate(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", source=~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[2h]))"
+      # recurring peer contact — durable active ms/hour (I4 sum)
+      - record: w1:stable:recurring_durable_active_ms_per_hour
+        expr: "3600 * sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[2h]))"
+      # recurring peer contact — share of eligible durable bytes
+      - record: w1:stable:recurring_share_of_eligible_durable_bytes
+        expr: "((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[2h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[2h])) or vector(0))) / ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[2h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[2h])) or vector(0)))"
+      # recurring peer contact — share of eligible durable active ms
+      - record: w1:stable:recurring_share_of_eligible_durable_active_ms
+        expr: "sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[2h])) / sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[2h]))"
+      # excluded / reported separately — durable bytes/hour (I2 + I3)
+      - record: w1:stable:excluded_durable_bytes_per_hour
+        expr: "3600 * ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[2h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[2h])) or vector(0)))"
+      # excluded / reported separately — durable attempts/hour (I1)
+      - record: w1:stable:excluded_durable_attempts_per_hour
+        expr: "3600 * sum(rate(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[2h]))"
+      # excluded / reported separately — durable active ms/hour (I4 sum)
+      - record: w1:stable:excluded_durable_active_ms_per_hour
+        expr: "3600 * sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[2h]))"
+      # Operations rejected before starting (I5)
+      - record: w1:stable:rejected_operations_by_reason
+        expr: "sum by (reason) (increase(dkg_sync_operation_rejected_total{lane=~\"durable|changelog\", instance=~\"${node:regex}\"}[2h]))"
+      # Single-flight joins by scope (I6)
+      - record: w1:stable:singleflight_joins_by_scope
+        expr: "sum by (scope) (increase(dkg_sync_singleflight_joins_total{instance=~\"${node:regex}\"}[2h]))"
+      # Corroborating pressure — sync scheduler queue wait p95
+      - record: w1:stable:sync_scheduler_queue_wait_p95_ms
+        expr: "histogram_quantile(0.95, sum by (le, lane) (rate({__name__=~\"dkg_sync_scheduler_queue_wait_ms(_milliseconds)?_bucket\", scheduler=\"sync-global\", instance=~\"${node:regex}\"}[2h])))"
+      # Corroborating pressure — oldest queued item age
+      - record: w1:stable:sync_scheduler_oldest_queued_age_ms
+        expr: "max by (lane) ({__name__=~\"dkg_backpressure_oldest_queued_age_ms(_milliseconds)?\", scheduler=\"sync-global\", instance=~\"${node:regex}\"})"
+      # Catch-up subscribe requests by route result (I7)
+      - record: w1:stable:catchup_requests_by_result
+        expr: "sum by (result) (increase(dkg_context_graph_catchup_requests_total{instance=~\"${node:regex}\"}[2h]))"
+      # Catch-up jobs by terminal status and admission path (I8)
+      - record: w1:stable:catchup_jobs_by_status_and_admission
+        expr: "sum by (status, admission) (increase(dkg_context_graph_catchup_jobs_total{instance=~\"${node:regex}\"}[2h]))"
+      # Walk catch-up job duration p95 (I9)
+      - record: w1:stable:catchup_walk_job_duration_p95_ms
+        expr: "histogram_quantile(0.95, sum by (le, admission) (rate({__name__=~\"dkg_context_graph_catchup_job_duration_ms(_milliseconds)?_bucket\", instance=~\"${node:regex}\"}[2h])))"
+  - name: w1-reconnect-window
+    rules:
+      # Completed durable/changelog sync operations (I4 count)
+      - record: w1:reconnect:completed_durable_operations
+        expr: "sum(increase({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_count\", lane=~\"durable|changelog\", instance=~\"${node:regex}\"}[1h]))"
+      # Attributed durable payload bytes (I2 + I3)
+      - record: w1:reconnect:attributed_durable_payload_bytes
+        expr: "(sum(increase({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[1h])) or vector(0)) + (sum(increase({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[1h])) or vector(0))"
+      # Cross-family single-flight joins (I6)
+      - record: w1:reconnect:cross_family_singleflight_joins
+        expr: "(sum(increase(dkg_sync_singleflight_joins_total{owner_source=~\"catchup-foreground\", joiner_source!~\"catchup-foreground\", instance=~\"${node:regex}\"}[1h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source=~\"on-connect|reconcile\", joiner_source!~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[1h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source=~\"catchup-background|vm-recovery|swm-recovery|control-plane\", joiner_source!~\"catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[1h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source!~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", joiner_source=~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[1h])) or vector(0))"
+      # Samples carrying an unclassified source
+      - record: w1:reconnect:invalidating_source_samples
+        expr: "(sum(increase(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", source!~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[1h])) or vector(0)) + (sum(increase({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_count\", lane=~\"durable|changelog\", source!~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[1h])) or vector(0)) + (sum(increase(dkg_sync_operation_rejected_total{lane=~\"durable|changelog\", source!~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[1h])) or vector(0))"
+      # Counter resets inside the window
+      - record: w1:reconnect:counter_resets
+        expr: "max(resets(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[1h]))"
+      # Export coverage — fewest samples on any read series
+      - record: w1:reconnect:export_coverage_min_samples
+        expr: "min(count_over_time(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[1h]))"
+      # ALL-SOURCE durable active ms/hour (I4 sum, no family filter)
+      - record: w1:reconnect:all_source_durable_active_ms_per_hour
+        expr: "3600 * sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", instance=~\"${node:regex}\"}[1h]))"
+      # ALL-SOURCE durable bytes/hour (I2 + I3, no family filter)
+      - record: w1:reconnect:all_source_durable_bytes_per_hour
+        expr: "3600 * ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[1h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[1h])) or vector(0)))"
+      # ALL-SOURCE durable attempts/hour (I1, no family filter)
+      - record: w1:reconnect:all_source_durable_attempts_per_hour
+        expr: "3600 * sum(rate(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[1h]))"
+      # Eligible (foreground + recurring) durable active ms/hour
+      - record: w1:reconnect:eligible_durable_active_ms_per_hour
+        expr: "3600 * sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[1h]))"
+      # Eligible (foreground + recurring) durable bytes/hour
+      - record: w1:reconnect:eligible_durable_bytes_per_hour
+        expr: "3600 * ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[1h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[1h])) or vector(0)))"
+      # Eligible completed durable operations (I4 count)
+      - record: w1:reconnect:eligible_durable_operations
+        expr: "sum(increase({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_count\", lane=~\"durable|changelog\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[1h]))"
+      # Strain floor — eligible active ms ÷ ALL-SOURCE active ms
+      - record: w1:reconnect:eligible_active_share_of_all_source
+        expr: "sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[1h])) / sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", instance=~\"${node:regex}\"}[1h]))"
+      # user-triggered catch-up — durable bytes/hour (I2 + I3)
+      - record: w1:reconnect:foreground_durable_bytes_per_hour
+        expr: "3600 * ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground\", instance=~\"${node:regex}\"}[1h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground\", instance=~\"${node:regex}\"}[1h])) or vector(0)))"
+      # user-triggered catch-up — durable attempts/hour (I1)
+      - record: w1:reconnect:foreground_durable_attempts_per_hour
+        expr: "3600 * sum(rate(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground\", instance=~\"${node:regex}\"}[1h]))"
+      # user-triggered catch-up — durable active ms/hour (I4 sum)
+      - record: w1:reconnect:foreground_durable_active_ms_per_hour
+        expr: "3600 * sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground\", instance=~\"${node:regex}\"}[1h]))"
+      # user-triggered catch-up — share of eligible durable bytes
+      - record: w1:reconnect:foreground_share_of_eligible_durable_bytes
+        expr: "((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground\", instance=~\"${node:regex}\"}[1h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground\", instance=~\"${node:regex}\"}[1h])) or vector(0))) / ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[1h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[1h])) or vector(0)))"
+      # user-triggered catch-up — share of eligible durable active ms
+      - record: w1:reconnect:foreground_share_of_eligible_durable_active_ms
+        expr: "sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground\", instance=~\"${node:regex}\"}[1h])) / sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[1h]))"
+      # recurring peer contact — durable bytes/hour (I2 + I3)
+      - record: w1:reconnect:recurring_durable_bytes_per_hour
+        expr: "3600 * ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[1h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[1h])) or vector(0)))"
+      # recurring peer contact — durable attempts/hour (I1)
+      - record: w1:reconnect:recurring_durable_attempts_per_hour
+        expr: "3600 * sum(rate(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", source=~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[1h]))"
+      # recurring peer contact — durable active ms/hour (I4 sum)
+      - record: w1:reconnect:recurring_durable_active_ms_per_hour
+        expr: "3600 * sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[1h]))"
+      # recurring peer contact — share of eligible durable bytes
+      - record: w1:reconnect:recurring_share_of_eligible_durable_bytes
+        expr: "((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[1h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[1h])) or vector(0))) / ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[1h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[1h])) or vector(0)))"
+      # recurring peer contact — share of eligible durable active ms
+      - record: w1:reconnect:recurring_share_of_eligible_durable_active_ms
+        expr: "sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[1h])) / sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[1h]))"
+      # excluded / reported separately — durable bytes/hour (I2 + I3)
+      - record: w1:reconnect:excluded_durable_bytes_per_hour
+        expr: "3600 * ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[1h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[1h])) or vector(0)))"
+      # excluded / reported separately — durable attempts/hour (I1)
+      - record: w1:reconnect:excluded_durable_attempts_per_hour
+        expr: "3600 * sum(rate(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[1h]))"
+      # excluded / reported separately — durable active ms/hour (I4 sum)
+      - record: w1:reconnect:excluded_durable_active_ms_per_hour
+        expr: "3600 * sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[1h]))"
+      # Operations rejected before starting (I5)
+      - record: w1:reconnect:rejected_operations_by_reason
+        expr: "sum by (reason) (increase(dkg_sync_operation_rejected_total{lane=~\"durable|changelog\", instance=~\"${node:regex}\"}[1h]))"
+      # Single-flight joins by scope (I6)
+      - record: w1:reconnect:singleflight_joins_by_scope
+        expr: "sum by (scope) (increase(dkg_sync_singleflight_joins_total{instance=~\"${node:regex}\"}[1h]))"
+      # Corroborating pressure — sync scheduler queue wait p95
+      - record: w1:reconnect:sync_scheduler_queue_wait_p95_ms
+        expr: "histogram_quantile(0.95, sum by (le, lane) (rate({__name__=~\"dkg_sync_scheduler_queue_wait_ms(_milliseconds)?_bucket\", scheduler=\"sync-global\", instance=~\"${node:regex}\"}[1h])))"
+      # Corroborating pressure — oldest queued item age
+      - record: w1:reconnect:sync_scheduler_oldest_queued_age_ms
+        expr: "max by (lane) ({__name__=~\"dkg_backpressure_oldest_queued_age_ms(_milliseconds)?\", scheduler=\"sync-global\", instance=~\"${node:regex}\"})"
+      # Catch-up subscribe requests by route result (I7)
+      - record: w1:reconnect:catchup_requests_by_result
+        expr: "sum by (result) (increase(dkg_context_graph_catchup_requests_total{instance=~\"${node:regex}\"}[1h]))"
+      # Catch-up jobs by terminal status and admission path (I8)
+      - record: w1:reconnect:catchup_jobs_by_status_and_admission
+        expr: "sum by (status, admission) (increase(dkg_context_graph_catchup_jobs_total{instance=~\"${node:regex}\"}[1h]))"
+      # Walk catch-up job duration p95 (I9)
+      - record: w1:reconnect:catchup_walk_job_duration_p95_ms
+        expr: "histogram_quantile(0.95, sum by (le, admission) (rate({__name__=~\"dkg_context_graph_catchup_job_duration_ms(_milliseconds)?_bucket\", instance=~\"${node:regex}\"}[1h])))"

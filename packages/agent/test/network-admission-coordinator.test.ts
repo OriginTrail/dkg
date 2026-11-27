@@ -1,0 +1,1160 @@
+import { describe, expect, it, vi } from 'vitest';
+import { peerIdFromString } from '@libp2p/peer-id';
+import {
+  createOperationContext,
+  ed25519Sign,
+  QuietRetryableHandlerError,
+} from '@origintrail-official/dkg-core';
+import {
+  NetworkAdmissionCoordinator,
+  NetworkAdmissionProbeBackoffError,
+  NetworkAdmissionProbeError,
+  NetworkAdmissionRejectedError,
+  type NetworkAdmissionCoordinatorOptions,
+} from '../src/p2p/network-admission-coordinator.js';
+import {
+  createNetworkAdmissionProtocolCheck,
+  createNetworkAdmissionRouterPolicy,
+  translateNetworkAdmissionErrorAtProtocolBoundary,
+} from '../src/p2p/network-admission-protocol-adapter.js';
+import { NetworkAdmissionService, type NetworkAdmissionOptions } from '../src/p2p/network-admission.js';
+import { signNetworkIdentityResponse } from '../src/p2p/network-identity-proof.js';
+import { CORE_CHAIN_CACHE_SOURCE_PROTOCOL, CORE_CHAIN_CACHE_SNAPSHOT_PROTOCOL } from '../src/core-chain-cache-config.js';
+
+const REMOTE_PEER_ID = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
+const REMOTE_PEER_ID_CID = peerIdFromString(REMOTE_PEER_ID).toCID().toString();
+const REMOTE_PRIVATE_KEY_SEED = Buffer
+  .from('vHxcSg3ecwP9UfJWdmlnWQeJe83jD2yKtOJlWuLpIrTRh3QiB5sL6iRhAidCZ3bHQLaE0RwBfHBNEmV7ylcjqg==', 'base64')
+  .slice(0, 32);
+const SELF_PEER_ID = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
+const PREFLIGHT_PEER_IDS = [
+  REMOTE_PEER_ID,
+  '12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw',
+  '12D3KooWPyTpqBBtU1AvzSsd5rWXCQzFcGtG44qDmeYenWcpzsge',
+  '12D3KooWJqhnnfouiNRUyJBEREpuKtV4A448LUbS6JiVCe8Q82bZ',
+] as const;
+const identity = {
+  networkId: 'network-a',
+  genesisId: 'base-testnet',
+};
+
+describe('protocol admission error boundary', () => {
+  it('translates only inbound probe backoff into the core quiet-retryable type', () => {
+    const probeError = new NetworkAdmissionProbeError(REMOTE_PEER_ID, 'retryable probe backed off');
+    const inbound = translateNetworkAdmissionErrorAtProtocolBoundary(probeError, 'inbound');
+
+    expect(inbound).toBeInstanceOf(QuietRetryableHandlerError);
+    expect((inbound as Error).message).toBe(probeError.message);
+    expect(translateNetworkAdmissionErrorAtProtocolBoundary(probeError, 'outbound')).toBe(probeError);
+
+    const rejected = new NetworkAdmissionRejectedError(REMOTE_PEER_ID);
+    expect(translateNetworkAdmissionErrorAtProtocolBoundary(rejected, 'inbound')).toBe(rejected);
+  });
+
+  it.each([
+    ['/dkg/test/1.0.0', false],
+    [CORE_CHAIN_CACHE_SOURCE_PROTOCOL, true],
+    [CORE_CHAIN_CACHE_SNAPSHOT_PROTOCOL, true],
+  ] as const)('dispatches %s with inbound quiet translation and outbound error preservation', async (protocol, cache) => {
+    const probeError = new NetworkAdmissionProbeError(REMOTE_PEER_ID, 'retryable probe backed off');
+    const coordinator = { ensureAdmitted: vi.fn(), ensureCacheAdmitted: vi.fn() };
+    const admit = cache ? coordinator.ensureCacheAdmitted : coordinator.ensureAdmitted;
+    admit.mockRejectedValue(probeError);
+    const check = createNetworkAdmissionProtocolCheck(coordinator);
+    const options = { timeoutMs: 123, signal: new AbortController().signal };
+
+    await expect(
+      check(REMOTE_PEER_ID, protocol, 'inbound', options),
+    ).rejects.toBeInstanceOf(QuietRetryableHandlerError);
+    await expect(
+      check(REMOTE_PEER_ID, protocol, 'outbound', options),
+    ).rejects.toBe(probeError);
+
+    expect(admit).toHaveBeenCalledTimes(2);
+    expect(admit.mock.contexts).toEqual([coordinator, coordinator]);
+    expect(admit.mock.calls[0][0]).toBe(REMOTE_PEER_ID);
+    expect(admit.mock.calls[0][1]).toMatchObject({ operationName: 'connect' });
+    expect(admit.mock.calls[0][2]).toBe(options);
+    expect(cache ? coordinator.ensureAdmitted : coordinator.ensureCacheAdmitted).not.toHaveBeenCalled();
+  });
+
+  it('builds BOTH router hooks from one coordinator via createNetworkAdmissionRouterPolicy', async () => {
+    // The wiring test asserts zero ensureAdmitted calls for a cached-rejected
+    // peer, so it cannot catch a factory whose full-admission half was
+    // disconnected (e.g. replaced with `async () => true`). This pins each
+    // half's delegation to the SAME coordinator.
+    const ensureAdmitted = vi.fn().mockResolvedValue(true);
+    const ensureCacheAdmitted = vi.fn().mockResolvedValue(true);
+    const isRejectedPeer = vi.fn().mockReturnValue(false);
+    const policy = createNetworkAdmissionRouterPolicy({ ensureAdmitted, ensureCacheAdmitted, isRejectedPeer });
+
+    await expect(policy.isPeerAccepted(REMOTE_PEER_ID, '/p', 'inbound')).resolves.toBe(true);
+    expect(ensureAdmitted).toHaveBeenCalledTimes(1);
+    expect(ensureAdmitted.mock.calls[0][0]).toBe(REMOTE_PEER_ID);
+    await expect(policy.isPeerAccepted(REMOTE_PEER_ID, CORE_CHAIN_CACHE_SOURCE_PROTOCOL, 'outbound')).resolves.toBe(true);
+    expect(ensureCacheAdmitted).toHaveBeenCalledTimes(1);
+    expect(ensureAdmitted).toHaveBeenCalledTimes(1);
+
+    expect(policy.isPeerKnownRejected(REMOTE_PEER_ID, '/p')).toBe(false);
+    expect(isRejectedPeer).toHaveBeenCalledTimes(1);
+    expect(isRejectedPeer).toHaveBeenCalledWith(REMOTE_PEER_ID);
+  });
+});
+
+function buildCoordinator(input: {
+  sendIdentityProbe: (...args: any[]) => Promise<Uint8Array>;
+  identity?: typeof identity;
+  probeTimeoutMs?: number;
+  probeBackoff?: NetworkAdmissionOptions['probeBackoff'];
+  quarantineCooldownMs?: number;
+  maxProbeBackoffEntries?: number;
+  now?: () => number;
+  onPeerRejected?: (peerId: string, quarantineMs: number) => void;
+  onPeerVerified?: (peerId: string) => void;
+  log?: NetworkAdmissionCoordinatorOptions['log'];
+}) {
+  const admission = new NetworkAdmissionService({
+    networkId: input.identity?.networkId,
+    selfPeerId: SELF_PEER_ID,
+    ...(input.probeBackoff !== undefined ? { probeBackoff: input.probeBackoff } : {}),
+    ...(input.quarantineCooldownMs !== undefined ? { quarantineCooldownMs: input.quarantineCooldownMs } : {}),
+    ...(input.maxProbeBackoffEntries !== undefined
+      ? { maxProbeBackoffEntries: input.maxProbeBackoffEntries }
+      : {}),
+    ...(input.now !== undefined ? { now: input.now } : {}),
+  });
+  const close = vi.fn();
+  const abort = vi.fn();
+  const deletePeerFromPeerStore = vi.fn();
+  const cleanupRejectedPeerState = vi.fn();
+  const coordinator = new NetworkAdmissionCoordinator({
+    admission,
+    identity: input.identity,
+    selfPeerId: SELF_PEER_ID,
+    sign: async () => new Uint8Array(),
+    sendIdentityProbe: input.sendIdentityProbe,
+    getConnections: () => [{
+      remotePeer: { toString: () => REMOTE_PEER_ID },
+      close,
+      abort,
+    }],
+    deletePeerFromPeerStore,
+    cleanupRejectedPeerState,
+    ...(input.onPeerRejected !== undefined ? { onPeerRejected: input.onPeerRejected } : {}),
+    ...(input.onPeerVerified !== undefined ? { onPeerVerified: input.onPeerVerified } : {}),
+    ...(input.probeTimeoutMs !== undefined ? { probeTimeoutMs: input.probeTimeoutMs } : {}),
+    ...(input.log !== undefined ? { log: input.log } : {}),
+  });
+
+  return {
+    admission,
+    coordinator,
+    close,
+    abort,
+    deletePeerFromPeerStore,
+    cleanupRejectedPeerState,
+  };
+}
+
+describe('NetworkAdmissionCoordinator', () => {
+  it('accepts every peer synchronously when network identity is disabled', () => {
+    const fixture = buildCoordinator({
+      identity: undefined,
+      sendIdentityProbe: async () => {
+        throw new Error('probe should not run');
+      },
+    });
+
+    expect(fixture.coordinator.enabled).toBe(false);
+    expect(fixture.coordinator.isAcceptedPeer(REMOTE_PEER_ID)).toBe(true);
+    expect(fixture.coordinator.filterAcceptedPeerIds([REMOTE_PEER_ID])).toEqual([REMOTE_PEER_ID]);
+  });
+
+  it('keeps transport probe failures retryable instead of quarantining the peer', async () => {
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe: async () => {
+        throw new Error('stream timeout');
+      },
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+
+    expect(fixture.coordinator.isAcceptedPeer(REMOTE_PEER_ID)).toBe(false);
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(false);
+    expect(fixture.admission.snapshot().quarantinedPeerIds).toEqual([]);
+    expect(fixture.admission.snapshot().verifiedPeerIds).toEqual([]);
+    expect(fixture.cleanupRejectedPeerState).not.toHaveBeenCalled();
+    expect(fixture.close).not.toHaveBeenCalled();
+    expect(fixture.abort).not.toHaveBeenCalled();
+    expect(fixture.deletePeerFromPeerStore).not.toHaveBeenCalled();
+  });
+
+  // GH#1578 - the connection-open caller no longer logs this error class, so
+  // the coordinator's warning is the only diagnostic a failed probe gets.
+  it.each([
+    {
+      failure: 'a transport error',
+      probe: async (): Promise<Uint8Array> => { throw new Error('stream timeout'); },
+      diagnostic: 'failed retryably: stream timeout',
+      backoff: '(automatic probes paused for 100ms)',
+    },
+    {
+      failure: 'an empty response',
+      probe: async (): Promise<Uint8Array> => new Uint8Array(),
+      diagnostic: 'failed retryably: identity probe ended without a response',
+      backoff: '(automatic probes paused for 100ms)',
+    },
+    {
+      failure: 'an unreadable response',
+      probe: async (): Promise<Uint8Array> => new TextEncoder().encode('NOT_JSON'),
+      diagnostic: 'returned unreadable response: ',
+      backoff: '(automatic probes paused for 250ms)',
+    },
+  ])('logs one warning for $failure and none for the backed-off skips after it', async ({ probe, diagnostic, backoff }) => {
+    const sendIdentityProbe = vi.fn(probe);
+    const log = { info: vi.fn(), warn: vi.fn() };
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      now: () => 1_000,
+      probeBackoff: {
+        transientBaseMs: 100,
+        transientMaxMs: 100,
+        unreadableResponseMs: 250,
+      },
+      log,
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toBeInstanceOf(NetworkAdmissionProbeError);
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    const warning = log.warn.mock.calls[0][1] as string;
+    expect(warning).toContain(`Network identity probe for ${REMOTE_PEER_ID.slice(-8)} ${diagnostic}`);
+    expect(warning.endsWith(backoff)).toBe(true);
+
+    for (let reconnect = 0; reconnect < 3; reconnect += 1) {
+      const skipped = await fixture.coordinator
+        .ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect'))
+        .catch((err: unknown) => err);
+      // Its own type, so callers tell a skip from a failed probe without the message.
+      expect(skipped).toBeInstanceOf(NetworkAdmissionProbeBackoffError);
+      expect(skipped).toBeInstanceOf(NetworkAdmissionProbeError);
+      expect(skipped).toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED', name: 'NetworkAdmissionProbeBackoffError' });
+      expect((skipped as NetworkAdmissionProbeBackoffError).retryAfterMs).toBe(Number(/(\d+)ms\)$/.exec(backoff)![1]));
+      expect((skipped as Error).message).toContain('retryable probe backed off');
+    }
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+    expect(log.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps active retryable probe backoff on the retryable error path', async () => {
+    let now = 1_000;
+    const sendIdentityProbe = vi.fn(async () => {
+      throw new Error('stream timeout');
+    });
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      now: () => now,
+      probeBackoff: {
+        transientBaseMs: 100,
+        transientMaxMs: 100,
+      },
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(false);
+
+    now += 101;
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports a peer as backed off exactly while an automatic attempt would skip it', async () => {
+    let now = 1_000;
+    let holdProbe = false;
+    let releaseProbe!: () => void;
+    const sendIdentityProbe = vi.fn(async (_peerId: string, data: Uint8Array): Promise<Uint8Array> => {
+      if (!holdProbe) throw new Error('stream reset');
+      await new Promise<void>((resolve) => { releaseProbe = resolve; });
+      const response = await signNetworkIdentityResponse({
+        request: JSON.parse(new TextDecoder().decode(data)), identity, responderPeerId: REMOTE_PEER_ID,
+        sign: (payload) => ed25519Sign(payload, REMOTE_PRIVATE_KEY_SEED),
+      });
+      return new TextEncoder().encode(JSON.stringify(response));
+    });
+    const fixture = buildCoordinator({
+      identity, sendIdentityProbe, now: () => now, probeBackoff: { transientBaseMs: 100, transientMaxMs: 100 },
+    });
+    const ctx = createOperationContext('sync');
+    const { coordinator } = fixture;
+    const attempt = () => coordinator.ensureAdmitted(REMOTE_PEER_ID, ctx).catch((error: unknown) => error);
+
+    expect(coordinator.isProbeBackedOff(REMOTE_PEER_ID)).toBe(false);
+    const failed = await attempt();
+    expect(failed).toBeInstanceOf(NetworkAdmissionProbeError);
+    expect(failed).not.toBeInstanceOf(NetworkAdmissionProbeBackoffError);
+    expect(coordinator.isProbeBackedOff(REMOTE_PEER_ID)).toBe(true);
+    expect(coordinator.isProbeBackedOff(REMOTE_PEER_ID_CID)).toBe(true);
+    expect(coordinator.isProbeBackedOff('not-a-peer-id')).toBe(false);
+    expect(await attempt()).toBeInstanceOf(NetworkAdmissionProbeBackoffError);
+
+    now += 100;
+    expect(coordinator.isProbeBackedOff(REMOTE_PEER_ID)).toBe(false);
+    expect(await attempt()).not.toBeInstanceOf(NetworkAdmissionProbeBackoffError);
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+    expect(coordinator.isProbeBackedOff(REMOTE_PEER_ID)).toBe(true);
+
+    // An explicit connect probes inside the window; an automatic caller would join that probe.
+    holdProbe = true;
+    const explicit = coordinator.ensureExplicitConnectAdmitted(REMOTE_PEER_ID, ctx);
+    await vi.waitFor(() => expect(sendIdentityProbe).toHaveBeenCalledTimes(3));
+    expect(fixture.admission.getRetryableProbeBackoff(REMOTE_PEER_ID)).toBeDefined();
+    expect(coordinator.isProbeBackedOff(REMOTE_PEER_ID)).toBe(false);
+    releaseProbe();
+    await expect(explicit).resolves.toBe(true);
+
+    // A cached verdict wins over any retry state, as it does for the attempt itself.
+    fixture.admission.rememberRetryableProbeFailure(REMOTE_PEER_ID, 'stream reset', 'transient');
+    expect(fixture.admission.getRetryableProbeBackoff(REMOTE_PEER_ID)).toBeDefined();
+    expect(coordinator.isProbeBackedOff(REMOTE_PEER_ID)).toBe(false);
+    await expect(coordinator.ensureAdmitted(REMOTE_PEER_ID, ctx)).resolves.toBe(true);
+
+    const disabled = buildCoordinator({ sendIdentityProbe, now: () => now });
+    disabled.admission.rememberRetryableProbeFailure(REMOTE_PEER_ID, 'stream reset', 'transient');
+    expect(disabled.coordinator.isProbeBackedOff(REMOTE_PEER_ID)).toBe(false);
+  });
+
+  it('preflight retries after a short lease and admits before automatic backoff expires', async () => {
+    let now = 1_000;
+    let attempt = 0;
+    const sendIdentityProbe = vi.fn(async (_peerId: string, data: Uint8Array) => {
+      attempt += 1;
+      if (attempt === 1) throw new Error('peer still booting');
+      const request = JSON.parse(new TextDecoder().decode(data));
+      const response = await signNetworkIdentityResponse({
+        request,
+        identity,
+        responderPeerId: REMOTE_PEER_ID,
+        sign: (payload) => ed25519Sign(payload, REMOTE_PRIVATE_KEY_SEED),
+      });
+      return new TextEncoder().encode(JSON.stringify(response));
+    });
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      now: () => now,
+      probeBackoff: {
+        transientBaseMs: 10_000,
+        transientMaxMs: 10_000,
+        preflightRetryMs: 100,
+      },
+    });
+    fixture.admission.rememberRetryableProbeFailure(REMOTE_PEER_ID, 'peer still booting', 'transient');
+
+    await expect(fixture.coordinator.preflightPeerAdmission(
+      [REMOTE_PEER_ID, REMOTE_PEER_ID_CID],
+      createOperationContext('publish'),
+    )).resolves.toEqual({ checked: 1, admitted: 0, unresolved: 1 });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+
+    await expect(fixture.coordinator.preflightPeerAdmission(
+      [REMOTE_PEER_ID],
+      createOperationContext('publish'),
+    )).resolves.toEqual({ checked: 1, admitted: 0, unresolved: 1 });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+
+    now += 100;
+    await expect(fixture.coordinator.preflightPeerAdmission(
+      [REMOTE_PEER_ID],
+      createOperationContext('publish'),
+    )).resolves.toEqual({ checked: 1, admitted: 1, unresolved: 0 });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+    expect(fixture.coordinator.isAcceptedPeer(REMOTE_PEER_ID)).toBe(true);
+  });
+
+  it('preflight admits a healthy peer despite an active automatic backoff', async () => {
+    const now = 1_000;
+    const sendIdentityProbe = vi.fn(async (_peerId: string, data: Uint8Array) => {
+      const request = JSON.parse(new TextDecoder().decode(data));
+      const response = await signNetworkIdentityResponse({
+        request,
+        identity,
+        responderPeerId: REMOTE_PEER_ID,
+        sign: (payload) => ed25519Sign(payload, REMOTE_PRIVATE_KEY_SEED),
+      });
+      return new TextEncoder().encode(JSON.stringify(response));
+    });
+    const fixture = buildCoordinator({ identity, sendIdentityProbe, now: () => now });
+    fixture.admission.rememberRetryableProbeFailure(REMOTE_PEER_ID, 'connection/open race', 'transient');
+
+    await expect(fixture.coordinator.preflightPeerAdmission(
+      [REMOTE_PEER_ID],
+      createOperationContext('publish'),
+    )).resolves.toEqual({ checked: 1, admitted: 1, unresolved: 0 });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+    expect(fixture.coordinator.isAcceptedPeer(REMOTE_PEER_ID)).toBe(true);
+  });
+
+  it('preflight bounds concurrent identity admission attempts', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const releases: Array<() => void> = [];
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe: async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise<void>((resolve) => releases.push(resolve));
+        active -= 1;
+        return new Uint8Array();
+      },
+    });
+
+    const preflight = fixture.coordinator.preflightPeerAdmission(
+      PREFLIGHT_PEER_IDS,
+      createOperationContext('publish'),
+      { maxConcurrency: 2 },
+    );
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    releases[0]();
+    releases[1]();
+    await vi.waitFor(() => expect(releases).toHaveLength(4));
+    releases[2]();
+    releases[3]();
+
+    await expect(preflight).resolves.toEqual({ checked: 4, admitted: 0, unresolved: 4 });
+    expect(maxActive).toBe(2);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])(
+    'keeps invalid preflight concurrency %s bounded to one probe',
+    async (maxConcurrency) => {
+      let active = 0;
+      let maxActive = 0;
+      const fixture = buildCoordinator({
+        identity,
+        sendIdentityProbe: async () => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          active -= 1;
+          return new Uint8Array();
+        },
+      });
+
+      await expect(fixture.coordinator.preflightPeerAdmission(
+        PREFLIGHT_PEER_IDS,
+        createOperationContext('publish'),
+        { maxConcurrency },
+      )).resolves.toEqual({ checked: 4, admitted: 0, unresolved: 4 });
+      expect(maxActive).toBe(1);
+    },
+  );
+
+  it('lets an explicit connect bypass cached retry backoff without bypassing admission', async () => {
+    const now = 1_000;
+    const sendIdentityProbe = vi.fn(async () => {
+      throw new Error('stream timeout');
+    });
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      now: () => now,
+      probeBackoff: {
+        transientBaseMs: 100,
+      },
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({
+      code: 'NETWORK_ADMISSION_PROBE_FAILED',
+    });
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({
+      code: 'NETWORK_ADMISSION_PROBE_FAILED',
+    });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+
+    await expect(
+      fixture.coordinator.ensureExplicitConnectAdmitted(
+        REMOTE_PEER_ID,
+        createOperationContext('connect'),
+      ),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(false);
+
+    fixture.admission.quarantinePeer(REMOTE_PEER_ID);
+    await expect(
+      fixture.coordinator.ensureExplicitConnectAdmitted(
+        REMOTE_PEER_ID,
+        createOperationContext('connect'),
+      ),
+    ).resolves.toBe(false);
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+  });
+
+  it('coalesces explicit and automatic callers onto one explicit retry probe', async () => {
+    let release!: (value: Uint8Array) => void;
+    let attempt = 0;
+    const sendIdentityProbe = vi.fn(async () => {
+      attempt += 1;
+      if (attempt === 1) throw new Error('stream timeout');
+      return new Promise<Uint8Array>((resolve) => {
+        release = resolve;
+      });
+    });
+    const fixture = buildCoordinator({ identity, sendIdentityProbe });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+
+    const first = fixture.coordinator.ensureExplicitConnectAdmitted(
+      REMOTE_PEER_ID,
+      createOperationContext('connect'),
+    );
+    const second = fixture.coordinator.ensureExplicitConnectAdmitted(
+      REMOTE_PEER_ID_CID,
+      createOperationContext('connect'),
+    );
+    const automatic = fixture.coordinator.ensureAdmitted(
+      REMOTE_PEER_ID,
+      createOperationContext('connect'),
+    );
+    await Promise.resolve();
+
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+    release(new TextEncoder().encode('not-json'));
+    await expect(first).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    await expect(second).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    await expect(automatic).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+  });
+
+  it('grows transient retryable probe backoff up to the configured cap', async () => {
+    let now = 1_000;
+    const sendIdentityProbe = vi.fn(async () => {
+      throw new Error('stream timeout');
+    });
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      now: () => now,
+      probeBackoff: {
+        transientBaseMs: 100,
+        transientMaxMs: 150,
+      },
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+
+    now += 99;
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({
+      code: 'NETWORK_ADMISSION_PROBE_FAILED',
+      message: expect.stringContaining('retryable probe backed off for 1ms'),
+    });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+
+    now += 1;
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+
+    now += 149;
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({
+      code: 'NETWORK_ADMISSION_PROBE_FAILED',
+      message: expect.stringContaining('retryable probe backed off for 1ms'),
+    });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+
+    now += 1;
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(3);
+  });
+
+  it('uses unreadable-response backoff before retrying malformed probe responses', async () => {
+    let now = 1_000;
+    const sendIdentityProbe = vi.fn(async () => new TextEncoder().encode('REMOTE_SENTINEL_NOT_JSON'));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      now: () => now,
+      probeBackoff: {
+        unreadableResponseMs: 250,
+      },
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+
+    now += 249;
+    const cachedError = await fixture.coordinator
+      .ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect'))
+      .catch((err: unknown) => err);
+    expect(cachedError).toMatchObject({
+      code: 'NETWORK_ADMISSION_PROBE_FAILED',
+      message: expect.stringContaining('retryable probe backed off for 1ms after unreadable response'),
+    });
+    expect((cachedError as Error).message).not.toContain('REMOTE_SENTINEL');
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+
+    now += 1;
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats identity-probe negotiation failures as transient, not a long blackhole', async () => {
+    // A peer that answers multistream `na` because it has not yet registered
+    // the identity protocol (still booting) must recover on the short transient
+    // schedule, not be quarantined off every protocol for minutes. Regression
+    // guard for the rolling-upgrade blackhole (PR #1558 review, HIGH-1).
+    let now = 1_000;
+    const sendIdentityProbe = vi.fn(async () => {
+      throw new Error('Protocol selection failed - could not negotiate /dkg/network-identity');
+    });
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      now: () => now,
+      probeBackoff: {
+        transientBaseMs: 100,
+        transientMaxMs: 100,
+      },
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+    // Still within the short transient window: suppressed, but NOT quarantined.
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(false);
+    expect(fixture.admission.snapshot().quarantinedPeerIds).toEqual([]);
+
+    // The transient backoff elapses in 100ms — a booting peer is re-probed
+    // promptly rather than blackholed for the old flat 300s.
+    now += 100;
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps unreadable probe responses retryable instead of quarantining the peer', async () => {
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe: async () => new TextEncoder().encode('{not json'),
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+
+    expect(fixture.admission.snapshot().quarantinedPeerIds).toEqual([]);
+    expect(fixture.cleanupRejectedPeerState).not.toHaveBeenCalled();
+    expect(fixture.deletePeerFromPeerStore).not.toHaveBeenCalled();
+  });
+
+  it('races caller cancellation without passing caller abort into the shared probe', async () => {
+    const callerSignal = AbortSignal.timeout(5_000);
+    let seenOptions: { timeoutMs: number; signal?: AbortSignal } | undefined;
+    const fixture = buildCoordinator({
+      identity,
+      probeTimeoutMs: 3_000,
+      sendIdentityProbe: async (_peerId, _data, options) => {
+        seenOptions = options;
+        return new TextEncoder().encode('{not json');
+      },
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(
+        REMOTE_PEER_ID,
+        createOperationContext('connect'),
+        { signal: callerSignal, timeoutMs: 100 },
+      ),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+
+    expect(seenOptions).toMatchObject({ timeoutMs: 3_000 });
+    expect(seenOptions?.signal).toBeInstanceOf(AbortSignal);
+    expect(seenOptions?.signal).not.toBe(callerSignal);
+  });
+
+  it('does not start a background probe when the first admission wait is already aborted', async () => {
+    const sendIdentityProbe = vi.fn(async () => new TextEncoder().encode('{not json'));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+    });
+    const callerAbort = new AbortController();
+    callerAbort.abort(new Error('caller already cancelled'));
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(
+        REMOTE_PEER_ID,
+        createOperationContext('connect'),
+        { signal: callerAbort.signal },
+      ),
+    ).rejects.toThrow('caller already cancelled');
+    await Promise.resolve();
+    expect(sendIdentityProbe).not.toHaveBeenCalled();
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledOnce();
+  });
+
+  it('canonicalizes peer ids before probing and sharing in-flight admission attempts', async () => {
+    let release!: (value: Uint8Array) => void;
+    const sendIdentityProbe = vi.fn(async () => new Promise<Uint8Array>((resolve) => {
+      release = resolve;
+    }));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+    });
+
+    const first = fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID_CID, createOperationContext('connect'));
+    const second = fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect'));
+    await Promise.resolve();
+
+    expect(sendIdentityProbe).toHaveBeenCalledOnce();
+    expect(sendIdentityProbe.mock.calls[0][0]).toBe(REMOTE_PEER_ID);
+    release(new TextEncoder().encode('{not json'));
+    await expect(first).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    await expect(second).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+  });
+
+  it('keeps caller aborts local to that waiter for shared admission attempts', async () => {
+    let release!: (value: Uint8Array) => void;
+    const sendIdentityProbe = vi.fn(async () => new Promise<Uint8Array>((resolve) => {
+      release = resolve;
+    }));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+    });
+    const firstAbort = new AbortController();
+
+    const first = fixture.coordinator.ensureAdmitted(
+      REMOTE_PEER_ID_CID,
+      createOperationContext('connect'),
+      { signal: firstAbort.signal },
+    );
+    const second = fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect'));
+    await Promise.resolve();
+
+    expect(sendIdentityProbe).toHaveBeenCalledOnce();
+    expect(sendIdentityProbe.mock.calls[0][2].signal).toBeInstanceOf(AbortSignal);
+    expect(sendIdentityProbe.mock.calls[0][2].signal).not.toBe(firstAbort.signal);
+    firstAbort.abort(new Error('caller cancelled'));
+    await expect(first).rejects.toThrow('caller cancelled');
+
+    release(new TextEncoder().encode('{not json'));
+    await expect(second).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+  });
+
+  it('times out a caller wait with the connect timeout code and aborts an unobserved probe', async () => {
+    let release!: (value: Uint8Array) => void;
+    let probeSignal: AbortSignal | undefined;
+    const sendIdentityProbe = vi.fn(async () => new Promise<Uint8Array>((resolve) => {
+      release = resolve;
+    }));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(
+        REMOTE_PEER_ID,
+        createOperationContext('connect'),
+        { timeoutMs: 1 },
+      ),
+    ).rejects.toMatchObject({ name: 'AbortError', code: 'CONNECT_TIMEOUT' });
+
+    expect(sendIdentityProbe).toHaveBeenCalledOnce();
+    probeSignal = sendIdentityProbe.mock.calls[0][2].signal;
+    expect(probeSignal).toBeInstanceOf(AbortSignal);
+    expect(probeSignal?.aborted).toBe(true);
+    release(new TextEncoder().encode('{not json'));
+    await Promise.resolve();
+    expect(fixture.admission.snapshot().quarantinedPeerIds).toEqual([]);
+    expect(fixture.admission.snapshot().verifiedPeerIds).toEqual([]);
+  });
+
+  it('keeps a shared probe alive when one of multiple waiters times out', async () => {
+    let release!: (value: Uint8Array) => void;
+    const sendIdentityProbe = vi.fn(async () => new Promise<Uint8Array>((resolve) => {
+      release = resolve;
+    }));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+    });
+
+    const first = fixture.coordinator.ensureAdmitted(
+      REMOTE_PEER_ID_CID,
+      createOperationContext('connect'),
+      { timeoutMs: 1 },
+    );
+    const second = fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect'));
+    await expect(first).rejects.toMatchObject({ name: 'AbortError', code: 'CONNECT_TIMEOUT' });
+
+    const probeSignal = sendIdentityProbe.mock.calls[0][2].signal;
+    expect(probeSignal).toBeInstanceOf(AbortSignal);
+    expect(probeSignal?.aborted).toBe(false);
+    release(new TextEncoder().encode('{not json'));
+    await expect(second).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+  });
+
+  it('rejects malformed peer ids before probing', async () => {
+    const sendIdentityProbe = vi.fn(async () => new TextEncoder().encode('{not json'));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted('not-a-peer-id', createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'INVALID_PEER_ID' });
+    expect(sendIdentityProbe).not.toHaveBeenCalled();
+  });
+
+  it('does not remember retryable backoff for aborted probe attempts', async () => {
+    let now = 1_000;
+    let attempts = 0;
+    const controller = new AbortController();
+    const sendIdentityProbe = vi.fn(async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        await Promise.resolve();
+        controller.abort(new Error('caller cancelled'));
+      }
+      throw new Error('stream timeout');
+    });
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      now: () => now,
+      probeBackoff: {
+        transientBaseMs: 1_000,
+      },
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(
+        REMOTE_PEER_ID,
+        createOperationContext('connect'),
+        { signal: controller.signal },
+      ),
+    ).rejects.toThrow('caller cancelled');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+
+    now += 999;
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({
+      code: 'NETWORK_ADMISSION_PROBE_FAILED',
+      message: expect.stringContaining('retryable probe backed off for 1ms'),
+    });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['transport error', 'empty response'])('clears transient backoff after %s and a successful signed probe', async (failure) => {
+    let attempt = 0;
+    const sendIdentityProbe = vi.fn(async (_peerId: string, data: Uint8Array) => {
+      attempt += 1;
+      if (attempt === 1) {
+        if (failure === 'empty response') return new Uint8Array();
+        throw new Error('stream timeout');
+      }
+
+      const request = JSON.parse(new TextDecoder().decode(data));
+      const response = await signNetworkIdentityResponse({
+        request,
+        identity,
+        responderPeerId: REMOTE_PEER_ID,
+        sign: (payload) => ed25519Sign(payload, REMOTE_PRIVATE_KEY_SEED),
+      });
+      return new TextEncoder().encode(JSON.stringify(response));
+    });
+    const fixture = buildCoordinator({ identity, sendIdentityProbe });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(fixture.admission.getRetryableProbeBackoff(REMOTE_PEER_ID)).toMatchObject({ kind: 'transient' });
+    expect(fixture.coordinator.isAcceptedPeer(REMOTE_PEER_ID)).toBe(false);
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(false);
+
+    await expect(
+      fixture.coordinator.ensureExplicitConnectAdmitted(
+        REMOTE_PEER_ID_CID,
+        createOperationContext('connect'),
+      ),
+    ).resolves.toBe(true);
+    expect(fixture.admission.getRetryableProbeBackoff(REMOTE_PEER_ID)).toBeUndefined();
+    expect(fixture.coordinator.isAcceptedPeer(REMOTE_PEER_ID)).toBe(true);
+  });
+
+  it('quarantines peers with a parsed but mismatched network identity proof', async () => {
+    const sendIdentityProbe = vi.fn(async () => new TextEncoder().encode(JSON.stringify({
+      version: 1,
+      peerId: REMOTE_PEER_ID,
+      networkId: 'network-b',
+      genesisId: identity.genesisId,
+      proofKind: 'ed25519-peer-id',
+      signature: 'invalid-signature',
+    })));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).resolves.toBe(false);
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).resolves.toBe(false);
+
+    expect(fixture.admission.snapshot().quarantinedPeerIds).toEqual([REMOTE_PEER_ID]);
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(true);
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+    expect(fixture.cleanupRejectedPeerState).toHaveBeenCalledWith(REMOTE_PEER_ID);
+    expect(fixture.close).toHaveBeenCalledTimes(1);
+    expect(fixture.deletePeerFromPeerStore).toHaveBeenCalledWith(REMOTE_PEER_ID);
+  });
+
+  it('re-probes a quarantined peer once the quarantine cooldown elapses', async () => {
+    // Quarantine must be a bounded cooldown, not terminal-until-restart: a peer
+    // that corrected a mismatched networkId and restarted has to be able to
+    // re-admit. Regression guard for PR #1558 review, HIGH-2.
+    let now = 1_000;
+    const sendIdentityProbe = vi.fn(async () => new TextEncoder().encode(JSON.stringify({
+      version: 1,
+      peerId: REMOTE_PEER_ID,
+      networkId: 'network-b',
+      genesisId: identity.genesisId,
+      proofKind: 'ed25519-peer-id',
+      signature: 'invalid-signature',
+    })));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      now: () => now,
+      quarantineCooldownMs: 1_000,
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).resolves.toBe(false);
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(true);
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+
+    // Within the cooldown: still rejected, and the repeat probe is suppressed.
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).resolves.toBe(false);
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+
+    // Cooldown elapsed: the peer is no longer reported as rejected and the next
+    // admission attempt re-probes instead of blackholing until restart.
+    now += 1_001;
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(false);
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).resolves.toBe(false);
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses transport dials to a rejected peer before closing its connections', async () => {
+    // 2026-09-23 Base mainnet: a rejected testnet relay was re-dialed ~0.2s
+    // after its connection closed. The dial refusal must be in place before
+    // the disconnect, which is what libp2p's reconnect queue reacts to.
+    const order: string[] = [];
+    const sendIdentityProbe = vi.fn(async () => new TextEncoder().encode(JSON.stringify({
+      version: 1,
+      peerId: REMOTE_PEER_ID,
+      networkId: 'network-b',
+      genesisId: identity.genesisId,
+      proofKind: 'ed25519-peer-id',
+      signature: 'invalid-signature',
+    })));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      onPeerRejected: (peerId) => order.push(`deny-dial:${peerId}`),
+      onPeerVerified: (peerId) => order.push(`verified:${peerId}`),
+    });
+    fixture.close.mockImplementation(() => { order.push('close'); });
+    fixture.deletePeerFromPeerStore.mockImplementation(async () => { order.push('forget'); });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).resolves.toBe(false);
+
+    expect(order).toEqual([`deny-dial:${REMOTE_PEER_ID}`, 'close', 'forget']);
+  });
+
+  it('hands the transport hook the quarantine the admission service applied', async () => {
+    // One source for both windows: the node refuses the peer for exactly as
+    // long as admission quarantines it, whatever the service's cooldown is.
+    let now = 1_000;
+    const onPeerRejected = vi.fn();
+    const sendIdentityProbe = vi.fn(async () => new TextEncoder().encode(JSON.stringify({
+      version: 1,
+      peerId: REMOTE_PEER_ID,
+      networkId: 'network-b',
+      genesisId: identity.genesisId,
+      proofKind: 'ed25519-peer-id',
+      signature: 'invalid-signature',
+    })));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      quarantineCooldownMs: 42_000,
+      now: () => now,
+      onPeerRejected,
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).resolves.toBe(false);
+
+    expect(onPeerRejected).toHaveBeenCalledWith(REMOTE_PEER_ID, 42_000);
+    now += 41_999;
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(true);
+    now += 1;
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(false);
+  });
+
+  it('re-arms the transport refusal and forgets the peer again when a lapsed quarantine re-rejects it', async () => {
+    // The churn the mismatch window accepts (NETWORK_MISMATCH_DENY_DEFAULT_MS in
+    // core) is bounded: a still-foreign peer costs one probe per window, and
+    // that probe puts back everything the lapse released, in the same order as
+    // the first rejection: the refusal for a new window, the closed
+    // connection, and the addresses removed from the peer store.
+    let now = 1_000;
+    const order: string[] = [];
+    const sendIdentityProbe = vi.fn(async () => new TextEncoder().encode(JSON.stringify({
+      version: 1,
+      peerId: REMOTE_PEER_ID,
+      networkId: 'network-b',
+      genesisId: identity.genesisId,
+      proofKind: 'ed25519-peer-id',
+      signature: 'invalid-signature',
+    })));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      quarantineCooldownMs: 60_000,
+      now: () => now,
+      onPeerRejected: (peerId, quarantineMs) => order.push(`deny:${peerId}:${quarantineMs}`),
+    });
+    fixture.close.mockImplementation(() => { order.push('close'); });
+    fixture.deletePeerFromPeerStore.mockImplementation(async () => { order.push('forget'); });
+    const rejection = [`deny:${REMOTE_PEER_ID}:60000`, 'close', 'forget'];
+    const ctx = createOperationContext('connect');
+
+    await expect(fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, ctx)).resolves.toBe(false);
+    expect(order).toEqual(rejection);
+
+    // Inside the window: no probe, nothing re-armed.
+    now += 59_999;
+    await expect(fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, ctx)).resolves.toBe(false);
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(rejection);
+
+    // Window over: exactly one probe, and the full rejection again.
+    now += 1;
+    await expect(fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, ctx)).resolves.toBe(false);
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+    expect(order).toEqual([...rejection, ...rejection]);
+  });
+
+  it('lifts the transport dial refusal when a peer passes the identity proof', async () => {
+    const onPeerVerified = vi.fn();
+    const onPeerRejected = vi.fn();
+    const sendIdentityProbe = vi.fn(async (_peerId: string, data: Uint8Array) => {
+      const request = JSON.parse(new TextDecoder().decode(data));
+      const response = await signNetworkIdentityResponse({
+        request,
+        identity,
+        responderPeerId: REMOTE_PEER_ID,
+        sign: (payload) => ed25519Sign(payload, REMOTE_PRIVATE_KEY_SEED),
+      });
+      return new TextEncoder().encode(JSON.stringify(response));
+    });
+    const fixture = buildCoordinator({ identity, sendIdentityProbe, onPeerRejected, onPeerVerified });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).resolves.toBe(true);
+
+    expect(onPeerVerified).toHaveBeenCalledWith(REMOTE_PEER_ID);
+    expect(onPeerRejected).not.toHaveBeenCalled();
+  });
+
+  it('keeps the admission verdict when a transport hook throws', async () => {
+    const sendIdentityProbe = vi.fn(async () => new TextEncoder().encode(JSON.stringify({
+      version: 1,
+      peerId: REMOTE_PEER_ID,
+      networkId: 'network-b',
+      genesisId: identity.genesisId,
+      proofKind: 'ed25519-peer-id',
+      signature: 'invalid-signature',
+    })));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      onPeerRejected: () => { throw new Error('node not started'); },
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).resolves.toBe(false);
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(true);
+    expect(fixture.close).toHaveBeenCalledTimes(1);
+  });
+});

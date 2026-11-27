@@ -256,7 +256,8 @@ export const listDesignatableNodes = (opts?: { fresh?: boolean }) =>
   );
 
 /**
- * Resolved PCA contract addresses + chain — the bootstrap the in-browser wallet (web3) layer needs.
+ * Resolved PCA contract addresses and chain — the bootstrap the in-browser wallet
+ * (web3) layer needs.
  * The daemon resolves these via its Hub config (the browser does NOT re-resolve the Hub). Minimal
  * set: the NFT wrapper (every wallet-signed write + the ERC721Enumerable owned-PCA walk + the mint
  * `Transfer` accountId decode all target it), the TRAC token (approve/allowance), the chain id, and
@@ -421,10 +422,10 @@ export function describePcaError(
         message = 'Enter a TRAC amount greater than 0.';
         break;
       case 'PrimaryNodeNotInShardingTable':
-        message = "That primary node isn't a staked node in the sharding table.";
+        message = "That primary node isn't an active Core node.";
         break;
       case 'ZeroPrimaryNode':
-        message = 'Choose a staked node as the primary node.';
+        message = 'Choose an active Core node as the primary node.';
         break;
       case 'PrimaryNodeUnchanged':
         message = "That's already this account's primary node.";

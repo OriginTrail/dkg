@@ -48,6 +48,17 @@
         "internalType": "uint256",
         "name": "accountId",
         "type": "uint256"
+      }
+    ],
+    "name": "EmissionAlreadyScheduled",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
       },
       {
         "internalType": "uint40",
@@ -71,6 +82,27 @@
   {
     "inputs": [],
     "name": "InvalidAmount",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "fromEpoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "toEpoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "currentEpoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "InvalidCollectionRange",
     "type": "error"
   },
   {
@@ -141,6 +173,17 @@
   {
     "inputs": [
       {
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      }
+    ],
+    "name": "OnlyServiceSubscriptions",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "uint256",
         "name": "accountId",
         "type": "uint256"
@@ -179,6 +222,22 @@
       }
     ],
     "name": "PrimaryNodeUnchanged",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "treasury",
+        "type": "address"
+      }
+    ],
+    "name": "ServiceFundingPausedTreasuryWired",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "TreasuryNotSet",
     "type": "error"
   },
   {
@@ -227,6 +286,11 @@
   {
     "inputs": [],
     "name": "ZeroPrimaryNode",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroServiceValue",
     "type": "error"
   },
   {
@@ -390,17 +454,54 @@
       {
         "indexed": false,
         "internalType": "uint96",
-        "name": "drawnFromEpoch",
+        "name": "spentFromEpoch",
         "type": "uint96"
       },
       {
         "indexed": false,
         "internalType": "uint96",
-        "name": "drawnFromTopUp",
+        "name": "spentFromTopUp",
         "type": "uint96"
       }
     ],
     "name": "CostCovered",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "fromWindow",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "toWindow",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "scheduled",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "treasuryFee",
+        "type": "uint96"
+      }
+    ],
+    "name": "EmissionScheduled",
     "type": "event"
   },
   {
@@ -444,6 +545,67 @@
         "type": "uint256"
       },
       {
+        "indexed": true,
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "value",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "cost",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "epoch",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "window",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "spentFromWindow",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "spentFromTopUp",
+        "type": "uint96"
+      }
+    ],
+    "name": "ServiceCostCovered",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
         "indexed": false,
         "internalType": "uint96",
         "name": "amount",
@@ -457,6 +619,31 @@
       }
     ],
     "name": "ToppedUp",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "fromEpoch",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "toEpoch",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
+    "name": "TreasuryEmissionCollected",
     "type": "event"
   },
   {
@@ -524,6 +711,19 @@
   },
   {
     "inputs": [],
+    "name": "TREASURY_SHARD_ID",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "chronos",
     "outputs": [
       {
@@ -544,6 +744,24 @@
       }
     ],
     "name": "clearAgents",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "fromEpoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "toEpoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "collectTreasuryEmission",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -590,6 +808,72 @@
         "internalType": "uint96",
         "name": "discountedCost",
         "type": "uint96"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint96",
+        "name": "value",
+        "type": "uint96"
+      }
+    ],
+    "name": "coverServiceCost",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint96",
+            "name": "cost",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "spentFromWindow",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "spentFromTopUp",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint40",
+            "name": "window",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "epoch",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint16",
+            "name": "discountBps",
+            "type": "uint16"
+          }
+        ],
+        "internalType": "struct PublishingConviction.ServiceSpend",
+        "name": "spend",
+        "type": "tuple"
       }
     ],
     "stateMutability": "nonpayable",
@@ -913,6 +1197,19 @@
       }
     ],
     "name": "settle",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256[]",
+        "name": "accountIds",
+        "type": "uint256[]"
+      }
+    ],
+    "name": "settleMany",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

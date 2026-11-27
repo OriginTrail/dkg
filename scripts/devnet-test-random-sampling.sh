@@ -21,14 +21,13 @@
 #      and the prover returns no-challenge forever.
 #   3. Polls each core node's `/api/random-sampling/status` until at
 #      least one reports `submittedCount > 0` (or RS_TIMEOUT seconds
-#      elapse). Captures the tx hash and identityId of the first
-#      successful submission.
-#   4. Verifies on-chain that `RandomSamplingStorage.getNodeChallenge(idId)`
-#      reports `solved=true` for the captured prover identity.
-#   5. Verifies on-chain that
-#      `RandomSamplingStorage.getNodeEpochProofPeriodScore(idId, epoch, periodStart)`
-#      is non-zero — i.e. the chain credited the score and downstream
-#      reward accounting will read it.
+#      elapse). A daemon restart resets this in-process counter while its
+#      submitted proof remains in the WAL and on-chain, so the timeout path
+#      verifies a persisted proof before reporting failure.
+#   4. Verifies the current challenge is solved on-chain, or verifies the
+#      persisted submitProof receipt when the daemon was restarted after a
+#      previous proof period.
+#   5. Reads the on-chain proof-period score for the verified submission.
 #   6. Asserts the prover's WAL has the expected trail
 #      [challenge, extracted, built, submitted] for the latest period.
 #
@@ -198,6 +197,9 @@ SUCCESS_PORT=""
 SUCCESS_IDENTITY=""
 SUCCESS_TX=""
 SUCCESS_OUTCOME=""
+SUCCESS_PERSISTED=0
+SUCCESS_EPOCH=""
+SUCCESS_PERIOD=""
 
 for attempt in $(seq 1 "$RS_TIMEOUT"); do
   for n in $(seq 1 $NUM_CORE_NODES); do
@@ -238,14 +240,90 @@ except Exception:
 done
 
 if [ -z "$SUCCESS_NODE" ]; then
-  log "No core node reported submittedCount>0 within ${RS_TIMEOUT}s. Last status snapshots:"
-  for n in $(seq 1 $NUM_CORE_NODES); do
-    port=$((API_PORT_BASE + n - 1))
-    snap=$(curl -sS --max-time 5 -H "Authorization: Bearer $AUTH_TOKEN" \
-      "http://127.0.0.1:${port}/api/random-sampling/status" 2>/dev/null || echo '{}')
-    log "  node $n: $snap"
-  done
-  fail "prover did not submit any proof — check daemon logs and /api/random-sampling/status"
+  # Earlier suites restart core daemons. Their in-process submittedCount
+  # resets, but the append-only WAL and on-chain receipt survive. Accept only
+  # a complete WAL trail whose submitProof transaction succeeded against the
+  # deployed RandomSampling contract. The existing score check below still
+  # validates the recorded epoch and proof period.
+  PERSISTED_PROOF=$(
+    cd "$REPO_ROOT/packages/evm-module" && \
+    RS_WAL_DIR="$DEVNET_DIR" RS_RPC_URL="http://127.0.0.1:${HARDHAT_PORT}" \
+    RS_DEPLOYMENTS="$CONTRACTS_JSON" RS_ABI_DIR="$EVM_ABI_DIR" \
+    RS_CORE_COUNT="$NUM_CORE_NODES" node -e '
+const fs = require("fs");
+const path = require("path");
+const { ethers } = require("ethers");
+(async () => {
+  const contracts = JSON.parse(fs.readFileSync(process.env.RS_DEPLOYMENTS, "utf8")).contracts;
+  const randomSampling = contracts.RandomSampling?.evmAddress;
+  const storage = contracts.RandomSamplingStorage?.evmAddress;
+  if (!randomSampling || !storage) process.exit(2);
+  const abi = JSON.parse(fs.readFileSync(path.join(process.env.RS_ABI_DIR, "RandomSamplingStorage.json"), "utf8"));
+  const provider = new ethers.JsonRpcProvider(process.env.RS_RPC_URL);
+  const rss = new ethers.Contract(storage, abi, provider);
+  const numeric = (value) => typeof value === "string" && /^[0-9]+$/.test(value);
+  for (let node = 1; node <= Number(process.env.RS_CORE_COUNT); node++) {
+    const wal = path.join(process.env.RS_WAL_DIR, `node${node}`, "random-sampling.wal");
+    if (!fs.existsSync(wal)) continue;
+    const records = fs.readFileSync(wal, "utf8").split(/\n+/).filter(Boolean).flatMap((line) => {
+      try { return [JSON.parse(line)]; } catch { return []; }
+    });
+    for (const proof of records.filter((row) => row.status === "submitted").reverse()) {
+      if (![proof.identityId, proof.kaId, proof.epoch, proof.periodStartBlock].every(numeric)
+          || !/^0x[0-9a-fA-F]{64}$/.test(proof.txHash ?? "")) continue;
+      const samePeriod = records.filter((row) =>
+        String(row.identityId) === proof.identityId
+        && String(row.kaId) === proof.kaId
+        && String(row.epoch) === proof.epoch
+        && String(row.periodStartBlock) === proof.periodStartBlock);
+      let position = -1;
+      const completeTrail = ["challenge", "extracted", "built", "submitted"].every((stage) => {
+        position = samePeriod.findIndex((row, index) => index > position && row.status === stage);
+        return position >= 0;
+      });
+      if (!completeTrail) continue;
+      try {
+        const receipt = await provider.getTransactionReceipt(proof.txHash);
+        if (receipt?.status !== 1 || receipt.to?.toLowerCase() !== randomSampling.toLowerCase()) continue;
+        await rss.getNodeEpochProofPeriodScore(
+          BigInt(proof.identityId), BigInt(proof.epoch), BigInt(proof.periodStartBlock));
+        const challenge = await rss.getNodeChallenge(BigInt(proof.identityId));
+        const isCurrent = String(challenge[0]) === proof.kaId
+          && String(challenge[3]) === proof.epoch
+          && String(challenge[4]) === proof.periodStartBlock;
+        if (isCurrent && challenge[6] !== true) continue;
+        console.log(JSON.stringify({
+          node, identityId: proof.identityId, txHash: proof.txHash,
+          epoch: proof.epoch, periodStartBlock: proof.periodStartBlock,
+        }));
+        return;
+      } catch { /* Try an earlier WAL submission or another core. */ }
+    }
+  }
+  process.exit(2);
+})().catch(() => process.exit(2));
+' 2>/dev/null
+  ) || PERSISTED_PROOF=""
+  if [ -n "$PERSISTED_PROOF" ]; then
+    SUCCESS_NODE=$(printf '%s' "$PERSISTED_PROOF" | jq -r '.node')
+    SUCCESS_PORT=$((API_PORT_BASE + SUCCESS_NODE - 1))
+    SUCCESS_IDENTITY=$(printf '%s' "$PERSISTED_PROOF" | jq -r '.identityId')
+    SUCCESS_TX=$(printf '%s' "$PERSISTED_PROOF" | jq -r '.txHash')
+    SUCCESS_EPOCH=$(printf '%s' "$PERSISTED_PROOF" | jq -r '.epoch')
+    SUCCESS_PERIOD=$(printf '%s' "$PERSISTED_PROOF" | jq -r '.periodStartBlock')
+    SUCCESS_OUTCOME='{"kind":"persisted-wal-proof"}'
+    SUCCESS_PERSISTED=1
+    log "Verified a persisted submitted proof after daemon restart (node=$SUCCESS_NODE, period=$SUCCESS_PERIOD)"
+  else
+    log "No core node reported submittedCount>0 within ${RS_TIMEOUT}s. Last status snapshots:"
+    for n in $(seq 1 $NUM_CORE_NODES); do
+      port=$((API_PORT_BASE + n - 1))
+      snap=$(curl -sS --max-time 5 -H "Authorization: Bearer $AUTH_TOKEN" \
+        "http://127.0.0.1:${port}/api/random-sampling/status" 2>/dev/null || echo '{}')
+      log "  node $n: $snap"
+    done
+    fail "prover did not submit any proof — check daemon logs and /api/random-sampling/status"
+  fi
 fi
 
 log "Submitted: node=${SUCCESS_NODE} idId=${SUCCESS_IDENTITY} tx=${SUCCESS_TX}"
@@ -253,8 +331,16 @@ log "  outcome: ${SUCCESS_OUTCOME}"
 
 # --- 4. Confirm on-chain that the challenge is marked solved ---------------
 
-log "Verifying on-chain RandomSamplingStorage.getNodeChallenge(${SUCCESS_IDENTITY}).solved == true..."
-CHALLENGE_INFO=$(
+if [ "$SUCCESS_PERSISTED" -eq 1 ]; then
+  # The current challenge may belong to a later period. The fallback above
+  # checked the successful on-chain receipt and full WAL trail for this period.
+  CH_EPOCH="$SUCCESS_EPOCH"
+  CH_PERIOD="$SUCCESS_PERIOD"
+  SOLVED=true
+  log "Verified persisted submitProof receipt for epoch=${CH_EPOCH}, periodStartBlock=${CH_PERIOD}"
+else
+  log "Verifying on-chain RandomSamplingStorage.getNodeChallenge(${SUCCESS_IDENTITY}).solved == true..."
+  CHALLENGE_INFO=$(
   cd "$REPO_ROOT/packages/evm-module" && \
   RPC_URL="http://127.0.0.1:${HARDHAT_PORT}" \
   CONTRACTS_JSON="$CONTRACTS_JSON" \
@@ -286,16 +372,17 @@ const path = require("path");
 ' 2>&1
 ) || { log "node script output: $CHALLENGE_INFO"; fail "RandomSamplingStorage.getNodeChallenge call failed"; }
 
-SOLVED=$(echo "$CHALLENGE_INFO" | python3 -c "import sys,json;print(json.load(sys.stdin)['solved'])" 2>/dev/null || echo 'unknown')
-CH_EPOCH=$(echo "$CHALLENGE_INFO" | python3 -c "import sys,json;print(json.load(sys.stdin)['epoch'])" 2>/dev/null || echo '0')
-CH_PERIOD=$(echo "$CHALLENGE_INFO" | python3 -c "import sys,json;print(json.load(sys.stdin)['periodStartBlock'])" 2>/dev/null || echo '0')
+  SOLVED=$(echo "$CHALLENGE_INFO" | python3 -c "import sys,json;print(json.load(sys.stdin)['solved'])" 2>/dev/null || echo 'unknown')
+  CH_EPOCH=$(echo "$CHALLENGE_INFO" | python3 -c "import sys,json;print(json.load(sys.stdin)['epoch'])" 2>/dev/null || echo '0')
+  CH_PERIOD=$(echo "$CHALLENGE_INFO" | python3 -c "import sys,json;print(json.load(sys.stdin)['periodStartBlock'])" 2>/dev/null || echo '0')
 
-if [ "$SOLVED" != "True" ] && [ "$SOLVED" != "true" ]; then
-  log "Challenge NOT solved on-chain — chain disagrees with prover status?"
-  log "  challenge: $CHALLENGE_INFO"
-  fail "RandomSamplingStorage.getNodeChallenge.solved is not true"
+  if [ "$SOLVED" != "True" ] && [ "$SOLVED" != "true" ]; then
+    log "Challenge NOT solved on-chain — chain disagrees with prover status?"
+    log "  challenge: $CHALLENGE_INFO"
+    fail "RandomSamplingStorage.getNodeChallenge.solved is not true"
+  fi
+  log "On-chain solved=true (epoch=${CH_EPOCH}, periodStartBlock=${CH_PERIOD})"
 fi
-log "On-chain solved=true (epoch=${CH_EPOCH}, periodStartBlock=${CH_PERIOD})"
 
 # --- 5. Confirm the score was credited --------------------------------------
 

@@ -1,0 +1,16 @@
+{
+  "name": "@origintrail-official/dkg-devnet-node-store-persistence",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:devnet": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "12.11.1",
+    "ethers": "^6.16.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  }
+}

@@ -1,0 +1,119 @@
+# Issue #2052 system-record characterization
+
+This directory is the design/characterization gate for
+[`docs/adr/0002-system-record-sync-v1.md`](../../docs/adr/0002-system-record-sync-v1.md).
+It changes no daemon behavior.
+
+The committed r27 fixture combines the public issue's system-sync observations
+with a later, redacted export of the stopped node's `agents` data projection.
+Its provenance records that distinction and the exact diagnostics capture
+window. It deliberately excludes `agents/_meta`: that graph is withheld by
+current sync policy and is not the phonebook projection being characterized.
+
+Profile records are grouped by the `dkg:peerId` predicate, never inferred from the
+wallet-address root. Missing-peer, multi-peer-root, and peer-on-multiple-root cases
+remain explicit ambiguous evidence instead of being projected into trusted
+records. Wallet authority kind is `unknown` unless independently classified from
+finalized chain code. V1 capability is `unsupported` for the baseline because the
+protocol does not exist at the captured commit.
+
+Run the protocol-evidence checks enforced by
+`.github/workflows/system-record-protocol.yml`:
+
+```bash
+pnpm --filter @origintrail-official/dkg-core... build
+pnpm --filter @devnet/issue-2052-system-records typecheck
+pnpm --filter @devnet/issue-2052-system-records test
+pnpm --filter @devnet/issue-2052-system-records characterize
+```
+
+The W1 telemetry smoke command is separate manual comparison evidence because this PR
+changes no agent runtime path and the protocol-evidence workflow does not gate agent
+telemetry code:
+
+```bash
+pnpm bench:w1-sync-telemetry:smoke
+```
+
+The package test runs the byte-for-byte fixture check before the Node test suite.
+`pnpm --filter @devnet/issue-2052-system-records build-fixture` is also available as
+the standalone reproducibility gate.
+
+The committed sanitized inputs are sufficient to rebuild and byte-compare the
+fixture without the original node home or diagnostics file. This proves that the
+derived fixture matches its committed sanitized input; it is not independent proof
+that the redacted capture matches a now-unavailable original store:
+
+```bash
+node --import tsx devnet/issue-2052-system-records/build-fixture.ts --check
+```
+
+For an audit against the original stopped-store copy, the sanitized source and
+fixture were generated with:
+
+```bash
+node --import tsx devnet/issue-2052-system-records/extract-rdf.ts \
+  --endpoint http://127.0.0.1:17880 \
+  --output devnet/issue-2052-system-records/fixtures/r27-v1.json \
+  --source-output devnet/issue-2052-system-records/inputs/r27-redacted-source-v1.json \
+  --observation-time 2026-08-04T20:24:21.000Z \
+  --source-commit c297a7b6ffb6df82305c1f7eb76864a8b7a77c35 \
+  --system-sync-input devnet/issue-2052-system-records/inputs/r27-system-sync-v1.json
+```
+
+The sanitized system-sync input records the exact min/max r27 capture bounds and
+the original `diagnostics.jsonl` digest,
+`sha256:30d3f690d2cc106f3ce97f872d89291d3d687831637ff19ca035b54779fb7f47`.
+The source also commits separate raw population/detail input digests. The fixture
+builder recomputes the profile digest and a manifest digest binding fixture
+identity, every provenance field, and the complete evidence body.
+
+The W1 smoke command measures telemetry record-site overhead only. It does not
+measure system replay, B+tree convergence, profile authority, or activation load.
+The CLI exposes this only as a load-envelope sub-gate, not a full activation
+verdict. The baseline remains activation-ineligible until Stack C/D can produce
+real unique complete-closure service/arrival measurements, exact encoded bundle and
+verification-closure byte counts, signed capability/authority coverage, and complete-
+closure serve-reference evidence. Activation measurements must contain at least 30 paired
+one-minute intervals marked cold by the runtime instrumentation. Before capture, the
+activation coordinator supplies immutable expected capture identity, endpoint sources,
+and start/end bounds. Requester and provider collectors emit role-specific sample digests.
+After capture, a separately supplied trusted coordinator artifact binds those ordered
+digest arrays, the exact fixture manifest, and aggregate verification-closure bytes. The
+runtime capture digest binds the paired interval array; zero-based ordinals, canonical
+timestamps, strict minute-to-minute continuity, exact boundary coverage, and trusted
+endpoint digest matching reject duplicate, reordered, gapped, trimmed, cherry-picked,
+or recomputed cross-minute-swapped evidence. The artifact's provenance is an operational
+trust input; this V1 parser does not claim to cryptographically attest its author. Requester and
+provider counters in every interval must each cover at least three exact requests per
+serviced record; mixed warm/cold evidence and independently aggregated marginal percentiles
+cannot satisfy the gate.
+The reported `nquadsBytes` values characterize RDF size only; they are not a
+substitute for either encoded transferable bundle size or complete verification-
+closure bytes used by the activation gate and drain equation.
+
+A trusted activation run supplies that separate artifact explicitly:
+
+```bash
+node --import tsx devnet/issue-2052-system-records/characterize.ts \
+  --fixture /path/to/capture-fixture.json \
+  --load-envelope-evidence /path/to/coordinator-evidence.json \
+  --require-load-envelope
+```
+
+Without the artifact, `--require-load-envelope` fails closed.
+
+The fixture was generated from an isolated copy of the stopped node's Oxigraph
+v0.5.8 store. `extract-rdf.ts` accepts only an unauthenticated localhost endpoint,
+retains only frozen allowlisted predicate/subject shapes and byte counts, and rejects
+unknown nested subjects or predicates before serialization. It writes no literal,
+wallet, peer-ID, peer-ID hash, name, multiaddr, token, or key values. Fixture-local
+ordinal aliases preserve source lexicographic rank as well as the duplicate-key
+relationships needed by the model. Their rank and the retained per-record
+shape/byte counts may therefore be correlated with the public `agents` graph; the
+fixture is sanitized evidence, not unlinkable anonymized data.
+Record aliases determine their redacted wallet-root aliases, peer aliases use the
+same canonical ordinal grammar, and referenced x25519 subjects use a distinct
+fixture-only ordinal shape. The parser rejects duplicate aliases, underived key
+subjects, disposition summaries that contradict the detailed evidence, unknown
+JSON fields, and provenance URLs outside the fixed public issue evidence allowlist.

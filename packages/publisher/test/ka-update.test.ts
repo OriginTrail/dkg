@@ -837,13 +837,13 @@ describe('UpdateHandler', () => {
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
-    await publisher.update(original.kaId, {
+    const updateResult = await publisher.update(original.kaId, {
       contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
     });
 
     const verification = await chain.verifyKAUpdate(
-      '0xfaketx',
+      updateResult.onChainResult!.txHash,
       original.kaId,
       '0xWrongPublisher',
     );

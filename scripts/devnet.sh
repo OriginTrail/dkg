@@ -5,6 +5,7 @@
 # Usage:
 #   ./scripts/devnet.sh start [N]      Start devnet with N nodes (default 6)
 #   ./scripts/devnet.sh stop            Stop all devnet processes (incl. UI)
+#   ./scripts/devnet.sh stop-node <N>   Stop one devnet node and its managed store
 #   ./scripts/devnet.sh status          Show running devnet processes (incl. UI)
 #   ./scripts/devnet.sh logs [N]        Tail logs for node N (1-based)
 #   ./scripts/devnet.sh clean           Stop and wipe all devnet data
@@ -18,6 +19,12 @@
 # Environment:
 #   DEVNET_DIR    Base directory for devnet data (default: .devnet)
 #   HARDHAT_PORT  Hardhat node port (default: 8545)
+#   DEVNET_BLAZEGRAPH_PORT
+#                 Host port for the devnet Blazegraph container (default: 9999)
+#   DEVNET_OXIGRAPH_SERVER_PORT_5 / DEVNET_OXIGRAPH_SERVER_PORT_6
+#                 Host ports for edge-node Oxigraph containers (defaults: 7878/7879)
+#   DEVNET_DOCKER_NAME_PREFIX
+#                 Prefix for devnet store container names (default: devnet)
 #   UI_PORT       node-ui Vite port (default: 5173)
 #   UI_NODE_ID    Which devnet node the UI talks to (default: 1)
 #   NUM_CORE_NODES
@@ -29,10 +36,30 @@
 #                 Context graph used by /api/epcis/capture when publisher is enabled
 #   DEVNET_SWM_SYNC_ON_CONNECT=0
 #                 Skip peer-connect SWM catch-up, useful for bulk SWM benchmarks
+#   DEVNET_SNAPSHOT_GC_{HARD_RESERVE,TRIGGER_FREE,TARGET_FREE}_BYTES
+#                 Local snapshot-store watermarks (defaults: 256 MiB, 512 MiB,
+#                 and 1 GiB) so devnet keeps capacity admission without
+#                 requiring production-scale free disk.
+#   DEVNET_ENABLE_SEMANTIC_RUNTIME=1
+#                 Enable the Wasm semantic runtime on each node
+#   DEVNET_SNAPSHOT_GC_FINALIZED_CLEANUP=1
+#                 Opt every node into the finalized-snapshot collector
+#                 (sharedMemoryPublicSnapshotStorage.gc.finalizedCleanupEnabled).
+#   DEVNET_SNAPSHOT_GC_FINALIZED_RETENTION_MS
+#                 Grace period after a confirmed publish before a snapshot may
+#                 be reclaimed (only written with FINALIZED_CLEANUP=1; the node
+#                 default is 24 hours).
+#   DEVNET_SNAPSHOT_GC_INTERVAL_MS
+#                 How often the snapshot collector runs (only written when set;
+#                 the node default is 5 minutes).
+#   DEVNET_RPC_BUDGET=shipped
+#                 Keep each node's shipped chain RPC request budget. By default
+#                 (`local`) nodes get a budget sized for the one local chain
+#                 they share: see devnet_chain_config_block.
 #
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 HARDHAT_PORT="${HARDHAT_PORT:-8545}"
 NUM_NODES="${2:-6}"
@@ -65,16 +92,23 @@ NUM_OP_WALLETS=3
 # overwhelming the prover loop. Set to 0 to disable (fall back to per-tx
 # mining) for tests that need deterministic block-per-tx semantics.
 HARDHAT_BLOCK_INTERVAL_MS="${HARDHAT_BLOCK_INTERVAL_MS:-1000}"
-BLAZEGRAPH_PORT=9999
-BLAZEGRAPH_CONTAINER="devnet-blazegraph"
+DEVNET_DOCKER_NAME_PREFIX="${DEVNET_DOCKER_NAME_PREFIX:-devnet}"
+DEVNET_SNAPSHOT_GC_HARD_RESERVE_BYTES="${DEVNET_SNAPSHOT_GC_HARD_RESERVE_BYTES:-268435456}"
+DEVNET_SNAPSHOT_GC_TRIGGER_FREE_BYTES="${DEVNET_SNAPSHOT_GC_TRIGGER_FREE_BYTES:-536870912}"
+DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES="${DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES:-1073741824}"
+DEVNET_RPC_BUDGET="${DEVNET_RPC_BUDGET:-local}"
+BLAZEGRAPH_PORT="${DEVNET_BLAZEGRAPH_PORT:-9999}"
+BLAZEGRAPH_CONTAINER="${DEVNET_DOCKER_NAME_PREFIX}-blazegraph"
+BLAZEGRAPH_LOG_MAX_SIZE="200m"
+BLAZEGRAPH_LOG_MAX_FILE="20"
 # Webapp context path: the 2.1.5 Docker image serves under /bigdata; a native
 # 2.1.6 JAR (the Apple-silicon workaround) serves under /blazegraph. Override with
 # DEVNET_BLAZEGRAPH_CTX to match whichever Blazegraph is actually running.
 BLAZEGRAPH_CTX="${DEVNET_BLAZEGRAPH_CTX:-bigdata}"
-OXIGRAPH_SERVER_PORT_5=7878
-OXIGRAPH_SERVER_PORT_6=7879
-OXIGRAPH_CONTAINER_5="devnet-oxigraph-5"
-OXIGRAPH_CONTAINER_6="devnet-oxigraph-6"
+OXIGRAPH_SERVER_PORT_5="${DEVNET_OXIGRAPH_SERVER_PORT_5:-7878}"
+OXIGRAPH_SERVER_PORT_6="${DEVNET_OXIGRAPH_SERVER_PORT_6:-7879}"
+OXIGRAPH_CONTAINER_5="${DEVNET_DOCKER_NAME_PREFIX}-oxigraph-5"
+OXIGRAPH_CONTAINER_6="${DEVNET_DOCKER_NAME_PREFIX}-oxigraph-6"
 
 # Hardhat default accounts (first 10 of the well-known mnemonic)
 # "test test test test test test test test test test test junk"
@@ -134,11 +168,54 @@ ensure_built() {
   fi
 }
 
+find_hardhat_pid_by_port() {
+  command -v lsof >/dev/null 2>&1 || return 1
+
+  local raw_pids pid cmdline
+  raw_pids=$(lsof -nP -iTCP:"$HARDHAT_PORT" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)
+  for pid in $raw_pids; do
+    cmdline=$(ps -p "$pid" -o command= 2>/dev/null || true)
+    case "$cmdline" in
+      *"$REPO_ROOT"*hardhat*"node --port $HARDHAT_PORT"*)
+        echo "$pid"
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+refresh_hardhat_pidfile() {
+  local pidfile="$DEVNET_DIR/hardhat.pid"
+  local pid
+
+  if [ -f "$pidfile" ]; then
+    pid=$(cat "$pidfile" 2>/dev/null || true)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      echo "$pid"
+      return 0
+    fi
+  fi
+
+  pid=$(find_hardhat_pid_by_port || true)
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    mkdir -p "$DEVNET_DIR"
+    echo "$pid" > "$pidfile"
+    echo "$pid"
+    return 0
+  fi
+
+  rm -f "$pidfile"
+  return 1
+}
+
 start_hardhat() {
   local pidfile="$DEVNET_DIR/hardhat.pid"
+  local existing_pid
 
-  if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-    log "Hardhat node already running (PID $(cat "$pidfile"))"
+  existing_pid=$(refresh_hardhat_pidfile || true)
+  if [ -n "$existing_pid" ]; then
+    log "Hardhat node already running (PID $existing_pid)"
     return 0
   fi
 
@@ -167,9 +244,41 @@ start_hardhat() {
 
   # --config "$HARDHAT_CONFIG" (defined up top): devnet-only solc 0.8.24 + cancun.
   # The full rationale lives in packages/evm-module/hardhat.devnet.config.ts.
-  npx hardhat node --port "$HARDHAT_PORT" --no-deploy --config "$HARDHAT_CONFIG" \
-    > "$DEVNET_DIR/hardhat/node.log" 2>&1 &
-  local hh_pid=$!
+  local hardhat_cli
+  hardhat_cli=$(node -e "console.log(require.resolve('hardhat/internal/cli/bootstrap'))")
+  local hh_pid
+  hh_pid=$(HARDHAT_CLI="$hardhat_cli" \
+    HARDHAT_LOG="$DEVNET_DIR/hardhat/node.log" \
+    HARDHAT_PORT="$HARDHAT_PORT" \
+    HARDHAT_CONFIG="$HARDHAT_CONFIG" \
+    EVM_MODULE_DIR="$REPO_ROOT/packages/evm-module" \
+    node -e '
+      const fs = require("fs");
+      const { spawn } = require("child_process");
+      const out = fs.openSync(process.env.HARDHAT_LOG, "w");
+      const child = spawn(
+        process.execPath,
+        [
+          "--max-old-space-size=2048",
+          process.env.HARDHAT_CLI,
+          "node",
+          "--port",
+          process.env.HARDHAT_PORT,
+          "--no-deploy",
+          "--config",
+          process.env.HARDHAT_CONFIG,
+        ],
+        {
+          cwd: process.env.EVM_MODULE_DIR,
+          detached: true,
+          stdio: ["ignore", out, out],
+          env: process.env,
+        },
+      );
+      child.unref();
+      if (!child.pid) process.exit(1);
+      process.stdout.write(String(child.pid) + "\n");
+    ')
   echo "$hh_pid" > "$pidfile"
   log "Hardhat node started (PID $hh_pid)"
 
@@ -253,11 +362,13 @@ deploy_contracts() {
   # NEVER lower this (e.g. to 1). The devnet MUST exercise the real 3-of-N
   # StorageACK quorum so publish/consensus behaviour matches mainnet. A lower
   # value silently hides quorum bugs and produces false "publishing works"
-  # signals. A publisher collects StorageACKs from its PEERS only (it does NOT
-  # sign its own quorum), so a VM publish needs `minimumRequiredSignatures`
-  # OTHER reachable core nodes — i.e. >= minSig + 1 core nodes total (>= 4 for
-  # minSig=3). Verified empirically: with only 3 core nodes a publish aborts
-  # with "need 3 ACKs but only 2 core peers connected — quorum impossible".
+  # signals. A publisher collects StorageACKs from Core nodes only, and a
+  # publishing Core also counts its own StorageACK (it stores the copy and
+  # signs through its local endpoint; the chain requires distinct identities).
+  # So an Edge publish needs `minimumRequiredSignatures` reachable cores and a
+  # Core publish needs minSig - 1 OTHER reachable cores. The devnet runs
+  # >= minSig + 1 core nodes (4 for minSig=3), which leaves an Edge publish one
+  # spare core.
   # DO NOT CHANGE THIS VALUE. ── important ──
   local ps_addr
   ps_addr=$(node -e "
@@ -285,10 +396,50 @@ deploy_contracts() {
 
 BLAZEGRAPH_AVAILABLE=false
 
+# Prints the named metadata fields, one value per line — callers ask for
+# fields by NAME; the JSON contract has no positional output form.
+read_blazegraph_metadata() {
+  node "$REPO_ROOT/packages/cli/blazegraph-image-metadata.cjs" \
+    "$REPO_ROOT/blazegraph-image.json" "$@"
+}
+
+create_blazegraph_namespace() {
+  local ns="$1"
+  local namespace_xml response_code
+  if ! namespace_xml="$(
+    node "$REPO_ROOT/packages/cli/blazegraph-image-metadata.cjs" --namespace-xml "$ns"
+  )"; then
+    log "WARNING: Failed to render Blazegraph namespace properties: $ns"
+    return 1
+  fi
+  if ! response_code="$(
+    curl -sS -o /dev/null -w '%{http_code}' -X POST \
+      "http://127.0.0.1:$BLAZEGRAPH_PORT/bigdata/namespace" \
+      -H "Content-Type: application/xml" \
+      --data-binary "$namespace_xml"
+  )"; then
+    log "WARNING: Failed to create Blazegraph namespace: $ns (request failed)"
+    return 1
+  fi
+  case "$response_code" in
+    2??)
+      log "Created Blazegraph namespace: $ns"
+      return 0
+      ;;
+    409)
+      log "Blazegraph namespace already exists: $ns"
+      return 0
+      ;;
+    *)
+      log "WARNING: Failed to create Blazegraph namespace: $ns (HTTP ${response_code:-unknown})"
+      return 1
+      ;;
+  esac
+}
+
 start_blazegraph() {
-  # Use an EXTERNAL Blazegraph already serving on the port (e.g. a native arm64 JAR
-  # started out-of-band because the amd64 Docker image only runs under glacial qemu
-  # on Apple silicon). Skips Docker entirely; namespaces are the operator's job here.
+  # Use an EXTERNAL Blazegraph already serving on the port. Skips Docker entirely;
+  # namespaces are the operator's job here.
   if curl -sf --max-time 4 "http://127.0.0.1:${BLAZEGRAPH_PORT}/${BLAZEGRAPH_CTX}/status" >/dev/null 2>&1; then
     log "Blazegraph already serving on :${BLAZEGRAPH_PORT}/${BLAZEGRAPH_CTX} (external) — using it (skip Docker)"
     BLAZEGRAPH_AVAILABLE=true
@@ -308,10 +459,20 @@ start_blazegraph() {
     docker rm -f "$BLAZEGRAPH_CONTAINER" > /dev/null 2>&1 || true
   fi
 
+  local blazegraph_image blazegraph_container_port
+  if ! blazegraph_image="$(read_blazegraph_metadata image)" \
+    || ! blazegraph_container_port="$(read_blazegraph_metadata containerPort)"; then
+    log "ERROR: Could not read the pinned Blazegraph image metadata"
+    return 1
+  fi
+
   log "Starting Blazegraph (Docker) on port $BLAZEGRAPH_PORT..."
   if ! docker run -d --name "$BLAZEGRAPH_CONTAINER" \
-    -p "$BLAZEGRAPH_PORT:8080" \
-    lyrasis/blazegraph:2.1.5 > /dev/null 2>&1; then
+    --log-driver local \
+    --log-opt "max-size=$BLAZEGRAPH_LOG_MAX_SIZE" \
+    --log-opt "max-file=$BLAZEGRAPH_LOG_MAX_FILE" \
+    -p "127.0.0.1:$BLAZEGRAPH_PORT:$blazegraph_container_port" \
+    "$blazegraph_image" > /dev/null 2>&1; then
     log "WARNING: Failed to start Blazegraph container — nodes 3-4 will use Oxigraph"
     return 0
   fi
@@ -321,22 +482,12 @@ start_blazegraph() {
     if curl -s "http://127.0.0.1:$BLAZEGRAPH_PORT/bigdata/status" > /dev/null 2>&1; then
       log "Blazegraph ready"
       BLAZEGRAPH_AVAILABLE=true
-      # Create per-node namespaces for nodes 3–4 (Blazegraph)
+      # Create per-node namespaces for nodes 3–4 (Blazegraph). The
+      # namespace-properties XML comes from the shared contract module —
+      # no inline copy to drift.
       for n in 3 4; do
         local ns="node${n}"
-        curl -s -X POST "http://127.0.0.1:$BLAZEGRAPH_PORT/bigdata/namespace" \
-          -H "Content-Type: application/xml" \
-          -d "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>
-<!DOCTYPE properties SYSTEM \"http://java.sun.com/dtd/properties.dtd\">
-<properties>
-  <entry key=\"com.bigdata.rdf.sail.namespace\">$ns</entry>
-  <entry key=\"com.bigdata.rdf.store.AbstractTripleStore.quads\">true</entry>
-  <entry key=\"com.bigdata.rdf.store.AbstractTripleStore.statementIdentifiers\">false</entry>
-  <entry key=\"com.bigdata.rdf.store.AbstractTripleStore.textIndex\">false</entry>
-  <entry key=\"com.bigdata.rdf.sail.truthMaintenance\">false</entry>
-  <entry key=\"com.bigdata.rdf.store.AbstractTripleStore.axiomsClass\">com.bigdata.rdf.axioms.NoAxioms</entry>
-</properties>" > /dev/null 2>&1
-        log "Created Blazegraph namespace: $ns"
+        create_blazegraph_namespace "$ns" || true
       done
       return 0
     fi
@@ -353,11 +504,11 @@ start_oxigraph_servers() {
     return 0
   fi
   if ! docker_responsive 3; then
-    log "Docker not responsive within 3s — nodes 5-6 will use Oxigraph (in-process) instead of Oxigraph server"
+    log "Docker not responsive within 3s — nodes 5-6 will use daemon-managed Oxigraph instead of external Oxigraph"
     return 0
   fi
   if ! docker image inspect oxigraph/oxigraph:latest > /dev/null 2>&1; then
-    log "Oxigraph Docker image not found locally — nodes 5-6 will use in-process Oxigraph (pull oxigraph/oxigraph:latest to enable)"
+    log "Oxigraph Docker image not found locally — nodes 5-6 will use daemon-managed Oxigraph (pull oxigraph/oxigraph:latest to enable the external endpoint)"
     return 0
   fi
 
@@ -377,7 +528,7 @@ start_oxigraph_servers() {
       oxigraph/oxigraph:latest serve --bind 0.0.0.0:7878 > /dev/null 2>&1; then
       log "Oxigraph server started ($name)"
     else
-      log "WARNING: Failed to start Oxigraph server $name — nodes 5-6 will use in-process Oxigraph"
+      log "WARNING: Failed to start external Oxigraph server $name — nodes 5-6 will use daemon-managed Oxigraph"
       return 0
     fi
   done
@@ -432,6 +583,43 @@ stop_blazegraph() {
   fi
 }
 
+# The "chain" member of one node's config.json.
+#
+# A node's shipped RPC request budget is sized for a public provider it shares
+# with other users: 10 requests/second, with background work held back for a
+# random part of the first 30 seconds so that nodes restarting together do not
+# all ask at once. Every devnet node talks to one local chain, where neither
+# limit protects anything, so a node gets a budget sized for that chain.
+#
+# DEVNET_RPC_BUDGET=shipped leaves the block out, for a run that is meant to
+# exercise the shipped budget. A node on another version (DEVNET_VERSION_LAYOUT)
+# keeps its shipped budget as well: only the code under test is known to read
+# this block.
+devnet_chain_config_block() {
+  local hub_addr="$1" version_ref="$2" rpc_budget=""
+  case "$DEVNET_RPC_BUDGET" in
+    local)
+      if [ "$version_ref" = "current" ]; then
+        rpc_budget=',
+    "rpcRequestBudget": { "maxRequestsPerSecond": 1000, "burstRequests": 1000, "startupJitterMs": 0 }'
+      fi
+      ;;
+    shipped) ;;
+    *)
+      echo "[devnet] DEVNET_RPC_BUDGET must be 'local' or 'shipped' (got '$DEVNET_RPC_BUDGET')" >&2
+      return 1
+      ;;
+  esac
+  cat <<EOCHAIN
+"chain": {
+    "type": "evm",
+    "rpcUrl": "http://127.0.0.1:${HARDHAT_PORT}",
+    "hubAddress": "${hub_addr}",
+    "chainId": "evm:31337"${rpc_budget}
+  }
+EOCHAIN
+}
+
 create_node_config() {
   local node_num="$1"
   local node_dir="$DEVNET_DIR/node${node_num}"
@@ -472,8 +660,11 @@ create_node_config() {
   #             backend and deterministically reproduces SPARQL-over-HTTP-only
   #             bugs such as #996 — which the old `oxigraph-worker` default hid.)
   #   Node 3-4: blazegraph (if Docker) else oxigraph  (in-process baseline)
-  #   Node 5-6: sparql-http → external Dockerized Oxigraph  (EXTRA coverage of the
-  #             generic external-endpoint path; Docker-only, optional)
+  #   Node 5-6: sparql-http → external Dockerized Oxigraph when available;
+  #             otherwise daemon-managed oxigraph-server on distinct ports.
+  #             Do not omit the store block here: the implicit embedded fallback
+  #             persists by dumping the complete store through one JS string and
+  #             cannot restart a >=512 MiB devnet dataset.
   local store_block=""
   if [ "$node_num" -ge 1 ] && [ "$node_num" -le 2 ]; then
     # The managed oxigraph-server defaults to port 7878; multiple nodes on one
@@ -496,7 +687,28 @@ create_node_config() {
     if [ "$OXIGRAPH_SERVER_AVAILABLE" = true ]; then
       local ox_port_var="OXIGRAPH_SERVER_PORT_${node_num}"
       local ox_port="${!ox_port_var}"
-      store_block="\"store\": { \"backend\": \"sparql-http\", \"options\": { \"queryEndpoint\": \"http://127.0.0.1:${ox_port}/query\", \"updateEndpoint\": \"http://127.0.0.1:${ox_port}/update\" } },"
+      # Declare the transactional guarantee this endpoint actually has. The
+      # container is the same Oxigraph the managed path spawns (which
+      # self-declares `atomic-readback`), but an explicitly configured
+      # sparql-http endpoint defaults to `best-effort` — it cannot know what is
+      # behind it. RFC-64 durable sync requires atomic data/metadata
+      # replacement, so without this nodes 5-6 refuse every graph-scoped
+      # materialization with VM_ATOMIC_REPLACE_UNSUPPORTED and converge nothing
+      # while nodes 1-2 pass — a matrix hole that looks like a product failure.
+      #
+      # `atomic-update` is the minimum that lifts that refusal
+      # (SparqlHttpStore.replaceGraphAndSubject gates on it). `atomic-readback`
+      # is declared deliberately instead: one Oxigraph process does guarantee
+      # read-after-write, and it additionally exercises the receipt-bearing
+      # author-commit CAS lane (rfc64AuthorCommitCasV1) over sparql-http, which
+      # this matrix otherwise never covers. A failure in that lane on nodes 5-6
+      # is therefore a real finding, not devnet drift. Note the certifications
+      # reserved for the daemon-spawned runtime (shared projection stream,
+      # exact-bindings and semantic reads) stay off here by design, so these
+      # nodes remain an external-endpoint cell rather than a managed twin.
+      store_block="\"store\": { \"backend\": \"sparql-http\", \"options\": { \"queryEndpoint\": \"http://127.0.0.1:${ox_port}/query\", \"updateEndpoint\": \"http://127.0.0.1:${ox_port}/update\", \"consistencyProfile\": \"atomic-readback\" } },"
+    else
+      store_block="\"store\": { \"backend\": \"oxigraph-server\", \"options\": { \"port\": $(( ${DEVNET_OXIGRAPH_BASE:-7900} + node_num )) } },"
     fi
   fi
 
@@ -517,6 +729,10 @@ create_node_config() {
       swm_sync_block='"syncSharedMemoryOnConnect": false,'
       ;;
   esac
+  local semantic_runtime_block=""
+  if [ "${DEVNET_ENABLE_SEMANTIC_RUNTIME:-}" = "1" ]; then
+    semantic_runtime_block="\"semanticRuntime\": { \"enabled\": true, \"watchdogMs\": 1000, \"startupTimeoutMs\": 30000, \"operatorPolicyIri\": \"${DEVNET_SEMANTIC_RUNTIME_POLICY_IRI:-urn:sr:policy:devnet-codex}\" },"
+  fi
 
   # Random Sampling prover (core-only). For devnet we want a
   # persistent WAL (so `dkg rs wal-tail` / smoke tests can read the
@@ -529,6 +745,24 @@ create_node_config() {
     rs_block="\"randomSampling\": { \"walPath\": \"${node_dir}/random-sampling.wal\", \"tickIntervalMs\": 5000 },"
   fi
 
+  # Optional snapshot collector tuning; nothing is written unless requested.
+  local snapshot_gc_extra=""
+  if [ "${DEVNET_SNAPSHOT_GC_FINALIZED_CLEANUP:-}" = "1" ]; then
+    snapshot_gc_extra="${snapshot_gc_extra},
+      \"finalizedCleanupEnabled\": true"
+    if [ -n "${DEVNET_SNAPSHOT_GC_FINALIZED_RETENTION_MS:-}" ]; then
+      snapshot_gc_extra="${snapshot_gc_extra},
+      \"finalizedRetentionMs\": ${DEVNET_SNAPSHOT_GC_FINALIZED_RETENTION_MS}"
+    fi
+  fi
+  if [ -n "${DEVNET_SNAPSHOT_GC_INTERVAL_MS:-}" ]; then
+    snapshot_gc_extra="${snapshot_gc_extra},
+      \"intervalMs\": ${DEVNET_SNAPSHOT_GC_INTERVAL_MS}"
+  fi
+
+  local chain_block
+  chain_block="$(devnet_chain_config_block "$hub_addr" "$(node_version_ref "$node_num" "$node_role")")"
+
   cat > "$node_dir/config.json" <<EOCONF
 {
   "name": "devnet-node-${node_num}",
@@ -538,7 +772,17 @@ create_node_config() {
   ${relay_value}
   ${store_block}
   "contextGraphs": ["devnet-test", "devnet-isolation"],
+  "localBootstrapContextGraphs": ["devnet-test", "devnet-isolation"],
   ${swm_sync_block}
+  "sharedMemoryPublicSnapshotStorage": {
+    "enabled": true,
+    "directory": "${node_dir}/swm-public-snapshots",
+    "gc": {
+      "hardReserveBytes": ${DEVNET_SNAPSHOT_GC_HARD_RESERVE_BYTES},
+      "triggerFreeBytes": ${DEVNET_SNAPSHOT_GC_TRIGGER_FREE_BYTES},
+      "targetFreeBytes": ${DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES}${snapshot_gc_extra}
+    }
+  },
   "publisher": {
     "enabled": true,
     "pollIntervalMs": 12000,
@@ -548,12 +792,8 @@ create_node_config() {
   ${rs_block}
   ${publisher_block}
   ${epcis_block}
-  "chain": {
-    "type": "evm",
-    "rpcUrl": "http://127.0.0.1:${HARDHAT_PORT}",
-    "hubAddress": "${hub_addr}",
-    "chainId": "evm:31337"
-  }
+${semantic_runtime_block}
+  ${chain_block}
 }
 EOCONF
 
@@ -613,6 +853,175 @@ EOCONF
   log "Node $node_num config: port=$api_port, libp2p=$libp2p_port, role=$node_role, wallets=$((NUM_OP_WALLETS + 1))"
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-version support (mixed-version devnet).
+#
+# By default every node launches from the freshly-built repo ("current"). To run
+# a MIXED-VERSION cluster — e.g. edges lagging the cores during a rollout — set
+# DEVNET_VERSION_LAYOUT to a comma-separated list of SELECTOR:REF entries:
+#
+#   SELECTOR : all | cores | edges | <N> | <A-B>
+#   REF      : current | prev | <git-ref, e.g. v10.0.3>
+#
+# Later entries win, so "edges one release behind the cores" is:
+#
+#   DEVNET_VERSION_LAYOUT="all:current,edges:prev"
+#
+# N-version ready — any number of refs can coexist in one cluster:
+#
+#   DEVNET_VERSION_LAYOUT="1-2:current,3-4:v10.0.3,5-6:v10.0.2"
+#
+# "prev" resolves to DEVNET_PREV_VERSION if set, else the latest release tag —
+# i.e. the version immediately preceding the code under test on main. Non-current
+# refs are checked out as git worktrees under DEVNET_VERSIONS_DIR and built once
+# (cached across runs; DEVNET_VERSION_REBUILD=1 forces a rebuild).
+# ─────────────────────────────────────────────────────────────────────────────
+DEVNET_VERSION_LAYOUT="${DEVNET_VERSION_LAYOUT:-}"
+DEVNET_VERSIONS_DIR="${DEVNET_VERSIONS_DIR:-$REPO_ROOT/.devnet-versions}"
+
+# Latest release tag (vMAJOR.MINOR.PATCH) STRICTLY BELOW the current workspace
+# version, or DEVNET_PREV_VERSION if set. 'prev' must never resolve to the
+# CURRENT version: right after a release the newest tag equals the workspace
+# version (v10.0.3 tag while package.json says 10.0.3), and a prev==current
+# layout silently builds a single-version devnet whose mixed-version suite
+# self-skips — a falsely green lane. Echoes nothing when no older tag exists
+# (callers guard on empty and point at DEVNET_PREV_VERSION).
+resolve_prev_version() {
+  if [ -n "${DEVNET_PREV_VERSION:-}" ]; then
+    echo "$DEVNET_PREV_VERSION"
+    return 0
+  fi
+  local current tag bare
+  current="$(node -p "require('$REPO_ROOT/package.json').version" 2>/dev/null || true)"
+  for tag in $(git -C "$REPO_ROOT" tag --sort=-v:refname 2>/dev/null | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' || true); do
+    if [ -z "$current" ]; then
+      # Workspace version unreadable — degrade to the newest tag (legacy behavior).
+      echo "$tag"
+      return 0
+    fi
+    bare="${tag#v}"
+    if [ "$bare" = "$current" ]; then continue; fi
+    if [ "$(printf '%s\n%s\n' "$bare" "$current" | sort -V | head -1)" = "$bare" ]; then
+      echo "$tag" # newest-first scan → first tag strictly below current
+      return 0
+    fi
+  done
+  echo "[devnet] resolve_prev_version: no release tag strictly below current version ${current:-unknown}; set DEVNET_PREV_VERSION explicitly" >&2
+  return 0
+}
+
+# Map a version REF to its cli.js entry point. current/empty -> the repo build.
+version_cli_entry() {
+  local ref="$1"
+  if [ -z "$ref" ] || [ "$ref" = "current" ]; then
+    echo "$REPO_ROOT/packages/cli/dist/cli.js"
+    return 0
+  fi
+  if [ "$ref" = "prev" ]; then
+    ref="$(resolve_prev_version)"
+  fi
+  echo "$DEVNET_VERSIONS_DIR/$ref/packages/cli/dist/cli.js"
+}
+
+# A node's authoritative role from its written config (default edge).
+node_role_of() {
+  local node_num="$1"
+  node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).nodeRole||'edge')}catch(e){process.stdout.write('edge')}" \
+    "$DEVNET_DIR/node${node_num}/config.json" 2>/dev/null || printf edge
+}
+
+# Resolve the version REF node <num> (role <role>) should run, per the layout.
+# Later matching entries override earlier ones.
+node_version_ref() {
+  local node_num="$1" role="$2" ref="current"
+  local oldifs="$IFS"
+  IFS=','
+  local entry
+  for entry in $DEVNET_VERSION_LAYOUT; do
+    if [ -z "$entry" ]; then continue; fi
+    local sel="${entry%%:*}" r="${entry#*:}"
+    case "$sel" in
+      all)   ref="$r" ;;
+      cores) if [ "$role" = "core" ]; then ref="$r"; fi ;;
+      edges) if [ "$role" = "edge" ]; then ref="$r"; fi ;;
+      *-*)   local lo="${sel%-*}" hi="${sel#*-}"
+             if [ "$node_num" -ge "$lo" ] 2>/dev/null && [ "$node_num" -le "$hi" ] 2>/dev/null; then
+               ref="$r"
+             fi ;;
+      *)     if [ "$node_num" = "$sel" ]; then ref="$r"; fi ;;
+    esac
+  done
+  IFS="$oldifs"
+  echo "$ref"
+}
+
+# The cli.js a given node should launch from.
+node_cli_entry() {
+  local node_num="$1"
+  local role
+  role="$(node_role_of "$node_num")"
+  version_cli_entry "$(node_version_ref "$node_num" "$role")"
+}
+
+# Modern compilers own their output identity. Historical checkouts receive
+# truthful metadata from the identity captured before their build begins.
+write_devnet_version_build_info() {
+  local dest="$1" before="${2:-}"
+  node "$(dirname "${BASH_SOURCE[0]}")/stamp-cli-build-info.mjs" --ensure-devnet "$dest" "$before"
+}
+
+# Check out <ref> as a worktree under DEVNET_VERSIONS_DIR and build it once.
+prepare_version() {
+  local ref="$1"
+  if [ "$ref" = "prev" ]; then ref="$(resolve_prev_version)"; fi
+  if [ -z "$ref" ]; then
+    echo "[devnet] prepare_version: no ref resolved (set DEVNET_PREV_VERSION, or ensure release tags exist)" >&2
+    return 1
+  fi
+  local dest="$DEVNET_VERSIONS_DIR/$ref"
+  if [ -f "$dest/packages/cli/dist/cli.js" ] && [ "${DEVNET_VERSION_REBUILD:-0}" != "1" ] &&
+    node "$(dirname "${BASH_SOURCE[0]}")/stamp-cli-build-info.mjs" --check-devnet-cache "$dest"; then
+    log "Version '$ref' already prepared at $dest"
+    return 0
+  fi
+  mkdir -p "$DEVNET_VERSIONS_DIR"
+  if [ ! -e "$dest/package.json" ]; then
+    log "Checking out version '$ref' as a worktree at $dest ..."
+    git -C "$REPO_ROOT" worktree add --force "$dest" "$ref"
+  fi
+  local before
+  before="$(node "$(dirname "${BASH_SOURCE[0]}")/stamp-cli-build-info.mjs" --capture-devnet "$dest")"
+  log "Building version '$ref' (runs once, then cached) ..."
+  ( cd "$dest" && pnpm install --prefer-offline && pnpm run build )
+  write_devnet_version_build_info "$dest" "$before"
+  log "Version '$ref' prepared at $dest"
+}
+
+# Build every distinct non-current ref referenced by the layout (idempotent).
+prepare_layout_versions() {
+  if [ -z "$DEVNET_VERSION_LAYOUT" ]; then return 0; fi
+  local oldifs="$IFS"
+  IFS=','
+  local entry
+  local built=""
+  for entry in $DEVNET_VERSION_LAYOUT; do
+    if [ -z "$entry" ]; then continue; fi
+    local r="${entry#*:}"
+    if [ "$r" = "current" ] || [ -z "$r" ]; then continue; fi
+    if [ "$r" = "prev" ]; then r="$(resolve_prev_version)"; fi
+    case " $built " in *" $r "*) continue ;; esac
+    built="$built $r"
+    IFS="$oldifs"
+    prepare_version "$r"
+    IFS=','
+  done
+  IFS="$oldifs"
+}
+
+cmd_prepare_version() {
+  prepare_version "${2:-prev}"
+}
+
 start_node() {
   local node_num="$1"
   local node_dir="$DEVNET_DIR/node${node_num}"
@@ -644,7 +1053,13 @@ start_node() {
     const fs = require('fs');
     const dir = process.env.DEVNET_DIR;
     const cfgPath = process.env.NODE_DIR + '/config.json';
-    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    // The members a test set when it added this node (addnode's
+    // DEVNET_ADDNODE_CONFIG_OVERRIDES), applied here only, on every start: the
+    // defaults below are derived from them (an overridden nodeRole or
+    // authorityIndex), and they win over the values generated below.
+    const overridesPath = process.env.NODE_DIR + '/addnode-overrides.json';
+    const overrides = fs.existsSync(overridesPath) ? JSON.parse(fs.readFileSync(overridesPath, 'utf8')) : {};
+    const cfg = { ...JSON.parse(fs.readFileSync(cfgPath, 'utf8')), ...overrides };
     if (process.env.RELAY_ARG) cfg.relay = process.env.RELAY_ARG;
     const n = Number(process.env.NODE_NUM);
     // Bootstrap targets are the CORE nodes among 1..n-1, read from each node's
@@ -661,6 +1076,22 @@ start_node() {
       try { const m = fs.readFileSync(dir + '/node' + c + '/multiaddr', 'utf8').trim(); if (m) peers.push(m); } catch {}
     }
     if (peers.length) cfg.bootstrapPeers = peers;
+    // The isolated Hardhat chain has no authority history on the public
+    // network relays. Pin an edge's snapshot trust to the local Core mesh so
+    // unregistered-CG subscription can prove finalized name absence without
+    // repeatedly cold-scanning the same chain on every receiver. Preserve an
+    // explicit operator override when adding a node to an existing devnet.
+    // The daemon rejects a trust list longer than eight Cores
+    // (CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_TRUSTED_PEERS), so a larger
+    // Core mesh trusts its first eight; bootstrapPeers above stays complete.
+    if (cfg.nodeRole === 'edge' && peers.length && !cfg.authorityIndex) {
+      cfg.authorityIndex = {
+        mode: 'core-snapshot',
+        trustedCorePeers: peers.slice(0, 8),
+        maxTailBlocks: 2000,
+      };
+    }
+    Object.assign(cfg, overrides);
     fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
   "
 
@@ -679,11 +1110,27 @@ start_node() {
   # byte-replayed duplicate tail segments in daemon.log — and doubled the
   # rpc_usage telemetry counts the rpc-quiet-window suite sums. console.log
   # still captures pre-tee output from an early crash.
-  DKG_HOME="$node_dir" DKG_NO_BLUE_GREEN=1 DKG_WALLETS_NO_MIGRATE=1 \
-    node "$REPO_ROOT/packages/cli/dist/cli.js" start --foreground \
-    > "$node_dir/console.log" 2>&1 &
-  local node_pid=$!
-  echo "$node_pid" > "$pidfile"
+  # Version-layout aware: `node_cli_entry` returns the repo build for `current`
+  # nodes and a prepared alternate-version dist for mixed-version layouts.
+  local cli_entry
+  cli_entry="$(node_cli_entry "$node_num")"
+  log "Node $node_num launching from $cli_entry"
+  # Shutdown uses the running node's launch identity, independent of the next
+  # invocation's DEVNET_VERSION_LAYOUT. Publish the record before spawning.
+  record_node_cli_entry "$node_num" "$cli_entry"
+  # Use the CLI's detached supervisor. `restart-node` is commonly called from
+  # short-lived devnet test scripts; foreground mode leaves the worker in that
+  # shell's process group and can make the daemon disappear after the helper
+  # exits. Plain `start` returns after the daemon is ready and leaves a detached
+  # supervisor behind. Store that supervisor pid in devnet.pid so stop/restart
+  # still bounce the whole node process tree.
+  if ! env DKG_HOME="$node_dir" DKG_NO_BLUE_GREEN=1 DKG_WALLETS_NO_MIGRATE=1 \
+    node "$cli_entry" start \
+    > "$node_dir/console.log" 2>&1 < /dev/null; then
+    log "WARNING: Node $node_num start command returned non-zero (check $node_dir/console.log)"
+  fi
+  local node_pid
+  node_pid=$(refresh_node_pidfile "$node_num" || true)
 
   # Wait for API to be ready — relay node (1) gets extra time since first boot
   # compiles Solidity contracts which is CPU-intensive.
@@ -696,7 +1143,10 @@ start_node() {
       auth_args=(-H "Authorization: Bearer $auth_token")
     fi
   fi
-  local max_wait=${DEVNET_NODE_READY_TIMEOUT:-30}
+  # 120 s, not 30: a Core that restarts into a running network has taken 70 s
+  # to answer on a busy machine, and a restart that gives up early aborts the
+  # suite that asked for it. The loop ends as soon as the node answers.
+  local max_wait=${DEVNET_NODE_READY_TIMEOUT:-120}
   [ "$node_num" -eq 1 ] && max_wait=$(( max_wait > 120 ? max_wait : 120 ))
   local ready=false
   # CRITICAL: declare loop variable `local` so we don't clobber the OUTER
@@ -706,8 +1156,10 @@ start_node() {
   # 1 and 2 would ever start.
   local i
   for i in $(seq 1 "$max_wait"); do
+    [ -n "$node_pid" ] || node_pid=$(refresh_node_pidfile "$node_num" || true)
     if curl -sf "${auth_args[@]}" "http://127.0.0.1:$api_port/api/status" > /dev/null 2>&1; then
-      log "Node $node_num ready (PID $node_pid, API http://127.0.0.1:$api_port)"
+      [ -n "$node_pid" ] || node_pid=$(refresh_node_pidfile "$node_num" || true)
+      log "Node $node_num ready (PID ${node_pid:-unknown}, API http://127.0.0.1:$api_port)"
       ready=true
       break
     fi
@@ -758,19 +1210,90 @@ start_node() {
   fi
 }
 
+record_node_cli_entry() {
+  local node_dir="$DEVNET_DIR/node$1"
+  printf '%s\n' "$2" > "$node_dir/.devnet-cli-entry.tmp.$$"
+  mv "$node_dir/.devnet-cli-entry.tmp.$$" "$node_dir/.devnet-cli-entry"
+}
+
+run_devnet_process_control() {
+  local action="$1" selected="${2:-}" node_dir num entry
+  local entries=()
+  # Old launches have no durable entry record. Only their node-specific configured
+  # version may fill that gap; a launch record always owns the process identity.
+  if [ -n "$DEVNET_VERSION_LAYOUT" ]; then
+    for node_dir in "$DEVNET_DIR"/node*; do
+      [ -d "$node_dir" ] || continue
+      num="${node_dir##*/node}"
+      case "$num" in ''|*[!0-9]*) continue ;; esac
+      [ -z "$selected" ] || [ "$selected" = "$num" ] || continue
+      [ ! -e "$node_dir/.devnet-cli-entry" ] || continue
+      entry="$(node_cli_entry "$num")"
+      entries+=("$num" "$entry")
+    done
+  fi
+  node --experimental-strip-types "$REPO_ROOT/scripts/devnet-node-process-control.mjs" \
+    "$action" "$REPO_ROOT" "$DEVNET_DIR" "$selected" ${entries[@]+"${entries[@]}"}
+}
+
+collect_devnet_node_pids() {
+  run_devnet_process_control collect "${1:-}"
+}
+
+refresh_node_pidfile() {
+  local node_num="$1"
+  local node_dir="$DEVNET_DIR/node${node_num}"
+  local pidfile="$node_dir/devnet.pid"
+  local node_pid="" worker_pid="" supervisor_pid="" pid cmd
+
+  if [ -f "$node_dir/daemon.pid" ]; then
+    worker_pid=$(cat "$node_dir/daemon.pid" 2>/dev/null || true)
+  fi
+  if [ -n "$worker_pid" ] && kill -0 "$worker_pid" 2>/dev/null; then
+    supervisor_pid=$(ps -p "$worker_pid" -o ppid= 2>/dev/null | tr -d '[:space:]' || true)
+    if [ -n "$supervisor_pid" ] && [ "$supervisor_pid" != "1" ] && kill -0 "$supervisor_pid" 2>/dev/null; then
+      node_pid="$supervisor_pid"
+    else
+      node_pid="$worker_pid"
+    fi
+  fi
+
+  if [ -z "$node_pid" ]; then
+    for pid in $(collect_devnet_node_pids "$node_num"); do
+      kill -0 "$pid" 2>/dev/null || continue
+      cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
+      case "$cmd" in
+        *" daemon-supervisor"*) node_pid="$pid"; break ;;
+      esac
+    done
+  fi
+
+  if [ -z "$node_pid" ]; then
+    for pid in $(collect_devnet_node_pids "$node_num"); do
+      kill -0 "$pid" 2>/dev/null || continue
+      cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
+      case "$cmd" in
+        *oxigraph*) continue ;;
+      esac
+      node_pid="$pid"
+      break
+    done
+  fi
+
+  if [ -n "$node_pid" ]; then
+    echo "$node_pid" > "$pidfile"
+    printf '%s\n' "$node_pid"
+  fi
+}
+
+stop_devnet_node_processes() {
+  run_devnet_process_control stop "${1:-}"
+}
+
 stop_devnet_nodes_only() {
   # Stop DKG node processes only (leave Hardhat, Blazegraph, Oxigraph servers running).
   # Ensures the next start_node uses freshly written configs (e.g. store backends).
-  for pidfile in "$DEVNET_DIR"/node*/devnet.pid; do
-    [ -f "$pidfile" ] || continue
-    local pid
-    pid=$(cat "$pidfile")
-    if kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-      log "Stopped node (PID $pid) for config refresh"
-    fi
-    rm -f "$pidfile"
-  done
+  stop_devnet_node_processes
 }
 
 start_ui() {
@@ -783,17 +1306,28 @@ start_ui() {
 
   log "Starting node-ui Vite dev server on port $UI_PORT (talks to devnet node $UI_NODE_ID)..."
 
-  # Detach with nohup + setsid-equivalent (`bash -c 'exec ...' &` + disown so
-  # SIGHUP from a dying parent shell can't reach it). The UI process group is
-  # its own from this point on. This is the fix for the "Vite dies when the
-  # Cursor agent terminal recycles" SIGHUP cascade we observed.
-  (
-    cd "$REPO_ROOT/packages/node-ui"
-    nohup env DEVNET_NODE="$UI_NODE_ID" pnpm dev:ui \
-      > "$UI_LOGFILE" 2>&1 < /dev/null &
-    echo $! > "$UI_PIDFILE"
-    disown
-  )
+  # Start Vite in a detached process group. A plain `nohup ... & disown`
+  # still inherits the caller's process group on macOS, so stop_ui's
+  # `kill -TERM -$pgid` can accidentally signal the orchestrator that launched
+  # the smoke test. Node's detached spawn gives the UI its own group while
+  # keeping the shell script portable.
+  node - "$REPO_ROOT/packages/node-ui" "$UI_LOGFILE" "$UI_PIDFILE" "$UI_NODE_ID" <<'NODE'
+const { openSync, closeSync, writeFileSync } = require('node:fs');
+const { spawn } = require('node:child_process');
+
+const [, , cwd, logFile, pidFile, uiNodeId] = process.argv;
+const out = openSync(logFile, 'a');
+const child = spawn('pnpm', ['dev:ui'], {
+  cwd,
+  detached: true,
+  env: { ...process.env, DEVNET_NODE: uiNodeId },
+  stdio: ['ignore', out, out],
+});
+
+writeFileSync(pidFile, `${child.pid}\n`);
+child.unref();
+closeSync(out);
+NODE
 
   # Poll until Vite reports ready or we hit the budget. Vite v6 binds to
   # `localhost` only by default, which on macOS resolves to ::1 first, so we
@@ -863,9 +1397,16 @@ cmd_ui() {
 
 cmd_start() {
   log "Starting devnet with $NUM_NODES nodes..."
+  if [ -n "$DEVNET_VERSION_LAYOUT" ]; then
+    log "Mixed-version layout: $DEVNET_VERSION_LAYOUT"
+  fi
   mkdir -p "$DEVNET_DIR"
 
   ensure_built
+  # Build any alternate versions the layout references BEFORE starting nodes, so
+  # a mixed-version cluster comes up in one `start`. No-op for the default
+  # (all-current) layout.
+  prepare_layout_versions
   start_hardhat
   deploy_contracts
   start_blazegraph
@@ -882,7 +1423,7 @@ cmd_start() {
   # their absence a hard failure for full-matrix CI.
   local bg_state ox_extra
   if [ "$BLAZEGRAPH_AVAILABLE" = true ]; then bg_state="blazegraph"; else bg_state="oxigraph in-process (blazegraph Docker unavailable)"; fi
-  if [ "$OXIGRAPH_SERVER_AVAILABLE" = true ]; then ox_extra="sparql-http → external Oxigraph"; else ox_extra="(skipped — external Oxigraph Docker unavailable)"; fi
+  if [ "$OXIGRAPH_SERVER_AVAILABLE" = true ]; then ox_extra="sparql-http → external Oxigraph"; else ox_extra="oxigraph-server managed fallback (external Docker unavailable)"; fi
   log "Store-backend matrix:  nodes 1-2: oxigraph-server (managed, no Docker)  |  nodes 3-4: $bg_state  |  nodes 5-6: $ox_extra"
   if [ "$BLAZEGRAPH_AVAILABLE" != true ] || [ "$OXIGRAPH_SERVER_AVAILABLE" != true ]; then
     if [ "${DEVNET_REQUIRE_ALL_BACKENDS:-0}" = "1" ]; then
@@ -1392,7 +1933,7 @@ cmd_start() {
       [ "$BLAZEGRAPH_AVAILABLE" = true ] && store_label="blazegraph" || store_label="oxigraph"
     fi
     if [ "$i" -ge 5 ]; then
-      [ "$OXIGRAPH_SERVER_AVAILABLE" = true ] && store_label="oxigraph-server" || store_label="oxigraph-worker"
+      [ "$OXIGRAPH_SERVER_AVAILABLE" = true ] && store_label="sparql-http → external Oxigraph" || store_label="oxigraph-server"
     fi
     log "Node $i ($role, $store_label): http://127.0.0.1:$api_port/ui"
   done
@@ -1411,28 +1952,17 @@ cmd_stop() {
 
   stop_ui
 
-  # Stop nodes
-  for pidfile in "$DEVNET_DIR"/node*/devnet.pid; do
-    [ -f "$pidfile" ] || continue
-    local pid
-    pid=$(cat "$pidfile")
-    if kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-      log "Stopped node (PID $pid)"
-    fi
-    rm -f "$pidfile"
-  done
+  stop_devnet_node_processes
 
   # Stop hardhat
-  if [ -f "$DEVNET_DIR/hardhat.pid" ]; then
-    local pid
-    pid=$(cat "$DEVNET_DIR/hardhat.pid")
-    if kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-      log "Stopped Hardhat (PID $pid)"
-    fi
-    rm -f "$DEVNET_DIR/hardhat.pid"
+  local pid
+  pid=$(refresh_hardhat_pidfile || true)
+  if [ -n "$pid" ]; then
+    kill "$pid" 2>/dev/null || true
+    log "Stopped Hardhat (PID $pid)"
+    sleep 1
   fi
+  rm -f "$DEVNET_DIR/hardhat.pid"
 
   stop_blazegraph
   stop_oxigraph_servers
@@ -1470,7 +2000,10 @@ cmd_stop() {
 # stays bash 3.2 clean.
 collect_devnet_pids() {
   local pids="" f pid children
-  for f in "$DEVNET_DIR/hardhat.pid" "$DEVNET_DIR"/node*/devnet.pid "$DEVNET_DIR"/node*/daemon.pid; do
+  pids="$(collect_devnet_node_pids)"
+  pid=$(refresh_hardhat_pidfile || true)
+  [ -n "$pid" ] && pids+=" $pid"
+  for f in "$DEVNET_DIR/hardhat.pid"; do
     [ -f "$f" ] || continue
     pid=$(cat "$f" 2>/dev/null || true)
     [ -n "$pid" ] && pids+=" $pid"
@@ -1572,8 +2105,10 @@ sweep_ports_for_devnet() {
 cmd_status() {
   echo "=== Devnet Status ==="
 
-  if [ -f "$DEVNET_DIR/hardhat.pid" ] && kill -0 "$(cat "$DEVNET_DIR/hardhat.pid")" 2>/dev/null; then
-    echo "Hardhat:  RUNNING (PID $(cat "$DEVNET_DIR/hardhat.pid"), port $HARDHAT_PORT)"
+  local hardhat_pid
+  hardhat_pid=$(refresh_hardhat_pidfile || true)
+  if [ -n "$hardhat_pid" ]; then
+    echo "Hardhat:  RUNNING (PID $hardhat_pid, port $HARDHAT_PORT)"
   else
     echo "Hardhat:  STOPPED"
   fi
@@ -1584,8 +2119,15 @@ cmd_status() {
     node_num=$(basename "$node_dir" | sed 's/node//')
     local api_port=$((API_PORT_BASE + node_num - 1))
     local pidfile="$node_dir/devnet.pid"
+    local pid=""
 
     if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+      pid=$(cat "$pidfile")
+    else
+      pid=$(refresh_node_pidfile "$node_num" || true)
+    fi
+
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
       local status_json
       status_json=$(curl -s "http://127.0.0.1:$api_port/api/status" 2>/dev/null || echo "{}")
       local peer_id
@@ -1595,7 +2137,7 @@ cmd_status() {
           try{const j=JSON.parse(d);console.log(j.peerId?.slice(0,16)||'??')}catch{console.log('??')}
         })
       " 2>/dev/null || echo "??")
-      echo "Node $node_num:   RUNNING (PID $(cat "$pidfile"), API :$api_port, peer ${peer_id}...)"
+      echo "Node $node_num:   RUNNING (PID $pid, API :$api_port, peer ${peer_id}...)"
     else
       echo "Node $node_num:   STOPPED"
     fi
@@ -1636,6 +2178,8 @@ cmd_clean() {
 # itself so it can assert on every step.
 #
 # Usage: devnet.sh addnode <num> [core|edge]
+#   DEVNET_ADDNODE_CONFIG_OVERRIDES='{"key": value, ...}'  config.json members
+#                                   to set before the node's first start
 cmd_addnode() {
   local node_num="${2:-}"
   local role="${3:-core}"
@@ -1655,14 +2199,52 @@ cmd_addnode() {
     core|edge) ;;
     *) echo "[devnet] role must be 'core' or 'edge'"; exit 1 ;;
   esac
-  local hardhat_pid_file="$DEVNET_DIR/hardhat.pid"
-  if [ ! -f "$hardhat_pid_file" ] || ! kill -0 "$(cat "$hardhat_pid_file")" 2>/dev/null; then
+  local hardhat_pid
+  hardhat_pid=$(refresh_hardhat_pidfile || true)
+  if [ -z "$hardhat_pid" ]; then
     echo "[devnet] Hardhat is not running. Start the devnet first with: $0 start <N>"
     exit 1
   fi
 
   log "Adding node $node_num (role=$role)..."
+  # One mkdir claims the folder: it fails when another caller made the folder
+  # since the check above, so only the caller that created it goes on. A caller
+  # that names a mark (DEVNET_ADDNODE_MARK_NAME, a file name, with
+  # DEVNET_ADDNODE_MARK_TEXT) has it written into the folder before anything
+  # else happens there, the daemon's start included: it can then tell its own
+  # node from another caller's even when this addnode is interrupted.
+  if ! mkdir "$DEVNET_DIR/node${node_num}" 2>/dev/null; then
+    echo "[devnet] node${node_num} already exists at $DEVNET_DIR/node${node_num}"
+    exit 1
+  fi
+  if [ -n "${DEVNET_ADDNODE_MARK_NAME:-}" ]; then
+    case "$DEVNET_ADDNODE_MARK_NAME" in
+      */*|.|..)
+        echo "[devnet] DEVNET_ADDNODE_MARK_NAME must be a file name; node${node_num} was not started"
+        rm -rf "$DEVNET_DIR/node${node_num}"
+        exit 1 ;;
+    esac
+    printf '%s\n' "${DEVNET_ADDNODE_MARK_TEXT:-}" > "$DEVNET_DIR/node${node_num}/$DEVNET_ADDNODE_MARK_NAME"
+  fi
   DEVNET_NODE_ROLE_OVERRIDE="$role" create_node_config "$node_num"
+
+  # A test that needs the new node to differ from the first second it runs
+  # (the addresses it announces, for one: what a peer has once learnt about a
+  # node it keeps) passes a JSON object here. addnode checks it and keeps it
+  # beside the node's config; start_node applies it, on the first start and on
+  # every later one (see there).
+  if [ -n "${DEVNET_ADDNODE_CONFIG_OVERRIDES:-}" ]; then
+    if ! node -e '
+      const overrides = JSON.parse(process.env.DEVNET_ADDNODE_CONFIG_OVERRIDES);
+      if (overrides === null || typeof overrides !== "object" || Array.isArray(overrides)) throw new Error("not a JSON object");
+    '; then
+      echo "[devnet] DEVNET_ADDNODE_CONFIG_OVERRIDES must be a JSON object; node${node_num} was not started"
+      rm -rf "$DEVNET_DIR/node${node_num}"
+      exit 1
+    fi
+    printf '%s\n' "$DEVNET_ADDNODE_CONFIG_OVERRIDES" > "$DEVNET_DIR/node${node_num}/addnode-overrides.json"
+    log "Node $node_num config: DEVNET_ADDNODE_CONFIG_OVERRIDES kept for every start"
+  fi
 
   # Reuse the cluster's shared auth token so the test can talk to the new
   # node with the same bearer used everywhere else.
@@ -1696,30 +2278,43 @@ cmd_restart_node() {
     echo "[devnet] node${node_num} does not exist at $DEVNET_DIR/node${node_num} — start the devnet first."
     exit 1
   fi
-  local pidf="$DEVNET_DIR/node${node_num}/devnet.pid"
-  if [ -f "$pidf" ]; then
-    local pid
-    pid=$(cat "$pidf")
-    if kill -0 "$pid" 2>/dev/null; then
-      log "Stopping node $node_num (pid=$pid)..."
-      kill "$pid" 2>/dev/null || true
-      for _ in 1 2 3 4 5 6 7 8 9 10; do
-        kill -0 "$pid" 2>/dev/null || break
-        sleep 1
-      done
-      kill -9 "$pid" 2>/dev/null || true
-    fi
-    rm -f "$pidf"
-  fi
+  stop_devnet_node_processes "$node_num"
   cd "$REPO_ROOT" || exit 1
   start_node "$node_num"
   log "Node $node_num restarted."
 }
 
+# Stop a single already-existing devnet node. Preserves on-chain state,
+# wallets, store backends, and CG metadata. Unlike ad-hoc pidfile kills,
+# this uses the same process discovery as full devnet shutdown so detached
+# daemon children and managed stores cannot keep the API port alive.
+#
+# Usage: devnet.sh stop-node <num>
+cmd_stop_node() {
+  local node_num="${2:-}"
+  if [ -z "$node_num" ]; then
+    echo "Usage: $0 stop-node <num>"
+    exit 1
+  fi
+  if [ ! -d "$DEVNET_DIR/node${node_num}" ]; then
+    echo "[devnet] node${node_num} does not exist at $DEVNET_DIR/node${node_num} — start the devnet first."
+    exit 1
+  fi
+  stop_devnet_node_processes "$node_num"
+  log "Node $node_num stopped."
+}
+
+if [ "${DEVNET_SOURCE_ONLY:-0}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 case "${1:-}" in
-  start)        cmd_start ;;
-  addnode)      cmd_addnode "$@" ;;
-  restart-node) cmd_restart_node "$@" ;;
+  start)            cmd_start ;;
+  addnode)          cmd_addnode "$@" ;;
+  stop-node)        cmd_stop_node "$@" ;;
+  restart-node)     cmd_restart_node "$@" ;;
+  start-node)       start_node "${2:?node number required}" ;;
+  prepare-version)  cmd_prepare_version "$@" ;;
   stop)         cmd_stop ;;
   status)       cmd_status ;;
   logs)         cmd_logs "$@" ;;
@@ -1734,6 +2329,9 @@ case "${1:-}" in
     echo "                          on-chain identity/stake/ask. (1 <= num <= 10)"
     echo "  restart-node <num>      Restart a single already-existing devnet node"
     echo "                          (pick up new code without rebuilding state)"
+    echo "  prepare-version [ref]   Check out + build an alternate version (default"
+    echo "                          'prev' = latest release tag) for mixed-version"
+    echo "                          runs. See DEVNET_VERSION_LAYOUT."
     echo "  stop                    Stop all devnet processes (incl. UI)"
     echo "  status                  Show running nodes (incl. UI) and their status"
     echo "  logs [N]                Tail logs for node N (default 1)"

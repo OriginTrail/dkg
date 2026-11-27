@@ -1,3 +1,4 @@
+import { LiftPayloadValidationError } from './lift-validation-error.js';
 import type {
   LiftPublishRequestMetadata,
   LiftPublishSnapshotRequest,
@@ -30,7 +31,7 @@ export function normalizeLiftPublishInput(
       },
     };
   }
-  throw new Error(`${errorContext} requires request metadata for non-raw snapshot requests`);
+  throw new LiftPayloadValidationError(`${errorContext} requires request metadata for non-raw snapshot requests`);
 }
 
 function hasInlineLiftMetadata(

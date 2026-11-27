@@ -10,10 +10,51 @@
  */
 
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
-import { ethers } from 'ethers';
-import type { OperationalWalletRegistrationResult, TxResult, IdentityProof } from './chain-adapter.js';
+import { ethers, type Contract } from 'ethers';
+import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
+import { isExternalEvmSigner } from './evm-signer.js';
+import type {
+  IdentityProof,
+  IdentityWalletContracts,
+  OperationalWalletRegistrationResult,
+  TxResult,
+} from './chain-adapter.js';
+
+/** Explains a missing admin key on a node whose operational signing is external. */
+const EXTERNAL_SIGNER_ADMIN_HINT =
+  ' Operational signing is delegated to an external signer and the node holds no admin key; ' +
+  'perform admin-key operations with the admin key outside this node.';
+
+function externalSignerAdminHint(signer: unknown): string {
+  return isExternalEvmSigner(signer) ? EXTERNAL_SIGNER_ADMIN_HINT : '';
+}
 
 export class IdentityMethods extends EVMChainAdapterBase {
+  /** Independent all-or-none browser capability for node-identity key rotation. */
+  async getIdentityWalletContracts(): Promise<IdentityWalletContracts | null> {
+    await this.init();
+    const profile = this.contracts.profile;
+    const identity = this.contracts.identity;
+    if (!profile || !identity) return null;
+    let storage: Contract;
+    try {
+      storage = await this.getIdentityStorage();
+    } catch (error) {
+      if (error instanceof HubContractNotFoundError && error.contractName === 'IdentityStorage') {
+        return null;
+      }
+      throw error;
+    }
+    return {
+      profile: ethers.getAddress(await profile.getAddress()),
+      identity: ethers.getAddress(await identity.getAddress()),
+      storage: ethers.getAddress(await storage.getAddress()),
+      chainId: this.chainId,
+      rpcUrls: [...this.walletRpcUrls],
+      walletRpcUrls: [...this.walletRpcUrls],
+    };
+  }
+
   async ensureOperationalWalletsRegistered(options?: {
     identityId?: bigint;
     additionalAddresses?: string[];
@@ -55,6 +96,8 @@ export class IdentityMethods extends EVMChainAdapterBase {
       const existingIdentityId = onChainIds[i];
       if (existingIdentityId === identityId) {
         result.alreadyRegistered.push(address);
+        // Confirmed registered under this identity → eligible for RS rotation.
+        this.registeredOperationalAddresses.add(address.toLowerCase());
       } else if (existingIdentityId === 0n) {
         missing.push(address);
       } else {
@@ -67,7 +110,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
     if (!this.adminSigner) {
       throw new Error(
         `Cannot register operational wallets for identity ${identityId}: ` +
-        'adminPrivateKey is not configured.',
+        'adminPrivateKey is not configured.' + externalSignerAdminHint(this.signer),
       );
     }
     if (!(await this.hasAdminPurpose(identityStorage, identityId, this.adminSigner.address))) {
@@ -89,6 +132,8 @@ export class IdentityMethods extends EVMChainAdapterBase {
       if (await this.hasOperationalPurpose(identityStorage, identityId, address)) {
         result.registered.push(address);
         this.seedIdentityIdForAddress(address, identityId);
+        // Confirmed just-registered → eligible for RS rotation.
+        this.registeredOperationalAddresses.add(address.toLowerCase());
       }
     }
 
@@ -114,7 +159,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
     }
     if (!this.adminSigner) {
       throw new Error(
-        `Cannot add operational wallet to identity ${identityId}: adminPrivateKey is not configured.`,
+        `Cannot add operational wallet to identity ${identityId}: adminPrivateKey is not configured.` + externalSignerAdminHint(this.signer),
       );
     }
     const identityStorage = await this.getIdentityStorage();
@@ -132,6 +177,8 @@ export class IdentityMethods extends EVMChainAdapterBase {
       'addOperationalWallet',
     );
     this.seedIdentityIdForAddress(wallet, identityId);
+    // Newly registered on-chain → eligible for RS rotation.
+    if (receipt.status === 1) this.registeredOperationalAddresses.add(wallet.toLowerCase());
     return {
       hash: receipt.hash,
       blockNumber: receipt.blockNumber,
@@ -168,7 +215,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
     }
     if (!this.adminSigner) {
       throw new Error(
-        `Cannot remove operational wallet from identity ${identityId}: adminPrivateKey is not configured.`,
+        `Cannot remove operational wallet from identity ${identityId}: adminPrivateKey is not configured.` + externalSignerAdminHint(this.signer),
       );
     }
     const identityStorage = await this.getIdentityStorage();
@@ -211,6 +258,12 @@ export class IdentityMethods extends EVMChainAdapterBase {
       'removeOperationalWallet',
     );
     this.clearIdentityIdForAddress(wallet);
+    // Prune from the RS eligibility set: the wallet is no longer a registered
+    // operational key, so RandomSampling would resolve it to identity 0 and
+    // revert. Same-process only — an out-of-band removal (another instance /
+    // admin tx) does not reach this set and heals on restart (the set re-seeds
+    // to registered wallets); see `registeredOperationalAddresses`.
+    if (receipt.status === 1) this.registeredOperationalAddresses.delete(wallet.toLowerCase());
     return {
       hash: receipt.hash,
       blockNumber: receipt.blockNumber,
@@ -284,7 +337,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
       const nodeName = options?.nodeName ?? `node-${Date.now()}`;
       if (!this.adminSigner) {
         throw new Error(
-          'Cannot create profile: adminPrivateKey is required so the profile admin key is not lost.',
+          'Cannot create profile: adminPrivateKey is required so the profile admin key is not lost.' + externalSignerAdminHint(this.signer),
         );
       }
       const nodeId = ethers.hexlify(ethers.randomBytes(32));
@@ -374,7 +427,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
     await this.init();
     if (!this.adminSigner) {
       throw new Error(
-        'Cannot register identity: adminPrivateKey is required so the profile admin key is not lost.',
+        'Cannot register identity: adminPrivateKey is required so the profile admin key is not lost.' + externalSignerAdminHint(this.signer),
       );
     }
     const nodeName = `node-${ethers.hexlify(ethers.randomBytes(4)).slice(2)}`;

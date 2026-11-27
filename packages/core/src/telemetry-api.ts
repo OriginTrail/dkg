@@ -24,8 +24,15 @@ import {
   type Attributes,
   type SpanContext,
   type Counter,
+  type Gauge,
   type Histogram,
+  type UpDownCounter,
 } from '@opentelemetry/api';
+import {
+  ADMISSION_LATENCY_BUCKETS, BYTE_BUCKETS, CATCHUP_DURATION_BUCKETS, GRAPH_COUNT_BUCKETS,
+  OP_DURATION_BUCKETS, PAGE_COUNT_BUCKETS, PICKUP_BUCKETS, QUAD_COUNT_BUCKETS, QUEUE_WAIT_BUCKETS,
+  READ_GRAPH_CHECK_DURATION_BUCKETS, RPC_DURATION_BUCKETS, SYNC_OPERATION_DURATION_BUCKETS,
+} from './telemetry-buckets.js';
 
 const TRACER_NAME = '@origintrail-official/dkg';
 const METER_NAME = '@origintrail-official/dkg';
@@ -114,12 +121,19 @@ export function activeSpanContext(): SpanContext | undefined {
 // Attributes are supplied at record time; keep them to the bounded keys
 // documented per metric (never peer_id / cg_id / tx_hash / op_id as labels).
 
-/** Duration buckets (ms) for operation-level histograms. */
-const OP_DURATION_BUCKETS = [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000];
-/** Duration buckets (ms) for chain RPC histograms (faster floor). */
-const RPC_DURATION_BUCKETS = [25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 120000];
-
 export interface DkgMetrics {
+  /** bytes; boundary and phase are bounded sync lifecycle enums */
+  processHeapUsedBytes: Gauge;
+  /** bytes; boundary and phase are bounded sync lifecycle enums */
+  processHeapTotalBytes: Gauge;
+  /** bytes; boundary and phase are bounded sync lifecycle enums */
+  processHeapLimitBytes: Gauge;
+  /** bytes; boundary and phase are bounded sync lifecycle enums */
+  processRssBytes: Gauge;
+  /** bytes; boundary and phase are bounded sync lifecycle enums */
+  processExternalBytes: Gauge;
+  /** bytes; boundary and phase are bounded sync lifecycle enums */
+  processArrayBuffersBytes: Gauge;
   /** outcome={tentative|confirmed|failed|error}, source={direct|swm}, chain_id
    *  (`error` = the publish flow threw before producing a status). */
   publishTotal: Counter;
@@ -135,6 +149,146 @@ export interface DkgMetrics {
   ackVerifyTotal: Counter;
   /** outcome={ack|decline|reset}, decline_code?, chain_id */
   ackHandlerTotal: Counter;
+  /** reason={fixed enum/known label} */
+  storageAckDeclinesTotal: Counter;
+  /** ms; operation={query|insert|dropGraph|flush|...} */
+  storageAckQueueWaitMs: Histogram;
+  /** ms; operation, outcome={ok|error} */
+  storageAckStoreOpDurationMs: Histogram;
+  /** queue_depth sample for ACK-priority store work */
+  storageAckPriorityQueueDepth: Histogram;
+  /** inflight sample for ACK-priority store work */
+  storageAckInflight: Histogram;
+  /** queue_depth sample for background/normal store work competing with ACK */
+  syncBackgroundQueueDepth: Histogram;
+  /** priority={ack|health|normal|background|control}, reason={queue_full|queue_wait_timeout}, operation_family=first two dot-separated segments of the caller's source (at most 64 per scheduler, then `other`). `control` is the queue control path's own schedulers (one per async queue). */
+  storeSchedulerRejectionsTotal: Counter;
+  /** ms; priority and operation identify the bounded admission lane and static caller */
+  storeSchedulerQueueWaitMs: Histogram;
+  /** ms; admitted execution time by priority, static operation and outcome={ok|error} */
+  storeSchedulerOperationDurationMs: Histogram;
+  /** active admitted operations by priority and operation */
+  storeSchedulerActive: UpDownCounter;
+  /** current queued work; scheduler and lane are bounded static labels */
+  backpressureQueueDepth: Gauge;
+  /**
+   * depth the lane's pressure state was classified against — the numerator that
+   * pairs with `backpressureQueueLimit`. Equals queue depth on a lane holding a
+   * private allocation, and the pool's depth on a lane drawing from a shared
+   * one; scheduler and lane are bounded static labels
+   */
+  backpressurePressureDepth: Gauge;
+  /** configured queue capacity; scheduler and lane are bounded static labels */
+  backpressureQueueLimit: Gauge;
+  /** current admitted work; scheduler and lane are bounded static labels */
+  backpressureInflight: Gauge;
+  /**
+   * admitted count the lane's `backpressureInflightLimit` bounds — this lane's
+   * own under a private allocation, the pool's under a shared one; scheduler
+   * and lane are bounded static labels
+   */
+  backpressurePressureInflight: Gauge;
+  /** configured concurrent-work capacity; scheduler and lane are bounded static labels */
+  backpressureInflightLimit: Gauge;
+  /** age of the oldest queued item; scheduler and lane are bounded static labels */
+  backpressureOldestQueuedAgeMs: Gauge;
+  /** age of the oldest admitted item; scheduler and lane are bounded static labels */
+  backpressureOldestActiveAgeMs: Gauge;
+  /** scheduler, lane, event, and optional reason are bounded labels */
+  backpressureEventsTotal: Counter;
+  /** queue wait by bounded scheduler and lane */
+  backpressureQueueWaitMs: Histogram;
+  /** admitted-work duration by bounded scheduler, lane, and outcome */
+  backpressureActiveDurationMs: Histogram;
+  /** graphs in the node's graph catalog at its last refresh; no labels */
+  storeGraphCatalogGraphs: Gauge;
+  /** bytes; measured size of the node's graph catalog at its last refresh; no labels */
+  storeGraphCatalogBytes: Gauge;
+  /** ms; one full graph catalog scan. kind={seed|revalidate|rebuild}, outcome={ok|error} */
+  storeGraphCatalogRefreshMs: Histogram;
+  /** failed graph catalog scans. kind={seed|revalidate|rebuild},
+   *  reason={internal_limit|timeout|busy|aborted|error} */
+  storeGraphCatalogRefreshFailuresTotal: Counter;
+  /** named graphs in the store, as the graph catalog last counted them; no labels */
+  storeGraphsTotal: Gauge;
+  /** store reads refused by a node-side limit. limit=<limit name, a fixed set, else `other`> */
+  queryInternalLimitTotal: Counter;
+  /** queries by route={view|legacy|unscoped}, view={wm|swm|vm|none|other},
+   *  graph={none|variable|explicit}, min_trust={true|false}, private={true|false} */
+  queryScopeRequestsTotal: Counter;
+  /** graphs one query routes per asset (its slice). route={view|legacy}, graph */
+  queryScopeSliceGraphs: Histogram;
+  /** ms; store time of a query's routed reads. route, graph, slice={le_100|le_1000|…|le_20000|gt_20000} */
+  queryScopeStoreMs: Histogram;
+  /** queries whose slice is over a candidate scope limit. route, graph, limit=<candidate> */
+  queryScopeOverLimitTotal: Counter;
+  /** read-graph checks. mode={sampled|full}, outcome={consistent|mismatch|skipped|interrupted|error}, layer={wm|swm|vm|other} */
+  storeReadGraphChecksTotal: Counter;
+  /** ms; one read-graph check. mode, outcome */
+  storeReadGraphCheckMs: Histogram;
+  /** read graphs a check found unequal to their member graphs' union, each marked dirty.
+   *  mode, direction={missing|unheld}, layer */
+  storeReadGraphMismatchesTotal: Counter;
+  /** read graphs in the state mirror by state={building|ready|dirty|repairing|rebuilding}, at each check pass */
+  storeReadGraphs: Gauge;
+  /** bounded materialized result rows by static source */
+  storeQueryResultRows: Histogram;
+  /** conservative bounded materialized bytes by static source */
+  storeQueryResultBytesEstimate: Histogram;
+  /** operation and source are bounded adapter/static caller labels */
+  storeCancellationCompletedTotal: Counter;
+  /** scope and reason identify the bounded retry loop; attempt is capped */
+  storeRetryAttemptsTotal: Counter;
+  /** adapter, operation,
+   *  position={graph|subject|predicate|object|datatype|subject-prefix},
+   *  kind={iri|literal|blank-node|relative-iri|rfc3987-iri},
+   *  enforcement={observe|reject} — malformed RDF terms reaching a storage
+   *  adapter's SPARQL builders, and relative or RFC 3987-invalid IRIs in the
+   *  quads it writes through its atomic-replace and RFC-64 builders or an
+   *  N-Quads load. `observe` = counted and logged, and the write was built
+   *  exactly as before validation existed (the pre-validation SPARQL still
+   *  strips characters from a malformed IRI). */
+  storeSparqlInvalidTermsTotal: Counter;
+  /** current durable finalization entries whose retry gate is open */
+  finalizationRecoveryDueEntries: Gauge;
+  /** milliseconds since the oldest currently due finalization was received */
+  finalizationRecoveryOldestDueAgeMs: Gauge;
+  /** outcome={recovered|invalidated|retry-pending|none} */
+  finalizationRecoveryAttemptsTotal: Counter;
+  /** outcome={inserted|existing|deferred|capacity|conflict|closed|write-failure} */
+  finalizationRecoveryAdmissionTotal: Counter;
+  /** durable finalization envelopes waiting for live-inbox capacity */
+  finalizationRecoveryDeferredEntries: Gauge;
+  /** sampled StorageACK copies registered on chain but not in this core's VM past the stall threshold (last audit) */
+  vmPromotionStalledAcks: Gauge;
+  /** context graphs the ACK promotion audit recorded as core-hosted (backfill) */
+  vmPromotionBackfillRecordedTotal: Counter;
+  /** VM reconcile passes the ACK promotion watchdog re-triggered for stalled graphs */
+  vmPromotionRetriesTotal: Counter;
+  /** process-local sync inflight sample */
+  syncGlobalInflight: Histogram;
+  /** ms; lane and priority_class are bounded sync scheduler enums */
+  syncSchedulerQueueWaitMs: Histogram;
+  /** lane, priority_class, outcome={started|rejected|displaced|aged|aborted} */
+  syncSchedulerDecisionsTotal: Counter;
+  /** currently retained responder snapshots; phase is a bounded enum */
+  syncResponderSnapshots: UpDownCounter;
+  /** currently retained responder snapshot rows; phase is a bounded enum */
+  syncResponderSnapshotRows: UpDownCounter;
+  /** estimated bytes retained by responder snapshots; phase is a bounded enum */
+  syncResponderSnapshotBytesEstimate: UpDownCounter;
+  /** phase, reason={lru|expired|limit_rejected} */
+  syncResponderSnapshotEvictionsTotal: Counter;
+  /** ms; phase, outcome={completed|error} */
+  syncResponderSnapshotLoadDurationMs: Histogram;
+  /** quads retained at requester phase completion; phase and outcome are bounded enums */
+  syncRequesterAccumulatedQuads: Histogram;
+  /** estimated bytes retained at requester phase completion; phase and outcome are bounded enums */
+  syncRequesterAccumulatedBytes: Histogram;
+  /** response pages consumed by a requester phase; phase and outcome are bounded enums */
+  syncRequesterPageCount: Histogram;
+  /** ms; phase and outcome are bounded enums */
+  syncRequesterPhaseDurationMs: Histogram;
   /** rpc_method, outcome={ok|error|timeout}, retryable, chain_id */
   chainRpcTotal: Counter;
   /** rpc_method (bounded known JSON-RPC set, else 'other'), chain_id — RAW
@@ -156,11 +310,111 @@ export interface DkgMetrics {
   protocolSendTotal: Counter;
   /** ms; protocol_id — P2P protocol send duration */
   protocolSendDuration: Histogram;
+  /** kind={oversize|vm-quarantine|store-reject} — synced quads refused for
+   *  exceeding the RDF-literal size invariant (OT-RFC-56; poison visibility). */
+  oversizeTombstonesTotal: Counter;
+
+  // ── W1 sync measurement contract (I1–I9) ────────────────────────────────
+  // Attributes are closed vocabularies clamped at the record site; an unknown
+  // value becomes `unspecified` and never throws. No cg_id / peer_id, ever.
+
+  /** I1 — one point per *physically invoked* send.
+   *  transport={legacy|changelog}, plane={durable|shared-memory},
+   *  phase={data|meta|snapshot|catalog|delta}, source=<admission source>,
+   *  outcome={response|validation_rejected|cancelled|transport_error}.
+   *  There is deliberately no `timeout`: no causal deadline predicate exists. */
+  syncAttemptTotal: Counter;
+  /** I2 — bytes; encoded application-protocol request payload at the router
+   *  boundary (excludes libp2p framing). Recorded once, immediately before
+   *  `send()`, so attempts that never receive a response still count.
+   *  transport, plane, phase, source. */
+  syncAttemptRequestBytes: Counter;
+  /** I3 — bytes; encoded response payload. Exists only if `send()` resolved,
+   *  including validation rejection. transport, plane, phase, source, outcome. */
+  syncAttemptResponseBytes: Counter;
+  /** I4 — ms; source-attributed *active* occupancy of one completed logical sync
+   *  operation, excluding admission queue wait. Its `count` is the operation
+   *  denominator. lane={durable|changelog|shared_memory|swm_recovery},
+   *  source, outcome={resolved|error|cancelled}. */
+  syncOperationDurationMs: Histogram;
+  /** I5 — operations rejected *before starting*, so they are never a 0 ms I4
+   *  sample. lane, source,
+   *  reason={queue_full|queue_timeout|displaced|aborted_before_start}. */
+  syncOperationRejectedTotal: Counter;
+  /** I6 — single-flight/coalescing joins, recorded at map-hit time (before any
+   *  bytes move). scope={context-graph|durable|shared-memory|page},
+   *  owner_source, joiner_source. A cross-*family* join invalidates the window. */
+  syncSingleflightJoinsTotal: Counter;
+  /** I7 — catch-up subscribe requests, one per route return.
+   *  result={bad_request|forbidden|authority_unavailable|deduped|ready_replay|
+   *  ready_synthetic|queued|shutting_down}, include_shared_memory. Requests ≠ jobs (N:1). */
+  contextGraphCatchupRequestsTotal: Counter;
+  /** I8 — exactly one point per unique jobId. status=<terminal CatchupJobState>,
+   *  admission={walk|synthetic}. */
+  contextGraphCatchupJobsTotal: Counter;
+  /** I9 — ms; walk jobs only, monotonic clock. admission={walk}. */
+  contextGraphCatchupJobDurationMs: Histogram;
+  /** On-demand `agents` phonebook fetches. trigger={subscribe|vm-reconcile},
+   *  outcome={complete|partial|empty|failed|no-peers}, curator_resolved={true|false}. */
+  agentsPhonebookFetchTotal: Counter;
+  /** ms; on-demand `agents` phonebook fetches that reached a peer. trigger, outcome. */
+  agentsPhonebookFetchDurationMs: Histogram;
+
+  // ── Async share / publish queue admission (OT-RFC-73 P1b) ───────────────
+  // The `async_admission_usage` log line is the primary signal; these mirror it
+  // for nodes that export metrics. Attribute values are bounded static sets.
+
+  /** Async admission requests. route={share_async|publish_async},
+   *  phase={request|write_preflight|intent_resolution|snapshot_preflight|enqueue}
+   *  (the step that answered), status (HTTP, `0` = client left first), code
+   *  (response error code, `-` for none; at most 64 distinct series per process
+   *  and then `other`). Every outcome is counted, 2xx included. */
+  asyncAdmissionOutcomesTotal: Counter;
+  /** ms; request start to response, every outcome. route={share_async|publish_async} */
+  asyncAdmissionLatencyMs: Histogram;
+  /** Expired leases swept. queue={share|lift}, outcome={reclaimed|abandoned}
+   *  (`abandoned` is share only: a job out of retries). */
+  asyncQueueLeaseRecoveriesTotal: Counter;
+  /** A claimed publisher job whose claim token no longer matched. queue={lift} */
+  asyncQueueStaleClaimsTotal: Counter;
+  /** ms; share lease renewal, from the call to its settlement (mutex wait included) */
+  asyncQueueHeartbeatLatenessMs: Histogram;
+  /** ms; share `claimNext`, mutex wait and idle polls included */
+  asyncShareClaimNextMs: Histogram;
+  /** ms; publisher job ready (latest of accepted, retried, recovered) to claimed.
+   *  worker_free={true|false|unknown}: whether a configured wallet held no lock when it became ready. */
+  asyncLiftPickupMs: Histogram;
+  /** ms; publisher job claimed to finalized (the normal worker transition) */
+  asyncLiftClaimToFinishMs: Histogram;
+  /** Jobs per state, read every five minutes. queue={share|lift}, state=<job state> */
+  asyncQueueDepth: Gauge;
+  /** Publisher admission journal entries, read every five minutes */
+  asyncQueueJournalEntries: Gauge;
+  /** Wallets that run publisher workers */
+  asyncLiftConfiguredWallets: Gauge;
 }
 
 function buildMetrics(): DkgMetrics {
   const meter = metrics.getMeter(METER_NAME);
   return {
+    processHeapUsedBytes: meter.createGauge('process.heap_used_bytes', {
+      unit: 'By', description: 'Current V8 heap bytes sampled at bounded sync lifecycle checkpoints',
+    }),
+    processHeapTotalBytes: meter.createGauge('process.heap_total_bytes', {
+      unit: 'By', description: 'Current V8 allocated heap bytes sampled at bounded sync lifecycle checkpoints',
+    }),
+    processHeapLimitBytes: meter.createGauge('process.heap_limit_bytes', {
+      unit: 'By', description: 'Current V8 heap size limit sampled at bounded sync lifecycle checkpoints',
+    }),
+    processRssBytes: meter.createGauge('process.rss_bytes', {
+      unit: 'By', description: 'Current process resident set size sampled at bounded sync lifecycle checkpoints',
+    }),
+    processExternalBytes: meter.createGauge('process.external_bytes', {
+      unit: 'By', description: 'Current V8 external memory sampled at bounded sync lifecycle checkpoints',
+    }),
+    processArrayBuffersBytes: meter.createGauge('process.array_buffers_bytes', {
+      unit: 'By', description: 'Current V8 ArrayBuffer memory sampled at bounded sync lifecycle checkpoints',
+    }),
     publishTotal: meter.createCounter('dkg.publish.total', { description: 'Publish operations by outcome/source' }),
     publishDuration: meter.createHistogram('dkg.publish.duration', {
       unit: 'ms', description: 'Publish wall-time', advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
@@ -169,6 +423,228 @@ function buildMetrics(): DkgMetrics {
     ackPeerTotal: meter.createCounter('dkg.ack.peer.total', { description: 'Per-peer ACK request results' }),
     ackVerifyTotal: meter.createCounter('dkg.ack.verify.total', { description: 'ACK identity verification results' }),
     ackHandlerTotal: meter.createCounter('dkg.ack.handler.total', { description: 'Inbound storage-ACK handler outcomes' }),
+    storageAckDeclinesTotal: meter.createCounter('dkg.storage_ack.declines_total', {
+      description: 'Inbound StorageACK declines by bounded reason',
+    }),
+    storageAckQueueWaitMs: meter.createHistogram('dkg.storage_ack.queue_wait_ms', {
+      unit: 'ms',
+      description: 'StorageACK priority-store queue wait',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    storageAckStoreOpDurationMs: meter.createHistogram('dkg.storage_ack.store_op_duration_ms', {
+      unit: 'ms',
+      description: 'StorageACK priority-store operation wall-time',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    storageAckPriorityQueueDepth: meter.createHistogram('dkg.storage_ack.priority_queue_depth', {
+      description: 'Sampled ACK-priority store queue depth',
+    }),
+    storageAckInflight: meter.createHistogram('dkg.storage_ack.inflight', {
+      description: 'Sampled ACK-priority store inflight count',
+    }),
+    syncBackgroundQueueDepth: meter.createHistogram('dkg.sync.background_queue_depth', {
+      description: 'Sampled non-ACK store queue depth',
+    }),
+    storeSchedulerRejectionsTotal: meter.createCounter('dkg.store.scheduler_rejections_total', {
+      description: 'External-store work rejected before dispatch by bounded priority, reason and operation family',
+    }),
+    storeSchedulerQueueWaitMs: meter.createHistogram('dkg.store.scheduler_queue_wait_ms', {
+      unit: 'ms',
+      description: 'External-store admission queue wait by lane and static caller',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    storeSchedulerOperationDurationMs: meter.createHistogram('dkg.store.scheduler_operation_duration_ms', {
+      unit: 'ms',
+      description: 'External-store execution time after admission by lane and static caller',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    storeSchedulerActive: meter.createUpDownCounter('dkg.store.scheduler_active', {
+      description: 'Currently admitted external-store operations by lane and static caller',
+    }),
+    backpressureQueueDepth: meter.createGauge('dkg.backpressure.queue_depth', {
+      description: 'Current scheduler queue depth by bounded scheduler and lane',
+    }),
+    backpressurePressureDepth: meter.createGauge('dkg.backpressure.pressure_depth', {
+      description:
+        'Queue depth a lane\'s pressure state was classified against, by bounded scheduler and lane',
+    }),
+    backpressureQueueLimit: meter.createGauge('dkg.backpressure.queue_limit', {
+      description: 'Configured scheduler queue capacity by bounded scheduler and lane',
+    }),
+    backpressureInflight: meter.createGauge('dkg.backpressure.inflight', {
+      description: 'Current admitted scheduler work by bounded scheduler and lane',
+    }),
+    backpressurePressureInflight: meter.createGauge('dkg.backpressure.pressure_inflight', {
+      description:
+        'Admitted work the lane inflight limit bounds, by bounded scheduler and lane',
+    }),
+    backpressureInflightLimit: meter.createGauge('dkg.backpressure.inflight_limit', {
+      description: 'Configured scheduler concurrent-work capacity by bounded scheduler and lane',
+    }),
+    backpressureOldestQueuedAgeMs: meter.createGauge('dkg.backpressure.oldest_queued_age_ms', {
+      unit: 'ms',
+      description: 'Current age of the oldest queued scheduler item',
+    }),
+    backpressureOldestActiveAgeMs: meter.createGauge('dkg.backpressure.oldest_active_age_ms', {
+      unit: 'ms',
+      description: 'Current age of the oldest admitted scheduler item',
+    }),
+    backpressureEventsTotal: meter.createCounter('dkg.backpressure.events_total', {
+      description: 'Scheduler lifecycle events and admission rejections',
+    }),
+    backpressureQueueWaitMs: meter.createHistogram('dkg.backpressure.queue_wait_ms', {
+      unit: 'ms',
+      description: 'Scheduler queue wait by bounded scheduler and lane',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    backpressureActiveDurationMs: meter.createHistogram('dkg.backpressure.active_duration_ms', {
+      unit: 'ms',
+      description: 'Scheduler admitted-work duration by bounded scheduler, lane, and outcome',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    storeGraphCatalogGraphs: meter.createGauge('dkg.store.graph_catalog_graphs', {
+      description: 'Graphs in the node graph catalog at its last refresh',
+    }),
+    storeGraphCatalogBytes: meter.createGauge('dkg.store.graph_catalog_bytes', {
+      unit: 'By', description: 'Measured size of the node graph catalog at its last refresh',
+    }),
+    storeGraphCatalogRefreshMs: meter.createHistogram('dkg.store.graph_catalog_refresh_ms', {
+      unit: 'ms', description: 'Duration of one full graph catalog scan',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    storeGraphCatalogRefreshFailuresTotal: meter.createCounter('dkg.store.graph_catalog_refresh_failures_total', {
+      description: 'Failed graph catalog scans by kind and bounded reason',
+    }),
+    storeGraphsTotal: meter.createGauge('dkg.store.graphs_total', {
+      description: 'Named graphs in the store, as the graph catalog last counted them',
+    }),
+    queryInternalLimitTotal: meter.createCounter('dkg.query.internal_limit_total', {
+      description: 'Store reads refused by a node-side limit, by limit name',
+    }),
+    queryScopeRequestsTotal: meter.createCounter('dkg.query.scope_requests_total', {
+      description: 'Queries by route and class',
+    }),
+    queryScopeSliceGraphs: meter.createHistogram('dkg.query.scope_slice_graphs', {
+      description: 'Graphs one query routes per asset', advice: { explicitBucketBoundaries: GRAPH_COUNT_BUCKETS },
+    }),
+    queryScopeStoreMs: meter.createHistogram('dkg.query.scope_store_ms', {
+      unit: 'ms', description: 'Store time of the reads a query routes per asset, by slice size',
+      advice: { explicitBucketBoundaries: SYNC_OPERATION_DURATION_BUCKETS },
+    }),
+    queryScopeOverLimitTotal: meter.createCounter('dkg.query.scope_over_limit_total', {
+      description: 'Queries whose slice is over a candidate scope limit; none is refused',
+    }),
+    storeReadGraphChecksTotal: meter.createCounter('dkg.store.read_graph_checks_total', {
+      description: 'Read-graph checks by mode, outcome and layer',
+    }),
+    storeReadGraphCheckMs: meter.createHistogram('dkg.store.read_graph_check_ms', {
+      unit: 'ms', description: 'Duration of one read-graph check',
+      advice: { explicitBucketBoundaries: READ_GRAPH_CHECK_DURATION_BUCKETS },
+    }),
+    storeReadGraphMismatchesTotal: meter.createCounter('dkg.store.read_graph_mismatches_total', {
+      description: 'Read graphs found unequal to the union of their member graphs, each marked dirty',
+    }),
+    storeReadGraphs: meter.createGauge('dkg.store.read_graphs', {
+      description: 'Read graphs in the state mirror by state, at each check pass',
+    }),
+    storeQueryResultRows: meter.createHistogram('dkg.store.query_result_rows', {
+      description: 'Rows retained by bounded expensive store reads',
+      advice: { explicitBucketBoundaries: QUAD_COUNT_BUCKETS },
+    }),
+    storeQueryResultBytesEstimate: meter.createHistogram('dkg.store.query_result_bytes_estimate', {
+      unit: 'By',
+      description: 'Estimated bytes retained by bounded expensive store reads',
+      advice: { explicitBucketBoundaries: BYTE_BUCKETS },
+    }),
+    storeCancellationCompletedTotal: meter.createCounter('dkg.store.cancellation_completed_total', {
+      description: 'Store attempts whose adapter cancellation completed before returning control',
+    }),
+    storeRetryAttemptsTotal: meter.createCounter('dkg.store.retry_attempts_total', {
+      description: 'Bounded expensive-work retry attempts',
+    }),
+    storeSparqlInvalidTermsTotal: meter.createCounter('dkg.store.sparql_invalid_terms_total', {
+      description: 'Malformed RDF terms reaching storage-adapter writes, by adapter, operation, position, kind and enforcement',
+    }),
+    finalizationRecoveryDueEntries: meter.createGauge(
+      'dkg.finalization_recovery.due_entries',
+      { description: 'Durable finalization inbox entries currently eligible for retry' },
+    ),
+    finalizationRecoveryOldestDueAgeMs: meter.createGauge(
+      'dkg.finalization_recovery.oldest_due_age_ms',
+      {
+        unit: 'ms',
+        description: 'Age of the oldest durable finalization inbox entry eligible for retry',
+      },
+    ),
+    finalizationRecoveryAttemptsTotal: meter.createCounter(
+      'dkg.finalization_recovery.attempts_total',
+      { description: 'Autonomous finalization replay attempts by bounded outcome' },
+    ),
+    finalizationRecoveryAdmissionTotal: meter.createCounter(
+      'dkg.finalization_recovery.admission_total',
+      { description: 'Durable finalization admission outcomes by bounded result' },
+    ),
+    finalizationRecoveryDeferredEntries: meter.createGauge(
+      'dkg.finalization_recovery.deferred_entries',
+      { description: 'Durable finalization envelopes waiting for live-inbox capacity' },
+    ),
+    vmPromotionStalledAcks: meter.createGauge(
+      'dkg.vm_promotion.stalled_acks',
+      { description: 'Sampled StorageACK copies registered on chain but not in VM past the stall threshold' },
+    ),
+    vmPromotionBackfillRecordedTotal: meter.createCounter(
+      'dkg.vm_promotion.backfill_recorded_total',
+      { description: 'Context graphs the ACK promotion audit recorded as core-hosted' },
+    ),
+    vmPromotionRetriesTotal: meter.createCounter(
+      'dkg.vm_promotion.retries_total',
+      { description: 'VM reconcile passes re-triggered for graphs with stalled StorageACK copies' },
+    ),
+    syncGlobalInflight: meter.createHistogram('dkg.sync.global_inflight', {
+      description: 'Sampled process-local sync inflight count',
+    }),
+    syncSchedulerQueueWaitMs: meter.createHistogram('dkg.sync.scheduler.queue_wait_ms', {
+      unit: 'ms',
+      description: 'Process-local sync scheduler queue wait by bounded lane and priority class',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    syncSchedulerDecisionsTotal: meter.createCounter('dkg.sync.scheduler.decisions_total', {
+      description: 'Process-local sync scheduler outcomes by bounded lane and priority class',
+    }),
+    syncResponderSnapshots: meter.createUpDownCounter('dkg.sync.responder.snapshots', {
+      description: 'Currently retained sync responder snapshots',
+    }),
+    syncResponderSnapshotRows: meter.createUpDownCounter('dkg.sync.responder.snapshot_rows', {
+      description: 'Currently retained rows in sync responder snapshots',
+    }),
+    syncResponderSnapshotBytesEstimate: meter.createUpDownCounter('dkg.sync.responder.snapshot_bytes_estimate', {
+      unit: 'By', description: 'Estimated bytes retained by sync responder snapshots',
+    }),
+    syncResponderSnapshotEvictionsTotal: meter.createCounter('dkg.sync.responder.snapshot_evictions_total', {
+      description: 'Sync responder snapshot removals caused by pressure, expiry, or admission limits',
+    }),
+    syncResponderSnapshotLoadDurationMs: meter.createHistogram('dkg.sync.responder.snapshot_load_duration_ms', {
+      unit: 'ms',
+      description: 'Sync responder full-snapshot materialization duration',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    syncRequesterAccumulatedQuads: meter.createHistogram('dkg.sync.requester.accumulated_quads', {
+      description: 'Requester quads retained at sync phase completion',
+      advice: { explicitBucketBoundaries: QUAD_COUNT_BUCKETS },
+    }),
+    syncRequesterAccumulatedBytes: meter.createHistogram('dkg.sync.requester.accumulated_bytes', {
+      unit: 'By', description: 'Estimated requester quad bytes retained at sync phase completion',
+      advice: { explicitBucketBoundaries: BYTE_BUCKETS },
+    }),
+    syncRequesterPageCount: meter.createHistogram('dkg.sync.requester.page_count', {
+      description: 'Pages consumed by a requester sync phase',
+      advice: { explicitBucketBoundaries: PAGE_COUNT_BUCKETS },
+    }),
+    syncRequesterPhaseDurationMs: meter.createHistogram('dkg.sync.requester.phase_duration_ms', {
+      unit: 'ms',
+      description: 'Requester sync phase wall-time',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
     chainRpcTotal: meter.createCounter('dkg.chain.rpc.total', { description: 'Chain RPC calls by method/outcome' }),
     chainRpcRequestsTotal: meter.createCounter('dkg.chain.rpc.requests.total', {
       description: 'Raw JSON-RPC client requests by method (provider billing unit)',
@@ -180,8 +656,99 @@ function buildMetrics(): DkgMetrics {
     syncRequestTotal: meter.createCounter('dkg.sync.request.total', { description: 'Outbound sync requests' }),
     syncResponseTotal: meter.createCounter('dkg.sync.response.total', { description: 'Inbound sync responses' }),
     protocolSendTotal: meter.createCounter('dkg.protocol_router.send.total', { description: 'Outbound P2P protocol sends' }),
+    oversizeTombstonesTotal: meter.createCounter('dkg.sync.oversize_tombstones.total', {
+      description: 'Synced quads refused for exceeding the RDF-literal size invariant (OT-RFC-56)',
+    }),
     protocolSendDuration: meter.createHistogram('dkg.protocol_router.send.duration', {
       unit: 'ms', description: 'P2P protocol send wall-time', advice: { explicitBucketBoundaries: RPC_DURATION_BUCKETS },
+    }),
+
+    // ── W1 sync measurement contract (I1–I9) ──────────────────────────────
+    syncAttemptTotal: meter.createCounter('dkg.sync.attempt.total', {
+      description: 'Physically invoked sync sends by transport/plane/phase/source and terminal outcome',
+    }),
+    syncAttemptRequestBytes: meter.createCounter('dkg.sync.attempt.request_bytes', {
+      unit: 'By',
+      description: 'Encoded sync request payload bytes at the router boundary (excludes libp2p framing)',
+    }),
+    syncAttemptResponseBytes: meter.createCounter('dkg.sync.attempt.response_bytes', {
+      unit: 'By',
+      description: 'Encoded sync response payload bytes at the router boundary (excludes libp2p framing)',
+    }),
+    syncOperationDurationMs: meter.createHistogram('dkg.sync.operation.duration_ms', {
+      unit: 'ms',
+      description: 'Active occupancy of one completed logical sync operation, excluding admission queue wait',
+      advice: { explicitBucketBoundaries: SYNC_OPERATION_DURATION_BUCKETS },
+    }),
+    syncOperationRejectedTotal: meter.createCounter('dkg.sync.operation.rejected_total', {
+      description: 'Sync operations rejected before starting (never a 0 ms duration sample)',
+    }),
+    syncSingleflightJoinsTotal: meter.createCounter('dkg.sync.singleflight.joins_total', {
+      description: 'Single-flight/coalescing joins by scope, owner source and joiner source',
+    }),
+    contextGraphCatchupRequestsTotal: meter.createCounter('dkg.context_graph.catchup.requests_total', {
+      description: 'Catch-up subscribe requests by route result (N:1 with jobs)',
+    }),
+    contextGraphCatchupJobsTotal: meter.createCounter('dkg.context_graph.catchup.jobs_total', {
+      description: 'Catch-up jobs by terminal status and admission path (exactly once per jobId)',
+    }),
+    contextGraphCatchupJobDurationMs: meter.createHistogram('dkg.context_graph.catchup.job_duration_ms', {
+      unit: 'ms',
+      description: 'Walk catch-up job wall-time, monotonic clock',
+      advice: { explicitBucketBoundaries: CATCHUP_DURATION_BUCKETS },
+    }),
+    agentsPhonebookFetchTotal: meter.createCounter('dkg.sync.agents_phonebook.fetch_total', {
+      description: 'On-demand agents phonebook fetches by trigger, outcome and whether a wanted curator resolved',
+    }),
+    agentsPhonebookFetchDurationMs: meter.createHistogram('dkg.sync.agents_phonebook.fetch_duration_ms', {
+      unit: 'ms',
+      description: 'Wall time of on-demand agents phonebook fetches that reached a peer',
+      // Full fetches take tens of seconds, and one that runs into its 120 s
+      // budget ends a little after it: the 300 s bound keeps both finite.
+      advice: { explicitBucketBoundaries: SYNC_OPERATION_DURATION_BUCKETS },
+    }),
+    asyncAdmissionOutcomesTotal: meter.createCounter('dkg.async_admission.outcomes_total', {
+      description: 'Async share and publish admission requests by route, answering phase, status and code',
+    }),
+    asyncAdmissionLatencyMs: meter.createHistogram('dkg.async_admission.latency_ms', {
+      unit: 'ms',
+      description: 'Async admission request wall-time, request start to response',
+      advice: { explicitBucketBoundaries: ADMISSION_LATENCY_BUCKETS },
+    }),
+    asyncQueueLeaseRecoveriesTotal: meter.createCounter('dkg.async_queue.lease_recoveries_total', {
+      description: 'Expired async queue leases swept, by queue and outcome',
+    }),
+    asyncQueueStaleClaimsTotal: meter.createCounter('dkg.async_queue.stale_claims_total', {
+      description: 'Claimed async publisher jobs whose claim token no longer matched',
+    }),
+    asyncQueueHeartbeatLatenessMs: meter.createHistogram('dkg.async_queue.heartbeat_lateness_ms', {
+      unit: 'ms',
+      description: 'Async share lease renewal duration, mutex wait included',
+      advice: { explicitBucketBoundaries: QUEUE_WAIT_BUCKETS },
+    }),
+    asyncShareClaimNextMs: meter.createHistogram('dkg.async_share.claim_next_ms', {
+      unit: 'ms',
+      description: 'Async share claimNext duration, mutex wait and idle polls included',
+      advice: { explicitBucketBoundaries: QUEUE_WAIT_BUCKETS },
+    }),
+    asyncLiftPickupMs: meter.createHistogram('dkg.async_lift.pickup_ms', {
+      unit: 'ms',
+      description: 'Async publisher job wait from ready to claimed',
+      advice: { explicitBucketBoundaries: PICKUP_BUCKETS },
+    }),
+    asyncLiftClaimToFinishMs: meter.createHistogram('dkg.async_lift.claim_to_finish_ms', {
+      unit: 'ms',
+      description: 'Async publisher job duration from claimed to finalized',
+      advice: { explicitBucketBoundaries: PICKUP_BUCKETS },
+    }),
+    asyncQueueDepth: meter.createGauge('dkg.async_queue.depth', {
+      description: 'Async queue jobs by queue and state, sampled every five minutes',
+    }),
+    asyncQueueJournalEntries: meter.createGauge('dkg.async_queue.journal_entries', {
+      description: 'Async publisher admission journal entries, sampled every five minutes',
+    }),
+    asyncLiftConfiguredWallets: meter.createGauge('dkg.async_lift.configured_wallets', {
+      description: 'Wallets that run async publisher workers',
     }),
   };
 }

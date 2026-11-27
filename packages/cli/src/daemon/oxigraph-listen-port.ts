@@ -3,15 +3,24 @@
  *
  * HTTP 200 on loopback alone is not enough — another local SPARQL service
  * can answer while our `oxigraph serve` child died on EADDRINUSE. We try
- * platform-specific probes in order and require a match on `child.pid`.
+ * platform-specific probes in order and require a match on the child process
+ * tree selected by the caller.
  *
  * `lsof` is preferred on Unix but often missing in minimal Linux/container
  * images; Linux fallbacks use `ss`, `fuser`, then `/proc` inode matching.
+ * On Unix hosts Oxigraph runs under a tiny parent watchdog, so callers may
+ * explicitly permit a descendant PID while still rejecting unrelated local
+ * listeners.
  */
 import { execFile } from 'node:child_process';
-import { readdir, readFile, readlink } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import type { ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
+import {
+  procHasFdTarget,
+  processTreeWalker,
+  type ProcessTreeWalker,
+} from './process-probe.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -24,23 +33,25 @@ export function procNetLocalPortHex(port: number): string {
   return port.toString(16).toUpperCase().padStart(4, '0');
 }
 
-async function lsofShowsPidListening(pid: number, port: number): Promise<boolean> {
+async function lsofListenOwnerPid(pids: ReadonlySet<number>, port: number): Promise<number | null> {
   try {
     const { stdout } = await execFileAsync(
       'lsof',
       ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN'],
       { timeout: 2_000 },
     );
-    return stdout.split('\n').some((line) => {
+    for (const line of stdout.split('\n')) {
       const parts = line.trim().split(/\s+/);
-      return parts.length >= 2 && Number(parts[1]) === pid;
-    });
+      const pid = Number(parts[1]);
+      if (parts.length >= 2 && pids.has(pid)) return pid;
+    }
+    return null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-async function ssShowsPidListening(pid: number, port: number): Promise<boolean> {
+async function ssListenOwnerPid(pids: ReadonlySet<number>, port: number): Promise<number | null> {
   try {
     // `-p` is required for the `users:(("proc",pid=N,fd=M))` process column;
     // without it `ss` never emits `pid=` and this probe is dead code. Our own
@@ -52,15 +63,16 @@ async function ssShowsPidListening(pid: number, port: number): Promise<boolean> 
     );
     for (const line of stdout.split('\n')) {
       const m = line.match(/pid=(\d+)/);
-      if (m && Number(m[1]) === pid) return true;
+      const pid = Number(m?.[1]);
+      if (m && pids.has(pid)) return pid;
     }
-    return false;
+    return null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-async function fuserShowsPidOnPort(pid: number, port: number): Promise<boolean> {
+async function fuserListenOwnerPid(pids: ReadonlySet<number>, port: number): Promise<number | null> {
   try {
     const { stdout } = await execFileAsync('fuser', [`${port}/tcp`], {
       timeout: 2_000,
@@ -69,13 +81,14 @@ async function fuserShowsPidOnPort(pid: number, port: number): Promise<boolean> 
       .trim()
       .split(/\s+/)
       .filter(Boolean)
-      .some((tok) => Number(tok) === pid);
+      .map(Number)
+      .find((pid) => pids.has(pid)) ?? null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-async function procfsShowsPidListening(pid: number, port: number): Promise<boolean> {
+async function procfsListenOwnerPid(pids: ReadonlySet<number>, port: number): Promise<number | null> {
   try {
     const portHex = procNetLocalPortHex(port);
     const tcp = await readFile('/proc/net/tcp', 'utf8');
@@ -92,68 +105,89 @@ async function procfsShowsPidListening(pid: number, port: number): Promise<boole
         break;
       }
     }
-    if (!listenInode) return false;
+    if (!listenInode) return null;
 
-    const fdDir = `/proc/${pid}/fd`;
-    const fds = await readdir(fdDir);
     const socketNeedle = `socket:[${listenInode}]`;
-    for (const fd of fds) {
-      try {
-        const target = await readlink(`${fdDir}/${fd}`);
-        if (target.includes(socketNeedle)) return true;
-      } catch {
-        continue;
-      }
+    for (const pid of pids) {
+      if (await procHasFdTarget(pid, (target) => target.includes(socketNeedle))) return pid;
     }
-    return false;
+    return null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-async function windowsChildOwnsPort(pid: number, port: number): Promise<boolean> {
+/** Match the expected child against the local endpoint in Windows' TCP table. */
+export function windowsTcpOwnerPid(stdout: string, pid: number, port: number): number | null {
+  const suffix = `:${port}`;
+  for (const line of stdout.split('\n')) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length !== 5 || parts[0] !== 'TCP') continue;
+    const [, localEndpoint, , state, owner] = parts;
+    // A successful HTTP readiness probe can leave only the server's accepted
+    // socket visible. A remote endpoint match is never ownership evidence.
+    if (Number(owner) === pid && localEndpoint.endsWith(suffix)
+      && (state === 'LISTENING' || state === 'ESTABLISHED')) return pid;
+  }
+  return null;
+}
+
+async function windowsListenOwnerPid(pid: number, port: number): Promise<number | null> {
   try {
     const { stdout } = await execFileAsync('netstat', ['-ano'], { timeout: 3_000 });
-    const suffix = `:${port}`;
-    for (const line of stdout.split('\n')) {
-      if (!line.includes('LISTENING') || !line.includes(suffix)) continue;
-      const parts = line.trim().split(/\s+/);
-      const rowPid = Number(parts[parts.length - 1]);
-      if (rowPid === pid) return true;
-    }
-    return false;
+    return windowsTcpOwnerPid(stdout, pid, port);
   } catch {
-    return false;
+    return null;
   }
 }
 
 /**
- * Return true when `child` is alive and owns the TCP listener on `port`.
- * For non-loopback hosts we only require the child to be alive (tests).
+ * Return the PID when `child` (or, when explicitly enabled, one of its Unix
+ * descendants) is alive and owns the TCP listener on `port`.
+ * For non-loopback hosts a child-only caller only requires the child to be
+ * alive (tests); a process-tree caller still needs the listening descendant,
+ * never the wrapper.
+ * `processTree` overrides the host's descendant walker, so each walker can be
+ * exercised on any Unix host.
  */
+export async function findListenOwnerPid(
+  child: ChildProcess,
+  port: number,
+  host: string,
+  ownership: 'child-only' | 'process-tree' = 'child-only',
+  processTree: ProcessTreeWalker = processTreeWalker(process.platform),
+): Promise<number | null> {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) {
+    return null;
+  }
+  if (host !== '127.0.0.1' && host !== 'localhost' && ownership === 'child-only') return child.pid;
+
+  const pid = child.pid;
+  if (process.platform === 'win32') {
+    return windowsListenOwnerPid(pid, port);
+  }
+  const pids = ownership === 'child-only' ? new Set([pid]) : await processTree(pid);
+
+  const lsofOwner = await lsofListenOwnerPid(pids, port);
+  if (lsofOwner !== null) return lsofOwner;
+
+  if (process.platform === 'linux') {
+    const ssOwner = await ssListenOwnerPid(pids, port);
+    if (ssOwner !== null) return ssOwner;
+    const fuserOwner = await fuserListenOwnerPid(pids, port);
+    if (fuserOwner !== null) return fuserOwner;
+    const procfsOwner = await procfsListenOwnerPid(pids, port);
+    if (procfsOwner !== null) return procfsOwner;
+  }
+
+  return null;
+}
+
 export async function childOwnsListenPort(
   child: ChildProcess,
   port: number,
   host: string,
+  ownership: 'child-only' | 'process-tree' = 'child-only',
 ): Promise<boolean> {
-  if (!child.pid || child.exitCode !== null || child.signalCode !== null) {
-    return false;
-  }
-  if (host !== '127.0.0.1' && host !== 'localhost') return true;
-
-  const pid = child.pid;
-
-  if (process.platform === 'win32') {
-    return windowsChildOwnsPort(pid, port);
-  }
-
-  if (await lsofShowsPidListening(pid, port)) return true;
-
-  if (process.platform === 'linux') {
-    if (await ssShowsPidListening(pid, port)) return true;
-    if (await fuserShowsPidOnPort(pid, port)) return true;
-    if (await procfsShowsPidListening(pid, port)) return true;
-  }
-
-  return false;
+  return (await findListenOwnerPid(child, port, host, ownership)) !== null;
 }

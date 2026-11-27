@@ -1,18 +1,25 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   reconcileContextGraph,
-  ReconcileCoalescer,
+  VmReconcileSchedulingRuntime,
+  VmReconcileDispatcher,
   RecentUalSet,
+  RecentReconcileEvidenceMap,
   type ChainReconcilerDeps,
+  type OrdinalRecoveryTarget,
   type OrdinalOutcome,
 } from '../src/chain-reconciler.js';
+import {
+  VmReconcileQueueClosedError,
+  VmReconcileQueueFullError,
+} from '../src/vm-reconcile-service.js';
 import { createCursorState } from '../src/reconcile-cursor.js';
 
 /**
  * Phase B — sweep + cursor orchestration (B.2/B.4). The cursor math itself is
  * covered by reconcile-cursor.test.ts; here we pin the sweep driver:
  * gap-fill, watermark-persist-only-on-move, reorg depth, pending-retry, plus
- * the coalescer and UAL dedupe.
+ * the VM scheduler and UAL dedupe.
  */
 
 function makeDeps(overrides: Partial<ChainReconcilerDeps> = {}): {
@@ -37,6 +44,22 @@ function makeDeps(overrides: Partial<ChainReconcilerDeps> = {}): {
   return { deps, persisted, attempted };
 }
 
+function recoveryTarget(
+  ordinal: number,
+  overrides: Partial<OrdinalRecoveryTarget> = {},
+): OrdinalRecoveryTarget {
+  return {
+    localCgId: 'cg',
+    onChainCgId: '1',
+    ordinal,
+    ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
+    merkleRoot: `0x${ordinal.toString(16).padStart(64, '0')}`,
+    kaId: String(ordinal),
+    reason: 'no-swm',
+    ...overrides,
+  };
+}
+
 describe('reconcileContextGraph — sweep', () => {
   it('reconciles [watermark, head) and advances + persists the watermark', async () => {
     const { deps, persisted, attempted } = makeDeps({ getKCCount: async () => 3 });
@@ -47,10 +70,30 @@ describe('reconcileContextGraph — sweep', () => {
     expect(persisted).toEqual([{ cg: 'cg', watermark: 3 }]);
   });
 
-  it('does not persist when the watermark does not move (nothing new)', async () => {
-    const { deps, persisted } = makeDeps({ getKCCount: async () => 3 });
+  it('skips head-block and ordinal work when the durable watermark covers the chain head', async () => {
+    let headBlockReads = 0;
+    const { deps, persisted, attempted } = makeDeps({
+      getKCCount: async () => 3,
+      getHeadBlock: async () => {
+        headBlockReads += 1;
+        return 100;
+      },
+    });
     const state = createCursorState(3); // already at head
-    await reconcileContextGraph(deps, state, 'cg', 1n);
+    const result = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(result).toEqual({
+      head: 3,
+      watermark: 3,
+      reconciled: 0,
+      pending: 0,
+      processed: 0,
+      hasMore: false,
+      shouldContinueImmediately: false,
+      staleTarget: false,
+    });
+    expect(headBlockReads).toBe(0);
+    expect(attempted).toEqual([]);
     expect(persisted).toEqual([]);
   });
 
@@ -150,43 +193,1263 @@ describe('reconcileContextGraph — sweep', () => {
     expect(attempted).toEqual([0, 1]);
     expect(persisted).toEqual([{ cg: 'cg', watermark: 2 }]);
   });
-});
 
-describe('ReconcileCoalescer', () => {
-  it('collapses a burst into one run plus a single trailing run', async () => {
-    let runs = 0;
-    let resolveCurrent!: () => void;
-    const coalescer = new ReconcileCoalescer(async () => {
-      runs += 1;
-      await new Promise<void>((r) => { resolveCurrent = r; });
+  it('processes a large head in bounded slices and yields between them', async () => {
+    const attempts: number[][] = [[], [], []];
+    let pass = 0;
+    const { deps } = makeDeps({
+      getKCCount: async () => 25,
+      maxOrdinalsPerPass: 10,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempts[pass]!.push(ordinal);
+        return { status: 'pending' };
+      },
     });
+    const state = createCursorState(0);
 
-    // First trigger starts a run (now in flight, awaiting resolveCurrent).
-    void coalescer.trigger('cg');
-    // 4 more triggers while in flight → mark "again", do NOT start new runs.
-    void coalescer.trigger('cg');
-    void coalescer.trigger('cg');
-    void coalescer.trigger('cg');
-    void coalescer.trigger('cg');
-    expect(runs).toBe(1);
+    const r1 = await reconcileContextGraph(deps, state, 'cg', 1n);
+    pass += 1;
+    const r2 = await reconcileContextGraph(deps, state, 'cg', 1n);
+    pass += 1;
+    const r3 = await reconcileContextGraph(deps, state, 'cg', 1n);
 
-    // Finish the first run → exactly one trailing run starts.
-    const r1 = resolveCurrent;
-    r1();
-    await new Promise((r) => setTimeout(r, 0));
-    expect(runs).toBe(2);
-
-    // Finish the trailing run → no further runs (no triggers landed during it).
-    resolveCurrent();
-    await new Promise((r) => setTimeout(r, 0));
-    expect(runs).toBe(2);
+    expect(attempts).toEqual([
+      [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+      [10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+      [20, 21, 22, 23, 24],
+    ]);
+    expect([r1.processed, r2.processed, r3.processed]).toEqual([10, 10, 5]);
+    expect([r1.hasMore, r2.hasMore, r3.hasMore]).toEqual([true, true, false]);
+    expect([
+      r1.shouldContinueImmediately,
+      r2.shouldContinueImmediately,
+      r3.shouldContinueImmediately,
+    ]).toEqual([false, false, false]);
+    expect(state.scanOrdinal).toBe(0);
   });
 
-  it('runs independently per key', async () => {
+  it('makes the recent head useful while preserving bounded historical progress', async () => {
+    const attempts: number[][] = [[], [], []];
+    let pass = 0;
+    const { deps } = makeDeps({
+      getKCCount: async () => 30,
+      maxOrdinalsPerPass: 10,
+      recentOrdinalsPerPass: 7,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempts[pass]!.push(ordinal);
+        return { status: 'reconciled', blockNumber: 0 };
+      },
+    });
+    const state = createCursorState(0);
+
+    const first = await reconcileContextGraph(deps, state, 'cg', 1n);
+    pass += 1;
+    const second = await reconcileContextGraph(deps, state, 'cg', 1n);
+    pass += 1;
+    const third = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(attempts).toEqual([
+      [0, 1, 2, 23, 24, 25, 26, 27, 28, 29],
+      [3, 4, 5, 16, 17, 18, 19, 20, 21, 22],
+      [6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    ]);
+    expect([first.hasMore, second.hasMore, third.hasMore]).toEqual([true, true, false]);
+    expect([
+      first.shouldContinueImmediately,
+      second.shouldContinueImmediately,
+      third.shouldContinueImmediately,
+    ]).toEqual([true, true, false]);
+    expect([first.watermark, second.watermark, third.watermark]).toEqual([3, 6, 30]);
+    expect(state.scanOrdinal).toBe(30);
+  });
+
+  it('spends selected exact-recovery budget on recent ordinals before history', async () => {
+    const recoveryCalls: number[][] = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => 30,
+      maxOrdinalsPerPass: 10,
+      recentOrdinalsPerPass: 7,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
+        status: 'pending',
+        recovery: recoveryTarget(ordinal),
+      }),
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => {
+        recoveryCalls.push(targets.map(({ ordinal }) => ordinal));
+        return {
+          outcomes: new Map(),
+          attemptedOrdinals: [targets[0]!.ordinal],
+          continuationOrdinal: targets[1]!.ordinal,
+          hasImmediateRecoveryWork: false,
+        };
+      },
+    });
+
+    await reconcileContextGraph(deps, createCursorState(0), 'cg', 1n);
+
+    expect(recoveryCalls).toEqual([[
+      29, 28, 27, 26, 25, 24, 23,
+      0, 1, 2,
+    ]]);
+  });
+
+  it('never lets recent recovery continuation starve history while the head grows', async () => {
+    let head = 30;
+    let pass = 0;
+    const attempts: number[][] = [[], [], []];
+    const recoveryCalls: number[][] = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => head,
+      maxOrdinalsPerPass: 10,
+      recentOrdinalsPerPass: 7,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempts[pass]!.push(ordinal);
+        if (ordinal < head - 7) {
+          return { status: 'reconciled', blockNumber: 0 };
+        }
+        return {
+          status: 'pending',
+          recovery: recoveryTarget(ordinal),
+        };
+      },
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => {
+        const ordinals = targets.map(({ ordinal }) => ordinal);
+        recoveryCalls.push(ordinals);
+        const attempted = targets[0]!;
+        return {
+          outcomes: new Map([[
+            attempted.ordinal,
+            { status: 'pending', recovery: attempted } as OrdinalOutcome,
+          ]]),
+          attemptedOrdinals: [attempted.ordinal],
+          continuationOrdinal: targets[1]?.ordinal,
+          hasImmediateRecoveryWork: false,
+        };
+      },
+    });
+    const state = createCursorState(0);
+
+    const first = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(first.watermark).toBe(3);
+    expect(state.scanOrdinal).toBe(3);
+
+    head = 35;
+    pass += 1;
+    const second = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(second.watermark).toBe(6);
+    expect(state.scanOrdinal).toBe(6);
+
+    head = 40;
+    pass += 1;
+    const third = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(third.watermark).toBe(9);
+    expect(state.scanOrdinal).toBe(9);
+
+    expect(attempts).toEqual([
+      [0, 1, 2, 23, 24, 25, 26, 27, 28, 29],
+      [3, 4, 5, 28, 29, 30, 31, 32, 33, 34],
+      [6, 7, 8, 33, 34, 35, 36, 37, 38, 39],
+    ]);
+    expect(recoveryCalls.map((ordinals) => ordinals[0])).toEqual([29, 34, 39]);
+  });
+
+  it('runs each bounded slice with capped ordinal concurrency', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const { deps } = makeDeps({
+      getKCCount: async () => 10,
+      maxOrdinalsPerPass: 10,
+      maxOrdinalConcurrency: 3,
+      reconcileOrdinal: async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        active -= 1;
+        return { status: 'reconciled', blockNumber: 0 };
+      },
+    });
+    const state = createCursorState(0);
+
+    const result = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(maxActive).toBe(3);
+    expect(result).toMatchObject({ processed: 10, reconciled: 10, watermark: 10 });
+  });
+
+  it('batch-recovers only locally-missing ordinals and reuses their outcomes', async () => {
+    const recoveryCalls: number[][] = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => 3,
+      maxOrdinalsPerPass: 10,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        if (ordinal === 0) return { status: 'already', blockNumber: 100 };
+        return {
+          status: 'pending',
+          recovery: recoveryTarget(ordinal),
+        };
+      },
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => {
+        recoveryCalls.push(targets.map((target) => target.ordinal));
+        return {
+          outcomes: new Map(targets.map((target) => [
+            target.ordinal,
+            { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
+          ])),
+          attemptedOrdinals: targets.map((target) => target.ordinal),
+          continuationOrdinal: undefined,
+          hasImmediateRecoveryWork: false,
+        };
+      },
+    });
+    const state = createCursorState(0);
+
+    const result = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(recoveryCalls).toEqual([[1, 2]]);
+    expect(result).toMatchObject({ processed: 3, reconciled: 3, watermark: 3 });
+  });
+
+  it('resumes at the first untouched recovery ordinal instead of skipping to the next slice', async () => {
+    const recoveryCalls: number[][] = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => 25,
+      maxOrdinalsPerPass: 10,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
+        status: 'pending',
+        recovery: recoveryTarget(ordinal),
+      }),
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => {
+        const ordinals = targets.map((target) => target.ordinal);
+        recoveryCalls.push(ordinals);
+        const attempted = ordinals.slice(0, 3);
+        return {
+          outcomes: new Map(attempted.map((ordinal) => [
+            ordinal,
+            { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
+          ])),
+          attemptedOrdinals: attempted,
+          continuationOrdinal: ordinals[attempted.length],
+          hasImmediateRecoveryWork: false,
+        };
+      },
+    });
+    const state = createCursorState(0);
+
+    const first = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(first.hasMore).toBe(true);
+    expect(first.shouldContinueImmediately).toBe(true);
+    expect(state.watermark).toBe(3);
+    expect(state.scanOrdinal).toBe(3);
+
+    await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(recoveryCalls).toEqual([
+      [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+      [3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    ]);
+  });
+
+  it('visits an untouched ordinal before reprobing an earlier provider rotation', async () => {
+    const recoveryCalls: number[][] = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => 2,
+      maxOrdinalsPerPass: 1,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
+        status: 'pending',
+        recovery: recoveryTarget(ordinal),
+      }),
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => {
+        recoveryCalls.push(targets.map((target) => target.ordinal));
+        const target = targets[0]!;
+        return {
+          outcomes: new Map([[
+            target.ordinal,
+            { status: 'pending', recovery: target } as OrdinalOutcome,
+          ]]),
+          attemptedOrdinals: [target.ordinal],
+          continuationOrdinal: undefined,
+          hasImmediateRecoveryWork: true,
+        };
+      },
+    });
+    const state = createCursorState(0);
+
+    const first = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(first.hasMore).toBe(true);
+    expect(first.shouldContinueImmediately).toBe(true);
+    expect(state.scanOrdinal).toBe(1);
+
+    await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(recoveryCalls).toEqual([[0], [1]]);
+  });
+
+  it('schedules another pass when recovery alone reports immediate work', async () => {
+    const target = recoveryTarget(0);
+    const { deps } = makeDeps({
+      getKCCount: async () => 1,
+      maxOrdinalsPerPass: 1,
+      reconcileOrdinal: async () => ({ status: 'pending', recovery: target }),
+      recoverPendingOrdinals: async () => ({
+        outcomes: new Map([[0, { status: 'pending', recovery: target }]]),
+        attemptedOrdinals: [0],
+        continuationOrdinal: undefined,
+        hasImmediateRecoveryWork: true,
+      }),
+    });
+    const state = createCursorState(0);
+
+    const result = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(result.hasMore).toBe(true);
+    expect(result.shouldContinueImmediately).toBe(true);
+    expect(state.scanOrdinal).toBe(0);
+  });
+
+  it('schedules another pass for an untouched recovery continuation ordinal', async () => {
+    const targets = [recoveryTarget(0), recoveryTarget(1)];
+    const { deps } = makeDeps({
+      getKCCount: async () => 2,
+      maxOrdinalsPerPass: 2,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
+        status: 'pending',
+        recovery: targets[ordinal]!,
+      }),
+      recoverPendingOrdinals: async () => ({
+        outcomes: new Map([[0, {
+          status: 'pending',
+          recovery: targets[0]!,
+        } as OrdinalOutcome]]),
+        attemptedOrdinals: [0],
+        continuationOrdinal: 1,
+        hasImmediateRecoveryWork: false,
+      }),
+    });
+    const state = createCursorState(0);
+
+    const result = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(result.reconciled).toBe(0);
+    expect(result.hasMore).toBe(true);
+    expect(result.shouldContinueImmediately).toBe(true);
+    expect(state.scanOrdinal).toBe(1);
+  });
+
+  it('preserves the next recovery target across a cooldown-only pass', async () => {
+    const recoveryCalls: number[][] = [];
+    const networkAttempts: number[] = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => 2,
+      maxOrdinalsPerPass: 2,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
+        status: 'pending',
+        recovery: recoveryTarget(ordinal),
+      }),
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => {
+        const ordinals = targets.map((target) => target.ordinal);
+        recoveryCalls.push(ordinals);
+        if (recoveryCalls.length === 2) {
+          return {
+            outcomes: new Map(),
+            attemptedOrdinals: [],
+            continuationOrdinal: targets[0]?.ordinal,
+            hasImmediateRecoveryWork: false,
+            cooldownOnly: true,
+          };
+        }
+        const attempted = targets[0]!;
+        networkAttempts.push(attempted.ordinal);
+        const outcome: OrdinalOutcome = attempted.ordinal === 1
+          ? { status: 'reconciled', blockNumber: 100 }
+          : { status: 'pending', recovery: attempted };
+        return {
+          outcomes: new Map([[attempted.ordinal, outcome]]),
+          attemptedOrdinals: [attempted.ordinal],
+          continuationOrdinal: targets[1]?.ordinal
+            ?? (outcome.status === 'pending' ? attempted.ordinal : undefined),
+          hasImmediateRecoveryWork: false,
+        };
+      },
+    });
+    const state = createCursorState(0);
+
+    const first = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(first.hasMore).toBe(true);
+    expect(first.shouldContinueImmediately).toBe(true);
+    expect(state.watermark).toBe(0);
+    expect(state.scanOrdinal).toBe(1);
+
+    const cooldown = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(cooldown.hasMore).toBe(false);
+    expect(cooldown.shouldContinueImmediately).toBe(false);
+    expect(state.scanOrdinal).toBe(1);
+
+    await reconcileContextGraph(deps, state, 'cg', 1n);
+    await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(networkAttempts).toEqual([0, 1, 0]);
+    expect(recoveryCalls).toEqual([
+      [0, 1],
+      [1],
+      [1],
+      [0],
+    ]);
+  });
+
+  it.each([
+    {
+      lane: 'recent-first recovery',
+      recentOrdinalsPerPass: 7,
+      inspectedOrdinals: [30, 31, 32, 93, 94, 95, 96, 97, 98, 99],
+      recoveryOrdinals: [99, 98, 97, 96, 95, 94, 93, 30, 31, 32],
+      nextScanOrdinal: 33,
+    },
+    {
+      lane: 'historical-only recovery',
+      recentOrdinalsPerPass: 0,
+      inspectedOrdinals: [30, 31, 32, 33, 34, 35, 36, 37, 38, 39],
+      recoveryOrdinals: [30, 31, 32, 33, 34, 35, 36, 37, 38, 39],
+      nextScanOrdinal: 40,
+    },
+  ])('retries an admission-deferred historical slice in a larger backlog with $lane', async ({
+    recentOrdinalsPerPass,
+    inspectedOrdinals,
+    recoveryOrdinals,
+    nextScanOrdinal,
+  }) => {
+    const inspections: number[][] = [[], []];
+    const recoveryCalls: number[][] = [];
+    const fetchAttempts: number[] = [];
+    let pass = 0;
+    const { deps, persisted } = makeDeps({
+      getKCCount: async () => 100,
+      maxOrdinalsPerPass: 10,
+      recentOrdinalsPerPass,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        inspections[pass]!.push(ordinal);
+        return { status: 'pending', recovery: recoveryTarget(ordinal) };
+      },
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => {
+        const ordinals = targets.map(({ ordinal }) => ordinal);
+        recoveryCalls.push(ordinals);
+        if (pass === 0) {
+          return {
+            outcomes: new Map(),
+            attemptedOrdinals: [],
+            continuationOrdinal: targets[0]?.ordinal,
+            hasImmediateRecoveryWork: false,
+            localAdmissionDeferred: true,
+          };
+        }
+        fetchAttempts.push(...ordinals);
+        return {
+          outcomes: new Map(ordinals.map((ordinal) => [
+            ordinal,
+            { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
+          ])),
+          attemptedOrdinals: ordinals,
+          continuationOrdinal: undefined,
+          hasImmediateRecoveryWork: false,
+        };
+      },
+    });
+    const state = createCursorState(0);
+    state.scanOrdinal = 30;
+
+    const refused = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(refused).toMatchObject({
+      head: 100,
+      processed: 10,
+      reconciled: 0,
+      pending: 100,
+      watermark: 0,
+      localAdmissionDeferred: true,
+      hasMore: false,
+      shouldContinueImmediately: false,
+    });
+    // No peer was asked, so the pass did not use the node's sync admission.
+    expect(refused.recoveryAttempted).toBeUndefined();
+    expect(inspections[0]).toEqual(inspectedOrdinals);
+    expect(recoveryCalls).toEqual([recoveryOrdinals]);
+    expect(fetchAttempts).toEqual([]);
+    expect(state.scanOrdinal).toBe(30);
+    expect(state.ahead.size).toBe(0);
+    expect(persisted).toEqual([]);
+
+    pass = 1;
+    const admitted = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    // Unvisited candidates remain beyond this pass; refusal must not skip the
+    // historical slice merely because its recent-first continuation is near head.
+    expect(inspections).toEqual([inspectedOrdinals, inspectedOrdinals]);
+    expect(recoveryCalls).toEqual([recoveryOrdinals, recoveryOrdinals]);
+    expect(fetchAttempts).toEqual(recoveryOrdinals);
+    expect(admitted).toMatchObject({
+      processed: 10,
+      reconciled: 10,
+      pending: 90,
+      watermark: 0,
+      hasMore: true,
+      shouldContinueImmediately: true,
+      recoveryAttempted: true,
+    });
+    expect(admitted.localAdmissionDeferred).toBeUndefined();
+    expect(state.scanOrdinal).toBe(nextScanOrdinal);
+    expect(state.ahead.size).toBe(10);
+    expect(persisted).toEqual([]);
+  });
+
+  it('keeps the fair scan moving when recovery finds no eligible peer', async () => {
+    const attempts: number[][] = [[], []];
+    let pass = 0;
+    const { deps } = makeDeps({
+      getKCCount: async () => 25,
+      maxOrdinalsPerPass: 10,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempts[pass]!.push(ordinal);
+        if (ordinal !== 0) return { status: 'reconciled', blockNumber: 100 };
+        return {
+          status: 'pending',
+          recovery: recoveryTarget(ordinal),
+        };
+      },
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => ({
+        outcomes: new Map(),
+        attemptedOrdinals: [],
+        continuationOrdinal: targets[0]?.ordinal,
+        hasImmediateRecoveryWork: false,
+        cooldownOnly: false,
+      }),
+    });
+    const state = createCursorState(0);
+
+    const first = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(first.hasMore).toBe(true);
+    expect(first.shouldContinueImmediately).toBe(true);
+    expect(state.scanOrdinal).toBe(10);
+
+    pass += 1;
+    await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(attempts).toEqual([
+      [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+      [10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+    ]);
+  });
+
+  it('advances the fair scan past a damped recovery gap without hot-looping', async () => {
+    const attempts: number[][] = [[], [], []];
+    let pass = 0;
+    const { deps } = makeDeps({
+      getKCCount: async () => 25,
+      maxOrdinalsPerPass: 10,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempts[pass]!.push(ordinal);
+        if (ordinal !== 0) return { status: 'reconciled', blockNumber: 100 };
+        return {
+          status: 'pending',
+          recovery: recoveryTarget(ordinal),
+        };
+      },
+      recoverPendingOrdinals: async () => ({
+        outcomes: new Map(),
+        attemptedOrdinals: [],
+        continuationOrdinal: undefined,
+        hasImmediateRecoveryWork: false,
+      }),
+    });
+    const state = createCursorState(0);
+
+    const first = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(first.hasMore).toBe(true);
+    expect(first.shouldContinueImmediately).toBe(true);
+    expect(state.scanOrdinal).toBe(10);
+
+    pass += 1;
+    const second = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(second.hasMore).toBe(true);
+    expect(second.shouldContinueImmediately).toBe(true);
+    expect(state.scanOrdinal).toBe(20);
+
+    pass += 1;
+    const third = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(attempts).toEqual([
+      [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+      [10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+      [20, 21, 22, 23, 24],
+    ]);
+    expect(third.watermark).toBe(0);
+    expect(third.pending).toBe(1);
+    expect(third.hasMore).toBe(false);
+    expect(third.shouldContinueImmediately).toBe(false);
+    expect(state.ahead.size).toBe(24);
+    expect(state.scanOrdinal).toBe(0);
+  });
+
+  it('keeps scanning later slices when an early ordinal remains pending', async () => {
+    const attempts: number[][] = [[], [], []];
+    let pass = 0;
+    const { deps } = makeDeps({
+      getKCCount: async () => 6,
+      maxOrdinalsPerPass: 2,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempts[pass]!.push(ordinal);
+        if (ordinal === 0) return { status: 'pending' };
+        return { status: 'reconciled', blockNumber: 0 };
+      },
+    });
+    const state = createCursorState(0);
+
+    await reconcileContextGraph(deps, state, 'cg', 1n);
+    pass += 1;
+    await reconcileContextGraph(deps, state, 'cg', 1n);
+    pass += 1;
+    const result = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(attempts).toEqual([[0, 1], [2, 3], [4, 5]]);
+    expect(result.watermark).toBe(0);
+    expect(result.pending).toBe(1);
+    expect(result.hasMore).toBe(false);
+    expect(result.shouldContinueImmediately).toBe(false);
+    expect(state.ahead.size).toBe(5);
+  });
+
+  it('stops a slice when its captured context-graph binding becomes stale', async () => {
+    let current = true;
+    const { deps, attempted } = makeDeps({
+      getKCCount: async () => 5,
+      maxOrdinalsPerPass: 5,
+      isTargetCurrent: async () => current,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempted.push(ordinal);
+        current = false;
+        return { status: 'reconciled', blockNumber: 0 };
+      },
+    });
+    const state = createCursorState(0);
+
+    const result = await reconcileContextGraph(deps, state, 'cg', 66n);
+
+    expect(attempted).toEqual([0]);
+    expect(result).toMatchObject({
+      processed: 1,
+      reconciled: 0,
+      staleTarget: true,
+      hasMore: false,
+      shouldContinueImmediately: true,
+    });
+    expect(state.watermark).toBe(0);
+    expect(state.scanOrdinal).toBe(0);
+  });
+
+  it('discards recovered outcomes when the binding flips during batch recovery', async () => {
+    let current = true;
+    const { deps, persisted } = makeDeps({
+      getKCCount: async () => 2,
+      maxOrdinalsPerPass: 10,
+      isTargetCurrent: async () => current,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
+        status: 'pending',
+        recovery: recoveryTarget(ordinal),
+      }),
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => {
+        // The rebind lands while the long recovery await is in flight. The
+        // recovered outcomes belong to the OLD binding and must be discarded.
+        current = false;
+        return {
+          outcomes: new Map(targets.map((target) => [
+            target.ordinal,
+            { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
+          ])),
+          attemptedOrdinals: targets.map((target) => target.ordinal),
+          continuationOrdinal: undefined,
+          hasImmediateRecoveryWork: false,
+        };
+      },
+    });
+    const state = createCursorState(0);
+
+    const result = await reconcileContextGraph(deps, state, 'cg', 5n);
+
+    expect(result.staleTarget).toBe(true);
+    expect(result.reconciled).toBe(0);
+    expect(result.hasMore).toBe(false);
+    expect(result.shouldContinueImmediately).toBe(true);
+    expect(state.watermark).toBe(0);
+    expect(state.scanOrdinal).toBe(0);
+    expect(persisted).toEqual([]);
+  });
+
+  it('contains a worker failure: siblings drain, no new ordinals start, then the pass rejects', async () => {
+    const attempted: number[] = [];
+    const completed: number[] = [];
+    let releaseSlow!: () => void;
+    const slowGate = new Promise<void>((resolve) => { releaseSlow = resolve; });
+    const { deps } = makeDeps({
+      getKCCount: async () => 6,
+      maxOrdinalsPerPass: 6,
+      maxOrdinalConcurrency: 2,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempted.push(ordinal);
+        if (ordinal === 0) {
+          throw new Error('ordinal 0 exploded');
+        }
+        if (ordinal === 1) {
+          await slowGate;
+        }
+        completed.push(ordinal);
+        return { status: 'reconciled', blockNumber: 0 };
+      },
+    });
+    const state = createCursorState(0);
+
+    const pass = reconcileContextGraph(deps, state, 'cg', 1n);
+    let settled = false;
+    void pass.catch(() => undefined).then(() => { settled = true; });
+
+    // Let the failing worker reject and the dispatch loops observe it.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // The pass must still be waiting on the in-flight sibling ordinal…
+    expect(settled).toBe(false);
+    releaseSlow();
+    await expect(pass).rejects.toThrow('ordinal 0 exploded');
+
+    // …and after the failure no NEW ordinal may have been dispatched.
+    expect(attempted).toEqual([0, 1]);
+    expect(completed).toEqual([1]);
+    expect(state.watermark).toBe(0);
+  });
+
+  it('keeps what a rejected pass proved: its completions and the scan past what it dispatched', async () => {
+    const attempts: number[][] = [];
+    const { deps, persisted } = makeDeps({
+      getKCCount: async () => 8,
+      maxOrdinalsPerPass: 4,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempts[attempts.length - 1]!.push(ordinal);
+        if (ordinal === 1) throw new Error('ordinal 1 exploded');
+        return { status: 'already', blockNumber: 0 };
+      },
+    });
+    const state = createCursorState(0);
+    const pass = async () => {
+      attempts.push([]);
+      return reconcileContextGraph(deps, state, 'cg', 1n).then(
+        (result) => `ok:${result.watermark}`,
+        (error: Error) => `failed:${error.message}`,
+      );
+    };
+
+    const outcomes = [await pass(), await pass(), await pass(), await pass()];
+
+    expect(outcomes).toEqual([
+      'failed:ordinal 1 exploded',
+      'ok:1',
+      'ok:1',
+      'failed:ordinal 1 exploded',
+    ]);
+    // The settled ordinal 0 is never re-read; the throwing ordinal is retried
+    // with the next cycle like any other gap instead of pinning its slice.
+    expect(attempts).toEqual([[0, 1], [2, 3, 4, 5], [6, 7], [1]]);
+    expect(state.watermark).toBe(1);
+    expect([...state.ahead.keys()].sort((a, b) => a - b)).toEqual([2, 3, 4, 5, 6, 7]);
+    expect(persisted).toEqual([{ cg: 'cg', watermark: 1 }]);
+  });
+
+  it('keeps worker completions when batch recovery rejects under the same binding', async () => {
+    let current = true;
+    let flipBindingDuringRecovery = false;
+    const { deps } = makeDeps({
+      getKCCount: async () => 3,
+      isTargetCurrent: async () => current,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => ordinal === 1
+        ? { status: 'pending', recovery: recoveryTarget(1) }
+        : { status: 'reconciled', blockNumber: 0 },
+      recoverPendingOrdinals: async () => {
+        if (flipBindingDuringRecovery) current = false;
+        throw new Error('recovery transport failed');
+      },
+    });
+
+    const kept = createCursorState(0);
+    await expect(reconcileContextGraph(deps, kept, 'cg', 1n)).rejects.toThrow('recovery transport failed');
+    expect([...kept.ahead.keys()]).toEqual([0, 2]);
+    expect(kept.watermark).toBe(0);
+    expect(kept.scanOrdinal).toBe(3);
+
+    flipBindingDuringRecovery = true;
+    const discarded = createCursorState(0);
+    await expect(reconcileContextGraph(deps, discarded, 'cg', 1n)).rejects.toThrow('recovery transport failed');
+    expect(discarded.ahead.size).toBe(0);
+    expect(discarded.scanOrdinal).toBe(0);
+  });
+});
+
+describe('VmReconcileDispatcher scheduling', () => {
+  it('places a self-scheduled next slice behind context graphs already waiting', async () => {
+    const observed: string[] = [];
+    let scheduler!: VmReconcileDispatcher<void>;
+    scheduler = new VmReconcileDispatcher(
+      async (key) => {
+        observed.push(key);
+        if (key === 'large-cg' && observed.filter((seen) => seen === key).length === 1) {
+          scheduler.triggerLive(key);
+        }
+      },
+      () => undefined,
+    );
+
+    scheduler.triggerLive('large-cg');
+    scheduler.triggerLive('waiting-cg');
+    await scheduler.waitForIdle();
+
+    expect(observed).toEqual(['large-cg', 'waiting-cg', 'large-cg']);
+  });
+
+  it('passes the trigger source to the scheduled run', async () => {
+    const observed: string[] = [];
+    const scheduler = new VmReconcileDispatcher(
+      async (_key, source) => { observed.push(source); },
+      () => undefined,
+    );
+
+    scheduler.triggerLive('cg');
+    await scheduler.waitForIdle('cg');
+    scheduler.triggerPeriodic('cg');
+    await scheduler.waitForIdle('cg');
+
+    expect(observed).toEqual(['live', 'periodic']);
+  });
+
+  it('collapses a successful live burst into one run plus one trailing run', async () => {
+    let runs = 0;
+    let resolveCurrent!: () => void;
+    const scheduler = new VmReconcileDispatcher(
+      async () => {
+        runs += 1;
+        await new Promise<void>((resolve) => {
+          resolveCurrent = resolve;
+        });
+      },
+      () => undefined,
+    );
+
+    expect(scheduler.triggerLive('cg')).toBeUndefined();
+    scheduler.triggerLive('cg');
+    scheduler.triggerLive('cg');
+    scheduler.triggerLive('cg');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runs).toBe(1);
+
+    resolveCurrent();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runs).toBe(2);
+
+    resolveCurrent();
+    await scheduler.waitForIdle('cg');
+    expect(runs).toBe(2);
+    expect(scheduler.isInFlight('cg')).toBe(false);
+  });
+
+  it('suppresses queued/live retries after failure but retries on the periodic path', async () => {
+    let runs = 0;
+    const failures: Array<{ key: string; error: unknown }> = [];
+    let resolveCurrent!: () => void;
+    let rejectCurrent!: (error: Error) => void;
+    const scheduler = new VmReconcileDispatcher(
+      async () => {
+        runs += 1;
+        await new Promise<void>((resolve, reject) => {
+          resolveCurrent = resolve;
+          rejectCurrent = reject;
+        });
+      },
+      (key, error) => failures.push({ key, error }),
+    );
+
+    const failure = new Error('store deadline exceeded');
+    scheduler.triggerLive('cg');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    scheduler.triggerLive('cg'); // queues one trailing pass while active
+    rejectCurrent(failure);
+    await scheduler.waitForIdle('cg');
+    expect(runs).toBe(1); // failed pass does not immediately run the queued pass
+    expect(failures).toEqual([{ key: 'cg', error: failure }]);
+
+    scheduler.triggerLive('cg');
+    await scheduler.waitForIdle('cg');
+    expect(runs).toBe(1); // live nudge during the failure hold is ignored
+
+    scheduler.triggerPeriodic('cg');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runs).toBe(2); // the periodic reliability path retries normally
+    resolveCurrent();
+    await scheduler.waitForIdle('cg');
+
+    scheduler.triggerLive('cg');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runs).toBe(3); // successful periodic recovery releases the live hold
+    resolveCurrent();
+    await scheduler.waitForIdle('cg');
+  });
+
+  it('does not let a stale active failure re-block live work released by a rebind', async () => {
+    const runs: string[] = [];
+    let rejectStale!: (error: Error) => void;
+    const scheduler = new VmReconcileDispatcher(
+      async (_key, source) => {
+        runs.push(source);
+        if (runs.length === 1) {
+          await new Promise<void>((_resolve, reject) => { rejectStale = reject; });
+        }
+      },
+      () => undefined,
+    );
+
+    scheduler.triggerPeriodic('cg');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    scheduler.releaseLiveHold('cg');
+    scheduler.triggerLive('cg');
+    rejectStale(new Error('old binding became stale'));
+    await scheduler.waitForIdle('cg');
+
+    expect(runs).toEqual(['periodic', 'live']);
+    scheduler.triggerLive('cg');
+    await scheduler.waitForIdle('cg');
+    expect(runs).toEqual(['periodic', 'live', 'live']);
+  });
+
+  it('preserves a periodic retry queued behind a failing live pass', async () => {
+    let runs = 0;
+    let resolveCurrent!: () => void;
+    let rejectCurrent!: (error: Error) => void;
+    const scheduler = new VmReconcileDispatcher(
+      async () => {
+        runs += 1;
+        await new Promise<void>((resolve, reject) => {
+          resolveCurrent = resolve;
+          rejectCurrent = reject;
+        });
+      },
+      () => undefined,
+    );
+
+    scheduler.triggerLive('cg');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    scheduler.triggerPeriodic('cg');
+    rejectCurrent(new Error('store deadline exceeded'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(runs).toBe(2); // queued periodic pass starts despite the live failure hold
+    resolveCurrent();
+    await scheduler.waitForIdle('cg');
+    expect(scheduler.isInFlight('cg')).toBe(false);
+  });
+
+  it('isolates the live failure hold per context graph', async () => {
     const ran: string[] = [];
-    const coalescer = new ReconcileCoalescer(async (key) => { ran.push(key); });
-    await Promise.all([coalescer.trigger('a'), coalescer.trigger('b')]);
-    expect(ran.sort()).toEqual(['a', 'b']);
+    const failures: string[] = [];
+    const scheduler = new VmReconcileDispatcher(
+      async (key) => {
+        ran.push(key);
+        if (key === 'cg-a') throw new Error('cg-a unavailable');
+      },
+      (key) => failures.push(key),
+    );
+
+    scheduler.triggerLive('cg-a');
+    await scheduler.waitForIdle('cg-a');
+    scheduler.triggerLive('cg-a'); // held after failure
+    await scheduler.waitForIdle('cg-a');
+    scheduler.triggerLive('cg-b'); // unrelated CG still runs immediately
+    await scheduler.waitForIdle('cg-b');
+
+    expect(ran).toEqual(['cg-a', 'cg-b']);
+    expect(failures).toEqual(['cg-a']);
+  });
+});
+
+describe('VmReconcileDispatcher admission', () => {
+  it.each((['tryTriggerPeriodic', 'triggerPeriodic', 'dispatch'] as const).flatMap(entry =>
+    (['manual', 'live'] as const).map(source => ({ entry, source })),
+  ))('keeps the $source foreground reserve through $entry', async ({ entry, source }) => {
+    let release!: () => void;
+    const blocked = new Promise<void>(done => { release = done; });
+    const ran: string[] = [];
+    const dispatcher = new VmReconcileDispatcher(async key => { ran.push(key); await blocked; }, () => undefined, { maxPending: 2 });
+    const admit = (key: string) => entry === 'dispatch'
+      ? void dispatcher.dispatch(key, 'periodic').catch(() => undefined)
+      : void dispatcher[entry](key);
+    try {
+      admit('active'); admit('queued'); admit('overflow');
+      expect(dispatcher.snapshot()).toEqual({ active: 1, queued: 1, closed: false });
+      expect(dispatcher.tryTriggerPeriodic('overflow')).toBe(false);
+      const foreground = source === 'manual'
+        ? dispatcher.triggerManual('foreground')
+        : (dispatcher.triggerLive('foreground'), dispatcher.waitForIdle('foreground'));
+      expect(dispatcher.isInFlight('foreground')).toBe(true);
+      release();
+      await foreground;
+      await dispatcher.waitForIdle();
+      expect(ran).toEqual(['active', 'foreground', 'queued']);
+      await dispatcher.close();
+      expect(dispatcher.tryTriggerPeriodic('closed')).toBe(false);
+    } finally { release(); await dispatcher.close(); }
+  });
+
+  it('returns boolean periodic admission outcomes and preserves the foreground reserve', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const dispatcher = new VmReconcileDispatcher(async () => blocked, () => undefined, { maxPending: 2 });
+    expect(dispatcher.tryTriggerPeriodic('active')).toBe(true);
+    expect(dispatcher.tryTriggerPeriodic('queued')).toBe(true);
+    expect(dispatcher.tryTriggerPeriodic('queued')).toBe(true);
+    expect(dispatcher.tryTriggerPeriodic('overflow')).toBe(false);
+    expect(dispatcher.snapshot()).toEqual({ active: 1, queued: 1, closed: false });
+    const foreground = dispatcher.triggerManual('foreground').catch(error => error);
+    expect(dispatcher.snapshot().queued).toBe(2);
+    expect(dispatcher.tryTriggerPeriodic('queued')).toBe(true);
+    const closed = dispatcher.close();
+    expect(dispatcher.tryTriggerPeriodic('new')).toBe(false);
+    expect(await foreground).toBeInstanceOf(VmReconcileQueueClosedError);
+    release();
+    await closed;
+  });
+
+  it('reports one new trailing admission and subsequent coalescing without spending another slot', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const dispatcher = new VmReconcileDispatcher(async () => blocked, () => undefined, { maxPending: 2 });
+    expect(dispatcher.tryTriggerPeriodic('active')).toBe(true);
+    expect(dispatcher.tryTriggerPeriodic('active')).toBe(true);
+    expect(dispatcher.tryTriggerPeriodic('active')).toBe(true);
+    expect(dispatcher.tryTriggerPeriodic('other')).toBe(false);
+    expect(dispatcher.snapshot().queued).toBe(1);
+    release();
+    await dispatcher.waitForIdle();
+  });
+
+  it('serializes cross-CG work and lets foreground work pass periodic backlog', async () => {
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    const dispatcher = new VmReconcileDispatcher(async (key) => {
+      if (key === 'first') {
+        order.push('first:start');
+        await new Promise<void>((resolve) => { releaseFirst = resolve; });
+        order.push('first:end');
+      } else {
+        order.push(key);
+      }
+    }, () => undefined, { concurrency: 1 });
+
+    const first = dispatcher.dispatch('first', 'periodic');
+    const second = dispatcher.dispatch('second', 'periodic');
+    const foreground = dispatcher.dispatch('foreground', 'live');
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(dispatcher.snapshot()).toEqual({ active: 1, queued: 2, closed: false });
+    releaseFirst();
+    await Promise.all([first, second, foreground]);
+
+    expect(order).toEqual(['first:start', 'first:end', 'foreground', 'second']);
+    expect(dispatcher.snapshot()).toEqual({ active: 0, queued: 0, closed: false });
+  });
+
+  it('keeps draining after a failed reconciliation job', async () => {
+    const failure = new Error('store unavailable');
+    const dispatcher = new VmReconcileDispatcher(async (key) => {
+      if (key === 'first') throw failure;
+      return 'recovered';
+    }, () => undefined, { concurrency: 1 });
+    const first = dispatcher.dispatch('first', 'periodic');
+    const second = dispatcher.dispatch('second', 'periodic');
+
+    await expect(first).rejects.toBe(failure);
+    await expect(second).resolves.toBe('recovered');
+    expect(dispatcher.snapshot()).toEqual({ active: 0, queued: 0, closed: false });
+  });
+
+  it('upgrades a queued periodic CG to live priority in place', async () => {
+    const order: string[] = [];
+    let releaseBlocker!: () => void;
+    const dispatcher = new VmReconcileDispatcher(
+      async (key, source) => {
+        if (key === 'blocker') {
+          await new Promise<void>((resolve) => { releaseBlocker = resolve; });
+          return;
+        }
+        order.push(`${key}:${source}`);
+      },
+      () => undefined,
+      { concurrency: 1 },
+    );
+    const blocker = dispatcher.dispatch('blocker', 'periodic');
+
+    dispatcher.triggerPeriodic('a');
+    dispatcher.triggerPeriodic('b');
+    dispatcher.triggerLive('b');
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(dispatcher.pendingSource('b')).toBe('live');
+    expect(dispatcher.snapshot()).toEqual({ active: 1, queued: 2, closed: false });
+    releaseBlocker();
+    await blocker;
+    await dispatcher.waitForIdle();
+
+    expect(order).toEqual(['b:live', 'a:periodic']);
+  });
+
+  it('coalesces repeated manual requests for one queued context graph', async () => {
+    let releaseBlocker!: () => void;
+    let manualRuns = 0;
+    const dispatcher = new VmReconcileDispatcher(async (key) => {
+      if (key === 'blocker') {
+        await new Promise<void>((resolve) => { releaseBlocker = resolve; });
+        return 'blocker';
+      }
+      if (key === 'manual-cg') {
+        manualRuns += 1;
+        return 'done';
+      }
+      return key;
+    }, () => undefined, { concurrency: 1, maxPending: 2 });
+    const blocker = dispatcher.dispatch('blocker', 'periodic');
+    const requests = Array.from({ length: 20 }, () => dispatcher.triggerManual('manual-cg'));
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(new Set(requests).size).toBe(1);
+    expect(dispatcher.snapshot()).toEqual({ active: 1, queued: 1, closed: false });
+    releaseBlocker();
+    await blocker;
+    await expect(Promise.all(requests)).resolves.toEqual(Array(20).fill('done'));
+    expect(manualRuns).toBe(1);
+  });
+
+  it('makes manual admission wait for one fresh pass behind active automatic work', async () => {
+    let observedHead = 5;
+    let releaseAutomatic!: () => void;
+    const runs: Array<{ source: string; head: number }> = [];
+    const dispatcher = new VmReconcileDispatcher(async (_key, source) => {
+      const result = { source, head: observedHead };
+      runs.push(result);
+      if (runs.length === 1) {
+        await new Promise<void>((resolve) => { releaseAutomatic = resolve; });
+      }
+      return result;
+    }, () => undefined, { concurrency: 1 });
+
+    const automatic = dispatcher.dispatch('cg', 'periodic');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    dispatcher.triggerLive('cg');
+    const manual = dispatcher.triggerManual('cg');
+    const duplicateManual = dispatcher.triggerManual('cg');
+    observedHead = 6;
+
+    let manualSettled = false;
+    void manual.then(() => { manualSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(manualSettled).toBe(false);
+    expect(manual).toBe(duplicateManual);
+    expect(manual).not.toBe(automatic);
+
+    releaseAutomatic();
+    await expect(automatic).resolves.toEqual({ source: 'periodic', head: 5 });
+    await expect(manual).resolves.toEqual({ source: 'manual', head: 6 });
+    expect(runs).toEqual([
+      { source: 'periodic', head: 5 },
+      { source: 'manual', head: 6 },
+    ]);
+  });
+
+  it('still runs a fresh manual boundary when the older automatic pass fails', async () => {
+    let rejectAutomatic!: (error: Error) => void;
+    const sources: string[] = [];
+    const dispatcher = new VmReconcileDispatcher(async (_key, source) => {
+      sources.push(source);
+      if (sources.length === 1) {
+        await new Promise<void>((_resolve, reject) => { rejectAutomatic = reject; });
+      }
+      return source;
+    }, () => undefined, { concurrency: 1 });
+
+    const automaticFailure = dispatcher.dispatch('cg', 'periodic').catch((error) => error);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const manual = dispatcher.triggerManual('cg');
+    const failure = new Error('automatic pass failed');
+    rejectAutomatic(failure);
+
+    await expect(automaticFailure).resolves.toBe(failure);
+    await expect(manual).resolves.toBe('manual');
+    expect(sources).toEqual(['periodic', 'manual']);
+  });
+
+  it('rejects excess distinct work with a typed overload error', async () => {
+    let releaseBlocker!: () => void;
+    const dispatcher = new VmReconcileDispatcher(async (key) => {
+      if (key === 'blocker') await new Promise<void>((resolve) => { releaseBlocker = resolve; });
+    }, () => undefined, { concurrency: 1, maxPending: 1 });
+    const blocker = dispatcher.dispatch('blocker', 'periodic');
+    const admitted = dispatcher.triggerManual('admitted');
+
+    await expect(dispatcher.triggerManual('over-limit'))
+      .rejects.toBeInstanceOf(VmReconcileQueueFullError);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    releaseBlocker();
+    await Promise.all([blocker, admitted]);
+  });
+
+  it('admits periodic work within a bounded foreground burst', async () => {
+    const order: string[] = [];
+    let releaseBlocker!: () => void;
+    const dispatcher = new VmReconcileDispatcher(async (key) => {
+      if (key === 'blocker') {
+        await new Promise<void>((resolve) => { releaseBlocker = resolve; });
+        return;
+      }
+      order.push(key);
+    }, () => undefined, { concurrency: 1, maxForegroundBurst: 2 });
+    const blocker = dispatcher.dispatch('blocker', 'periodic');
+    const periodic = dispatcher.dispatch('periodic', 'periodic');
+    const foreground = Array.from({ length: 5 }, (_, index) =>
+      dispatcher.triggerManual(`manual-${index}`));
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    releaseBlocker();
+    await Promise.all([blocker, periodic, ...foreground]);
+
+    expect(order.slice(0, 3)).toEqual(['manual-0', 'manual-1', 'periodic']);
+  });
+
+  it('cancels pending work and never starts it after the dispatcher closes', async () => {
+    let releaseActive!: () => void;
+    let queuedStarted = false;
+    const dispatcher = new VmReconcileDispatcher(async (key) => {
+      if (key === 'active') {
+        await new Promise<void>((resolve) => { releaseActive = resolve; });
+      } else if (key === 'queued') {
+        queuedStarted = true;
+      }
+    }, () => undefined, { concurrency: 1 });
+    const active = dispatcher.triggerManual('active');
+    const queued = dispatcher.triggerManual('queued');
+    const queuedOutcome = queued.catch((error) => error);
+
+    const closing = dispatcher.close();
+    let closed = false;
+    void closing.then(() => { closed = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(await queuedOutcome).toBeInstanceOf(VmReconcileQueueClosedError);
+    await expect(dispatcher.triggerManual('late'))
+      .rejects.toBeInstanceOf(VmReconcileQueueClosedError);
+    expect(queuedStarted).toBe(false);
+    expect(closed).toBe(false);
+
+    releaseActive();
+    await Promise.all([active, closing]);
+    expect(queuedStarted).toBe(false);
+    expect(dispatcher.snapshot()).toEqual({ active: 0, queued: 0, closed: true });
   });
 });
 
@@ -214,4 +1477,170 @@ describe('RecentUalSet', () => {
     expect(set.has('cg-a\0ual#02')).toBe(false);
     expect(set.has('cg-b\0ual#01')).toBe(true);
   });
+});
+
+describe('RecentReconcileEvidenceMap', () => {
+  it('expires stagnant-head evidence and evicts the oldest slot past the cap', () => {
+    let now = 1_000;
+    const evidence = new RecentReconcileEvidenceMap<number>(2, 50, () => now);
+    evidence.set('a', 1);
+    evidence.set('b', 2);
+    evidence.set('c', 3);
+    expect(evidence.get('a')).toBeUndefined();
+    expect(evidence.get('b')).toBe(2);
+
+    now = 1_050;
+    expect(evidence.get('b')).toBeUndefined();
+    expect(evidence.get('c')).toBeUndefined();
+  });
+
+  it('deletes all evidence owned by one context graph prefix', () => {
+    const evidence = new RecentReconcileEvidenceMap<number>();
+    evidence.set('cg-a\0slot:0', 1);
+    evidence.set('cg-a\0slot:1', 2);
+    evidence.set('cg-b\0slot:0', 3);
+    evidence.deleteByPrefix('cg-a\0');
+    expect(evidence.get('cg-a\0slot:0')).toBeUndefined();
+    expect(evidence.get('cg-a\0slot:1')).toBeUndefined();
+    expect(evidence.get('cg-b\0slot:0')).toBe(3);
+  });
+});
+
+describe('capacity-aware periodic admission', () => {
+  it.each(['no sweep', 'abort', 'reset'] as const)('keeps foreground capacity after its burst with %s', async action => {
+    const started: string[] = [];
+    const releases: Array<() => void> = [];
+    let paused = true;
+    const runtime = new VmReconcileSchedulingRuntime(async key => {
+      started.push(key);
+      if (paused) await new Promise<void>(resolve => releases.push(resolve));
+    }, () => undefined, { concurrency: 1, maxPending: 1, maxForegroundBurst: 1 });
+    const controller = new AbortController();
+    const first = runtime.triggerManual('first');
+    const second = runtime.triggerManual('second');
+    const sweep = action === 'no sweep' ? Promise.resolve()
+      : runtime.completeSweep(['periodic'], [], () => true, controller.signal);
+    if (action === 'abort') controller.abort();
+    if (action === 'reset') runtime.resetSweep();
+    try {
+      await sweep;
+      await vi.waitFor(() => expect(releases).toHaveLength(1));
+      releases.shift()!();
+      await vi.waitFor(() => expect(started).toEqual(['first', 'second']));
+      const third = runtime.triggerManual('third');
+      void third.catch(() => undefined);
+      expect(runtime.isInFlight('third')).toBe(true);
+      paused = false;
+      for (const release of releases.splice(0)) release();
+      await Promise.all([first, second, third]);
+      expect(started).toEqual(['first', 'second', 'third']);
+    } finally {
+      paused = false;
+      for (const release of releases.splice(0)) release();
+      await runtime.close();
+    }
+  });
+
+  it.each([1, 2, 8].flatMap(maxForegroundBurst =>
+    (['completion', 'timer'] as const).flatMap(mode =>
+      (['live', 'manual'] as const).map(source => ({ maxForegroundBurst, mode, source }))),
+  ))('$mode serves a waiting sweep under sustained $source foreground backlog with one pending slot and burst $maxForegroundBurst', async ({ maxForegroundBurst, mode, source }) => {
+    const started: string[] = [];
+    const releases: Array<() => void> = [];
+    let producing = true;
+    let nextForeground = 0;
+    const runtime = new VmReconcileSchedulingRuntime(async (key, source) => {
+      started.push(key);
+      // Refill synchronously when each foreground job starts, before the
+      // waiting sweep's promise continuation can retry admission.
+      if (producing && source !== 'periodic') enqueueForeground(`foreground-${++nextForeground}`);
+      expect(runtime.snapshot().active).toBeLessThanOrEqual(1);
+      expect(runtime.snapshot().queued).toBeLessThanOrEqual(1);
+      await new Promise<void>(resolve => releases.push(resolve));
+    }, () => undefined, { concurrency: 1, maxPending: 1, maxForegroundBurst });
+    const enqueueForeground = (key: string) => {
+      if (source === 'live') runtime.triggerLive(key);
+      else void runtime.triggerManual(key).catch(() => undefined);
+    };
+    enqueueForeground('foreground-0');
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    const sweep = mode === 'completion'
+      ? runtime.completeSweep(['periodic'], [], () => true)
+      : Promise.resolve(runtime.scheduleSweep(['periodic'], [], () => true));
+    try {
+      for (let turn = 0; turn <= maxForegroundBurst && !started.includes('periodic'); turn++) {
+        releases.shift()!();
+        await new Promise<void>(resolve => setImmediate(resolve));
+        if (mode === 'timer') runtime.scheduleSweep(['periodic'], [], () => true);
+        await vi.waitFor(() => expect(releases).toHaveLength(1));
+      }
+      expect(started).toContain('periodic');
+      // The initial foreground pass predates the sweep request. Any foreground
+      // work already queued still counts toward the subsequent burst bound.
+      expect(started.indexOf('periodic') - 1).toBeLessThanOrEqual(maxForegroundBurst);
+    } finally {
+      producing = false;
+      const closing = runtime.close();
+      for (const release of releases.splice(0)) release();
+      await Promise.all([closing, sweep]);
+    }
+  });
+
+  it.each(['abort', 'close'] as const)('releases a one-slot wait on %s while active work stays owned', async action => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const runtime = new VmReconcileSchedulingRuntime(
+      async () => blocked,
+      () => undefined,
+      { maxPending: 1 },
+    );
+    const controller = new AbortController();
+    const active = runtime.triggerManual('active');
+    const sweep = runtime.completeSweep(['waiting'], [], () => true, controller.signal);
+    const closing = action === 'close' ? runtime.close() : undefined;
+    if (action === 'abort') controller.abort();
+    try {
+      await expect(sweep).resolves.toBeUndefined();
+      expect(runtime.isInFlight('waiting')).toBe(false);
+      expect(runtime.isInFlight('active')).toBe(true);
+    } finally { release(); await active; await closing; await runtime.close(); }
+    expect(runtime.tryTriggerPeriodic('closed')).toBe(false);
+  });
+
+  it('admits no work for an already-aborted caller', async () => {
+    const run = vi.fn(async () => undefined);
+    const runtime = new VmReconcileSchedulingRuntime(
+      run,
+      () => undefined,
+    );
+    const controller = new AbortController(); controller.abort();
+    await runtime.completeSweep(['cancelled'], [], () => true, controller.signal);
+    expect(run).not.toHaveBeenCalled();
+    await runtime.close();
+  });
+});
+
+
+it('coalesces a waiting periodic request when a foreground trailing pass becomes available', async () => {
+  const gates = new Map<string, () => void>();
+  const counts = new Map<string, number>();
+  const runtime = new VmReconcileSchedulingRuntime(async key => {
+    const count = (counts.get(key) ?? 0) + 1; counts.set(key, count);
+    if (count === 1) await new Promise<void>(resolve => { gates.set(key, resolve); });
+    return key;
+  }, () => undefined, { concurrency: 3, maxPending: 2 });
+  for (const key of ['A', 'B', 'C']) runtime.triggerLive(key);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  runtime.triggerLive('A');
+  gates.get('C')!(); await runtime.waitForIdle('C');
+  const sweep = runtime.completeSweep(['B'], [], () => true);
+  const manual = runtime.triggerManual('B');
+  try {
+    await new Promise(resolve => setTimeout(resolve, 5));
+    expect(counts.get('B')).toBe(1);
+  } finally {
+    gates.get('A')!(); gates.get('B')!();
+    await manual; await sweep; await runtime.close();
+  }
+  expect(counts.get('B')).toBe(2);
 });

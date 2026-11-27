@@ -1,7 +1,9 @@
+import type { AuthenticatedHeldMetadataDescriptor } from './sync/durable-integrity.js';
 import { Worker } from 'node:worker_threads';
 import { existsSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, sep } from 'node:path';
+import { workerThreadEnv } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 export interface SyncVerifyLogEntry {
@@ -19,6 +21,8 @@ export interface SyncVerifyResult {
 export interface SyncParseResult {
   quads: Quad[];
   totalQuads: number;
+  /** Raw page index for each retained quad, preserving responder coordinates. */
+  sourceIndexes?: number[];
 }
 
 export interface SharedMemoryProcessResult {
@@ -37,9 +41,35 @@ export interface SharedMemoryBatchProcessResult {
   entityCreators: Array<{ dataGraph: string; entity: string; creator: string }>;
 }
 
+export type DurableBatchVerificationMode =
+  | { kind: 'fullSnapshot' }
+  | { kind: 'sinceBatchId'; sinceBatchId: string }
+  | { kind: 'changelogPage'; changedDataGraphs: readonly string[] }
+  | { kind: 'heldMetadata'; descriptors: readonly AuthenticatedHeldMetadataDescriptor[] };
+
 export interface DurableBatchProcessResult {
   verifiedData: Quad[];
   verifiedMeta: Quad[];
+  verifiedGraphScopedDataGraphs: string[];
+  /** Metadata controls deliberately consumed after failing authentication (diagnostic). */
+  droppedSyncControlTriples: number;
+  /**
+   * Non-IRI (blank-node/literal) `_meta` subject rows deliberately dropped at
+   * ingest (#1921) — a verifier-side diagnostic count.
+   */
+  droppedNonIriSubjectTriples: number;
+  /**
+   * Reason-agnostic aggregate of meta rows the verifier deliberately CONSUMED
+   * but did not persist (unverified sync controls + non-IRI subjects). This is
+   * the single count the requester uses to decide whether a fully-discarded
+   * metadata-only page still advances the meta checkpoint (rather than pinning
+   * durable sync on the same page). Keeping the per-reason counts above as
+   * diagnostics only keeps checkpoint orchestration decoupled from verifier
+   * discard policy.
+   */
+  consumedUnpersistedMetaTriples: number;
+  /** Clean batches containing verified V2 assets with no public assertion triples. */
+  verifiedPrivateOnlyResponses: number;
   totalFetchedDataQuads: number;
   totalFetchedMetaQuads: number;
   rejectedKcs: number;
@@ -49,8 +79,37 @@ export interface DurableBatchProcessResult {
   logs: SyncVerifyLogEntry[];
 }
 
+/**
+ * Worker-wire form of {@link DurableBatchProcessResult}.
+ *
+ * Returning verified Quad objects through `postMessage()` structured-clones
+ * every accepted quad back into the requester heap. The requester already
+ * retains the original input arrays, so that clone briefly doubles the
+ * complete durable phase immediately before store serialization. Return only
+ * indexes across the worker boundary and rebuild arrays of references to the
+ * caller-owned quads on the main thread.
+ */
+export interface DurableBatchProcessWireResult
+  extends Omit<DurableBatchProcessResult, 'verifiedData' | 'verifiedMeta'> {
+  verifiedDataIndexes: number[];
+  verifiedMetaIndexes: number[];
+}
+
+type WorkerOperations = {
+  verify: { args: [Quad[], Quad[], boolean]; result: SyncVerifyResult };
+  parseAndFilter: { args: [string, string, string]; result: SyncParseResult };
+  processSharedMemory: { args: [Quad[], Quad[]]; result: SharedMemoryProcessResult };
+  processDurableBatch: { args: [Quad[], Quad[], boolean, DurableBatchVerificationMode]; result: DurableBatchProcessWireResult };
+  processSharedMemoryBatch: {
+    args: [Quad[], Quad[], string, readonly string[] | undefined, readonly string[] | undefined];
+    result: SharedMemoryBatchProcessResult;
+  };
+};
+
 export class SyncVerifyWorker {
   private readonly worker: Worker;
+  private closing: Promise<void> | undefined;
+  private failure: Error | undefined;
   private nextId = 0;
   private readonly pending = new Map<number, {
     resolve: (value: any) => void;
@@ -149,53 +208,75 @@ export class SyncVerifyWorker {
       );
     }
 
-    this.worker = new Worker(workerPath);
-    this.worker.on('message', (message: { id: number; result?: SyncVerifyResult; error?: string }) => {
+    this.worker = new Worker(workerPath, { env: workerThreadEnv() });
+    this.worker.on('message', (message: { id: number; result?: unknown; error?: string }) => {
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
       if (message.error) pending.reject(new Error(message.error));
       else pending.resolve(message.result);
     });
-    this.worker.on('error', (error) => {
-      for (const [, pending] of this.pending) pending.reject(error);
-      this.pending.clear();
+    this.worker.on('error', error => this.fail(error));
+    this.worker.on('exit', code => this.fail(new Error(`Sync verification worker exited (${code})`)));
+  }
+
+  private fail(error: Error): void {
+    this.failure ??= error;
+    for (const pending of this.pending.values()) pending.reject(this.failure);
+    this.pending.clear();
+  }
+
+  private dispatch<M extends keyof WorkerOperations>(
+    method: M, ...args: WorkerOperations[M]['args']
+  ): Promise<WorkerOperations[M]['result']> {
+    if (this.failure) return Promise.reject(this.failure);
+    const id = this.nextId++;
+    return new Promise<WorkerOperations[M]['result']>((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      try { this.worker.postMessage({ id, method, args }); }
+      catch (error) { this.pending.delete(id); reject(error); }
     });
   }
 
   verify(dataQuads: Quad[], metaQuads: Quad[], acceptUnverified: boolean): Promise<SyncVerifyResult> {
-    const id = this.nextId++;
-    return new Promise<SyncVerifyResult>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, method: 'verify', args: [dataQuads, metaQuads, acceptUnverified] });
-    });
+    return this.dispatch('verify', dataQuads, metaQuads, acceptUnverified);
   }
 
   parseAndFilter(nquadsText: string, graphUri: string, contextGraphId: string): Promise<SyncParseResult> {
-    const id = this.nextId++;
-    return new Promise<SyncParseResult>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, method: 'parseAndFilter', args: [nquadsText, graphUri, contextGraphId] });
-    });
+    return this.dispatch('parseAndFilter', nquadsText, graphUri, contextGraphId);
   }
 
   processSharedMemory(wsDataQuads: Quad[], wsMetaQuads: Quad[]): Promise<SharedMemoryProcessResult> {
-    const id = this.nextId++;
-    return new Promise<SharedMemoryProcessResult>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, method: 'processSharedMemory', args: [wsDataQuads, wsMetaQuads] });
-    });
+    return this.dispatch('processSharedMemory', wsDataQuads, wsMetaQuads);
   }
 
+  /**
+   * Array membership and order are snapshotted before dispatch. Callers must
+   * keep the Quad objects themselves immutable until the returned promise
+   * settles so the caller-owned references still match the worker snapshot.
+   */
   processDurableBatch(
-    dataQuads: Quad[],
-    metaQuads: Quad[],
+    dataQuads: readonly Quad[],
+    metaQuads: readonly Quad[],
     acceptUnverified: boolean,
+    mode: DurableBatchVerificationMode = { kind: 'fullSnapshot' },
   ): Promise<DurableBatchProcessResult> {
-    const id = this.nextId++;
-    return new Promise<DurableBatchProcessResult>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, method: 'processDurableBatch', args: [dataQuads, metaQuads, acceptUnverified] });
+    // Preserve the array membership/order that the worker verifies without
+    // cloning the Quad object graph on the caller side. Callers may resize or
+    // reorder their arrays once this method returns.
+    const stableDataQuads = dataQuads.slice();
+    const stableMetaQuads = metaQuads.slice();
+    return this.dispatch('processDurableBatch', stableDataQuads, stableMetaQuads, acceptUnverified, mode).then((wireResult) => {
+      const {
+        verifiedDataIndexes,
+        verifiedMetaIndexes,
+        ...summary
+      } = wireResult;
+      return {
+        ...summary,
+        verifiedData: selectQuadReferences(stableDataQuads, verifiedDataIndexes, 'data'),
+        verifiedMeta: selectQuadReferences(stableMetaQuads, verifiedMetaIndexes, 'meta'),
+      };
     });
   }
 
@@ -206,18 +287,31 @@ export class SyncVerifyWorker {
     registeredSubGraphNames?: readonly string[],
     excludedSubGraphNames?: readonly string[],
   ): Promise<SharedMemoryBatchProcessResult> {
-    const id = this.nextId++;
-    return new Promise<SharedMemoryBatchProcessResult>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({
-        id,
-        method: 'processSharedMemoryBatch',
-        args: [wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames],
-      });
-    });
+    return this.dispatch('processSharedMemoryBatch', wsDataQuads, wsMetaQuads, contextGraphId,
+      registeredSubGraphNames, excludedSubGraphNames);
   }
 
   async close(): Promise<void> {
-    await this.worker.terminate();
+    if (!this.closing) {
+      this.fail(new Error('Sync verification worker closed'));
+      this.closing = this.worker.terminate().then(() => undefined);
+    }
+    await this.closing;
   }
+}
+
+function selectQuadReferences(
+  source: Quad[],
+  indexes: readonly number[],
+  phase: 'data' | 'meta',
+): Quad[] {
+  const selected = new Array<Quad>(indexes.length);
+  for (let i = 0; i < indexes.length; i++) {
+    const index = indexes[i];
+    if (!Number.isSafeInteger(index) || index < 0 || index >= source.length) {
+      throw new Error(`Sync verify worker returned an invalid ${phase} quad index: ${index}`);
+    }
+    selected[i] = source[index];
+  }
+  return selected;
 }

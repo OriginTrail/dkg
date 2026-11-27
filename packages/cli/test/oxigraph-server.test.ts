@@ -18,76 +18,50 @@
  * production code path; only the supervised binary's identity differs, and
  * the binary's own behaviour is real, not emitted by the test.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdtemp, rm, writeFile, chmod } from 'node:fs/promises';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:net';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+import {
+  createManagedOxigraphSparqlStoreV1,
+} from '@origintrail-official/dkg-storage';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
-
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+import {
+  invalidateExternalStoreQuadsCache,
+  peekCachedExternalStoreQuads,
+  requestExternalStoreQuads,
+} from '../src/daemon/store-quads-cache.js';
+import { OXIGRAPH_WATCHDOG_OOM_MARKER } from '../src/daemon/oxigraph-parent-watchdog.js';
+import {
+  childOwnsListenPort,
+  findListenOwnerPid,
+} from '../src/daemon/oxigraph-listen-port.js';
+import {
+  createOxigraphStandinFixture,
+  fetchPid,
+  freePort,
+  portAnswers,
+  sleep,
+  type OxigraphStandinFixture,
+} from './fixtures/oxigraph-server-real-fixture.js';
 
 let dir: string;
 let standin: string;
+let standinFixture: OxigraphStandinFixture;
 
-// A real port that is free at allocation time. The OS hands us an ephemeral
-// port; we close the probe listener and reuse the number immediately.
-async function freePort(): Promise<number> {
-  return await new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.once('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const addr = srv.address();
-      if (!addr || typeof addr === 'string') return reject(new Error('no port'));
-      const port = addr.port;
-      srv.close(() => resolve(port));
-    });
-  });
+async function fetchArgs(port: number): Promise<string[]> {
+  const res = await fetch(`http://127.0.0.1:${port}/args`);
+  return await res.json() as string[];
 }
 
-async function fetchPid(port: number): Promise<number> {
-  const res = await fetch(`http://127.0.0.1:${port}/pid`);
-  return Number(await res.text());
-}
-
-async function portAnswers(port: number): Promise<boolean> {
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/query`, { signal: AbortSignal.timeout(500) });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
 
 beforeAll(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'oxi-server-real-'));
-  standin = join(dir, 'oxigraph-standin.cjs');
-  await writeFile(
-    standin,
-    `#!/usr/bin/env node
-// Real stand-in server with oxigraph's CLI surface. Binds a REAL port,
-// answers the readiness probe, exposes its pid, exits 1 on a REAL bind
-// failure, exits 0 on SIGTERM.
-const http = require('node:http');
-const bindIdx = process.argv.indexOf('--bind');
-const [host, port] = process.argv[bindIdx + 1].split(':');
-const srv = http.createServer((req, res) => {
-  if (req.url === '/pid') { res.statusCode = 200; res.end(String(process.pid)); return; }
-  res.statusCode = 200;
-  res.setHeader('Content-Type', 'application/sparql-results+json');
-  res.end(JSON.stringify({ head: {}, boolean: true }));
-});
-srv.on('error', (e) => { console.error('bind failed: ' + e.message); process.exit(1); });
-srv.listen(Number(port), host);
-process.on('SIGTERM', () => { srv.close(() => process.exit(0)); setTimeout(() => process.exit(0), 100).unref(); });
-`,
-    'utf8',
-  );
-  await chmod(standin, 0o755);
+  standinFixture = await createOxigraphStandinFixture();
+  dir = standinFixture.directory;
+  standin = standinFixture.binaryPath;
 });
 
 afterAll(async () => {
-  await rm(dir, { recursive: true, force: true }).catch(() => {});
+  await standinFixture.cleanup();
 });
 
 function startOpts(port: number, extra: Record<string, unknown> = {}) {
@@ -102,10 +76,144 @@ function startOpts(port: number, extra: Record<string, unknown> = {}) {
     restartBackoffMaxMs: 200,
     log: () => {},
     ...extra,
-  };
+  } as { binaryPath: string; location: string; port: number } & Record<string, unknown>;
 }
 
 describe('startOxigraphServer (real child processes)', () => {
+  // A real child launched directly (the Windows launch, child-only signals)
+  // whose `kill` refuses the given signals the way Node reports it: an
+  // `error` event while the process keeps running.
+  const refusingSpawn = (refuse: (signal: NodeJS.Signals | number | undefined) => boolean) => {
+    const children: import('node:child_process').ChildProcess[] = [];
+    const spawnProcess = ((command: string, args: readonly string[], options: Parameters<typeof spawn>[2]) => {
+      const child = spawn(command, args, options);
+      const kill = child.kill.bind(child);
+      child.kill = (signal?: NodeJS.Signals | number) => {
+        if (!refuse(signal)) return kill(signal);
+        child.emit('error', Object.assign(new Error(`kill ${String(signal)} EPERM`), { code: 'EPERM' }));
+        return false;
+      };
+      children.push(child);
+      return child;
+    }) as typeof spawn;
+    return { children, spawnProcess };
+  };
+
+  it('escalates to SIGKILL when the SIGTERM of stop() is refused', async () => {
+    const port = await freePort();
+    const lines: string[] = [];
+    const { children, spawnProcess } = refusingSpawn((signal) => signal === 'SIGTERM');
+    const handle = await startOxigraphServer(startOpts(port, {
+      platform: 'win32',
+      stopGraceMs: 200,
+      log: (line: string) => lines.push(line),
+      io: { spawn: spawnProcess },
+    }));
+    try {
+      const started = Date.now();
+      await handle.stop();
+      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(children[0].signalCode).toBe('SIGKILL');
+      expect(lines.join('\n')).toContain('did not exit on SIGTERM; sending SIGKILL');
+      expect(lines.join('\n')).toContain('server stopped');
+    } finally {
+      try { process.kill(children[0].pid!, 'SIGKILL'); } catch { /* already gone */ }
+    }
+  });
+
+  it('stops waiting, and says so, when every signal of stop() is refused', async () => {
+    const port = await freePort();
+    const lines: string[] = [];
+    const { children, spawnProcess } = refusingSpawn(() => true);
+    const handle = await startOxigraphServer(startOpts(port, {
+      platform: 'win32',
+      stopGraceMs: 200,
+      log: (line: string) => lines.push(line),
+      io: { spawn: spawnProcess },
+    }));
+    try {
+      const started = Date.now();
+      await handle.stop();
+      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(children[0].exitCode).toBeNull();
+      expect(children[0].signalCode).toBeNull();
+      expect(lines.join('\n')).toContain(`server pid ${children[0].pid} did not exit 400ms after SIGTERM; not waiting any longer`);
+      expect(lines.join('\n')).not.toContain('server stopped');
+    } finally {
+      process.kill(children[0].pid!, 'SIGKILL');
+    }
+  });
+
+  it('threads memory limits through systemd launch, descendant readiness, and listener cgroup sampling', async () => {
+    const port = await freePort();
+    let launchedCommand = '';
+    let launchedArgs: readonly string[] = [];
+    let launchedEnv: NodeJS.ProcessEnv | undefined;
+    let ownershipPolicy: 'child-only' | 'process-tree' | undefined;
+    const snapshotPids: number[] = [];
+    const resolvedListenerPid = 424_242;
+
+    const injectedSpawn = ((command: string, args: readonly string[], options: Parameters<typeof spawn>[2]) => {
+      launchedCommand = command;
+      launchedArgs = args;
+      launchedEnv = options?.env;
+      const binaryIndex = args.indexOf(standin);
+      expect(binaryIndex).toBeGreaterThan(0);
+      return spawn(standin, args.slice(binaryIndex + 1), options);
+    }) as typeof spawn;
+
+    const handle = await startOxigraphServer(startOpts(port, {
+      memoryLimits: { highMiB: 128, maxMiB: 256 },
+      platform: 'linux',
+      io: {
+        spawn: injectedSpawn,
+        findListenOwnerPid: async (child: import('node:child_process').ChildProcess, _port: number, _host: string, ownership?: 'child-only' | 'process-tree') => {
+          ownershipPolicy = ownership;
+          expect(child.pid).toBeDefined();
+          return resolvedListenerPid;
+        },
+        readCgroupOomSnapshot: (pid: number) => {
+          snapshotPids.push(pid);
+          return { dir: '/sys/fs/cgroup/dkg-test-oxi', oomKill: 0 };
+        },
+      },
+    }));
+    try {
+      expect(launchedCommand).toBe('systemd-run');
+      expect(launchedArgs).toContain('--property=MemoryHigh=128M');
+      expect(launchedArgs).toContain('--property=MemoryMax=256M');
+      expect(launchedArgs).toContain('--property=MemorySwapMax=0');
+      expect(launchedEnv?.XDG_RUNTIME_DIR).toMatch(/^\/run\/user\/\d+$/);
+      expect(ownershipPolicy).toBe('process-tree');
+      expect(snapshotPids).toEqual([resolvedListenerPid]);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it.runIf(process.platform !== 'win32')('accepts a descendant process as the verified listener owner', async () => {
+    const port = await freePort();
+    const wrapper = spawn('/bin/sh', [
+      '-c',
+      '"$@" & child=$!; trap \'kill -TERM "$child" 2>/dev/null; wait "$child" 2>/dev/null\' TERM; wait "$child"',
+      'wrapper',
+      standin,
+      'serve',
+      '--location', dir,
+      '--bind', `127.0.0.1:${port}`,
+    ], { stdio: 'ignore' });
+    try {
+      for (let i = 0; i < 50 && !(await portAnswers(port)); i++) await sleep(20);
+      const listenerPid = await fetchPid(port);
+      expect(await childOwnsListenPort(wrapper, port, '127.0.0.1')).toBe(false);
+      expect(await childOwnsListenPort(wrapper, port, '127.0.0.1', 'process-tree')).toBe(true);
+      expect(await findListenOwnerPid(wrapper, port, '127.0.0.1', 'process-tree')).toBe(listenerPid);
+    } finally {
+      wrapper.kill('SIGTERM');
+      await new Promise<void>((resolve) => wrapper.once('exit', () => resolve()));
+    }
+  });
+
   it('spawns the binary and resolves once the real readiness probe answers', async () => {
     const port = await freePort();
     const handle = await startOxigraphServer(startOpts(port));
@@ -114,6 +222,19 @@ describe('startOxigraphServer (real child processes)', () => {
       expect(handle.queryEndpoint).toContain(`:${port}`);
       // The child really owns a really-bound socket.
       expect(await portAnswers(port)).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('passes the native Oxigraph query timeout to the child process', async () => {
+    const port = await freePort();
+    const handle = await startOxigraphServer(startOpts(port, { queryTimeoutS: 35 }));
+    try {
+      const args = await fetchArgs(port);
+      const timeoutIndex = args.indexOf('--timeout-s');
+      expect(timeoutIndex).toBeGreaterThanOrEqual(0);
+      expect(args[timeoutIndex + 1]).toBe('35');
     } finally {
       await handle.stop();
     }
@@ -156,18 +277,92 @@ describe('startOxigraphServer (real child processes)', () => {
     expect(await portAnswers(port)).toBe(false);
   });
 
-  it('restarts the child after an unexpected crash (real SIGKILL), with a new pid', async () => {
+  it('retains confirmed reclamation across two spontaneous crashes without requesting a third restart', async () => {
     const port = await freePort();
     const handle = await startOxigraphServer(startOpts(port));
     try {
+      let pid = await fetchPid(port);
+      expect(pid).toBeGreaterThan(0);
+      for (const generation of [1, 2]) {
+        // Genuinely crash the supervised child from outside. Launch must first
+        // reclaim its physical store ownership before the replacement is ready.
+        process.kill(pid, 'SIGKILL');
+        let replacement = 0;
+        for (let i = 0; i < 100; i++) {
+          await sleep(100);
+          try {
+            replacement = await fetchPid(port);
+            if (replacement && replacement !== pid) break;
+          } catch { /* not back yet */ }
+        }
+        expect(replacement, 'supervisor never respawned the crashed child').toBeGreaterThan(0);
+        expect(replacement).not.toBe(pid);
+        pid = replacement;
+        for (let i = 0; i < 50 && handle.getRecoveryState().recovering; i++) await sleep(20);
+        expect(handle.getRecoveryState()).toEqual({ recovering: false, admissionsPaused: false, generation });
+      }
+      for (const generation of [0, 1]) {
+        const phases: string[] = [];
+        const dispose = handle.requestRecovery!(generation, 'old abandoned work')!.subscribe(phase => phases.push(phase));
+        expect(phases).toEqual([generation === 0 ? 'terminated' : 'reopened']); dispose();
+      }
+      expect(handle.requestRecovery!(3, 'unconfirmed future')).toBeUndefined();
+      expect(handle.getRecoveryState()).toEqual({ recovering: false, admissionsPaused: false, generation: 2 });
+      expect(await fetchPid(port)).toBe(pid);
+    } finally { await handle.stop(); }
+  });
+
+  it('drops a store count that failed while the child was recovering once it is healthy again', async () => {
+    const port = await freePort();
+    // A long restart backoff keeps the respawn well behind the count below.
+    const handle = await startOxigraphServer(startOpts(port, {
+      restartBackoffBaseMs: 500,
+      restartBackoffMaxMs: 500,
+    }));
+    const recoveringAgent = {
+      store: {
+        query: async () => {
+          throw new Error('Managed Oxigraph is recovering; query was not started');
+        },
+      },
+    } as unknown as Parameters<typeof requestExternalStoreQuads>[0];
+    try {
+      process.kill(await fetchPid(port), 'SIGKILL');
+      for (let i = 0; i < 100 && !handle.getRecoveryState().recovering; i++) await sleep(10);
+      expect(handle.getRecoveryState().recovering).toBe(true);
+
+      // `dkg status` asks for a count during the outage, and it fails.
+      requestExternalStoreQuads(recoveringAgent, Date.now());
+      await sleep(0);
+      expect(peekCachedExternalStoreQuads(Date.now())).toMatchObject({ storeQuadsStatus: 'unreachable' });
+
+      for (let i = 0; i < 100 && handle.getRecoveryState().recovering; i++) await sleep(50);
+      expect(handle.getRecoveryState().recovering).toBe(false);
+      expect(peekCachedExternalStoreQuads(Date.now())).toEqual({
+        storeQuads: null,
+        storeQuadsStatus: 'not-requested',
+        storeQuadsAgeMs: null,
+        storeQuadsRefreshing: false,
+      });
+    } finally {
+      await handle.stop();
+      invalidateExternalStoreQuadsCache();
+    }
+  });
+
+  it('restarts the child on an explicit recovery request and coalesces duplicates', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    const handle = await startOxigraphServer(startOpts(port, { log: (line: string) => logs.push(line) }));
+    try {
       const pid1 = await fetchPid(port);
-      expect(pid1).toBeGreaterThan(0);
+      expect(handle.requestRestart('query exceeded the managed SPARQL client deadline')).toBe(true);
+      // Recovery admission closes before asynchronous listener verification,
+      // so a new store operation cannot race the signal boundary.
+      expect(handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: true, generation: 0 });
+      expect(handle.requestRestart('duplicate timeout')).toBe(false);
 
-      // Genuinely crash the supervised child from outside.
-      process.kill(pid1, 'SIGKILL');
-
-      // The supervisor must respawn it (backoff base 100ms). Poll until the
-      // probe answers again with a DIFFERENT real pid.
       let pid2 = 0;
       for (let i = 0; i < 100; i++) {
         await sleep(100);
@@ -175,13 +370,220 @@ describe('startOxigraphServer (real child processes)', () => {
           pid2 = await fetchPid(port);
           if (pid2 && pid2 !== pid1) break;
         } catch {
-          /* not back yet */
+          /* recovery is still in progress */
         }
       }
-      expect(pid2, 'supervisor never respawned the crashed child').toBeGreaterThan(0);
+      expect(pid2, 'supervisor never recovered the explicitly restarted child').toBeGreaterThan(0);
       expect(pid2).not.toBe(pid1);
+      for (let i = 0; i < 50 && handle.getRecoveryState().recovering; i++) await sleep(20);
+      expect(handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: false, generation: 1 });
+      expect(logs.some((line) => line.includes('server terminated for recovery'))).toBe(true);
     } finally {
       await handle.stop();
+    }
+  });
+
+  it('exposes one generation handle and keeps signalling distinct from physical reclamation', async () => {
+    const port = await freePort();
+    const phases: string[] = [];
+    const handle = await startOxigraphServer(startOpts(port, {
+      restartBackoffBaseMs: 20, restartBackoffMaxMs: 20,
+      io: { killProcess: () => true }, // Accepted signal, deliberately no actual termination.
+    }));
+    let unsubscribe: (() => void) | undefined;
+    try {
+      const pid = await fetchPid(port);
+      const recovery = handle.requestRecovery!(0, 'held physical termination');
+      expect(recovery?.generation).toBe(0);
+      unsubscribe = recovery!.subscribe(phase => phases.push(phase));
+      expect(handle.requestRecovery!(0, 'duplicate')).toBe(recovery);
+      for (let i = 0; i < 50 && !phases.includes('signalled'); i++) await sleep(10);
+      expect(phases).toEqual(['verifying', 'signalled']);
+      expect(await fetchPid(port)).toBe(pid);
+      expect(handle.getRecoveryState().generation).toBe(1); // State is not termination proof.
+      process.kill(pid, 'SIGKILL');
+      for (let i = 0; i < 100 && !phases.includes('reopened'); i++) await sleep(20);
+      expect(phases).toEqual(['verifying', 'signalled', 'terminated', 'reopened']);
+      expect(await fetchPid(port)).not.toBe(pid);
+      const late: string[] = [];
+      recovery!.subscribe(phase => late.push(phase))();
+      expect(late).toEqual(['reopened']);
+    } finally { unsubscribe?.(); await handle.stop(); }
+  });
+
+  it('cancels recovery without signalling when listener ownership changes', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    let reportChangedOwner = false;
+    const killProcess = vi.fn(() => true) as unknown as typeof process.kill;
+    const originalFetch = globalThis.fetch;
+    const handle = await startOxigraphServer(startOpts(port, {
+      log: (line: string) => logs.push(line),
+      io: {
+        killProcess,
+        findListenOwnerPid: async (child, listenerPort, host, ownership) => {
+          const actual = await findListenOwnerPid(child, listenerPort, host, ownership);
+          return reportChangedOwner && actual !== null ? actual + 100_000 : actual;
+        },
+      },
+    }));
+    try {
+      const pid = await fetchPid(port);
+      let rejectUpdate!: (error: unknown) => void;
+      let markUpdateStarted!: () => void;
+      const updateStarted = new Promise<void>((resolve) => { markUpdateStarted = resolve; });
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(init?.body ?? '').startsWith('INSERT')) {
+          markUpdateStarted();
+          return await new Promise<Response>((_resolve, reject) => { rejectUpdate = reject; });
+        }
+        return await originalFetch(input, init);
+      }) as typeof fetch;
+      const store = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: `http://127.0.0.1:${port}/query`,
+        updateEndpoint: `http://127.0.0.1:${port}/update`,
+        timeout: 5_000,
+      }, {
+        getRecoveryState: () => handle.getRecoveryState(),
+      });
+      const updateFailure = store.insert([{
+        subject: 'http://ex.org/s',
+        predicate: 'http://ex.org/p',
+        object: '"value"',
+        graph: 'http://ex.org/g',
+      }]).catch((error) => error);
+      await updateStarted;
+      reportChangedOwner = true;
+      const progress: string[] = [];
+      const recovery = handle.requestRecovery!(0, 'ownership-negative-path');
+      expect(recovery).toBeDefined();
+      recovery!.subscribe(phase => progress.push(phase));
+
+      for (let i = 0; i < 50 && !logs.some((line) => line.includes('ownership changed')); i++) {
+        await sleep(20);
+      }
+
+      expect(killProcess).not.toHaveBeenCalled();
+      expect(progress).toEqual(['verifying', 'cancelled']);
+      expect(handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: false, generation: 0 });
+      const definitiveError = new Error('definitive backend failure after cancelled restart');
+      rejectUpdate(definitiveError);
+      expect(await updateFailure).toBe(definitiveError);
+      expect(await fetchPid(port)).toBe(pid);
+      expect(await portAnswers(port)).toBe(true);
+      expect(logs.some((line) => line.includes('ownership changed'))).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await handle.stop();
+    }
+  });
+
+  it.each(['throws', 'returns false'] as const)(
+    'rolls back a restart whose SIGKILL %s and accepts a later request',
+    async (failureMode) => {
+      const port = await freePort();
+      const logs: string[] = [];
+      let signalAttempts = 0;
+      const killProcess = vi.fn(() => {
+        signalAttempts += 1;
+        if (failureMode === 'returns false') return false;
+        const error = new Error('operation not permitted') as NodeJS.ErrnoException;
+        error.code = 'EPERM';
+        throw error;
+      }) as unknown as typeof process.kill;
+      const handle = await startOxigraphServer(startOpts(port, {
+        log: (line: string) => logs.push(line),
+        io: { killProcess },
+      }));
+      try {
+        const pid = await fetchPid(port);
+        expect(handle.requestRestart(`signal failure: ${failureMode}`)).toBe(true);
+        for (let i = 0; i < 50 && signalAttempts < 1; i++) await sleep(20);
+
+        expect(signalAttempts).toBe(1);
+        expect(handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: false, generation: 0 });
+        expect(await fetchPid(port)).toBe(pid);
+        expect(await portAnswers(port)).toBe(true);
+
+        // Rollback must restore ready, not strand the supervisor in a request
+        // phase that rejects every future recovery attempt.
+        expect(handle.requestRestart(`second signal failure: ${failureMode}`)).toBe(true);
+        for (let i = 0; i < 50 && signalAttempts < 2; i++) await sleep(20);
+        expect(signalAttempts).toBe(2);
+        expect(handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: false, generation: 0 });
+        expect(logs.filter((line) => line.includes('could not signal')).length).toBe(2);
+      } finally {
+        await handle.stop();
+      }
+    },
+  );
+
+  it('targets the verified Oxigraph listener when a systemd-style wrapper owns the child', async () => {
+    const port = await freePort();
+    const wrapperPids: number[] = [];
+    const recoverySignals: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    const wrapperProgram = `
+      const { spawn } = require('node:child_process');
+      const [command, ...args] = process.argv.slice(1);
+      const child = spawn(command, args, { stdio: 'inherit' });
+      process.on('SIGTERM', () => child.kill('SIGTERM'));
+      child.once('exit', (code, signal) => process.exit(signal === 'SIGKILL' ? 137 : (code ?? 1)));
+    `;
+    const injectedSpawn = ((_command: string, args: readonly string[], options: Parameters<typeof spawn>[2]) => {
+      const binaryIndex = args.indexOf(standin);
+      const wrapper = spawn(
+        process.execPath,
+        ['-e', wrapperProgram, standin, ...args.slice(binaryIndex + 1)],
+        options,
+      );
+      if (wrapper.pid !== undefined) wrapperPids.push(wrapper.pid);
+      return wrapper;
+    }) as typeof spawn;
+    const killProcess = ((pid: number, signal?: NodeJS.Signals | number) => {
+      recoverySignals.push({ pid, signal: signal ?? 'SIGTERM' });
+      return process.kill(pid, signal);
+    }) as typeof process.kill;
+    const handle = await startOxigraphServer(startOpts(port, {
+      memoryLimits: { maxMiB: 256 },
+      platform: 'linux',
+      io: {
+        spawn: injectedSpawn,
+        killProcess,
+        findListenOwnerPid: async () => await fetchPid(port),
+      },
+    }));
+    try {
+      const pid1 = await fetchPid(port);
+      expect(handle.requestRestart('client deadline fallback')).toBe(true);
+
+      let pid2 = 0;
+      for (let i = 0; i < 100; i++) {
+        await sleep(100);
+        try {
+          pid2 = await fetchPid(port);
+          if (pid2 && pid2 !== pid1) break;
+        } catch {
+          /* recovery is still in progress */
+        }
+      }
+      expect(pid2, 'supervisor did not replace the scoped listener').toBeGreaterThan(0);
+      expect(pid2).not.toBe(pid1);
+      expect(wrapperPids[0]).toBeGreaterThan(0);
+      expect(pid1).not.toBe(wrapperPids[0]);
+      expect(recoverySignals).toContainEqual({ pid: pid1, signal: 'SIGKILL' });
+      expect(recoverySignals.some((entry) => entry.pid === wrapperPids[0])).toBe(false);
+    } finally {
+      await handle.stop();
+      // Failure-path cleanup if a regression orphaned the listener behind its wrapper.
+      try {
+        process.kill(await fetchPid(port), 'SIGKILL');
+      } catch {
+        /* port is already free */
+      }
     }
   });
 
@@ -190,9 +592,236 @@ describe('startOxigraphServer (real child processes)', () => {
     const handle = await startOxigraphServer(startOpts(port));
     expect(await portAnswers(port)).toBe(true);
     await handle.stop();
+    expect(handle.getRecoveryState().recovering).toBe(true);
+    expect(handle.requestRestart('after-stop')).toBe(false);
     // Wait well past restartBackoffMaxMs: a buggy supervisor would have
     // respawned by now and the probe would answer.
     await sleep(600);
     expect(await portAnswers(port)).toBe(false);
   });
+
+
+});
+
+describe('startOxigraphServer OOM classification in the restart log', () => {
+  // The cgroup OOM readers are the one piece that can't be exercised against a
+  // real cgroup portably in CI, so we inject ONLY those while keeping the REAL
+  // child lifecycle (genuine SIGKILL -> real exit event -> the supervisor's
+  // exit handler). This proves startOxigraphServer captures the per-child
+  // baseline and surfaces the operator-facing OOM note — coverage the
+  // parser-only oxigraph-memory tests cannot provide.
+  async function waitForLog(logs: string[], re: RegExp, ms = 3_000): Promise<boolean> {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (logs.some((l) => re.test(l))) return true;
+      await sleep(25);
+    }
+    return false;
+  }
+
+  it('attributes a scoped wrapper SIGKILL using the resolved Oxigraph listener cgroup', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    const listenerPid = 777_777;
+    const snapshotPids: number[] = [];
+    let launched: import('node:child_process').ChildProcess | undefined;
+    let oomKillAtExit = 5;
+    const injectedSpawn = ((_command: string, args: readonly string[], options: Parameters<typeof spawn>[2]) => {
+      const binaryIndex = args.indexOf(standin);
+      launched = spawn(standin, args.slice(binaryIndex + 1), options);
+      return launched;
+    }) as typeof spawn;
+
+    const handle = await startOxigraphServer(startOpts(port, {
+      memoryLimits: { maxMiB: 256 },
+      platform: 'linux',
+      log: (message: string) => logs.push(message),
+      io: {
+        spawn: injectedSpawn,
+        findListenOwnerPid: async () => listenerPid,
+        readCgroupOomSnapshot: (pid: number) => {
+          snapshotPids.push(pid);
+          return { dir: '/sys/fs/cgroup/dkg-scoped-oxi', oomKill: 5 };
+        },
+        readCgroupOomKill: () => oomKillAtExit,
+      },
+    }));
+    try {
+      expect(snapshotPids).toEqual([listenerPid]);
+      oomKillAtExit = 6;
+      launched!.kill('SIGKILL');
+      expect(await waitForLog(logs, /OOM-killed by cgroup memory cap/)).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('attributes a scoped command OOM when its wrapper translates SIGKILL to exit 137', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    let oomKillAtExit = 9;
+    const wrapperProgram = `
+      const { spawn } = require('node:child_process');
+      const [command, ...args] = process.argv.slice(1);
+      const child = spawn(command, args, { stdio: 'inherit' });
+      process.on('SIGTERM', () => child.kill('SIGTERM'));
+      child.once('exit', () => process.exit(137));
+    `;
+    const injectedSpawn = ((_command: string, args: readonly string[], options: Parameters<typeof spawn>[2]) => {
+      const binaryIndex = args.indexOf(standin);
+      return spawn(
+        process.execPath,
+        ['-e', wrapperProgram, standin, ...args.slice(binaryIndex + 1)],
+        options,
+      );
+    }) as typeof spawn;
+
+    const handle = await startOxigraphServer(startOpts(port, {
+      memoryLimits: { maxMiB: 256 },
+      platform: 'linux',
+      log: (message: string) => logs.push(message),
+      io: {
+        spawn: injectedSpawn,
+        findListenOwnerPid: async () => await fetchPid(port),
+        readCgroupOomSnapshot: () => ({ dir: '/sys/fs/cgroup/dkg-scoped-oxi', oomKill: 9 }),
+        readCgroupOomKill: () => oomKillAtExit,
+      },
+    }));
+    try {
+      oomKillAtExit = 10;
+      process.kill(await fetchPid(port), 'SIGKILL');
+      expect(await waitForLog(logs, /code=137.*OOM-killed by cgroup memory cap/)).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('uses the scoped watchdog marker when systemd removes memory.events before wrapper exit', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    const wrapperProgram = `
+      const { spawn } = require('node:child_process');
+      const [command, ...args] = process.argv.slice(1);
+      const child = spawn(command, args, { stdio: 'inherit' });
+      process.on('SIGTERM', () => child.kill('SIGTERM'));
+      child.once('exit', () => {
+        process.stderr.write(${JSON.stringify(OXIGRAPH_WATCHDOG_OOM_MARKER)} + '\\n');
+        process.exit(0);
+      });
+    `;
+    const injectedSpawn = ((_command: string, args: readonly string[], options: Parameters<typeof spawn>[2]) => {
+      const binaryIndex = args.indexOf(standin);
+      return spawn(
+        process.execPath,
+        ['-e', wrapperProgram, standin, ...args.slice(binaryIndex + 1)],
+        options,
+      );
+    }) as typeof spawn;
+
+    const handle = await startOxigraphServer(startOpts(port, {
+      memoryLimits: { maxMiB: 256 },
+      platform: 'linux',
+      log: (message: string) => logs.push(message),
+      io: {
+        spawn: injectedSpawn,
+        findListenOwnerPid: async () => await fetchPid(port),
+        readCgroupOomSnapshot: () => ({ dir: '/sys/fs/cgroup/vanished', oomKill: 12 }),
+        readCgroupOomKill: () => null,
+      },
+    }));
+    try {
+      process.kill(await fetchPid(port), 'SIGKILL');
+      expect(await waitForLog(logs, /code=0.*OOM-killed by cgroup memory cap/)).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('labels an OOM-kill when the cgroup oom_kill count increments across the exit', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    const snapshotPids: number[] = [];
+    const oomDir = '/sys/fs/cgroup/oxi';
+    let oomKillAtExit = 5;
+    const handle = await startOxigraphServer(
+      startOpts(port, {
+        log: (m: string) => logs.push(m),
+        io: {
+          readCgroupOomSnapshot: (pid: number) => {
+            snapshotPids.push(pid);
+            return { dir: oomDir, oomKill: 5 };
+          },
+          readCgroupOomKill: (dir: string) => {
+            expect(dir).toBe(oomDir);
+            return oomKillAtExit;
+          },
+        },
+      }),
+    );
+    try {
+      const pid = await fetchPid(port);
+      expect(snapshotPids[0]).toBe(pid);
+      oomKillAtExit = 6; // kernel cgroup-OOM-killed it: oom_kill 5 -> 6
+      process.kill(pid, 'SIGKILL');
+      const labelled = await waitForLog(
+        logs,
+        /server exited unexpectedly.*OOM-killed by cgroup memory cap/,
+      );
+      expect(labelled, `no OOM-labelled restart log; got: ${logs.join(' | ')}`).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('omits the OOM note when the cgroup counter increments but the child was not SIGKILLed', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    let exitReads = 0;
+    const handle = await startOxigraphServer(
+      startOpts(port, {
+        log: (m: string) => logs.push(m),
+        io: {
+          readCgroupOomSnapshot: () => ({ dir: '/sys/fs/cgroup/oxi', oomKill: 5 }),
+          readCgroupOomKill: () => {
+            exitReads += 1;
+            return 6; // would look incremented, but the child did not die by SIGKILL
+          },
+        },
+      }),
+    );
+    try {
+      const pid = await fetchPid(port);
+      process.kill(pid, 'SIGTERM');
+      const logged = await waitForLog(logs, /server exited unexpectedly/);
+      expect(logged, `no restart log; got: ${logs.join(' | ')}`).toBe(true);
+      expect(exitReads).toBe(0);
+      expect(logs.some((l) => /OOM-killed/.test(l))).toBe(false);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('omits the OOM note on a plain crash (oom_kill unchanged)', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    const handle = await startOxigraphServer(
+      startOpts(port, {
+        log: (m: string) => logs.push(m),
+        io: {
+          readCgroupOomSnapshot: () => ({ dir: '/sys/fs/cgroup/oxi', oomKill: 5 }),
+          readCgroupOomKill: () => 5, // unchanged → not an OOM-kill
+        },
+      }),
+    );
+    try {
+      const pid = await fetchPid(port);
+      process.kill(pid, 'SIGKILL');
+      const logged = await waitForLog(logs, /server exited unexpectedly/);
+      expect(logged, `no restart log; got: ${logs.join(' | ')}`).toBe(true);
+      expect(logs.some((l) => /OOM-killed/.test(l))).toBe(false);
+    } finally {
+      await handle.stop();
+    }
+  });
+
 });

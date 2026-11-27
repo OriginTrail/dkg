@@ -1,3 +1,6 @@
+import type { QueryOptions } from './query-engine.js';
+import type { StoreSchedulerBusyReason } from '@origintrail-official/dkg-storage';
+
 export type LookupType =
   | 'ENTITY_BY_UAL'
   | 'ENTITIES_BY_TYPE'
@@ -7,11 +10,14 @@ export type LookupType =
 export type QueryStatus =
   | 'OK'
   | 'ERROR'
+  | 'BUSY'
   | 'ACCESS_DENIED'
   | 'RATE_LIMITED'
   | 'NOT_FOUND'
   | 'GAS_LIMIT_EXCEEDED'
   | 'UNSUPPORTED_LOOKUP';
+
+export type NonBusyQueryStatus = Exclude<QueryStatus, 'BUSY'>;
 
 export interface QueryRequest {
   operationId: string;
@@ -25,17 +31,65 @@ export interface QueryRequest {
   timeout?: number;
 }
 
-export interface QueryResponse {
+interface QueryResponseBase {
   operationId: string;
-  status: QueryStatus;
+  truncated: boolean;
+  resultCount: number;
+}
+
+export interface QueryNonBusyResponse extends QueryResponseBase {
+  status: NonBusyQueryStatus;
   ntriples?: string;
   bindings?: string;
   entityUris?: string[];
-  truncated: boolean;
-  resultCount: number;
   gasConsumed?: number;
   error?: string;
+  code?: never;
+  retryable?: never;
+  retryAfterMs?: never;
+  reason?: never;
 }
+
+interface QueryBusyResponseBase extends QueryResponseBase {
+  status: 'BUSY';
+  error: string;
+  retryable: true;
+  retryAfterMs: number;
+  ntriples?: never;
+  bindings?: never;
+  entityUris?: never;
+  gasConsumed?: never;
+}
+
+/** The store scheduler shed the work before it started. */
+interface QueryStoreBusyResponse extends QueryBusyResponseBase {
+  code: 'STORE_BUSY';
+  reason: StoreSchedulerBusyReason;
+}
+
+/** The node's own state passed one of its internal store limits; not the request's size. */
+interface QueryStoreInternalLimitResponse extends QueryBusyResponseBase {
+  code: 'STORE_INTERNAL_LIMIT';
+  reason?: never;
+}
+
+export type QueryBusyResponse = QueryStoreBusyResponse | QueryStoreInternalLimitResponse;
+
+export type QueryResponse = QueryNonBusyResponse | QueryBusyResponse;
+
+type AssertFalse<T extends false> = T;
+type IncompleteBusyResponse = QueryResponseBase & { status: 'BUSY' };
+type ContradictoryOkResponse = QueryResponseBase & {
+  status: 'OK';
+  code: 'STORE_BUSY';
+  retryable: true;
+};
+// Compile-only contract: intentionally private so fixture types do not enter the public API.
+// eslint-disable-next-line no-unused-vars
+type QueryResponseTypeAssertions = [
+  AssertFalse<IncompleteBusyResponse extends QueryResponse ? true : false>,
+  AssertFalse<ContradictoryOkResponse extends QueryResponse ? true : false>,
+];
 
 export interface ContextGraphQueryPolicy {
   policy: 'deny' | 'public' | 'allowList';
@@ -51,3 +105,21 @@ export interface QueryAccessConfig {
   contextGraphs?: Record<string, ContextGraphQueryPolicy>;
   rateLimitPerMinute?: number;
 }
+
+/** Authorized partition and the admission needed before reading its content. */
+export interface ContextGraphPartitionRead {
+  readonly graph: string;
+  readonly admission: 'public' | 'shared-memory';
+}
+
+export interface ContextGraphNamedGraphStats {
+  graph: string;
+  entityCount: number;
+  tripleCount: number;
+}
+
+/** Typed inventory and aggregates implement partition routing, draft ownership and bounded store reads only. */
+export type ContextGraphPartitionReadOptions = Pick<QueryOptions,
+  'graphSuffix' | 'subGraphName' | 'includeSharedMemory' | 'includeWorkspace'
+  | 'includeSharedMemoryMeta' | 'draftAccess' | 'timeout' | 'maxResponseBytes'
+  | 'signal' | 'priority' | 'source'>;

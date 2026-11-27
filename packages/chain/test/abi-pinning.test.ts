@@ -152,7 +152,11 @@ const PINNED_DIGESTS: Record<string, string> = {
   // ContextGraphEscrowSwept + deposit accounting on ContextGraphs/ContextGraphStorage;
   // +contextGraphRegistrationDeposit getter/setter on ParametersStorage. Chain-local
   // ABIs refreshed in lockstep with evm-module/abi.
-  KnowledgeAssetsLifecycle:     '409efa6a580e3d374c0f53c70cd21dd6e78cd904b2f103edc9737803f0829820',
+  // Re-pinned (vendored ABI sync): the chain-local copy had fallen behind
+  // evm-module/abi; +errors `CannotWriteValueToInactiveContextGraph(uint256)` /
+  // `PublicKARequiresMerkleLeafCount(uint256)`. vendored-abi-sync.unit.test.ts
+  // now holds every vendored ABI byte-equal to its evm-module counterpart.
+  KnowledgeAssetsLifecycle:     '1b1a65084d29618cc77e34e7ebe086a384a01ff9ea98438901b01b8daa699ac6',
 
   // Re-pinned for OT-RFC-43 Option-1 (variant 1a, PR #975): deterministic
   // author-namespaced KA identity. `createKnowledgeAsset` now takes an explicit
@@ -188,7 +192,9 @@ const PINNED_DIGESTS: Record<string, string> = {
   // Merged surface: OT-RFC-53 deposit events/functions + main's KC→KA getter
   // rename (getContextGraphKCCount/At/List → getContextGraphKaCount/At/List).
   // Digests recomputed post-merge from the combined ABI.
-  ContextGraphs:                '54583e20167c37f4356247cb6bc657b0dccf6f17f99a3267427674a35a151bcf',
+  // Re-pinned (vendored ABI sync): +event
+  // `ContextGraphRegistrationDepositWaived(uint256,uint256,address)` from evm-module/abi.
+  ContextGraphs:                'c39fb7faf81da5f26782c80d53da2686d63e94fd3db419acb99f5b46b35d3cf8',
   // Repinned: decoupled sampling list (10.0.6). Adds getSamplingKaCount/At
   // (the compacted per-CG list the within-CG draw + keeper use) alongside the
   // RandomSampling-gated `swapRemoveSamplingKnowledgeAssetAt` pruning primitive
@@ -221,7 +227,10 @@ const PINNED_DIGESTS: Record<string, string> = {
   //
   // Updated PR #1083: added `ZeroShardingTableSizeLimit()` for the
   // governance guard that rejects `setShardingTableSizeLimit(0)`.
-  ParametersStorage:            'da6f8b6435f709e02d3730d04d79abe9a2ed27e04ad1a1d058ba00ebccc82aa9',
+  //
+  // Re-pinned (vendored ABI sync): +`minPcaCommitmentForCgWaiver()` getter and
+  // `setMinPcaCommitmentForCgWaiver(uint96)` setter from evm-module/abi.
+  ParametersStorage:            '2cc0ce9f09d974dfd15375c430052d14f6f29f3446c5b8906a68ab71eb476317',
   // Added PR #470 round 3: pin the V10 NFT-backed PCA contract so that
   // any drift in its events (CostCovered / WindowSettled /
   // AccountFinalSwept / TokensAddedToEpochRange consumers) or errors
@@ -244,8 +253,8 @@ const PINNED_DIGESTS: Record<string, string> = {
   // pins below capture all three surfaces; chain consumers MUST load
   // both `DKGPublishingConvictionNFT` (for ERC-721 + forwarders) and
   // `PublishingConviction` (for PCA event/error decoding) — see
-  // `getPcaLogicInterface` in `evm-adapter.ts` and the
-  // `ERROR_ABI_CONTRACTS` list update in the same file. This
+  // `getPcaLogicInterface` in `evm-adapter-errors.ts`, whose error decoder
+  // reads every vendored ABI. This
   // intentional break is documented as the v2.x → v3.0.0 wrapper
   // bump in the wrapper NatSpec.
   //
@@ -281,10 +290,54 @@ const PINNED_DIGESTS: Record<string, string> = {
   // Repinned (bulk-register-agents, 10.0.7): added owner-gated
   // `registerAgents(uint256,address[])` (no new event/error — reuses
   // AgentRegistered). Function surface change → new digest.
-  PublishingConviction:         '2f35f06c94b14f4137b5602d5fc58793bfe812bb5263c6545d9da50f479bdb29',
+  // Repinned (deterministic emission schedule, 10.0.8): added the Hub-owner
+  // batch `migrateEmissionSchedule(uint256[])` + event
+  // `EmissionScheduled(uint256,uint40,uint40,uint96,uint96)` (`scheduled`
+  // staker-shard net + `treasuryFee` treasury-shard split), the
+  // permissionless `collectTreasuryEmission(uint256,uint256)` + event
+  // `TreasuryEmissionCollected(uint256,uint256,uint96)` + errors
+  // `TreasuryNotSet()` / `InvalidCollectionRange(uint256,uint256,uint256)`,
+  // and the `TREASURY_SHARD_ID` constant getter. The staker-pool
+  // distribution of committedTRAC is now written up front at account
+  // creation (each window's budget forward-spread over the lock length,
+  // split net/fee at schedule time when a treasury is wired), so
+  // `WindowSettled` is no longer emitted (declaration retained — decoding
+  // stays valid) and `settle()` reduces to schedule-if-needed + the
+  // post-expiry topUp tail. Additive surface change → new digest.
+  // Repinned (Conviction Account service spending, OT-RFC-27, 10.1.0): added
+  // `coverServiceCost(uint256,address,bytes32,uint96)`, callable only by the
+  // Hub-registered `ServiceSubscriptions` and returning the draw split (cost,
+  // window/top-up parts, window, epoch, discount, top-up emission ranges), the
+  // event `ServiceCostCovered(uint256,address,bytes32,uint96,uint96,uint40,uint40,uint96,uint96)`
+  // and the errors `OnlyServiceSubscriptions(address)`,
+  // `ServiceFundingPausedTreasuryWired(address)` and `ZeroServiceValue()`.
+  // `coverPublishingCost` and every other entry are unchanged. Additive
+  // surface change → new digest.
+  // Repinned (Conviction Accounts pay at use time, OT-RFC-27, 10.2.0): added
+  // the permissionless batch `settleMany(uint256[])` (a name of its own, so
+  // `settle` keeps one signature and a bare `settle(id)` call stays
+  // unambiguous in ethers v6) and the error
+  // `EmissionAlreadyScheduled(uint256)`; removed the Hub-owner batch
+  // `migrateEmissionSchedule(uint256[])`; `coverServiceCost` returns the
+  // draw split without the top-up emission ranges. `settle(uint256)`,
+  // `coverPublishingCost`, and every event signature are unchanged
+  // (`EmissionScheduled` now reports each booking of closed windows).
+  PublishingConviction:         'fba9333eb367239151010b93ac0572d37f12fc39e4cecd466cc4e904b8744b3a',
   // Updated OT-RFC-51: storage surface for the above — primaryNode field on the
   // widened Account tuple + the seeded per-epoch publishing allocation getters.
   PublishingConvictionStorage:  '7eeae71f0efd9183fce232ccc669227dfd70fe4f93b4663392a0a52c1ccba859',
+
+  // The NeuroSymbolic Marketplace (OT-RFC-27):
+  // ServiceSubscriptions 1.2.0 (account grants, fundings and top-ups),
+  // ServiceSubscriptionsWallet 1.0.0 (wallet fundings and top-ups),
+  // ServiceSubscriptionsStorage 1.2.0, QueryInferenceSettlement 1.0.0 (receipt
+  // batches, the pool) and QueryInferenceStorage 1.0.0. The marketplace mixin
+  // (evm-adapter-marketplace.ts) calls all five.
+  ServiceSubscriptions:         'd5fe1b788d129d8e696a5d5d9173d901dc3bdb292ba73ff8b43c020aad872e6a',
+  ServiceSubscriptionsWallet:   '05305a5de9f76efbdabb5ef541d1e2d609ae42f647629c8e291dadcb0548edb6',
+  ServiceSubscriptionsStorage:  '559977bda39ee3a14e4f85c11aadc1035c7b879c412d2c18374f15e30e15024f',
+  QueryInferenceSettlement:     'e41753c87b56d297b2fd79470b8844da32e25313a2148e8e2967aaf557154a4b',
+  QueryInferenceStorage:        'c367dfd37f72a07a49a17a88fe4bf7fabd65a9660dd08fa8e8137e88e7747fe5',
 };
 
 describe('ABI pin digest — detects silent contract surface drift [CH-5]', () => {
@@ -311,6 +364,26 @@ describe('ABI pin digest — detects silent contract surface drift [CH-5]', () =
 });
 
 describe('ABI content sanity — required event/error surfaces are present [CH-5 / CH-6]', () => {
+  it('PublishingConviction keeps coverPublishingCost input names ABI-stable', () => {
+    const abi = JSON.parse(
+      readFileSync(join(ABI_DIR, 'PublishingConviction.json'), 'utf8'),
+    ) as AbiEntry[];
+    const fn = abi.find((e) => e.type === 'function' && e.name === 'coverPublishingCost');
+    expect(fn).toBeDefined();
+    expect((fn!.inputs ?? []).map((i) => i.name)).toEqual([
+      'publishingAgent',
+      'baseCost',
+      'kaStartEpoch',
+      'kaEpochs',
+    ]);
+    expect((fn!.inputs ?? []).map((i) => i.type)).toEqual([
+      'address',
+      'uint96',
+      'uint40',
+      'uint40',
+    ]);
+  });
+
   it('KnowledgeCollectionStorage declares KnowledgeAssetCreated with the full spec field set', () => {
     const abi = JSON.parse(
       readFileSync(join(ABI_DIR, 'DKGKnowledgeAssets.json'), 'utf8'),

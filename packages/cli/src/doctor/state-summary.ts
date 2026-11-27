@@ -1,8 +1,8 @@
 /**
  * Always-reported state summary for `dkg doctor` (OT-RFC-41 §4.7.0).
  *
- * Eighteen fields gathered from a mix of:
- *   - `~/.dkg/config.json` + `~/.dkg/daemon.pid` + `~/.dkg/previous-version`
+ * The state summary gathered from a mix of:
+ *   - `~/.dkg/config.json` (or `config.yaml`) + `~/.dkg/daemon.pid` + `~/.dkg/previous-version`
  *   - `~/.dkg/auto-update/{last-check,last-error}.json`
  *   - `GET /api/status` (added by §4.9 — populates daemon.commit, distTag, buildTime, installMode)
  *   - `/proc/<pid>/cmdline` (Linux) / `ps -o command=` (macOS) — daemon entryPoint
@@ -15,6 +15,8 @@
  */
 import { join } from 'node:path';
 import type { DoctorDeps, LocalInstallMode, StateSummary } from './types.js';
+import { readConfigMapping } from './config-file.js';
+import { inspectNodeRuntime } from '../node-runtime-preflight.js';
 
 const AUTO_UPDATE_LAST_CHECK_FILE = 'auto-update/last-check.json';
 const AUTO_UPDATE_LAST_ERROR_FILE = 'auto-update/last-error.json';
@@ -91,21 +93,12 @@ async function resolveDaemonEntryPoint(
 }
 
 /**
- * Read and parse `~/.dkg/config.json`. Returns `{}` on missing /
- * malformed config — checks downstream report explicit findings
- * for those conditions.
+ * Read and parse the node config (`config.json`, else `config.yaml`).
+ * Returns `{}` on missing / malformed config — checks downstream report
+ * explicit findings for those conditions.
  */
 async function readDkgConfig(deps: DoctorDeps): Promise<Record<string, unknown>> {
-  const raw = await deps.readFile(join(deps.dkgHome, 'config.json'));
-  if (!raw) return {};
-  try {
-    const parsed = JSON.parse(raw);
-    return typeof parsed === 'object' && parsed !== null
-      ? (parsed as Record<string, unknown>)
-      : {};
-  } catch {
-    return {};
-  }
+  return (await readConfigMapping(deps))?.config ?? {};
 }
 
 async function readPid(deps: DoctorDeps): Promise<number | null> {
@@ -184,6 +177,7 @@ async function resolveNpmGlobalDkg(deps: DoctorDeps): Promise<string | null> {
  * whatever fields landed.
  */
 export async function collectStateSummary(deps: DoctorDeps): Promise<StateSummary> {
+  const runtime = inspectNodeRuntime(deps.runtime);
   const config = await readDkgConfig(deps);
   const nodeRoleRaw = (config as { nodeRole?: unknown }).nodeRole;
   const nodeRole: 'edge' | 'core' | null =
@@ -235,6 +229,7 @@ export async function collectStateSummary(deps: DoctorDeps): Promise<StateSummar
   const lastError = await readAutoUpdateLastError(deps);
 
   return {
+    runtime,
     daemon: {
       pid,
       entryPoint,

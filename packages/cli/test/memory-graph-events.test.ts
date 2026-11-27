@@ -69,7 +69,10 @@ describe('memory_graph_changed -- real daemon SSE emissions', () => {
     expect(created.status).toBe(200);
     if (register) {
       const reg = await postJson(daemon, '/api/context-graph/register', { id });
-      expect(reg.status).toBe(200);
+      expect(
+        reg.status,
+        `register response=${JSON.stringify(reg.body)}\ndaemon stderr=${daemon.owner.stderr.slice(-8_000)}`,
+      ).toBe(200);
     }
     return id;
   }
@@ -141,7 +144,7 @@ describe('memory_graph_changed -- real daemon SSE emissions', () => {
   it('emits WM+SWM refresh events after assertion sharing (swm/share)', async () => {
     const cg = await freshCg();
     await postJson(daemon, '/api/knowledge-assets/draft/wm/write', { contextGraphId: cg, quads: QUADS });
-    const res = await postJson(daemon, '/api/knowledge-assets/draft/swm/share', { contextGraphId: cg, entities: ['urn:root'] });
+    const res = await postJson(daemon, '/api/knowledge-assets/draft/swm/share', { contextGraphId: cg });
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ swmShared: true });
     const frame = await stream.waitFor(isFrame(cg, 'assertion_promoted'));

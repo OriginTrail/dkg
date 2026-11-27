@@ -84,12 +84,11 @@ const AGENT_CONTEXT_GRAPH = 'agent-context';
 const AGENT_DID_PREFIX = 'did:dkg:agent:';
 
 /**
- * The DKG V10 query engine routes WM reads by raw peer ID, NOT the DID
- * form. A DID-form input gets routed to a non-existent namespace and
- * silently returns empty bindings. Mirror the adapter's normalisation
- * at the consumption boundary. Source: `DkgMemoryPlugin.ts:762-766`.
+ * Older daemons can expose the agent address in DID form. The query route
+ * expects the underlying address, so strip only that wrapper while preserving
+ * EVM addresses and peer IDs verbatim.
  */
-function toAgentPeerId(agentAddress: string): string {
+function unwrapAgentAddress(agentAddress: string): string {
   return agentAddress.startsWith(AGENT_DID_PREFIX)
     ? agentAddress.slice(AGENT_DID_PREFIX.length)
     : agentAddress;
@@ -210,17 +209,19 @@ export function registerMemorySearchTool(
       }
       const cap = Math.floor(Math.max(1, Math.min(100, limit ?? 20)));
 
-      // The query engine requires the agent's raw peer ID for WM view
-      // routing. Probe the daemon's identity once per call; without this,
-      // the WM layer fan-out silently returns empty bindings.
+      // Resolve the same primary agent namespace that assertion writes use.
+      // rc.17+ WM graphs are keyed by the daemon-resolved agentAddress (normally
+      // the default EVM wallet), while older nodes without a default agent use
+      // peerId. Preferring peerId here stranded every wallet-keyed project
+      // sub-graph and made memory search report zero hits even though an
+      // explicitly scoped dkg_query could retrieve the same triples.
       let agentAddress: string | undefined;
       try {
         const identity = await client.getAgentIdentity();
-        // Prefer raw `peerId` (the daemon emits it directly); fall back to
-        // stripping the DID prefix off `agentAddress` if `peerId` is absent
-        // on older daemons.
-        const raw = identity.peerId ?? (identity.agentAddress ? toAgentPeerId(identity.agentAddress) : undefined);
-        if (raw && raw.length > 0) agentAddress = raw;
+        const resolved = identity.agentAddress
+          ? unwrapAgentAddress(identity.agentAddress)
+          : identity.peerId;
+        if (resolved && resolved.length > 0) agentAddress = resolved;
       } catch {
         // Identity probe failure is recoverable as long as some layer
         // doesn't need it. We try the call anyway; if every layer 400s

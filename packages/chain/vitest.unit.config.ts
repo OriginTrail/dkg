@@ -24,6 +24,7 @@ export default defineConfig({
       'test/evm-adapter-pca-enrich.test.ts',
       'test/filter-error-console-suppressor.test.ts',
       'test/filter-error-silencer.test.ts',
+      'test/keyed-mutex-observability.test.ts',
       'test/mock-adapter-publishing-conviction-v10.test.ts',
     ],
     exclude: ['**/node_modules/**', '**/dist/**'],

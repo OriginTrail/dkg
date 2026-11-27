@@ -123,14 +123,15 @@ describe('PR #1387 — bulk registerAgents on PublishingConviction', () => {
     const iface = new ethers.Interface(PUBLISHING_CONVICTION_ABI);
     let emitted = 0;
     for (const log of receipt?.logs ?? []) {
+      let parsed: ReturnType<typeof iface.parseLog>;
       try {
-        const parsed = iface.parseLog(log);
-        if (parsed?.name === 'AgentRegistered' && (parsed.args.accountId as bigint) === pca.accountId) {
-          emitted += 1;
-          expect(agents).toContain(parsed.args.agent as string);
-        }
+        parsed = iface.parseLog(log);
       } catch {
-        /* unrelated log */
+        continue; // Unrelated ABI; assertion failures must propagate.
+      }
+      if (parsed?.name === 'AgentRegistered' && (parsed.args.accountId as bigint) === pca.accountId) {
+        emitted += 1;
+        expect(agents).toContain(parsed.args.agent as string);
       }
     }
     expect(emitted).toBe(K);

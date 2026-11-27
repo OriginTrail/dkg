@@ -8,6 +8,7 @@
   "include": ["src"],
   "references": [
     { "path": "../core" },
+    { "path": "../rdf-utils" },
     { "path": "../storage" }
   ]
 }

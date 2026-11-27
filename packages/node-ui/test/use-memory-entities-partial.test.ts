@@ -23,7 +23,9 @@ class MockEventSource {
 }
 
 function triple(subject: string, graph: string) {
-  return { s: { value: subject }, p: { value: RDF_TYPE }, o: { value: 'http://schema.org/Thing' }, g: { value: graph } };
+  return { s: { value: subject }, p: { value: RDF_TYPE }, o: { value: 'http://schema.org/Thing' }, g: { value: graph },
+    __g: { value: graph }, __s: { value: `I:${subject}` }, __p: { value: RDF_TYPE },
+    __kind: { value: 'I' }, __o: { value: 'http://schema.org/Thing' }, __lang: { value: '' }, __datatype: { value: '' } };
 }
 
 function sparqlLimit(sparql: string): number {

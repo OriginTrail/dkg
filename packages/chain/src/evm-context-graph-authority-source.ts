@@ -1,0 +1,161 @@
+// SPDX-License-Identifier: Apache-2.0
+
+import { ethers } from 'ethers';
+import type { ContextGraphPublishDomainV1 } from '@origintrail-official/dkg-core';
+import type { RawContextGraphAuthorityIndexEvent } from
+  './context-graph-authority-index-reducer.js';
+import {
+  normalizeContextGraphAuthorityAccessPolicy,
+  normalizeContextGraphAuthorityPublishDomain,
+  type ContextGraphAuthorityState,
+} from './context-graph-authority-state.js';
+
+export const CONTEXT_GRAPH_AUTHORITY_EVENT_NAMES = Object.freeze([
+  'ContextGraphCreated',
+  'ContextGraphDeactivated',
+  'Transfer',
+  'PublishPolicyUpdated',
+  'PublishAuthorityUpdated',
+  'AgentParticipantAdded',
+  'AgentParticipantRemoved',
+] as const);
+
+export type EvmContextGraphCurrentAuthorityState = Readonly<{
+  owner: string;
+  active: boolean;
+  accessPolicy: ContextGraphAuthorityState['accessPolicy'];
+  participantAgents: readonly string[];
+}> & ContextGraphPublishDomainV1;
+
+function tupleField(value: unknown, name: string, index: number): unknown {
+  if (value === null || typeof value !== 'object') return undefined;
+  const named = (value as Record<string, unknown>)[name];
+  if (named !== undefined) return named;
+  return Array.isArray(value) ? value[index] : undefined;
+}
+
+/** Normalize the ethers named tuple once, at the reader boundary. */
+export function normalizeEvmContextGraphCurrentAuthorityState(
+  value: unknown,
+): EvmContextGraphCurrentAuthorityState {
+  const owner = String(tupleField(value, 'owner', 0)).toLowerCase();
+  if (!ethers.isAddress(owner)) throw new Error('Context Graph owner is invalid');
+  const participantValue = tupleField(value, 'participantAgents', 1);
+  if (!Array.isArray(participantValue)) {
+    throw new Error('Context Graph participant agents are invalid');
+  }
+  const participantAgents = participantValue.map((entry) => String(entry).toLowerCase());
+  if (participantAgents.some((entry) => !ethers.isAddress(entry))) {
+    throw new Error('Context Graph participant agent is invalid');
+  }
+  participantAgents.sort();
+  const authority = String(tupleField(value, 'publishAuthority', 7)).toLowerCase();
+  if (!ethers.isAddress(authority)) {
+    throw new Error('Context Graph publish authority is invalid');
+  }
+  const accountId = BigInt(
+    tupleField(value, 'publishAuthorityAccountId', 8) as ethers.BigNumberish,
+  );
+  if (accountId < 0n || accountId > ethers.MaxUint256) {
+    throw new Error('Context Graph publish authority account id is invalid');
+  }
+  const accessPolicy = normalizeContextGraphAuthorityAccessPolicy(
+    Number(BigInt(tupleField(value, 'accessPolicy', 5) as ethers.BigNumberish)),
+  );
+  if (accessPolicy === undefined) throw new Error('Context Graph access policy is invalid');
+  const publishDomain = normalizeContextGraphAuthorityPublishDomain(
+    Number(BigInt(tupleField(value, 'publishPolicy', 6) as ethers.BigNumberish)),
+    authority,
+    accountId,
+  );
+  if (publishDomain === undefined) throw new Error('Context Graph publish policy is invalid');
+  return Object.freeze({
+    owner,
+    active: Boolean(tupleField(value, 'active', 3)),
+    accessPolicy,
+    ...publishDomain,
+    participantAgents: Object.freeze(participantAgents),
+  });
+}
+
+export function contextGraphAuthorityEventTopics(
+  contractInterface: ethers.Interface,
+): readonly string[] {
+  return Object.freeze(CONTEXT_GRAPH_AUTHORITY_EVENT_NAMES.map((name) => {
+    const fragment = contractInterface.getEvent(name);
+    if (fragment === null) throw new Error(`ContextGraphStorage has no ${name} event`);
+    return fragment.topicHash;
+  }));
+}
+
+/** Decode one real ethers log into an untrusted DTO for page admission. */
+export function decodeContextGraphAuthorityIndexLog(
+  contractInterface: ethers.Interface,
+  log: ethers.Log,
+): RawContextGraphAuthorityIndexEvent {
+  const parsed = contractInterface.parseLog(log);
+  if (parsed === null) throw new Error('ContextGraphStorage returned an unknown authority event');
+  const base = {
+    blockNumber: log.blockNumber,
+    blockHash: log.blockHash,
+    index: log.index,
+  };
+  switch (parsed.name) {
+    case 'ContextGraphCreated':
+      return {
+        ...base,
+        name: parsed.name,
+        contextGraphId: parsed.args.contextGraphId ?? parsed.args[0],
+        owner: parsed.args.owner ?? parsed.args[1],
+        nameHash: parsed.args.nameHash ?? parsed.args[2],
+        participantAgents: parsed.args.participantAgents ?? parsed.args[3],
+        accessPolicy: parsed.args.accessPolicy ?? parsed.args[5],
+        publishPolicy: parsed.args.publishPolicy ?? parsed.args[6],
+        publishAuthority: parsed.args.publishAuthority ?? parsed.args[7],
+        publishAuthorityAccountId:
+          parsed.args.publishAuthorityAccountId ?? parsed.args[8],
+      };
+    case 'Transfer':
+      return {
+        ...base,
+        name: parsed.name,
+        contextGraphId: parsed.args.tokenId ?? parsed.args[2],
+        from: parsed.args.from ?? parsed.args[0],
+        to: parsed.args.to ?? parsed.args[1],
+      };
+    case 'PublishPolicyUpdated':
+      return {
+        ...base,
+        name: parsed.name,
+        contextGraphId: parsed.args.contextGraphId ?? parsed.args[0],
+        publishPolicy: parsed.args.publishPolicy ?? parsed.args[1],
+        publishAuthority: parsed.args.publishAuthority ?? parsed.args[2],
+        publishAuthorityAccountId:
+          parsed.args.publishAuthorityAccountId ?? parsed.args[3],
+      };
+    case 'PublishAuthorityUpdated':
+      return {
+        ...base,
+        name: parsed.name,
+        contextGraphId: parsed.args.contextGraphId ?? parsed.args[0],
+        publishAuthority: parsed.args.newAuthority ?? parsed.args[1],
+        publishAuthorityAccountId: parsed.args.newAuthorityAccountId ?? parsed.args[2],
+      };
+    case 'AgentParticipantAdded':
+    case 'AgentParticipantRemoved':
+      return {
+        ...base,
+        name: parsed.name,
+        contextGraphId: parsed.args.contextGraphId ?? parsed.args[0],
+        agent: parsed.args.agent ?? parsed.args[1],
+      };
+    case 'ContextGraphDeactivated':
+      return {
+        ...base,
+        name: parsed.name,
+        contextGraphId: parsed.args.contextGraphId ?? parsed.args[0],
+      };
+    default:
+      throw new Error(`Unsupported ContextGraphStorage authority event ${parsed.name}`);
+  }
+}

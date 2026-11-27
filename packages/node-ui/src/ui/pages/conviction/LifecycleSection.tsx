@@ -6,6 +6,7 @@ import type { PcaHealthState } from '../../pca/health.js';
 import { ApproveWalletsModal } from './ApproveWalletsModal.js';
 import { CreatePcaModal } from './CreatePcaModal.js';
 import type { PcaOwnerAccess } from '../../pca/ownerAccess.js';
+import { Loading } from '../../components/ds/Loading.js';
 
 /** Lifecycle / Renew — re-mint a REPLACEMENT account (deliberately omits refresh; the mint is a NEW id). */
 export function LifecycleSection({
@@ -27,17 +28,17 @@ export function LifecycleSection({
       <section className="v10-pca-detail-section">
         <h3 className="v10-pca-detail-section-title">Lifecycle</h3>
         {(health === 'expiring' || health === 'expired') && (
-          <p className="v10-pca-card-warn">
-            {formatRelativeExpiry(snapshot.expiresAtTimestamp)}. The lock period can’t be extended —
-            Renew creates a fresh replacement account seeded from this one (the old TRAC stays locked
-            until its own expiry).
+          <p className="v10-pca-card-warn ds-card-nested">
+            {formatRelativeExpiry(snapshot.expiresAtTimestamp)}. A PCA can’t be extended. Renew creates a new PCA, then lets you
+            approve this PCA’s wallets on it in one step, so they keep a discount. This PCA’s
+            committed TRAC isn’t returned.
           </p>
         )}
         {/* S2b — Renew = re-mint a REPLACEMENT (owner-signed create), emphasized as the
             account nears/passes expiry. Honest copy lives in the seeded create modal (#9). */}
         <button
           type="button"
-          className={`v10-pca-card-btn${health === 'expiring' || health === 'expired' ? ' primary' : ''}`}
+          className={`v10-pca-card-btn ds-btn${health === 'expiring' || health === 'expired' ? ' primary ds-primary' : ''}`}
           data-testid="pca-renew-btn"
           onClick={() => renewal.openRenew()}
           disabled={!access.writesEnabled}
@@ -68,9 +69,7 @@ export function LifecycleSection({
       )}
       {/* LOW#3 — brief in-flight state between the mint and the seeded re-approval. */}
       {renewal.renewChaining && (
-        <div className="lazy-spinner" role="status" data-testid="pca-renew-chaining">
-          Preparing re-approval…
-        </div>
+        <Loading block label="Preparing re-approval…" data-testid="pca-renew-chaining" />
       )}
       {/* S2b renew — chained Approve, pre-seeded with the OLD account's agents, which it
           DEREGISTERS from the old account first (expiry doesn't free them — gate-HIGH). */}

@@ -18,9 +18,22 @@ import { isStandaloneInstall } from '../config.js';
 
 export type CorsAllowlist = '*' | string[];
 
+/** Most recent "is this daemon up to date?" result; polled by `/api/status`
+ *  and written by the auto-update polling runners. */
+export interface LastUpdateCheck {
+  upToDate: boolean;
+  checkedAt: number;
+  latestCommit: string;
+  latestVersion: string;
+  /** True when a pinned auto-update channel has no acceptable target
+   *  (tag missing / prerelease rejected / non-semver). Distinct from
+   *  `upToDate` so `/api/status` can show a misconfigured channel. */
+  channelTargetMissing: boolean;
+}
+
 /**
  * Verbose sync-progress tracing. Opt-in via either env var. Referenced
- * from the catch-up job handler (routes/context-graph.ts) plus the
+ * from the catch-up job (context-graph-catchup-job.ts) plus the
  * daemon bootstrap path, so it lives here next to `daemonState` rather
  * than inside any one module.
  */
@@ -30,19 +43,10 @@ export const DEBUG_SYNC_TRACE =
 export const daemonState: {
   /** Populated in `runDaemonInner` once the DKGAgent is ready. */
   catchupRunner: CatchupRunner | null;
-  /** Set to `true` while a monorepo `git pull` / slot-swap is in flight. */
+  /** Set to `true` while a package or git slot update is in flight. */
   isUpdating: boolean;
   /** Most recent "is this daemon up to date?" result; polled by `/status`. */
-  lastUpdateCheck: {
-    upToDate: boolean;
-    checkedAt: number;
-    latestCommit: string;
-    latestVersion: string;
-    /** True when a pinned auto-update channel has no acceptable target
-     *  (tag missing / prerelease rejected / non-semver). Distinct from
-     *  `upToDate` so `/api/status` can show a misconfigured channel. */
-    channelTargetMissing: boolean;
-  };
+  lastUpdateCheck: LastUpdateCheck;
   /** Memoised result of `isStandaloneInstall()` — null = not yet checked. */
   standaloneCache: boolean | null;
   /**
@@ -72,6 +76,26 @@ export const daemonState: {
    * `false` so operators see *why* the queue is closed.
    */
   promoteWorkerUnavailableReason: string | null;
+  /**
+   * Whether the subscribe route may still MINT a catch-up job.
+   *
+   * Same shape as `promoteWorkerAvailable` above and for the same reason: the
+   * route needs a shutdown signal it can actually see. The daemon's own
+   * `shuttingDown` is a closure-local `let` inside `runDaemonInner`, invisible
+   * to every route module, so without this a subscribe arriving mid-shutdown
+   * would queue a job that nothing will ever drain — the runner's worker is
+   * about to be terminated, and its exit handler rejects every pending run.
+   *
+   * Defaults to `true` (unlike `promoteWorkerAvailable`, which waits for its
+   * supervisor to come up): catch-up needs no separate readiness handshake, so
+   * the only state that closes it is shutdown itself, set as the first
+   * statement of `shutdown()`.
+   *
+   * Guards the two MINT sites only. Dedupe and already-ready replay return an
+   * existing job and create nothing, so they stay open — 503-ing them would be
+   * a regression, not a safeguard.
+   */
+  catchupAcceptingJobs: boolean;
   /** OpenClaw bridge health cache. Mutated from both `openclaw.ts`
    *  (read) and `handle-request.ts` (write after each /send round
    *  trip), so it lives here rather than inside openclaw.ts. */
@@ -91,6 +115,7 @@ export const daemonState: {
   moduleCorsAllowed: '*',
   promoteWorkerAvailable: false,
   promoteWorkerUnavailableReason: null,
+  catchupAcceptingJobs: true,
   openClawBridgeHealth: null,
 };
 
@@ -99,7 +124,8 @@ export const daemonState: {
  * install, honouring the operator's `autoUpdate.source` override if present.
  *
  *   - `source === 'npm'` → return `true` regardless of `.git` presence.
- *   - `source === 'git'` → return `false` regardless of `.git` presence.
+ *   - `source === 'git'` → return `false` regardless of `.git` presence
+ *     because git mode is slot-built from source, not an npm install.
  *   - `source === 'auto'` or omitted → fall through to the filesystem probe
  *     (`isStandaloneInstall()`, i.e. `repoDir() === null`).
  *
@@ -120,14 +146,9 @@ export function resolveStandaloneInstall(
     return true;
   }
   if (source === 'git' || source === 'monorepo') {
-    // OT-RFC-41 §4.3 Bundle B1d: 'monorepo' is the new sentinel for
-    // dev checkouts (set by Bundle B's `dkg init` monorepo guard
-    // when a contributor opts in via DKG_HOME). For the
-    // standalone-vs-git probe it behaves identically to the legacy
-    // 'git' value — auto-update is monorepo-style ("git pull" in
-    // the dev tree) — until the git-build path itself is deleted
-    // in PR 5, at which point monorepo daemons stop auto-updating
-    // entirely.
+    // Both modes are non-npm for install-layout/status purposes.
+    // Lifecycle dispatch distinguishes the advanced git updater from
+    // contributor monorepo mode before deciding whether to poll.
     daemonState.standaloneCache = false;
     return false;
   }
@@ -135,6 +156,17 @@ export function resolveStandaloneInstall(
     daemonState.standaloneCache = isStandaloneInstall();
   }
   return daemonState.standaloneCache;
+}
+
+export type AutoUpdatePollingMode = 'npm' | 'git' | 'monorepo';
+
+export function resolveAutoUpdatePollingMode(
+  source: 'auto' | 'npm' | 'git' | 'monorepo' | undefined,
+  standalone: boolean,
+): AutoUpdatePollingMode {
+  if (source === 'git') return 'git';
+  if (source === 'monorepo') return 'monorepo';
+  return standalone ? 'npm' : 'monorepo';
 }
 
 /**

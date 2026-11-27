@@ -4,15 +4,108 @@ import {
   contextGraphFinalizationTopic,
   contextGraphAppTopic,
   contextGraphDataUri,
+  contextGraphMetaUri,
   contextGraphSessionsTopic,
   contextGraphPublishTopic,
   contextGraphWorkspaceTopic,
+  contextGraphAssertionUri,
+  parseContextGraphAssertionUri,
+  parseContextGraphContextStorageUri,
+  DHT_PROTOCOL,
   validateContextGraphId,
+  validateNewContextGraphId,
   validateSubGraphName,
   validateAssertionName,
   deriveCuratorDidFromCgId,
+  dhtProtocolForNetwork,
+  logicalTopicFromWireTopic,
+  networkNamespaceSegment,
+  wireTopicForNetwork,
 } from '../src/constants.js';
 import { createOperationContext } from '../src/logger.js';
+
+describe('legacy context storage inverse', () => {
+  it.each(['plain', 'team/context/old', 'tenant/_meta'])('round-trips context partitions for %s', (contextGraphId) => {
+    expect(parseContextGraphContextStorageUri(contextGraphDataUri(contextGraphId, '7'))).toEqual({
+      contextGraphId, subGraphId: '7', metadata: false,
+    });
+    expect(parseContextGraphContextStorageUri(contextGraphMetaUri(contextGraphId, '7'))).toEqual({
+      contextGraphId, subGraphId: '7', metadata: true,
+    });
+  });
+
+  it.each([
+    'urn:other:graph/context/7',
+    'did:dkg:context-graph:team',
+    'did:dkg:context-graph:team/context/',
+    'did:dkg:context-graph:/context/7',
+    'did:dkg:context-graph:team/context/7/_meta/extra',
+  ])('rejects an absent or incomplete context partition %s', (uri) => {
+    expect(parseContextGraphContextStorageUri(uri)).toBeUndefined();
+  });
+});
+
+describe('parseContextGraphAssertionUri (inverse of contextGraphAssertionUri)', () => {
+  const ADDR = '0xA32f1cc125401B55911678847426759094055B2d';
+  // Wallet-scoped context graph IDs may contain '/' (validateContextGraphId allows it).
+  const SLASH_CG = '0x1111111111111111111111111111111111111111/project';
+
+  it('round-trips the no-subgraph coordinate (scope = contextGraphId)', () => {
+    const uri = contextGraphAssertionUri('construction', ADDR, 'justTriplets');
+    expect(parseContextGraphAssertionUri(uri)).toEqual({
+      scope: 'construction',
+      agentAddress: ADDR,
+      name: 'justTriplets',
+    });
+  });
+
+  it('round-trips the sub-graph coordinate (scope = contextGraphId/subGraphName)', () => {
+    const uri = contextGraphAssertionUri('construction', ADDR, 'justTriplets', 'wing-a');
+    expect(parseContextGraphAssertionUri(uri)).toEqual({
+      scope: 'construction/wing-a',
+      agentAddress: ADDR,
+      name: 'justTriplets',
+    });
+  });
+
+  it('preserves a slash-containing contextGraphId (GH#1778 review) — no subgraph', () => {
+    const uri = contextGraphAssertionUri(SLASH_CG, ADDR, 'asset');
+    // The whole cg id (incl. its slash) is the scope; it is NOT mis-split into a subgraph.
+    expect(parseContextGraphAssertionUri(uri)).toEqual({
+      scope: SLASH_CG,
+      agentAddress: ADDR,
+      name: 'asset',
+    });
+  });
+
+  it('preserves a slash-containing contextGraphId with a subGraphName', () => {
+    const uri = contextGraphAssertionUri(SLASH_CG, ADDR, 'asset', 'wing-a');
+    expect(parseContextGraphAssertionUri(uri)).toEqual({
+      scope: `${SLASH_CG}/wing-a`,
+      agentAddress: ADDR,
+      name: 'asset',
+    });
+  });
+
+  it('anchors on the rightmost assertion coordinate even when the scope contains one', () => {
+    const trickyCg = `weird/assertion/${ADDR}/inner`;
+    const uri = contextGraphAssertionUri(trickyCg, ADDR, 'asset');
+    expect(parseContextGraphAssertionUri(uri)).toEqual({
+      scope: trickyCg,
+      agentAddress: ADDR,
+      name: 'asset',
+    });
+  });
+
+  it('returns undefined for non-assertion, malformed, or non-0x-author subjects', () => {
+    expect(parseContextGraphAssertionUri('did:dkg:context-graph:construction/_meta')).toBeUndefined();
+    expect(parseContextGraphAssertionUri(`did:dkg:context-graph:construction/_shared_memory/${ADDR}/7`)).toBeUndefined();
+    expect(parseContextGraphAssertionUri('did:dkg:gnosis:100/0xabc/7')).toBeUndefined();
+    expect(parseContextGraphAssertionUri('urn:dkg:assertion:construction:0xabc:name')).toBeUndefined();
+    // author segment is not a 0x40 address
+    expect(parseContextGraphAssertionUri('did:dkg:context-graph:construction/assertion/notanaddr/asset')).toBeUndefined();
+  });
+});
 
 describe('context graph topic helpers (V10)', () => {
   it('contextGraphFinalizationTopic matches deprecated contextGraphPublishTopic', () => {
@@ -62,6 +155,53 @@ describe('context graph topic helpers (V10)', () => {
   });
 });
 
+describe('network namespace helpers', () => {
+  it('keeps the legacy DHT protocol when no network identity is supplied', () => {
+    expect(dhtProtocolForNetwork()).toBe(DHT_PROTOCOL);
+  });
+
+  it('derives distinct DHT protocols for distinct networks', () => {
+    expect(dhtProtocolForNetwork('base-testnet')).toBe('/dkg/base-testnet/kad/1.0.0');
+    expect(dhtProtocolForNetwork('base-mainnet')).toBe('/dkg/base-mainnet/kad/1.0.0');
+  });
+
+  it('derives distinct DHT protocols for the same network id on different chains', () => {
+    expect(dhtProtocolForNetwork('shared-genesis', 'base:84532')).toBe('/dkg/shared-genesis.base:84532/kad/1.0.0');
+    expect(dhtProtocolForNetwork('shared-genesis', 'base:8453')).toBe('/dkg/shared-genesis.base:8453/kad/1.0.0');
+  });
+
+  it('maps logical DKG topics into and out of network-scoped wire topics', () => {
+    const logical = contextGraphFinalizationTopic('agents');
+    const wire = wireTopicForNetwork('base-testnet', logical);
+    expect(wire).toBe('dkg/network/base-testnet/context-graph/agents/finalization');
+    expect(logicalTopicFromWireTopic('base-testnet', wire)).toBe(logical);
+    expect(logicalTopicFromWireTopic('base-mainnet', wire)).toBeNull();
+  });
+
+  it('maps logical DKG topics into chain-scoped wire topics', () => {
+    const logical = contextGraphFinalizationTopic('agents');
+    const baseSepoliaWire = wireTopicForNetwork('shared-genesis', logical, 'base:84532');
+    const baseMainnetWire = wireTopicForNetwork('shared-genesis', logical, 'base:8453');
+
+    expect(baseSepoliaWire).toBe('dkg/network/shared-genesis.base:84532/context-graph/agents/finalization');
+    expect(baseMainnetWire).toBe('dkg/network/shared-genesis.base:8453/context-graph/agents/finalization');
+    expect(logicalTopicFromWireTopic('shared-genesis', baseSepoliaWire, 'base:84532')).toBe(logical);
+    expect(logicalTopicFromWireTopic('shared-genesis', baseSepoliaWire, 'base:8453')).toBeNull();
+  });
+
+  it('round-trips non-DKG topics without colliding with DKG topic suffixes', () => {
+    const wire = wireTopicForNetwork('network-a', 'custom/topic');
+    expect(wire).toBe('dkg/network/network-a/topic/custom/topic');
+    expect(logicalTopicFromWireTopic('network-a', wire)).toBe('custom/topic');
+  });
+
+  it('rejects unsafe network namespace segments', () => {
+    expect(() => networkNamespaceSegment('base/testnet')).toThrow(/Invalid DKG network namespace/);
+    expect(() => networkNamespaceSegment('base-testnet', 'bad chain')).toThrow(/Invalid DKG network namespace/);
+    expect(() => dhtProtocolForNetwork('base testnet')).toThrow(/Invalid DKG network namespace/);
+  });
+});
+
 describe('createOperationContext', () => {
   it('generates a unique operationId', () => {
     const ctx = createOperationContext('publish');
@@ -105,6 +245,37 @@ describe('validateContextGraphId', () => {
     expect(validateContextGraphId('urn:uuid:12345').valid).toBe(true);
     expect(validateContextGraphId('my-graph_v2').valid).toBe(true);
     expect(validateContextGraphId('user@domain').valid).toBe(true);
+  });
+
+  it('rejects relative path segments while keeping dots inside a segment valid', () => {
+    // The character whitelist permits both `/` and `.` because URN/DID/URI-shaped
+    // IDs need them, which also admits `.`/`..` as whole segments. This mirrors
+    // the segment-aware check `isValidContextGraphId` already applies at the HTTP
+    // boundary, so the two validators agree rather than diverging in strictness.
+    expect(validateContextGraphId('victim/../secret').valid).toBe(false);
+    expect(validateContextGraphId('../secret').valid).toBe(false);
+    expect(validateContextGraphId('victim/./secret').valid).toBe(false);
+    expect(validateContextGraphId('..').valid).toBe(false);
+    expect(validateContextGraphId('.').valid).toBe(false);
+
+    // Dots WITHIN a segment are legitimate and must keep working — version
+    // markers and hostname-shaped identifiers both rely on them.
+    expect(validateContextGraphId('did:dkg:context-graph:acme.example/v1').valid).toBe(true);
+    expect(validateContextGraphId('graph/v1..2').valid).toBe(true);
+    expect(validateContextGraphId('a..b').valid).toBe(true);
+    expect(validateContextGraphId('my.graph').valid).toBe(true);
+  });
+
+  it('reserves structural partition segments for new IDs without breaking legacy reads', () => {
+    for (const id of [
+      'victim/_meta',
+      'victim/_private',
+      'victim/_shared_memory',
+      'victim/_future-partition',
+    ]) {
+      expect(validateContextGraphId(id)).toEqual({ valid: true });
+      expect(validateNewContextGraphId(id)).toMatchObject({ valid: false });
+    }
   });
 
   it('rejects IDs exceeding 256 chars', () => {

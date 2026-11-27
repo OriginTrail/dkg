@@ -21,7 +21,9 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
+import { RpcUsageTracker, withRpcUsageConsumer } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { stubRecipientRevisions } from './_helpers/recipient-fence-stub.js';
 
 // Hand-rolled call recorder: records every invocation's args and delegates to
 // the real impl, replacing the DI-seam spies on this file's agent-like stub.
@@ -119,6 +121,9 @@ function makeAgentLike(opts: {
     log,
     chain,
     store: { query: storeQuery },
+    contextGraphMetaProjection: { readAuthorityFactsRevision: 0, ...stubRecipientRevisions({ query: storeQuery } as any) },
+    swmSenderKeyStateLoaded: true,
+    loadSwmSenderKeyState: vi.fn(async () => {}),
     subscribedContextGraphs,
     wireIdToLocalCgId,
     onChainAccessPolicyCache: opts.cache ?? new Map<string, number>(),
@@ -142,8 +147,32 @@ function makeAgentLike(opts: {
   agentLike.localCgMatchesOnChainSlot = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
   agentLike.isWireIdKeyedSubscription = (DKGAgent.prototype as any).isWireIdKeyedSubscription;
   agentLike.readLiveOnChainAccessPolicy = (DKGAgent.prototype as any).readLiveOnChainAccessPolicy;
+  agentLike.resolveLiveOnChainAccessPolicyState =
+    (DKGAgent.prototype as any).resolveLiveOnChainAccessPolicyState;
   agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
   agentLike.resolveWorkspaceRecipientsGated = (DKGAgent.prototype as any).resolveWorkspaceRecipientsGated;
+  // This fixture isolates the public/plaintext decision. Registered-private
+  // chain roster selection has dedicated production-agent coverage.
+  agentLike.resolveRegisteredContextGraphAuthority = vi.fn(async (contextGraphId: string) => {
+    const rawNumeric = /^\d+$/.test(contextGraphId) && opts.localCgExists !== true;
+    const resolvesRegistered = opts.onChainId !== null;
+    if (!resolvesRegistered && !rawNumeric) return { kind: 'unregistered' as const };
+    if (opts.activeOnChain === false || opts.activeOnChain instanceof Error) {
+      return { kind: 'unavailable' as const, reason: 'chain-access-policy-unavailable' };
+    }
+    const onChainId = BigInt(opts.onChainId ?? (rawNumeric ? contextGraphId : '1'));
+    return (opts.accessPolicy ?? 0) === 0
+      ? { kind: 'public' as const, onChainId }
+      : { kind: 'private' as const, onChainId, participantAgents: [] };
+  });
+  agentLike.resolveWorkspaceAgentRecipientsForCurrentAuthority =
+    (DKGAgent.prototype as any).resolveWorkspaceAgentRecipientsForCurrentAuthority;
+  // No graph here has an accepted owner-signed public policy (#2827), so the
+  // SWM paths keep the on-chain behaviour these tests pin.
+  agentLike.resolveSwmRegisteredAuthority = (DKGAgent.prototype as any).resolveSwmRegisteredAuthority;
+  agentLike.isContextGraphSwmPublic = (DKGAgent.prototype as any).isContextGraphSwmPublic;
+  agentLike.resolveSwmTransportAuthority = (DKGAgent.prototype as any).resolveSwmTransportAuthority;
+  agentLike.hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1 = () => false;
   agentLike._resolveCuratedChainKeyContext = (DKGAgent.prototype as any)._resolveCuratedChainKeyContext;
   return agentLike;
 }
@@ -152,6 +181,77 @@ const isPublic = (a: any, cgId = '0xCURATOR/experimental-music') =>
   (DKGAgent.prototype as any).isContextGraphPublicOnChain.call(a, cgId);
 
 describe('DKGAgent.isContextGraphPublicOnChain', () => {
+  it('attributes the production public-policy probe instead of the shared funnel', async () => {
+    const tracker = new RpcUsageTracker(() => '31337');
+    const agentLike = makeAgentLike({ onChainId: '1', accessPolicy: 0 });
+    agentLike.resolveOnChainAccessPolicyState = async () => withRpcUsageConsumer(
+      'cgStorage.getContextGraph',
+      () => {
+        tracker.record('eth_call');
+        return 0;
+      },
+    );
+
+    await expect(isPublic(agentLike)).resolves.toBe(true);
+    expect(tracker.drainWindow().ethCallByConsumer).toEqual({
+      'cgStorage.getContextGraph:cgAuth.publicProbe': 1,
+    });
+  });
+
+  it('preserves the legacy strict binding option while retryable strict reads propagate transport errors', async () => {
+    const cgId = '0xCURATOR/experimental-music';
+    const agentLike = makeAgentLike({ onChainId: '5', accessPolicy: 0 });
+    const legacyBinding = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
+    const retryableStrictBinding = (DKGAgent.prototype as any).requireLocalCgMatchesOnChainSlot;
+
+    await expect(legacyBinding.call(agentLike, cgId, 'not-a-slot')).resolves.toBe(true);
+    await expect(legacyBinding.call(
+      agentLike,
+      cgId,
+      'not-a-slot',
+      undefined,
+      { bindingMode: 'chain-attested-repair' },
+    )).resolves.toBe(false);
+
+    delete agentLike.chain.getContextGraphNameHash;
+    await expect(legacyBinding.call(agentLike, cgId, '5')).resolves.toBe(true);
+    await expect(legacyBinding.call(
+      agentLike,
+      cgId,
+      '5',
+      undefined,
+      { requireCommittedNameHash: true },
+    )).resolves.toBe(false);
+    await expect(legacyBinding.call(
+      agentLike,
+      cgId,
+      '5',
+      undefined,
+      { bindingMode: 'chain-attested-repair' },
+    )).resolves.toBe(false);
+    await expect(legacyBinding.call(
+      agentLike,
+      cgId,
+      '5',
+      undefined,
+      { requireCommittedNameHash: true, bindingMode: 'legacy-policy' },
+    )).rejects.toThrow(/contradicts/u);
+
+    const transportError = Object.assign(new Error('name-hash RPC unavailable'), {
+      code: 'RPC_ENDPOINTS_EXHAUSTED',
+    });
+    agentLike.chain.getContextGraphNameHash = async () => { throw transportError; };
+    await expect(legacyBinding.call(
+      agentLike,
+      cgId,
+      '5',
+      undefined,
+      { bindingMode: 'chain-attested-repair' },
+    )).rejects.toBe(transportError);
+    await expect(retryableStrictBinding.call(agentLike, cgId, '5'))
+      .rejects.toBe(transportError);
+  });
+
   it('returns true for a LIVE CG whose on-chain access policy is public (0)', async () => {
     const agentLike = makeAgentLike({ onChainId: '1', accessPolicy: 0 });
     await expect(isPublic(agentLike)).resolves.toBe(true);
@@ -203,18 +303,18 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     ]);
   });
 
-  it('proceeds for a DIRECT NUMERIC SELF-ADDRESS even with NO committed name-hash (#884 review GaZk2)', async () => {
-    // A local CG whose own id IS its numeric on-chain slot (onChainId === id,
-    // e.g. a CG mirroring a raw slot created via createOnChainContextGraph,
-    // which commits no name-hash) is a direct slot address, not a
-    // cleartext→numeric remapping. Name-hash binding is inapplicable, so a
-    // missing commitment does NOT fail closed — liveness + fresh public policy
-    // still win. (Regression for the e2e-chain real-blockchain publish path.)
+  it('preserves the compatibility self-address outside strict repair', async () => {
+    // Existing publish/share and durable verification paths still accept a
+    // local numeric self-address. Chain-attested metadata repair alone opts
+    // into the stricter name-hash proof.
     const agentLike = makeAgentLike({ onChainId: '7', accessPolicy: 0, onChainNameHash: null });
     await expect(isPublic(agentLike, '7')).resolves.toBe(true);
     expect((agentLike.chain.getContextGraphAccessPolicy as any).calls.at(-1)).toEqual([7n]);
-    // The binding is skipped entirely for a self-address, so the name-hash getter
-    // is never even consulted.
+    expect((agentLike.chain.getContextGraphNameHash as any).calls).toEqual([]);
+
+    const retryableStrictBinding = (DKGAgent.prototype as any)
+      .requireLocalCgMatchesOnChainSlot;
+    await expect(retryableStrictBinding.call(agentLike, '7', '7')).resolves.toBe(true);
     expect((agentLike.chain.getContextGraphNameHash as any).calls).toEqual([]);
   });
 
@@ -272,6 +372,38 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     const agentLike = makeAgentLike({ onChainId: '5', accessPolicy: 0, onChainNameHash: committed });
     await expect(isPublic(agentLike, hexCleartext)).resolves.toBe(true);
     expect((agentLike.chain.getContextGraphAccessPolicy as any).calls.at(-1)).toEqual([5n]);
+  });
+
+  it('keeps a hash-shaped cleartext subscription bound to keccak(utf8(id)), not its raw reverse-index key', async () => {
+    const hexCleartext = '0x' + 'bc'.repeat(32);
+    const committed = ethers.keccak256(ethers.toUtf8Bytes(hexCleartext)).toLowerCase();
+    const matching = makeAgentLike({
+      onChainId: '5',
+      accessPolicy: 0,
+      onChainNameHash: committed,
+    });
+    matching.subscribedContextGraphs.set(hexCleartext, {
+      subscribed: true,
+      synced: false,
+    });
+    // setContextGraphSubscription maintains this general reverse lookup for
+    // every subscription. It is routing metadata, not proof that the local id
+    // is host-only/wire-keyed.
+    matching.wireIdToLocalCgId.set(hexCleartext, hexCleartext);
+    await expect(isPublic(matching, hexCleartext)).resolves.toBe(true);
+
+    const rawOnly = makeAgentLike({
+      onChainId: '5',
+      accessPolicy: 0,
+      onChainNameHash: hexCleartext,
+    });
+    rawOnly.subscribedContextGraphs.set(hexCleartext, {
+      subscribed: true,
+      synced: false,
+    });
+    rawOnly.wireIdToLocalCgId.set(hexCleartext, hexCleartext);
+    await expect(isPublic(rawOnly, hexCleartext)).resolves.toBe(false);
+    expect((rawOnly.chain.getContextGraphAccessPolicy as any).calls).toEqual([]);
   });
 
   it('fails closed when the name-hash getter is PRESENT but REJECTS — identity unverifiable (#884 review GZ8L_)', async () => {
@@ -463,16 +595,13 @@ describe('DKGAgent.resolveWorkspaceRecipientsGated (gate-before)', () => {
     expect(agentLike.store.query.calls).toEqual([]);
   });
 
-  it('delegates to the store resolver for a non-public (curated) CG', async () => {
+  it('fails closed for a registered private CG with an empty live roster', async () => {
     const agentLike = makeAgentLike({ onChainId: '1', accessPolicy: 1 });
-    const resolution = await (DKGAgent.prototype as any).resolveWorkspaceRecipientsGated.call(
+    await expect((DKGAgent.prototype as any).resolveWorkspaceRecipientsGated.call(
       agentLike,
       { contextGraphId: '0xCURATOR/curated-cg' },
-    );
-    // Empty store bindings → no allowedAgents → store resolver returns
-    // requiresEncryption=false, but it WAS consulted (delegation path).
-    expect(resolution.requiresEncryption).toBe(false);
-    expect(agentLike.store.query.calls.length).toBeGreaterThan(0);
+    )).rejects.toThrow(/authoritative chain roster is empty/);
+    expect(agentLike.store.query.calls).toEqual([]);
   });
 
   it('delegates to the store resolver when the policy is unknown (fail-closed to encrypted path)', async () => {
@@ -484,17 +613,17 @@ describe('DKGAgent.resolveWorkspaceRecipientsGated (gate-before)', () => {
     expect(agentLike.store.query.calls.length).toBeGreaterThan(0);
   });
 
-  it('delegates (encrypted path) when the on-chain probe cannot prove the CG is live — NO local-metadata bypass (#884 review)', async () => {
+  it('fails closed when registered authority cannot prove the CG is live', async () => {
     // A local accessPolicy="public" literal (or any local signal) must NOT
     // override a failed on-chain liveness proof: a pre-registration / stale
     // local graph would otherwise leak allowlisted traffic in plaintext. With
     // liveness false we delegate to the store resolver (encrypted path).
     const agentLike = makeAgentLike({ onChainId: '1', accessPolicy: 0, activeOnChain: false });
-    await (DKGAgent.prototype as any).resolveWorkspaceRecipientsGated.call(
+    await expect((DKGAgent.prototype as any).resolveWorkspaceRecipientsGated.call(
       agentLike,
       { contextGraphId: '0xCURATOR/not-yet-live' },
-    );
-    expect(agentLike.store.query.calls.length).toBeGreaterThan(0);
+    )).rejects.toThrow(/authority is unavailable/);
+    expect(agentLike.store.query.calls).toEqual([]);
   });
 
   it('returns plaintext for a LIVE public CG addressed by its numeric on-chain id WITHOUT the store resolver (#884)', async () => {

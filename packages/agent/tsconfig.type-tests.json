@@ -1,0 +1,30 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": ".",
+    "sourceMap": false
+  },
+  "include": [
+    "test/**/*.typecheck.ts",
+    "test/write-preflight-attribution.test.ts",
+    "test/bulk-graph-boundaries.test.ts",
+    "test/**/*.typechecked.test.ts",
+    "test/knowledge-asset-draft-read-authority.test.ts",
+    "test/descriptor-read-cancellation.test.ts",
+    "src/jsonld.d.ts",
+    "test/_helpers/sync-requester-fixtures.ts",
+    "test/_helpers/rolling-subscription-promotion.ts",
+    "test/finalized-private-placement-ownership.test.ts",
+    "test/publication-terminal-before-catalog-placement.test.ts",
+    "test/rfc64-finalized-private-placement-repair-store-v1.test.ts",
+    "test/support/confirmed-publication-harness.ts",
+    "test/finalized-private-placement-key.test.ts",
+    "test/confirmed-catalog-obligation-recovery.test.ts",
+    "test/rfc64-unpublished-catalog-revision.test.ts",
+    "test/catalog-asset-vm-boundary.test.ts"
+  ]
+}

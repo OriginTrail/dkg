@@ -170,11 +170,17 @@ describe('SWM seal<->recompute parity: mixed real-world KA', () => {
 });
 
 // Quad-SET invariant: the consensus root also requires both sides to hash the
-// SAME quad set. The publisher strips trust/workspaceOwner quads before sealing
-// (dkg-publisher.ts:1365); the receiver's loadSWMQuads does NOT — they stay in
-// lockstep ONLY because those quads live in `_shared_memory_meta`, which
-// `sharedMemoryReadBothFilter` excludes. This pins that, so the asymmetry can't
-// silently start mattering.
+// SAME quad set. Since #1509 BOTH sides strip trust/workspaceOwner bookkeeping
+// through the shared `isSwmMerkleExcludedQuad` filter (dkg-core trust.ts) —
+// the publisher's SWM read before sealing (dkg-publisher.ts) and the
+// receiver's `loadSWMQuads` (storage-ack-handler.ts) — so lockstep is
+// enforced by the shared import even when bookkeeping is stamped into the
+// DATA graph (the incident shape; pinned behaviorally at the responder
+// boundary in swm-merkle-exclusion-responder-1509.test.ts). What THIS block
+// pins is the graph-layout half both reads also share:
+// `sharedMemoryReadBothFilter` keeps `_shared_memory_meta` (where bookkeeping
+// normally lives) and the transient `/staging/` graphs out of the read-both
+// SPARQL entirely.
 describe('SWM read filter — quad-set parity (trust/owner exclusion + read-both)', () => {
   const CG = '0xabc';
   const swm = contextGraphSharedMemoryUri(CG); // .../_shared_memory bucket

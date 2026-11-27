@@ -920,6 +920,22 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
     expect(queryFilter.calls).toEqual([]);
   });
 
+  it('keeps a configured RPC URL (and its API key) out of the getCode failure message [GH#2945]', async () => {
+    const storage: any = { filters: { KnowledgeAssetCreated: recorder(() => 'F') }, queryFilter: recorder(async () => []) };
+    const a = makeAdapter(storage, 100_000);
+    const orig = new Error('429 Too Many Requests: rate limit exceeded for https://rpc.example/v2/SECRET-API-KEY');
+    (a as any).provider.getCode = recorder(async (_addr: string, block?: number) => {
+      if (block !== undefined) throw orig;
+      return '0x6000';
+    });
+    const err = await a.getMaxKaNumberForAuthor(AUTHOR).then(() => null, (e) => e);
+
+    expect(err.message).toMatch(/eth_getCode for DKGKnowledgeAssets/);
+    expect(err.message).not.toContain('SECRET-API-KEY');
+    expect(err.message).toContain('rpc.example');
+    expect(err.cause).toBe(orig);
+  });
+
   // The deploy-block search surfaces only a TRANSIENT throttle (degrading fires
   // getCode retries + a page-1 eth_getLogs that worsen it); everything else
   // degrades, since the scan does not need archive state. Uses REAL provider

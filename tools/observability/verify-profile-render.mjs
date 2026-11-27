@@ -178,6 +178,7 @@ const dkgSelectorViolations = (rawExpr, rawNodeFilter) => {
     'Publish failures',
     'Chain RPC failover exhausted',
     'Errored spans rate',
+    'Graph catalog at 80%',
   ];
   for (const stem of EXPECTED_RULE_STEMS) {
     const n = (payload.rules ?? []).filter((r) => (r.title ?? '').startsWith(stem)).length;
@@ -185,6 +186,14 @@ const dkgSelectorViolations = (rawExpr, rawNodeFilter) => {
   }
   if ((payload.rules ?? []).length !== EXPECTED_RULE_STEMS.length) {
     fail(alertsFile, `golden inventory: expected ${EXPECTED_RULE_STEMS.length} rules, payload has ${(payload.rules ?? []).length} — update EXPECTED_RULE_STEMS consciously when the catalog changes`);
+  }
+  // The graph catalog rule reads the node's 80 % warning by its text. The storage test
+  // graph-catalog-alert-contract.test.ts runs the node's real warnings through this rule;
+  // change the two together.
+  const EXPECTED_CATALOG_FILTER = '|= `The graph catalog has reached 80% of its internal limit`';
+  const catalogRule = (payload.rules ?? []).find((r) => (r.title ?? '').startsWith('Graph catalog at 80%'));
+  if (!String(catalogRule?.data?.[0]?.model?.expr ?? '').includes(EXPECTED_CATALOG_FILTER)) {
+    fail(alertsFile, `graph catalog rule: its query must contain ${EXPECTED_CATALOG_FILTER}`);
   }
   const EXPECTED_CONTACT_POINTS = ['logs', 'metrics', 'traces'].map((sig) => `DKG node ${sig} (Slack)`);
   for (const name of EXPECTED_CONTACT_POINTS) {

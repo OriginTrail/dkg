@@ -1,0 +1,74 @@
+import { describe, expect, it } from 'vitest';
+import { DkgClient } from '../src/client.js';
+import { makeConfig } from './harness.js';
+
+function clientReturning(result: unknown): DkgClient {
+  return new DkgClient({
+    config: makeConfig(),
+    fetcher: (async () => new Response(JSON.stringify({ result }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as typeof fetch,
+  });
+}
+
+describe('DkgClient rolling query-result compatibility', () => {
+  it('normalizes legacy ASK bindings from an older daemon', async () => {
+    const result = await clientReturning({ bindings: [{ result: 'false' }] }).query({
+      sparql: 'PREFIX ex: <urn:ex:> ASK { ?s ex:p ?o }',
+      contextGraphId: 'test-cg',
+    });
+    expect(result).toEqual({
+      type: 'boolean',
+      value: false,
+      bindings: [{ result: 'false' }],
+    });
+  });
+
+  it('normalizes legacy graph results from an older daemon', async () => {
+    const quads = [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o', graph: 'urn:g' }];
+    const result = await clientReturning({ bindings: [], quads }).query({
+      sparql: 'PREFIX ex: <urn:ex:> CONSTRUCT { ?s ex:p ?o } WHERE { ?s ex:p ?o }',
+      contextGraphId: 'test-cg',
+    });
+    expect(result).toEqual({ type: 'quads', quads, bindings: [] });
+  });
+
+  it('accepts the additive head-daemon result contract', async () => {
+    const result = await clientReturning({
+      type: 'boolean',
+      value: true,
+      bindings: [{ result: 'true' }],
+    }).query({ sparql: 'ASK { ?s ?p ?o }', contextGraphId: 'test-cg' });
+    expect(result).toEqual({
+      type: 'boolean',
+      value: true,
+      bindings: [{ result: 'true' }],
+    });
+  });
+
+  it('preserves additive compatibility bindings on tagged graph results', async () => {
+    const quads = [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o', graph: 'urn:g' }];
+    const result = await clientReturning({
+      type: 'quads',
+      quads,
+      bindings: [],
+    }).query({
+      sparql: 'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }',
+      contextGraphId: 'test-cg',
+    });
+    expect(result).toEqual({ type: 'quads', quads, bindings: [] });
+  });
+});
+
+
+it('serializes both scoped metadata opt-ins to the daemon', async () => {
+  let body: Record<string, unknown> = {};
+  const client = new DkgClient({ config: makeConfig(), fetcher: (async (_url, init) => {
+    body = JSON.parse(String(init?.body));
+    return new Response(JSON.stringify({ result: { bindings: [] } }), { status: 200 });
+  }) as typeof fetch });
+  await client.query({ sparql: 'SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }', contextGraphId: 'parent',
+    includeContextGraphPartitions: true, includeSharedMemoryMeta: true });
+  expect(body).toMatchObject({ contextGraphId: 'parent', includeContextGraphPartitions: true, includeSharedMemoryMeta: true });
+});

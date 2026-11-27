@@ -44,6 +44,13 @@ const ROOT_B = 'urn:test:tokenrows:beta';
 const PRIV_A = new Uint8Array(32).fill(0xaa);
 const PRIV_B = new Uint8Array(32).fill(0xbb);
 
+const rootContextGraphRegistration = (): Quad => ({
+  subject: `did:dkg:context-graph:${CG}`,
+  predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+  object: 'https://dkg.network/ontology#ContextGraph',
+  graph: META,
+});
+
 function kaEntry(rootEntity: string, tokenId: bigint, privateMerkleRoot?: Uint8Array): KAMetadata {
   return {
     rootEntity,
@@ -113,10 +120,13 @@ describe('generateKCMetadata — conditional collapse', () => {
 describe('AccessHandler on the dual (multi-root) shape', () => {
   async function seedDualShapeStore(): Promise<OxigraphStore> {
     const store = new OxigraphStore();
-    await store.insert(generateKCMetadata(kcMeta(), [
-      kaEntry(ROOT_A, 1n, PRIV_A),
-      kaEntry(ROOT_B, 2n, PRIV_B),
-    ]));
+    await store.insert([
+      rootContextGraphRegistration(),
+      ...generateKCMetadata(kcMeta(), [
+        kaEntry(ROOT_A, 1n, PRIV_A),
+        kaEntry(ROOT_B, 2n, PRIV_B),
+      ]),
+    ]);
     await store.insert([
       { subject: ROOT_A, predicate: 'http://ex.org/secretA', object: '"alpha-secret"', graph: PRIVATE },
       { subject: ROOT_B, predicate: 'http://ex.org/secretB', object: '"beta-secret"', graph: PRIVATE },
@@ -146,6 +156,7 @@ describe('AccessHandler hardening on already-written collapsed multi-root stores
     // private bag exists ONLY for ROOT_B. Pre-hardening, an engine that
     // bound ROOT_A first denied "No private triples available".
     await store.insert([
+      rootContextGraphRegistration(),
       { subject: UAL, predicate: `${DKG_NS}rootEntity`, object: ROOT_A, graph: META },
       { subject: UAL, predicate: `${DKG_NS}rootEntity`, object: ROOT_B, graph: META },
       { subject: UAL, predicate: `${DKG_NS}privateMerkleRoot`, object: `"${toHex(PRIV_B)}"`, graph: META },

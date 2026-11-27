@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RelayFlapGuard, buildRelayFlapConnectionGater, parseCircuitRelayPeerIds } from '../src/relay-flap-guard.js';
+import { RelayFlapGuard, buildRelayFlapConnectionGater } from '../src/relay-flap-guard.js';
 
 const RELAY_A = '12D3KooWRelayA';
 const RELAY_B = '12D3KooWRelayB';
@@ -19,30 +19,30 @@ function guard(): RelayFlapGuard {
 }
 
 function recordShortBurst(g: RelayFlapGuard, relayPeerId = RELAY_A, remotePeerId = REMOTE_A): void {
-  expect(g.recordRelayedClose({ relayPeerId, remotePeerId, durationMs: 50, now: 0 }).enteredQuarantine).toBe(false);
-  expect(g.recordRelayedClose({ relayPeerId, remotePeerId, durationMs: 50, now: 10 }).enteredQuarantine).toBe(false);
-  expect(g.recordRelayedClose({ relayPeerId, remotePeerId, durationMs: 50, now: 20 }).enteredQuarantine).toBe(true);
+  expect(g.recordRelayedClose({ relayPeerId, remotePeerId, durationMs: 50, confirmedFailure: true, now: 0 }).enteredQuarantine).toBe(false);
+  expect(g.recordRelayedClose({ relayPeerId, remotePeerId, durationMs: 50, confirmedFailure: true, now: 10 }).enteredQuarantine).toBe(false);
+  expect(g.recordRelayedClose({ relayPeerId, remotePeerId, durationMs: 50, confirmedFailure: true, now: 20 }).enteredQuarantine).toBe(true);
 }
 
-describe('parseCircuitRelayPeerIds', () => {
-  it('extracts relay and remote peer ids from a circuit address', () => {
-    expect(
-      parseCircuitRelayPeerIds(`/ip4/1.2.3.4/tcp/9090/p2p/${RELAY_A}/p2p-circuit/p2p/${REMOTE_A}`),
-    ).toEqual({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A });
-  });
-
-  it('extracts only the relay peer id from reservation-style circuit addresses', () => {
-    expect(
-      parseCircuitRelayPeerIds(`/ip4/1.2.3.4/tcp/9090/p2p/${RELAY_A}/p2p-circuit`),
-    ).toEqual({ relayPeerId: RELAY_A, remotePeerId: undefined });
-  });
-
-  it('does not classify direct addresses as relayed paths', () => {
-    expect(parseCircuitRelayPeerIds(`/ip4/1.2.3.4/tcp/9090/p2p/${REMOTE_A}`)).toBeNull();
-  });
-});
-
 describe('RelayFlapGuard', () => {
+  it('does not treat normal short-lived request/response circuits as relay failures', () => {
+    const g = guard();
+
+    for (let i = 0; i < 20; i++) {
+      const result = g.recordRelayedClose({
+        relayPeerId: RELAY_A,
+        remotePeerId: REMOTE_A,
+        durationMs: 25,
+        confirmedFailure: false,
+        now: i * 10,
+      });
+      expect(result.enteredQuarantine).toBe(false);
+    }
+
+    expect(g.getPairState(RELAY_A, REMOTE_A, 250)).toBeUndefined();
+    expect(g.checkRelayedConnection({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, now: 250 }).deny).toBe(false);
+  });
+
   it('quarantines the exact relay/remote pair after repeated short relayed closes', () => {
     const g = guard();
     recordShortBurst(g);
@@ -59,8 +59,8 @@ describe('RelayFlapGuard', () => {
 
   it('does not quarantine below the short-close threshold', () => {
     const g = guard();
-    g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, now: 0 });
-    g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, now: 10 });
+    g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, confirmedFailure: true, now: 0 });
+    g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, confirmedFailure: true, now: 10 });
 
     expect(g.checkRelayedConnection({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, now: 20 }).deny).toBe(false);
     expect(g.getPairState(RELAY_A, REMOTE_A, 20)?.shortCloseCount).toBe(2);
@@ -68,10 +68,10 @@ describe('RelayFlapGuard', () => {
 
   it('does not quarantine long-lived relayed closes and clears prior penalty', () => {
     const g = guard();
-    g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, now: 0 });
-    g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, now: 10 });
+    g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, confirmedFailure: true, now: 0 });
+    g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, confirmedFailure: true, now: 10 });
 
-    const result = g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 1_000, now: 20 });
+    const result = g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 1_000, confirmedFailure: true, now: 20 });
     expect(result.cleared).toBe(true);
     expect(g.getPairState(RELAY_A, REMOTE_A, 20)).toBeUndefined();
   });
@@ -116,9 +116,9 @@ describe('RelayFlapGuard', () => {
     // first two must be pruned, so the late one is the only in-window close and
     // never reaches the quarantine threshold (a regression that stops pruning
     // would let three closes across a >window span trip quarantine).
-    expect(g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, now: 0 }).enteredQuarantine).toBe(false);
-    expect(g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, now: 10 }).enteredQuarantine).toBe(false);
-    const late = g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, now: 1_100 });
+    expect(g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, confirmedFailure: true, now: 0 }).enteredQuarantine).toBe(false);
+    expect(g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, confirmedFailure: true, now: 10 }).enteredQuarantine).toBe(false);
+    const late = g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, confirmedFailure: true, now: 1_100 });
     expect(late.enteredQuarantine).toBe(false);
     expect(late.shortCloseCount).toBe(1);
     expect(g.checkRelayedConnection({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, now: 1_100 }).deny).toBe(false);
@@ -150,10 +150,10 @@ describe('buildRelayFlapConnectionGater (libp2p wiring)', () => {
       stableCloseMs: 60_000,
     });
     const now = Date.now();
-    g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, now });
-    g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, now: now + 10 });
+    g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, confirmedFailure: true, now });
+    g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, confirmedFailure: true, now: now + 10 });
     expect(
-      g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, now: now + 20 }).enteredQuarantine,
+      g.recordRelayedClose({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A, durationMs: 50, confirmedFailure: true, now: now + 20 }).enteredQuarantine,
     ).toBe(true);
 
     const gater = buildRelayFlapConnectionGater(g);
@@ -171,4 +171,5 @@ describe('buildRelayFlapConnectionGater (libp2p wiring)', () => {
     expect(gater.denyInboundRelayedConnection({ toString: () => RELAY_A }, { toString: () => REMOTE_A })).toBe(true);
     expect(gater.denyInboundRelayedConnection({ toString: () => RELAY_B }, { toString: () => REMOTE_B })).toBe(false);
   });
+
 });

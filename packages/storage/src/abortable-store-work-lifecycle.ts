@@ -1,0 +1,277 @@
+/**
+ * Compose caller cancellation with a store lifecycle signal.
+ *
+ * Kept here instead of in an HTTP adapter so every scheduled operation in one
+ * lifecycle generation observes the same close boundary.
+ */
+export interface AbortSignalScope {
+  readonly signal: AbortSignal | undefined;
+  dispose(): void;
+}
+
+export interface StoreWorkTimeoutRace {
+  readonly timeoutMs: number;
+  readonly timeoutError: () => Error;
+}
+
+export interface StoreWorkRaceOptions<T> {
+  readonly onLateResult?: (value: T) => void | Promise<void>;
+  readonly timeout?: StoreWorkTimeoutRace;
+}
+
+const NOOP_DISPOSE = () => {};
+
+export function composeAbortSignals(
+  primary: AbortSignal | undefined,
+  secondary: AbortSignal | undefined,
+): AbortSignalScope {
+  if (!primary) return { signal: secondary, dispose: NOOP_DISPOSE };
+  if (!secondary) return { signal: primary, dispose: NOOP_DISPOSE };
+
+  const combined = new AbortController();
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    primary.removeEventListener('abort', forwardPrimary);
+    secondary.removeEventListener('abort', forwardSecondary);
+  };
+  const forwardPrimary = () => {
+    if (disposed || combined.signal.aborted) return;
+    combined.abort(primary.reason);
+    dispose();
+  };
+  const forwardSecondary = () => {
+    if (disposed || combined.signal.aborted) return;
+    combined.abort(secondary.reason);
+    dispose();
+  };
+
+  if (primary.aborted) combined.abort(primary.reason);
+  else if (secondary.aborted) combined.abort(secondary.reason);
+  else {
+    primary.addEventListener('abort', forwardPrimary, { once: true });
+    secondary.addEventListener('abort', forwardSecondary, { once: true });
+  }
+  return { signal: combined.signal, dispose };
+}
+
+/**
+ * Race one already-started operation against cancellation without leaking a
+ * listener or an unhandled late settlement. An optional late-result hook owns
+ * resources that arrive after cancellation (for example a backend iterator).
+ */
+export function raceStoreWorkAgainstAbort<T>(
+  work: Promise<T>,
+  signal: AbortSignal | undefined,
+  options: StoreWorkRaceOptions<T> = {},
+): Promise<T> {
+  const timeoutMs = options.timeout?.timeoutMs ?? 0;
+  if (!signal && timeoutMs <= 0) return work;
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (action: () => void): boolean => {
+      if (settled) return false;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      action();
+      return true;
+    };
+    const consumeLateResult = (value: T) => {
+      if (!options.onLateResult) return;
+      void Promise.resolve()
+        .then(() => options.onLateResult?.(value))
+        .catch(() => undefined);
+    };
+    const onAbort = () => finish(() => reject(normalizeAbortReason(signal?.reason)));
+    signal?.addEventListener('abort', onAbort, { once: true });
+    // Attach both handlers before observing pre-abort so every started promise
+    // remains consumed even when cancellation wins the race immediately.
+    work.then(
+      (value) => {
+        if (!finish(() => resolve(value))) consumeLateResult(value);
+      },
+      (cause) => finish(() => reject(cause)),
+    );
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    if (timeoutMs > 0) {
+      timer = setTimeout(
+        () => finish(() => reject(options.timeout!.timeoutError())),
+        timeoutMs,
+      );
+      if (typeof timer.unref === 'function') timer.unref();
+    }
+  });
+}
+
+function normalizeAbortReason(reason: unknown): Error {
+  return reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
+}
+
+interface StoreWorkGeneration {
+  readonly controller: AbortController;
+  readonly inFlight: Set<Promise<unknown>>;
+  closing: boolean;
+}
+
+function createGeneration(): StoreWorkGeneration {
+  return {
+    controller: new AbortController(),
+    inFlight: new Set(),
+    closing: false,
+  };
+}
+
+function closedError(generation: StoreWorkGeneration): Error {
+  const reason = generation.controller.signal.reason;
+  return reason instanceof Error ? reason : new Error(String(reason ?? 'Store lifecycle closed'));
+}
+
+/** Put `task` under the generation's drain contract until it settles. */
+function trackInFlight<T>(
+  report: () => void,
+  generation: StoreWorkGeneration,
+  task: Promise<T>,
+  onSettled?: () => void,
+): Promise<T> {
+  generation.inFlight.add(task);
+  report();
+  void task.finally(() => {
+    if (generation.inFlight.delete(task)) report();
+    onSettled?.();
+  }).catch(() => undefined);
+  return task;
+}
+
+/**
+ * What an admitted operation is handed besides its (caller + close) signal.
+ *
+ * An operation's caller-facing promise may settle before the work behind it
+ * has stopped, for example a dispatched HTTP request whose caller stopped
+ * waiting. Such work must not escape the lifecycle: it goes through
+ * {@link runDetached}, which keeps it in the generation's drain set until it
+ * has settled, so `close()` aborts it and waits for it.
+ */
+export interface StoreWorkContext {
+  /** The caller's own signal, without the store-close signal. */
+  readonly callerSignal: AbortSignal | undefined;
+  /**
+   * Run `start` as detached work: it is not cancelled by the caller's signal,
+   * only when the store closes (the signal it is given), and `close()` waits
+   * for the returned promise however early the operation's own result settled.
+   * Refused, without starting `start`, once the generation is closing.
+   */
+  runDetached<R>(start: (closeSignal: AbortSignal) => Promise<R>): Promise<R>;
+}
+
+/**
+ * Owns admission, cancellation, and draining for reusable store adapters.
+ *
+ * `close()` atomically closes one generation: work admitted before the close
+ * is aborted and drained, while work attempted during the close is rejected
+ * without reaching the scheduler/backend. Once draining completes a fresh
+ * generation is installed, preserving SparqlHttpStore's historical reusable
+ * close contract without allowing work to escape the closing snapshot.
+ */
+export interface AbortableStoreWorkLifecycleOptions {
+  /** Observation of all physical work, including detached requests. */
+  readonly onActivityChange?: (activeOperations: number) => void;
+  /** Release generation-owned resources after draining, before reusable admission opens. */
+  readonly onGenerationClosed?: () => void;
+}
+
+export class AbortableStoreWorkLifecycle {
+  private generation = createGeneration();
+  private closePromise: Promise<void> | null = null;
+
+  /**
+   * `start` receives the caller signal combined with the close signal, and a
+   * {@link StoreWorkContext} for work that may outlive the promise it returns.
+   */
+  constructor(private readonly options: AbortableStoreWorkLifecycleOptions = {}) {}
+
+  private reportActivity(generation: StoreWorkGeneration): void {
+    try {
+      this.options.onActivityChange?.(generation.inFlight.size);
+    } catch {
+      // Observation cannot change lifecycle/drain semantics.
+    }
+  }
+
+  run<T>(
+    callerSignal: AbortSignal | undefined,
+    start: (signal: AbortSignal | undefined, context: StoreWorkContext) => Promise<T>,
+  ): Promise<T> {
+    const generation = this.generation;
+    if (generation.closing) return Promise.reject(closedError(generation));
+
+    const signalScope = composeAbortSignals(callerSignal, generation.controller.signal);
+    const context: StoreWorkContext = {
+      callerSignal,
+      runDetached: <R>(detached: (closeSignal: AbortSignal) => Promise<R>): Promise<R> => {
+        if (generation.closing) return Promise.reject(closedError(generation));
+        let work: Promise<R>;
+        try {
+          work = detached(generation.controller.signal);
+        } catch (error) {
+          work = Promise.reject(error);
+        }
+        return trackInFlight(() => this.reportActivity(generation), generation, work);
+      },
+    };
+    let task: Promise<T>;
+    try {
+      task = start(signalScope.signal, context);
+    } catch (error) {
+      signalScope.dispose();
+      throw error;
+    }
+    return trackInFlight(() => this.reportActivity(generation), generation, task, signalScope.dispose);
+  }
+
+  /** Retained server work is activity even after its caller/HTTP task has settled. */
+  retainActivity(): Readonly<{ release(): void }> {
+    const generation = this.generation;
+    if (generation.closing) return Object.freeze({ release() {} });
+    let complete!: () => void;
+    let released = false;
+    const completion = new Promise<void>(resolve => { complete = resolve; });
+    const release = () => {
+      if (released) return;
+      released = true;
+      generation.controller.signal.removeEventListener('abort', release);
+      if (generation.inFlight.delete(completion)) this.reportActivity(generation);
+      complete();
+    };
+    generation.controller.signal.addEventListener('abort', release, { once: true });
+    generation.inFlight.add(completion);
+    this.reportActivity(generation);
+    return Object.freeze({ release });
+  }
+
+  close(reason: Error): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+
+    const generation = this.generation;
+    generation.closing = true;
+    generation.controller.abort(reason);
+    const draining = [...generation.inFlight];
+    const task = (async () => {
+      await Promise.allSettled(draining);
+      if (this.generation === generation) {
+        try { this.options.onGenerationClosed?.(); } catch { /* Observation cannot prevent reuse. */ }
+        this.generation = createGeneration();
+      }
+    })();
+    this.closePromise = task;
+    void task.finally(() => {
+      if (this.closePromise === task) this.closePromise = null;
+    }).catch(() => undefined);
+    return task;
+  }
+}

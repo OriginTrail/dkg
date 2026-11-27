@@ -12,7 +12,7 @@
 # Test plan:
 #
 #   1. Curator (N5) creates curated CG with allowlist
-#      [curator, M1=N6, M2=N4]. All three pre-create the CG.
+#      [curator, M1=N6, M2=N4]. Both members join through the curator.
 #   2. Curator writes 3 triples. Catchup on both members confirms
 #      they can decrypt the pre-revocation batch.
 #   3. Curator calls /api/context-graph/{id}/remove-participant for M2.
@@ -46,8 +46,7 @@
 #   ✓ The curator drops cached SWM sender-key send state for the CG so
 #     the next write mints a NEW epoch with a NEW chain key.
 #   ✓ The new epoch's setup-send wraps ONLY for current members
-#     (curator + M1). M2 receives the broadcast envelope and rejects
-#     it with `reason=no-state` (verifiable in M2's daemon log).
+#     (curator + M1); direct fan-out need not send M2 a broadcast.
 #   ✓ The curator's sync auth refuses M2's catchup request post-revoke.
 #
 # What this does NOT validate yet (full forward-security gap):
@@ -72,6 +71,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=devnet-publish-helpers.sh
 source "$SCRIPT_DIR/devnet-publish-helpers.sh"
+# shellcheck source=devnet-curated-join-helpers.sh
+source "$SCRIPT_DIR/devnet-curated-join-helpers.sh"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 API_PORT_BASE=9201
 CURATOR_NODE=5
@@ -86,6 +87,28 @@ act()  { echo ""; echo "[rev] === $1 ==="; }
 node_dir()   { echo "$DEVNET_DIR/node$1"; }
 node_token() { tail -1 "$(node_dir "$1")/auth.token" 2>/dev/null | tr -d '\r\n'; }
 node_port()  { echo $((API_PORT_BASE + $1 - 1)); }
+
+restore_edges() {
+  local result=$? node i healthy
+  trap - EXIT
+  for node in "$CURATOR_NODE" "$M1_NODE"; do
+    "$SCRIPT_DIR/devnet.sh" restart-node "$node" >/dev/null 2>&1 \
+      || { warn "cleanup could not restart edge $node"; result=1; }
+    healthy=0
+    for i in $(seq 1 90); do
+      if curl -sS --max-time 1 -o /dev/null "http://127.0.0.1:$(node_port "$node")/api/status" 2>/dev/null; then
+        healthy=1
+        break
+      fi
+      sleep 1
+    done
+    [ "$healthy" -eq 1 ] || { warn "cleanup could not health-check edge $node"; result=1; }
+  done
+  exit "$result"
+}
+trap restore_edges EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 api_call() {
   local node="$1" method="$2" path="$3" data="${4:-}"
@@ -120,7 +143,7 @@ log "M2:       $M2_AGENT (node $M2_NODE) [will be revoked]"
 log "CG:       $CG_ID"
 
 # ===========================================================================
-act "1. All three parties pre-create the CG with [curator, M1, M2] allowlist"
+act "1. Curator creates the CG; M1 and M2 join through the signed approval flow"
 # ===========================================================================
 ALLOWED='["'"$CURATOR_AGENT"'", "'"$M1_AGENT"'", "'"$M2_AGENT"'"]'
 
@@ -135,28 +158,10 @@ ON_CHAIN_ID=$(parse_json "$CREATE_CUR" '.onChainId')
 [ -n "$ON_CHAIN_ID" ] || fail "create+register failed: $CREATE_CUR"
 log "✓ curated CG onChainId=$ON_CHAIN_ID"
 
-# Codex PR #621 follow-up: don't swallow EVERY error with `|| true`.
-# Capture the response and tolerate only the idempotent "already
-# exists" signal — a real failure (wrong auth, malformed body, etc.)
-# now aborts the script instead of surfacing later as an opaque
-# catchup timeout with the actual setup error lost.
-member_pre_create() {
-  local node="$1" tag="$2"
-  local resp
-  resp=$(api_call "$node" POST /api/context-graph/create "$(cat <<EOF
-{ "id": "$CG_ID", "name": "revocation ${STAMP} ($tag)",
-  "accessPolicy": 1, "publishPolicy": 0, "allowedAgents": $ALLOWED }
-EOF
-)") || true
-  case "$resp" in
-    *'"created"'*|*'"uri"'*) log "✓ $tag pre-created CG locally" ;;
-    *'already'*|*'duplicate'*|*'exists'*) log "✓ $tag CG already locally known (idempotent)" ;;
-    '') fail "$tag pre-create returned empty response — daemon unreachable?" ;;
-    *) fail "$tag pre-create FAILED with non-idempotent error: $resp" ;;
-  esac
-}
-member_pre_create "$M1_NODE" "M1"
-member_pre_create "$M2_NODE" "M2"
+devnet_join_curated_member "$M1_NODE" "$CURATOR_NODE" "$CG_ID" "$M1_AGENT" \
+  || fail "M1 did not connect, join and subscribe to the curator's CG"
+devnet_join_curated_member "$M2_NODE" "$CURATOR_NODE" "$CG_ID" "$M2_AGENT" \
+  || fail "M2 did not connect, join and subscribe to the curator's CG"
 sleep 3
 
 # ===========================================================================
@@ -236,6 +241,24 @@ log "Waiting for M1 + M2 to catch up the pre-revocation batch..."
 M1_PRE=$(wait_for_count_at_least "$M1_NODE" "M1" 3)
 M2_PRE=$(wait_for_count_at_least "$M2_NODE" "M2" 3)
 log "✓ M1 sees $M1_PRE triples pre-revocation; M2 sees $M2_PRE triples"
+CURATOR_LOG="$DEVNET_DIR/node${CURATOR_NODE}/daemon.log"
+PRE_EPOCH=$(python3 - "$CURATOR_LOG" "$CG_ID" "$M2_AGENT" <<'PY'
+import re, sys
+path, graph, recipient = sys.argv[1:]
+with open(path) as stream:
+    epochs = {
+        match.group(1)
+        for line in stream
+        if 'SWM sender-key setup send:' in line
+        and f'contextGraph={graph}' in line
+        and f'recipientAgent={recipient}' in line
+        if (match := re.search(r'\bepoch=([0-9a-f]+)', line))
+    }
+if len(epochs) != 1:
+    sys.exit('expected exactly one pre-revocation sender-key epoch for M2')
+print(next(iter(epochs)))
+PY
+) || fail "cannot establish M2's pre-revocation sender-key epoch"
 
 # ===========================================================================
 act "3. Curator revokes M2"
@@ -260,6 +283,9 @@ case "$PARTICIPANTS_LIST" in
   *"$M1_AGENT"*) log "✓ M1 still on the allowlist" ;;
   *)             fail "M1 unexpectedly missing from the post-revoke allowlist" ;;
 esac
+# Bound the encryption assertion to setup sends after the successful revoke.
+# Older setup sends belong to the pre-revocation membership and are valid.
+POST_REVOKE_LOG_LINES=$(wc -l < "$CURATOR_LOG")
 
 # ===========================================================================
 act "4. Curator writes post-revocation batch (3 NEW triples)"
@@ -310,15 +336,39 @@ wait_for_count_or_steady() {
 
 log "Polling for post-revocation steady state (up to 30s per peer)…"
 M1_FINAL=$(wait_for_count_or_steady "$M1_NODE" "M1" 6)
-M2_FINAL=$(wait_for_count_or_steady "$M2_NODE" "M2" 6)
+M2_API_FINAL=$(wait_for_count_or_steady "$M2_NODE" "M2" 6)
 CURATOR_FINAL=$(count_triples "$CURATOR_NODE")
 
-# Codex PR #621 R4: a read failure on M2 must NOT be silently treated
-# as "M2 only sees the first batch". Distinguish read errors (empty
-# string from count_triples) from real zero / low counts, and fail
-# the script if we can't actually measure M2's post-revocation state.
+# A revoked member's scoped API query can now return no bindings even while
+# its earlier decrypted data remains on disk. Inspect node 4's configured
+# backing store directly, below the read gate, to prove the exact pre-revoke
+# subjects remain and count any post-revoke delivery. Do not turn an empty API
+# result into a zero count or a passing revocation result.
+M2_STORE_URL=$(jq -r '.store.options.url // empty' "$(node_dir "$M2_NODE")/config.json")
+if [ -n "$M2_STORE_URL" ]; then
+  M2_STORE_RESPONSE=$(curl -fsS --max-time 20 -G \
+    -H 'Accept: application/sparql-results+json' \
+    --data-urlencode "query=SELECT ?s WHERE { GRAPH ?g { ?s <http://schema.org/name> ?o . FILTER(STRSTARTS(STR(?s), \"urn:rev:${STAMP}/\")) } }" \
+    "$M2_STORE_URL") || fail "M2 backing-store query failed"
+  M2_SUBJECTS=$(printf '%s' "$M2_STORE_RESPONSE" | jq -r '.results.bindings[]?.s.value') \
+    || fail "M2 backing-store response was not SPARQL JSON"
+  M2_FINAL=$(printf '%s\n' "$M2_SUBJECTS" | sed '/^$/d' | wc -l | tr -d '[:space:]')
+  for tag in pre-alpha pre-beta pre-gamma; do
+    grep -Fxq "urn:rev:${STAMP}/${tag}" <<<"$M2_SUBJECTS" \
+      || fail "M2 backing store lost pre-revocation subject $tag"
+  done
+  if [ -n "$M2_API_FINAL" ] && [ "$M2_API_FINAL" -gt "$M2_FINAL" ]; then
+    fail "M2 API count $M2_API_FINAL exceeds backing-store count $M2_FINAL"
+  fi
+  [ -n "$M2_API_FINAL" ] || log "M2 scoped API returned no count after revocation; checked its backing store directly"
+else
+  # A non-HTTP local store has no independent endpoint; retain the original
+  # API check and fail if the API no longer permits a physical count.
+  M2_FINAL=$M2_API_FINAL
+fi
+
 [ -n "$M1_FINAL" ]      || fail "M1 final read failed — can't measure post-revocation state"
-[ -n "$M2_FINAL" ]      || fail "M2 final read failed — can't measure post-revocation state"
+[ -n "$M2_FINAL" ]      || fail "M2 final count unavailable from both API and backing store"
 [ -n "$CURATOR_FINAL" ] || fail "Curator final read failed — can't sanity-check the writer's own view"
 
 log "Curator sees:  $CURATOR_FINAL triples"
@@ -338,25 +388,40 @@ log "M2 sees:       $M2_FINAL triples (pre=$M2_PRE)"
 [ "$M2_FINAL" -ge "$M2_PRE" ] || fail "FORWARD-ONLY ROTATION VIOLATED: M2 had $M2_PRE pre-revoke triples, now has $M2_FINAL post-revoke. Revocation removed history it should have left alone."
 
 # ===========================================================================
-act "6. Encryption-side rotation: M2 must reject the new sender-key epoch"
+act "6. Encryption-side rotation: M2 must not receive the new sender-key epoch"
 # ===========================================================================
-# This is what the C1-pass fix (`removeAgentFromContextGraph` writes
-# `dkg:revokedAgent` tombstone + drops sender-key cache) actually
-# enforces today. We grep M2's daemon log for the broadcast-receive
-# denial — proof that the curator's new epoch was NOT distributed to
-# the revoked member. Without this denial line the encryption-side
-# revoke is broken; with it, the only remaining gap is durable-sync
-# propagation (LU-4b — see script header).
-M2_LOG="$DEVNET_DIR/node${M2_NODE}/daemon.log"
-if [ ! -r "$M2_LOG" ]; then
-  fail "M2 daemon log not readable at $M2_LOG — can't validate sender-key denial"
-fi
-ROTATION_DENIED=$(grep -c "broadcast receive denied: reason=no-state.*${CG_ID}" "$M2_LOG" 2>/dev/null || echo 0)
-if [ -z "$ROTATION_DENIED" ] || [ "$ROTATION_DENIED" -lt 1 ]; then
-  fail "ENCRYPTION-SIDE REGRESSION: M2 did not reject the post-revoke sender-key broadcast with reason=no-state. " \
-       "Either the curator failed to rotate the epoch, OR the new epoch was distributed to the revoked member."
-fi
-log "✓ M2 rejected $ROTATION_DENIED post-revoke sender-key broadcast(s) with reason=no-state — curator-side rotation works"
+# Direct fan-out need not broadcast to a revoked member at all. Inspect both
+# setup sends and pending-package queueing: M1 must receive a fresh epoch,
+# while M2 must receive neither a direct nor a deferred setup after removal.
+POST_EPOCH=$(python3 - "$CURATOR_LOG" "$CG_ID" "$M1_AGENT" "$M2_AGENT" "$PRE_EPOCH" "$POST_REVOKE_LOG_LINES" <<'PY'
+import itertools, re, sys
+path, graph, member, revoked, pre, skip = sys.argv[1:]
+by_recipient = {member: set(), revoked: set()}
+with open(path) as stream:
+    for line in itertools.islice(stream, int(skip), None):
+        # A recipient without a peerId is queued before the direct-send log.
+        # Other retryable sends log both a direct attempt and a queue event.
+        if 'SWM sender-key setup for ' in line and 'queued' in line:
+            queued_recipient = re.search(r'\bSWM sender-key setup for (0x[0-9a-fA-F]{40})\b', line)
+            if queued_recipient and queued_recipient.group(1).lower() == revoked.lower():
+                sys.exit('revoked member had a sender-key setup queued after removal')
+        if 'SWM sender-key setup send:' not in line or f'contextGraph={graph}' not in line:
+            continue
+        recipient = re.search(r'\brecipientAgent=([^ ]+)', line)
+        epoch = re.search(r'\bepoch=([0-9a-f]+)', line)
+        if recipient and epoch:
+            for agent in by_recipient:
+                if recipient.group(1).lower() == agent.lower():
+                    by_recipient[agent].add(epoch.group(1))
+new_epochs = by_recipient[member] - {pre}
+if not new_epochs:
+    sys.exit('remaining member received no fresh sender-key epoch')
+if by_recipient[revoked]:
+    sys.exit('revoked member received a sender-key setup after removal')
+print(','.join(sorted(new_epochs)))
+PY
+) || fail "ENCRYPTION-SIDE REGRESSION: curator did not rotate exclusively to current members"
+log "✓ curator gave M1 fresh epoch $POST_EPOCH and sent no post-revoke setup to M2"
 
 # ===========================================================================
 act "7. Authorization-side rotation: curator must deny M2's sync requests post-revoke"
@@ -375,8 +440,10 @@ M2_DENIED_BY_CURATOR=$(printf '%s' "${M2_DENIED_BY_CURATOR:-0}" | tr -d '[:space
 if [ "$M2_DENIED_BY_CURATOR" -lt 1 ]; then
   warn "AUTH-SIDE OBSERVATION: curator didn't log any post-revoke M2 sync-denials yet. " \
        "M2 may not have re-tried sync against the curator within the test window."
+  AUTH_SIDE_SUMMARY="not observed (M2 made no recorded post-revoke sync request)"
 else
   log "✓ Curator denied $M2_DENIED_BY_CURATOR of M2's sync requests post-revoke — auth-side rotation works"
+  AUTH_SIDE_SUMMARY="✓ curator denied $M2_DENIED_BY_CURATOR M2 sync request(s)."
 fi
 
 # ===========================================================================
@@ -404,7 +471,7 @@ log "  Curated CG:        $CG_ID  (onChainId=$ON_CHAIN_ID)"
 log "  Pre-revoke:        3 triples; all 3 members could read."
 log "  Revoked:           M2 ($M2_AGENT)"
 log "  Post-revoke:       3 NEW triples; M1 reads all 6."
-log "  Encryption-side:   ✓ curator rotated epoch; M2 rejected $ROTATION_DENIED broadcast(s)."
-log "  Auth-side:         ✓ curator denied $M2_DENIED_BY_CURATOR M2 sync request(s)."
+log "  Encryption-side:   ✓ curator rotated epoch for M1 without setting up M2."
+log "  Auth-side:         $AUTH_SIDE_SUMMARY"
 log "  Durable-sync gap:  M2 final count = $M2_FINAL (≤3 ideal, may leak via peer-to-peer sync — LU-4b)."
 log "================================================================"

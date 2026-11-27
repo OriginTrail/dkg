@@ -1,3 +1,8 @@
+import { parseCircuitRelayPeerIds, type RelayedConnectionGater } from './relay-path.js';
+
+export { parseCircuitRelayPeerIds } from './relay-path.js';
+export type { RelayPathPeerIds } from './relay-path.js';
+
 export const RELAY_FLAP_SHORT_CLOSE_MS = 1_000;
 export const RELAY_FLAP_WINDOW_MS = 60_000;
 export const RELAY_FLAP_THRESHOLD = 5;
@@ -7,11 +12,6 @@ export const RELAY_FLAP_STABLE_CLOSE_MS = 10_000;
 export const RELAY_FLAP_DENY_LOG_INTERVAL_MS = 30_000;
 
 const KEY_SEPARATOR = '\u001f';
-
-export interface RelayPathPeerIds {
-  relayPeerId: string;
-  remotePeerId?: string;
-}
 
 export interface RelayFlapGuardOptions {
   shortCloseMs?: number;
@@ -78,31 +78,6 @@ function clampPositiveInteger(value: number, fallback: number): number {
     : fallback;
 }
 
-export function parseCircuitRelayPeerIds(addr: string): RelayPathPeerIds | null {
-  const parts = addr.split('/').filter(Boolean);
-  const circuitIndex = parts.indexOf('p2p-circuit');
-  if (circuitIndex === -1) return null;
-
-  let relayPeerId: string | undefined;
-  for (let i = circuitIndex - 1; i >= 0; i--) {
-    if (parts[i] === 'p2p' && i + 1 < circuitIndex) {
-      relayPeerId = parts[i + 1];
-      break;
-    }
-  }
-  if (!relayPeerId) return null;
-
-  let remotePeerId: string | undefined;
-  for (let i = circuitIndex + 1; i < parts.length - 1; i++) {
-    if (parts[i] === 'p2p') {
-      remotePeerId = parts[i + 1];
-      break;
-    }
-  }
-
-  return { relayPeerId, remotePeerId };
-}
-
 export class RelayFlapGuard {
   private readonly options: Required<RelayFlapGuardOptions>;
   private readonly pairs = new Map<string, RelayFlapPairState>();
@@ -124,9 +99,24 @@ export class RelayFlapGuard {
     relayPeerId: string;
     remotePeerId: string;
     durationMs: number;
+    /**
+     * A short-lived relay circuit is not, by itself, a failure: normal DKG
+     * request/response streams routinely open and close in well under a
+     * second. Callers must have an independent failure signal before a close
+     * can contribute to quarantine.
+     */
+    confirmedFailure: boolean;
     now?: number;
   }): RelayFlapCloseResult {
     const now = input.now ?? Date.now();
+    if (!input.confirmedFailure) {
+      return {
+        shortClose: false,
+        shortCloseCount: 0,
+        enteredQuarantine: false,
+        cleared: false,
+      };
+    }
     if (input.durationMs >= this.options.stableCloseMs) {
       return {
         shortClose: false,
@@ -291,17 +281,6 @@ export class RelayFlapGuard {
 }
 
 /**
- * Minimal structural shape of the libp2p ConnectionGater hooks this guard
- * implements. Kept structural (`{ toString(): string }`) so the gater can be
- * unit-tested without importing libp2p's PeerId/Multiaddr types — the module
- * stays a dependency-free, pure state machine.
- */
-export interface RelayFlapConnectionGater {
-  denyInboundRelayedConnection(relay: { toString(): string }, remotePeer: { toString(): string }): boolean;
-  denyDialMultiaddr(multiaddr: { toString(): string }): boolean;
-}
-
-/**
  * Build the libp2p connection-gater hooks that enforce a `RelayFlapGuard`.
  * Extracted as a pure function so the WIRING (not just the guard) is testable:
  * a regression in the hook arg-shapes or guard plumbing fails a unit test
@@ -316,7 +295,7 @@ export interface RelayFlapConnectionGater {
 export function buildRelayFlapConnectionGater(
   guard: RelayFlapGuard,
   log: (message: string) => void = () => {},
-): RelayFlapConnectionGater {
+): RelayedConnectionGater {
   const short = (id: string): string => id.slice(-8);
   const denyRelayedPath = (
     direction: 'inbound' | 'outbound',
@@ -342,7 +321,8 @@ export function buildRelayFlapConnectionGater(
     denyDialMultiaddr: (multiaddr) => {
       const addr = multiaddr.toString();
       const parsed = parseCircuitRelayPeerIds(addr);
-      if (!parsed?.remotePeerId) return false;
+      if (!parsed) return false;
+      if (!parsed.remotePeerId) return false;
       return denyRelayedPath('outbound', parsed.relayPeerId, parsed.remotePeerId, addr);
     },
   };

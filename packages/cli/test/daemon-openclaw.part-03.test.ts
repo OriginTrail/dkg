@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Agent, errors as undiciErrors } from 'undici';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildOpenClawChannelHeaders,
@@ -295,6 +296,64 @@ describe('OpenClaw channel routing helpers', () => {
         correlationId: 'corr-timeout',
         timeoutMs: OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
       });
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it("does not replay OpenClaw chat send when undici's header timer ends the bridge forward", async () => {
+    const urls: string[] = [];
+    let inboundInit: RequestInit | undefined;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const requestUrl = String(url);
+      urls.push(requestUrl);
+      if (requestUrl.endsWith('/health')) {
+        return new Response(JSON.stringify({ ok: true, channel: 'dkg-ui' }), { status: 200 });
+      }
+      if (requestUrl === 'http://127.0.0.1:9301/inbound') {
+        inboundInit = init;
+        // What Node's fetch throws when undici's headersTimeout fires before the bridge answers.
+        throw new TypeError('fetch failed', { cause: new undiciErrors.HeadersTimeoutError() });
+      }
+      return new Response(JSON.stringify({ text: 'gateway reply' }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const { ctx, res } = makeOpenClawRouteContext({
+        text: 'slow task',
+        correlationId: 'corr-timeout',
+      }, '/api/openclaw-channel/send', {
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            capabilities: { localChat: true },
+            transport: {
+              kind: 'openclaw-channel',
+              bridgeUrl: 'http://127.0.0.1:9301',
+              gatewayUrl: 'https://openclaw.example.com',
+            },
+          },
+        },
+      });
+
+      await handleOpenclawRoutes(ctx);
+
+      expect(urls).toEqual([
+        'http://127.0.0.1:9301/health',
+        'http://127.0.0.1:9301/inbound',
+      ]);
+      expect(res.statusCode).toBe(504);
+      expect(JSON.parse(res.body)).toMatchObject({
+        error: 'OpenClaw bridge response timeout',
+        code: 'OPENCLAW_BRIDGE_RESPONSE_TIMEOUT',
+        source: 'openclaw-channel',
+        target: 'bridge',
+        correlationId: 'corr-timeout',
+        timeoutMs: OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
+      });
+      // A slow agent is not an offline bridge.
+      expect(daemonState.openClawBridgeHealth).toMatchObject({ ok: true });
+      expect((inboundInit as { dispatcher?: unknown } | undefined)?.dispatcher).toBeInstanceOf(Agent);
     } finally {
       globalThis.fetch = origFetch;
     }

@@ -1,4 +1,15 @@
+---
+status: historical
+version: v10
+audience: human
+doc_type: historical
+---
+
 # V10 Mainnet Release Timeline
+
+{% hint style="warning" %}
+**Historical launch plan.** The April 2026 dates and prospective instructions below are retained for context and are not current operational guidance. See [Networks & RPCs](../general/networks.md) for current availability and [GitHub Releases](https://github.com/OriginTrail/dkg/releases) for shipped versions.
+{% endhint %}
 
 <table data-header-hidden><thead><tr><th width="146"></th><th width="169.5"></th><th></th></tr></thead><tbody><tr><td><strong>Milestone</strong></td><td><strong>Date (indicative)</strong></td><td><strong>Key Output</strong></td></tr><tr><td>V10 Release Candidate out</td><td>8 April 2026</td><td>V10rc testnet releases. Smart contracts finalised (implementation, tests, internal security review). V10 protocol core implementation confirmed. New node UI implemented.</td></tr><tr><td>Epoch snapshot</td><td>9 April 2026 00:00:01 UTC</td><td>Current epoch ends. Mainnet snapshot executed — V8 publishing allocation frozen at epoch boundary. Defines each publisher's TRAC balance eligible for V10 conviction migration.</td></tr><tr><td>Updating V8 publishing allocation to V10 Publisher Conviction</td><td>10 April 2026</td><td><p>Tokens sent to publisher wallets so they can republish under the V10 conviction system once V10 launches. Publishers have time to bridge to networks of their choice.</p><p>Node runners have 1 week to get ready to update.</p><p>Stakers prepare to potentially re-delegate ahead of V10 release. V10.0 Mainnet release scheduled for the following week.</p></td></tr><tr><td>New Conviction System Staking UI</td><td>15–17 April 2026</td><td>New Staking UI live, now including conviction staking. Exact release time communicated only via the official channel on the day of release — not published in advance to reduce potential attack vectors.</td></tr><tr><td>V10 Mainnet launch window</td><td>15–17 April 2026</td><td><p>DKG V10 deployed on all networks (NeuroWeb, Base, Gnosis). Publishers and node runners choose which network to operate on. Publishing factor resets to new V10 system (breaking change).</p><p>Publishers create publishing conviction accounts and allocate their TRAC on their network of choice.</p><p>Stakers use the new Staking UI to upgrade their staking positions to V10 conviction.</p></td></tr><tr><td>Ongoing V10 updates &#x26; bounty release</td><td>20 April onwards</td><td>Rolling V10 updates across all integrated networks. Bounty programme releases, with rewards for ecosystem builders and developers actively growing the V10 network, including bug bounty.</td></tr></tbody></table>
 

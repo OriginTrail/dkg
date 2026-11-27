@@ -1,0 +1,505 @@
+import { describe, expect, it, vi } from 'vitest';
+import {
+  DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES,
+  GraphSetIndexStore,
+  OxigraphStore,
+  STORE_GRAPH_CATALOG_MAX_BYTES_ENV,
+  StoreResponseTooLargeError,
+  withDefaultStoreWorkPriority,
+  type TripleStore,
+  type StorePressureSnapshot,
+} from '@origintrail-official/dkg-storage';
+import {
+  DKGQueryEngine,
+  QUERY_CATALOG_LIMIT_NAME,
+  QUERY_CATALOG_MAX_RESPONSE_BYTES,
+  QueryMaterializationBudget,
+} from '@origintrail-official/dkg-query';
+import {
+  canReadUnscopedQuery,
+  type UnscopedQueryAdmissionDependencies,
+} from '../src/unscoped-query-admission.js';
+
+type ContextGraphQueryStore = Pick<TripleStore, 'query' | 'listGraphs' | 'listGraphsByPrefix'>;
+
+const contextGraphIds = Array.from({ length: 10 }, (_, index) => `authority-candidate-${index}`);
+
+function admissionDependencies(
+  canReadContextGraph: UnscopedQueryAdmissionDependencies['canReadContextGraph'],
+  knownContextGraphIds: Iterable<string> = contextGraphIds,
+) {
+  const store = {
+    query: vi.fn<ContextGraphQueryStore['query']>(async () => ({ type: 'bindings', bindings: [] })),
+    listGraphs: vi.fn<ContextGraphQueryStore['listGraphs']>(async () => []),
+    listGraphsByPrefix: vi.fn<NonNullable<ContextGraphQueryStore['listGraphsByPrefix']>>(async () => []),
+  } satisfies ContextGraphQueryStore;
+  return {
+    store: store as TripleStore,
+    knownContextGraphIds,
+    canReadContextGraph,
+  } satisfies UnscopedQueryAdmissionDependencies;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+describe('unscoped query admission', () => {
+  it('rejects admission with STORE_INTERNAL_LIMIT once a warm catalog passes its ceiling through another writer', async () => {
+    let now = 1_000;
+    const readable = 'did:dkg:context-graph:readable';
+    const inner = new OxigraphStore();
+    await inner.insert([{ graph: readable, subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
+    const store = new GraphSetIndexStore(inner, { revalidateMs: 100, revalidate: 'background', now: () => now });
+    const canRead = vi.fn(async (id: string) => id === 'readable');
+    const deps = { store, knownContextGraphIds: [], canReadContextGraph: canRead } satisfies UnscopedQueryAdmissionDependencies;
+    try {
+      await expect(canReadUnscopedQuery(deps)).resolves.toBe(true);
+      // A write through the inner store adds a context graph, and the catalog passes its ceiling.
+      vi.stubEnv(STORE_GRAPH_CATALOG_MAX_BYTES_ENV, String(Buffer.byteLength(JSON.stringify([readable]))));
+      await inner.insert([{ graph: 'did:dkg:context-graph:other', subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
+      now += 100;
+      // Admission reads a current catalog: the due read waits for the revalidation, which fails at the ceiling.
+      await expect(canReadUnscopedQuery(deps)).rejects.toMatchObject({ code: 'STORE_INTERNAL_LIMIT' });
+    } finally {
+      vi.unstubAllEnvs();
+      await store.close();
+    }
+  });
+
+  it('reads a current catalog: a due catalog makes admission wait, while a scoped read is answered warm', async () => {
+    let now = 1_000;
+    const readable = 'did:dkg:context-graph:readable';
+    class HeldListing extends OxigraphStore {
+      hold: Promise<void> | null = null;
+      override async listGraphs(options?: Parameters<OxigraphStore['listGraphs']>[0]): Promise<string[]> {
+        await this.hold;
+        return super.listGraphs(options);
+      }
+    }
+    const inner = new HeldListing();
+    await inner.insert([{ graph: readable, subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
+    const store = new GraphSetIndexStore(inner, { revalidateMs: 100, revalidate: 'background', now: () => now });
+    const canRead = vi.fn(async (id: string) => id === 'readable');
+    const deps = { store, knownContextGraphIds: [], canReadContextGraph: canRead } satisfies UnscopedQueryAdmissionDependencies;
+    try {
+      await expect(canReadUnscopedQuery(deps)).resolves.toBe(true);
+      await inner.insert([{ graph: 'did:dkg:context-graph:added', subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
+      now += 100;
+      const scan = deferred<void>();
+      inner.hold = scan.promise;
+
+      await expect(store.listGraphsByPrefix(readable)).resolves.toEqual([readable]);
+      let decided = false;
+      const admission = canReadUnscopedQuery(deps).finally(() => { decided = true; });
+      for (let turn = 0; turn < 4; turn++) await new Promise((resolve) => setImmediate(resolve));
+      expect(decided).toBe(false);
+      scan.resolve();
+      await expect(admission).resolves.toBe(false);
+      expect(canRead.mock.calls.map(([id]) => id)).toContain('added');
+    } finally {
+      inner.hold = null;
+      await store.close();
+    }
+  });
+
+  it('reads policy discovery and the owner inventory under the node limits, outside any caller budget', async () => {
+    const canRead = vi.fn(async () => true);
+    const deps = admissionDependencies(canRead, []);
+    const owner = 'private'.repeat(32);
+    deps.store.query.mockResolvedValue({ type: 'bindings', bindings: [{ cg: `did:dkg:context-graph:${owner}` }] });
+    await expect(canReadUnscopedQuery(deps)).resolves.toBe(true);
+    expect(deps.store.query.mock.calls[0]?.[1]).toMatchObject({ maxResponseBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES });
+    expect(deps.store.listGraphsByPrefix.mock.calls[0]?.[1])
+      .toMatchObject({ maxResponseBytes: DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES });
+    expect(canRead).toHaveBeenCalledWith(owner, expect.any(AbortSignal));
+  });
+
+  it('answers an access-policy read over its node limit with STORE_INTERNAL_LIMIT', async () => {
+    const canRead = vi.fn(async () => true);
+    const deps = admissionDependencies(canRead, []);
+    deps.store.query.mockRejectedValue(
+      new StoreResponseTooLargeError(QUERY_CATALOG_MAX_RESPONSE_BYTES, QUERY_CATALOG_MAX_RESPONSE_BYTES + 1));
+    await expect(canReadUnscopedQuery(deps)).rejects.toMatchObject({
+      code: 'STORE_INTERNAL_LIMIT', limitName: QUERY_CATALOG_LIMIT_NAME, limitBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES,
+    });
+    expect(canRead).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('charges the caller for its result only, whatever the owner inventory (prefix API: %s)', async (withPrefix) => {
+    const owner = 'c'.repeat(200);
+    const inventory = Array.from({ length: 1000 }, (_, i) =>
+      `did:dkg:context-graph:${owner}/_verifiable_memory/did:dkg:31337/0x${'1'.repeat(40)}/${i + 1}`);
+    const policy = { type: 'bindings' as const, bindings: [] };
+    const content = { type: 'bindings' as const, bindings: [{ value: 'x'.repeat(800_000) }] };
+    const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
+    const total = bytes(content);
+    const deps = admissionDependencies(vi.fn(async () => true), []);
+    deps.store.listGraphsByPrefix.mockResolvedValue(inventory);
+    deps.store.listGraphs.mockResolvedValue(inventory);
+    if (!withPrefix) delete deps.store.listGraphsByPrefix;
+    const run = async (limit: number) => {
+      deps.store.query.mockResolvedValueOnce(policy).mockResolvedValueOnce(content);
+      const budget = new QueryMaterializationBudget(limit);
+      await expect(canReadUnscopedQuery(deps)).resolves.toBe(true);
+      return new DKGQueryEngine(deps.store).query('SELECT ?value WHERE { ?s ?p ?value }', {
+        maxResponseBytes: limit, materializationBudget: budget,
+      });
+    };
+    // The inventory and the policy read are node work: the budget covers the result alone.
+    expect(bytes(inventory) + bytes(policy)).toBeGreaterThan(100_000);
+    await expect(run(total - 1)).rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE', actualBytes: total });
+    await expect(run(total)).resolves.toMatchObject({ bindings: content.bindings });
+    expect(new Set(deps.canReadContextGraph.mock.calls.map(([id]) => id))).toEqual(new Set([owner]));
+  });
+
+  it.each([
+    ['normal', 2, 1, 2], ['background', 2, 1, 1],
+    ['normal', 8, 8, 4], ['normal', 0, 1, 4],
+  ] as const)('bounds %s authority checks to the advertised lane (%s, %s)', async (lane, normal, background, expected) => {
+    let active = 0;
+    let peak = 0;
+    const canRead = vi.fn(async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      active -= 1;
+      return true;
+    });
+    const deps = admissionDependencies(canRead);
+    deps.store.getPressureSnapshot = () => ({ normalInflightLimit: normal, backgroundInflightLimit: background } as StorePressureSnapshot);
+    await expect(withDefaultStoreWorkPriority(lane, () => canReadUnscopedQuery(deps))).resolves.toBe(true);
+    expect(peak).toBe(expected);
+    expect(canRead).toHaveBeenCalledTimes(contextGraphIds.length);
+  });
+
+  it('still rejects a late private owner when reads use a single store slot', async () => {
+    const canRead = vi.fn(async (id: string) => id !== contextGraphIds.at(-1));
+    const deps = admissionDependencies(canRead);
+    deps.store.getPressureSnapshot = () => ({ normalInflightLimit: 1 } as StorePressureSnapshot);
+    await expect(canReadUnscopedQuery(deps)).resolves.toBe(false);
+    expect(canRead).toHaveBeenCalledTimes(contextGraphIds.length);
+  });
+
+  it('starts independent discovery together and waits for the complete candidate union', async () => {
+    const ontology = deferred<Awaited<ReturnType<ContextGraphQueryStore['query']>>>();
+    const inventory = deferred<string[]>();
+    const canRead = vi.fn<UnscopedQueryAdmissionDependencies['canReadContextGraph']>(async () => true);
+    const deps = admissionDependencies(canRead, ['runtime']);
+    deps.store.query.mockImplementation(() => ontology.promise);
+    deps.store.listGraphsByPrefix.mockImplementation(() => inventory.promise);
+    const pending = canReadUnscopedQuery(deps);
+    try {
+      await vi.waitFor(() => {
+        expect(deps.store.query).toHaveBeenCalledOnce();
+        expect(deps.store.listGraphsByPrefix).toHaveBeenCalledOnce();
+      });
+      ontology.resolve({ type: 'bindings', bindings: [{ cg: 'did:dkg:context-graph:ontology' }] });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(canRead).not.toHaveBeenCalled();
+      inventory.resolve(['did:dkg:context-graph:stored']);
+      expect(await pending).toBe(true);
+      expect(new Set(canRead.mock.calls.map(([id]) => id))).toEqual(new Set(['ontology', 'runtime', 'stored']));
+    } finally {
+      ontology.resolve({ type: 'bindings', bindings: [] });
+      inventory.resolve([]);
+      await pending;
+    }
+  });
+
+  it('checks at most four candidates together and allows all-readable owners after out-of-order completion', async () => {
+    const gates = contextGraphIds.map(() => deferred<boolean>());
+    let active = 0;
+    let maximumActive = 0;
+    const completed: string[] = [];
+    const canReadContextGraph = vi.fn(async (id: string) => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      const allowed = await gates[contextGraphIds.indexOf(id)].promise;
+      active -= 1;
+      completed.push(id);
+      return allowed;
+    });
+    const pending = canReadUnscopedQuery(admissionDependencies(canReadContextGraph));
+
+    try {
+      await vi.waitFor(() => expect(canReadContextGraph).toHaveBeenCalledTimes(4));
+      expect(active).toBe(4);
+      for (const index of [3, 2, 1, 0]) gates[index].resolve(true);
+      await vi.waitFor(() => expect(canReadContextGraph).toHaveBeenCalledTimes(8));
+      expect(active).toBe(4);
+      for (const index of [7, 6, 5, 4]) gates[index].resolve(true);
+      await vi.waitFor(() => expect(canReadContextGraph).toHaveBeenCalledTimes(10));
+      for (const index of [9, 8]) gates[index].resolve(true);
+
+      await expect(pending).resolves.toBe(true);
+      expect(maximumActive).toBe(4);
+      expect(active).toBe(0);
+      expect(completed).not.toEqual(contextGraphIds);
+    } finally {
+      for (const gate of gates) gate.resolve(true);
+      await pending;
+    }
+  });
+
+  it('denies when any possible owner is unreadable', async () => {
+    const canReadContextGraph = vi.fn(async (id: string) => id !== contextGraphIds[6]);
+    await expect(canReadUnscopedQuery(admissionDependencies(canReadContextGraph)))
+      .resolves.toBe(false);
+  });
+
+  it('returns on the first denial, aborts active siblings and leaves queued owners untouched', async () => {
+    const gates = contextGraphIds.map(() => deferred<boolean>());
+    const receivedSignals = new Map<string, AbortSignal>();
+    const canReadContextGraph = vi.fn(async (id: string, signal: AbortSignal) => {
+      receivedSignals.set(id, signal);
+      if (id === contextGraphIds[0]) return false;
+      return gates[contextGraphIds.indexOf(id)].promise;
+    });
+    const pending = canReadUnscopedQuery(admissionDependencies(canReadContextGraph));
+    try {
+      await expect(pending).resolves.toBe(false);
+      expect(canReadContextGraph).toHaveBeenCalledTimes(4);
+      expect([...receivedSignals.values()].every((signal) => signal.aborted)).toBe(true);
+      for (const gate of gates) gate.resolve(true);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(canReadContextGraph).toHaveBeenCalledTimes(4);
+    } finally {
+      for (const gate of gates) gate.resolve(true);
+    }
+  });
+
+  it('rejects promptly with the original authority failure and aborts pending siblings', async () => {
+    const gates = contextGraphIds.map(() => deferred<boolean>());
+    const receivedSignals = new Map<string, AbortSignal>();
+    const observedAborts: string[] = [];
+    const canReadContextGraph = vi.fn(async (id: string, signal: AbortSignal) => {
+      receivedSignals.set(id, signal);
+      signal.addEventListener('abort', () => { observedAborts.push(id); }, { once: true });
+      return gates[contextGraphIds.indexOf(id)].promise;
+    });
+    const pending = canReadUnscopedQuery(admissionDependencies(canReadContextGraph));
+    let failure: unknown;
+    const observed = pending.catch((error: unknown) => { failure = error; });
+    const authorityFailure = new Error('authority lookup failed');
+
+    try {
+      await vi.waitFor(() => expect(canReadContextGraph).toHaveBeenCalledTimes(4));
+      gates[1].reject(authorityFailure);
+      // Three callbacks deliberately keep hanging after their signals abort.
+      // The failed request must settle before they return, preserving its cause.
+      await vi.waitFor(() => expect(failure).toBe(authorityFailure));
+      const siblingIds = [contextGraphIds[0], contextGraphIds[2], contextGraphIds[3]];
+      expect(observedAborts).toEqual(expect.arrayContaining(siblingIds));
+      for (const id of siblingIds) expect(receivedSignals.get(id)?.aborted).toBe(true);
+      expect(canReadContextGraph).toHaveBeenCalledTimes(4);
+      for (const gate of gates) gate.resolve(true);
+      await observed;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(canReadContextGraph).toHaveBeenCalledTimes(4);
+    } finally {
+      for (const gate of gates) gate.resolve(true);
+      await observed;
+    }
+  });
+
+  it('authorizes the complete public inventory after 1000 ordinary KA partitions', async () => {
+    const canReadContextGraph = vi.fn(async () => true);
+    const deps = admissionDependencies(canReadContextGraph, ['public-cg']);
+    const author = '0x00000000000000000000000000000000000000ff';
+    deps.store.listGraphsByPrefix.mockResolvedValue(Array.from({ length: 1000 }, (_, index) => (
+      `did:dkg:context-graph:public-cg/_verifiable_memory/${author}/${index + 1}`
+    )));
+
+    await expect(canReadUnscopedQuery(deps)).resolves.toBe(true);
+    expect(canReadContextGraph).toHaveBeenCalledTimes(1002);
+    expect(canReadContextGraph).toHaveBeenCalledWith(
+      `public-cg/_verifiable_memory/${author}/1000`, expect.any(AbortSignal),
+    );
+  });
+
+  it('prepares the complete deduplicated union of ontology, runtime and stored owners', async () => {
+    const fallback = vi.fn(async () => true);
+    const ids = Array.from({ length: 750 }, (_, index) => `candidate-${index}`);
+    const deps = admissionDependencies(fallback, ids.slice(0, 300));
+    deps.store.listGraphsByPrefix.mockResolvedValue(ids.slice(250, 600).map((id) => `did:dkg:context-graph:${id}`));
+    deps.store.query.mockResolvedValue({
+      type: 'bindings', bindings: ids.slice(550).map((id) => ({ cg: `did:dkg:context-graph:${id}` })),
+    });
+    const prepared = vi.fn(async (id: string, _signal: AbortSignal) => id !== ids[749]);
+    const prepareReadChecks = vi.fn<NonNullable<UnscopedQueryAdmissionDependencies['prepareReadChecks']>>(async () => prepared);
+
+    await expect(canReadUnscopedQuery({ ...deps, prepareReadChecks })).resolves.toBe(false);
+    expect(prepareReadChecks).toHaveBeenCalledTimes(1);
+    const [candidates, signal] = prepareReadChecks.mock.calls[0];
+    expect(new Set(candidates)).toEqual(new Set(ids));
+    expect(candidates).toHaveLength(ids.length);
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(prepared.mock.calls.length).toBeLessThan(ids.length);
+    const deniedSignal = prepared.mock.calls.find(([id]) => id === ids[749])?.[1];
+    expect(deniedSignal).toBeInstanceOf(AbortSignal);
+    expect(deniedSignal).not.toBe(signal);
+    expect(deniedSignal?.aborted).toBe(true);
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
+  it('rejects incomplete preparation instead of falling back to optimistic reads', async () => {
+    const canReadContextGraph = vi.fn(async () => true);
+    const prepareReadChecks = vi.fn(async () => { throw new Error('incomplete registration snapshot'); });
+    await expect(canReadUnscopedQuery({ ...admissionDependencies(canReadContextGraph), prepareReadChecks }))
+      .rejects.toThrow('incomplete registration snapshot');
+    expect(canReadContextGraph).not.toHaveBeenCalled();
+  });
+
+  it('includes prepared authority discovery in the deadline and ignores its late result', async () => {
+    vi.useFakeTimers();
+    const gate = deferred<void>();
+    const canReadContextGraph = vi.fn(async () => true);
+    const prepared = vi.fn(async () => true);
+    let preparationSignal: AbortSignal | undefined;
+    const prepareReadChecks: NonNullable<UnscopedQueryAdmissionDependencies['prepareReadChecks']> = async (_ids, signal) => {
+      preparationSignal = signal;
+      await gate.promise;
+      return prepared;
+    };
+    const pending = canReadUnscopedQuery({ ...admissionDependencies(canReadContextGraph), prepareReadChecks });
+    const observed = pending.catch((error: unknown) => error);
+    try {
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(await observed).toMatchObject({ code: 'BOUNDED_OPERATION_TIMEOUT' });
+      expect(preparationSignal?.aborted).toBe(true);
+      gate.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(prepared).not.toHaveBeenCalled();
+      expect(canReadContextGraph).not.toHaveBeenCalled();
+    } finally {
+      gate.resolve();
+      await observed;
+      vi.useRealTimers();
+    }
+  });
+
+  it('does no discovery when the caller is already aborted', async () => {
+    const canReadContextGraph = vi.fn(async () => true);
+    const deps = admissionDependencies(canReadContextGraph);
+    const controller = new AbortController();
+    controller.abort(new Error('caller disconnected'));
+
+    await expect(canReadUnscopedQuery(deps, { signal: controller.signal }))
+      .rejects.toMatchObject({ name: 'AbortError', message: 'caller disconnected' });
+    expect(deps.store.query).not.toHaveBeenCalled();
+    expect(deps.store.listGraphsByPrefix).not.toHaveBeenCalled();
+    expect(deps.store.listGraphs).not.toHaveBeenCalled();
+    expect(canReadContextGraph).not.toHaveBeenCalled();
+  });
+
+  it('signals all four active checks on caller abort and schedules no more after late success', async () => {
+    const gates = contextGraphIds.map(() => deferred<boolean>());
+    const receivedSignals: AbortSignal[] = [];
+    const observedAborts: string[] = [];
+    const canReadContextGraph = vi.fn(async (id: string, signal: AbortSignal) => {
+      receivedSignals.push(signal);
+      signal.addEventListener('abort', () => { observedAborts.push(id); }, { once: true });
+      // The outer admission boundary must also handle non-cooperative callbacks.
+      return gates[contextGraphIds.indexOf(id)].promise;
+    });
+    const controller = new AbortController();
+    const pending = canReadUnscopedQuery(admissionDependencies(canReadContextGraph), { signal: controller.signal });
+    let failure: unknown;
+    const observed = pending.catch((error: unknown) => { failure = error; });
+
+    try {
+      await vi.waitFor(() => expect(canReadContextGraph).toHaveBeenCalledTimes(4));
+      expect(receivedSignals).toHaveLength(4);
+      controller.abort(new Error('caller disconnected'));
+      await vi.waitFor(() => expect(failure).toMatchObject({ name: 'AbortError', message: 'caller disconnected' }));
+      expect(observedAborts).toEqual(contextGraphIds.slice(0, 4));
+      expect(receivedSignals.every((signal) => signal.aborted)).toBe(true);
+      for (const gate of gates) gate.resolve(true);
+      await observed;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(canReadContextGraph).toHaveBeenCalledTimes(4);
+    } finally {
+      for (const gate of gates) gate.resolve(true);
+      await observed;
+    }
+  });
+
+  it('bounds the entire authority admission to five seconds and stops checks after late success', async () => {
+    vi.useFakeTimers();
+    const gates = contextGraphIds.map(() => deferred<boolean>());
+    const receivedSignals: AbortSignal[] = [];
+    const canReadContextGraph = vi.fn(async (id: string, signal: AbortSignal) => {
+      receivedSignals.push(signal);
+      return gates[contextGraphIds.indexOf(id)].promise;
+    });
+    const pending = canReadUnscopedQuery(admissionDependencies(canReadContextGraph));
+    let failure: unknown;
+    const observed = pending.catch((error: unknown) => { failure = error; });
+
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(canReadContextGraph).toHaveBeenCalledTimes(4);
+      await vi.advanceTimersByTimeAsync(4999);
+      expect(failure).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(failure).toMatchObject({ code: 'BOUNDED_OPERATION_TIMEOUT', timeoutMs: 5000 });
+      expect(receivedSignals).toHaveLength(4);
+      expect(receivedSignals.every((signal) => signal.aborted)).toBe(true);
+      for (const gate of gates) gate.resolve(true);
+      await observed;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(canReadContextGraph).toHaveBeenCalledTimes(4);
+    } finally {
+      for (const gate of gates) gate.resolve(true);
+      await observed;
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['ontology', 'inventory'] as const)('includes blocked %s discovery in the five-second admission deadline', async (stage) => {
+    vi.useFakeTimers();
+    const gate = deferred<void>();
+    const canReadContextGraph = vi.fn(async () => true);
+    const deps = admissionDependencies(canReadContextGraph);
+    let discoverySignal: AbortSignal | undefined;
+    if (stage === 'ontology') {
+      deps.store.query.mockImplementation(async (_sparql, options) => {
+        discoverySignal = options?.signal;
+        await gate.promise;
+        return { type: 'bindings', bindings: [] };
+      });
+    } else {
+      deps.store.listGraphsByPrefix.mockImplementation(async (_prefix, options) => {
+        discoverySignal = options?.signal;
+        await gate.promise;
+        return [];
+      });
+    }
+    const pending = canReadUnscopedQuery(deps);
+    let failure: unknown;
+    const observed = pending.catch((error: unknown) => { failure = error; });
+
+    try {
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(failure).toMatchObject({ code: 'BOUNDED_OPERATION_TIMEOUT', timeoutMs: 5000 });
+      expect(discoverySignal?.aborted).toBe(true);
+      expect(canReadContextGraph).not.toHaveBeenCalled();
+      gate.resolve();
+      await observed;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(deps.store.query).toHaveBeenCalledOnce();
+      expect(deps.store.listGraphsByPrefix).toHaveBeenCalledOnce();
+      expect(deps.store.query.mock.calls[0][1]?.signal?.aborted).toBe(true);
+      expect(deps.store.listGraphsByPrefix.mock.calls[0][1]?.signal?.aborted).toBe(true);
+      expect(canReadContextGraph).not.toHaveBeenCalled();
+    } finally {
+      gate.resolve();
+      await observed;
+      vi.useRealTimers();
+    }
+  });
+});

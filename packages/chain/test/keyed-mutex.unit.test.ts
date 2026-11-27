@@ -63,6 +63,36 @@ describe('KeyedSerializer', () => {
     expect(s.activeKeyCount).toBe(0);
   });
 
+  it('reports active keys while an operation is in flight', async () => {
+    const s = new KeyedSerializer();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const p = s.run('w', async () => { await gate; });
+
+    expect(s.isActive('w')).toBe(true);
+    expect(s.isActive('other')).toBe(false);
+
+    release();
+    await p;
+    await tick(0);
+    expect(s.isActive('w')).toBe(false);
+  });
+
+  it('reports active keys while later operations are queued', async () => {
+    const s = new KeyedSerializer();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const p1 = s.run('w', async () => { await gate; });
+    const p2 = s.run('w', async () => undefined);
+
+    expect(s.isActive('w')).toBe(true);
+
+    release();
+    await Promise.all([p1, p2]);
+    await tick(0);
+    expect(s.isActive('w')).toBe(false);
+  });
+
   it('prevents the publisher nonce race: same-wallet sends get distinct, monotonic nonces', async () => {
     // Model the real bug (OriginTrail/dkg#953): an op-wallet's `pending`
     // nonce only advances AFTER a tx is broadcast, and there's an async gap

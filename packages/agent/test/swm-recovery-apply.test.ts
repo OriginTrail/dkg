@@ -1,6 +1,15 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { applySwmRecovery } from '../src/sync/requester/swm-recovery-apply.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  applySwmRecovery,
+  applyVerifiedSwmRecoveryGraphAsset,
+  applyVerifiedSwmRecoveryPlan,
+  createVerifiedSwmRecoveryApplyPlan,
+  type SwmRecoveryStore,
+  type VerifiedSwmRecoveryApplyPorts,
+} from '../src/sync/requester/swm-recovery-apply.js';
+import { createRecoveryExecutionAdmission } from
+  '../src/sync/requester/recovery-execution-guard.js';
 
 /**
  * Recovery must REPLACE per root, not blind-union.
@@ -86,5 +95,567 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
     });
     expect(result.insertedQuads).toBe(1);
     expect(await values(store, SUBJ, STATUS)).toEqual(['"v2"']);
+  });
+
+  it('finishes the admitted root replacement when authority is revoked after deletion starts', async () => {
+    const revoked = new Error('recovery revoked');
+    const controller = new AbortController();
+    let current = true;
+    let rows: Quad[] = [
+      { subject: SUBJ, predicate: STATUS, object: '"v1"', graph: G },
+      { subject: CHILD, predicate: VALUE, object: '"old-leg"', graph: G },
+    ];
+    const operations: string[] = [];
+    const store: SwmRecoveryStore = {
+      insert: async (quads) => {
+        operations.push('insert');
+        rows.push(...quads);
+      },
+      replaceGraph: async () => undefined,
+      deleteByPattern: async (pattern) => {
+        operations.push('delete-root');
+        rows = rows.filter((quad) => !(
+          quad.graph === pattern.graph && quad.subject === pattern.subject
+        ));
+        // Simulate unsubscribe after the backend committed the first delete.
+        current = false;
+        controller.abort(revoked);
+      },
+      deleteBySubjectPrefix: async (graph, prefix) => {
+        operations.push('delete-children');
+        rows = rows.filter((quad) => !(
+          quad.graph === graph && quad.subject.startsWith(prefix)
+        ));
+        return 1;
+      },
+    };
+    const executionBoundary = createRecoveryExecutionAdmission({
+      signal: controller.signal,
+      assertCurrent: () => {
+        if (!current) throw revoked;
+      },
+    });
+
+    await expect(applySwmRecovery({
+      store,
+      verifiedData: [
+        { subject: SUBJ, predicate: STATUS, object: '"v2"', graph: G },
+        { subject: CHILD, predicate: VALUE, object: '"new-leg"', graph: G },
+      ],
+      roots: [{ dataGraph: G, entity: SUBJ }],
+      executionBoundary,
+    })).resolves.toEqual({ replacedRoots: 1, insertedQuads: 2 });
+
+    expect(operations).toEqual(['delete-root', 'delete-children', 'insert']);
+    expect(rows.filter((quad) => quad.subject === SUBJ)).toEqual([
+      { subject: SUBJ, predicate: STATUS, object: '"v2"', graph: G },
+    ]);
+    expect(rows.filter((quad) => quad.subject === CHILD)).toEqual([
+      { subject: CHILD, predicate: VALUE, object: '"new-leg"', graph: G },
+    ]);
+  });
+
+  it('rejects a revoked lease before the root replacement mutates anything', async () => {
+    const revoked = new Error('recovery revoked');
+    const controller = new AbortController();
+    controller.abort(revoked);
+    const operations: string[] = [];
+    const store: SwmRecoveryStore = {
+      insert: async () => { operations.push('insert'); },
+      replaceGraph: async () => undefined,
+      deleteByPattern: async () => { operations.push('delete-root'); },
+      deleteBySubjectPrefix: async () => {
+        operations.push('delete-children');
+        return 0;
+      },
+    };
+    const executionBoundary = createRecoveryExecutionAdmission({
+      signal: controller.signal,
+      assertCurrent: () => { throw revoked; },
+    });
+
+    await expect(applySwmRecovery({
+      store,
+      verifiedData: [{ subject: SUBJ, predicate: STATUS, object: '"v2"', graph: G }],
+      roots: [{ dataGraph: G, entity: SUBJ }],
+      executionBoundary,
+    })).rejects.toBe(revoked);
+    expect(operations).toEqual([]);
+  });
+
+  const PLAN_MUTATIONS = [
+    'ensure-context-graph',
+    'delete-root',
+    'delete-children',
+    'insert-root-data',
+    'replace-graph',
+    'replace-graph-meta',
+    'replace-root-meta',
+    'insert-verified-meta',
+  ] as const;
+
+  it.each(PLAN_MUTATIONS)(
+    'resumes the exact plan after %s commits and then rejects',
+    async (failurePoint) => {
+      const assertionGraph = `${G}/asset`;
+      const metaGraph = `${G}_meta`;
+      const rootData: Quad[] = [
+        { subject: SUBJ, predicate: STATUS, object: '"v2"', graph: G },
+        { subject: CHILD, predicate: VALUE, object: '"new-leg"', graph: G },
+      ];
+      const graphData: Quad[] = [{
+        subject: 'urn:asset', predicate: STATUS, object: '"current"', graph: assertionGraph,
+      }];
+      const verifiedMeta: Quad[] = [{
+        subject: 'urn:head', predicate: STATUS, object: '"current"', graph: metaGraph,
+      }];
+      const descriptor = {
+        metaGraph,
+        headSubject: 'urn:head',
+        operationSubject: 'urn:operation',
+        kaUal: 'did:dkg:ka:retry',
+        assertionVersion: '1',
+        assertionGraph,
+        shareOperationId: 'retry-operation',
+        publicQuadsDigest: `sha256:${'a'.repeat(64)}`,
+        publicQuadsCount: graphData.length,
+        privateTripleCount: 0,
+        publisherPeerId: '12D3KooWRecoveryRetryProvider',
+        metadataQuads: [],
+      };
+      const plan = createVerifiedSwmRecoveryApplyPlan({
+        contextGraphId: 'ws00',
+        rootData,
+        roots: [{ dataGraph: G, entity: SUBJ, creator: 'did:example:creator' }],
+        graphAssets: [{ kind: 'replace', descriptor, replacementQuads: graphData }],
+        verifiedMeta,
+      });
+
+      let rows: Quad[] = [
+        { subject: SUBJ, predicate: STATUS, object: '"stale"', graph: G },
+        { subject: CHILD, predicate: VALUE, object: '"stale-leg"', graph: G },
+      ];
+      let graphRows: Quad[] = [{
+        subject: 'urn:asset', predicate: STATUS, object: '"stale"', graph: assertionGraph,
+      }];
+      let contextGraphReady = false;
+      let graphMetaCurrent = false;
+      let rootMetaCurrent = false;
+      let appliedRootMetaGraphs: readonly string[] = [];
+      let failed = false;
+      const owned = new Map<string, Map<string, string>>();
+      const failAfter = (point: string): void => {
+        if (!failed && point === failurePoint) {
+          failed = true;
+          throw new Error(`post-commit failure: ${point}`);
+        }
+      };
+      const store: SwmRecoveryStore = {
+        insert: async (quads) => {
+          const point = quads.every((quad) => quad.graph === G)
+            ? 'insert-root-data'
+            : 'insert-verified-meta';
+          const existing = new Set(rows.map((quad) => JSON.stringify(quad)));
+          for (const quad of quads) {
+            if (!existing.has(JSON.stringify(quad))) rows.push(quad);
+          }
+          failAfter(point);
+        },
+        replaceGraph: async (_graph, quads) => {
+          graphRows = [...quads];
+          failAfter('replace-graph');
+        },
+        deleteByPattern: async (pattern) => {
+          if (pattern.graph === G && pattern.subject === SUBJ) {
+            rows = rows.filter((quad) => !(
+              quad.graph === pattern.graph && quad.subject === pattern.subject
+            ));
+            failAfter('delete-root');
+          }
+        },
+        deleteBySubjectPrefix: async (graph, prefix) => {
+          rows = rows.filter((quad) => !(
+            quad.graph === graph && quad.subject.startsWith(prefix)
+          ));
+          failAfter('delete-children');
+          return 1;
+        },
+      };
+      const ports: VerifiedSwmRecoveryApplyPorts = {
+        store,
+        ensureContextGraph: async () => {
+          contextGraphReady = true;
+          failAfter('ensure-context-graph');
+        },
+        replaceMetaForRoots: async (_roots, metaGraphs) => {
+          rootMetaCurrent = true;
+          appliedRootMetaGraphs = [...metaGraphs];
+          failAfter('replace-root-meta');
+        },
+        replaceMetaForGraphAssets: async () => {
+          graphMetaCurrent = true;
+          failAfter('replace-graph-meta');
+        },
+        snapshotMaterializer: {
+          withKaWriteLock: async (_cg: string, _sg: string | undefined, _ual: string, fn: () => Promise<unknown>) => fn(),
+          readStoredHead: async () => ({
+            version: null,
+            shareOperationId: null,
+            shareOperationIds: [],
+            needsRepair: false,
+          }),
+        } as never,
+        ensureOwnedMap: (key) => {
+          let map = owned.get(key);
+          if (map === undefined) {
+            map = new Map();
+            owned.set(key, map);
+          }
+          return map;
+        },
+      };
+      const executionBoundary = createRecoveryExecutionAdmission();
+
+      await expect(applyVerifiedSwmRecoveryPlan({
+        plan, ports, executionBoundary,
+      })).rejects.toThrow(`post-commit failure: ${failurePoint}`);
+      await expect(applyVerifiedSwmRecoveryPlan({
+        plan, ports, executionBoundary,
+      })).resolves.toEqual({
+        replacedRoots: 1,
+        replacedGraphs: 1,
+        insertedRootQuads: rootData.length,
+        insertedGraphQuads: graphData.length,
+        insertedMetaQuads: verifiedMeta.length,
+      });
+
+      expect(contextGraphReady).toBe(true);
+      expect(graphMetaCurrent).toBe(true);
+      expect(rootMetaCurrent).toBe(true);
+      expect(appliedRootMetaGraphs).toEqual([metaGraph]);
+      expect(rows.filter((quad) => quad.graph === G)).toEqual(rootData);
+      expect(rows.filter((quad) => quad.graph === metaGraph)).toEqual(verifiedMeta);
+      expect(graphRows).toEqual(graphData);
+      expect(owned.get('ws00')?.get(SUBJ)).toBe('did:example:creator');
+    },
+  );
+
+  it('keeps witness invalidation best-effort after an atomic graph replacement', async () => {
+    const assertionGraph = `${G}/asset`;
+    const graphData: Quad[] = [{
+      subject: 'urn:asset', predicate: STATUS, object: '"current"', graph: assertionGraph,
+    }];
+    let graphRows: Quad[] = [];
+    const ports: VerifiedSwmRecoveryApplyPorts = {
+      store: {
+        insert: async () => undefined,
+        replaceGraph: async (_graph, quads) => { graphRows = [...quads]; },
+        deleteByPattern: async () => { throw new Error('witness backend unavailable'); },
+        deleteBySubjectPrefix: async () => 0,
+      },
+      ensureContextGraph: async () => undefined,
+      replaceMetaForRoots: async () => undefined,
+      replaceMetaForGraphAssets: async () => undefined,
+      snapshotMaterializer: {
+        withKaWriteLock: async (_cg: string, _sg: string | undefined, _ual: string, fn: () => Promise<unknown>) => fn(),
+        readStoredHead: async () => ({
+          version: null,
+          shareOperationId: null,
+          shareOperationIds: [],
+          needsRepair: false,
+        }),
+      } as never,
+      ensureOwnedMap: () => new Map(),
+    };
+    const descriptor = {
+      metaGraph: `${G}_meta`,
+      headSubject: 'urn:head',
+      operationSubject: 'urn:operation',
+      kaUal: 'did:dkg:ka:witness',
+      assertionVersion: '1',
+      assertionGraph,
+      shareOperationId: 'witness-operation',
+      publicQuadsDigest: `sha256:${'b'.repeat(64)}`,
+      publicQuadsCount: 1,
+      privateTripleCount: 0,
+      publisherPeerId: '12D3KooWWitnessProvider',
+      metadataQuads: [],
+    };
+
+    await expect(applyVerifiedSwmRecoveryPlan({
+      plan: createVerifiedSwmRecoveryApplyPlan({
+        contextGraphId: 'witness-cg',
+        rootData: [],
+        roots: [],
+        graphAssets: [{ kind: 'replace', descriptor, replacementQuads: graphData }],
+        verifiedMeta: [],
+      }),
+      ports,
+      executionBoundary: createRecoveryExecutionAdmission(),
+    })).resolves.toMatchObject({ replacedGraphs: 1, insertedGraphQuads: 1 });
+    expect(graphRows).toEqual(graphData);
+  });
+
+  it.each(['replace', 'preserve-equivalent'] as const)(
+    'commits a private root %s with its durable boundary companion',
+    async (kind) => {
+      const assertionGraph = `${G}/private-root-asset`;
+      const graphData: Quad[] = [{
+        subject: 'urn:private-root-asset',
+        predicate: STATUS,
+        object: '"current"',
+        graph: assertionGraph,
+      }];
+      const descriptor = {
+        metaGraph: `${G}_meta`,
+        headSubject: 'urn:private-root-head',
+        operationSubject: 'urn:private-root-operation',
+        kaUal: 'did:dkg:hardhat:31337/0x1111111111111111111111111111111111111111/9',
+        assertionVersion: '4',
+        assertionGraph,
+        shareOperationId: 'private-root-recovery',
+        publicQuadsDigest: `sha256:${'c'.repeat(64)}`,
+        publicQuadsCount: 1,
+        privateTripleCount: 0,
+        publisherPeerId: '12D3KooWPrivateRootRecovery',
+        metadataQuads: [],
+      };
+      const companion = {
+        graphUri: 'urn:test:late-root-boundary',
+        subject: 'urn:test:late-root-boundary:private-recovery',
+        quads: [{
+          subject: 'urn:test:late-root-boundary:private-recovery',
+          predicate: 'urn:test:entry',
+          object: '"private-recovery"',
+          graph: 'urn:test:late-root-boundary',
+        }],
+      };
+      const replaceGraph = vi.fn();
+      const replaceGraphWithAtomicCompanion = vi.fn().mockResolvedValue(undefined);
+      const preserveStoredIdentityForSkippedAsset = vi.fn().mockResolvedValue({
+        outcome: 'preserved',
+        withholdRows: [],
+      });
+      const replaceMetaForGraphAssets = vi.fn().mockResolvedValue(undefined);
+      const resolveRootAtomicCompanion = vi.fn(() => companion);
+
+      await expect(applyVerifiedSwmRecoveryGraphAsset({
+        contextGraphId: 'private-recovery-cg',
+        asset: kind === 'replace'
+          ? { kind, descriptor, replacementQuads: graphData }
+          : { kind, descriptor },
+        ports: {
+          store: {
+            insert: async () => undefined,
+            replaceGraph,
+            deleteByPattern: async () => undefined,
+            deleteBySubjectPrefix: async () => 0,
+          },
+          replaceMetaForGraphAssets,
+          snapshotMaterializer: {
+            withKaWriteLock: async (
+              _cg: string,
+              _sg: string | undefined,
+              _ual: string,
+              fn: () => Promise<unknown>,
+            ) => fn(),
+            readStoredHead: async () => kind === 'replace'
+              ? {
+                  version: null,
+                  shareOperationId: null,
+                  shareOperationIds: [],
+                  needsRepair: false,
+                }
+              : {
+                  version: descriptor.assertionVersion,
+                  shareOperationId: descriptor.shareOperationId,
+                  shareOperationIds: [descriptor.shareOperationId],
+                  needsRepair: false,
+                },
+            readExactMaterializedGraph: async () => [...graphData],
+            replaceGraphWithAtomicCompanion,
+            preserveStoredIdentityForSkippedAsset,
+          } as never,
+          resolveRootAtomicCompanion,
+        },
+      })).resolves.toMatchObject({ insertedGraphQuads: 1 });
+
+      expect(resolveRootAtomicCompanion).toHaveBeenCalledWith({
+        contextGraphId: 'private-recovery-cg',
+        kaUal: descriptor.kaUal,
+        assertionVersion: descriptor.assertionVersion,
+        shareOperationId: descriptor.shareOperationId,
+      });
+      expect(replaceGraph).not.toHaveBeenCalled();
+      expect(replaceGraphWithAtomicCompanion).toHaveBeenCalledWith(
+        assertionGraph,
+        graphData,
+        companion,
+      );
+    },
+  );
+
+  it('rechecks the stored version after the KA lock and never overwrites newer live gossip', async () => {
+    const assertionGraph = `${G}/private-root-race`;
+    const headSubject = 'urn:private-root-race-head';
+    const descriptor = {
+      metaGraph: `${G}_meta`,
+      headSubject,
+      operationSubject: 'urn:private-root-race-operation',
+      kaUal: 'did:dkg:hardhat:31337/0x1111111111111111111111111111111111111111/10',
+      assertionVersion: '4',
+      assertionGraph,
+      shareOperationId: 'private-root-race',
+      publicQuadsDigest: `sha256:${'d'.repeat(64)}`,
+      publicQuadsCount: 1,
+      privateTripleCount: 0,
+      publisherPeerId: '12D3KooWPrivateRootRace',
+      metadataQuads: [{
+        subject: headSubject,
+        predicate: STATUS,
+        object: '"remote-v4"',
+        graph: `${G}_meta`,
+      }],
+    };
+    const enteredLock = Promise.withResolvers<void>();
+    const releaseLock = Promise.withResolvers<void>();
+    let storedVersion = '4';
+    const replaceGraph = vi.fn();
+    const replaceGraphWithAtomicCompanion = vi.fn();
+    const resolveRootAtomicCompanion = vi.fn();
+
+    const applying = applyVerifiedSwmRecoveryGraphAsset({
+      contextGraphId: 'private-recovery-cg',
+      asset: {
+        kind: 'replace',
+        descriptor,
+        replacementQuads: [{
+          subject: 'urn:private-root-race',
+          predicate: STATUS,
+          object: '"remote-v4"',
+          graph: assertionGraph,
+        }],
+      },
+      ports: {
+        store: {
+          insert: async () => undefined,
+          replaceGraph,
+          deleteByPattern: async () => undefined,
+          deleteBySubjectPrefix: async () => 0,
+        },
+        replaceMetaForGraphAssets: vi.fn(),
+        snapshotMaterializer: {
+          withKaWriteLock: async (
+            _cg: string,
+            _sg: string | undefined,
+            _ual: string,
+            fn: () => Promise<unknown>,
+          ) => {
+            enteredLock.resolve();
+            await releaseLock.promise;
+            return fn();
+          },
+          readStoredHead: async () => ({
+            version: storedVersion,
+            shareOperationId: 'live-v5',
+            shareOperationIds: ['live-v5'],
+            needsRepair: false,
+          }),
+          replaceGraphWithAtomicCompanion,
+        } as never,
+        resolveRootAtomicCompanion,
+      },
+    });
+
+    await enteredLock.promise;
+    storedVersion = '5';
+    releaseLock.resolve();
+    await expect(applying).resolves.toEqual({
+      insertedGraphQuads: 0,
+      withholdRows: descriptor.metadataQuads,
+    });
+    expect(resolveRootAtomicCompanion).not.toHaveBeenCalled();
+    expect(replaceGraph).not.toHaveBeenCalled();
+    expect(replaceGraphWithAtomicCompanion).not.toHaveBeenCalled();
+  });
+
+  it('repairs an unparseable head only when the stored content is already equivalent', async () => {
+    const assertionGraph = `${G}/private-corrupt-version`;
+    const headSubject = 'urn:private-corrupt-version-head';
+    const descriptor = {
+      metaGraph: `${G}_meta`,
+      headSubject,
+      operationSubject: 'urn:private-corrupt-version-operation',
+      kaUal: 'did:dkg:hardhat:31337/0x1111111111111111111111111111111111111111/11',
+      assertionVersion: '4',
+      assertionGraph,
+      shareOperationId: 'private-corrupt-version',
+      publicQuadsDigest: `sha256:${'e'.repeat(64)}`,
+      publicQuadsCount: 1,
+      privateTripleCount: 0,
+      publisherPeerId: '12D3KooWPrivateCorruptVersion',
+      metadataQuads: [{
+        subject: headSubject,
+        predicate: STATUS,
+        object: '"remote-v4"',
+        graph: `${G}_meta`,
+      }],
+      // Keep the regression focused on metadata repair rather than the root
+      // boundary companion, which is covered by the preceding parameterized
+      // rows.
+      subGraphName: 'named',
+    };
+    const replacementQuads: Quad[] = [{
+      subject: 'urn:private-corrupt-version',
+      predicate: STATUS,
+      object: '"remote-v4"',
+      graph: assertionGraph,
+    }];
+    const replaceGraph = vi.fn();
+    const replaceMetaForGraphAssets = vi.fn().mockResolvedValue(undefined);
+    const ports = {
+      store: {
+        insert: async () => undefined,
+        replaceGraph,
+        deleteByPattern: async () => undefined,
+        deleteBySubjectPrefix: async () => 0,
+      },
+      replaceMetaForGraphAssets,
+      snapshotMaterializer: {
+        withKaWriteLock: async (
+          _cg: string,
+          _sg: string | undefined,
+          _ual: string,
+          fn: () => Promise<unknown>,
+        ) => fn(),
+        readStoredHead: async () => ({
+          version: 'not-a-version',
+          shareOperationId: descriptor.shareOperationId,
+          shareOperationIds: [descriptor.shareOperationId],
+          needsRepair: false,
+        }),
+      } as never,
+    };
+
+    await expect(applyVerifiedSwmRecoveryGraphAsset({
+      contextGraphId: 'private-recovery-cg',
+      asset: { kind: 'preserve-equivalent', descriptor },
+      ports,
+    })).resolves.toEqual({ insertedGraphQuads: 1, withholdRows: [] });
+    expect(replaceMetaForGraphAssets).toHaveBeenCalledOnce();
+    expect(replaceMetaForGraphAssets).toHaveBeenCalledWith([descriptor]);
+    expect(replaceGraph).not.toHaveBeenCalled();
+
+    replaceMetaForGraphAssets.mockClear();
+    await expect(applyVerifiedSwmRecoveryGraphAsset({
+      contextGraphId: 'private-recovery-cg',
+      asset: { kind: 'replace', descriptor, replacementQuads },
+      ports,
+    })).resolves.toEqual({
+      insertedGraphQuads: 0,
+      withholdRows: descriptor.metadataQuads,
+    });
+    expect(replaceMetaForGraphAssets).not.toHaveBeenCalled();
+    expect(replaceGraph).not.toHaveBeenCalled();
   });
 });

@@ -42,6 +42,39 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "NoWithdrawnEpoch",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "NodeAlreadyInShardingTable",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "NodeBelowMinimumStake",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "NotPositionOwner",
     "type": "error"
@@ -178,6 +211,22 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "WithdrawnEpochInProgress",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "ZeroAddressHub",
     "type": "error"
@@ -191,6 +240,25 @@
     "inputs": [],
     "name": "ZeroTokenAmount",
     "type": "error"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "nodeStakeV10",
+        "type": "uint256"
+      }
+    ],
+    "name": "NodeAdmissionDeferred",
+    "type": "event"
   },
   {
     "anonymous": false,
@@ -324,6 +392,62 @@
     "type": "event"
   },
   {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "staker",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
+    "name": "WithdrawnEpochClaimed",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "staker",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "WithdrawnEpochRecorded",
+    "type": "event"
+  },
+  {
     "inputs": [],
     "name": "SCALE18",
     "outputs": [
@@ -334,6 +458,19 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "admitNode",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -418,7 +555,7 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "staker",
+        "name": "",
         "type": "address"
       },
       {
@@ -429,6 +566,38 @@
     ],
     "name": "claim",
     "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "claimFor",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "claimWithdrawnEpoch",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
     "stateMutability": "nonpayable",
     "type": "function"
   },
@@ -584,6 +753,32 @@
     "outputs": [
       {
         "internalType": "contract ProfileStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "queryInferenceSettlement",
+    "outputs": [
+      {
+        "internalType": "contract QueryInferenceSettlement",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "queryInferenceStorage",
+    "outputs": [
+      {
+        "internalType": "contract QueryInferenceStorage",
         "name": "",
         "type": "address"
       }

@@ -29,10 +29,12 @@ function isDaemonAcceptedObjectTerm(value: string): boolean {
 describe('installOntology', () => {
   let originalFetch: typeof globalThis.fetch | undefined;
   let calls: FetchCall[];
+  let failAtomicShare: boolean;
 
   beforeEach(() => {
     originalFetch = globalThis.fetch;
     calls = [];
+    failAtomicShare = false;
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       const body = init?.body ? JSON.parse(String(init.body)) : {};
@@ -50,6 +52,28 @@ describe('installOntology', () => {
             headers: { 'Content-Type': 'application/json' },
           });
         }
+      }
+
+      if (path.endsWith('/swm/share')) {
+        if ('entities' in body || 'skipSeal' in body) {
+          return new Response(JSON.stringify({
+            code: 'KA_ATOMIC_SHARE_REQUIRED',
+            error: 'Knowledge Assets are shared atomically',
+          }), { status: 409, headers: { 'Content-Type': 'application/json' } });
+        }
+        if (failAtomicShare) {
+          return new Response(JSON.stringify({ error: 'peer delivery failed' }), {
+            status: 503,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({
+          swmShared: true,
+          promotedCount: 21,
+          sealed: true,
+          publishReady: true,
+          shareOperationId: 'ontology-share-1',
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
 
       return new Response(JSON.stringify({ ok: true }), {
@@ -85,5 +109,15 @@ describe('installOntology', () => {
     expect(writtenObjects).not.toEqual(expect.arrayContaining([
       expect.stringMatching(/^<[^>]+>$/),
     ]));
+
+    const shareCall = calls.find((call) => call.path.endsWith('/swm/share'));
+    expect(shareCall?.body).toEqual({ contextGraphId, subGraphName: 'meta' });
+    expect(shareCall?.body).not.toHaveProperty('entities');
+  });
+
+  it('propagates atomic share failure instead of reporting a local-only install as successful', async () => {
+    failAtomicShare = true;
+    await expect(installOntology('team-cg', 'pkm')).rejects.toThrow('peer delivery failed');
+    expect(calls.some((call) => call.path.endsWith('/swm/share'))).toBe(true);
   });
 });

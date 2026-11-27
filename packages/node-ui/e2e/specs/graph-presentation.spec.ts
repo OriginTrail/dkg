@@ -22,7 +22,7 @@ test.describe('Graph presentation — memory layer views', () => {
   test('WM Graph tab renders canvas or loading state without error', async ({ projectLayer, page }) => {
     await openLayerGraphTab(projectLayer, page);
     await expect(page.locator('.v10-me-error')).toBeHidden();
-    const graphSurface = page.locator('canvas, .rdf-graph, .v10-me-graph-loading, .v10-layer-expand-body');
+    const graphSurface = page.locator('canvas, .rdf-graph, .v10-layer-expand-body');
     await expect(graphSurface.first()).toBeVisible({ timeout: 15_000 });
   });
 
@@ -32,7 +32,7 @@ test.describe('Graph presentation — memory layer views', () => {
     // Either real staged entities render, or the empty/staging state shows —
     // both are valid for a real CG depending on what's currently in WM.
     const hasEntities = await page
-      .locator('.v10-me-entity, .v10-entity-card, .v10-me-list-row')
+      .locator('.v10-entity-card')
       .first()
       .isVisible()
       .catch(() => false);
@@ -48,7 +48,7 @@ test.describe('Graph presentation — memory layer views', () => {
   test('VM layer shows verifiable memory hero and entity list', async ({ projectLayer, page }) => {
     await projectLayer.switchLayer('Verifiable Memory');
     await expect(page.locator('.v10-me-error')).toBeHidden();
-    await expect(page.getByText(/Verifiable Triples|Knowledge Assets/i).first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('.v10-vm-hero-stats [data-stat-id="triples"] .v10-stat-strip-label')).toHaveText('Stored triples (data + provenance)', { timeout: 15_000 });
   });
 });
 

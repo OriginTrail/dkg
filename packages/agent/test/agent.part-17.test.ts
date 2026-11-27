@@ -256,7 +256,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         await agent.start();
         (agent as any).subscribedContextGraphs.set('local-private-cg', {
           name: 'local-private-cg',
-          subscribed: false,
+          subscribed: true,
           synced: true,
         });
         (agent as any).isPrivateContextGraph = async () => true;
@@ -267,6 +267,39 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
         const cannotRead = await (agent as any).canReadContextGraph('unsubscribed-private-cg');
         expect(cannotRead).toBe(false);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+
+
+    it('canReadContextGraph denies retained identity-only and host-only private CGs when identityId is 0n', async () => {
+      const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      (chain as any).getIdentityId = async () => 0n;
+      const agent = await DKGAgent.create({
+        name: 'CanReadRetainedIdentity',
+        listenHost: '127.0.0.1',
+        chainAdapter: chain,
+      });
+      try {
+        await agent.start();
+        (agent as any).subscribedContextGraphs.set('identity-only-private-cg', {
+          name: 'identity-only-private-cg',
+          subscribed: false,
+          synced: true,
+        });
+        (agent as any).subscribedContextGraphs.set('host-only-private-cg', {
+          name: 'host-only-private-cg',
+          subscribed: false,
+          coreHosted: true,
+          synced: true,
+        });
+        (agent as any).isPrivateContextGraph = async () => true;
+        (agent as any).getPrivateContextGraphParticipants = async () => ['1'];
+
+        expect(await (agent as any).canReadContextGraph('identity-only-private-cg')).toBe(false);
+        expect(await (agent as any).canReadContextGraph('host-only-private-cg')).toBe(false);
       } finally {
         await agent.stop().catch(() => {});
       }
@@ -400,8 +433,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       try {
         await agent.start();
         (agent as any).subscribedContextGraphs.set('public-cg', {
-          name: 'public-cg', subscribed: true, synced: true,
+          name: 'public-cg', subscribed: true, synced: true, metaSynced: true,
         });
+        (agent as any).hasConfirmedMetaState = async () => true;
         const bytes = await (agent as any).buildSyncRequest('public-cg', 5, 100, false, 'peer-remote', 'meta');
         const text = new TextDecoder().decode(bytes);
         expect(text).toBe('public-cg|5|100|meta');
@@ -427,7 +461,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           name: 'discovered-public-cg',
           subscribed: false,
           synced: true,
+          metaSynced: true,
         });
+        (agent as any).hasConfirmedMetaState = async () => true;
 
         const bytes = await (agent as any).buildSyncRequest('discovered-public-cg', 0, 50, false, 'peer-remote');
         const text = new TextDecoder().decode(bytes);

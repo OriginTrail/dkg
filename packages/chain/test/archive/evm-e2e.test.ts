@@ -21,12 +21,12 @@ let deployerProfileId: number;
 
 describe('EVM E2E: Full on-chain publishing lifecycle', () => {
   beforeAll(async () => {
-    ctx = await spawnHardhatEnv(8546);
+    ctx = await spawnHardhatEnv();
     deployerProfileId = ctx.coreProfileId;
   }, 90_000);
 
-  afterAll(() => {
-    killHardhat(ctx);
+  afterAll(async () => {
+    await killHardhat(ctx);
   });
 
   it('deploys V8 + V9 contracts and registers them in Hub', async () => {

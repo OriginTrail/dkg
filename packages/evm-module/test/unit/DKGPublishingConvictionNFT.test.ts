@@ -271,16 +271,17 @@ describe('@unit DKGPublishingConvictionNFT', function () {
   // C. createAccount escrow-only model (lazy-settlement)
   // ======================================================================
 
-  describe('createAccount: lazy-settlement escrow-only model', () => {
-    it('writes ZERO EpochStorage pool deltas upfront — only the CSS escrow balance moves', async () => {
-      // V10 lazy-settlement model: committed TRAC stays in escrow at
-      // createAccount time. The staker pool is funded lazily — via
-      // `coverPublishingCost` (active sink) and `settle()` (passive sink).
+  describe('createAccount: nothing booked at creation (10.2.0)', () => {
+    it('books nothing to the staker pool — the escrow moves to CSS and the account pays at use time', async () => {
+      // 10.2.0 model: the account books its money when it uses it — a
+      // publish when it is spent, a closed window's unused budget once the
+      // window has closed. The TRAC itself escrows in the CSS vault.
       const amount = hre.ethers.parseEther('1200000');
       const current = await ChronosContract.getCurrentEpoch();
+      const span = 2 * LOCK_DURATION + 3;
 
       const before: bigint[] = [];
-      for (let i = 0; i < MAX_CHAIN_EPOCHS_TOUCHED + 2; i++) {
+      for (let i = 0; i < span; i++) {
         before.push(await EpochStorageContract.getEpochPool(STAKER_SHARD_ID, current + BigInt(i)));
       }
       const remainderBefore = await EpochStorageContract.accumulatedRemainder(STAKER_SHARD_ID);
@@ -290,56 +291,48 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       await TokenContract.approve(await NFT.getAddress(), amount);
       await NFT.createAccount(amount, 0);
 
-      // Pool deltas: ZERO across the entire account lifetime + a couple
-      // safety epochs past it.
-      for (let i = 0; i < MAX_CHAIN_EPOCHS_TOUCHED + 2; i++) {
+      for (let i = 0; i < span; i++) {
         const after = await EpochStorageContract.getEpochPool(STAKER_SHARD_ID, current + BigInt(i));
-        expect(after - before[i]).to.equal(0n);
+        expect(after, `epoch ${current + BigInt(i)}`).to.equal(before[i]);
       }
-      // Accumulated remainder: also untouched. createAccount must never
-      // call addTokensToEpochRange.
-      const remainderAfter = await EpochStorageContract.accumulatedRemainder(STAKER_SHARD_ID);
-      expect(remainderAfter - remainderBefore).to.equal(0n);
-
-      // Escrow balance: full committedTRAC moved into CSS vault.
+      expect(await EpochStorageContract.accumulatedRemainder(STAKER_SHARD_ID)).to.equal(remainderBefore);
       expect(await TokenContract.balanceOf(cssAddr)).to.equal(cssBefore + amount);
 
-      // Account is created with the lazy-settlement cursor zeroed.
+      // The booking cursor starts at window 0: a use-time account.
       const info = await NFT.getAccountInfo(1);
       expect(info.lastSettledWindow).to.equal(0n);
       expect(info.fullySwept).to.equal(false);
     });
 
-    it('also writes ZERO pool deltas when committedTRAC % 12 != 0 (dust is held in escrow until final settle)', async () => {
-      // 25_013 ether: lowest tier (>=25K) plus 13 wei tail. Pre-lazy this
-      // tail would have ended up in EpochStorage's accumulatedRemainder
-      // shard; in the lazy model, it stays in CSS escrow until
-      // `settle()` is called post-expiry.
+    it('books every wei of an idle commitment by the end of the lock, dust with the last window', async () => {
+      // 25_013 ether + 13 wei: lowest tier (>=25K) plus a wei tail. The
+      // `committedTRAC % lock` dust rides the LAST window's booking.
       const amount = hre.ethers.parseEther('25000') + 13n;
       const current = await ChronosContract.getCurrentEpoch();
+      const span = 2 * LOCK_DURATION + 3;
 
       const remainderBefore = await EpochStorageContract.accumulatedRemainder(STAKER_SHARD_ID);
       const epochBefore: bigint[] = [];
-      for (let i = 0; i < MAX_CHAIN_EPOCHS_TOUCHED; i++) {
-        epochBefore.push(
-          await EpochStorageContract.getEpochPool(STAKER_SHARD_ID, current + BigInt(i)),
-        );
+      for (let i = 0; i < span; i++) {
+        epochBefore.push(await EpochStorageContract.getEpochPool(STAKER_SHARD_ID, current + BigInt(i)));
       }
 
       await TokenContract.approve(await NFT.getAddress(), amount);
       await NFT.createAccount(amount, 0);
+      const epochLength = await ChronosContract.epochLength();
+      await time.increase(epochLength * BigInt(LOCK_DURATION + 1));
+      await NFT.settle(1);
 
-      // No epoch pool deltas anywhere.
-      for (let i = 0; i < MAX_CHAIN_EPOCHS_TOUCHED; i++) {
+      // Conservation to the wei, dust included.
+      let sum = 0n;
+      for (let i = 0; i < span; i++) {
         const after = await EpochStorageContract.getEpochPool(STAKER_SHARD_ID, current + BigInt(i));
-        expect(after - epochBefore[i]).to.equal(0n);
+        sum += after - epochBefore[i];
       }
-      // No accumulator drift either — the contract NEVER calls
-      // addTokensToEpochRange at createAccount time, so the per-shard
-      // floor-division residual cannot change.
       const remainderAfter = await EpochStorageContract.accumulatedRemainder(STAKER_SHARD_ID);
-      expect(remainderAfter - remainderBefore).to.equal(0n);
+      expect(sum + (remainderAfter - remainderBefore)).to.equal(amount);
       expect(amount % BigInt(LOCK_DURATION)).to.not.equal(0n);
+      expect((await NFT.getAccountInfo(1)).lastSettledWindow).to.equal(BigInt(LOCK_DURATION));
     });
   });
 
@@ -759,7 +752,24 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       return newId;
     }
 
-    it('returns the discounted cost, deducts from epoch allowance, and funds the KA epoch range (active sink)', async () => {
+    /** The staker-shard credits a receipt made, as [start, end, amount]. */
+    async function stakerCredits(receipt: { logs: ReadonlyArray<{ address: string; topics: ReadonlyArray<string>; data: string }> }) {
+      const epsAddr = (await EpochStorageContract.getAddress()).toLowerCase();
+      const iface = EpochStorageContract.interface;
+      const out: Array<[bigint, bigint, bigint]> = [];
+      for (const log of receipt.logs) {
+        if (log.address.toLowerCase() !== epsAddr) continue;
+        let parsed;
+        try { parsed = iface.parseLog({ topics: log.topics as string[], data: log.data }); }
+        catch { continue; }
+        if (parsed?.name !== 'TokensAddedToEpochRange') continue;
+        expect(parsed.args.shardId).to.equal(STAKER_SHARD_ID);
+        out.push([BigInt(parsed.args.startEpoch), BigInt(parsed.args.endEpoch), BigInt(parsed.args.tokenAmount)]);
+      }
+      return out;
+    }
+
+    it('returns the discounted cost, deducts it from the window allowance, and books it over the KA epochs (10.2.0 use time)', async () => {
       const committed = hre.ethers.parseEther('1200000');
       await createAtWithAgent(committed, agent.address);
 
@@ -776,43 +786,21 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       );
       expect(returned).to.equal(expectedDiscount);
 
-      // Pin the active-sink distribution via the sum of
-      // `TokensAddedToEpochRange` events emitted by `EpochStorage`. The
-      // distribution now mirrors `KnowledgeAssetsV10._distributeTokens`:
-      // the discountedCost is prorated across `kaEpochs + 1` chain epochs
-      // (partial current + (kaEpochs - 1) full middle + partial final),
-      // so we get up to 3 separate events. The TOTAL summed across all
-      // emissions must equal `expectedDiscount`, and every event must
-      // sit within `[currentEpoch, currentEpoch + kaEpochs]` for shard
-      // STAKER_SHARD_ID. Event-based assertion (rather than per-epoch
-      // pool deltas) because V8 staker-shard `cumulative[...]` storage
-      // is shared with pre-existing unfinalized diffs from the deploy
-      // fixture, polluting per-epoch delta math.
+      // 10.2.0: the account pays when it spends, as a wallet publish does —
+      // the whole discounted cost is credited over the KA's `kaEpochs` from
+      // the current epoch, and nothing else is.
       const tx = await NFT.connect(Kav10Signer).coverPublishingCost(
         agent.address,
         baseCost,
         currentEpoch,
         kaEpochs,
       );
-      const receipt = await tx.wait();
-      const epsAddr = (await EpochStorageContract.getAddress()).toLowerCase();
-      const iface = EpochStorageContract.interface;
-      let totalDistributed = 0n;
-      let eventCount = 0;
-      for (const log of receipt!.logs) {
-        if (log.address.toLowerCase() !== epsAddr) continue;
-        let parsed;
-        try { parsed = iface.parseLog({ topics: log.topics as string[], data: log.data }); }
-        catch { continue; }
-        if (parsed?.name !== 'TokensAddedToEpochRange') continue;
-        eventCount++;
-        expect(parsed.args.shardId).to.equal(STAKER_SHARD_ID);
-        expect(parsed.args.startEpoch).to.be.gte(currentEpoch);
-        expect(parsed.args.endEpoch).to.be.lte(currentEpoch + kaEpochs);
-        totalDistributed += BigInt(parsed.args.tokenAmount);
+      const credits = await stakerCredits((await tx.wait())!);
+      expect(credits.reduce((sum, r) => sum + r[2], 0n)).to.equal(expectedDiscount);
+      for (const [start, end] of credits) {
+        expect(start).to.be.gte(currentEpoch);
+        expect(end).to.be.lte(currentEpoch + kaEpochs);
       }
-      expect(eventCount).to.be.greaterThan(0);
-      expect(totalDistributed).to.equal(expectedDiscount);
 
       const info = await NFT.getAccountInfo(1);
       const epochLength = await ChronosContract.epochLength();
@@ -822,19 +810,29 @@ describe('@unit DKGPublishingConvictionNFT', function () {
     });
 
     describe('PublishingMathLib integration', () => {
-      it('PCA coverPublishingCost event ranges match the shared active-sink calculator', async () => {
+      it('a use-time PCA spend, top-up overflow included, books the ranges of the shared active-sink calculator over the KA epochs', async () => {
         const source = readFileSync(
           join(__dirname, '../../contracts/PublishingConviction.sol'),
           'utf8',
         );
         expect(source).to.include('PublishingMathLib.prorateActiveSink(');
 
+        // 10.2.0: a use-time account books its whole spend, window part and
+        // topUp overflow alike, over the KA's epochs from the current epoch,
+        // as a wallet publish does — assert its event ranges byte-match the
+        // shared calculator.
         const committed = hre.ethers.parseEther('1200000');
         await createAtWithAgent(committed, agent.address);
+        const top = hre.ethers.parseEther('50000');
+        await TokenContract.approve(await NFT.getAddress(), top);
+        await NFT.topUp(1, top);
 
-        const baseCost = hre.ethers.parseEther('10000');
-        const expectedDiscount = (baseCost * (BPS - 7500n)) / BPS;
-        const kaEpochs = 3n;
+        const baseAllowance = committed / BigInt(LOCK_DURATION); // 100k
+        const overflow = hre.ethers.parseEther('5000');
+        // discounted = baseAllowance + overflow → baseCost = that / 0.25
+        const baseCost = ((baseAllowance + overflow) * BPS) / (BPS - 7500n);
+        const discounted = (baseCost * (BPS - 7500n)) / BPS;
+        expect(discounted).to.be.gt(baseAllowance);
 
         const Harness = await hre.ethers.getContractFactory('PublishingMathLibHarness');
         const harness = await Harness.deploy();
@@ -844,19 +842,24 @@ describe('@unit DKGPublishingConvictionNFT', function () {
         const timeRemaining =
           (await ChronosContract.timestampForEpoch(targetEpoch + 1n)) - targetTimestamp;
         const [starts, ends, amounts] = await harness.prorateActiveSink(
-          expectedDiscount,
+          discounted,
           targetEpoch,
-          kaEpochs,
+          BigInt(LOCK_DURATION),
           epochLength,
           timeRemaining,
         );
 
         await time.setNextBlockTimestamp(Number(targetTimestamp));
+        // Pass a kaStartEpoch deliberately away from the execution epoch
+        // (`targetEpoch`): the booking anchors at the current epoch and
+        // ignores the ABI-retained kaStartEpoch. The harness model above is
+        // anchored at `targetEpoch`, so this call fails if the
+        // implementation ever regresses to kaStartEpoch-anchored booking.
         const tx = await NFT.connect(Kav10Signer).coverPublishingCost(
           agent.address,
           baseCost,
-          targetEpoch,
-          kaEpochs,
+          targetEpoch + 5n,
+          LOCK_DURATION,
         );
         const receipt = await tx.wait();
         const epsAddr = (await EpochStorageContract.getAddress()).toLowerCase();
@@ -1103,8 +1106,9 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       );
       expect(returned).to.equal(expectedFloor);
 
-      // Execute the real call: the floor must propagate through to
-      // `_distributeProrated` and `windowSpent` accounting.
+      // Execute the real call: the floor must propagate to the `windowSpent`
+      // accounting and to the booking (a free conviction-discounted publish
+      // would otherwise skip both): the 1 wei lands in the KA's last epoch.
       const epochLength = await ChronosContract.epochLength();
       const currentWindow = await currentBillingWindow(
         info.createdAtTimestamp,
@@ -1120,30 +1124,14 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       );
       const receipt = await tx.wait();
 
-      // Active-sink invariant: sum of `TokensAddedToEpochRange` events
-      // emitted against `STAKER_SHARD_ID` MUST equal 1 (the floor).
-      const epsAddr = (await EpochStorageContract.getAddress()).toLowerCase();
-      const iface = EpochStorageContract.interface;
-      let totalDistributed = 0n;
-      let eventCount = 0;
-      for (const log of receipt!.logs) {
-        if (log.address.toLowerCase() !== epsAddr) continue;
-        let parsed;
-        try {
-          parsed = iface.parseLog({ topics: log.topics as string[], data: log.data });
-        } catch {
-          continue;
-        }
-        if (parsed?.name !== 'TokensAddedToEpochRange') continue;
-        eventCount++;
-        expect(parsed.args.shardId).to.equal(STAKER_SHARD_ID);
-        totalDistributed += BigInt(parsed.args.tokenAmount);
-      }
-      expect(eventCount).to.be.greaterThan(0);
-      expect(totalDistributed).to.equal(expectedFloor);
+      // One wei, booked to the KA's last epoch by the dust-corrected tail.
+      const credits = await stakerCredits(receipt!);
+      const execEpoch = await ChronosContract.getCurrentEpoch();
+      expect(credits).to.deep.equal([[execEpoch + kaEpochs, execEpoch + kaEpochs, 1n]]);
 
-      // windowSpent accounting must also increment by 1 (drawnFromEpoch
-      // is the floored amount when the base allowance covers it).
+      // windowSpent accounting must increment by 1 (spentFromEpoch is the
+      // floored amount when the base allowance covers it) — this is the
+      // guard against the free-publish truncation bug.
       const windowSpentAfter = await NFT.windowSpent(1, currentWindow);
       expect(windowSpentAfter - windowSpentBefore).to.equal(expectedFloor);
     });
@@ -1428,7 +1416,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
   // J. Lazy settlement (passive sink, settle(), post-expiry tail)
   // ======================================================================
 
-  describe('lazy settlement', () => {
+  describe('settlement (10.2.0: closed windows booked at use time)', () => {
     let Kav10Signer: SignerWithAddress;
     let agent: SignerWithAddress;
 
@@ -1439,38 +1427,34 @@ describe('@unit DKGPublishingConvictionNFT', function () {
     });
 
     /**
-     * @notice Sum the TRAC accounted to the staker pool by a single tx.
+     * @notice Sum the TRAC accounted by a single tx, from the V10
+     *         conviction events (exact per-account trail; getEpochPool
+     *         deltas would mix in unrelated fixture diffs).
      *
-     * We parse the V10 conviction events instead of relying on
-     * `EpochStorage.getEpochPool` deltas: the underlying cumulative
-     * storage is shared with V8 stake-related diffs from the deployment
-     * fixtures, and the public `getEpochPool` getter walks unfinalized
-     * diffs from `lastFinalizedEpoch + 1`, which mixes unrelated noise
-     * into per-test deltas. The conviction events are the exact,
-     * unambiguous trail of what THIS account flushed into the staker
-     * pool.
-     *
-     * Post-split: state-change events live on `PublishingConviction`
-     * (the logic contract). The NFT wrapper emits no accounting events.
-     * We scan the logic contract's address for `WindowSettled`,
-     * `CostCovered`, and `AccountFinalSwept`.
-     *
-     * Returns: passive-sink (`WindowSettled.remainderSwept`) + active-sink
-     * (`CostCovered.drawnFromEpoch + drawnFromTopUp`) + post-expiry tail
-     * (`AccountFinalSwept.topUpSwept + dustSwept`).
+     * 10.2.0 semantics:
+     *   - `EmissionScheduled.scheduled` — the unused base budget of the
+     *     windows the tx booked (each closed window once).
+     *   - `CostCovered.discountedCost` — a publishing spend, booked to the
+     *     staker pool over the KA's epochs at use time. Reported as `spent`.
+     *   - `AccountFinalSwept.topUpSwept + dustSwept` — post-expiry tail
+     *     (`dustSwept` is 0: the dust rides the last window's booking).
+     *   - `WindowSettled` never fires (declaration kept for indexers).
      */
     async function sumStakerPoolDistributionFromEvents(
       tx: Awaited<ReturnType<typeof NFT.settle>>,
     ): Promise<{
-      passive: bigint;
-      active: bigint;
+      scheduled: bigint;
+      spent: bigint;
       tail: bigint;
-      total: bigint;
+      windowSettledCount: number;
+      bookedWindows: Array<[bigint, bigint]>;
     }> {
       const receipt = await tx.wait();
-      let passive = 0n;
-      let active = 0n;
+      let scheduled = 0n;
+      let spent = 0n;
       let tail = 0n;
+      let windowSettledCount = 0;
+      const bookedWindows: Array<[bigint, bigint]> = [];
       const logicAddr = (await LogicContract.getAddress()).toLowerCase();
       for (const log of receipt!.logs) {
         if (log.address.toLowerCase() !== logicAddr) continue;
@@ -1484,34 +1468,42 @@ describe('@unit DKGPublishingConvictionNFT', function () {
           continue;
         }
         if (parsed === null) continue;
-        if (parsed.name === 'WindowSettled') {
-          passive += BigInt(parsed.args.remainderSwept);
+        if (parsed.name === 'EmissionScheduled') {
+          scheduled += BigInt(parsed.args.scheduled);
+          bookedWindows.push([BigInt(parsed.args.fromWindow), BigInt(parsed.args.toWindow)]);
+        } else if (parsed.name === 'WindowSettled') {
+          windowSettledCount += 1;
         } else if (parsed.name === 'CostCovered') {
-          active += BigInt(parsed.args.drawnFromEpoch) + BigInt(parsed.args.drawnFromTopUp);
+          spent += BigInt(parsed.args.discountedCost);
         } else if (parsed.name === 'AccountFinalSwept') {
           tail += BigInt(parsed.args.topUpSwept) + BigInt(parsed.args.dustSwept);
         }
       }
-      return { passive, active, tail, total: passive + active + tail };
+      return { scheduled, spent, tail, windowSettledCount, bookedWindows };
     }
 
-    it('settle() with no elapsed windows is a no-op (does not advance cursor)', async () => {
+    it('createAccount books nothing; settle() before any window closes is a pure no-op (cursor at 0)', async () => {
       const amount = hre.ethers.parseEther('120000');
       await TokenContract.approve(await NFT.getAddress(), amount);
-      await NFT.createAccount(amount, 0);
+      const txCreate = await NFT.createAccount(amount, 0);
+      const createSums = await sumStakerPoolDistributionFromEvents(txCreate);
+      expect(createSums.scheduled).to.equal(0n);
+      expect(createSums.bookedWindows).to.have.length(0);
 
       const tx = await NFT.settle(1);
       const sums = await sumStakerPoolDistributionFromEvents(tx);
-      expect(sums.total).to.equal(0n);
+      expect(sums.scheduled).to.equal(0n);
+      expect(sums.tail).to.equal(0n);
+      expect(sums.windowSettledCount).to.equal(0);
 
       const info = await NFT.getAccountInfo(1);
       expect(info.lastSettledWindow).to.equal(0n);
       expect(info.fullySwept).to.equal(false);
     });
 
-    it('settle() after N elapsed windows (no publishes) sweeps N * B to the staker pool', async () => {
+    it('settle() after N closed windows books exactly those N windows, once, and moves the cursor to N', async () => {
       const committed = hre.ethers.parseEther('120000');
-      const baseAllowance = committed / 12n;
+      const baseAllowance = committed / BigInt(LOCK_DURATION);
       await TokenContract.approve(await NFT.getAddress(), committed);
       await NFT.createAccount(committed, 0);
 
@@ -1521,16 +1513,21 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       const tx = await NFT.settle(1);
       const sums = await sumStakerPoolDistributionFromEvents(tx);
 
-      expect(sums.passive).to.equal(N * baseAllowance);
-      expect(sums.active).to.equal(0n);
+      expect(sums.scheduled).to.equal(N * baseAllowance);
+      expect(sums.bookedWindows).to.deep.equal([[0n, N]]);
       expect(sums.tail).to.equal(0n);
-
+      expect(sums.windowSettledCount).to.equal(0);
       const after = await NFT.getAccountInfo(1);
-      expect(after.lastSettledWindow).to.be.gte(N);
+      expect(after.lastSettledWindow).to.equal(N);
       expect(after.fullySwept).to.equal(false);
+
+      // Idempotent within the window.
+      const again = await sumStakerPoolDistributionFromEvents(await NFT.settle(1));
+      expect(again.scheduled + again.tail).to.equal(0n);
+      expect(again.bookedWindows).to.have.length(0);
     });
 
-    it('mixed publish + settle: per-window remainder is swept exactly once', async () => {
+    it('mixed publish + settle: the publish books its whole spend at once; the closed window books only B − spent', async () => {
       const committed = hre.ethers.parseEther('120000');
       const baseAllowance = committed / 12n;
       const discountBps = 3000n;
@@ -1553,26 +1550,25 @@ describe('@unit DKGPublishingConvictionNFT', function () {
         LOCK_DURATION,
       );
       const publishSums = await sumStakerPoolDistributionFromEvents(txPublish);
-      // Active sink: discounted cost. Passive sink: nothing (window 0 still active).
-      expect(publishSums.active).to.equal(actualDisc);
-      expect(publishSums.passive).to.equal(0n);
+      expect(publishSums.spent).to.equal(actualDisc);
+      expect(publishSums.scheduled).to.equal(0n);
+      expect(publishSums.windowSettledCount).to.equal(0);
 
-      // Advance one full window; settle.
+      // Advance one full window; settle books window 0's unused budget.
       await time.increase(epochLength + 1n);
-      const txSettle = await NFT.settle(1);
-      const settleSums = await sumStakerPoolDistributionFromEvents(txSettle);
-      // Passive sink: window 0 remainder = baseAllowance - actualDisc.
-      expect(settleSums.passive).to.equal(baseAllowance - actualDisc);
-      expect(settleSums.active).to.equal(0n);
+      const settleSums = await sumStakerPoolDistributionFromEvents(await NFT.settle(1));
+      expect(settleSums.scheduled).to.equal(baseAllowance - actualDisc);
+      expect(settleSums.bookedWindows).to.deep.equal([[0n, 1n]]);
+      // Window 0 is fully accounted: published + booked == B.
+      expect(publishSums.spent + settleSums.scheduled).to.equal(baseAllowance);
 
-      // Idempotency: calling settle again in the same window is a no-op.
-      const txSettle2 = await NFT.settle(1);
-      const sums2 = await sumStakerPoolDistributionFromEvents(txSettle2);
-      expect(sums2.total).to.equal(0n);
+      // Idempotency: again a no-op.
+      const sums2 = await sumStakerPoolDistributionFromEvents(await NFT.settle(1));
+      expect(sums2.scheduled + sums2.tail).to.equal(0n);
     });
 
-    it('post-expiry settle() sweeps remaining base windows, topUp buffer, and dust; sets fullySwept', async () => {
-      // Pick committed amount NOT divisible by 12 to exercise the dust path.
+    it('post-expiry settle() books the remaining windows (dust included) and sweeps the topUp buffer; sets fullySwept', async () => {
+      // Committed amount NOT divisible by 12: the dust rides the last window.
       const committed = hre.ethers.parseEther('120000') + 5n;
       const baseAllowance = committed / 12n;
       const dust = committed - baseAllowance * 12n;
@@ -1585,18 +1581,12 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       const epochLength = await ChronosContract.epochLength();
       await time.increase(epochLength * BigInt(LOCK_DURATION + 1));
 
-      const tx = await NFT.settle(1);
-      const sums = await sumStakerPoolDistributionFromEvents(tx);
-
-      // Passive sink covers the base allowance across all 12 windows
-      // (no publishes happened, so each window's remainder == baseAllowance).
-      expect(sums.passive).to.equal(baseAllowance * 12n);
-      expect(sums.active).to.equal(0n);
-      // Post-expiry tail = topUp + dust.
-      expect(sums.tail).to.equal(top + dust);
-      // Conservation: total === committedTRAC + topUp (dust is part of
-      // committedTRAC because committed = baseAllowance*12 + dust).
-      expect(sums.total).to.equal(committed + top);
+      const sums = await sumStakerPoolDistributionFromEvents(await NFT.settle(1));
+      // Every window, dust included, then the topUp tail (dustSwept is 0).
+      expect(sums.scheduled).to.equal(committed);
+      expect(sums.bookedWindows).to.deep.equal([[0n, BigInt(LOCK_DURATION)]]);
+      expect(sums.tail).to.equal(top);
+      expect(sums.windowSettledCount).to.equal(0);
 
       const after = await NFT.getAccountInfo(1);
       expect(after.fullySwept).to.equal(true);
@@ -1615,14 +1605,15 @@ describe('@unit DKGPublishingConvictionNFT', function () {
 
       const tx2 = await NFT.settle(1);
       const sums2 = await sumStakerPoolDistributionFromEvents(tx2);
-      expect(sums2.total).to.equal(0n);
+      expect(sums2.scheduled + sums2.tail).to.equal(0n);
     });
 
-    it('NFT transfer auto-settles elapsed windows (pre-expiry; agents preserved)', async () => {
+    it('NFT transfer pre-expiry books the closed windows (agents preserved)', async () => {
       const committed = hre.ethers.parseEther('120000');
-      const baseAllowance = committed / 12n;
+      const baseAllowance = committed / BigInt(LOCK_DURATION);
       await TokenContract.approve(await NFT.getAddress(), committed);
       await NFT.createAccount(committed, 0);
+      await NFT.registerAgent(1, agent.address);
 
       const epochLength = await ChronosContract.epochLength();
       const N = 2n;
@@ -1630,15 +1621,17 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       const tx = await NFT.transferFrom(accounts[0].address, accounts[7].address, 1);
       const sums = await sumStakerPoolDistributionFromEvents(tx);
 
-      expect(sums.passive).to.equal(N * baseAllowance);
+      expect(sums.scheduled).to.equal(N * baseAllowance);
       expect(sums.tail).to.equal(0n);
+      expect(sums.windowSettledCount).to.equal(0);
 
       const after = await NFT.getAccountInfo(1);
-      expect(after.lastSettledWindow).to.be.gte(N);
+      expect(after.lastSettledWindow).to.equal(N);
       expect(after.fullySwept).to.equal(false);
+      expect(await NFT.agentToAccountId(agent.address)).to.equal(1n);
     });
 
-    it('NFT transfer post-expiry triggers FULL sweep (fullySwept=true) on the outgoing owner', async () => {
+    it('NFT transfer post-expiry triggers the final sweep (remaining windows and the topUp tail; fullySwept=true) on the outgoing owner', async () => {
       const committed = hre.ethers.parseEther('120000');
       const top = hre.ethers.parseEther('10000');
       await TokenContract.approve(await NFT.getAddress(), committed + top);
@@ -1650,8 +1643,8 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       const tx = await NFT.transferFrom(accounts[0].address, accounts[7].address, 1);
       const sums = await sumStakerPoolDistributionFromEvents(tx);
 
-      // committedTRAC divides 12 cleanly here → no dust path, just topUp tail.
-      expect(sums.total).to.equal(committed + top);
+      expect(sums.scheduled).to.equal(committed);
+      expect(sums.tail).to.equal(top);
 
       const after = await NFT.getAccountInfo(1);
       expect(after.fullySwept).to.equal(true);
@@ -1786,24 +1779,25 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       ) => {
         const seen = new Set<string>();
         for (const log of receipt.logs) {
+          let parsed: ReturnType<typeof logicAbi.parseLog>;
           try {
-            const parsed = logicAbi.parseLog({
+            parsed = logicAbi.parseLog({
               topics: [...log.topics],
               data: log.data,
             });
-            if (parsed && pcaEventNames.includes(parsed.name)) {
-              expect(
-                log.address.toLowerCase(),
-                `${parsed.name} must be emitted by the logic contract, not the wrapper`,
-              ).to.equal(logicAddr);
-              expect(
-                log.address.toLowerCase(),
-                `${parsed.name} must NOT be emitted by the NFT wrapper`,
-              ).to.not.equal(wrapperAddr);
-              seen.add(parsed.name);
-            }
           } catch {
-            // Not a logic-contract event — skip.
+            continue; // Unrelated ABI; assertion failures must propagate.
+          }
+          if (parsed && pcaEventNames.includes(parsed.name)) {
+            expect(
+              log.address.toLowerCase(),
+              `${parsed.name} must be emitted by the logic contract, not the wrapper`,
+            ).to.equal(logicAddr);
+            expect(
+              log.address.toLowerCase(),
+              `${parsed.name} must NOT be emitted by the NFT wrapper`,
+            ).to.not.equal(wrapperAddr);
+            seen.add(parsed.name);
           }
         }
         for (const expected of expectedEventNames) {

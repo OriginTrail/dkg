@@ -1,9 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useFetch } from '../../hooks.js';
-import { fetchWalletsBalances, fetchPca, pcaAgentAccount, describePcaError } from '../../api.js';
+import { fetchWalletsBalances, pcaAgentAccount, describePcaError, isPcaReadFailed } from '../../api.js';
 import { formatEth, formatEthTooltip } from '../../lib/formatEth.js';
 import { usePcaStore } from '../../stores/pca.js';
-import { classifyCoverage, type PcaCoverageResult } from '../../pca/coverage.js';
+import type { PcaCoverageResult } from '../../pca/coverage.js';
+import { readPcaAccount, type PcaAccountRead } from '../../pca/readAccount.js';
+import type { CoverageProbe } from '../../pca/walletCoverage.js';
 import { PcaModalShell } from './PcaModalShell.js';
 import {
   WalletRow,
@@ -11,6 +13,11 @@ import {
   nativeGasSymbol,
   isTestnetChain,
 } from '../../components/Pca/index.js';
+import { RetryButton } from '../../components/ds/RetryButton.js';
+import { Check } from 'lucide-react';
+import { Badge, StatusGlyph } from '../../components/ds/Badge.js';
+import { Loading } from '../../components/ds/Loading.js';
+import { ExternalMark } from '../../components/ds/ExternalMark.js';
 
 // Testnet faucets for the native gas token (testnet-only CTA — §6.2). Only
 // chains we have a known faucet for render a button; others show the copy alone.
@@ -26,31 +33,149 @@ function faucetUrl(chainId: string | null | undefined): string | undefined {
   return FAUCETS[numeric];
 }
 
-interface ProbeRow {
-  wallet: string;
+/**
+ * Everything the panel shows for one check. Each variant carries only what it can show:
+ * approval and Ready exist only once approval was checked, and the Add offer only once
+ * the PCA itself was read.
+ */
+type CheckResult =
+  /** The ID isn't a number, or the PCA itself couldn't be read: nothing to show or add. */
+  | { kind: 'failed'; message: string; retry: boolean }
   /**
-   * The CANONICAL coverage result for this wallet on the probed account — carried as the
-   * discriminated union (#1344), NOT flattened into parallel `registered`/`covers`/
-   * `adapterUnsupported` flags that could express impossible states. Every derived signal
-   * (approved count, N1 coverage, S6 "Ready", the #1356 capability-gap split) reads the
-   * single `.outcome` discriminant. A transport failure maps to the `inconclusive`
-   * variant with `adapterUnsupported:false` (couldn't read ≠ capability gap).
+   * The PCA was read, but approval couldn't be checked: no wallets, unreadable wallets, or
+   * no probe answered. It can still go in the list read-only; `addNote` shows once it's there.
    */
-  coverage: PcaCoverageResult;
+  | { kind: 'unverifiable'; accountId: string; message: string; retry: boolean; addNote: string }
+  /** Approval was checked wallet by wallet. */
+  | {
+    kind: 'checked';
+    accountId: string;
+    rows: ProbeRow[];
+    approvedCount: number;
+    /** N1: a wallet is covered (a spendable PCA, not bare registration) and has gas. */
+    ready: boolean;
+    /** Offered for the list when no wallet is approved here; null when one is (it's tracked then). */
+    addNote: string | null;
+  };
+
+/**
+ * Put a PCA that was read but covers nothing here (or can't be checked) in the list,
+ * read-only, so its funding, expiry and owner stay reachable. It claims no coverage.
+ */
+function AddToListAction({ accountId, trackedNote }: { accountId: string; trackedNote: string }) {
+  const trackAccount = usePcaStore((s) => s.trackAccount);
+  const tracked = usePcaStore((s) => s.trackedIds.includes(accountId));
+  if (tracked) return <p className="v10-pca-detail-hint" data-testid="pca-sponsor-tracked">{trackedNote}</p>;
+  return (
+    <div className="v10-pca-overview-cta-group">
+      <button type="button" className="v10-pca-card-btn ds-btn ds-sm" data-testid="pca-sponsor-track" onClick={() => trackAccount(accountId)}>
+        Add PCA #{accountId} to your list
+      </button>
+    </div>
+  );
 }
+
+/**
+ * One wallet's canonical coverage on the checked PCA (#1344). Every derived signal
+ * (approved count, N1 coverage, S6 "Ready", the #1356 capability-gap split) reads the
+ * single `.outcome` discriminant.
+ */
+type ProbeRow = CoverageProbe;
 
 /** The S6 approval-row status derived from the single coverage discriminant. */
 function sponsorRowStatus(c: PcaCoverageResult): { text: string; tone: 'success' | 'warn' | 'danger' | 'neutral' } {
   switch (c.outcome) {
     case 'covers':
-      return { text: 'approved', tone: 'success' };
+      return { text: 'Approved', tone: 'success' };
     case 'uncovered':
-      return { text: 'approved, but that PCA is expired, swept, or out of budget - publishes will not get the discount', tone: 'warn' };
+      return { text: 'Approved, no discount', tone: 'warn' };
     case 'unregistered':
-      return { text: 'not approved - ask the PCA owner to approve it', tone: 'danger' };
+      return { text: 'Not approved: ask the PCA owner to approve it', tone: 'danger' };
     case 'inconclusive':
-      return { text: 'unknown', tone: 'neutral' };
+      return { text: 'Couldn’t check', tone: 'warn' };
   }
+}
+
+/** Why approved wallets get no discount, said once above the rows. */
+function inactiveReason(accountId: string, rows: ProbeRow[]): string | null {
+  const uncovered = rows.map((r) => r.coverage).filter((c) => c.outcome === 'uncovered');
+  if (uncovered.length === 0) return null;
+  return uncovered.some((c) => c.dead)
+    ? `PCA #${accountId} has expired, so publishes pay the full fee.`
+    : `PCA #${accountId} has no TRAC left in this billing period, so publishes pay the full fee until its next billing period starts.`;
+}
+
+/** Summary icon: all covered is a success, none approved an error, the rest need a look. */
+function summaryTone(rows: ProbeRow[]): 'success' | 'warning' | 'danger' {
+  if (rows.every((r) => r.coverage.outcome === 'covers')) return 'success';
+  if (rows.every((r) => r.coverage.outcome === 'unregistered')) return 'danger';
+  return 'warning';
+}
+
+/** What one submitted check fetched: the trimmed ID and the raw PCA read (null for an ID that isn't a number). */
+interface CheckRead {
+  id: string;
+  read: PcaAccountRead | null;
+}
+
+/** What the panel shows for one check, derived from the raw read. Pure. */
+function presentCheck(
+  { id, read }: CheckRead,
+  ctx: { walletsReadError: boolean; isFunded: (wallet: string) => boolean },
+): CheckResult {
+  if (read === null) return { kind: 'failed', message: 'Enter the PCA ID as a number.', retry: false };
+  if (!read.ok) {
+    const temporary: CheckResult = { kind: 'failed', message: `Couldn’t check PCA #${id} right now.`, retry: true };
+    // A 503 PCA_LOOKUP_READ_FAILED is a chain read that failed, not a network without
+    // PCAs, so it's temporary (Retry) before any capability reading of the 503.
+    if (isPcaReadFailed(read.error)) return temporary;
+    // A known daemon error says what happened (a missing PCA among them); anything else is a transient read failure.
+    const described = describePcaError(read.error, { accountId: id });
+    return described
+      ? { kind: 'failed', message: described.message, retry: described.code === 'ServerError' }
+      : temporary;
+  }
+
+  // From here the PCA exists, so it can always be added read-only, whatever approval shows.
+  const unverifiable = (message: string, retry: boolean): CheckResult => ({
+    kind: 'unverifiable', accountId: id, message, retry,
+    addNote: `PCA #${id} is in your list. This node can’t check whether it covers your wallets.`,
+  });
+  const rows: ProbeRow[] = read.probes;
+  // No wallets were probed. Approval needs only the addresses, so a balance-read error
+  // with known addresses still probes them (and Ready stays off until gas is known).
+  if (rows.length === 0) {
+    // The wallet section above has its own Retry for an unreadable list.
+    return unverifiable(ctx.walletsReadError
+      ? `PCA #${id} exists, but this node’s wallets couldn’t be read, so we can’t check its approval. Retry loading the wallets above.`
+      : `PCA #${id} exists, but this node reported no publishing wallets to check.`, false);
+  }
+  // L4: every probe inconclusive means approval couldn't be checked at all, never a
+  // false "0 of N approved". #1356: only a capability gap on every probe says "not
+  // supported" (Retry won't help); anything else is transient (Retry).
+  if (rows.every((r) => r.coverage.outcome === 'inconclusive')) {
+    const allAdapterGap = rows.every((r) => r.coverage.outcome === 'inconclusive' && r.coverage.adapterUnsupported);
+    return unverifiable(allAdapterGap
+      ? 'This node can’t check PCA approval, so we can’t confirm which wallets are covered. You can still publish. To check approval, update the node or ask the PCA owner.'
+      : `Couldn’t check approval on PCA #${id} right now.`, !allAdapterGap);
+  }
+
+  const approvedCount = rows.filter((r) => r.coverage.registered === true).length;
+  // "Needs approval" only when every wallet is confirmed unregistered; a wallet whose probe
+  // failed might already be approved, so then coverage stays unknown.
+  const allUnregistered = rows.every((r) => r.coverage.outcome === 'unregistered');
+  return {
+    kind: 'checked',
+    accountId: id,
+    rows,
+    approvedCount,
+    ready: rows.some((r) => r.coverage.outcome === 'covers' && ctx.isFunded(r.wallet)),
+    addNote: approvedCount > 0
+      ? null
+      : allUnregistered
+        ? `PCA #${id} is in your list. It gives no discount until the owner approves these wallets.`
+        : `PCA #${id} is in your list. This node couldn’t check every wallet, so it may already cover some.`,
+  };
 }
 
 /**
@@ -59,7 +184,14 @@ function sponsorRowStatus(c: PcaCoverageResult): { text: string; tone: 'success'
  * testnet-only), and track approval against the owner-provided PCA id. Ready =
  * ≥1 wallet approved AND gas-funded → publish.
  */
-export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
+export function GetSponsoredPanel({
+  onClose,
+  initialAccountId,
+}: {
+  onClose: () => void;
+  /** A PCA ID entered on the Overview: pre-filled and checked once the wallets load. */
+  initialAccountId?: string;
+}) {
   const { data: wb, loading: walletsLoading, error: walletsError, refresh: refreshWallets } = useFetch(fetchWalletsBalances, [], 0);
   const wallets = wb?.wallets ?? [];
   const balances = wb?.balances ?? [];
@@ -91,10 +223,12 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
     0,
   );
 
-  const [sponsorId, setSponsorId] = useState('');
-  const [checking, setChecking] = useState(false);
-  const [probeError, setProbeError] = useState<string | null>(null);
-  const [probed, setProbed] = useState<{ accountId: string; rows: ProbeRow[] } | null>(null);
+  const [sponsorId, setSponsorId] = useState(initialAccountId ?? '');
+  // The check that was asked for: the ID from the Overview to start with, then each Check
+  // or Retry. A fresh object per submission, so the same ID can be checked again.
+  const [submitted, setSubmitted] = useState<{ id: string } | null>(() => (initialAccountId ? { id: initialAccountId } : null));
+  const initialSubmission = useRef(submitted);
+  const submit = () => setSubmitted({ id: sponsorId });
 
   const ethFor = (w: string) => balances.find((b) => b.address?.toLowerCase() === w.toLowerCase())?.eth;
   const isFunded = (w: string) => {
@@ -102,82 +236,73 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
     return e != null && Number(e) > 0;
   };
 
-  const check = async () => {
-    const id = sponsorId.trim();
-    if (!/^\d+$/.test(id)) { setProbeError('Enter the numeric PCA ID the owner gave you.'); return; }
-    setChecking(true);
-    setProbeError(null);
-    try {
-      const rows = await Promise.all(
-        wallets.map((w) =>
-          fetchPca(id, w, { extended: true })
-            // #1344 — single canonical classifier (reads snap.probedKey); the row keeps the
-            // whole discriminated result. S2 adapterSupported===false → inconclusive
-            // (neutral "unknown" row, not a false not-approved; all-unsupported → wholesale
-            // "not supported"); N1 coverage / S6 "Ready" == outcome 'covers'.
-            .then((snap): ProbeRow => ({ wallet: w, coverage: classifyCoverage(snap) }))
-            // A transport failure couldn't determine coverage → inconclusive, NOT a
-            // capability gap (retry may resolve it).
-            .catch((): ProbeRow => ({ wallet: w, coverage: { outcome: 'inconclusive', registered: null, adapterUnsupported: false } })),
-        ),
-      );
-      // L4: the per-wallet .catch swallows failures, so every-row-null means the
-      // lookup failed wholesale (vs genuine 0-approved, which is registered:false).
-      // Surface that as an error — don't render a false "0 of N approved".
-      if (rows.length > 0 && rows.every((r) => r.coverage.outcome === 'inconclusive')) {
-        // #1356 — split the CAPABILITY GAP (the chain adapter can't answer PCA
-        // queries here — retrying is futile) from a transient RPC failure (retry).
-        // Only claim "not supported" when EVERY inconclusive probe is an adapter gap.
-        const allAdapterGap = rows.every((r) => r.coverage.outcome === 'inconclusive' && r.coverage.adapterUnsupported);
-        setProbeError(
-          allAdapterGap
-            ? 'PCA approval isn’t verifiable on this chain’s adapter — not supported here. You can still publish without a discount.'
-            : `Couldn’t check approval on PCA #${id} right now — the chain lookup failed. Retry.`,
-        );
-        setProbed(null);
-        return;
-      }
-      // N2: persist the sponsor id once ≥1 wallet is approved so the overview/chip
-      // pick it up (NOT on the wholesale-failure path). Downstream re-probes the
-      // chain independently, so nothing trusts this S6 result — safe vs #9.
-      if (rows.some((r) => r.coverage.registered === true)) trackAccount(id);
-      setProbed({ accountId: id, rows });
-    } catch (err) {
-      setProbeError(describePcaError(err, { accountId: id })?.message ?? 'Couldn’t check approval.');
-    } finally {
-      setChecking(false);
-    }
-  };
+  // A submitted check runs once this node's wallets are known, either way: presentCheck
+  // reports no or unreadable wallets itself. The fetch returns only the raw read, scoped to
+  // its submission, so a new check never shows the previous one's result while it runs. It
+  // runs again when the wallet addresses or the wallet read's outcome change (a wallet
+  // Retry that recovers), with the recovered wallets; useFetch drops a superseded run.
+  const walletsSettled = !walletsLoading && (wb != null || walletsReadError != null);
+  const { data: checkData, error: checkError, loading: checking } = useFetch(
+    async (): Promise<CheckRead> => {
+      const id = submitted!.id.trim();
+      // The PCA itself is read first: nothing is offered for an ID that doesn't exist.
+      return { id, read: /^\d+$/.test(id) ? await readPcaAccount(id, wallets) : null };
+    },
+    [submitted, walletsKey, walletsReadError],
+    0,
+    { enabled: submitted != null && walletsSettled, scope: submitted, retention: 'scope' },
+  );
+  const result = useMemo<CheckResult | null>(() => {
+    if (checkData) return presentCheck(checkData, { walletsReadError: walletsReadError != null, isFunded });
+    if (checkError && submitted) return { kind: 'failed', message: `Couldn’t check PCA #${submitted.id.trim()} right now.`, retry: true };
+    return null;
+    // isFunded reads the balances in wb.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checkData, checkError, submitted, walletsReadError, wb]);
+  const checked = result?.kind === 'checked' ? result : null;
+  // The PCA was read but nothing here is approved on it (or it couldn't be checked): offer Add.
+  const addNote = result && result.kind !== 'failed' ? result.addNote : null;
 
-  const approvedCount = probed?.rows.filter((r) => r.coverage.registered === true).length ?? 0;
-  // N1: Ready requires actual COVERAGE (spendable PCA), not bare registration.
-  const ready = !!probed && probed.rows.some((r) => r.coverage.outcome === 'covers' && isFunded(r.wallet));
+  // N2: once a wallet is approved, put the PCA in the list so the Overview and chip pick it
+  // up. Downstream re-probes the chain independently, so nothing trusts this result (#9).
+  useEffect(() => {
+    if (result?.kind === 'checked' && result.rows.some((r) => r.coverage.registered === true)) trackAccount(result.accountId);
+  }, [result, trackAccount]);
+
+  // Bring the Overview ID's result into view: it sits below the wallets to share.
+  const resultsRef = useRef<HTMLDivElement>(null);
+  const scrolledToResult = useRef(false);
+  useEffect(() => {
+    if (scrolledToResult.current || !result || submitted == null || submitted !== initialSubmission.current) return;
+    scrolledToResult.current = true;
+    resultsRef.current?.scrollIntoView?.({ block: 'start' });
+  }, [result, submitted]);
 
   return (
     <PcaModalShell
       onClose={onClose}
       testId="pca-get-sponsored"
       title="Get added to a PCA"
-      subtitle="Share this node's operational publishing wallets with the PCA owner. They approve them; this node still pays its own gas."
+      subtitle="Share this node's publishing wallets with the PCA owner, who approves them. You still pay gas."
     >
       <div className="v10-modal-body v10-pca-get-added-body">
         {/* Wallets to share */}
         <section className="v10-pca-detail-section">
-          <h3 className="v10-pca-detail-section-title">Your operational wallets (signers / msg.sender)</h3>
+          <h3 className="v10-pca-detail-section-title">This node's publishing wallets</h3>
           <div className="v10-pca-detail-agentlist">
             {/* Gate the empty state on load/error — a false "No operational
                 wallets" while the fetch is in flight (or on a transient error)
                 reads, on the edge's ONLY path to a discount, as "I can't get
                 sponsored". Empty copy shows ONLY when loaded AND truly zero. */}
             {walletsLoading && !wb ? (
-              <p className="v10-pca-handshake-empty" role="status">Loading your wallets…</p>
+              <Loading label="Loading your wallets…" />
             ) : walletsReadError && wallets.length === 0 ? (
-              <p className="v10-modal-error" role="alert">
-                Couldn’t load your wallets.{' '}
-                <button type="button" className="v10-pca-card-btn" onClick={() => refreshWallets()}>Retry</button>
-              </p>
+              <div className="v10-pca-retry-block">
+                <p className="v10-modal-error ds-card-nested" role="alert">Couldn’t load your wallets.</p>
+                <RetryButton onClick={() => refreshWallets()} />
+              </div>
             ) : wallets.length === 0 ? (
-              <p className="v10-pca-handshake-empty">No operational wallets detected on this node.</p>
+              <p className="v10-pca-handshake-empty" data-testid="pca-sponsor-no-wallets">This node didn't report any publishing wallets.</p>
             ) : (
               wallets.map((w) => {
                 const eth = ethFor(w);
@@ -189,7 +314,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
                     gas={
                       eth != null ? (
                         <span title={formatEthTooltip(eth)}>
-                          gas {formatEth(eth)} {gasSymbol} {funded ? '✓' : '⚠ fund to publish'}
+                          gas {formatEth(eth)} {gasSymbol} {funded ? <Check size={12} /> : <><StatusGlyph tone="warning" /> fund to publish</>}
                         </span>
                       ) : undefined
                     }
@@ -208,78 +333,90 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
               {copied ? 'Copied' : `Copy all ${wallets.length}`}
             </button>
           )}
-          <p className="v10-pca-detail-hint">
-            Share <strong>all</strong> wallets (the node rotates its signer per publish) or pin to one.
-            Share the exact address - a typo can be approved by the PCA owner but never match your real signer.
-          </p>
+          {wallets.length > 0 && (
+            <p className="v10-pca-detail-hint">
+              Share <strong>all</strong> of them, because the node can sign with a different wallet each time, or pin publishing to one.
+              Copy the exact addresses: a wrong address can still be approved, but it gives no discount.
+            </p>
+          )}
         </section>
 
         {/* Gas nudge */}
-        <div className="v10-modal-warning">
-          ⚠ Gas is always on you. The PCA covers the TRAC publishing fee — never your gas. Fund each
-          wallet with native {gasSymbol}.
+        <div className="v10-modal-warning ds-card-nested">
+          <StatusGlyph tone="warning" /> You pay gas. The PCA only covers the TRAC fee, so each publishing wallet needs {gasSymbol}.
           {faucet ? (
-            <>{' '}<a href={faucet} target="_blank" rel="noreferrer">Open faucet ↗</a> (testnet only)</>
-          ) : (
-            <>{' '}Fund with native {gasSymbol} from your wallet.</>
-          )}
+            <>{' '}Get test {gasSymbol}: <a className="v10-pca-text-link" href={faucet} target="_blank" rel="noreferrer">Open faucet <ExternalMark /></a></>
+          ) : wallets.length > 0 ? (
+            <>{' '}Transfer {gasSymbol} to the addresses above.</>
+          ) : null}
         </div>
 
         {/* Approval tracker */}
         <section className="v10-pca-detail-section">
-          <h3 className="v10-pca-detail-section-title">Can&apos;t find it automatically?</h3>
+          <h3 className="v10-pca-detail-section-title">Have a PCA ID?</h3>
           {/* GAP-3 discovery — surface any sponsoring PCA we found on-chain; pre-fill the
               check (the user confirms; nothing is auto-tracked). */}
           <p className="v10-pca-detail-hint">
-            If the PCA owner gives you an account id, check it here to track whether this node&apos;s wallets are covered.
+            If the PCA owner gave you a PCA ID, enter it to see which of this node&apos;s wallets are covered.
           </p>
           {discovered && discovered.length > 0 && (
             <div className="v10-pca-discovered-check" role="status" data-testid="pca-sponsor-discovered">
-              ◉ We found your wallet(s) already approved on {discovered.map((id) => `PCA #${id}`).join(', ')}.{' '}
-              <button type="button" className="v10-pca-card-btn compact" onClick={() => setSponsorId(discovered[0])}>
+              <StatusGlyph tone="success" /> At least one of your wallets is already approved on {discovered.map((id) => `PCA #${id}`).join(', ')}.{' '}
+              <button type="button" className="v10-pca-card-btn compact ds-btn ds-sm" onClick={() => setSponsorId(discovered[0])}>
                 Check PCA #{discovered[0]}
               </button>
             </div>
           )}
           <div className="v10-pca-detail-form">
             <input
-              className="v10-form-input"
+              className="v10-form-input ds-input"
               type="text"
               value={sponsorId}
               onChange={(e) => setSponsorId(e.target.value)}
               placeholder="PCA ID from owner (e.g. 7)"
               aria-label="PCA ID from owner"
             />
-            <button type="button" className="v10-pca-card-btn primary" onClick={check} disabled={checking}>
+            <button type="button" className="v10-pca-card-btn primary ds-btn ds-primary" onClick={submit} disabled={checking || walletsLoading}>
               {checking ? 'Checking…' : 'Check approval'}
             </button>
           </div>
-          {probeError && <p className="v10-modal-error" role="alert">{probeError}</p>}
-          {probed && (
+          <div ref={resultsRef} aria-hidden="true" />
+          {result && result.kind !== 'checked' && (
+            <div className="v10-pca-retry-block">
+              <p className="v10-modal-error ds-card-nested" role="alert">{result.message}</p>
+              {result.retry && <RetryButton onClick={submit} />}
+            </div>
+          )}
+          {checked && (
             <div className="v10-pca-approve-results" role="status" aria-live="polite">
               <p className="v10-pca-approve-summary">
-                Approved on PCA #{probed.accountId}: {approvedCount} of {probed.rows.length} wallets ✓
+                <Badge tone={summaryTone(checked.rows)}>Approved on PCA #{checked.accountId}: {checked.approvedCount} of {checked.rows.length} wallets</Badge>
               </p>
-              {probed.rows.map((r) => {
+              {inactiveReason(checked.accountId, checked.rows) && (
+                <p className="v10-modal-warning ds-card-nested">{inactiveReason(checked.accountId, checked.rows)}</p>
+              )}
+              {checked.rows.map((r) => {
                 const s = sponsorRowStatus(r.coverage);
                 return <WalletRow key={r.wallet} address={r.wallet} status={s.text} statusTone={s.tone} />;
               })}
             </div>
           )}
+          {/* Read-only: funding, expiry and owner stay reachable. It claims no coverage. */}
+          {result && result.kind !== 'failed' && addNote && <AddToListAction accountId={result.accountId} trackedNote={addNote} />}
         </section>
 
-        {ready && (
+        {checked?.ready && (
           <div className="v10-pca-create-success" role="status">
-            Ready: at least 1 wallet is approved and gas-funded - this node can publish under PCA #{probed!.accountId}.{' '}
+            Ready. At least 1 wallet is approved and has gas, so this node can publish with PCA #{checked.accountId}.{' '}
             {/* L9: no global publish target — the discount applies at any per-CG
                 publish. Guidance hint, not an inert "Go to publish →" button. */}
-            Publish from any context graph — the discount applies automatically to your approved wallets.
+            Publish from any context graph. The discount applies automatically to approved wallets.
           </div>
         )}
       </div>
 
       <div className="v10-modal-footer">
-        <button type="button" className="v10-modal-btn" onClick={onClose}>Close</button>
+        <button type="button" className="v10-modal-btn ds-btn" onClick={onClose}>Close</button>
       </div>
     </PcaModalShell>
   );

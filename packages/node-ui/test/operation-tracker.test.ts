@@ -63,6 +63,20 @@ describe('OperationTracker', () => {
     expect(op!.error_message).toBe('string error');
   });
 
+  it('tracks caller cancellation without recording an operation failure', () => {
+    const c = ctx('query', 'op-cancelled');
+    tracker.start(c);
+    tracker.startPhase(c, 'execute');
+
+    tracker.cancel(c, new Error('API query caller disconnected'));
+
+    const { operation, phases } = db.getOperation('op-cancelled');
+    expect(operation!.status).toBe('cancelled');
+    expect(operation!.error_message).toBe('API query caller disconnected');
+    expect(phases).toHaveLength(1);
+    expect(phases[0].status).toBe('cancelled');
+  });
+
   it('stores details as JSON', () => {
     const c = ctx('publish', 'op-4');
     tracker.start(c, { details: { quads: 100, contextGraph: 'testing' } });
@@ -88,6 +102,7 @@ describe('OperationTracker', () => {
     expect(() => nullTracker.start(c)).not.toThrow();
     expect(() => nullTracker.complete(c)).not.toThrow();
     expect(() => nullTracker.fail(c, new Error('test'))).not.toThrow();
+    expect(() => nullTracker.cancel(c, new Error('test'))).not.toThrow();
   });
 
   it('never throws even if DB is broken', () => {

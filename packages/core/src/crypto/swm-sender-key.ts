@@ -117,11 +117,26 @@ export function computeSwmSenderKeyMembershipHash(
     throw new Error('Sender Key membership requires at least one DKG agent recipient');
   }
 
-  const framedMembers = input.members
-    .map((member) => ({
+  // Membership is the set of authenticated (agent, key) pairs. The same key
+  // may be advertised through several peer-bound profile variants; transport
+  // provenance must not create duplicate logical members or spuriously rotate
+  // the Sender Key epoch.
+  const uniqueMembers = new Map<string, {
+    agentAddress: string;
+    recipientKeyId: string;
+  }>();
+  for (const member of input.members) {
+    const normalized = {
       agentAddress: member.agentAddress.toLowerCase(),
       recipientKeyId: member.recipientKeyId,
-    }))
+    };
+    uniqueMembers.set(
+      `${normalized.agentAddress}\u0000${normalized.recipientKeyId}`,
+      normalized,
+    );
+  }
+
+  const framedMembers = [...uniqueMembers.values()]
     .sort((a, b) => {
       const byAgent = a.agentAddress.localeCompare(b.agentAddress);
       return byAgent !== 0 ? byAgent : a.recipientKeyId.localeCompare(b.recipientKeyId);

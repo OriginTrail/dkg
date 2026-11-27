@@ -69,9 +69,30 @@ beforeEach(() => {
 afterEach(() => { document.body.innerHTML = ''; });
 
 describe('PublishVmWidget — B8 confirmed discount badge (#1365 r3)', () => {
+  it('states the full paid action scope before publishing assertions outside the loaded preview', async () => {
+    const assertions = ['a', 'b', 'c'].map(name => ({ name, graphUri: name }));
+    apiMocks.listAssertions.mockResolvedValue(assertions);
+    apiMocks.publishAssertionsToVm.mockResolvedValue({ published: 3, total: 3, partial: 0, failures: [] });
+    const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }));
+    expect(container.textContent).toContain('all eligible complete Shared Working Memory Knowledge Assets');
+    expect(container.textContent).toContain('including assets outside the loaded preview');
+    expect(container.textContent).toContain('incurs a cost');
+    await clickPublish(container); await flush();
+    expect(apiMocks.publishAssertionsToVm).toHaveBeenCalledWith('cg', assertions);
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.getAttribute('data-tone')).toBe('success');
+    await unmount();
+  });
+  it('states the whole Context Graph share scope despite a one-entity preview', async () => {
+    apiMocks.listAssertions.mockResolvedValue(['a', 'b', 'c'].map(name => ({ name, graphUri: name })));
+    const { container, unmount } = await render(React.createElement(PromoteWidget, { count: 1, contextGraphId: 'cg' }));
+    expect(container.textContent).toContain('all eligible complete Working Memory Knowledge Assets');
+    expect(container.textContent).toContain('including assets outside the loaded preview');
+    await act(async () => (container.querySelector('[data-testid="widget-promote-all-btn"]') as HTMLButtonElement).click());
+    await flush(); expect(apiMocks.promoteAssertion).toHaveBeenCalledTimes(3); await unmount();
+  });
   it('renders the badge from the BATCH convictionCostCovered even when the clean sample has none', async () => {
     apiMocks.publishAssertionsToVm.mockResolvedValue({
-      published: 1, total: 1, sealed: 0, partial: 0, failures: [],
+      published: 1, total: 1, partial: 0, failures: [],
       sample: { status: 'confirmed', txHash: '0xtx', kaId: '0xka' }, // clean, NO discount on the sample
       convictionCostCovered: { accountId: '7', epoch: 1284, baseCost: '1000', discountedCost: '700', drawnFromEpoch: '700', drawnFromTopUp: '0' },
     });
@@ -89,7 +110,7 @@ describe('PublishVmWidget — B8 confirmed discount badge (#1365 r3)', () => {
 
   it('renders NO badge when the batch drew no discount (degrade-hidden #9)', async () => {
     apiMocks.publishAssertionsToVm.mockResolvedValue({
-      published: 1, total: 1, sealed: 0, partial: 0, failures: [],
+      published: 1, total: 1, partial: 0, failures: [],
       sample: { status: 'confirmed', txHash: '0xtx', kaId: '0xka' },
       // no convictionCostCovered on the batch
     });
@@ -115,6 +136,102 @@ describe('PublishVmWidget — B8 confirmed discount badge (#1365 r3)', () => {
     const res = container.querySelector('[data-testid="layer-action-error"]');
     expect(res?.textContent).toContain('VM publish tx reverted');
     expect(res?.textContent).not.toContain('an assertion');
+    expect(res?.getAttribute('data-tone')).toBe('danger');
+    await unmount();
+  });
+});
+
+describe('PublishVmWidget — publish outcome unknown', () => {
+  const unknownA = { name: 'a', error: 'Publishing "a" got no response within 5 minutes.' };
+
+  it('reports an all-unknown batch as a warning result, not an error', async () => {
+    apiMocks.publishAssertionsToVm.mockResolvedValue({
+      published: 0, total: 1, partial: 0, failures: [], outcomeUnknown: [unknownA], sample: null,
+    });
+    const { container, unmount } = await render(
+      React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }),
+    );
+    await clickPublish(container);
+    await flush();
+    expect(container.querySelector('[data-testid="layer-action-error"]')).toBeNull();
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent)
+      .toContain('1 knowledge asset: publish outcome unknown');
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.getAttribute('data-tone')).toBe('warning');
+    await unmount();
+  });
+
+  it('adds the unknown count to a partly published batch', async () => {
+    apiMocks.listAssertions.mockResolvedValue([{ name: 'a', graphUri: 'g' }, { name: 'b', graphUri: 'g2' }]);
+    apiMocks.publishAssertionsToVm.mockResolvedValue({
+      published: 1, total: 2, partial: 0, failures: [], outcomeUnknown: [unknownA], sample: null,
+    });
+    const { container, unmount } = await render(
+      React.createElement(PublishVmWidget, { count: 2, contextGraphId: 'cg' }),
+    );
+    await clickPublish(container);
+    await flush();
+    const text = container.querySelector('[data-testid="layer-action-result"]')?.textContent;
+    expect(text).toContain('Published 1 knowledge asset to Verifiable Memory');
+    expect(text).toContain('publish outcome unknown');
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.getAttribute('data-tone')).toBe('warning');
+    await unmount();
+  });
+
+  it('keeps the unknown note on the error when every other asset failed', async () => {
+    apiMocks.listAssertions.mockResolvedValue([{ name: 'a', graphUri: 'g' }, { name: 'b', graphUri: 'g2' }]);
+    apiMocks.publishAssertionsToVm.mockResolvedValue({
+      published: 0, total: 2, partial: 0,
+      failures: [{ name: 'b', error: 'VM publish tx reverted' }],
+      outcomeUnknown: [unknownA],
+      sample: null,
+    });
+    const { container, unmount } = await render(
+      React.createElement(PublishVmWidget, { count: 2, contextGraphId: 'cg' }),
+    );
+    await clickPublish(container);
+    await flush();
+    const text = container.querySelector('[data-testid="layer-action-error"]')?.textContent;
+    expect(text).toContain('b: VM publish tx reverted');
+    expect(text).toContain('publish outcome unknown');
+    expect(container.querySelector('[data-testid="layer-action-error"]')?.getAttribute('data-tone')).toBe('danger');
+    await unmount();
+  });
+});
+
+describe('PublishVmWidget — completion follows the execution path', () => {
+  const run = async (onComplete: () => void) => {
+    const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg', onComplete }));
+    await clickPublish(container); await flush();
+    const btn = container.querySelector('[data-testid="widget-publish-vm-btn"]') as HTMLButtonElement;
+    return { container, unmount, btn };
+  };
+
+  it('completes a resolved publish that carries a warning', async () => {
+    apiMocks.publishAssertionsToVm.mockResolvedValue({ published: 1, total: 2, partial: 1, partialError: 'x', failures: [] });
+    const onComplete = vi.fn();
+    const { container, unmount, btn } = await run(onComplete);
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.getAttribute('data-tone')).toBe('warning');
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(btn.disabled).toBe(false);
+    await unmount();
+  });
+
+  it('completes a resolved no-op', async () => {
+    apiMocks.listAssertions.mockResolvedValue([]);
+    apiMocks.publishAssertionsToVm.mockResolvedValue({ published: 0, total: 0, partial: 0, failures: [] });
+    const onComplete = vi.fn();
+    const { unmount } = await run(onComplete);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    await unmount();
+  });
+
+  it('does not complete a rejected publish, and leaves the button usable', async () => {
+    apiMocks.publishAssertionsToVm.mockRejectedValue(new Error('VM publish tx reverted'));
+    const onComplete = vi.fn();
+    const { container, unmount, btn } = await run(onComplete);
+    expect(container.querySelector('[data-testid="layer-action-error"]')).toBeTruthy();
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(btn.disabled).toBe(false);
     await unmount();
   });
 });
@@ -265,35 +382,82 @@ describe('PublishVmWidget — S5 publish CTA gate (#1382)', () => {
     expect(publishBtn(container).getAttribute('aria-describedby')).toBeNull();
     await unmount();
   });
+
+  // R2 — the full-fee line is presentation only: it renders from useVmPublishGate's
+  // `fullFeeConfirmed`, which comes from the SAME eligibility read as the chip and the gate
+  // (`noPcaConfirmed`, pinned over the real hook in pca-publish-eligibility.test.ts).
+  const setNoPca = (noPcaConfirmed: boolean) =>
+    eligMock.usePublishEligibility.mockReturnValue({ verdict: 'unknown', ownerPublish: false, anyGasFunded: false, noPcaConfirmed } as any);
+
+  it('nothing tracked and no wallet on any PCA → a quiet full-fee line with the primer button', async () => {
+    usePcaStore.setState({ trackedIds: [] });
+    setNoPca(true);
+    const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }));
+    const note = container.querySelector('[data-testid="pca-fee-note"]')!;
+    expect(note.className).toBe('v10-pca-fee-note');
+    expect(note.textContent).toContain('This publish pays the full TRAC fee. A PCA can cut it by up to 75%.');
+    expect(note.querySelector('[data-testid="pca-primer-link"]')?.textContent).toBe('What is a PCA?');
+    // Not a warning: no status glyph, and the button is not described by it.
+    expect(note.querySelector('.ds-status-glyph')).toBeNull();
+    expect(publishBtn(container).getAttribute('aria-describedby')).toBeNull();
+    // One read for the whole CTA: the widget runs no lookups of its own.
+    expect(eligMock.usePublishEligibility).toHaveBeenCalledWith('cg', 30_000);
+    await unmount();
+  });
+
+  it('nothing tracked but not confirmed (checking, a wallet on a PCA, or a failed read) → no line', async () => {
+    usePcaStore.setState({ trackedIds: [] });
+    for (const value of [false, undefined]) {
+      eligMock.usePublishEligibility.mockReturnValue({ verdict: 'unknown', ownerPublish: false, anyGasFunded: false, noPcaConfirmed: value } as any);
+      const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }));
+      expect(container.querySelector('[data-testid="pca-fee-note"]')).toBeNull();
+      await unmount();
+    }
+  });
+
+  it('a tracked PCA shows the chip instead, even if a stale read still says confirmed', async () => {
+    setNoPca(true); // trackedIds is ['7'] from beforeEach
+    const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }));
+    expect(container.querySelector('[data-testid="pca-fee-note"]')).toBeNull();
+    expect(container.querySelector('[data-testid="pca-publish-eligibility"]')).toBeTruthy();
+    await unmount();
+  });
+
+  it('the full-fee line never gates the publish button', async () => {
+    usePcaStore.setState({ trackedIds: [] });
+    setNoPca(true);
+    const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }));
+    expect(publishBtn(container).getAttribute('aria-disabled')).toBeNull();
+    await unmount();
+  });
 });
 
 describe('PromoteWidget — promote flow (#1382)', () => {
   const clickPromote = async (c: HTMLElement) =>
     act(async () => { (c.querySelector('[data-testid="widget-promote-all-btn"]') as HTMLButtonElement).click(); });
 
-  it('seals (finalize) each draft BEFORE promoting, threading subGraph through both calls', async () => {
+  it('uses one atomic share per draft and threads subGraph without a separate finalize call', async () => {
     const order: string[] = [];
     apiMocks.listAssertions.mockResolvedValue([{ name: 'a1', subGraph: 'sg1' }]);
-    apiMocks.knowledgeAssetFinalize.mockImplementation(async () => { order.push('finalize'); });
+    apiMocks.knowledgeAssetFinalize.mockRejectedValue(new Error('redundant finalize must not run'));
     apiMocks.promoteAssertion.mockImplementation(async () => { order.push('promote'); return { promotedCount: 3 }; });
     const { container, unmount } = await render(
       React.createElement(PromoteWidget, { count: 1, contextGraphId: 'cg' }),
     );
     await clickPromote(container);
-    for (let i = 0; i < 30 && order.length < 2; i++) await flush();
-    // finalize precedes promote for the draft (a dropped seal would fail this).
-    expect(order).toEqual(['finalize', 'promote']);
-    // subGraph threaded through BOTH calls (a dropped passthrough would fail this).
-    expect(apiMocks.knowledgeAssetFinalize).toHaveBeenCalledWith('cg', 'a1', { subGraphName: 'sg1' });
-    expect(apiMocks.promoteAssertion).toHaveBeenCalledWith('cg', 'a1', 'all', 'sg1');
-    expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent).toContain('Promoted 3 triples to Shared Memory');
+    for (let i = 0; i < 30 && order.length < 1; i++) await flush();
+    expect(order).toEqual(['promote']);
+    expect(apiMocks.listAssertions).toHaveBeenCalledWith('cg', 'wm', { includeCounts: false });
+    expect(apiMocks.knowledgeAssetFinalize).not.toHaveBeenCalled();
+    expect(apiMocks.promoteAssertion).toHaveBeenCalledWith('cg', 'a1', { subGraphName: 'sg1' });
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent).toContain('Shared 1 complete Knowledge Asset to Shared Memory');
     await unmount();
   });
 
   // #1464 — THE MASK: a THROWN promote must render under a DISTINCT `layer-action-error` testid,
   // never the success `layer-action-result`. Before this split both shared one testid, so the
   // devnet e2e (which reads `layer-action-result` testid-agnostically and only rejects the literal
-  // "No triples were promoted" no-op string) mistook an "✕ Promote failed…" banner for a
+  // no-op result string) mistook an "✕ Promote failed…" banner for a
   // successful promote — then the SWM count stayed 0 and the throw was misdiagnosed as a silent
   // migration gap (#1464). Deterministic; fails before the testid split (the error was queryable
   // under layer-action-result), passes after.
@@ -310,6 +474,37 @@ describe('PromoteWidget — promote flow (#1382)', () => {
     expect(err?.textContent).toContain('[promote:resolveKaNumber]');
     // The success testid must be ABSENT — a testid-agnostic reader can no longer read the error as a result.
     expect(container.querySelector('[data-testid="layer-action-result"]')).toBeNull();
+    await unmount();
+  });
+});
+
+describe('LayerWidgetStrip — visibility does not widen mutation scope', () => {
+  it('keeps visible catalog entities in stats without rendering a bulk lifecycle action for them', async () => {
+    const catalogEntity = {
+      uri: 'urn:test:catalog',
+      label: 'Catalog',
+      types: ['http://dkg.io/ontology/profile/QueryCatalog'],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(),
+      properties: new Map(),
+      connections: [],
+      tripleCount: 1,
+    } as any;
+    const { container, unmount } = await render(
+      React.createElement(LayerWidgetStrip, {
+        layer: 'swm',
+        entities: [catalogEntity],
+        entityCount: 1,
+        actionEntityCount: 0,
+        tripleCount: 1,
+        contextGraphId: 'cg',
+      }),
+    );
+
+    expect(container.textContent).toContain('Entity1');
+    expect(container.textContent).toContain('Stored triples1');
+    expect(container.querySelector('[data-testid="widget-publish-vm-btn"]')).toBeNull();
     await unmount();
   });
 });
@@ -336,7 +531,7 @@ describe('LayerWidgetStrip — action-result survives the widget unmount (OVzK3)
   const clickBtn = async (c: HTMLElement, testid: string) =>
     act(async () => { (c.querySelector(`[data-testid="${testid}"]`) as HTMLButtonElement).click(); });
 
-  it('keeps the "Promoted N triples" feedback after promote empties the wm layer', async () => {
+  it('keeps the complete-KA share feedback after share empties the wm layer', async () => {
     apiMocks.promoteAssertion.mockResolvedValue({ promotedCount: 3 });
     const { container, unmount } = await render(React.createElement(StripHarness, { layer: 'wm' }));
     expect(container.querySelector('[data-testid="widget-promote-all-btn"]')).toBeTruthy();
@@ -345,18 +540,59 @@ describe('LayerWidgetStrip — action-result survives the widget unmount (OVzK3)
     // The layer emptied → the action widget unmounted…
     expect(container.querySelector('[data-testid="widget-promote-all-btn"]')).toBeNull();
     // …but the lifted outcome persists in the strip's own state.
-    expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent).toContain('Promoted 3 triples to Shared Memory');
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent).toContain('Shared 1 complete Knowledge Asset to Shared Memory');
     await unmount();
   });
 
   it('keeps the "Published N knowledge assets" feedback after publish empties the swm layer', async () => {
-    apiMocks.publishAssertionsToVm.mockResolvedValue({ published: 2, total: 2, sealed: 0, partial: 0, failures: [] });
+    apiMocks.publishAssertionsToVm.mockResolvedValue({ published: 2, total: 2, partial: 0, failures: [] });
     const { container, unmount } = await render(React.createElement(StripHarness, { layer: 'swm' }));
     expect(container.querySelector('[data-testid="widget-publish-vm-btn"]')).toBeTruthy();
     await clickBtn(container, 'widget-publish-vm-btn');
     for (let i = 0; i < 40 && !container.querySelector('[data-testid="layer-action-result"]'); i++) await flush();
     expect(container.querySelector('[data-testid="widget-publish-vm-btn"]')).toBeNull();
     expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent).toContain('Published 2 knowledge assets to Verifiable Memory');
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.getAttribute('data-tone')).toBe('success');
+    await unmount();
+  });
+
+  it('marks a partial publish as a warning, and keeps the warning after the widget unmounts', async () => {
+    apiMocks.listAssertions.mockResolvedValue([{ name: 'a', graphUri: 'g' }, { name: 'b', graphUri: 'g2' }]);
+    apiMocks.publishAssertionsToVm.mockResolvedValue({ published: 1, total: 2, partial: 1, partialError: 'registry write pending', failures: [] });
+    const { container, unmount } = await render(React.createElement(StripHarness, { layer: 'swm' }));
+    await clickBtn(container, 'widget-publish-vm-btn');
+    for (let i = 0; i < 40 && !container.querySelector('[data-testid="layer-action-result"]'); i++) await flush();
+    expect(container.querySelector('[data-testid="widget-publish-vm-btn"]')).toBeNull();
+    const result = container.querySelector('[data-testid="layer-action-result"]');
+    expect(result?.textContent).toContain('binding incomplete — registry write pending');
+    expect(result?.getAttribute('data-tone')).toBe('warning');
+    await unmount();
+  });
+
+  it('keeps an all-unknown batch a warning after the widget unmounts', async () => {
+    apiMocks.publishAssertionsToVm.mockResolvedValue({
+      published: 0, total: 1, partial: 0, failures: [],
+      outcomeUnknown: [{ name: 'a', error: 'Publishing "a" got no response within 5 minutes.' }], sample: null,
+    });
+    const { container, unmount } = await render(React.createElement(StripHarness, { layer: 'swm' }));
+    await clickBtn(container, 'widget-publish-vm-btn');
+    for (let i = 0; i < 40 && !container.querySelector('[data-testid="layer-action-result"]'); i++) await flush();
+    expect(container.querySelector('[data-testid="widget-publish-vm-btn"]')).toBeNull();
+    expect(container.querySelector('[data-testid="layer-action-error"]')).toBeNull();
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.getAttribute('data-tone')).toBe('warning');
+    await unmount();
+  });
+
+  it('keeps a failure as danger in the strip, and leaves the widget in place', async () => {
+    apiMocks.publishAssertionsToVm.mockRejectedValue(new Error('VM publish tx reverted'));
+    const { container, unmount } = await render(React.createElement(StripHarness, { layer: 'swm' }));
+    await clickBtn(container, 'widget-publish-vm-btn');
+    for (let i = 0; i < 40 && !container.querySelector('[data-testid="layer-action-error"]'); i++) await flush();
+    // A failure doesn't complete, so the layer keeps its widget and the strip shows one line.
+    expect(container.querySelector('[data-testid="widget-publish-vm-btn"]')).toBeTruthy();
+    const errors = container.querySelectorAll('[data-testid="layer-action-error"]');
+    expect(errors.length).toBeGreaterThan(0);
+    for (const e of errors) expect(e.getAttribute('data-tone')).toBe('danger');
     await unmount();
   });
 });

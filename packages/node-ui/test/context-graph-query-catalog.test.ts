@@ -6,10 +6,30 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ProjectProfile } from '../src/ui/hooks/useProjectProfile.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+const localStorageValues = new Map<string, string>();
+Object.defineProperty(globalThis, 'localStorage', {
+  configurable: true,
+  value: {
+    clear: () => localStorageValues.clear(),
+    getItem: (key: string) => localStorageValues.get(key) ?? null,
+    key: (index: number) => [...localStorageValues.keys()][index] ?? null,
+    get length() { return localStorageValues.size; },
+    removeItem: (key: string) => localStorageValues.delete(key),
+    setItem: (key: string, value: string) => localStorageValues.set(key, value),
+  },
+});
 
 const apiMocks = vi.hoisted(() => ({
   executeQuery: vi.fn(),
   writeProfileQueryCatalog: vi.fn(),
+}));
+
+// PR #2131 — SubGraphBar/SubGraphOverviewGrid now call `fetchSubGraphs`
+// through `api-wrapper` so the chip row and cards resolve in mock mode.
+// Point the wrapper at the same mock so this suite drives the same path
+// the component actually takes.
+vi.mock('../src/ui/api-wrapper.js', () => ({
+  api: { fetchSubGraphs: vi.fn(async () => ({ subGraphs: [] })) },
 }));
 
 vi.mock('../src/ui/api.js', () => ({
@@ -23,10 +43,8 @@ vi.mock('../src/ui/api.js', () => ({
   writeProfileQueryCatalog: apiMocks.writeProfileQueryCatalog,
   fetchSubGraphs: vi.fn(async () => ({ subGraphs: [] })),
   // ka.tsx (pulled in transitively via the components barrel) imports these —
-  // they must exist on the full mock or module-load fails. SwmSubsetNotSealableError
-  // is a real class because ka.tsx uses it in an `instanceof` check.
-  knowledgeAssetPublishWithSeal: vi.fn(),
-  SwmSubsetNotSealableError: class SwmSubsetNotSealableError extends Error {},
+  // they must exist on the full mock or module-load fails.
+  knowledgeAssetPublish: vi.fn(),
   partialPublishWarning: vi.fn(() => ''),
   PARTIAL_PUBLISH_STATUS_SUFFIX: 'binding incomplete',
 }));
@@ -119,13 +137,13 @@ describe('ContextGraphQueryView', () => {
   it('frames the page as a catalogue first and editor second', async () => {
     const { container, root } = await renderWithProfile(profile());
 
-    await waitForText(container, 'Query Catalogue');
+    await waitForText(container, 'Query catalogue');
 
     const buttonLabels = Array.from(container.querySelectorAll('button'))
       .map(button => button.textContent?.trim())
       .filter(Boolean);
 
-    expect(container.querySelector('h2.v10-mlv-title')?.textContent).toBe('Query Catalogue');
+    expect(container.querySelector('h2.v10-mlv-title')?.textContent).toBe('Query catalogue');
     expect(container.querySelector('#query-catalogue-saved-title')?.textContent).toBe('Choose a query');
     expect(container.querySelector('#query-catalogue-editor-title')?.textContent).toBe('Editor and results');
     expect(container.querySelector('textarea')).toBeTruthy();
@@ -133,11 +151,39 @@ describe('ContextGraphQueryView', () => {
     expect(buttonLabels.some(label => label?.startsWith('Graphs'))).toBe(true);
     expect(buttonLabels.some(label => label?.startsWith('Types'))).toBe(true);
     expect(buttonLabels).toEqual(expect.arrayContaining(['Run', 'Save', 'Reset']));
-    expect(container.textContent).toContain('Reusable SPARQL for this Context Graph');
+    expect(container.textContent).toContain('Reusable SPARQL for searching in this context graph');
     expect(container.textContent).toContain('Load a preset or saved query into the editor below.');
     expect(container.textContent).toContain('Built-in presets');
     expect(container.textContent).not.toContain('Catalogue scope');
     expect(container.textContent).not.toContain('Built-in context queries');
+
+    await act(async () => { root.unmount(); });
+  });
+
+  it.each([true, false])('renders ASK %s results', async (value) => {
+    apiMocks.executeQuery.mockResolvedValueOnce({ result: { type: 'boolean', value } });
+    const { container, root } = await renderWithProfile(profile());
+
+    await waitForText(container, 'ASK result');
+    expect(container.querySelector('[aria-label="ASK result"]')?.textContent).toContain(String(value));
+    expect(container.textContent).not.toContain('No results for this query.');
+
+    await act(async () => { root.unmount(); });
+  });
+
+  it('renders CONSTRUCT quads as graph-shaped results', async () => {
+    apiMocks.executeQuery.mockResolvedValueOnce({
+      result: {
+        type: 'quads',
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o', graph: 'urn:g' }],
+      },
+    });
+    const { container, root } = await renderWithProfile(profile());
+
+    await waitForText(container, '1 quad');
+    expect(container.textContent).toContain('subject');
+    expect(container.textContent).toContain('urn:s');
+    expect(container.textContent).toContain('urn:g');
 
     await act(async () => { root.unmount(); });
   });
@@ -200,13 +246,14 @@ describe('ContextGraphQueryView', () => {
           sparql: 'SELECT ?doc WHERE { GRAPH ?g { ?doc <http://schema.org/name> ?name } } LIMIT 5',
           resultColumn: 'doc',
           rank: 1,
+          view: 'working-memory',
         }],
       }],
     });
     const { container, root } = await renderWithProfile(savedProfile);
 
     await waitForText(container, 'Saved queries');
-    expect(container.textContent).toContain('User-created SPARQL saved in this node profile for this Context Graph.');
+    expect(container.textContent).toContain('User-created SPARQL saved in this node profile for this context graph.');
     expect(container.textContent).not.toContain('Queries saved from the Query tab.');
     expect(container.textContent).not.toContain('Profile-saved queries');
     expect(container.textContent).toContain('Personal research');
@@ -233,6 +280,36 @@ describe('ContextGraphQueryView', () => {
 
     const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
     expect(textarea.value).toContain('schema.org/name');
+    expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
+      expect.stringContaining('schema.org/name'),
+      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory', includeContextGraphPartitions: true },
+      { timeoutMs: null, maxResponseBytes: null },
+    );
+
+    const runButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Run');
+    expect(runButton).toBeTruthy();
+
+    apiMocks.executeQuery.mockClear();
+    await act(async () => {
+      runButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
+      expect.stringContaining('schema.org/name'),
+      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory', includeContextGraphPartitions: true },
+      { timeoutMs: null, maxResponseBytes: null },
+    );
+
+    apiMocks.executeQuery.mockClear();
+    await act(async () => {
+      setFieldValue(textarea, `${textarea.value}\n# edited`);
+      runButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
+      expect.stringContaining('# edited'),
+      { contextGraphId: 'cg-test', subGraphName: undefined, view: undefined },
+      { timeoutMs: null, maxResponseBytes: null },
+    );
 
     await act(async () => { root.unmount(); });
   });
@@ -240,7 +317,7 @@ describe('ContextGraphQueryView', () => {
   it('shows profile loading and saved-query empty catalogue states', async () => {
     const { container, root } = await renderWithProfile(profile({ loading: true }));
 
-    await waitForText(container, 'Loading saved queries...');
+    await waitForText(container, 'Loading saved queries…');
     expect(container.textContent).toContain('All triples');
     expect(container.textContent).not.toContain('No saved queries yet.');
 
@@ -252,6 +329,94 @@ describe('ContextGraphQueryView', () => {
     expect(emptyContainer.textContent).toContain('No saved queries yet.');
 
     await act(async () => { emptyRoot.unmount(); });
+  });
+
+  it('collects and safely renders runtime parameters before executing a catalog query', async () => {
+    const parameterizedProfile = profile({
+      queryCatalogs: [{
+        slug: 'kamstrup',
+        subGraph: 'docs',
+        name: 'Kamstrup',
+        rank: 1,
+        queries: [{
+          slug: 'configuration-trace',
+          subGraph: 'docs',
+          catalogSlug: 'kamstrup',
+          catalogName: 'Kamstrup',
+          catalogRank: 1,
+          name: 'Configuration trace',
+          sparql: 'SELECT ?record WHERE { ?record <urn:configuration> {{configurationId}} }',
+          resultColumn: 'record',
+          rank: 1,
+          view: 'verifiable-memory',
+          parameters: [{
+            name: 'configurationId',
+            type: 'string',
+            label: 'Configuration ID',
+            description: 'Configuration_ID to trace.',
+          }],
+        }],
+      }],
+    });
+    const { container, root } = await renderWithProfile(parameterizedProfile);
+    await waitForText(container, 'Configuration trace');
+    apiMocks.executeQuery.mockClear();
+
+    const catalogButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent?.includes('Configuration trace'));
+    await act(async () => {
+      catalogButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(apiMocks.executeQuery).not.toHaveBeenCalled();
+    const parameterInput = container.querySelector('input[aria-label="Configuration ID"]') as HTMLInputElement;
+    expect(parameterInput).toBeTruthy();
+    await act(async () => {
+      setFieldValue(parameterInput, '748387" } UNION { ?s ?p ?o');
+    });
+
+    const runButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Run');
+    await act(async () => {
+      runButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
+      expect.stringContaining('"748387\\" } UNION { ?s ?p ?o"'),
+      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'verifiable-memory' },
+      { timeoutMs: null, maxResponseBytes: null },
+    );
+    await act(async () => {
+      setFieldValue(parameterInput, 'different configuration');
+    });
+    expect(container.textContent).toContain('Previous query results are hidden');
+    await act(async () => {
+      setFieldValue(parameterInput, '748387" } UNION { ?s ?p ?o');
+    });
+    const callsBeforeSave = apiMocks.executeQuery.mock.calls.length;
+
+    const saveButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Save');
+    await act(async () => {
+      saveButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const nameInput = container.querySelector('input[placeholder="Query name"]') as HTMLInputElement;
+    await act(async () => {
+      setFieldValue(nameInput, 'Reusable configuration trace');
+    });
+    const saveQueryButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Save query');
+    await act(async () => {
+      saveQueryButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const writtenQuads = apiMocks.writeProfileQueryCatalog.mock.calls.at(-1)?.[1] as Array<{ predicate: string; object: string }>;
+    expect(writtenQuads.some(quad => quad.predicate.endsWith('/queryParameters'))).toBe(true);
+    expect(writtenQuads.some(quad => quad.predicate.endsWith('/executionView'))).toBe(true);
+    expect(writtenQuads.filter(quad => quad.predicate.endsWith('/forSubGraph')))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ object: '"docs"' })]));
+    expect(apiMocks.executeQuery).toHaveBeenCalledTimes(callsBeforeSave);
+    expect(apiMocks.executeQuery.mock.calls.some(([sparql]) => String(sparql).includes('{{'))).toBe(false);
+    await act(async () => { root.unmount(); });
   });
 
   it('shows profile errors without also implying an empty catalogue', async () => {
@@ -272,14 +437,14 @@ describe('ContextGraphQueryView', () => {
         slug: 'ui-saved-queries',
         subGraph: '__context_graph',
         name: 'Saved queries',
-        description: 'User-created SPARQL saved in this node profile for this Context Graph.',
+        description: 'User-created SPARQL saved in this node profile for this context graph.',
         rank: 50,
         queries: [{
           slug: 'existing-query',
           subGraph: '__context_graph',
           catalogSlug: 'ui-saved-queries',
           catalogName: 'Saved queries',
-          catalogDescription: 'User-created SPARQL saved in this node profile for this Context Graph.',
+          catalogDescription: 'User-created SPARQL saved in this node profile for this context graph.',
           catalogRank: 50,
           name: 'Existing saved query',
           description: 'Already persisted.',
@@ -290,7 +455,7 @@ describe('ContextGraphQueryView', () => {
       }],
     }));
 
-    await waitForText(container, 'Query Catalogue');
+    await waitForText(container, 'Query catalogue');
 
     const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
     await act(async () => {
@@ -350,7 +515,7 @@ describe('ContextGraphQueryView', () => {
   it('keeps local saves visible while profile queries are loading', async () => {
     const { container, root } = await renderWithProfile(profile({ loading: true }));
 
-    await waitForText(container, 'Loading saved queries...');
+    await waitForText(container, 'Loading saved queries…');
 
     const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
     await act(async () => {

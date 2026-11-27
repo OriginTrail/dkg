@@ -46,6 +46,14 @@ export interface CursorState {
    * sweep re-derives everything from chain + the persisted watermark.
    */
   ahead: Map<number, number>;
+  /**
+   * In-memory fair-scan cursor for bounded reconcile slices. A pass starts at
+   * this ordinal and advances toward the observed chain head; after reaching
+   * the head it resets to the contiguous watermark so a later periodic sweep
+   * retries any gaps. This is deliberately not persisted: completed ordinals
+   * remain protected by `ahead`, and replay after restart is safe.
+   */
+  scanOrdinal: number;
 }
 
 /** A reconciled ordinal plus the chain block its registration was observed at. */
@@ -55,7 +63,12 @@ export interface CompletedOrdinal {
 }
 
 export function createCursorState(watermark = 0): CursorState {
-  return { watermark: Math.max(0, watermark), ahead: new Map() };
+  const normalizedWatermark = Math.max(0, watermark);
+  return {
+    watermark: normalizedWatermark,
+    ahead: new Map(),
+    scanOrdinal: normalizedWatermark,
+  };
 }
 
 /**

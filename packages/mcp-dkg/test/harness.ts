@@ -1,6 +1,6 @@
 import { z, type ZodRawShape, type ZodTypeAny } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { DkgClient } from '../src/client.js';
+import type { DkgClient, PeerInfo } from '../src/client.js';
 import type { DkgConfig } from '../src/config.js';
 
 export interface RegisteredTool {
@@ -9,12 +9,19 @@ export interface RegisteredTool {
     title?: string;
     description?: string;
     inputSchema?: ZodRawShape;
+    annotations?: {
+      readOnlyHint?: boolean;
+      destructiveHint?: boolean;
+      idempotentHint?: boolean;
+      openWorldHint?: boolean;
+    };
   };
   handler: (...args: unknown[]) => Promise<ToolResult>;
 }
 
 export interface ToolResult {
   content: Array<{ type: 'text'; text: string }>;
+  structuredContent?: Record<string, unknown>;
   isError?: boolean;
 }
 
@@ -159,7 +166,7 @@ export class FakeClient {
    */
   readonly peerInfoByPeerId = new Map<
     string,
-    Record<string, unknown>
+    PeerInfo
   >();
 
   constructor(private readonly overrides: ClientMethods = {}) {}
@@ -433,14 +440,40 @@ export class FakeClient {
   }
 
   // ── Query ───────────────────────────────────────────────────────
-  async query(args: Record<string, unknown>) {
-    this.queryCalls.push(args);
+  async query(args: Parameters<DkgClient['query']>[0]) {
+    this.queryCalls.push({ ...args });
     if (this.overrides.query) return this.overrides.query.call(this, args);
     const cgId = String(args.contextGraphId ?? '');
     const view = String(args.view ?? 'working-memory');
     const key = `${cgId}::${view}`;
     const bindings = this.memoryFixtures.get(key) ?? [];
-    return { bindings };
+    return { type: 'bindings' as const, bindings };
+  }
+
+  async readQueryCatalog(contextGraphId: string) {
+    if (this.overrides.readQueryCatalog) {
+      return this.overrides.readQueryCatalog.call(this, contextGraphId);
+    }
+    throw new Error(`query-catalog fixture not configured for ${contextGraphId}`);
+  }
+
+  async writeQueryCatalog(args: Parameters<DkgClient['writeQueryCatalog']>[0]) {
+    if (this.overrides.writeQueryCatalog) {
+      return this.overrides.writeQueryCatalog.call(this, args);
+    }
+    return {
+      ok: true as const,
+      contextGraphId: args.contextGraphId,
+      graph: `did:dkg:context-graph:${args.contextGraphId}/meta`,
+      subGraphName: 'meta' as const,
+      assertionName: 'query-catalog-test',
+      assertionUri: `did:dkg:context-graph:${args.contextGraphId}/assertion/default/query-catalog-test`,
+      scopeGraphs: [`did:dkg:context-graph:${args.contextGraphId}`],
+      scopeGraph: `did:dkg:context-graph:${args.contextGraphId}`,
+      queryCount: 1,
+      triplesWritten: args.quads.length,
+      alreadyExists: false,
+    };
   }
 
   async getAgentIdentity() {
@@ -450,7 +483,7 @@ export class FakeClient {
 
   async listProjects() {
     if (this.overrides.listProjects) return this.overrides.listProjects.call(this);
-    return Array.from(this.contextGraphs).map((id) => ({ id, name: id }));
+    return Array.from(this.contextGraphs).map((id) => ({ id, name: id, callerInvolved: true }));
   }
 
   async listSubGraphs(_: string) {
@@ -504,7 +537,7 @@ export class FakeClient {
   async getPeerInfo(peerId: string) {
     if (this.overrides.getPeerInfo) return this.overrides.getPeerInfo.call(this, peerId);
     const seeded = this.peerInfoByPeerId.get(peerId);
-    if (seeded) return seeded as ReturnType<DkgClient['getPeerInfo']> extends Promise<infer T> ? T : never;
+    if (seeded) return seeded;
     // Default fixture: not connected, no peerStore entry, no outbox.
     return {
       peerId,
@@ -539,7 +572,7 @@ export class FakeClient {
   // tests can assert the tool never lets the client helper's seal-true default
   // leak. `status` follows the route: quads + share → swm-shared (publish-ready);
   // quads only → wm-sealed; (the no-quads path uses createAssertion, not this).
-  async createKnowledgeAsset(args: Record<string, unknown>) {
+  async createKnowledgeAsset(args: Parameters<DkgClient['createKnowledgeAsset']>[0]) {
     if (this.overrides.createKnowledgeAsset) return this.overrides.createKnowledgeAsset.call(this, args);
     this.createKnowledgeAssetCalls.push({ ...args });
     const shared = args.alsoShareSwm === true;
@@ -548,7 +581,12 @@ export class FakeClient {
       : { status: 'wm-sealed', sealed: true, publishReady: false };
   }
 
-  async registerContextGraph(args: { id: string }) {
+  async registerContextGraph(args: {
+    id: string;
+    accessPolicy?: number;
+    publishPolicy?: number;
+    pcaAccountId?: string | bigint;
+  }) {
     if (this.overrides.registerContextGraph) return this.overrides.registerContextGraph.call(this, args);
     return {
       registered: args.id,

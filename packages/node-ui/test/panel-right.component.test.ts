@@ -11,19 +11,25 @@
 // this package use real HTTP servers / real Storage shims (no mocks).
 
 import React, { act } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot } from 'react-dom/client';
+import { MemoryRouter } from 'react-router-dom';
+// The app always renders the panel inside a router (its Details link navigates).
+const inRouter = (el: React.ReactElement) => React.createElement(MemoryRouter, null, el);
 
 const fetchAgentsMock = vi.fn();
 const fetchConnectionsMock = vi.fn();
 const fetchLocalAgentIntegrationsMock = vi.fn();
 const fetchLocalAgentHistoryMock = vi.fn();
 const fetchCurrentAgentMock = vi.fn();
+const fetchContextGraphsMock = vi.fn();
 const importFileMock = vi.fn();
 const persistLocalAgentChatFailureMock = vi.fn();
 const streamLocalAgentChatMock = vi.fn();
 const connectLocalAgentIntegrationMock = vi.fn();
 const disconnectLocalAgentIntegrationMock = vi.fn();
+const clearLocalLlmSessionMock = vi.fn();
+const refreshLocalAgentIntegrationMock = vi.fn();
 const apiFetchMemorySessionsMock = vi.fn();
 
 vi.mock('../src/ui/api.js', async () => {
@@ -40,6 +46,8 @@ vi.mock('../src/ui/api.js', async () => {
     streamLocalAgentChat: streamLocalAgentChatMock,
     connectLocalAgentIntegration: connectLocalAgentIntegrationMock,
     disconnectLocalAgentIntegration: disconnectLocalAgentIntegrationMock,
+    clearLocalLlmSession: clearLocalLlmSessionMock,
+    refreshLocalAgentIntegration: refreshLocalAgentIntegrationMock,
   };
 });
 
@@ -51,6 +59,7 @@ vi.mock('../src/ui/api-wrapper.js', () => ({
     // through the wrapper (not the named import). Wire the same mock
     // through the wrapper so the hook resolves under test.
     fetchCurrentAgent: fetchCurrentAgentMock,
+    fetchContextGraphs: fetchContextGraphsMock,
   },
 }));
 
@@ -72,11 +81,19 @@ async function waitForAssertion(assertion: () => void): Promise<void> {
 }
 
 describe('PanelRight component', () => {
-  beforeEach(() => {
+  afterEach(() => vi.unstubAllGlobals());
+  beforeEach(async () => {
+    // Conversations live in a store that outlives the panel, so each test starts clean.
+    (await import('../src/ui/stores/agentConversations.js')).resetAgentConversations();
     vi.clearAllMocks();
+    fetchContextGraphsMock.mockImplementation(async () => {
+      const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+      return { contextGraphs: useProjectsStore.getState().contextGraphs };
+    });
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     localStorage.clear();
     Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal('EventSource', class { addEventListener() {} close() {} });
 
     fetchAgentsMock.mockResolvedValue({ agents: [{
       agentUri: 'did:dkg:agent:peer-2',
@@ -121,6 +138,11 @@ describe('PanelRight component', () => {
       nodeIdentityId: 'node-self',
     });
     streamLocalAgentChatMock.mockResolvedValue({ text: 'Roger that', correlationId: 'corr-1' });
+    clearLocalLlmSessionMock.mockResolvedValue({
+      ok: true,
+      sessionId: 'local-llm:dkg-ui',
+      readOnly: true,
+    });
     persistLocalAgentChatFailureMock.mockResolvedValue({ ok: true, turnId: 'corr-1' });
     importFileMock.mockResolvedValue({
       assertionUri: 'urn:dkg:assertion:completed',
@@ -131,7 +153,133 @@ describe('PanelRight component', () => {
     apiFetchMemorySessionsMock.mockResolvedValue({ sessions: [] });
   });
 
-  it('always injects target context graph name alongside id and URI', async () => {
+  it('keeps the chat graph picker live when the sidebar collapses during its initial inventory load', async () => {
+    let reply!: (value: any) => void;
+    fetchContextGraphsMock.mockReturnValueOnce(new Promise(resolve => { reply = resolve; }));
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const { useContextGraphInventory } = await import('../src/ui/hooks/useContextGraphInventory.js');
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    useProjectsStore.setState({ contextGraphs: [], loading: false, inventoryLoaded: false, activeProjectId: null });
+    function SidebarInventory() { useContextGraphInventory(); return null; }
+    const container = document.createElement('div'); document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(inRouter(React.createElement(React.Fragment, {},
+        React.createElement(SidebarInventory, { key: 'sidebar' }), React.createElement(PanelRight, { key: 'chat' })))));
+      await act(async () => root.render(inRouter(React.createElement(React.Fragment, {}, React.createElement(PanelRight, { key: 'chat' })))));
+      await act(async () => reply({ contextGraphs: [{ id: 'loaded', name: 'Loaded graph', callerInvolved: true }] }));
+      const picker = container.querySelector('.v10-local-agent-target-select .v10-select-trigger') as HTMLButtonElement;
+      expect(picker).not.toBeNull();
+      expect(picker.disabled).toBe(false);
+      await act(async () => picker.click());
+      expect(document.body.textContent).toContain('Loaded graph');
+    } finally { await act(async () => root.unmount()); container.remove(); }
+  });
+
+  it.each(['https', 'http', 'no-crypto'])('local-LLM send on %s exposes results or early errors', async (origin) => {
+    const crypto = globalThis.crypto;
+    if (origin === 'http') vi.stubGlobal('crypto', { getRandomValues: crypto.getRandomValues.bind(crypto) });
+    if (origin === 'no-crypto') vi.stubGlobal('crypto', undefined);
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
+      id: 'local-llm',
+      name: 'DKG Local LLM',
+      description: 'Daemon-owned local model',
+      defaultSessionId: 'local-llm:dkg-ui',
+      connectSupported: false,
+      chatSupported: true,
+      chatReady: true,
+      chatAttachments: false,
+      persistentChat: true,
+      bridgeOnline: true,
+      bridgeStatusLabel: 'Connected',
+      configured: true,
+      detected: true,
+      status: 'chat_ready',
+      statusLabel: 'Ready',
+      detail: 'ready',
+      source: 'live',
+    }] });
+    streamLocalAgentChatMock.mockResolvedValue({
+      text: 'Catalog evidence',
+      correlationId: 'local-correlation',
+      turnId: 'local-correlation',
+      sessionId: 'local-llm:dkg-ui',
+      contextGraphId: 'testing',
+      profile: 'catalog',
+      toolCalls: [{ name: 'dkg_query_catalog_list', arguments: {} }],
+      traceFile: '/tmp/local-llm.log',
+      readOnly: true,
+    });
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    act(() => {
+      useProjectsStore.setState({
+        contextGraphs: [{ id: 'testing', name: 'Testing' }],
+        loading: false,
+        activeProjectId: 'testing',
+      });
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(inRouter(React.createElement(PanelRight))));
+    await waitForAssertion(() => expect(container.textContent).toContain('DKG Local LLM'));
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(
+        textarea,
+        'List saved queries',
+      );
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('button[aria-label="Send message"]')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    if (origin === 'no-crypto') {
+      await waitForAssertion(() => expect(container.textContent).toContain('This browser cannot generate a secure request ID.'));
+      expect(streamLocalAgentChatMock).not.toHaveBeenCalled();
+      expect(textarea.value).toBe('List saved queries');
+      await act(async () => root.unmount());
+      container.remove();
+      return;
+    }
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain('Catalog evidence');
+      expect(container.textContent).toContain('Tools: dkg_query_catalog_list');
+      expect(container.textContent).toContain('Trace: /tmp/local-llm.log');
+    });
+    expect(streamLocalAgentChatMock).toHaveBeenCalledWith(
+      'local-llm',
+      'List saved queries',
+      expect.objectContaining({ contextGraphId: 'testing' }),
+    );
+
+    expect(streamLocalAgentChatMock.mock.calls.at(-1)?.[2].correlationId)
+      .toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i);
+
+    await act(async () => {
+      container.querySelector('.v10-agent-tab-menu-trigger')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const clearItem = Array.from(container.querySelectorAll<HTMLButtonElement>(
+      '.v10-agent-tab-menu-item',
+    )).find((item) => /clear session/i.test(item.textContent ?? ''));
+    expect(clearItem).toBeTruthy();
+    expect(container.textContent).not.toContain('Disconnect');
+    await act(async () => {
+      clearItem!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await waitForAssertion(() => expect(clearLocalLlmSessionMock).toHaveBeenCalledOnce());
+    await waitForAssertion(() => expect(container.textContent).not.toContain('Catalog evidence'));
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it('always injects target Context Graph name alongside id and URI', async () => {
     const { buildChatContextEntries } = await import('../src/ui/components/Shell/PanelRight.js');
 
     expect(buildChatContextEntries(
@@ -157,6 +305,72 @@ describe('PanelRight component', () => {
     ]);
   }, 10_000);
 
+  it('sends a selected Prime session as one raw-and-memory pairing', async () => {
+    const memorySessionId = 'prime-agent:dkg-ui:s1';
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
+      id: 'prime-agent',
+      name: 'Prime Agent',
+      description: 'Prime bridge',
+      connectSupported: true,
+      chatSupported: true,
+      chatReady: true,
+      chatAttachments: false,
+      persistentChat: true,
+      bridgeOnline: true,
+      bridgeStatusLabel: 'Connected',
+      configured: true,
+      detected: true,
+      status: 'chat_ready',
+      statusLabel: 'Ready',
+      detail: 'ready',
+      source: 'live',
+      defaultSessionId: memorySessionId,
+      liveSessions: [{ sessionId: memorySessionId, rawSessionId: 's1' }],
+    }] });
+    streamLocalAgentChatMock.mockResolvedValue({
+      text: 'Prime reply',
+      correlationId: 'prime-correlation',
+      turnId: 'prime-correlation',
+      sessionId: memorySessionId,
+    });
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(inRouter(React.createElement(PanelRight)));
+    });
+    await waitForAssertion(() => expect(container.textContent).toContain('Prime Agent'));
+
+    const textarea = container.querySelector('textarea');
+    expect(textarea).toBeTruthy();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      valueSetter?.call(textarea, 'Hello Prime');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const sendButton = container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement | null;
+    expect(sendButton).toBeTruthy();
+    await act(async () => {
+      sendButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await waitForAssertion(() => {
+      expect(streamLocalAgentChatMock).toHaveBeenCalledWith(
+        'prime-agent',
+        'Hello Prime',
+        expect.objectContaining({
+          sessionId: memorySessionId,
+          liveSession: { sessionId: memorySessionId, rawSessionId: 's1' },
+        }),
+      );
+    });
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   it('renders, loads agent state, and sends chat with injected context entries', async () => {
     const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
     const { useProjectsStore } = await import('../src/ui/stores/projects.js');
@@ -174,7 +388,7 @@ describe('PanelRight component', () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(React.createElement(PanelRight));
+      root.render(inRouter(React.createElement(PanelRight)));
     });
 
     await act(async () => {
@@ -328,7 +542,7 @@ describe('PanelRight component', () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(React.createElement(PanelRight));
+      root.render(inRouter(React.createElement(PanelRight)));
     });
     await act(async () => {
       await Promise.resolve();
@@ -359,6 +573,124 @@ describe('PanelRight component', () => {
     });
     container.remove();
   });
+
+  it('a reply in flight survives closing the panel, and Stop in the reopened panel aborts it', async () => {
+    let signal: AbortSignal | undefined;
+    streamLocalAgentChatMock.mockImplementation((_id: string, _text: string, options: any) => {
+      signal = options.signal;
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      });
+    });
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    let root = createRoot(container);
+    await act(async () => { root.render(React.createElement(PanelRight)); });
+    await act(async () => { await Promise.resolve(); });
+
+    const textarea = container.querySelector('textarea');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, 'Keep going while closed');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      (container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement).click();
+    });
+    await waitForAssertion(() => expect(container.querySelector('button[aria-label="Stop reply"]')).toBeTruthy());
+
+    // Close the panel (unmount) and open it again (a new instance).
+    await act(async () => { root.unmount(); });
+    root = createRoot(container);
+    await act(async () => { root.render(React.createElement(PanelRight)); });
+    try {
+      await waitForAssertion(() => expect(container.textContent).toContain('Keep going while closed'));
+      const stop = container.querySelector('button[aria-label="Stop reply"]') as HTMLButtonElement | null;
+      expect(stop).toBeTruthy();
+      await act(async () => { stop!.click(); });
+      expect(signal?.aborted).toBe(true);
+      await waitForAssertion(() => expect(container.querySelector('button[aria-label="Send message"]')).toBeTruthy());
+    } finally {
+      await act(async () => { root.unmount(); });
+      container.remove();
+    }
+  }, 20_000);
+
+  it('a reply that streams while the panel is closed keeps its text, and later deltas and the finish add to it once', async () => {
+    let options: any;
+    let finish: (value: unknown) => void = () => {};
+    streamLocalAgentChatMock.mockImplementation((_id: string, _text: string, opts: any) => {
+      options = opts;
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    let root = createRoot(container);
+    await act(async () => { root.render(React.createElement(PanelRight)); });
+    await act(async () => { await Promise.resolve(); });
+
+    const textarea = container.querySelector('textarea');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, 'Answer while I look away');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      (container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement).click();
+    });
+    await waitForAssertion(() => expect(options).toBeTruthy());
+
+    // Close the panel; part of the reply streams in while it is closed.
+    await act(async () => { root.unmount(); });
+    const partial = 'Streamed while the panel was closed';
+    await act(async () => {
+      options.onEvent?.({ type: 'text_delta', delta: partial });
+      await Promise.resolve();
+    });
+
+    // Reopen while the request is still pending. History on reopen already
+    // holds an earlier snapshot of this turn, stored under its own URI: it must
+    // not replace the row the stream is still writing to.
+    const snapshot = 'Persisted snapshot';
+    fetchLocalAgentHistoryMock.mockResolvedValue([
+      { uri: 'urn:dkg:chat:user-closed', author: 'user', text: 'Answer while I look away', ts: new Date().toISOString(), turnId: options.correlationId, persistStatus: 'stored' },
+      { uri: 'urn:dkg:chat:reply-closed', author: 'assistant', text: snapshot, ts: new Date().toISOString(), turnId: options.correlationId, persistStatus: 'pending' },
+    ]);
+    const historyCalls = fetchLocalAgentHistoryMock.mock.calls.length;
+    root = createRoot(container);
+    await act(async () => { root.render(React.createElement(PanelRight)); });
+    const count = (s: string) => container.textContent!.split(s).length - 1;
+    try {
+      await waitForAssertion(() => expect(fetchLocalAgentHistoryMock.mock.calls.length).toBeGreaterThan(historyCalls));
+      await act(async () => { await Promise.resolve(); });
+      await waitForAssertion(() => expect(container.textContent).toContain(partial));
+      expect(container.textContent).not.toContain(snapshot);
+      expect(container.querySelector('button[aria-label="Stop reply"]')).toBeTruthy();
+
+      // A later delta reaches the reopened panel and appears once.
+      const rest = ', and kept streaming once it reopened';
+      await act(async () => {
+        options.onEvent?.({ type: 'text_delta', delta: rest });
+        await Promise.resolve();
+      });
+      const reply = partial + rest;
+      await waitForAssertion(() => expect(container.textContent).toContain(reply));
+      expect(count(reply)).toBe(1);
+
+      // Finishing keeps the transcript: the reply once, and the panel ready to send.
+      await act(async () => {
+        finish({ text: reply, correlationId: 'corr-closed' });
+        await Promise.resolve();
+      });
+      await waitForAssertion(() => expect(container.querySelector('button[aria-label="Send message"]')).toBeTruthy());
+      expect(count(reply)).toBe(1);
+      expect(count('Answer while I look away')).toBe(1);
+      expect(container.querySelector('button[aria-label="Stop reply"]')).toBeNull();
+    } finally {
+      await act(async () => { root.unmount(); });
+      container.remove();
+    }
+  }, 20_000);
 
   it('persists failed Hermes turns so timeout sessions survive refresh', async () => {
     fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
@@ -403,7 +735,7 @@ describe('PanelRight component', () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(React.createElement(PanelRight));
+      root.render(inRouter(React.createElement(PanelRight)));
     });
     await act(async () => {
       await Promise.resolve();
@@ -480,7 +812,7 @@ describe('PanelRight component', () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(React.createElement(PanelRight));
+      root.render(inRouter(React.createElement(PanelRight)));
     });
     await act(async () => {
       await Promise.resolve();
@@ -553,7 +885,7 @@ describe('PanelRight component', () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(React.createElement(PanelRight));
+      root.render(inRouter(React.createElement(PanelRight)));
     });
     await act(async () => {
       await Promise.resolve();
@@ -577,6 +909,77 @@ describe('PanelRight component', () => {
       expect(container.textContent).toContain('Error: Hermes bridge response timed out.');
     });
     expect(container.textContent).not.toContain('The operation was aborted due to timeout');
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('renders a terminal Prime provider failure before the first token and releases the composer', async () => {
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const { LocalAgentApiError } = await import('../src/ui/api.js');
+
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
+      id: 'prime-agent',
+      name: 'Prime Agent',
+      description: 'Prime Agent bridge',
+      connectSupported: true,
+      chatSupported: true,
+      chatReady: true,
+      chatAttachments: false,
+      persistentChat: true,
+      bridgeOnline: true,
+      bridgeStatusLabel: 'Connected',
+      configured: true,
+      detected: true,
+      status: 'connected',
+      statusLabel: 'Connected',
+      detail: 'ready',
+      target: 'bridge',
+    }] });
+    streamLocalAgentChatMock.mockRejectedValueOnce(new LocalAgentApiError(
+      'Prime Agent provider authentication failed.',
+      {
+        code: 'PRIME_AGENT_PROVIDER_UNAUTHORIZED',
+        source: 'prime-agent-channel',
+        correlationId: 'corr-prime-auth',
+      },
+    ));
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(inRouter(React.createElement(PanelRight)));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const textarea = container.querySelector('textarea');
+    expect(textarea).toBeTruthy();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      valueSetter?.call(textarea, 'Use the provider');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    const sendButton = container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement | null;
+    expect(sendButton).toBeTruthy();
+    await act(async () => {
+      sendButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain(
+        'Error: Prime Agent provider authentication failed. Check its provider credentials and try again.',
+      );
+      expect(container.textContent).not.toContain('Thinking…');
+      expect((container.querySelector('textarea') as HTMLTextAreaElement).disabled).toBe(false);
+    });
+    expect(persistLocalAgentChatFailureMock).not.toHaveBeenCalled();
 
     await act(async () => {
       root.unmount();
@@ -613,7 +1016,7 @@ describe('PanelRight component', () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(React.createElement(PanelRight));
+      root.render(inRouter(React.createElement(PanelRight)));
     });
     await act(async () => {
       await Promise.resolve();
@@ -695,7 +1098,7 @@ describe('PanelRight component', () => {
     ]);
 
     await waitForAssertion(() => {
-      expect(container.querySelector('.v10-local-agent-attachment-list')).toBeNull();
+      expect(container.querySelector('.v10-local-agent-attachment-row')).toBeNull();
     });
     expect(container.textContent).toContain('Attachment import result: notes.epub.');
 
@@ -734,7 +1137,7 @@ describe('PanelRight component', () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(React.createElement(PanelRight));
+      root.render(inRouter(React.createElement(PanelRight)));
     });
     await act(async () => {
       await Promise.resolve();
@@ -808,6 +1211,94 @@ describe('PanelRight component', () => {
     container.remove();
   });
 
+  it('a queued file survives closing the panel, and its upload can finish while the panel is closed', async () => {
+    let finishImport: (value: unknown) => void = () => {};
+    importFileMock.mockImplementation(() => new Promise((resolve) => { finishImport = resolve; }));
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    act(() => {
+      useProjectsStore.setState({
+        contextGraphs: [{ id: 'testing', name: 'Testing' }],
+        loading: false,
+        activeProjectId: 'testing',
+      });
+    });
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    let root = createRoot(container);
+    const open = async () => {
+      root = createRoot(container);
+      await act(async () => { root.render(React.createElement(PanelRight)); });
+      await act(async () => { await Promise.resolve(); });
+    };
+    const close = async () => { await act(async () => { root.unmount(); }); };
+    const chipNames = () => Array.from(container.querySelectorAll('.v10-attachment-chip'))
+      .map((chip) => chip.textContent ?? '');
+
+    try {
+      await act(async () => { root.render(React.createElement(PanelRight)); });
+      await act(async () => { await Promise.resolve(); });
+
+      // Pick the context graph, then queue a file through the attach button's input.
+      const projectTrigger = container.querySelector('.v10-local-agent-target-select .v10-select-trigger') as HTMLButtonElement | null;
+      await act(async () => { projectTrigger!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+      const testingOption = Array.from(document.body.querySelectorAll('.v10-select-option'))
+        .find((opt) => opt.textContent?.trim() === 'Testing') as HTMLElement | undefined;
+      await act(async () => { testingOption!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+      const attachInput = Array.from(container.querySelectorAll('input[type="file"]'))
+        .find((el) => !el.hasAttribute('tabindex')) as HTMLInputElement | null;
+      const file = new File(['# Draft'], 'draft.md', { type: 'text/markdown', lastModified: 789 });
+      await act(async () => {
+        Object.defineProperty(attachInput, 'files', { configurable: true, value: [file] });
+        attachInput!.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      await waitForAssertion(() => expect(chipNames().some((name) => name.includes('draft.md'))).toBe(true));
+
+      // Close and reopen, as switching panels on a narrow screen does: the file is still queued.
+      await close();
+      await open();
+      await waitForAssertion(() => expect(chipNames().some((name) => name.includes('draft.md'))).toBe(true));
+      expect(importFileMock).not.toHaveBeenCalled();
+
+      // Send from the reopened panel, then close it while the upload is still running.
+      await act(async () => {
+        (container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement).click();
+      });
+      await waitForAssertion(() => expect(importFileMock).toHaveBeenCalledTimes(1));
+      expect(importFileMock).toHaveBeenCalledWith(expect.any(String), 'testing', file);
+      await close();
+
+      await act(async () => {
+        finishImport({
+          assertionUri: 'urn:dkg:assertion:draft',
+          fileHash: 'sha256:draft',
+          detectedContentType: 'text/markdown',
+          rootEntity: 'urn:dkg:assertion:draft#root',
+          extraction: { status: 'completed', tripleCount: 2, pipelineUsed: 'markdown' },
+        });
+        await Promise.resolve();
+      });
+
+      // The send carries on while the panel is closed, with the original file and context graph.
+      await waitForAssertion(() => expect(streamLocalAgentChatMock).toHaveBeenCalled());
+      const [, , options] = streamLocalAgentChatMock.mock.calls.at(-1) ?? [];
+      expect(options.attachments).toEqual([
+        expect.objectContaining({ fileName: 'draft.md', contextGraphId: 'testing', assertionUri: 'urn:dkg:assertion:draft' }),
+      ]);
+      expect(importFileMock).toHaveBeenCalledTimes(1);
+
+      // Reopened, the sent file is no longer queued and was imported once.
+      await open();
+      await waitForAssertion(() => expect(chipNames().some((name) => name.includes('draft.md'))).toBe(false));
+      expect(importFileMock).toHaveBeenCalledTimes(1);
+    } finally {
+      await close();
+      container.remove();
+    }
+  }, 20_000);
+
   it('keeps skipped-import-only transport text blank while showing the import summary locally', async () => {
     importFileMock.mockResolvedValue({
       assertionUri: 'urn:dkg:assertion:epub-only',
@@ -836,7 +1327,7 @@ describe('PanelRight component', () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(React.createElement(PanelRight));
+      root.render(inRouter(React.createElement(PanelRight)));
     });
     await act(async () => {
       await Promise.resolve();
@@ -907,5 +1398,102 @@ describe('PanelRight component', () => {
       root.unmount();
     });
     container.remove();
+  });
+
+  it('follows a replacement Prime session: the turn shows once and the next send goes to the new session', async () => {
+    const staleSessionId = 'prime-agent:dkg-ui:s1';
+    const liveSessionId = 'prime-agent:dkg-ui:s2';
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
+      id: 'prime-agent',
+      name: 'Prime Agent',
+      description: 'Prime bridge',
+      connectSupported: true,
+      chatSupported: true,
+      chatReady: true,
+      chatAttachments: false,
+      persistentChat: true,
+      bridgeOnline: true,
+      bridgeStatusLabel: 'Connected',
+      configured: true,
+      detected: true,
+      status: 'chat_ready',
+      statusLabel: 'Ready',
+      detail: 'ready',
+      source: 'live',
+      defaultSessionId: staleSessionId,
+      liveSessions: [{ sessionId: staleSessionId, rawSessionId: 's1' }],
+    }] });
+    streamLocalAgentChatMock
+      .mockResolvedValueOnce({ text: 'Answered after a restart', turnId: 'prime-turn-1', sessionId: liveSessionId })
+      .mockResolvedValueOnce({ text: 'Second answer', turnId: 'prime-turn-2', sessionId: liveSessionId });
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const send = async (text: string) => {
+      const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, text);
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>('button[aria-label="Send message"]')!
+          .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+    };
+    try {
+      await act(async () => root.render(React.createElement(PanelRight)));
+      await waitForAssertion(() => expect(container.textContent).toContain('Prime Agent'));
+
+      await send('First question');
+      await waitForAssertion(() => {
+        expect(container.textContent).toContain('Answered after a restart');
+        expect(container.textContent).toContain('Prime Agent restarted; switched chat to the live session.');
+      });
+      expect(streamLocalAgentChatMock.mock.calls[0][2]).toMatchObject({ sessionId: staleSessionId });
+      expect(container.textContent!.split('Answered after a restart').length - 1).toBe(1);
+      expect(container.textContent!.split('First question').length - 1).toBe(1);
+
+      await send('Second question');
+      await waitForAssertion(() => expect(container.textContent).toContain('Second answer'));
+      expect(streamLocalAgentChatMock.mock.calls[1][2]).toMatchObject({ sessionId: liveSessionId });
+      expect(container.textContent).toContain('Answered after a restart');
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  it('a failed conversation refresh keeps the messages and says why', async () => {
+    fetchLocalAgentHistoryMock.mockResolvedValue([
+      { uri: 'urn:msg:1', author: 'user', text: 'Earlier question', ts: '2026-11-10T10:00:00Z', turnId: 'turn-1' },
+    ]);
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(React.createElement(PanelRight)));
+      await waitForAssertion(() => expect(container.textContent).toContain('Earlier question'));
+
+      refreshLocalAgentIntegrationMock.mockResolvedValue({ integration: (await fetchLocalAgentIntegrationsMock()).integrations[0] });
+      fetchLocalAgentHistoryMock.mockRejectedValueOnce(new Error('History is unavailable right now'));
+      await act(async () => {
+        container.querySelector('.v10-agent-tab-menu-trigger')!
+          .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      const refreshItem = Array.from(container.querySelectorAll<HTMLButtonElement>('.v10-agent-tab-menu-item'))
+        .find((item) => /refresh/i.test(item.textContent ?? ''));
+      expect(refreshItem).toBeTruthy();
+      await act(async () => refreshItem!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+
+      await waitForAssertion(() => expect(container.textContent).toContain('History is unavailable right now'));
+      expect(refreshLocalAgentIntegrationMock).toHaveBeenCalledWith('openclaw');
+      expect(container.textContent).toContain('Earlier question');
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 });

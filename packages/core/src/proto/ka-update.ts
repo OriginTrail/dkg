@@ -35,6 +35,14 @@ export const KAUpdateRequestSchema = new Type('KAUpdateRequest')
   .add(new Field('newMerkleRoot', 9, 'bytes'))
   .add(new Field('timestampMs', 10, 'uint64'))
   .add(new Field('operationId', 11, 'string'))
+  // Rootless KA scope. Legacy per-root manifest MUST be empty for version 2.
+  .add(new Field('contentScopeVersion', 12, 'uint32'))
+  .add(new Field('kaUal', 13, 'string'))
+  .add(new Field('assertionVersion', 14, 'string'))
+  .add(new Field('publicTripleCount', 15, 'uint32'))
+  .add(new Field('privateMerkleRoot', 16, 'bytes'))
+  .add(new Field('privateTripleCount', 17, 'uint32'))
+  .add(new Field('subGraphName', 18, 'string'))
   .add(KAUpdateManifestEntrySchema);
 
 type Long = { low: number; high: number; unsigned: boolean };
@@ -59,6 +67,20 @@ export interface KAUpdateRequestMsg {
   timestampMs: number | bigint;
   /** Originator's operation ID for cross-node log correlation. */
   operationId?: string;
+  /** Rootless KA graph-scope discriminator. New writers emit exactly 2. */
+  contentScopeVersion?: number;
+  /** Canonical deterministic UAL for the updated KA. */
+  kaUal?: string;
+  /** One-based post-update assertion/Merkle-root index. */
+  assertionVersion?: string;
+  /** Number of public RDF triples in the replacement assertion. */
+  publicTripleCount?: number;
+  /** Optional single KA-level private commitment. */
+  privateMerkleRoot?: Uint8Array;
+  /** Number of private RDF triples committed by privateMerkleRoot. */
+  privateTripleCount?: number;
+  /** Optional named sub-graph containing this KA. */
+  subGraphName?: string;
 }
 
 function toBigInt(v: string | number | bigint | Long | unknown): bigint {

@@ -1,31 +1,94 @@
-import { type Page, type Locator } from '@playwright/test';
+import { expect, type Page, type Locator } from '@playwright/test';
 import { sel } from '../helpers/selectors.js';
+
+/** Matches `text` and nothing longer: a section's header also holds its count. */
+const exactly = (text: string) => new RegExp(`^${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
 
 export class LeftPanelPage {
   readonly page: Page;
   readonly root: Locator;
   readonly newProjectBtn: Locator;
   readonly joinProjectBtn: Locator;
-  readonly oraclePlaceholder: Locator;
+  /** The sidebar's "Node" group: Observability, Publisher Conviction, Settings. */
+  readonly nodePlaces: Locator;
 
   constructor(page: Page) {
     this.page = page;
     this.root = page.locator(sel.leftPanel.root).first();
-    // rc11 renamed "+ New Project" -> "+ New Context Graph". The button
-    // class (`.v10-new-project-btn`) was kept for backwards-compat but
-    // is now shared with "↗ Join Context Graph", so each handle filters
-    // by visible label to disambiguate.
-    this.newProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /New Context Graph/i });
-    this.joinProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /Join Context Graph/i });
+    this.newProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /^New$/i });
+    this.joinProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /^Join$/i });
     this.oraclePlaceholder = page.locator(sel.leftPanel.oraclePlaceholder);
+    this.nodePlaces = page.getByRole('navigation', { name: 'Node' });
+  }
+
+  /** A node-level place in the sidebar, by its visible name. */
+  place(name: 'Observability' | 'Publisher Conviction' | 'Settings') {
+    return this.nodePlaces.getByRole('button', { name, exact: true });
+  }
+
+  async openObservability() {
+    await this.place('Observability').click();
+    // The Observability view is a lazy-loaded centre tab: its <h1> only paints
+    // once the dynamic chunk + initial render settle. Under heavy parallel load
+    // (shared Vite dev server + shared node) that can exceed the default 5s
+    // `expect` budget callers assert with, and a click fired right after
+    // `shell.goto()` can also be missed while the shell is still hydrating.
+    // Confirm the view actually opened, retrying the click once — same missed-
+    // click guard used in clickNewProject — so every caller starts loaded.
+    const heading = this.page.getByRole('heading', { name: 'Observability', level: 1 });
+    try {
+      await heading.waitFor({ state: 'visible', timeout: 8_000 });
+    } catch {
+      await this.place('Observability').click();
+      await heading.waitFor({ state: 'visible', timeout: 20_000 });
+    }
+  }
+
+  async openSettings() {
+    await this.place('Settings').click();
   }
 
   private myCgSections() {
-    return this.root.locator(sel.myContextGraphs.peerGroupBody).locator(sel.leftPanel.section);
+    return this.section('My context graphs')
+      .locator(sel.myContextGraphs.peerGroupBody)
+      .locator(sel.leftPanel.section);
+  }
+
+  /**
+   * A collapsible sidebar section by its label (Marketplace, My Context
+   * Graphs, Public graphs, Integrations): its header, with the count where it
+   * has one, and, while expanded, its body.
+   */
+  section(label: string) {
+    return this.root
+      .locator(sel.leftPanel.peerGroup)
+      .filter({ has: this.page.locator(sel.leftPanel.peerGroupLabel, { hasText: exactly(label) }) })
+      .first();
+  }
+
+  /** The button that expands and collapses the section `label`; its `aria-expanded` says which it is. */
+  sectionHeader(label: string) {
+    return this.section(label).locator(sel.leftPanel.peerGroupHeader).first();
+  }
+
+  async isSectionExpanded(label: string) {
+    return (await this.sectionHeader(label).getAttribute('aria-expanded')) === 'true';
+  }
+
+  /** Expand the section `label`, and leave one already expanded as it is: a click on its header would collapse it. */
+  async expandSection(label: string) {
+    const header = this.sectionHeader(label);
+    if (!(await this.isSectionExpanded(label))) await header.click();
+    await expect(header).toHaveAttribute('aria-expanded', 'true');
+  }
+
+  /** The Public graphs section alone: its header (with the count) and, while expanded, its body. */
+  publicGraphsSection() {
+    return this.section('Public graphs');
   }
 
   private memoryStackControl() {
-    return this.root.locator(sel.leftPanel.dashboard).filter({ hasText: 'Memory Stack' });
+    return this.root.locator(sel.leftPanel.dashboard).filter({ hasText: 'Memory stack' });
   }
 
   async isVisible() {
@@ -42,27 +105,15 @@ export class LeftPanelPage {
       await sidebar.click();
       return;
     }
-    throw new Error('Memory Stack navigation control not found (expected .v10-tree-dashboard with "Memory Stack" label)');
+    throw new Error('Memory stack navigation control not found in the structured sidebar');
   }
 
   async isMemoryStackVisible() {
     return this.memoryStackControl().isVisible().catch(() => false);
   }
 
-  async switchToMode(mode: 'explorer' | 'oracle') {
-    // rc11 renamed mode tab "Projects" -> "Context Graphs"; the underlying
-    // store value `treeMode` is still 'explorer'/'oracle'.
-    const label = mode === 'explorer' ? 'Context Graphs' : 'Context Oracle';
-    await this.root.locator(sel.leftPanel.modeBtn).filter({ hasText: label }).click();
-  }
-
-  async getActiveMode() {
-    const active = this.root.locator(`${sel.leftPanel.modeBtn}.active`);
-    return active.textContent();
-  }
-
   async clickNewProject() {
-    const btn = this.newProjectBtn.filter({ hasText: '+ New Context Graph' });
+    const btn = this.newProjectBtn;
     await btn.waitFor({ state: 'visible', timeout: 10_000 });
     await btn.click();
     // The modal mounts via a layout-store update. If the click lands while the
@@ -148,7 +199,7 @@ export class LeftPanelPage {
    */
   async hideProject(name: string) {
     const section = this.root.locator(sel.leftPanel.section).filter({ hasText: name }).first();
-    await section.locator(sel.leftPanel.sectionHeader).first().getByRole('button', { name: '×' }).click();
+    await section.locator(sel.leftPanel.sectionHeader).first().getByRole('button', { name: /^Hide .+ from the sidebar$/ }).click();
   }
 
   /** The "↺ Show N hidden context graphs" restore button (only present while ≥1 is hidden). */

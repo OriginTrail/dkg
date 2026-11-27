@@ -1,0 +1,144 @@
+import { activeRpcRequestAbortSignal } from "../src/rpc-request-transport.js";
+import { describe, expect, it, vi } from 'vitest';
+import { Interface, ethers } from 'ethers';
+import { EVMChainAdapter } from '../src/evm-adapter.js';
+import { loadAbi } from '../src/evm-adapter-abi.js';
+import { MULTICALL3_RUNTIME_CODE } from './fixtures/multicall3-runtime-code.js';
+
+const hub = `0x${'1'.repeat(40)}`, cg = `0x${'2'.repeat(40)}`, ka = `0x${'3'.repeat(40)}`;
+const mc = new Interface(['function aggregate3((address target,bool allowFailure,bytes callData)[] calls) payable returns ((bool success,bytes returnData)[])']);
+function fixture(aggregate: boolean, reorg: boolean, depth: number, assetCount = 2) {
+  const reads: {name:string,tag:unknown,args?:unknown[]}[] = [];
+  const batches: {tag:unknown,size:number}[] = [];
+  let head = 10, collected = false;
+  const anchor = 11-depth;
+  const blockReads: unknown[] = [];
+  const interfaces: Record<string, Interface> = { [hub]:new Interface(loadAbi('Hub')), [cg]:new Interface(loadAbi('ContextGraphStorage')), [ka]:new Interface(loadAbi('DKGKnowledgeAssets')) };
+  function reply(to: string, data: string, tag: unknown): string {
+    const iface = interfaces[to]!; const call = iface.parseTransaction({ data })!;
+    reads.push({name:call.name, tag, args:Array.from(call.args)});
+    // The head moves during inventory collection. Every contract read must still use the originally selected anchor.
+    if(call.name === 'getContextGraphKaAt') { head = 11; collected = true; }
+    const v: Record<string, unknown[]> = {
+      getAssetStorageAddress:[call.args[0] === 'ContextGraphStorage' ? cg : ka],
+      getNameHash:[ethers.id('coherent-snapshot')], getContextGraphKaCount:[BigInt(assetCount)], getContextGraphKaAt:[call.name === 'getContextGraphKaAt' ? BigInt(call.args[1])+1n : 0n],
+      getLatestMerkleRoot:[assetCount > 2 ? ethers.id(`asset:${call.args[0]}:block:${tag}`)
+        : `0x${(tag === anchor ? (call.args[0] === 1n ? 'a' : 'b') : 'c').repeat(64)}`], kaToContextGraph:[1n],
+    };
+    if(call.name === 'getContextGraph') {
+      const outputs = iface.getFunction(call.name)!.outputs;
+      const defaults = (p: any): any => p.baseType === 'tuple' ? p.components.map(defaults) : p.baseType === 'array' ? [] : p.type === 'bool' ? true : p.type === 'address' ? ethers.ZeroAddress : p.type === 'string' ? '' : p.type.startsWith('bytes') ? ethers.ZeroHash : 0n;
+      return iface.encodeFunctionResult(call.name,outputs.map(defaults));
+    }
+    if(call.name === 'getKnowledgeAssetUpdateContext') {
+      const outputs = iface.getFunction(call.name)!.outputs;
+      const defaults = (p: any): any => p.baseType === 'tuple' ? p.components.map(defaults) : p.type === 'address' ? ethers.ZeroAddress : p.type === 'bool' ? false : p.type.startsWith('bytes') ? ethers.ZeroHash : p.name.toLowerCase().includes('rootscount') ? BigInt(call.args[0]) : 0n;
+      return iface.encodeFunctionResult(call.name,outputs.map(defaults));
+    }
+    return iface.encodeFunctionResult(call.name,v[call.name]!);
+  }
+  const provider: any = {
+    send: async () => '0x7a69',
+    getBlock: async (tag: unknown) => { blockReads.push(tag); return {number:tag === 'latest' ? head : tag, hash:`0x${(reorg && collected ? 'c' : 'd').repeat(64)}`}; },
+    getCode: async (_:unknown, tag:unknown) => { reads.push({name:'getCode',tag}); return aggregate ? MULTICALL3_RUNTIME_CODE : '0x'; },
+    call: async (tx:any) => {
+      if(interfaces[tx.to]) return reply(tx.to,tx.data,tx.blockTag);
+      const parsed = mc.parseTransaction({data:tx.data})!;
+      batches.push({tag:tx.blockTag,size:parsed.args[0].length});
+      return mc.encodeFunctionResult('aggregate3',[parsed.args[0].map((c:any) => [true,reply(c.target,c.callData,tx.blockTag)])]);
+    },
+    resolveName: async (name:string) => name,
+  };
+  const a: any = new EVMChainAdapter({rpcUrl:'http://127.0.0.1:59998',chainId:'evm:31337',hubAddress:hub,privateKey:ethers.Wallet.createRandom().privateKey,finalityConfirmations:depth});
+  a.init=vi.fn(async()=>{}); a.providers=[provider];
+  return {a, reads, blockReads, anchor, provider, interfaces, batches};
+}
+describe('public snapshot coherent provider reads', () => {
+  const cases = [true,false].flatMap(aggregate => [1,3].map(depth => ({aggregate,depth})));
+  it.each(cases)('keeps moving-head reads anchored ($aggregate, depth=$depth)', async ({aggregate,depth}) => {
+    const {a,reads,blockReads,anchor} = fixture(aggregate,false,depth);
+    const snapshot=await a.readPublicGraphSnapshot('coherent-snapshot','1');
+    expect(snapshot.blockNumber).toBe(String(anchor));
+    expect(snapshot.assets).toEqual([{id:'1',root:`0x${'a'.repeat(64)}`,version:'1'},{id:'2',root:`0x${'b'.repeat(64)}`,version:'2'}]);
+    expect(reads.length).toBeGreaterThan(8); expect(reads.every(r=>r.tag===anchor)).toBe(true);
+    expect(blockReads).toEqual(depth===1 ? ['latest',anchor] : ['latest',anchor,anchor]);
+  });
+  it.each([true, false])('collects all 33 ordered assets across batches (multicall=%s)', async aggregate => {
+    const {a,reads,batches,anchor,blockReads} = fixture(aggregate,false,3,33);
+    const snapshot = await a.readPublicGraphSnapshot('coherent-snapshot','1');
+    const ids = Array.from({length:33}, (_, i) => BigInt(i+1));
+    expect(snapshot.assets).toEqual(ids.map(id => ({
+      id:String(id), root:ethers.id(`asset:${id}:block:${anchor}`), version:String(id),
+    })));
+    expect(snapshot.blockNumber).toBe(String(anchor));
+    expect(blockReads).toEqual(['latest',anchor,anchor]);
+    expect(reads.filter(r => r.name === 'getContextGraphKaAt').map(r => r.args)).toEqual(
+      ids.map(id => [1n,id-1n]));
+    for (const method of ['getLatestMerkleRoot','getKnowledgeAssetUpdateContext','kaToContextGraph']) {
+      expect(reads.filter(r => r.name === method).map(r => r.args)).toEqual(ids.map(id => [id]));
+    }
+    expect(reads.every(r => r.tag === anchor)).toBe(true);
+    expect(batches).toEqual(aggregate ? [32,96,1,3].map(size => ({tag:anchor,size})) : []);
+  });
+  it.each(cases)('rejects anchor replacement ($aggregate, depth=$depth)', async ({aggregate,depth}) => {
+    const {a} = fixture(aggregate,true,depth);
+    await expect(a.readPublicGraphSnapshot('coherent-snapshot','1')).rejects.toThrow();
+  });
+});
+
+it.each(['hub','inventory','assets'] as const)('cancels sibling %s calls on pressure and settles before returning', async stage => {
+  const {a,provider,interfaces} = fixture(false,false,1);
+  const original = provider.call;
+  const pressure = Object.assign(new Error('local queue is full'),{code:'RPC_REQUEST_GOVERNOR_QUEUE_FULL'});
+  const started: string[] = [], cancelled: string[] = [];
+  let released = false, active = 0;
+  provider.call = async (tx:any) => {
+    const name = interfaces[tx.to]!.parseTransaction({data:tx.data})!.name;
+    const names = stage==='hub' ? ['getAssetStorageAddress'] : stage==='inventory' ? ['getContextGraph','getNameHash','getContextGraphKaCount'] : ['getLatestMerkleRoot','getKnowledgeAssetUpdateContext','kaToContextGraph'];
+    if(!names.includes(name)) return original(tx);
+    started.push(name); active++;
+    try {
+      if(!released) {released=true;await Promise.resolve();throw pressure;}
+      const signal=activeRpcRequestAbortSignal()!;
+      await new Promise((_resolve,reject)=>{
+        const abort=()=>{cancelled.push(name);reject(signal.reason);};
+        signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort();
+      });
+    } finally {active--;}
+  };
+  const fallback = {...provider,send:vi.fn(provider.send)}; a.providers.push(fallback);
+  await expect(a.readPublicGraphSnapshot('coherent-snapshot','1')).rejects.toThrow('unavailable');
+  expect(started).toHaveLength(stage==='hub'?2:stage==='inventory'?3:6);
+  expect(cancelled).toHaveLength(started.length-1);
+  expect(active).toBe(0);expect(fallback.send).not.toHaveBeenCalled();
+});
+
+it.each([false, true])('rejects wrong-chain RPC before statements (healthy fallback=%s)', async fallback => {
+  const wrong = fixture(false, false, 1), healthy = fixture(false, false, 1);
+  wrong.provider.send = vi.fn(async () => '0x1');
+  healthy.provider.send = vi.fn(healthy.provider.send);
+  wrong.a.providers = fallback ? [wrong.provider, healthy.provider] : [wrong.provider];
+  const read = wrong.a.readPublicGraphSnapshot('coherent-snapshot', '1');
+  if (fallback) {
+    await expect(read).resolves.toMatchObject({chainId:'evm:31337',assets:[{id:'1'}, {id:'2'}]});
+    expect(healthy.provider.send).toHaveBeenCalledWith('eth_chainId', []);
+    expect(healthy.blockReads.length).toBeGreaterThan(0);
+    expect(healthy.reads.length).toBeGreaterThan(0);
+  } else await expect(read).rejects.toThrow('unavailable');
+  expect(wrong.provider.send).toHaveBeenCalledWith('eth_chainId', []);
+  expect(wrong.blockReads).toEqual([]); expect(wrong.reads).toEqual([]);
+});
+
+
+it.each(['evm:0', 'evm:-1', 'evm:0x7a69', 'evm:', 'evm:unknown'])(
+  'rejects a noncanonical configured chain before RPC reads: %s', async chainId => {
+    const {a, provider, blockReads, reads} = fixture(false, false, 1);
+    a.chainId = chainId;
+    provider.send = vi.fn(provider.send);
+    await expect(a.readPublicGraphSnapshot('coherent-snapshot', '1'))
+      .rejects.toThrow('Invalid snapshot configured chain ID');
+    expect(provider.send).not.toHaveBeenCalled();
+    expect(blockReads).toEqual([]);
+    expect(reads).toEqual([]);
+  },
+);

@@ -1,0 +1,549 @@
+import { createOperationContext, CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1, type EvmAddressV1, type Digest32V1 } from '@origintrail-official/dkg-core';
+import { describe, expect, it, vi } from 'vitest';
+import { DKGAgent } from '../src/index.js';
+import { NetworkAdmissionProbeError } from '../src/p2p/network-admission-coordinator.js';
+import { resolveRfc64CatalogExecutionPlanV1, resolveRfc64CatalogResponsibilityAuthorityV1 } from '../src/rfc64/catalog-rollout-authority-v1.js';
+import { isRedundantLimitedConnection, syncOpenedPeerConnection, type OpenedConnectionView } from '../src/sync/peer-connection.js';
+import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
+import { createPeerEventFixture, deferred, flushMicrotasks } from './_helpers/peer-event-lifecycle.js';
+
+
+/** Connection orchestration consumes resolved receiver and serving authority independently. */
+function stubCatalogAuthorities(agent: DKGAgent, modes: Readonly<Record<string, 'catalog' | 'legacy' | 'inactive'>>) {
+  const resolve = (contextGraphId: string) => resolveRfc64CatalogResponsibilityAuthorityV1({
+    contextGraphId, responsible: modes[contextGraphId] !== undefined,
+    active: modes[contextGraphId] !== undefined && modes[contextGraphId] !== 'inactive',
+    mode: modes[contextGraphId] === 'legacy' ? 'legacy' : 'catalog', killSwitchActive: false,
+  });
+  vi.spyOn(agent, 'readRfc64CatalogResponsibilityV1').mockImplementation(contextGraphId => ({
+    contextGraphId, responsible: Object.hasOwn(modes, contextGraphId),
+    active: Object.hasOwn(modes, contextGraphId) && modes[contextGraphId] !== 'inactive',
+    mode: modes[contextGraphId] === 'legacy' ? 'legacy' : 'catalog',
+    responsibilityReason: Object.hasOwn(modes, contextGraphId) ? 'private-membership' : null,
+    selectionSource: 'default',
+  }));
+  vi.spyOn(agent, 'resolveRfc64CatalogReceiverAuthorityV1').mockImplementation(resolve);
+  vi.spyOn(agent, 'resolveRfc64CatalogServingAuthorityV1').mockImplementation(resolve);
+}
+
+function activeSessionWithoutJobs(): PeerSyncSession {
+  return new PeerSyncSession({
+    createJob: () => { throw new Error('scheduler is outside this fixture'); },
+    onInternalError: () => undefined,
+  });
+}
+
+function replayReservation() {
+  const admit = vi.fn();
+  const reject = vi.fn();
+  return { value: { admit, reject }, admit, reject };
+}
+
+function connectionOpenWithAdmissionFailure(failure: (remotePeer: string) => Error) {
+  const session = activeSessionWithoutJobs();
+  const replay = replayReservation();
+  const remotePeer = '12D3KooWProbeWarningDedupPeer';
+  const log = { info: vi.fn(), warn: vi.fn() };
+  const ports = {
+    localPeerId: '12D3KooWlocal',
+    isRedundantConnection: () => false,
+    prepareCatalogReplay: vi.fn(() => replay.value),
+    ensureAdmitted: vi.fn(async (): Promise<boolean> => { throw failure(remotePeer); }),
+    enrichPeerStore: vi.fn(async () => undefined),
+    drainPendingSenderKey: vi.fn(async () => 0),
+    queueSync: vi.fn(() => true),
+  };
+  const run = async (): Promise<void> => {
+    try {
+      await syncOpenedPeerConnection({
+        ports,
+        session,
+        ctx: createOperationContext('sync'),
+        log,
+      }, { direction: 'inbound', remotePeer: { toString: () => remotePeer } });
+    } finally {
+      session.close();
+    }
+  };
+  return { log, replay, remotePeer, run };
+}
+
+describe('peer connection lifecycle', () => {
+  it.each([new Error('queued sync failure'), 'queued sync failure'])(
+    'uses active configured replay authority and fences queued errors: %s',
+    async (failure) => {
+      const f = await createPeerEventFixture();
+      const executionPlan = resolveRfc64CatalogExecutionPlanV1({
+        configuredContextGraphs: [],
+        activation: {
+          enabled: true,
+          selectedContextGraphs: ['configured-active', 'configured-legacy'],
+          selectedPublicContextGraphs: ['configured-active', 'configured-legacy'],
+          rollout: {
+            killSwitch: false,
+            contextGraphModes: {
+              'configured-active': 'catalog',
+              'configured-legacy': 'legacy',
+            },
+          },
+        },
+      });
+      Object.defineProperty(f.agent.config, 'rfc64CatalogExecutionPlan', {
+        configurable: true,
+        value: executionPlan,
+      });
+      const session = activeSessionWithoutJobs();
+      const replay = replayReservation();
+      try {
+        vi.spyOn(f.agent, 'readRfc64CatalogResponsibilitiesV1').mockReturnValue([
+          {
+            contextGraphId: 'responsibility-active', responsible: true, active: true, mode: 'catalog',
+            responsibilityReason: 'private-membership', selectionSource: 'default',
+          },
+          {
+            contextGraphId: 'responsibility-inactive', responsible: true, active: false, mode: 'catalog',
+            responsibilityReason: 'private-membership', selectionSource: 'kill-switch',
+          },
+          {
+            contextGraphId: 'responsibility-legacy', responsible: true, active: true, mode: 'legacy',
+            responsibilityReason: 'private-membership', selectionSource: 'operator-override',
+          },
+          {
+            contextGraphId: 'configured-active', responsible: true, active: true, mode: 'catalog',
+            responsibilityReason: 'private-membership', selectionSource: 'operator-override',
+          },
+        ]);
+        stubCatalogAuthorities(f.agent, { 'configured-active': 'catalog', 'configured-legacy': 'legacy',
+          'responsibility-active': 'catalog', 'responsibility-inactive': 'inactive', 'responsibility-legacy': 'legacy' });
+        expect(f.agent.listActiveRfc64CatalogReplayContextGraphIdsV1()).toEqual([
+          'configured-active',
+          'responsibility-active',
+        ]);
+        const admission = vi.spyOn(f.agent.networkAdmissionCoordinator, 'ensureAdmitted')
+          .mockResolvedValue(true);
+        vi.spyOn(f.agent, 'enrichPeerStoreFromInboundCircuit').mockResolvedValue();
+        vi.spyOn(f.agent, 'drainPendingSenderKeyForPeer').mockResolvedValue(0);
+        const prepareReplay = vi.fn(() => replay.value);
+        let reportError!: Parameters<DKGAgent['queueSyncFromPeerOnConnect']>[1];
+        vi.spyOn(f.agent, 'queueSyncFromPeerOnConnect').mockImplementation((_peer, onError) => {
+          reportError = onError;
+          return true;
+        });
+        const log = { info: vi.fn(), warn: vi.fn() };
+        const ports = {
+          localPeerId: f.agent.node.libp2p.peerId.toString(),
+          isRedundantConnection: () => false,
+          prepareCatalogReplay: prepareReplay,
+          ensureAdmitted: (
+            remotePeer: string,
+            ctx: ReturnType<typeof createOperationContext>,
+            signal: AbortSignal,
+          ) => f.agent.networkAdmissionCoordinator.ensureAdmitted(remotePeer, ctx, { signal }),
+          enrichPeerStore: (
+            connection: Parameters<DKGAgent['enrichPeerStoreFromInboundCircuit']>[0],
+          ) => f.agent.enrichPeerStoreFromInboundCircuit(connection),
+          drainPendingSenderKey: (
+            remotePeer: string,
+            ctx: ReturnType<typeof createOperationContext>,
+          ) => f.agent.drainPendingSenderKeyForPeer(remotePeer, ctx),
+          queueSync: (
+            remotePeer: string,
+            onError: Parameters<DKGAgent['queueSyncFromPeerOnConnect']>[1],
+          ) => f.agent.queueSyncFromPeerOnConnect(remotePeer, onError),
+        };
+        const context = { ports, session, ctx: createOperationContext('sync'), log };
+        await syncOpenedPeerConnection(context, {
+          direction: 'inbound', remotePeer: f.agent.node.libp2p.peerId,
+        });
+        expect(admission).not.toHaveBeenCalled();
+        expect(prepareReplay).not.toHaveBeenCalled();
+        await syncOpenedPeerConnection(context, { direction: 'inbound', remotePeer: f.peer });
+        expect(prepareReplay).toHaveBeenCalledExactlyOnceWith(f.peerId);
+        expect(replay.admit).toHaveBeenCalledOnce();
+        expect(replay.reject).not.toHaveBeenCalled();
+        reportError(f.peerId, failure);
+        expect(log.warn).toHaveBeenCalledExactlyOnceWith(
+          context.ctx,
+          expect.stringContaining('queued sync failure'),
+        );
+        log.warn.mockClear();
+        session.close();
+        expect(replay.reject).not.toHaveBeenCalled();
+        reportError(f.peerId, failure);
+        expect(log.warn).not.toHaveBeenCalled();
+      } finally {
+        session.close();
+        await f.close();
+      }
+    },
+  );
+
+  it.each(['denied', 'failed'] as const)(
+    'rejects pending replay when connection admission is %s',
+    async (outcome) => {
+      const f = await createPeerEventFixture();
+      const replay = replayReservation();
+      try {
+        const prepareReplay = vi.spyOn(f.agent, 'prepareRfc64CatalogConnectionReplayV1')
+          .mockReturnValue(replay.value);
+        const admission = vi.spyOn(f.agent.networkAdmissionCoordinator, 'ensureAdmitted');
+        if (outcome === 'denied') admission.mockResolvedValue(false);
+        else admission.mockRejectedValue(new Error('admission unavailable'));
+        const enrich = vi.spyOn(f.agent, 'enrichPeerStoreFromInboundCircuit');
+        const queue = vi.spyOn(f.agent, 'queueSyncFromPeerOnConnect');
+        const warn = vi.spyOn(f.state.log, 'warn').mockImplementation(() => {});
+        f.dispatchOpen();
+        await vi.waitFor(() => expect(replay.reject).toHaveBeenCalledOnce());
+        expect(prepareReplay).toHaveBeenCalledExactlyOnceWith(f.peerId);
+        expect(replay.admit).not.toHaveBeenCalled();
+        expect(enrich).not.toHaveBeenCalled();
+        expect(queue).not.toHaveBeenCalled();
+        if (outcome === 'failed') {
+          expect(warn).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.stringContaining('admission unavailable'),
+          );
+        }
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  it('refuses an aborted scoped announcement before service or snapshot work', async () => {
+    const f = await createPeerEventFixture();
+    const cancellation = new Error('connection retired');
+    const controller = new AbortController(); controller.abort(cancellation);
+    try {
+      await expect(f.agent.reannounceRfc64CatalogHeadsToPeerV1(f.peerId, undefined, controller.signal))
+        .rejects.toBe(cancellation);
+    } finally { await f.agent.stop(); }
+  });
+
+  it.each(['enrichment', 'sender-key'] as const)(
+    'admits catalog replay before a stalled best-effort %s step',
+    async (stage) => {
+      const session = activeSessionWithoutJobs();
+      const replay = replayReservation();
+      const bestEffortGate = deferred<void>();
+      const remotePeer = '12D3KooWcatalogReplayBeforeBestEffort';
+      const ports = {
+        localPeerId: '12D3KooWlocal',
+        isRedundantConnection: () => false,
+        prepareCatalogReplay: vi.fn(() => replay.value),
+        ensureAdmitted: vi.fn(async () => true),
+        enrichPeerStore: vi.fn(async () => {
+          if (stage === 'enrichment') await bestEffortGate.promise;
+        }),
+        drainPendingSenderKey: vi.fn(async () => {
+          if (stage === 'sender-key') await bestEffortGate.promise;
+          return 0;
+        }),
+        queueSync: vi.fn(() => true),
+      };
+      const running = syncOpenedPeerConnection({
+        ports,
+        session,
+        ctx: createOperationContext('sync'),
+        log: { info: vi.fn(), warn: vi.fn() },
+      }, { direction: 'inbound', remotePeer: { toString: () => remotePeer } });
+      try {
+        await vi.waitFor(() => expect(replay.admit).toHaveBeenCalledOnce());
+        expect(replay.reject).not.toHaveBeenCalled();
+        expect(ports.queueSync).not.toHaveBeenCalled();
+      } finally {
+        bestEffortGate.resolve();
+        await running;
+        session.close();
+      }
+    },
+  );
+
+  it.each(['enrichment', 'sender-key', 'reannouncement', 'replay incomplete'] as const)(
+    'continues catch-up after a best-effort %s failure',
+    async (stage) => {
+      const f = await createPeerEventFixture();
+      try {
+        vi.spyOn(f.agent, 'readRfc64CatalogResponsibilitiesV1').mockReturnValue([{
+          contextGraphId: 'connection-catalog', responsible: true, active: true, mode: 'catalog',
+          responsibilityReason: 'private-membership', selectionSource: 'default',
+        }]);
+        stubCatalogAuthorities(f.agent, { 'connection-catalog': 'catalog' });
+        vi.spyOn(f.agent, 'markRfc64CatalogReplayPeerPendingV1')
+          .mockImplementation((_contextGraphId, peerId) => ({
+            peerId, generation: 1, release: vi.fn(),
+          }));
+        vi.spyOn(f.agent.networkAdmissionCoordinator, 'ensureAdmitted').mockResolvedValue(true);
+        const enrich = vi.spyOn(f.agent, 'enrichPeerStoreFromInboundCircuit').mockResolvedValue();
+        const drain = vi.spyOn(f.agent, 'drainPendingSenderKeyForPeer').mockResolvedValue(2);
+        if (stage === 'enrichment') enrich.mockRejectedValue(new Error('enrichment unavailable'));
+        else if (stage === 'sender-key') drain.mockRejectedValue(new Error('sender-key unavailable'));
+        vi.spyOn(f.agent, 'readAcceptedRfc64CatalogAccessSnapshotV1').mockReturnValue({
+          policy: {
+            networkId: 'otp:20430', contextGraphId: 'connection-catalog',
+            governanceChainId: null, governanceContractAddress: null, ownershipTransitionDigest: null,
+            era: '0', version: '0', previousPolicyDigest: null, accessPolicy: 0, publishPolicy: 1,
+            publishAuthority: null, publishAuthorityAccountId: '0',
+            projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1, administrativeDelegationDigest: null,
+            source: { kind: 'owner-signed-unregistered', ownerAddress: '0x1111111111111111111111111111111111111111' as EvmAddressV1,
+              ownerAuthorityEra: '0' }, effectiveAt: '0', issuedAt: '0',
+          },
+          policyDigest: ('0x' + '11'.repeat(32)) as Digest32V1, roster: null,
+        });
+        const reannounce = vi.spyOn(f.agent, 'reannounceRfc64CatalogHeadsToPeerV1')
+          .mockResolvedValue({ announced: 0, failed: 0, manifest: [] });
+        if (stage === 'reannouncement') {
+          reannounce.mockRejectedValue(new Error('reannouncement unavailable'));
+        }
+        const replay = vi.spyOn(f.agent as any, 'requestRfc64CatalogHeadReplayV1')
+          .mockRejectedValue(new Error('replay unavailable'));
+        if (stage === 'replay incomplete') replay.mockResolvedValue({ requested: 1, failed: 1 });
+        const queue = vi.spyOn(f.agent, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
+        const warn = vi.spyOn(f.state.log, 'warn').mockImplementation(() => {});
+        const debug = vi.spyOn(f.state.log, 'debug').mockImplementation(() => {});
+        f.dispatchOpen();
+        await vi.waitFor(() => expect(queue).toHaveBeenCalledWith(f.peerId, expect.any(Function)));
+        await flushMicrotasks();
+        expect(drain).toHaveBeenCalledWith(f.peerId, expect.anything());
+        expect(f.agent.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.peers).toContainEqual(
+          expect.objectContaining({ peerIdSuffix: f.peerId.slice(-8), started: 1 }),
+        );
+        expect(reannounce).toHaveBeenCalledExactlyOnceWith(f.peerId, expect.objectContaining({
+          contextGraphId: 'connection-catalog', policyDigest: '0x' + '11'.repeat(32),
+        }), expect.any(AbortSignal));
+        expect(reannounce.mock.calls[0][2]).toBe(replay.mock.calls[0][2]);
+        expect(replay).toHaveBeenCalledWith(
+          'connection-catalog',
+          expect.objectContaining({ kind: 'connection-demand' }),
+          expect.any(AbortSignal),
+        );
+        if (stage === 'replay incomplete') {
+          // A failed count without missing-row evidence is retry diagnostics.
+          expect(debug).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.stringContaining('could not replay from every peer'),
+          );
+        } else {
+          expect(warn).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.stringContaining(`${stage} unavailable`),
+          );
+          expect(warn).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.stringContaining('replay unavailable'),
+          );
+        }
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  it('activates only the requested graph for connected peers', async () => {
+    const f = await createPeerEventFixture();
+    const reservation = replayReservation();
+    const service = Object.getOwnPropertyDescriptor(f.agent, 'rfc64PublicCatalogServiceV1');
+    Object.defineProperty(f.agent, 'rfc64PublicCatalogServiceV1', { configurable: true, value: {} });
+    try {
+      const prepare = vi.spyOn(f.agent, 'prepareRfc64CatalogGraphActivationReplayV1').mockReturnValue(reservation.value);
+      vi.spyOn(f.agent.networkAdmissionCoordinator, 'ensureAdmitted').mockResolvedValue(true);
+      await expect(f.agent.replayRfc64CatalogToConnectedPeersV1('newly-active')).resolves.toEqual({ attempted: 1, admitted: 1 });
+      expect(prepare).toHaveBeenCalledExactlyOnceWith(f.peerId, 'newly-active');
+      expect(reservation.admit).toHaveBeenCalledOnce();
+    } finally {
+      if (service === undefined) delete (f.agent as { rfc64PublicCatalogServiceV1?: unknown }).rfc64PublicCatalogServiceV1;
+      else Object.defineProperty(f.agent, 'rfc64PublicCatalogServiceV1', service);
+      await f.close();
+    }
+  });
+
+  it.each([
+    { name: 'event', gate: 'event', reject: false },
+    { name: 'admission', gate: 'admission', reject: false },
+    { name: 'admission abort', gate: 'admission', reject: true },
+    { name: 'enrichment', gate: 'enrichment', reject: false },
+    { name: 'sender-key', gate: 'sender-key', reject: false },
+  ] as const)('does not resume connection work after shutdown at $name', async (scenario) => {
+    const f = await createPeerEventFixture();
+    const replay = replayReservation();
+    const admissionGate = deferred<void>();
+    const enrichmentGate = deferred<void>();
+    const senderKeyGate = deferred<void>();
+    try {
+      const prepareReplay = vi.spyOn(f.agent, 'prepareRfc64CatalogConnectionReplayV1')
+        .mockReturnValue(replay.value);
+      const admission = vi.spyOn(f.agent.networkAdmissionCoordinator, 'ensureAdmitted')
+        .mockImplementation(async (_peer, _ctx, options) => {
+          if (scenario.reject) {
+            options?.signal?.addEventListener(
+              'abort',
+              () => admissionGate.reject(new Error('admission cancelled')),
+              { once: true },
+            );
+          }
+          if (scenario.gate === 'admission') await admissionGate.promise;
+          return true;
+        });
+      const enrich = vi.spyOn(f.agent, 'enrichPeerStoreFromInboundCircuit')
+        .mockImplementation(async () => {
+          if (scenario.gate === 'enrichment') await enrichmentGate.promise;
+        });
+      const drain = vi.spyOn(f.agent, 'drainPendingSenderKeyForPeer')
+        .mockImplementation(async () => {
+          if (scenario.gate === 'sender-key') await senderKeyGate.promise;
+          return 0;
+        });
+      const queue = vi.spyOn(f.agent, 'queueSyncFromPeerOnConnect').mockReturnValue(false);
+      let stopping: Promise<void>;
+      if (scenario.gate === 'event') {
+        stopping = f.agent.stop();
+        f.dispatchOpen();
+      } else {
+        f.dispatchOpen();
+        await flushMicrotasks();
+        expect(admission).toHaveBeenCalledOnce();
+        if (scenario.gate === 'enrichment') expect(enrich).toHaveBeenCalledOnce();
+        if (scenario.gate === 'sender-key') expect(drain).toHaveBeenCalledOnce();
+        stopping = f.agent.stop();
+      }
+      await stopping;
+      if (scenario.gate === 'event') {
+        expect(prepareReplay).not.toHaveBeenCalled();
+      } else {
+        expect(prepareReplay).toHaveBeenCalledExactlyOnceWith(f.peerId);
+        if (scenario.gate === 'admission') {
+          expect(replay.reject).toHaveBeenCalledOnce();
+          expect(replay.admit).not.toHaveBeenCalled();
+        } else {
+          expect(replay.admit).toHaveBeenCalledOnce();
+          expect(replay.reject).not.toHaveBeenCalled();
+        }
+      }
+      admissionGate.resolve();
+      enrichmentGate.resolve();
+      senderKeyGate.resolve();
+      await flushMicrotasks();
+      if (scenario.gate === 'event') expect(admission).not.toHaveBeenCalled();
+      if (scenario.gate === 'event' || scenario.gate === 'admission') {
+        expect(enrich).not.toHaveBeenCalled();
+      }
+      if (scenario.gate !== 'sender-key') expect(drain).not.toHaveBeenCalled();
+      if (scenario.gate === 'event' || scenario.gate === 'admission') {
+        expect(replay.admit).not.toHaveBeenCalled();
+      }
+      expect(queue).not.toHaveBeenCalled();
+    } finally {
+      admissionGate.resolve();
+      enrichmentGate.resolve();
+      senderKeyGate.resolve();
+      await f.close();
+    }
+  });
+
+  // The coordinator logs a failed probe once (pinned in
+  // network-admission-coordinator.test.ts); the connection-open caller must
+  // not repeat it, for the failed probe or for a skip inside its backoff.
+  it.each([
+    { admissionFailure: 'a failed probe', reason: 'timeout' },
+    { admissionFailure: 'a backed-off skip', reason: 'retryable probe backed off for 15000ms after timeout' },
+  ])('does not repeat the coordinator warning for $admissionFailure on connection open', async ({ reason }) => {
+    const { log, replay, run } = connectionOpenWithAdmissionFailure(
+      (remotePeer) => new NetworkAdmissionProbeError(remotePeer, reason),
+    );
+
+    await run();
+
+    expect(replay.reject).toHaveBeenCalledOnce();
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it('still warns for an admission failure the coordinator does not report', async () => {
+    const { log, replay, remotePeer, run } = connectionOpenWithAdmissionFailure(
+      () => new Error('admission transport unavailable'),
+    );
+
+    await run();
+
+    expect(replay.reject).toHaveBeenCalledOnce();
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    expect(log.warn.mock.calls[0][1]).toBe(
+      `Network admission probe failed for ${remotePeer.slice(-8)} on connect: admission transport unavailable`,
+    );
+  });
+});
+
+describe('a second, limited connection to a connected peer', () => {
+  const view = (id: string, status: OpenedConnectionView['status'] = 'open', limits?: OpenedConnectionView['limits']) => (
+    { id, status, limits } satisfies OpenedConnectionView
+  );
+  const circuit = view('circuit-2', 'open', { bytes: 1n });
+
+  it('is redundant beside another open connection, limited or not', () => {
+    expect(isRedundantLimitedConnection(circuit, [view('direct'), circuit])).toBe(true);
+    expect(isRedundantLimitedConnection(circuit, [view('circuit-1', 'open', {}), circuit])).toBe(true);
+  });
+
+  it('is not redundant as the peer\'s only open connection, or when unlimited', () => {
+    expect(isRedundantLimitedConnection(circuit, [circuit])).toBe(false);
+    expect(isRedundantLimitedConnection(circuit, [])).toBe(false);
+    expect(isRedundantLimitedConnection(circuit, [{ ...circuit }])).toBe(false);
+    expect(isRedundantLimitedConnection(circuit, [view('old', 'closing'), view('older', 'closed')])).toBe(false);
+    const direct = view('direct-2');
+    expect(isRedundantLimitedConnection(direct, [view('circuit-1', 'open', {}), direct])).toBe(false);
+  });
+
+  it('starts no admission, catalog replay or sync-on-connect for an admitted peer, and records its way back', async () => {
+    const f = await createPeerEventFixture();
+    try {
+      const admission = vi.spyOn(f.agent.networkAdmissionCoordinator, 'ensureAdmitted').mockResolvedValue(false);
+      vi.spyOn(f.agent.networkAdmissionCoordinator, 'isAcceptedPeer').mockReturnValue(true);
+      const enrich = vi.spyOn(f.agent, 'enrichPeerStoreFromInboundCircuit').mockRejectedValue(new Error('peer store busy'));
+      const warn = vi.spyOn(f.state.log, 'warn');
+      const duplicate = { ...view('circuit-2', 'open', { bytes: 1n }), remotePeer: f.peer, direction: 'inbound' };
+      const elsewhere = { ...view('elsewhere'), remotePeer: { toString: () => '12D3KooWsomeOtherPeer' } };
+      const connections = vi.spyOn(f.agent.node.libp2p, 'getConnections')
+        .mockReturnValue([elsewhere, { ...view('direct'), remotePeer: f.peer }, duplicate] as never);
+      f.openConnection(duplicate);
+      await vi.waitFor(() => expect(enrich).toHaveBeenCalledExactlyOnceWith(duplicate));
+      await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('peer store busy')));
+      expect(admission).not.toHaveBeenCalled();
+
+      // The peer's first connection runs it, limited or not; so does a peer's only other connection elsewhere.
+      connections.mockReturnValue([elsewhere, duplicate] as never);
+      f.openConnection(duplicate);
+      await vi.waitFor(() => expect(admission).toHaveBeenCalledOnce());
+    } finally {
+      await f.close();
+    }
+  });
+
+  it('runs the connection work again for a second circuit while the peer is not admitted', async () => {
+    const f = await createPeerEventFixture();
+    try {
+      // The first circuit opens while the peer still boots: its admission probe fails, the circuit stays open.
+      const admission = vi.spyOn(f.agent.networkAdmissionCoordinator, 'ensureAdmitted')
+        .mockRejectedValueOnce(new NetworkAdmissionProbeError(f.peerId, 'identity protocol not registered yet'))
+        .mockResolvedValue(true);
+      vi.spyOn(f.agent.networkAdmissionCoordinator, 'isAcceptedPeer').mockReturnValue(false);
+      vi.spyOn(f.agent, 'enrichPeerStoreFromInboundCircuit').mockResolvedValue();
+      vi.spyOn(f.agent, 'drainPendingSenderKeyForPeer').mockResolvedValue(0);
+      const queueSync = vi.spyOn(f.agent, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
+      const circuit = (id: string) => ({ id, status: 'open', limits: { bytes: 1n }, remotePeer: f.peer, direction: 'inbound' });
+      const first = circuit('circuit-1');
+      const connections = vi.spyOn(f.agent.node.libp2p, 'getConnections').mockReturnValue([first] as never);
+      f.openConnection(first);
+      await vi.waitFor(() => expect(admission).toHaveBeenCalledTimes(1));
+      await flushMicrotasks();
+      expect(queueSync).not.toHaveBeenCalled();
+
+      // A second circuit beside the open one retries admission and schedules catch-up.
+      const second = circuit('circuit-2');
+      connections.mockReturnValue([first, second] as never);
+      f.openConnection(second);
+      await vi.waitFor(() => expect(queueSync).toHaveBeenCalledOnce());
+      expect(admission).toHaveBeenCalledTimes(2);
+    } finally {
+      await f.close();
+    }
+  });
+});

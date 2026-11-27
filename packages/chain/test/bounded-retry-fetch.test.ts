@@ -68,6 +68,23 @@ describe('boundedRetryFetchRequest — current single-arg retry budget (#894)', 
     // No timer advance — if the impl slept here this would still be pending.
     await expect(verdict).resolves.toBe(false);
   });
+
+  it('starts a fresh retry budget after the request object has aged past the old wall-clock deadline', async () => {
+    // Regression guard: the budget was once a Date.now() deadline captured at
+    // FetchRequest construction. Once that deadline elapsed, every later
+    // top-level request stopped retrying. Drive the retry function directly so
+    // this contract is deterministic and independent of real HTTP backoff.
+    vi.useFakeTimers({ now: 0 });
+    const req = boundedRetryFetchRequest(URL);
+    const retry = req.retryFunc!;
+
+    expect(await decideWithFakeTimers(retry, req, 0)).toBe(true);
+
+    // A new top-level request begins again at attempt 0, even long after the
+    // old construction-time budget would have expired.
+    vi.setSystemTime(60_000);
+    expect(await decideWithFakeTimers(retry, req, 0)).toBe(true);
+  });
 });
 
 // The parametrised `(url, maxRetries)` contract — the core of immediate failover:

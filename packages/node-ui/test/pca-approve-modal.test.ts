@@ -192,15 +192,15 @@ describe('ApproveWalletsModal — per-row mapping', () => {
 
     const results = container.querySelector('.v10-pca-approve-results')!;
     const rowFor = (addr: string) =>
-      Array.from(results.querySelectorAll('.v10-pca-wallet-row')).find(
+      Array.from(results.querySelectorAll('.v10-wallet-row')).find(
         (r) => r.getAttribute('aria-label')?.startsWith(addr),
       )!;
     // ADDR_A approved.
-    expect(rowFor(ADDR_A).querySelector('.v10-pca-wallet-status')?.textContent).toContain('approved');
+    expect(rowFor(ADDR_A).querySelector('.v10-wallet-status')?.textContent).toContain('approved');
     // ADDR_B registered HERE → benign skip.
-    expect(rowFor(ADDR_B).querySelector('.v10-pca-wallet-status')?.textContent?.toLowerCase()).toContain('skipped');
+    expect(rowFor(ADDR_B).querySelector('.v10-wallet-status')?.textContent?.toLowerCase()).toContain('skipped');
     // ADDR_C bound ELSEWHERE → conflict, NOT a benign skip (the load-bearing invariant).
-    const cStatus = rowFor(ADDR_C).querySelector('.v10-pca-wallet-status')!;
+    const cStatus = rowFor(ADDR_C).querySelector('.v10-wallet-status')!;
     expect(cStatus.getAttribute('data-tone')).toBe('danger');
     expect(cStatus.textContent?.toLowerCase()).not.toContain('skipped');
     expect(cStatus.textContent?.toLowerCase()).toContain('another pca');
@@ -639,7 +639,7 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     );
     await waitForText(container, 'slots used');
     await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
-    await waitForText(container, 'expired/swept'); // the R1 dead-sponsor conflict copy
+    await waitForText(container, 'but it’s expired'); // the R1 dead-sponsor conflict copy
     expect(container.querySelector('.v10-pca-approve-results')?.textContent).not.toContain('already discounted');
     expect(mocks.pcaAddAgent).not.toHaveBeenCalled(); // not registered (can't free a sponsor's PCA)
     expect(mocks.pcaRemoveAgent).not.toHaveBeenCalled(); // not deregistered (not the owner)
@@ -750,12 +750,12 @@ describe('ApproveWalletsModal — per-row mapping', () => {
 
     const results = container.querySelector('.v10-pca-approve-results')!;
     const rowFor = (addr: string) =>
-      Array.from(results.querySelectorAll('.v10-pca-wallet-row')).find(
+      Array.from(results.querySelectorAll('.v10-wallet-row')).find(
         (r) => r.getAttribute('aria-label')?.startsWith(addr),
       )!;
-    expect(rowFor(ADDR_A).querySelector('.v10-pca-wallet-status')?.textContent).toContain('approved');
-    expect(rowFor(ADDR_C).querySelector('.v10-pca-wallet-status')?.textContent).toContain('approved');
-    const bStatus = rowFor(ADDR_B).querySelector('.v10-pca-wallet-status')!;
+    expect(rowFor(ADDR_A).querySelector('.v10-wallet-status')?.textContent).toContain('approved');
+    expect(rowFor(ADDR_C).querySelector('.v10-wallet-status')?.textContent).toContain('approved');
+    const bStatus = rowFor(ADDR_B).querySelector('.v10-wallet-status')!;
     expect(bStatus.getAttribute('data-tone')).toBe('danger');
     expect(bStatus.textContent?.toLowerCase()).not.toContain('skipped');
     // Tallied as a failure, separate from skip/conflict.
@@ -800,9 +800,9 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     return handle;
   }
   const statusOf = (c: HTMLElement, addr: string) =>
-    Array.from(c.querySelectorAll('.v10-pca-wallet-row'))
+    Array.from(c.querySelectorAll('.v10-wallet-row'))
       .find((r) => r.getAttribute('aria-label')?.startsWith(addr))!
-      .querySelector('.v10-pca-wallet-status')!;
+      .querySelector('.v10-wallet-status')!;
 
   it('AgentAlreadyRegistered + probe FAILS → neutral "unverified", NOT a false conflict', async () => {
     const { container, unmount } = await runAlreadyRegistered(async () => {

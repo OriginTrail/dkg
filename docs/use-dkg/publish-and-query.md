@@ -7,6 +7,8 @@ doc_type: how-to
 
 # Publish & Query
 
+Publish a finding when other participants need a durable record they can cite and check. Query shared or published knowledge when an agent or application needs evidence for its next step. These operations connect the work of contributors and consumers across the DKG.
+
 The default DKG V10 write lifecycle is:
 
 ```
@@ -22,28 +24,31 @@ flowchart LR
   SWM --> VM["Publish to Verifiable Memory"]
 ```
 
-## CLI shape
+## Start with a known result
+
+Complete the [Atlas quickstart](../getting-started/quickstart.md) or [HTTP application example](../build/http-application.md) first. Both include supplied data and an expected answer. For documents, inspect [extraction status](../build/import-documents.md) before sealing or sharing.
+
+## Optional on-chain publication
+
+Continue only after the selected named KA is sealed and its full share has succeeded. Use the exact Context Graph ID and KA name from that workflow. Confirm that the configured network, author, access policy, and funded payer match the intended publication. [Funding](funding.md) explains the wallets.
 
 ```bash
-dkg context-graph create my-project
-CG="<agentAddress>/my-project"
-dkg ka import-file notes --input-file ./notes.md -c "$CG"
-dkg ka query notes -c "$CG"
-dkg context-graph register "$CG"
-dkg ka finalize notes -c "$CG"
-dkg ka share notes -c "$CG"
-dkg ka publish-async notes -c "$CG"
+dkg status
+dkg wallet
+dkg ka history atlas -c "$CG"
+# Run this funded step only when on-chain publication is intended:
+dkg ka publish atlas -c "$CG"
 ```
 
-Bare context-graph IDs are scoped by the daemon before use. After `create`, use the `ID:` printed by the CLI for later commands; it has the form `<agentAddress>/my-project`.
+The supported per-KA publish path can register the Context Graph on first publication; that registration also has on-chain prerequisites/costs. Explicit registration remains available with `dkg context-graph register`. It is not required for the private draft tutorial.
 
-Use `dkg ka create notes -c "$CG" --input-file ./notes.ttl --share` when the local source is RDF and you want one command to create, write, finalize, and share. This convenience stops at Shared Working Memory; it does not publish to Verifiable Memory.
+Inspect the returned UAL, transaction result, and lifecycle state. A partial result or a transaction awaiting local reconciliation is not a completed workflow. Retrieve the published content from the VM view and check it against the intended version before reporting success.
 
-Use `dkg ka share notes -c "$CG"` when you want to stop at Shared Working Memory without publishing to Verifiable Memory.
+For batching, enable/configure the async publisher and its wallets before using `dkg ka publish-async`. Persist the returned job ID and follow [Async Publisher Wallets](async-publisher-wallets.md) through chain finality and local completion. An accepted job is not proof of publication; retrying under another name can duplicate it.
 
-Use `dkg ka publish-async notes -c "$CG"` to enqueue the Verifiable Memory publish after the KA has been finalized and fully shared to SWM. `dkg publisher publish-async "$CG" notes` remains an operational alias for the same async VM publish route. See [Async Publisher Wallets](async-publisher-wallets.md) for funding and optional attribution identity setup.
+Use [the edit lifecycle](knowledge-asset-lifecycle.md#editing-a-published-knowledge-asset) for updates. A stable UAL identifies the asset across revisions; record the version/commitment when an audit needs the exact historical content.
 
-## Agent shape
+## Use the lifecycle through agent tools
 
 Agents should follow the Node Skill lifecycle (create → write → finalize → share → publish):
 
@@ -57,6 +62,8 @@ Agents should follow the Node Skill lifecycle (create → write → finalize →
 Do not publish to Verifiable Memory just because data exists. Publishing spends gas/TRAC and should be an explicit finality choice.
 
 ## Query Knowledge
+
+A useful query connects records into evidence for a task: which products use a component, which findings cite a source, or what a collaborating agent has contributed. Query the selected graph and memory layer, and preserve the source and version details needed to explain the answer.
 
 Use `memory_search` (`dkg_memory_search` on the MCP runtime) for free-text recall and `dkg_query` for precise SPARQL.
 

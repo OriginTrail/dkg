@@ -46,6 +46,11 @@ describe('DkgPublisherExtension', () => {
       '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
     );
     expect(escapeDkgRdfLiteral('a "quote"\nnext')).toBe('a \\"quote\\"\\nnext');
+    // #416: non-ECHAR C0 controls (NUL, VT, unit-sep) + DEL must be escaped as
+    // \uXXXX, not passed through raw (raw controls = invalid N-Triples literal).
+    expect(escapeDkgRdfLiteral('n\u0000v\u000Bu\u001Fd\u007F')).toBe('n\\u0000v\\u000Bu\\u001Fd\\u007F');
+    // ECHAR short forms are preserved (stable merkle output).
+    expect(escapeDkgRdfLiteral('t\tn\nr\rf\fb\b')).toBe('t\\tn\\nr\\rf\\fb\\b');
   });
 
   it('normalizes full quads without changing URI, literal, or blank-node RDF terms', () => {

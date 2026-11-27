@@ -24,6 +24,7 @@ import {
   ParametersStorage,
   Profile,
   PublishingConviction,
+  PublishingConvictionStorage,
   StakingV10,
   Token,
 } from '../typechain';
@@ -232,13 +233,17 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     expect(await NFT.agentToAccountId(agent.address)).to.equal(0n);
     expect((await NFT.getAccountInfo(accountId)).agentCount).to.equal(0n);
 
-    // ---- settle: one elapsed window advances the lazy-settlement cursor ----
+    // ---- settle (10.2.0): nothing is booked at creation; lastSettledWindow
+    // is the cursor of the closed windows booked so far, below the lock while
+    // the account is live; a permissionless settle books the closed ones ----
     const epochLength = await Chronos.epochLength();
+    expect((await NFT.getAccountInfo(accountId)).lastSettledWindow).to.equal(0n);
     await time.increase(Number(epochLength));
-    await NFT.connect(stranger).settle(accountId); // permissionless
-    expect((await NFT.getAccountInfo(accountId)).lastSettledWindow).to.equal(
-      1n,
+    await expect(NFT.connect(stranger).settle(accountId)).to.emit(
+      LogicContract,
+      'EmissionScheduled',
     );
+    expect((await NFT.getAccountInfo(accountId)).lastSettledWindow).to.equal(1n);
 
     // ---- settle: post-expiry final sweep marks the account fully swept ----
     const acct = await NFT.accounts(accountId);
@@ -385,17 +390,19 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     });
 
     // Escrow (100) is drawn first; the 900 remainder flows through the PCA
-    // discount branch. Assert BOTH the consume event AND that the staker pool
-    // received only escrow-gross(100) + discounted-remainder(720) = 820 — NOT
-    // the discounted FULL amount (800 → pool 900) a "consume-but-still-charge-
-    // full-tokenAmount" regression would produce.
+    // discount branch. 10.2.0: the escrow consume funds the pool on THIS tx,
+    // and so does the PCA remainder, booked at its discounted cost (720) as a
+    // wallet publish books its payment. So the pool events here total the
+    // escrow gross plus the discounted remainder, and the remainder is also
+    // asserted on windowSpent below. (A consume-but-still-charge-full
+    // regression would draw 900 from the budget.)
     const tx = await KAV10.connect(creator).publish(p);
     const receipt = await tx.wait();
     await expect(tx).to.emit(KAV10, 'RegistrationEscrowConsumed').withArgs(cgId, deposit);
 
     const remainder = tokenAmount - deposit; // 900
     const discountedRemainder = (remainder * (10_000n - EXPECTED_DISCOUNT_BPS)) / 10_000n; // 720
-    const expectedPool = deposit + discountedRemainder; // gross escrow 100 + 720 = 820
+    const expectedPool = deposit + discountedRemainder; // escrow gross + the PCA draw, booked at use time
     const epochStorageAddr = (await EpochStorageContract.getAddress()).toLowerCase();
     let poolSum = 0n;
     for (const log of receipt!.logs) {
@@ -413,6 +420,14 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
       }
     }
     expect(poolSum).to.equal(expectedPool);
+
+    // The PCA discount branch drew exactly the discounted remainder from
+    // the paying account's first billing window.
+    const PCSx = await hre.ethers.getContract<PublishingConvictionStorage>(
+      'PublishingConvictionStorage',
+    );
+    const payingAccountId = await NFT.agentToAccountId(creator.address);
+    expect(await PCSx.windowSpent(payingAccountId, 0n)).to.equal(discountedRemainder);
 
     // Escrow fully consumed (1000 > 100).
     expect(await CGS.getRegistrationEscrow(cgId)).to.equal(0n);
@@ -980,44 +995,55 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     const receipt = await tx.wait();
     expect(receipt!.status).to.equal(1);
 
-    // The conviction branch funds the staker pool with the DISCOUNTED cost
-    // via the NFT's `coverPublishingCost` → `addTokensToEpochRange`. A
-    // direct-spend fallthrough would instead distribute the full amount.
+    // 10.2.0: the conviction branch draws the DISCOUNTED cost from the
+    // window budget and books exactly that to the pool, over the KA's
+    // epochs, as a wallet publish would book its payment. A direct-spend
+    // fallthrough would book the full amount on this tx — so pool events
+    // summing to the discounted cost, plus the discounted windowSpent below,
+    // are the on-chain proof the discount branch (not direct spend) executed.
     const epochStorageAddr = (
       await EpochStorageContract.getAddress()
     ).toLowerCase();
     let activeSinkSum = 0n;
     for (const log of receipt!.logs) {
       if (log.address.toLowerCase() !== epochStorageAddr) continue;
+      let parsed: ReturnType<typeof EpochStorageContract.interface.parseLog>;
       try {
-        const parsed = EpochStorageContract.interface.parseLog({
+        parsed = EpochStorageContract.interface.parseLog({
           topics: [...log.topics],
           data: log.data,
         });
-        if (parsed?.name === 'TokensAddedToEpochRange') {
-          expect(BigInt(parsed.args.shardId)).to.equal(STAKER_SHARD_ID);
-          expect(BigInt(parsed.args.startEpoch)).to.be.gte(currentEpoch);
-          expect(BigInt(parsed.args.endEpoch)).to.be.lte(
-            currentEpoch + BigInt(epochs),
-          );
-          activeSinkSum += BigInt(parsed.args.tokenAmount);
-        }
       } catch {
-        // not the event we're after
+        continue; // Unrelated ABI; assertion failures must propagate.
+      }
+      if (parsed?.name === 'TokensAddedToEpochRange') {
+        expect(BigInt(parsed.args.shardId)).to.equal(STAKER_SHARD_ID);
+        expect(BigInt(parsed.args.startEpoch)).to.be.gte(currentEpoch);
+        expect(BigInt(parsed.args.endEpoch)).to.be.lte(
+          currentEpoch + BigInt(epochs),
+        );
+        activeSinkSum += BigInt(parsed.args.tokenAmount);
       }
     }
     expect(activeSinkSum).to.equal(expectedDiscounted);
+    const PCSy = await hre.ethers.getContract<PublishingConvictionStorage>(
+      'PublishingConvictionStorage',
+    );
+    const payerAccountId = await NFT.agentToAccountId(creator.address);
+    const drawn = await PCSy.windowSpent(payerAccountId, 0n);
+    expect(drawn).to.equal(expectedDiscounted);
 
-    // KA records the FULL tokenAmount; only the staker-pool distribution is
-    // discounted — the on-chain proof the discount branch (not direct
-    // spend) executed. OT-RFC-43 Option 1 (1a): the minted kaId equals the
-    // packed reservedKaId we supplied (ids are no longer globally sequential).
+    // KA records the FULL tokenAmount while only the DISCOUNTED cost was
+    // drawn from the budget — the on-chain proof the discount branch (not
+    // direct spend) executed. OT-RFC-43 Option 1 (1a): the minted kaId equals
+    // the packed reservedKaId we supplied (ids are no longer globally
+    // sequential).
     const kaId = reservedKaId;
     expect(await DKGKnowledgeAssets.ownerOf(kaId)).to.equal(creator.address);
     const meta =
       await DKGKnowledgeAssets.getKnowledgeAssetMetadata(kaId);
     expect(meta[6]).to.equal(tokenAmount);
-    expect(activeSinkSum).to.be.lessThan(meta[6]);
+    expect(drawn).to.be.lessThan(meta[6]);
   });
 
   // --------------------------------------------------------------------------

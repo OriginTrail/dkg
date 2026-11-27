@@ -1,0 +1,215 @@
+import { mapBoundedSelectResult, mapBoundedConstructResult } from '../src/adapters/bounded-query-result.js';
+import { describe, expect, it, vi } from 'vitest';
+
+import { OxigraphStore } from '../src/adapters/oxigraph.js';
+import {
+  StoreResponseTooLargeError,
+  isStoreResponseTooLargeError,
+} from '../src/http-response-limit.js';
+
+describe('store response-size error contract', () => {
+  it('recognizes instances and worker-deserialized errors structurally', () => {
+    expect(isStoreResponseTooLargeError(new StoreResponseTooLargeError(10, 11))).toBe(true);
+    expect(isStoreResponseTooLargeError({
+      code: 'STORE_RESPONSE_TOO_LARGE',
+      maxBytes: 10,
+      actualBytes: 11,
+      message: 'too large',
+    })).toBe(true);
+    expect(isStoreResponseTooLargeError({ code: 'STORE_RESPONSE_TOO_LARGE' })).toBe(false);
+  });
+
+  it('rejects invalid response limits before dispatching a local query', async () => {
+    const store = new OxigraphStore();
+    try {
+      await expect(store.query('ASK { ?s ?p ?o }', { maxResponseBytes: -1 }))
+        .rejects.toThrow('maxResponseBytes must be a non-negative safe integer');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+describe('OxigraphStore query result contract', () => {
+  it('bounds native string results as an empty binding envelope', async () => {
+    const store = new OxigraphStore();
+    const native = (store as unknown as {
+      store: { query(sparql: string): unknown };
+    }).store;
+    const query = vi.spyOn(native, 'query').mockReturnValue('serialized result');
+    const expected = { type: 'bindings', bindings: [] } as const;
+    const exactBytes = Buffer.byteLength(JSON.stringify(expected), 'utf8');
+    try {
+      await expect(store.query('SELECT * WHERE { ?s ?p ?o }', {
+        maxResponseBytes: exactBytes - 1,
+      })).rejects.toMatchObject({
+        code: 'STORE_RESPONSE_TOO_LARGE',
+        maxBytes: exactBytes - 1,
+        actualBytes: exactBytes,
+      });
+      await expect(store.query('SELECT * WHERE { ?s ?p ?o }', {
+        maxResponseBytes: exactBytes,
+      })).resolves.toEqual(expected);
+    } finally {
+      query.mockRestore();
+      await store.close();
+    }
+  });
+
+  it('returns an empty native graph catalog: the complete list is node work, not bounded by a caller limit', async () => {
+    const store = new OxigraphStore();
+    const native = (store as unknown as {
+      store: { query(sparql: string): unknown };
+    }).store;
+    const query = vi.spyOn(native, 'query').mockReturnValue(false);
+    try {
+      await expect(store.listGraphs({ maxResponseBytes: 1 })).resolves.toEqual([]);
+      await expect(store.listGraphs()).resolves.toEqual([]);
+    } finally {
+      query.mockRestore();
+      await store.close();
+    }
+  });
+
+  it('preserves the query form for empty SELECT, CONSTRUCT, DESCRIBE, and ASK results', async () => {
+    const store = new OxigraphStore();
+    try {
+      await expect(store.query(
+        'SELECT ?s WHERE { GRAPH <urn:missing> { ?s ?p ?o } }',
+      )).resolves.toEqual({ type: 'bindings', bindings: [] });
+      await expect(store.query(
+        'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <urn:missing> { ?s ?p ?o } }',
+      )).resolves.toEqual({ type: 'quads', quads: [] });
+      await expect(store.query(
+        'DESCRIBE <urn:missing>',
+      )).resolves.toEqual({ type: 'quads', quads: [] });
+      await expect(store.query(
+        'ASK { GRAPH <urn:missing> { ?s ?p ?o } }',
+      )).resolves.toEqual({ type: 'boolean', value: false });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('recognizes an empty graph query after comments and declarations', async () => {
+    const store = new OxigraphStore();
+    try {
+      const result = await store.query(`
+        # The operation keyword is intentionally not the first token.
+        BASE <https://example.org/>
+        PREFIX ex: <https://example.org/ns#>
+        CONSTRUCT { ?s ex:value ?o }
+        WHERE { GRAPH <urn:missing> { ?s ex:value ?o } }
+      `);
+      expect(result).toEqual({ type: 'quads', quads: [] });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('keeps non-empty CONSTRUCT results as quads', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert([{
+        subject: 'urn:subject',
+        predicate: 'urn:predicate',
+        object: 'urn:object',
+        graph: 'urn:graph',
+      }]);
+      const result = await store.query(
+        'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <urn:graph> { ?s ?p ?o } }',
+      );
+      expect(result).toEqual({
+        type: 'quads',
+        quads: [{
+          subject: 'urn:subject',
+          predicate: 'urn:predicate',
+          object: 'urn:object',
+          graph: '',
+        }],
+      });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('stops normalization immediately when the next mapped row exceeds the ceiling', () => {
+    const first = { value: 'fits' };
+    const limit = Buffer.byteLength(JSON.stringify({ type: 'bindings', bindings: [first] }), 'utf8');
+    const mapped: number[] = [];
+    const map = (value: number) => {
+      mapped.push(value);
+      if (value > 1) throw new Error('mapped beyond the overflowing row');
+      return value === 0 ? first : { value: 'overflow' };
+    };
+    expect(() => mapBoundedSelectResult([0, 1, 2, 3], map, limit))
+      .toThrow(StoreResponseTooLargeError);
+    expect(mapped).toEqual([0, 1]);
+    expect(mapBoundedSelectResult([0], map, limit)).toEqual({ type: 'bindings', bindings: [first] });
+  });
+
+  it('bounds normalized SELECT production at the local adapter boundary', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert(Array.from({ length: 32 }, (_, index) => ({
+        subject: `urn:subject:${index}`,
+        predicate: 'urn:predicate',
+        object: `"${'x'.repeat(64)}"`,
+        graph: 'urn:graph',
+      })));
+      const sparql = 'SELECT ?s ?o WHERE { GRAPH <urn:graph> { ?s <urn:predicate> ?o } }';
+      const result = await store.query(sparql);
+      const exactBytes = Buffer.byteLength(JSON.stringify(result), 'utf8');
+
+      await expect(store.query(sparql, { maxResponseBytes: exactBytes - 1 }))
+        .rejects.toMatchObject({
+          code: 'STORE_RESPONSE_TOO_LARGE',
+          maxBytes: exactBytes - 1,
+          actualBytes: expect.any(Number),
+        });
+      await expect(store.query(sparql, { maxResponseBytes: exactBytes }))
+        .resolves.toEqual(result);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('bounds a non-empty CONSTRUCT at its exact local-adapter boundary', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert([{
+        subject: 'urn:subject',
+        predicate: 'urn:predicate',
+        object: `"${'x'.repeat(64)}"`,
+        graph: 'urn:graph',
+      }]);
+      const sparql = 'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <urn:graph> { ?s ?p ?o } }';
+      const result = await store.query(sparql);
+      expect(result.type).toBe('quads');
+      const exactBytes = Buffer.byteLength(JSON.stringify(result), 'utf8');
+
+      await expect(store.query(sparql, { maxResponseBytes: exactBytes - 1 }))
+        .rejects.toMatchObject({
+          code: 'STORE_RESPONSE_TOO_LARGE',
+          maxBytes: exactBytes - 1,
+          actualBytes: exactBytes,
+        });
+      await expect(store.query(sparql, { maxResponseBytes: exactBytes }))
+        .resolves.toEqual(result);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+it('bounds CONSTRUCT normalization at the overflowing row with exact envelope bytes', () => {
+  const quad = { subject: 'urn:s', predicate: 'urn:p', object: '"é"', graph: '' };
+  const expected = { type: 'quads', quads: [quad] };
+  const limit = Buffer.byteLength(JSON.stringify(expected), 'utf8');
+  const calls: number[] = [];
+  const map = (value: number) => { calls.push(value); return quad; };
+  expect(() => mapBoundedConstructResult([0, 1, 2], map, limit)).toThrow(StoreResponseTooLargeError);
+  expect(calls).toEqual([0, 1]);
+  expect(mapBoundedConstructResult([0], map, limit)).toEqual(expected);
+  expect(() => mapBoundedConstructResult([0], map, limit - 1)).toThrow(StoreResponseTooLargeError);
+});

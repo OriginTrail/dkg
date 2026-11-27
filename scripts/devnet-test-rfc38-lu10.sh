@@ -19,9 +19,11 @@
 #   2. ANONYMOUS CATCHUP SWEEP — a non-member outsider node calls
 #      /api/shared-memory/catchup against the curator with NO
 #      authentication / membership. Public CGs MUST serve anyone;
-#      curated CGs reject the same call. We assert: catchup
-#      returned a 200 and inserted ≥1 triple (or, under load, at
-#      least did not error and the auth gate did not log a denial).
+#      curated CGs reject the same call. The outsider first knows
+#      the CG locally (otherwise the route skips it without asking
+#      any peer); we assert the curator's leg completed and the
+#      curator's auth gate did not log a denial. inserted may be 0:
+#      the publisher drains a KA's SWM after VM promotion.
 #
 #   3. VERIFY-BATCH SWEEP — explicit-quads verify-batch must
 #      succeed against the published merkleRoot. Tampered quads
@@ -67,6 +69,16 @@ api_call() {
   local -a curl_args=(-sS --max-time 240 -X "$method" -H "Authorization: Bearer $token" -H 'Content-Type: application/json')
   [ -n "$data" ] && curl_args+=(-d "$data")
   curl_args+=("http://127.0.0.1:${port}${path}")
+  curl "${curl_args[@]}"
+}
+
+api_call_with_status() {
+  local node="$1" method="$2" path="$3" data="${4:-}"
+  local port; port=$(node_port "$node")
+  local token; token=$(node_token "$node")
+  local -a curl_args=(-sS --max-time 240 -X "$method" -H "Authorization: Bearer $token" -H 'Content-Type: application/json')
+  [ -n "$data" ] && curl_args+=(-d "$data")
+  curl_args+=(-w $'\n%{http_code}' "http://127.0.0.1:${port}${path}")
   curl "${curl_args[@]}"
 }
 
@@ -156,13 +168,13 @@ log "✓ chain merkleRoot (first root): $MERKLE_ROOT"
 # Public publishes MUST NOT carry the curated chain-key AEAD wrap
 EDGE_LOG=$(node_log "$CURATOR_NODE")
 RECENT=$(tail -n 500 "$EDGE_LOG")
-if printf '%s' "$RECENT" | grep -qE "LU-5: curated CG ${CG_ID//\//\\/} .* wrapping inline ACK payload"; then
+if grep -qE "LU-5: curated CG ${CG_ID//\//\\/} .* wrapping inline ACK payload" <<<"$RECENT"; then
   fail "regression: public CG triggered LU-5 chain-key AEAD wrap"
 fi
 log "✓ public CG did NOT trigger curated chain-key AEAD wrap"
 
 # Public publishes MUST NOT carry the [ciphertext] byteSize marker
-if printf '%s' "$RECENT" | grep -qE "Submitting V10 on-chain publish tx \([0-9]+ KAs, byteSize=[0-9]+ \[ciphertext\],.*kc.*$KC\b" 2>/dev/null; then
+if grep -qE "Submitting V10 on-chain publish tx \([0-9]+ KAs, byteSize=[0-9]+ \[ciphertext\],.*kc.*$KC\b" <<<"$RECENT" 2>/dev/null; then
   # Heuristic — exact KC mention is unlikely in the publisher line, so use a softer check:
   true
 fi
@@ -175,27 +187,78 @@ act "2. ANONYMOUS CATCHUP SWEEP (outsider, no membership)"
 # The outsider is a CORE NODE so it has the libp2p peer and can talk
 # to the curator without any pre-existing membership. For public CGs
 # the curator's responder MUST serve without auth.
+# The Core discovers registered public graphs from chain authority without
+# joining their member roster. Wait for the outsider's own chain-backed view;
+# a foreign wallet-scoped create would neither install nor prove that view.
+OUTSIDER_ACTIVE=false
+for _ in $(seq 1 60); do
+  OUTSIDER_ACTIVE=$(api_call "$OUTSIDER_NODE" GET /api/context-graph/list | \
+    CG_ID="$CG_ID" ON_CHAIN_ID="$ON_CHAIN_ID" node -e '
+      let body = "";
+      process.stdin.on("data", chunk => body += chunk);
+      process.stdin.on("end", () => {
+        try {
+          const graph = JSON.parse(body).contextGraphs?.find(row => row.id === process.env.CG_ID);
+          // The list projection leaves active=null until full enumeration;
+          // the catch-up request below makes the live access decision.
+          console.log(graph?.onChain
+            && graph.onChain.active !== false
+            && graph.onChain.id === process.env.ON_CHAIN_ID
+            && graph.accessPolicy === "public" ? "true" : "false");
+        } catch { console.log("false"); }
+      });
+    ')
+  [ "$OUTSIDER_ACTIVE" = true ] && break
+  sleep 3
+done
+[ "$OUTSIDER_ACTIVE" = true ] || fail "outsider has no active chain-backed public view of $CG_ID"
+log "✓ outsider sees the curator's active public on-chain graph without membership"
 OUTSIDER_LOG_BASE=$(wc -l < "$(node_log "$OUTSIDER_NODE")" 2>/dev/null | tr -d ' ' || echo 0)
 CURATOR_LOG_BASE=$(wc -l < "$(node_log "$CURATOR_NODE")" 2>/dev/null | tr -d ' ' || echo 0)
 
+# Prints why a catch-up response does not show a completed request to the
+# curator, or nothing when it does.
+catchup_problem() {
+  CATCHUP="$1" CURATOR_PEER="$CURATOR_PEER" node -e '
+    let j;
+    try { j = JSON.parse(process.env.CATCHUP); } catch { console.log("unparseable response"); process.exit(0); }
+    if (j.error !== undefined) { console.log("error " + JSON.stringify(j.error)); process.exit(0); }
+    if (!(Number(j.peersAttempted) >= 1)) {
+      console.log("no peer attempted (peersAttempted=" + j.peersAttempted + ")");
+      process.exit(0);
+    }
+    const leg = (Array.isArray(j.results) ? j.results : []).find((r) => r?.peerId === process.env.CURATOR_PEER);
+    if (!leg) { console.log("no result for the curator peer"); process.exit(0); }
+    const legError = leg.swmError ?? (Array.isArray(leg.errors) ? leg.errors.join("; ") : undefined);
+    if (legError) console.log("curator leg failed: " + legError);
+  '
+}
+
 log "Outsider calls catchup against curator (anonymous, public CG)..."
-CATCHUP=$(api_call "$OUTSIDER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
+# A leg can fail transiently (responder busy); retry before failing.
+for attempt in 1 2 3; do
+  CATCHUP=$(api_call "$OUTSIDER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
 { "contextGraphId": "$CG_ID", "peerId": "$CURATOR_PEER" }
 EOF
 )")
-log "catchup response: $CATCHUP"
+  log "catchup response (attempt $attempt): $CATCHUP"
+  CATCH_PROBLEM=$(catchup_problem "$CATCHUP")
+  [ -n "$CATCH_PROBLEM" ] || break
+  warn "catchup attempt $attempt: $CATCH_PROBLEM"
+  sleep 5
+done
+[ -z "$CATCH_PROBLEM" ] || fail "outsider catchup did not complete a request to the curator: $CATCH_PROBLEM"
 
 CATCH_TOTAL=$(parse_json "$CATCHUP" '.totalInsertedTriples')
-CATCH_ERR=$(parse_json "$CATCHUP" '.results[0].swmError')
-log "outsider catchup: inserted=$CATCH_TOTAL ${CATCH_ERR:+(swmError=$CATCH_ERR)}"
+log "outsider catchup: curator leg completed, inserted=$CATCH_TOTAL"
 
 # Critical: curator MUST NOT have logged a denial line for this CG.
 sleep 1
 CURATOR_NEW=$(tail -n "+$((CURATOR_LOG_BASE + 1))" "$(node_log "$CURATOR_NODE")")
-if printf '%s' "$CURATOR_NEW" | grep -qE "Denied sync request for \"$CG_ID\""; then
+if grep -qE "Denied sync request for \"$CG_ID\"" <<<"$CURATOR_NEW"; then
   fail "regression: curator denied a public-CG anonymous catchup"
 fi
-if printf '%s' "$CURATOR_NEW" | grep -qE "Private sync auth for \"$CG_ID\".*allowed=false"; then
+if grep -qE "Private sync auth for \"$CG_ID\".*allowed=false" <<<"$CURATOR_NEW"; then
   fail "regression: curator's private-sync auth fired allowed=false for public CG"
 fi
 log "✓ curator did not deny — public CGs are served without auth"
@@ -302,7 +365,7 @@ log "  LU-10 public-CG regression sweep: PASS"
 log "================================================================"
 log "  Public CG:      $CG_ID  (onChainId=$ON_CHAIN_ID)"
 log "  Publish:        kaId=$KC tx=$TX merkleRoot=$MERKLE_ROOT"
-log "  Anon catchup:   inserted=$CATCH_TOTAL ${CATCH_ERR:+(timed out, not denied)}"
+log "  Anon catchup:   curator served, inserted=$CATCH_TOTAL"
 log "  Verify-batch:   ok=true on correct quads, root-mismatch on tampered"
 log "  Attestation:    mint+verify both ok / wrong-leaf rejected"
 log "================================================================"

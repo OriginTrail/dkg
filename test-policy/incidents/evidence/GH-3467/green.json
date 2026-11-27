@@ -1,0 +1,32 @@
+{
+  "command": [
+    "pnpm",
+    "--dir",
+    "packages/agent",
+    "exec",
+    "vitest",
+    "run",
+    "--config",
+    "vitest.unit.config.ts",
+    "test/rfc64-unregistered-seed-fetch-agent.test.ts",
+    "-t",
+    "reserves\\ window\\ slots\\ for\\ non\\-core\\ peers\\ so\\ a\\ lone\\ edge\\ author\\ is\\ asked\\ in\\ the\\ first\\ window",
+    "--reporter=json",
+    "--outputFile=<report>"
+  ],
+  "exitCode": 0,
+  "rawReportSha256": "633a353e9587e3b85c5499ecc1ca7ecfbfa78acf8d6b4b5e2680bdf3d45f2e5f",
+  "assertions": [
+    {
+      "ancestorTitles": [
+        "Rfc64SeedFetchMethods replica peer selection"
+      ],
+      "fullName": "Rfc64SeedFetchMethods replica peer selection reserves window slots for non-core peers so a lone edge author is asked in the first window",
+      "status": "passed",
+      "title": "reserves window slots for non-core peers so a lone edge author is asked in the first window",
+      "duration": 2.746874999999818,
+      "failureMessages": [],
+      "meta": {}
+    }
+  ]
+}

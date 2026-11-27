@@ -152,7 +152,8 @@ async function* walkSourceFiles(dir) {
 // detection, definition sites count too. The allowlist now pins:
 //   - the `Network` interface declaration of the method (network.ts)
 //   - the `LibP2PNetwork` impl: definition + the actual libp2p call
-//   - `ProtocolRouter.send`: the resolver-consulting call
+//   - `ProtocolRouter.send` and its negotiation-only capability probe:
+//     both use the Network transport after resolver admission
 const ALLOWLIST = new Map([
   [
     'packages/core/src/network/network.ts',
@@ -172,7 +173,7 @@ const ALLOWLIST = new Map([
     'packages/core/src/protocol-router.ts',
     {
       expectedHits: 1,
-      justification: 'ProtocolRouter.send consults PeerResolver before dialing (RFC 07 PR-3)',
+      justification: 'one shared admitted stream open, used by send, duplex streams and the payload-free capability probe, dials the injected Network transport after PeerResolver (RFC 07 PR-3)',
     },
   ],
   [

@@ -21,7 +21,7 @@ const rulesTable = (specs) => [
   '| # | Alert | Channel | Datasource | Fires when | for | noData |',
   '|---|---|---|---|---|---|---|',
   ...specs.map((s, i) =>
-    `| ${i + 1} | ${mdCell(s.title)} | #node-${s.signal} | ${alertDatasource(s).name} | \`${s.condition.op} ${s.condition.value}\` | ${s.forDur} | ${s.noData} |`),
+    `| ${i + 1} | ${mdCell(s.title)}${s.added ? ` (added ${s.added}, not yet provisioned)` : ''} | #node-${s.signal} | ${alertDatasource(s).name} | \`${s.condition.op} ${s.condition.value}\` | ${s.forDur} | ${s.noData} |`),
   '',
   '**Queries** (range queries, reduced with `last`, evaluated against the condition above):',
   '',
@@ -43,7 +43,7 @@ export const buildDocs = ({ specs, routes }) => ({
 
 # Grafana alerting — live setup on the observability server
 
-> **Status (2026-07-02):** everything below is **provisioned and healthy** on the
+> **Status (2026-07-02):** everything below, except rules marked as added since, is **provisioned and healthy** on the
 > production observability Grafana (the dedicated server, Loki 3.x native-OTLP
 > stack — see RUNBOOK.md). This file documents it so it can be recreated from
 > scratch. Webhook URLs are **secrets** — they live only in Grafana contact
@@ -92,6 +92,14 @@ ${rulesTable(specs)}
 - **Fleet blackout** complements it: the per-node \`unless\` form cannot fire
   when *both* sides are empty, so total-outage detection (pipeline down, Loki
   down, zero nodes) lives in its own rule with **noData = Alerting**.
+- **Graph catalog at 80%** matches the node's WARN log line for that level
+  (\`graphCatalogLimitWarning\` in lib/queries.mjs). The node repeats it hourly
+  while the catalog stays there, so the 70-minute count keeps the rule firing
+  between warnings. The query range is 10 minutes, like the other rules', so
+  the \`last\` reducer reads only current counts: the rule clears about 80
+  minutes after the last warning. The storage test
+  \`graph-catalog-alert-contract.test.ts\` runs the node's real warnings
+  through this rule's filter. Operator steps: docs/use-dkg/graph-catalog-limit.md.
 - **RPC credit burn** reads the \`rpc_usage\` log lines (delta counts, so
   \`sum_over_time\` is exact) — needs nodes on a post-#1409 build.
 - **Failover exhausted** filters \`reason="exhausted"\`: the metric contract also

@@ -72,13 +72,60 @@ export function rpcHost(url: string): string {
   }
 }
 
+/**
+ * A URL inside error text, in any case: the request URL ethers embeds in the
+ * message of an HTTP-level error, or a link in a provider's own words. It ends
+ * at whitespace, a quote or an angle bracket, so a URL quoted in JSON
+ * (`"requestUrl": "https://…"`) or in HTML is matched without its closing
+ * delimiter. Prose punctuation after the URL (`)` `,` `.` `:` `;` `!` `?`) is not
+ * part of it, so "(https://h/KEY)" and "https://h:8545: boom" keep their
+ * punctuation and their host; a key can still never survive, because the greedy
+ * prefix swallows everything up to the final non-punctuation character. `]` is
+ * deliberately not excluded (IPv6 hosts). The scheme is at most 32 characters:
+ * the scan restarts at every letter, so an unbounded scheme made it quadratic
+ * over a long `[a-z0-9+.-]` run (hex calldata), URL or no URL. A longer run
+ * before a URL keeps its leading characters, never the URL's key. Global: use
+ * it only with `replace`.
+ */
+export const RPC_TEXT_URL_PATTERN = /[a-z][a-z0-9+.-]{0,31}:\/\/[^\s"'<>]*[^\s"'<>),.:;!?]/gi;
+
+/**
+ * `text` with every URL in it reduced to its host ({@link rpcHost}). A
+ * configured RPC URL can carry an API key in its path or query, and ethers
+ * embeds the full request URL in the message of an HTTP-level error, so
+ * provider text passes through this before an error message or a log line
+ * quotes it. Idempotent, and total: a non-string is coerced, because this runs
+ * on failure paths that must not throw.
+ *
+ * The `://` guard skips the scan for the common URL-free message.
+ */
+export function hostOnlyRpcText(text: string): string {
+  const value = typeof text === 'string' ? text : String(text ?? '');
+  if (!value.includes('://')) return value;
+  return value.replace(RPC_TEXT_URL_PATTERN, (url) => rpcHost(url));
+}
+
 // --- Process-wide counters (host-only) --------------------------------------
 
 interface MutableStats {
   failovers: number;
   exhaustions: number;
+  // CUMULATIVE, monotonically-increasing count of establishment edges — each
+  // time endpoint-stickiness newly ESTABLISHED a preferred (last-good) backend
+  // after a failover (the primary was degraded). It is NOT decremented when the
+  // primary recovers and the preference is cleared; only the process-wide test
+  // reset (`_resetRpcFailoverStatsForTest`) zeroes it. A rising rate is the
+  // operator's signal that a configured primary is flapping. It is NOT a gauge of
+  // the current active preference (that state lives on the client instance) — for
+  // "is a preference active right now" a separate gauge would be needed.
+  preferredEstablishments: number;
   byErrorClass: Map<RpcFailoverErrorClass, number>;
   byEndpointHost: Map<string, number>;
+  // Per-host count of successful calls each endpoint SERVED — symmetric with
+  // `byEndpointHost` (which counts failures). This is the operator's "which
+  // provider is actually carrying the traffic" distribution, the success-side
+  // complement to the failover log.
+  servedByEndpointHost: Map<string, number>;
 }
 
 /** Cap the per-host map so a pathological churn of hosts can't grow it
@@ -86,11 +133,29 @@ interface MutableStats {
 const MAX_TRACKED_HOSTS = 64;
 const MAX_DEDUP_KEYS = 256;
 
+export type RpcServedAttribution =
+  | { mode: 'read'; key: string }
+  | { mode: 'write' };
+
 function freshStats(): MutableStats {
-  return { failovers: 0, exhaustions: 0, byErrorClass: new Map(), byEndpointHost: new Map() };
+  return {
+    failovers: 0,
+    exhaustions: 0,
+    preferredEstablishments: 0,
+    byErrorClass: new Map(),
+    byEndpointHost: new Map(),
+    servedByEndpointHost: new Map(),
+  };
 }
 
 let stats: MutableStats = freshStats();
+
+// Last host that successfully served each stable operation key — drives the
+// log-on-change gate for high-volume reads (so we log a provider shift, not
+// every call). This deliberately does NOT key by the human log label: call-site
+// wording is presentation, not process-wide state. Bounded with LRU eviction so
+// overflow labels can still suppress repeated same-host read logs.
+const lastServedByKey = new Map<string, string>();
 
 function bump(map: Map<string, number>, key: string, cap: number): void {
   if (!map.has(key) && map.size >= cap) return; // bounded; drop new keys past the cap
@@ -101,16 +166,20 @@ function bump(map: Map<string, number>, key: string, cap: number): void {
 export interface RpcFailoverStatsSnapshot {
   failovers: number;
   exhaustions: number;
+  preferredEstablishments: number;
   byErrorClass: Record<string, number>;
   byEndpointHost: Record<string, number>;
+  servedByEndpointHost: Record<string, number>;
 }
 
 export function getRpcFailoverStats(): RpcFailoverStatsSnapshot {
   return {
     failovers: stats.failovers,
     exhaustions: stats.exhaustions,
+    preferredEstablishments: stats.preferredEstablishments,
     byErrorClass: Object.fromEntries(stats.byErrorClass),
     byEndpointHost: Object.fromEntries(stats.byEndpointHost),
+    servedByEndpointHost: Object.fromEntries(stats.servedByEndpointHost),
   };
 }
 
@@ -118,6 +187,7 @@ export function getRpcFailoverStats(): RpcFailoverStatsSnapshot {
 export function _resetRpcFailoverStatsForTest(): void {
   stats = freshStats();
   dedup.clear();
+  lastServedByKey.clear();
   clockOverride = undefined;
 }
 
@@ -196,6 +266,24 @@ export function noteRpcFailover(
 }
 
 /**
+ * #3591 — a refusal for funds that does not count, because an earlier attempt at the same signed
+ * transaction may have been accepted. The sender then waits for chain proof, and if the wallet really
+ * was short no proof can arrive by itself, so this is worth one line that names the transaction.
+ */
+export function noteRefusalAfterPossibleAcceptance(label: string, txHash: string | undefined): void {
+  try {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[chain] ${label}: an endpoint refused tx ${txHash ?? '(unknown)'} for funds, but an earlier attempt may have been `
+      + 'accepted, so its outcome stays unknown. A publication waiting on it stays held until chain proof settles it; '
+      + 'if the wallet really was short, an operator may have to clear that job by id.',
+    );
+  } catch {
+    // Observability must never break the failover path.
+  }
+}
+
+/**
  * Record + log the terminal "all configured RPC endpoints exhausted"
  * condition. Host-only — does NOT print the full `rpcUrls.join()` aggregate
  * the thrown error carries. Synchronous and never-throwing.
@@ -219,5 +307,88 @@ export function noteRpcExhaustion(label: string, urls: readonly string[]): void 
     }
   } catch {
     // Observability must never break the failover path.
+  }
+}
+
+/**
+ * Record + log that endpoint-stickiness ESTABLISHED a preferred (last-good)
+ * backend after a failover — the `RpcFailoverClient` will now try `preferredUrl`
+ * first (until a TTL'd primary re-probe succeeds). Host-only, dedup-gated, and
+ * never-throwing, symmetric with {@link noteRpcFailover}: it sits on the success
+ * path inside the failover loops and must never alter control flow. Gives
+ * operators a visible "we're leaning on a backup because the primary is
+ * degraded" signal (also counted in {@link getRpcFailoverStats}).
+ */
+export function notePreferredEndpoint(label: string, preferredUrl: string): void {
+  try {
+    stats.preferredEstablishments += 1;
+    const host = rpcHost(preferredUrl);
+    const key = `PREFERRED|${host}`;
+    const now = nowMs();
+    const entry = dedup.get(key);
+    const shouldEmit = !entry || now - entry.lastEmitAt >= DEFAULT_DEDUP_WINDOW_MS;
+    if (shouldEmit) {
+      const suppressed = entry?.suppressed ?? 0;
+      const suffix = suppressed > 0 ? ` (${suppressed} similar re-establishments suppressed in the previous window)` : '';
+      // eslint-disable-next-line no-console
+      console.warn(`[chain] RPC stickiness: ${label} now prefers ${host} (primary degraded)${suffix}`);
+      setDedup(key, now);
+    } else {
+      entry.suppressed += 1;
+    }
+  } catch {
+    // Observability must never break the failover path.
+  }
+}
+
+/**
+ * Record + log which endpoint SERVED a successful call/tx — the success-side
+ * complement to {@link noteRpcFailover}. Host-only, never-throwing, safe on the
+ * hot success path. Answers "which provider is actually carrying the traffic",
+ * which the failure-only failover log cannot.
+ *
+ *  - `alwaysLog` (tx / write broadcasts): logs EVERY success. Broadcasts are
+ *    low-volume and operators want per-tx attribution — "which provider
+ *    broadcast this tx".
+ *  - default (reads): high-volume, so it logs ONLY when the serving host CHANGES
+ *    for this label (a provider shift), never once per call. The full per-host
+ *    distribution is always available via {@link getRpcFailoverStats}
+ *    (`servedByEndpointHost`) and `/api/status`.
+ *
+ * @param label   human operation label, e.g. `V10 publish broadcast`
+ * @param servedUrl the RPC URL that served the call (reduced to host before logging)
+ * @param attribution explicit read/write attribution mode. Reads require a
+ *                    stable low-cardinality suppression key; writes log every
+ *                    success for per-transaction attribution.
+ */
+export function noteRpcServed(
+  label: string,
+  servedUrl: string,
+  attribution: RpcServedAttribution,
+): void {
+  try {
+    const host = rpcHost(servedUrl);
+    bump(stats.servedByEndpointHost, host, MAX_TRACKED_HOSTS);
+    const alwaysLog = attribution.mode === 'write';
+    const key = attribution.mode === 'read' ? attribution.key : undefined;
+    const prior = key === undefined ? undefined : lastServedByKey.get(key);
+    const changed = prior !== host;
+    if (!alwaysLog && !changed) return; // same provider on a read — count only, don't log
+    if (key !== undefined) {
+      if (lastServedByKey.has(key)) lastServedByKey.delete(key);
+      lastServedByKey.set(key, host);
+      while (lastServedByKey.size > MAX_TRACKED_HOSTS) {
+        const oldest = lastServedByKey.keys().next().value;
+        if (oldest === undefined || oldest === key) break;
+        lastServedByKey.delete(oldest);
+      }
+    }
+    // Mark a genuine provider SHIFT (had a prior, different host) — not the first
+    // sighting, and not the always-log tx path.
+    const shift = changed && prior !== undefined && !alwaysLog;
+    // eslint-disable-next-line no-console
+    console.log(`[chain] RPC served: ${label} via ${host}${shift ? ' (provider shift)' : ''}`);
+  } catch {
+    // Observability must never break the call path.
   }
 }

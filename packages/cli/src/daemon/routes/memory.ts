@@ -1,3 +1,5 @@
+import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
+import { SUB_GRAPH_NOT_FOUND_CODE } from '@origintrail-official/dkg-publisher';
 // daemon/routes/memory.ts
 //
 // Route handlers for shared-memory / workspace write + publish + conditional-write, memory turn/search.
@@ -55,16 +57,22 @@ const daemonRequire = createRequire(import.meta.url);
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  enrichEvmError,
+  MockChainAdapter,
+} from '@origintrail-official/dkg-chain';
 import {
   DKGAgent,
   classifySwmCatchupPeerOutcome,
   createSwmCatchupPeerSelector,
   loadOpWallets,
+  swmCatchupOwnerPeerIds,
 } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
-import type { Quad } from '@origintrail-official/dkg-storage';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphMetaUri, advertisesSyncProtocol } from '@origintrail-official/dkg-core';
+import { retrieveMemorySearch } from "./memory-search-retrieval.js";
 import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
+import { handleSharedMemoryHostCatchupRoute } from './shared-memory-host-catchup.js';
 import {
   DashboardDB,
   MetricsCollector,
@@ -111,7 +119,19 @@ import {
   CLI_NPM_PACKAGE,
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
-import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
+import {
+  classifyDurableCatchupRequest,
+  createCatchupRunner,
+  formatDurableCatchupFailure,
+  runDurableCatchupLeg,
+  summarizeDurableLeg,
+  type CatchupJobResult,
+  type CatchupRunner,
+  type DurableCatchupAttempt,
+  type DurableCatchupFailureReason,
+  type DurableCatchupLegState,
+  type DurableLegDiagnostics,
+} from '../../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../../auth.js';
 import { recordAssertionActivity } from '../activity-notification.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -195,8 +215,6 @@ import {
 } from '../manifest.js';
 import {
   resolveNameToPeerId,
-  isWritableQuad,
-  validateQuadObjectTerms,
   validateWritableQuadLiteralSizes,
   oversizedRdfLiteralResponseBody,
   jsonResponse,
@@ -222,16 +240,14 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
   respondIfChainRpcTransportError,
 } from '../http-utils.js';
+import { handleQueryCatalogRoutes } from './query-catalog.js';
 import {
   normalizeRepo,
-  parseTagName,
-  isValidRef,
   isValidRepoSpec,
   repoToFetchUrl,
   githubRepoForApi,
@@ -252,6 +268,7 @@ import {
   releaseUpdateLock,
   performNpmUpdate,
 } from '../auto-update.js';
+import { isValidRef, parseTagName } from '../../auto-update-ref.js';
 import {
   OPENCLAW_UI_CONNECT_TIMEOUT_MS,
   OPENCLAW_UI_CONNECT_POLL_MS,
@@ -332,7 +349,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import { actorFromRequestContext, type RequestContext } from './context.js';
 import { authorizeAgentScopedAuthorClaim, isSameAgentAddress } from './shared-assertion-helpers.js';
 
 /**
@@ -432,6 +449,8 @@ function decodeReservedKaId(val: unknown): bigint | undefined {
 const swmCatchupPeerSelector = createSwmCatchupPeerSelector();
 
 type SwmCatchupDetailedResult = {
+  localYield?: true;
+  localYieldFailedPhases?: number;
   insertedTriples: number;
   fetchedDataTriples?: number;
   fetchedMetaTriples?: number;
@@ -448,16 +467,23 @@ function swmCatchupResultFromInserted(insertedTriples: number): SwmCatchupDetail
 
 function swmCatchupOutcomeInput(result: SwmCatchupDetailedResult, errorMessage?: string) {
   return {
-    insertedTriples: result.insertedTriples,
-    fetchedDataTriples: result.fetchedDataTriples,
-    fetchedMetaTriples: result.fetchedMetaTriples,
-    deniedPhases: result.deniedPhases,
-    failedPeers: result.failedPeers,
-    failedPhases: result.failedPhases,
-    timedOutPhases: result.timedOutPhases,
-    backoffWorthyFailures: result.backoffWorthyFailures,
+    // Preserve the agent's symbol-keyed internal cause model through this
+    // in-process edge. JSON responses still expose only the legacy fields.
+    ...result,
     errorMessage,
   };
+}
+
+function recordSwmCatchupPeerOutcome(
+  contextGraphId: string,
+  peerId: string,
+  result: SwmCatchupDetailedResult,
+  errorMessage?: string,
+): void {
+  const outcome = classifySwmCatchupPeerOutcome(
+    swmCatchupOutcomeInput(result, errorMessage),
+  );
+  if (outcome) swmCatchupPeerSelector.record(contextGraphId, peerId, outcome);
 }
 
 function uniquePeerIds(peerIds: readonly string[]): string[] {
@@ -499,143 +525,18 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     apiPortRef,
     url,
     path,
-    requestToken,
-    requestAgentAddress,
     emitMemoryGraphChanged,
     emitNotification,
   } = ctx;
-  const writePreflightCallerAgentAddress = requestToken
-    ? agent.resolveAgentByToken(requestToken)
-    : undefined;
+  const actor = actorFromRequestContext(ctx);
+  const { authentication, effectiveAgentAddress: requestAgentAddress } = actor;
+  const writePreflightCallerAgentAddress = actor.authenticatedAgentAddress;
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,
     allowLocalExactFallback: !writePreflightCallerAgentAddress,
   };
 
-
-  // POST /api/profile/query-catalog/write
-  //
-  // UI profile metadata intentionally lives in unregistered `.../meta/...`
-  // graphs. Do not route this through shared-memory sub-graph writes: that
-  // path correctly enforces registered sub-graphs, which is wrong for this
-  // local profile/catalog namespace.
-  if (req.method === "POST" && path === "/api/profile/query-catalog/write") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = safeParseJson(body, res);
-    if (!parsed) return;
-
-    const contextGraphId = parsed.contextGraphId;
-    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
-      agent,
-      contextGraphId,
-      res,
-      writePreflightContextGraphOpts,
-    );
-    if (!resolvedContextGraphId) return;
-
-    const { quads } = parsed;
-    if (!Array.isArray(quads) || quads.length === 0) {
-      return jsonResponse(res, 400, {
-        error: 'Missing or invalid "quads" (must be a non-empty array)',
-      });
-    }
-
-    const graph = `did:dkg:context-graph:${resolvedContextGraphId}/meta/query-catalog`;
-    try {
-      assertSafeIri(graph);
-      const normalized = quads.map((quad: unknown, index: number) => {
-        if (!quad || typeof quad !== "object" || Array.isArray(quad)) {
-          throw new Error(`quads[${index}] must be an object`);
-        }
-        const q = quad as Record<string, unknown>;
-        if (typeof q.subject !== "string" || q.subject.length === 0) {
-          throw new Error(`quads[${index}].subject must be a non-empty string`);
-        }
-        if (typeof q.predicate !== "string" || q.predicate.length === 0) {
-          throw new Error(`quads[${index}].predicate must be a non-empty string`);
-        }
-        if (typeof q.object !== "string" || q.object.length === 0) {
-          throw new Error(`quads[${index}].object must be a non-empty string`);
-        }
-
-        assertSafeIri(q.subject);
-        assertSafeIri(q.predicate);
-        if (q.object.startsWith('"')) {
-          assertSafeRdfTerm(q.object);
-        } else {
-          assertSafeIri(q.object);
-        }
-
-        return {
-          subject: q.subject,
-          predicate: q.predicate,
-          object: q.object,
-          graph,
-        };
-      });
-
-      const literalSize = validateWritableQuadLiteralSizes("quads", normalized);
-      if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
-      await agent.store.insert(normalized);
-      return jsonResponse(res, 200, {
-        ok: true,
-        contextGraphId: resolvedContextGraphId,
-        graph,
-        triplesWritten: normalized.length,
-      });
-    } catch (err: any) {
-      return jsonResponse(res, 400, {
-        error: err?.message ?? "Invalid query catalog write",
-      });
-    }
-  }
-
-  // POST /api/profile/query-catalog/read { contextGraphId }
-  if (req.method === "POST" && path === "/api/profile/query-catalog/read") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = safeParseJson(body, res);
-    if (!parsed) return;
-
-    const contextGraphId = parsed.contextGraphId;
-    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
-
-    const graph = `did:dkg:context-graph:${contextGraphId}/meta/query-catalog`;
-    const query = `PREFIX prof: <http://dkg.io/ontology/profile/>
-PREFIX schema: <http://schema.org/>
-SELECT ?q ?subGraph ?catalog ?name ?description ?sparql ?resultColumn ?rank ?catalogName ?catalogDescription ?catalogRank
-WHERE {
-  GRAPH <${graph}> {
-    ?q a prof:SavedQuery ;
-       prof:forSubGraph ?subGraph ;
-       prof:sparqlQuery ?sparql .
-    OPTIONAL { ?q prof:inCatalog ?catalog }
-    OPTIONAL { ?q prof:displayName ?name }
-    OPTIONAL { ?q schema:description ?description }
-    OPTIONAL { ?q prof:resultColumn ?resultColumn }
-    OPTIONAL { ?q prof:rank ?rank }
-    OPTIONAL { ?catalog prof:displayName ?catalogName }
-    OPTIONAL { ?catalog schema:description ?catalogDescription }
-    OPTIONAL { ?catalog prof:rank ?catalogRank }
-  }
-}`;
-
-    try {
-      const result = await agent.store.query(query);
-      const bindings = result.type === "bindings" ? result.bindings : [];
-      return jsonResponse(res, 200, {
-        contextGraphId,
-        graph,
-        result: {
-          type: "bindings",
-          bindings,
-        },
-      });
-    } catch (err: any) {
-      return jsonResponse(res, 400, {
-        error: err?.message ?? "Query catalog read failed",
-      });
-    }
-  }
+  if (await handleQueryCatalogRoutes(ctx)) return;
 
   // POST /api/shared-memory/catchup
   //
@@ -684,17 +585,23 @@ WHERE {
       });
     }
 
-    // OT-RFC-38 LU-7: SWMCatchupRequest is SWM-only. The durable
+    // OT-RFC-38 LU-7: SWMCatchupRequest is SWM-only by default. The durable
     // (knowledge-collection) layer has its own publish-time
     // commit->fanout->ACK protocol and a separate sync substrate; it's
     // out of scope for the catchup endpoint and would otherwise compound
     // the request budget (240s vs 120s). Opt-in via includeDurable=true
-    // for callers that want the full data leg in the same call.
+    // for callers that want the full data leg in the same call. Recovery
+    // operators may additionally pass includeSharedMemory=false to resume
+    // only the durable leg without replaying an already-complete SWM
+    // snapshot first.
+    const includeSharedMemory = parsed.includeSharedMemory !== false;
     const includeDurable = parsed.includeDurable === true;
 
-    // Per-peer hard cap on the catchup duration. Keeps the endpoint
-    // response within a single HTTP-level timeout even if the underlying
-    // sync internals retry their way to completion. SWM-only path:
+    // Per-peer operation deadline. Signal-aware work stops accepting new
+    // fetch/authentication/materialization work at this bound. If an atomic
+    // store commit already crossed its non-cancellable dispatch boundary, the
+    // route awaits settlement so its response reports the real commit outcome
+    // instead of returning a false zero-insert failure. SWM-only path:
     // ~45s/page * a couple of pages worst-case; under heavy gossip
     // load (the integration suite) backed-off retries can stretch this
     // out further. Underlying SYNC_TOTAL_TIMEOUT_MS in dkg-agent is
@@ -716,7 +623,6 @@ WHERE {
     };
     const PER_PEER_SWM_BUDGET_MS = boundedBudget(parsed.perPeerBudgetMs, DEFAULT_PER_PEER_SWM_BUDGET_MS);
     const PER_PEER_DURABLE_BUDGET_MS = boundedBudget(parsed.perPeerDurableBudgetMs, DEFAULT_PER_PEER_DURABLE_BUDGET_MS);
-
     const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
       new Promise<T>((resolve, reject) => {
         const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
@@ -743,7 +649,7 @@ WHERE {
       if (!check) {
         check = Promise.resolve()
           .then(() => agent.getPeerProtocols(peerId))
-          .then((protocols) => protocols.includes(PROTOCOL_SYNC))
+          .then((protocols) => advertisesSyncProtocol(protocols))
           .catch(() => undefined);
         protocolChecks.set(peerId, check);
       }
@@ -756,6 +662,21 @@ WHERE {
         return await agent.canUseSharedMemoryForContextGraph(cgId);
       } catch {
         return true;
+      }
+    };
+    const usesSelectedPublicCatalogRecovery = async (cgId: string): Promise<boolean> => {
+      try {
+        if (await agent.isPrivateContextGraph(cgId)) return false;
+        const authority = agent.resolveRfc64CatalogReceiverAuthorityV1(cgId);
+        return authority.active
+          && authority.mode === 'catalog'
+          && authority.reconciliationLane === 'catalog-apply'
+          && !authority.killSwitchActive;
+      } catch {
+        // Older/compatibility agents do not expose RFC-64 receiver authority.
+        // Preserve their ordinary catch-up behavior rather than guessing that
+        // an arbitrary public graph belongs to the selected catalog lane.
+        return false;
       }
     };
     const unsupportedPeersForContextGraph = async (cgId: string, peers: readonly string[]): Promise<Set<string>> => {
@@ -786,7 +707,11 @@ WHERE {
       }
     };
 
-    if (!peerIdParam && connectedPeerIds().length === 0) {
+    if (
+      !peerIdParam
+      && connectedPeerIds().length === 0
+      && !(includeDurable && !includeSharedMemory)
+    ) {
       return jsonResponse(res, 200, {
         contextGraphIds: cgIds,
         peersAttempted: 0,
@@ -810,6 +735,11 @@ WHERE {
       peerId: string;
       insertedTriples: number;
       durableInsertedTriples: number;
+      /** Typed internal outcome; omitted from the legacy HTTP response shape. */
+      durableState?: DurableCatchupLegState;
+      /** Present when the agent supports detailed durable-sync outcomes. */
+      durableComplete?: boolean;
+      durableDiagnostics?: DurableLegDiagnostics;
       swmError?: string;
       durableError?: string;
       error?: string;
@@ -817,12 +747,19 @@ WHERE {
     type PerCgLeg = {
       contextGraphId: string;
       perPeer: PerPeerLeg[];
+      /** True when RFC-64 owns this public graph's complete ROOT recovery. */
+      selectedPublicCatalog?: boolean;
+      /** Graph-owner outcome used for terminal request classification. */
+      durableAttempts?: DurableCatchupAttempt[];
       insertedTriples: number;
       durableInsertedTriples: number;
     };
     const perCgLegs: PerCgLeg[] = [];
     for (const cgId of cgIds) {
-      const canUseSharedMemory = await canUseSharedMemoryForContextGraph(cgId);
+      const canUseSharedMemory = includeSharedMemory
+        && await canUseSharedMemoryForContextGraph(cgId);
+      const selectedPublicCatalog = canUseSharedMemory
+        && await usesSelectedPublicCatalogRecovery(cgId);
       if (!canUseSharedMemory && !includeDurable) {
         perCgLegs.push({
           contextGraphId: cgId,
@@ -833,7 +770,12 @@ WHERE {
         continue;
       }
       const baseCandidatePeers = await candidatePeersForContextGraph(cgId);
-      const unsupportedPeers = await unsupportedPeersForContextGraph(cgId, baseCandidatePeers);
+      // An explicit peerId is an operator-directed bounded probe. libp2p's identify-backed peerStore can lag a live
+      // connection, so an absent protocol advertisement must not suppress the wire negotiation the operator requested.
+      // Default peer enumeration remains conservative and filters peers known not to advertise the current sync wire.
+      const unsupportedPeers = peerIdParam
+        ? new Set<string>()
+        : await unsupportedPeersForContextGraph(cgId, baseCandidatePeers);
       const privateCuratorPeerIds = await privateCuratorPeersForContextGraph(cgId);
       const swmSelectedPeers = canUseSharedMemory
         ? swmCatchupPeerSelector.select({
@@ -841,6 +783,7 @@ WHERE {
             candidatePeers: baseCandidatePeers,
             unsupportedPeers,
             privateCuratorPeerIds,
+            ownerPeerIds: await swmCatchupOwnerPeerIds(agent, cgId),
           }).selectedPeers
         : [];
       const durableSelectedPeers = includeDurable
@@ -849,72 +792,196 @@ WHERE {
       const swmSelected = new Set(swmSelectedPeers);
       const durableSelected = new Set(durableSelectedPeers);
       const selectedPeers = uniquePeerIds([...swmSelectedPeers, ...durableSelectedPeers]);
+
+      // A modern agent owns durable recovery once per Context Graph. Every
+      // explicit/on-connect/reconciler trigger joins this same owner, which
+      // prevents this route from competing for a second slow-lane slot as
+      // `durable:unspecified`. Keep the direct per-peer leg only as a
+      // compatibility path for older agents.
+      const coordinatedDurablePromise = durableSelectedPeers.length > 0
+        && typeof (agent as any).syncDurableRecoveryContextGraph === 'function'
+        ? (agent as any).syncDurableRecoveryContextGraph(cgId, {
+            candidatePeerIds: durableSelectedPeers,
+            restrictToCandidatePeerIds: true,
+            candidatesAreSyncCapable: true,
+          })
+        : undefined;
+      const directSelectedPeers = coordinatedDurablePromise
+        ? swmSelectedPeers
+        : selectedPeers;
       const settled = await Promise.allSettled(
-        selectedPeers.map(async (candidate) => {
+        directSelectedPeers.map(async (candidate) => {
           let swm = 0;
           let durable = 0;
+          let durableState: DurableCatchupLegState | undefined;
+          let durableComplete: boolean | undefined;
+          let durableDiagnostics: DurableLegDiagnostics | undefined;
+          let durableFailureReasons: DurableCatchupFailureReason[] | undefined;
           let swmError: string | undefined;
           let durableError: string | undefined;
           if (swmSelected.has(candidate)) {
             try {
-              const syncResult = await withTimeout(
-                typeof (agent as any).syncSharedMemoryFromPeerDetailed === 'function'
-                  ? (agent as any).syncSharedMemoryFromPeerDetailed(candidate, [cgId])
-                  : agent.syncSharedMemoryFromPeer(candidate, [cgId]).then(swmCatchupResultFromInserted),
+              const syncExecution = await withTimeout(
+                selectedPublicCatalog
+                  ? agent.syncSelectedSharedMemoryFromPeerDetailed(candidate, [cgId], {
+                      selectedSwmPriority: true,
+                      requestedScope: {
+                        kind: 'selected-public',
+                        targets: [{ contextGraphId: cgId, lane: 'selected-public' }],
+                      },
+                      source: 'catchup-foreground',
+                    })
+                  : typeof (agent as any).syncSharedMemoryFromPeerDetailed === 'function'
+                    ? (agent as any).syncSharedMemoryFromPeerDetailed(candidate, [cgId])
+                    : agent.syncSharedMemoryFromPeer(candidate, [cgId]).then(swmCatchupResultFromInserted),
                 PER_PEER_SWM_BUDGET_MS,
                 `SWM catchup from ${candidate} for ${cgId}`,
-              ) as SwmCatchupDetailedResult;
+              );
+              // Selected recovery has a typed terminal wrapper; the route's
+              // existing accounting consumes the underlying SWM diagnostics.
+              const syncResult = (selectedPublicCatalog
+                ? (syncExecution as Awaited<ReturnType<typeof agent.syncSelectedSharedMemoryFromPeerDetailed>>).shared
+                : syncExecution) as SwmCatchupDetailedResult;
               swm = Number(syncResult.insertedTriples ?? 0);
-              swmCatchupPeerSelector.record(
+              recordSwmCatchupPeerOutcome(
                 cgId,
                 candidate,
-                classifySwmCatchupPeerOutcome(swmCatchupOutcomeInput({ ...syncResult, insertedTriples: swm })),
+                { ...syncResult, insertedTriples: swm },
               );
             } catch (err: any) {
               swmError = err?.message ?? String(err);
-              swmCatchupPeerSelector.record(
+              recordSwmCatchupPeerOutcome(
                 cgId,
                 candidate,
-                classifySwmCatchupPeerOutcome(swmCatchupOutcomeInput({ insertedTriples: 0 }, swmError)),
+                { insertedTriples: 0 },
+                swmError,
               );
             }
           }
-          if (durableSelected.has(candidate)) {
-            try {
-              durable = await withTimeout(
-                (agent as any).syncFromPeer?.(candidate, [cgId]) ?? Promise.resolve(0),
-                PER_PEER_DURABLE_BUDGET_MS,
-                `Durable catchup from ${candidate} for ${cgId}`,
-              );
-            } catch (err: any) {
-              durableError = err?.message ?? String(err);
-            }
+          if (durableSelected.has(candidate) && !coordinatedDurablePromise) {
+            // The helper owns one outer deadline for fetch, verification, and
+            // authentication. Its AbortSignal prevents entry into later commit
+            // boundaries; an already-started atomic commit gets a bounded
+            // settlement grace, after which the response is explicitly
+            // indeterminate instead of hanging or claiming a false outcome.
+            const durableLeg = await runDurableCatchupLeg(
+              agent,
+              candidate,
+              cgId,
+              PER_PEER_DURABLE_BUDGET_MS,
+            );
+            durable = durableLeg.insertedTriples;
+            durableState = durableLeg.state;
+            durableDiagnostics = durableLeg.diagnostics;
+            durableComplete = durableLeg.complete;
+            durableFailureReasons = durableLeg.failureReasons;
+            durableError = formatDurableCatchupFailure(durableFailureReasons);
           }
-          return { peerId: candidate, insertedTriples: swm, durableInsertedTriples: durable, swmError, durableError } as PerPeerLeg;
+          return {
+            peerId: candidate,
+            insertedTriples: swm,
+            durableInsertedTriples: durable,
+            durableState,
+            durableComplete,
+            durableDiagnostics,
+            swmError,
+            durableError,
+          } as PerPeerLeg;
         }),
       );
       const perPeer: PerPeerLeg[] = settled.map((s, idx) => {
         if (s.status === 'fulfilled') {
           return {
-            peerId: selectedPeers[idx],
+            peerId: directSelectedPeers[idx],
             insertedTriples: s.value.insertedTriples,
             durableInsertedTriples: s.value.durableInsertedTriples,
+            ...(s.value.durableState ? { durableState: s.value.durableState } : {}),
+            ...(s.value.durableComplete !== undefined ? { durableComplete: s.value.durableComplete } : {}),
+            ...(s.value.durableDiagnostics ? { durableDiagnostics: s.value.durableDiagnostics } : {}),
             ...(s.value.swmError ? { swmError: s.value.swmError } : {}),
             ...(s.value.durableError ? { durableError: s.value.durableError } : {}),
           };
         }
         return {
-          peerId: selectedPeers[idx],
+          peerId: directSelectedPeers[idx],
           insertedTriples: 0,
           durableInsertedTriples: 0,
           error: s.reason?.message ?? String(s.reason),
         };
       });
+      let durableAttempts: DurableCatchupAttempt[] | undefined;
+      let coordinatedDurableInsertedTriples: number | undefined;
+      if (coordinatedDurablePromise) {
+        try {
+          const recovery = await coordinatedDurablePromise;
+          const aggregate = summarizeDurableLeg(recovery.result);
+          const aggregateError = formatDurableCatchupFailure(aggregate.failureReasons);
+          durableAttempts = [{
+            durableState: aggregate.state,
+            durableComplete: aggregate.complete,
+            ...(aggregateError ? { durableError: aggregateError } : {}),
+          }];
+          coordinatedDurableInsertedTriples = aggregate.insertedTriples;
+
+          // Keep peer attribution for operators, but classify completion and
+          // count totals from the graph-level aggregate exactly once.
+          const attributableResults = recovery.peerResults.length > 0
+            ? recovery.peerResults
+            : [{
+                peerId: recovery.peerId ?? durableSelectedPeers[0],
+                result: recovery.result,
+              }];
+          for (const peerResult of attributableResults) {
+            const summary = summarizeDurableLeg(peerResult.result);
+            const durableError = formatDurableCatchupFailure(summary.failureReasons);
+            const existing = perPeer.find((entry) => entry.peerId === peerResult.peerId);
+            const durableFields = {
+              durableInsertedTriples: summary.insertedTriples,
+              durableState: summary.state,
+              durableComplete: summary.complete,
+              durableDiagnostics: summary.diagnostics,
+              ...(durableError ? { durableError } : {}),
+            };
+            if (existing) {
+              Object.assign(existing, durableFields);
+            } else {
+              perPeer.push({
+                peerId: peerResult.peerId,
+                insertedTriples: 0,
+                ...durableFields,
+              });
+            }
+          }
+        } catch (err: any) {
+          const error = err?.message ?? String(err);
+          durableAttempts = [{ durableState: 'failed', durableComplete: false, durableError: error }];
+          coordinatedDurableInsertedTriples = 0;
+          const peerId = durableSelectedPeers[0];
+          const existing = perPeer.find((entry) => entry.peerId === peerId);
+          if (existing) {
+            existing.durableState = 'failed';
+            existing.durableComplete = false;
+            existing.durableError = error;
+          } else {
+            perPeer.push({
+              peerId,
+              insertedTriples: 0,
+              durableInsertedTriples: 0,
+              durableState: 'failed',
+              durableComplete: false,
+              durableError: error,
+            });
+          }
+        }
+      }
       perCgLegs.push({
         contextGraphId: cgId,
         perPeer,
+        ...(selectedPublicCatalog ? { selectedPublicCatalog: true } : {}),
+        ...(durableAttempts ? { durableAttempts } : {}),
         insertedTriples: perPeer.reduce((sum, p) => sum + p.insertedTriples, 0),
-        durableInsertedTriples: perPeer.reduce((sum, p) => sum + (p.durableInsertedTriples ?? 0), 0),
+        durableInsertedTriples: coordinatedDurableInsertedTriples
+          ?? perPeer.reduce((sum, p) => sum + (p.durableInsertedTriples ?? 0), 0),
       });
     }
 
@@ -933,7 +1000,7 @@ WHERE {
     //  - The host-catchup leg has its own internal time budget
     //    (sendReliable + a few rounds per peer); CGs are processed
     //    serially to keep wire load low.
-    const hostCatchupOpted = parsed.hostCatchupFallback !== false;
+    const hostCatchupOpted = includeSharedMemory && parsed.hostCatchupFallback !== false;
     const hostCatchupSupported = typeof (agent as any).catchupSwmFromConnectedHosts === 'function';
     type HostCatchupLeg = {
       contextGraphId: string;
@@ -947,7 +1014,7 @@ WHERE {
     const hostCatchup: HostCatchupLeg[] = [];
     if (hostCatchupOpted && hostCatchupSupported) {
       for (const cg of perCgLegs) {
-        if (cg.insertedTriples > 0) continue;
+        if (cg.insertedTriples > 0 || cg.selectedPublicCatalog === true) continue;
         try {
           const peerResults = await (agent as any).catchupSwmFromConnectedHosts(cg.contextGraphId, {
             peers: peerIdParam ? [peerIdParam] : undefined,
@@ -1003,6 +1070,7 @@ WHERE {
       peerId: string;
       insertedTriples: number;
       durableInsertedTriples: number;
+      durableComplete?: boolean;
       swmError?: string;
       durableError?: string;
       otherErrors?: string[];
@@ -1012,6 +1080,11 @@ WHERE {
         const entry = perPeerAggregate.get(p.peerId) ?? { peerId: p.peerId, insertedTriples: 0, durableInsertedTriples: 0 };
         entry.insertedTriples += p.insertedTriples;
         entry.durableInsertedTriples += p.durableInsertedTriples;
+        if (p.durableComplete !== undefined) {
+          entry.durableComplete = entry.durableComplete === undefined
+            ? p.durableComplete
+            : entry.durableComplete && p.durableComplete;
+        }
         if (p.swmError && !entry.swmError) entry.swmError = p.swmError;
         if (p.durableError && !entry.durableError) entry.durableError = p.durableError;
         if (p.error) entry.otherErrors = [...(entry.otherErrors ?? []), p.error];
@@ -1022,25 +1095,47 @@ WHERE {
       peerId: r.peerId,
       insertedTriples: r.insertedTriples,
       durableInsertedTriples: r.durableInsertedTriples,
+      ...(r.durableComplete !== undefined ? { durableComplete: r.durableComplete } : {}),
       ...(r.swmError ? { swmError: r.swmError } : {}),
       ...(r.durableError ? { durableError: r.durableError } : {}),
       ...(r.otherErrors && r.otherErrors.length > 0 ? { errors: r.otherErrors } : {}),
     }));
 
-    return jsonResponse(res, 200, {
+    // A durable-only operator request must not look successful until every
+    // detailed attempt reaches a terminal sync result. Preserve HTTP 200 for
+    // safely committed/checkpointed prefixes, but make the body explicitly
+    // retryable and `ok:false`; callers that only inspect `ok` must not confuse
+    // useful partial progress with completed catch-up. Keep mixed SWM+durable
+    // responses backward-compatible, and reserve 503 for the unambiguous case
+    // where every durable-only attempt failed without a usable result.
+    const durableOutcome = classifyDurableCatchupRequest(
+      perCgLegs.map((cg) => cg.durableAttempts ?? cg.perPeer),
+      includeDurable,
+      includeSharedMemory,
+    );
+
+    return jsonResponse(res, durableOutcome.responseStatus, {
+      ok: !durableOutcome.allPeersFailed && !durableOutcome.incomplete,
+      ...(durableOutcome.errorBody ?? {}),
       contextGraphIds: cgIds,
       peersAttempted: perPeerAggregate.size,
+      includeSharedMemory,
       includeDurable,
+      ...(durableOutcome.complete !== undefined ? { durableComplete: durableOutcome.complete } : {}),
       totalInsertedTriples: totalInserted,
       totalDurableInsertedTriples: totalDurable,
       standardInsertedTriples: standardInserted,
       results,
-      perContextGraph: perCgLegs.map((cg) => ({
-        contextGraphId: cg.contextGraphId,
-        insertedTriples: cg.insertedTriples,
-        durableInsertedTriples: cg.durableInsertedTriples,
-        perPeer: cg.perPeer,
-      })),
+      perContextGraph: perCgLegs.map((cg, index) => {
+        const durableComplete = durableOutcome.perContextGraphCompletion[index];
+        return {
+          contextGraphId: cg.contextGraphId,
+          insertedTriples: cg.insertedTriples,
+          durableInsertedTriples: cg.durableInsertedTriples,
+          ...(durableComplete !== undefined ? { durableComplete } : {}),
+          perPeer: cg.perPeer.map(({ durableState: _durableState, ...peer }) => peer),
+        };
+      }),
       hostCatchup: hostCatchupOpted ? {
         ranFallback: hostCatchup.length > 0,
         triggeredForContextGraphIds: hostCatchup.map((h) => h.contextGraphId),
@@ -1054,56 +1149,8 @@ WHERE {
     });
   }
 
-  // OT-RFC-38 LU-6 -- dedicated host-catchup endpoint.
-  //
-  // POST /api/shared-memory/host-catchup
-  // Body: { contextGraphId: string, peerId?: string, sinceSeqno?: number, maxRounds?: number }
-  //
-  // Pulls opaque ciphertext envelopes from cores that have been
-  // hosting the curated CG's SWM substrate and re-applies each
-  // through the local agent so the existing Sender-Key decrypt
-  // path runs verbatim. Distinct from the "fallback" leg embedded
-  // in /catchup above -- exposed so operators can debug host
-  // hosting independently (e.g. to confirm a specific core has
-  // stored ciphertext for a CG).
-  if (req.method === 'POST' && path === '/api/shared-memory/host-catchup') {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = safeParseJson(body, res);
-    if (!parsed) return;
-    if (typeof parsed.contextGraphId !== 'string' || !parsed.contextGraphId.trim()) {
-      return jsonResponse(res, 400, { error: 'Missing or invalid "contextGraphId"' });
-    }
-    const cgId = parsed.contextGraphId.trim();
-    const peerIdParam = typeof parsed.peerId === 'string' ? parsed.peerId.trim() : undefined;
-    const sinceSeqno = typeof parsed.sinceSeqno === 'number' && parsed.sinceSeqno >= 0 ? Math.floor(parsed.sinceSeqno) : 0;
-    const maxRounds = typeof parsed.maxRounds === 'number' && parsed.maxRounds > 0 ? Math.min(64, Math.floor(parsed.maxRounds)) : 8;
-    if (typeof (agent as any).catchupSwmFromConnectedHosts !== 'function') {
-      return jsonResponse(res, 501, { error: 'Host-catchup is not supported on this agent build' });
-    }
-    try {
-      const peerResults = await (agent as any).catchupSwmFromConnectedHosts(cgId, {
-        peers: peerIdParam ? [peerIdParam] : undefined,
-        sinceSeqno,
-        maxRounds,
-      });
-      // Codex PR #610 R2: report triples (`appliedTriples`) as the
-      // user-facing total; keep envelope count alongside as
-      // `appliedEnvelopes` for diagnostics. Same fix as the
-      // `/catchup` fallback leg above.
-      const appliedTotal = peerResults.reduce((sum: number, r: any) => sum + (r.appliedTriples ?? 0), 0);
-      const appliedEnvelopes = peerResults.reduce((sum: number, r: any) => sum + (r.applied ?? 0), 0);
-      const fetchedTotal = peerResults.reduce((sum: number, r: any) => sum + (r.fetched ?? 0), 0);
-      return jsonResponse(res, 200, {
-        contextGraphId: cgId,
-        peers: peerResults,
-        appliedTotal,
-        appliedEnvelopes,
-        fetchedTotal,
-      });
-    } catch (err: any) {
-      return jsonResponse(res, 500, { error: err?.message ?? String(err) });
-    }
-  }
+  // OT-RFC-38 LU-6 -- POST /api/shared-memory/host-catchup (see the module for the contract).
+  if (await handleSharedMemoryHostCatchupRoute(ctx)) return;
 
   // OT-RFC-38 LU-6 -- host-mode store diagnostics.
   // GET /api/shared-memory/host-mode/stats
@@ -1607,6 +1654,10 @@ WHERE {
       if (err?.code === "OVERSIZED_RDF_LITERAL") {
         return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(err));
       }
+      // A sub-graph neither this node nor the graph's peers hold (#3293).
+      if (err?.code === SUB_GRAPH_NOT_FOUND_CODE) {
+        return jsonResponse(res, 400, { code: err.code, error: err.message });
+      }
       return jsonResponse(res, 500, { error: `Failed to write turn to ${targetLayer}: ${err.message}` });
     }
     emitMemoryGraphChanged?.({
@@ -1630,6 +1681,7 @@ WHERE {
           entityUri: turnUri,
           contextGraphId: resolvedContextGraphId,
           memoryLayer: targetLayer,
+          agentAddress: actor.effectiveAgentAddress,
           model: embeddingProvider.model,
           snippet,
           label: extractResult.subjectIri,
@@ -1671,7 +1723,8 @@ WHERE {
     }
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
 
-    const resultLimit = typeof rawLimit === 'number' && rawLimit > 0 ? Math.min(rawLimit, 100) : 20;
+    const resultLimit = typeof rawLimit === 'number' && Number.isFinite(rawLimit) && rawLimit > 0
+      ? Math.max(1, Math.min(Math.floor(rawLimit), 100)) : 20;
     const requestedLayers = Array.isArray(parsed.memoryLayers)
       ? parsed.memoryLayers
       : ['wm', 'swm', 'vm'];
@@ -1681,122 +1734,60 @@ WHERE {
     }
     const memoryLayers = [...new Set(requestedLayers)] as Array<'wm' | 'swm' | 'vm'>;
 
-    const results: Array<{
-      entityUri: string;
-      label: string | null;
-      sources: string[];
-      similarity: number | null;
-      sourceFile: string | null;
-      snippet: string | null;
-      memoryLayer: string | null;
-    }> = [];
-    const seen = new Map<string, number>();
-
-    // Fan-out 1: Vector search
-    if (embeddingProvider) {
-      try {
-        const queryEmbedding = await embeddingProvider.embed(query);
-        const vectorResults = await vectorStore.search(queryEmbedding, {
-          contextGraphId,
-          memoryLayers,
-          limit: resultLimit,
-          minSimilarity: 0.3,
-        });
-        for (const vr of vectorResults) {
-          const idx = results.length;
-          seen.set(vr.entityUri, idx);
-          results.push({
-            entityUri: vr.entityUri,
-            label: vr.label,
-            sources: ['vector'],
-            similarity: Math.round(vr.similarity * 1000) / 1000,
-            sourceFile: vr.sourceUri,
-            snippet: vr.snippet,
-            memoryLayer: vr.memoryLayer,
-          });
-        }
-      } catch {
-        // Vector search failure is non-fatal
+    // ── Read authority ────────────────────────────────────────────────
+    // `contextGraphId` arrives from the request body and
+    // `validateRequiredContextGraphId` only checks its SHAPE, so without this
+    // gate any holder of a valid token — including an agent-scoped token whose
+    // agent is in no roster for this CG — could name a private context graph
+    // and have both fan-outs below serve its content back:
+    //
+    //   - fan-out 1 queries the vector store, whose rows are filtered by
+    //     `context_graph_id` in SQL (see `VectorStore.search`) — so the CG the
+    //     caller names IS the CG whose embeddings, labels and snippets are
+    //     ranked and returned,
+    //   - fan-out 2 queries the memory-layer views for that CG. It now runs
+    //     through `DKGAgent.query`, which applies its own
+    //     `canReadContextGraph` check — but that check resolves per VIEW
+    //     call and returns an empty result rather than a status, so the
+    //     explicit gate here is what turns a refusal into a 403 and what
+    //     also covers the vector fan-out above.
+    //
+    // This resolves the FULL authority decision rather than the
+    // `canReadContextGraph` boolean, because the boolean collapses three
+    // outcomes into two and loses the one fact an agent-scoped caller needs:
+    // WHY the read was allowed.
+    const callerAgentAddress = actor.authenticatedAgentAddress;
+    const isNodeAdmin = authentication.principal.kind === 'nodeOperator';
+    if (!(await requireContextGraphReadAuthority(ctx, contextGraphId, CG_AUTH_RPC_SITES.memorySearch))) return;
+    const unavailableLayers: Array<{ layer: 'swm'; reason: 'read-authority' }> = [];
+    if (!isNodeAdmin) {
+      // Shared memory carries a SECOND gate. `DKGAgent.query` requires
+      // `canUseSharedMemoryForContextGraph` — which additionally demands
+      // confirmed SWM metadata — for any shared-memory-targeting read
+      // (`dkg-agent-query.ts`). Reading `_shared_memory` graphs under
+      // `canReadContextGraph` alone would leave this route measurably more
+      // permissive than `/api/query` for that layer. Drop the layer rather
+      // than failing the whole request: that matches the engine's own
+      // empty-result semantics for an SWM denial, and the other requested
+      // layers remain legitimately readable.
+      if (
+        memoryLayers.includes('swm')
+        && !(await agent.canUseSharedMemoryForContextGraph(contextGraphId, { callerAgentAddress }))
+      ) {
+        const idx = memoryLayers.indexOf('swm');
+        if (idx >= 0) memoryLayers.splice(idx, 1);
+        unavailableLayers.push({ layer: 'swm', reason: 'read-authority' });
       }
     }
 
-    // Fan-out 2: SPARQL text search (scoped to the requested CG + layers).
-    // escapeSparqlLiteral escapes backslashes, quotes, and CR/LF/TAB per the
-    // SPARQL STRING_LITERAL2 grammar -- a simple `replace(/"/g, '\\"')` would
-    // still allow `\` to escape the closing quote and break out of the literal.
-    const escapedQuery = escapeSparqlLiteral(query.toLowerCase());
-    const cgUri = `did:dkg:context-graph:${contextGraphId}`;
-    const graphFilters = memoryLayers.map((l) => {
-      if (l === 'wm') {
-        return `(STRSTARTS(STR(?g), "${cgUri}/_working_memory") || STRSTARTS(STR(?g), "${cgUri}/assertion/"))`;
-      }
-      if (l === 'swm') return `STRSTARTS(STR(?g), "${cgUri}/_shared_memory")`;
-      // #1096: VM graphs live under `/_verifiable_memory/<id>` (see
-      // contextGraphVerifiableMemoryUri in dkg-core). The pre-rc.16
-      // "_verified" prefix matched nothing, so memory layer "vm" could
-      // never return SPARQL hits.
-      return `STRSTARTS(STR(?g), "${cgUri}/_verifiable_memory")`;
-    }).join(' || ') || 'false';
-    try {
-      // #1096: accept both http:// and https:// schema.org forms -- real
-      // payloads overwhelmingly use https://schema.org, which the previous
-      // http-only property path silently excluded.
-      const sparqlResult = await agent.store.query(`
-        SELECT DISTINCT ?entity ?name ?desc WHERE {
-          GRAPH ?g {
-            ?entity <http://schema.org/name>|<https://schema.org/name>|<http://www.w3.org/2000/01/rdf-schema#label> ?name .
-            OPTIONAL { ?entity <http://schema.org/description>|<https://schema.org/description> ?desc }
-          }
-          FILTER(${graphFilters})
-          FILTER(
-            CONTAINS(LCASE(STR(?name)), "${escapedQuery}")
-            || (BOUND(?desc) && CONTAINS(LCASE(STR(?desc)), "${escapedQuery}"))
-          )
-        }
-        LIMIT ${resultLimit}
-      `);
-      if (sparqlResult.type === 'bindings') {
-        for (const binding of sparqlResult.bindings) {
-          const uri = binding.entity;
-          const label = binding.name ?? null;
-          const snippet = binding.desc ?? null;
-          if (seen.has(uri)) {
-            const idx = seen.get(uri)!;
-            if (!results[idx].sources.includes('sparql')) {
-              results[idx].sources.push('sparql');
-            }
-          } else {
-            const idx = results.length;
-            seen.set(uri, idx);
-            results.push({
-              entityUri: uri,
-              label,
-              sources: ['sparql'],
-              similarity: null,
-              sourceFile: null,
-              snippet,
-              memoryLayer: null,
-            });
-          }
-        }
-      }
-    } catch {
-      // SPARQL search failure is non-fatal
-    }
-
-    // Sort: vector-matched results first (by similarity), then SPARQL-only
-    results.sort((a, b) => {
-      if (a.similarity !== null && b.similarity !== null) return b.similarity - a.similarity;
-      if (a.similarity !== null) return -1;
-      if (b.similarity !== null) return 1;
-      return 0;
-    });
+    const results = await retrieveMemorySearch(ctx, actor, { query, contextGraphId, memoryLayers, resultLimit });
 
     return jsonResponse(res, 200, {
       query,
       contextGraphId,
       resultCount: results.length,
-      results: results.slice(0, resultLimit),
+      results,
+      unavailableLayers,
     });
   }
 

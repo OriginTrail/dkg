@@ -15,11 +15,16 @@ import {
   AggregationTemporality,
 } from '@opentelemetry/sdk-metrics';
 import { rebuildMetrics } from '@origintrail-official/dkg-core';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
+import type { SyncResponderSnapshotBudgetOptions } from '../src/sync/responder/snapshot-budget.js';
 
 const noop = () => {};
 
-function captureHandler(): (data: Uint8Array, peerId: string) => Promise<Uint8Array> {
+function captureHandler(options: {
+  store?: OxigraphStore;
+  snapshotBudget?: SyncResponderSnapshotBudgetOptions;
+} = {}): (data: Uint8Array, peerId: string) => Promise<Uint8Array> {
   let captured: ((data: Uint8Array, peerId: string, options?: { signal?: AbortSignal }) => Promise<Uint8Array>) | null = null;
   registerSyncHandler({
     register: (_proto: string, handler: any) => { captured = handler; },
@@ -27,12 +32,13 @@ function captureHandler(): (data: Uint8Array, peerId: string) => Promise<Uint8Ar
     syncDeniedResponse: 'sync-denied',
     syncPageSize: 500,
     sharedMemoryTtlMs: 0,
-    store: {} as any, // never touched on the missing-contextGraphId early-return path
+    store: options.store ?? ({} as any), // untouched on malformed-request paths
     peerId: 'self-peer',
     parseSyncRequest: (data: Uint8Array) => JSON.parse(new TextDecoder().decode(data)),
     authorizeSyncRequest: async () => true,
     logWarn: noop,
     logDebug: noop,
+    snapshotBudget: options.snapshotBudget,
   } as any);
   if (!captured) throw new Error('handler not registered');
   return (data, peerId) => captured!(data, peerId, {});
@@ -92,5 +98,55 @@ describe('sync responder metrics — every path records an outcome', () => {
             for (const dp of m.dataPoints as Array<{ attributes: Record<string, unknown>; value: number }>)
               counts[String(dp.attributes.outcome)] = (counts[String(dp.attributes.outcome)] ?? 0) + dp.value;
     expect(counts['invalid'] ?? 0).toBeGreaterThanOrEqual(1);
+  });
+
+  it('keeps budget pressure on the quiet retryable limit path across same-token retries', async () => {
+    exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+    mp = new MeterProvider({ readers: [new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: 60_000 })] });
+    metrics.setGlobalMeterProvider(mp);
+    rebuildMetrics();
+
+    const store = new OxigraphStore();
+    const contextGraphId = 'budget-limit-metrics';
+    await store.insert([{
+      subject: 'urn:budget:s',
+      predicate: 'urn:budget:p',
+      object: '"budget"',
+      graph: `did:dkg:context-graph:${contextGraphId}/data`,
+    }]);
+    const invoke = captureHandler({
+      store,
+      snapshotBudget: {
+        maxRows: 0,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 10,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const request = new TextEncoder().encode(JSON.stringify({
+      contextGraphId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 10,
+      syncSessionId: 'same-budget-token',
+    }));
+
+    await expect(invoke(request, 'remote-peer')).rejects.toMatchObject({
+      name: 'QuietRetryableHandlerError',
+    });
+    await expect(invoke(request, 'remote-peer')).rejects.toMatchObject({
+      name: 'QuietRetryableHandlerError',
+    });
+
+    await mp.forceFlush();
+    let limitCount = 0;
+    for (const rm of exporter.getMetrics())
+      for (const sm of rm.scopeMetrics)
+        for (const metric of sm.metrics)
+          if (metric.descriptor.name === 'dkg.sync.response.total')
+            for (const point of metric.dataPoints as Array<{ attributes: Record<string, unknown>; value: number }>)
+              if (point.attributes.outcome === 'limit') limitCount += point.value;
+    expect(limitCount).toBeGreaterThanOrEqual(2);
   });
 });

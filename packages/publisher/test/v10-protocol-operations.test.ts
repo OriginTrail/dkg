@@ -19,6 +19,7 @@ import {
   decodeStorageACK,
   isStorageACKDecline,
   STORAGE_ACK_DECLINE_CODES,
+  STORAGE_ACK_MAX_STAGING_BYTES,
 } from '@origintrail-official/dkg-core';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
@@ -631,7 +632,7 @@ describe('V10 ACK Edge Cases', () => {
     expect(decoded.stagingQuads!.length).toBe(stagingBytes.length);
   });
 
-  it('stagingQuads omitted for publishFromSharedMemory (SWM-verified path)', () => {
+  it('stagingQuads can be omitted for the SWM-verified fallback path', () => {
     const intent = encodePublishIntent({
       merkleRoot,
       contextGraphId,
@@ -657,9 +658,9 @@ describe('V10 ACK Edge Cases', () => {
     expect(ethers.hexlify(inMemoryRoot)).toBe(ethers.hexlify(expectedRoot));
   });
 
-  it('rejects staging quads exceeding 4MB limit', async () => {
-    const oversizedBytes = new Uint8Array(4 * 1024 * 1024 + 1);
-    expect(oversizedBytes.length).toBeGreaterThan(4 * 1024 * 1024);
+  it('rejects staging quads exceeding the shared StorageACK staging limit', async () => {
+    const oversizedBytes = new Uint8Array(STORAGE_ACK_MAX_STAGING_BYTES + 1);
+    expect(oversizedBytes.length).toBeGreaterThan(STORAGE_ACK_MAX_STAGING_BYTES);
 
     const config: StorageACKHandlerConfig = {
       nodeRole: 'core',
@@ -997,8 +998,8 @@ describe('V10 StorageACKHandler round-trip', () => {
     expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.NO_DATA_IN_SWM);
   });
 
-  it('handler rejects stagingQuads > 4MB', async () => {
-    const oversized = new Uint8Array(4 * 1024 * 1024 + 1).fill(0x41);
+  it('handler rejects stagingQuads over the shared StorageACK staging limit', async () => {
+    const oversized = new Uint8Array(STORAGE_ACK_MAX_STAGING_BYTES + 1).fill(0x41);
     const handler = createHandler(createRecordingStore([]));
 
     const intent = encodePublishIntent({

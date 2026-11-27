@@ -186,8 +186,8 @@ while [ "$(node -e 'process.stdout.write(String(Math.floor(Date.now()/1000)))')"
       if run_timed 240 "$REPO_ROOT/scripts/devnet-test-cli-invite.sh" >>"$LOG" 2>&1; then INVITED=$((INVITED+1)); else log "  invite flow failed (isolated)"; ERRORS=$((ERRORS+1)); fi
     fi
     if [ -z "${SOAK_NO_STAKE:-}" ]; then
-      log "periodic: staking lifecycle (conviction-lazy-settle)"
-      if ( cd "$REPO_ROOT" && pnpm test:devnet:conviction-lazy-settle ) >>"$LOG" 2>&1; then STAKED=$((STAKED+1)); else log "  staking lifecycle failed (isolated)"; ERRORS=$((ERRORS+1)); fi
+      log "periodic: conviction emission (conviction-emission-bell)"
+      if ( cd "$REPO_ROOT" && pnpm test:devnet:conviction-emission-bell ) >>"$LOG" 2>&1; then STAKED=$((STAKED+1)); else log "  conviction emission failed (isolated)"; ERRORS=$((ERRORS+1)); fi
     fi
   fi
 

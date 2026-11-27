@@ -1,45 +1,123 @@
+import { boundGraphInventory, filterGraphInventory, measureGraphInventory, readCompleteGraphInventory, readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
+import { graphCatalogFlightKey } from './graph-catalog-flight-key.js';
+import { assertGraphCatalogWithinInternalLimit, internalCatalogReadOptions, isStoreInternalLimitError, readCompleteGraphCatalog } from './graph-catalog-internal-limit.js';
+import { graphCatalogRefreshKind, recordGraphCatalogSize, timeGraphCatalogRefresh } from './graph-catalog-metrics.js';
+import { composeGraphEnumerationVisibility, isStorageHiddenGraph } from './graph-enumeration-visibility.js';
+import { namedGraphsFromQuads, endsWithHighSurrogate, normalizeGraphUris, queryOptionsFromUpdateOptions } from "./graph-set-index-utils.js";
+import type { AtomicAssetReplacement } from './atomic-asset-group.js';
+import type { GraphSetMutationSource, TouchedGraphMutationSource, GraphSetRefreshSource, PendingFullRefreshSource, GraphSetMutationEvent, GraphSetDiagnosticEvent } from './graph-set-index-types.js';
+export type { GraphSetMutationSource, GraphSetMutationEvent } from './graph-set-index-types.js';
+import { assertSubjectAndInsertPayload } from './atomic-subject-insert.js';
 import { performance } from 'node:perf_hooks';
-import type { Quad, QueryOptions, QueryResult, TripleStore } from './triple-store.js';
+import {
+  codePointLowerBound,
+  createSortedUniqueStringCatalog,
+  isSparqlUpdateOperation,
+  type SortedUniqueStringCatalog,
+} from '@origintrail-official/dkg-core';
+import type {
+  Quad,
+  QueryOptions,
+  QueryResult,
+  StorePressureSnapshot,
+  StoreWorkPriority,
+  TripleStore,
+  TripleStoreDecorator,
+  UpdateOptions,
+} from './triple-store.js';
+import { deleteByPatternWithoutCount, runLogicalStoreMutation } from './triple-store.js';
+import { RefreshCoordinator, type RefreshFlight } from './graph-set-refresh-coordinator.js';
+import {
+  UnsupportedTripleStoreCapabilityError,
+} from './unsupported-capability-error.js';
+import { GraphSetCatalogState } from './graph-set-catalog-state.js';
+import type {
+  Rfc64AuthorCommitCasInputV1,
+  Rfc64AuthorCommitCasResultV1,
+} from './rfc64-author-commit-cas.js';
+import {
+  normalizeRfc64AuthorCommitCasV1,
+  sourceFromNormalizedRfc64AuthorCommitCasV1,
+} from './rfc64-author-commit-cas.js';
+import { isStoreOperationNotStarted } from './store-operation-outcome.js';
+import { raceStoreWorkAgainstAbort } from './abortable-store-work-lifecycle.js';
+import { assertGraphCatalogWithinResponseLimit } from './graph-catalog-response-limit.js';
+import { BackgroundGraphSetRevalidation, graphSetRevalidationDelayMs, readsCurrentGraphCatalog, type GraphSetRevalidation } from './graph-set-refresh.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
-
-export type GraphSetMutationSource =
-  | 'seed'
-  | 'revalidate'
-  | 'insert'
-  | 'delete'
-  | 'deleteByPattern'
-  | 'deleteBySubjectPrefix'
-  | 'dropGraph'
-  | 'query';
-
-type GraphSetRefreshSource = 'seed' | 'revalidate' | 'deleteByPattern' | 'query' | 'update';
-
-export type GraphSetMutationEvent =
-  | {
-      type: 'graph-added';
-      graph: string;
-      source: GraphSetMutationSource;
-    }
-  | {
-      type: 'graph-removed';
-      graph: string;
-      source: GraphSetMutationSource;
-    }
-  | {
-      type: 'graph-set-revalidated';
-      added: string[];
-      removed: string[];
-      source: GraphSetRefreshSource;
-    };
+export const DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
+const MIN_GRAPH_SET_REVALIDATE_FAILURE_BACKOFF_MS = 1_000;
+// Max times a bounded hasGraph probe is repeated when a concurrent write bumps
+// the mutation generation, before falling back to one O(store) rebuild.
+const MAINTAIN_INDEX_MAX_PROBE_RETRIES = 4;
+// A warm catalog revalidates on the background lane, carrying no caller's options.
+const BACKGROUND_REVALIDATION: QueryOptions = { priority: 'background', source: 'graph-set-index.revalidate' };
 
 export interface GraphSetIndexStoreOptions {
   enabled?: boolean;
-  /** Revalidate after this interval. Use 0 to revalidate on every read. */
+  /**
+   * Revalidate after this interval, or after twenty times the last refresh
+   * when that is longer. Use 0 to revalidate on every read, blocking.
+   */
   revalidateMs?: number;
+  /**
+   * How a warm catalog revalidates once it is due: `blocking` (the default)
+   * makes the caller that finds it due wait for the refresh; `background`
+   * answers callers from it while one background flight refreshes it. A
+   * warm answer can miss graphs written outside this index since the last
+   * refresh, and a node reading its own just-synced metadata must see it,
+   * so `background` is opt-in.
+   */
+  revalidate?: GraphSetRevalidation;
+  /**
+   * Initial retry delay after a failed warm periodic revalidation.
+   * Ignored when revalidateMs is 0.
+   */
+  revalidateFailureBackoffMs?: number;
+  /**
+   * Maximum exponential retry delay after failed warm periodic revalidations.
+   * Ignored when revalidateMs is 0.
+   */
+  revalidateFailureMaxBackoffMs?: number;
   now?: () => number;
   onMutation?: (event: GraphSetMutationEvent) => void;
 }
+
+/** Immutable graph catalog maintained in Unicode code-point order. */
+export interface SortedGraphSetSource {
+  listGraphsSorted(options?: QueryOptions): Promise<SortedGraphCatalog>;
+}
+
+export type SortedGraphCatalog = SortedUniqueStringCatalog;
+
+/**
+ * Load one immutable, unique, code-point-sorted catalog at the supplied store
+ * boundary. Capability discovery deliberately does not traverse decorators:
+ * an outer store may own graph-visibility semantics that its inner store does
+ * not, so only the supplied object may provide the sorted fast path.
+ */
+export async function loadSortedGraphCatalog(
+  store: TripleStore,
+  options?: QueryOptions,
+): Promise<SortedGraphCatalog> {
+  const sortedSource = typeof (store as Partial<SortedGraphSetSource>).listGraphsSorted
+    === 'function'
+    ? store as TripleStore & SortedGraphSetSource
+    : null;
+  const graphs = await readCompleteGraphCatalog(options, async internal => sortedSource
+    ? sortedSource.listGraphsSorted(internal)
+    : createSortedUniqueStringCatalog(await store.listGraphs(internal)));
+  // The ceiling bounds the list even if a store ignores byte options. The caller receives the complete
+  // list, so its own limit bounds that list too.
+  assertGraphCatalogWithinInternalLimit(graphs);
+  assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
+  return graphs;
+}
+
+/** Internal/test-only observation seam; intentionally absent from the package API. */
+type GraphSetIndexStoreInternalOptions = GraphSetIndexStoreOptions & {
+  onDiagnostic?: (event: GraphSetDiagnosticEvent) => void;
+};
 
 /**
  * Write-through named-graph index for stores whose `listGraphs()` implementation
@@ -47,68 +125,134 @@ export interface GraphSetIndexStoreOptions {
  * only graphs containing at least one quad are listed; empty `createGraph()`
  * calls are not visible until data is inserted.
  */
-export class GraphSetIndexStore implements TripleStore {
+export class GraphSetIndexStore implements TripleStoreDecorator {
   get queryCancellation() {
     return this.inner.queryCancellation;
   }
 
+  getPressureSnapshot(): StorePressureSnapshot | undefined {
+    return this.inner.getPressureSnapshot?.();
+  }
+
   private readonly inner: TripleStore;
+  readonly innerStore: TripleStore;
   private readonly enabled: boolean;
   private readonly revalidateMs: number;
+  private readonly revalidate: GraphSetRevalidation;
+  private readonly backgroundRevalidation = new BackgroundGraphSetRevalidation();
+  private readonly revalidateFailureBackoffMs: number;
+  private readonly revalidateFailureMaxBackoffMs: number;
   private readonly now: () => number;
   private readonly onMutation?: (event: GraphSetMutationEvent) => void;
+  private readonly onDiagnostic?: (event: GraphSetDiagnosticEvent) => void;
 
-  private graphs: Set<string> | null = null;
-  private validatedAt = 0;
+  private readonly catalog = new GraphSetCatalogState();
+  private nextRevalidateAt = 0;
+  /** When a current read next revalidates: `revalidateMs` after a refresh, without the cadence. */
+  private nextCurrentRevalidateAt = 0;
+  private revalidateFailureCount = 0;
   private mutationGeneration = 0;
-  private refreshInFlight: Promise<Set<string>> | null = null;
+  private readonly refreshCoordinator = new RefreshCoordinator<ReadonlySet<string>>();
+  /**
+   * Pending full rebuild requested by a mutation whose exact graph effects can't
+   * be applied incrementally. The stored source preserves the observer contract
+   * while deferring expensive full-store scans until the next graph read.
+   */
+  private pendingFullRefresh: PendingFullRefreshSource | null = null;
 
+  readonly graphEnumerationVisibility;
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
+    this.innerStore = inner;
+    this.graphEnumerationVisibility = composeGraphEnumerationVisibility(inner, graph => !isStorageHiddenGraph(graph));
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
+    this.revalidate = options.revalidate ?? 'blocking';
+    this.revalidateFailureBackoffMs = positiveFiniteMs(
+      options.revalidateFailureBackoffMs,
+      Math.max(MIN_GRAPH_SET_REVALIDATE_FAILURE_BACKOFF_MS, this.revalidateMs),
+    );
+    this.revalidateFailureMaxBackoffMs = Math.max(
+      this.revalidateFailureBackoffMs,
+      positiveFiniteMs(
+        options.revalidateFailureMaxBackoffMs,
+        DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS,
+      ),
+    );
     this.now = options.now ?? (() => performance.now());
     this.onMutation = options.onMutation;
+    this.onDiagnostic = (options as GraphSetIndexStoreInternalOptions).onDiagnostic;
   }
 
-  async insert(quads: Quad[]): Promise<void> {
-    if (!this.enabled) {
-      await this.inner.insert(quads);
-      return;
-    }
-    await this.inner.insert(quads);
-    const touched = namedGraphsFromQuads(quads);
-    if (touched.length === 0) return;
-    this.bumpMutation();
-    this.addGraphs(touched, 'insert');
+  async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
+    return runLogicalStoreMutation(this.inner, 'insert', options, async options => {
+      if (!this.enabled) {
+        await this.inner.insert(quads, options);
+        return;
+      }
+      await this.inner.insert(quads, options);
+      const touched = namedGraphsFromQuads(quads);
+      if (touched.length === 0) return;
+      this.bumpMutation();
+      this.addGraphs(touched, 'insert');
+    });
   }
 
-  async delete(quads: Quad[]): Promise<void> {
-    if (!this.enabled) {
-      await this.inner.delete(quads);
-      return;
-    }
-    await this.inner.delete(quads);
-    const touched = namedGraphsFromQuads(quads);
-    if (touched.length === 0) return;
-    this.bumpMutation();
-    await this.maintainIndex(() => this.refreshTouchedGraphs(touched, 'delete'));
+  async delete(quads: Quad[], options?: QueryOptions): Promise<void> {
+    return runLogicalStoreMutation(this.inner, 'delete', options, async options => {
+      if (!this.enabled) {
+        await this.inner.delete(quads, options);
+        return;
+      }
+      await this.inner.delete(quads, options);
+      const touched = namedGraphsFromQuads(quads);
+      if (touched.length === 0) return;
+      this.bumpMutation();
+      await this.maintainTouchedGraphs(touched, 'delete', options);
+    });
   }
 
-  async deleteByPattern(pattern: Partial<Quad>): Promise<number> {
-    if (!this.enabled) {
-      return this.inner.deleteByPattern(pattern);
-    }
-    const removed = await this.inner.deleteByPattern(pattern);
-    if (removed <= 0) return removed;
-    this.bumpMutation();
-    const graph = pattern.graph;
-    if (graph) {
-      await this.maintainIndex(() => this.refreshTouchedGraphs([graph], 'deleteByPattern'));
-    } else {
-      await this.maintainIndex(() => this.refreshIndex('deleteByPattern'));
-    }
-    return removed;
+  async deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number> {
+    return runLogicalStoreMutation(this.inner, 'deleteByPattern', options, async options => {
+      if (!this.enabled) {
+        return this.inner.deleteByPattern(pattern, options);
+      }
+      const removed = await this.inner.deleteByPattern(pattern, options);
+      if (removed <= 0) return removed;
+      const graph = pattern.graph;
+      if (graph) {
+        this.bumpMutation();
+        await this.maintainTouchedGraphs([graph], 'deleteByPattern', options);
+      } else {
+        // No target graph → can't know which graphs emptied; defer to a single
+        // lazy rebuild on the next read instead of a full scan now.
+        this.scheduleFullRefresh('deleteByPattern');
+      }
+      return removed;
+    });
+  }
+
+  async deleteByPatternWithoutCount(
+    pattern: Partial<Quad>,
+    options?: QueryOptions,
+  ): Promise<void> {
+    return runLogicalStoreMutation(this.inner, 'deleteByPattern', options, async options => {
+      if (!this.enabled) {
+        await deleteByPatternWithoutCount(this.inner, pattern, options);
+        return;
+      }
+      await deleteByPatternWithoutCount(this.inner, pattern, options);
+      const graph = pattern.graph;
+      if (graph) {
+        this.bumpMutation();
+        await this.maintainTouchedGraphs([graph], 'deleteByPattern', options);
+      } else {
+        // Without an exact count, conservatively invalidate even when the
+        // pattern may have matched no rows. This preserves graph membership
+        // correctness without reintroducing count-before/count-after scans.
+        this.scheduleFullRefresh('deleteByPattern');
+      }
+    });
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
@@ -116,41 +260,71 @@ export class GraphSetIndexStore implements TripleStore {
       return this.inner.query(sparql, options);
     }
     const result = await this.inner.query(sparql, options);
-    if (isSparqlUpdate(sparql)) {
-      this.bumpMutation();
-      if (this.graphs || this.refreshInFlight) {
-        await this.maintainIndex(() => this.refreshIndex('query'));
-      }
+    if (isSparqlUpdateOperation(sparql)) {
+      // A SPARQL UPDATE through query() may create/drop named graphs we can't
+      // derive incrementally — query() is the READ-path type and carries no
+      // index-maintenance hint (that lives on `update(…, UpdateOptions.touchedGraphs)`).
+      // Mark dirty for a single lazy rebuild on the next read instead of re-scanning
+      // the whole store now (the eager per-UPDATE scan thrashed large stores).
+      this.scheduleFullRefresh('query');
     }
     return result;
   }
 
-  async update(sparql: string): Promise<void> {
-    if (typeof this.inner.update !== 'function') {
-      throw new Error('GraphSetIndexStore: inner store does not support update()');
-    }
-    if (!this.enabled) {
-      await this.inner.update(sparql);
-      return;
-    }
-    await this.inner.update(sparql);
-    // A server-side SPARQL UPDATE (e.g. the RS heal's INSERT…WHERE) can create
-    // or drop named graphs that the index must learn about — without this a
-    // freshly-created scoped graph would be absent from listGraphs(). Same
-    // refresh-from-inner handling as an UPDATE routed through query() above.
-    this.bumpMutation();
-    if (this.graphs || this.refreshInFlight) {
-      await this.maintainIndex(() => this.refreshIndex('update'));
-    }
+  async update(sparql: string, options?: UpdateOptions): Promise<void> {
+    return runLogicalStoreMutation(this.inner, 'update', options, async scoped => {
+      const scopedUpdateOptions: UpdateOptions = { ...options, ...scoped };
+      if (typeof this.inner.update !== 'function') {
+        throw new UnsupportedTripleStoreCapabilityError('update', 'GraphSetIndexStore');
+      }
+      if (!this.enabled) {
+        await this.inner.update(sparql, scopedUpdateOptions);
+        return;
+      }
+      await this.inner.update(sparql, scopedUpdateOptions);
+      // A server-side SPARQL UPDATE (e.g. the RS heal's INSERT…WHERE) can create or
+      // drop named graphs the index must learn about. When the caller declares the
+      // touched graphs (#1549: RS-heal + agents-meta prune write statically-known
+      // URIs), maintain the index INCREMENTALLY — a bounded per-graph `hasGraph`
+      // (which correctly handles an ASK-guarded INSERT that matched zero rows) —
+      // instead of marking the whole index dirty. That keeps the index warm so
+      // graph enumeration stays O(1) rather than forcing a full store scan on the
+      // next read. Only opaque updates (no `touchedGraphs`) fall back to the lazy
+      // full rebuild.
+      if (scopedUpdateOptions?.touchedGraphs) {
+        // Normalize the caller-supplied hint once at the boundary (filter falsy +
+        // de-dupe), matching the `namedGraphsFromQuads` pattern — keeps the incremental
+        // path predictable and avoids repeated `hasGraph` calls on duplicates.
+        const touched = normalizeGraphUris(scopedUpdateOptions.touchedGraphs);
+        if (touched.length > 0) {
+          // Strip the update-only `touchedGraphs` hint before the maintenance READS
+          // (`hasGraph`) — it is meaningless on the read path and must not be smuggled
+          // through the `QueryOptions` boundary into read-path wrappers/diagnostics.
+          const readOptions = queryOptionsFromUpdateOptions(scopedUpdateOptions);
+          this.bumpMutation();
+          await this.maintainTouchedGraphs(touched, 'update', readOptions);
+          return;
+        }
+      }
+      this.scheduleFullRefresh('update');
+    });
   }
 
-  async hasGraph(graphUri: string): Promise<boolean> {
+  async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
+    if (isStorageHiddenGraph(graphUri)) return false;
     if (!this.enabled) {
-      return this.inner.hasGraph(graphUri);
+      return this.inner.hasGraph(graphUri, options);
     }
-    const hasGraph = await this.inner.hasGraph(graphUri);
-    const indexed = this.graphs?.has(graphUri);
-    if (this.graphs && indexed !== hasGraph) {
+    if (this.pendingFullRefresh) {
+      // A dirty catalog cannot answer presence, but the backend can. Do not
+      // make an exact probe wait for a full inventory scan under write load.
+      // Leave the dirty catalog and its mutation source for the next listing.
+      throwIfAborted(options?.signal);
+      return raceStoreWorkAgainstAbort(this.inner.hasGraph(graphUri, options), options?.signal);
+    }
+    const hasGraph = await this.inner.hasGraph(graphUri, options);
+    const indexed = this.catalog.has(graphUri);
+    if (this.catalog.initialized && indexed !== hasGraph) {
       this.bumpMutation();
       if (hasGraph) this.addGraphs([graphUri], 'revalidate');
       else this.removeGraphs([graphUri], 'revalidate');
@@ -162,91 +336,352 @@ export class GraphSetIndexStore implements TripleStore {
     await this.inner.createGraph(graphUri);
   }
 
-  async dropGraph(graphUri: string): Promise<void> {
+  async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
+    return runLogicalStoreMutation(this.inner, 'dropGraph', options, async options => {
+      if (!this.enabled) {
+        await this.inner.dropGraph(graphUri, options);
+        return;
+      }
+      await this.inner.dropGraph(graphUri, options);
+      this.bumpMutation();
+      this.removeGraphs([graphUri], 'dropGraph');
+    });
+  }
+
+  async replaceGraph(
+    graphUri: string,
+    quads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    return runLogicalStoreMutation(this.inner, 'replaceGraph', options, async options => {
+      if (typeof this.inner.replaceGraph !== 'function') {
+        throw new UnsupportedTripleStoreCapabilityError('replaceGraph', 'GraphSetIndexStore');
+      }
+      return this.runReplacementMutation('replaceGraph', [graphUri], options,
+        () => this.inner.replaceGraph!(graphUri, quads, options));
+    });
+  }
+
+  async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
+    return runLogicalStoreMutation(this.inner, 'replaceAssetGroup', options, async options => {
+      if (!this.inner.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'group-decorator');
+      try { await this.inner.replaceAssetGroup(assets, options); }
+      catch (error) {
+        if (!isStoreOperationNotStarted(error, 'replaceAssetGroup')) this.scheduleFullRefresh('replaceAssetGroup');
+        throw error;
+      }
+      if (!this.enabled) return;
+      this.bumpMutation();
+      await this.maintainTouchedGraphs([...new Set(assets.flatMap(a => [a.graphUri, a.metaGraphUri]))], 'replaceAssetGroup', options);
+    });
+  }
+
+  async replaceGraphAndSubject(
+    graphUri: string,
+    graphQuads: Quad[],
+    metaGraphUri: string,
+    metadataSubject: string,
+    metadataQuads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    return runLogicalStoreMutation(this.inner, 'replaceGraphAndSubject', options, async options => {
+      if (typeof this.inner.replaceGraphAndSubject !== 'function') {
+        throw new UnsupportedTripleStoreCapabilityError(
+          'replaceGraphAndSubject',
+          'GraphSetIndexStore',
+        );
+      }
+      try {
+        await this.inner.replaceGraphAndSubject(
+          graphUri,
+          graphQuads,
+          metaGraphUri,
+          metadataSubject,
+          metadataQuads,
+          options,
+        );
+      } catch (error) {
+        if (!isStoreOperationNotStarted(error, 'replaceGraphAndSubject')) {
+          this.scheduleFullRefresh('replaceGraphAndSubject');
+        }
+        throw error;
+      }
+      if (!this.enabled) return;
+      this.bumpMutation();
+      await this.maintainTouchedGraphs(
+        [graphUri, metaGraphUri],
+        'replaceGraphAndSubject',
+        options,
+      );
+    });
+  }
+
+  async replaceSubject(
+    graphUri: string,
+    subject: string,
+    quads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    return runLogicalStoreMutation(this.inner, 'replaceSubject', options, async options => {
+      if (typeof this.inner.replaceSubject !== 'function') {
+        throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'GraphSetIndexStore');
+      }
+      return this.runReplacementMutation('replaceSubject', [graphUri], options,
+        () => this.inner.replaceSubject!(graphUri, subject, quads, options));
+    });
+  }
+
+  async replaceSubjectAndInsert(
+    graphUri: string, subject: string, replacementQuads: Quad[], insertQuads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    assertSubjectAndInsertPayload(graphUri, subject, replacementQuads, insertQuads);
+    return runLogicalStoreMutation(this.inner, 'replaceSubjectAndInsert', options, async options => {
+      if (typeof this.inner.replaceSubjectAndInsert !== 'function') {
+        throw new UnsupportedTripleStoreCapabilityError('replaceSubjectAndInsert', 'GraphSetIndexStore');
+      }
+      return this.runReplacementMutation('replaceSubjectAndInsert', [graphUri], options,
+        () => this.inner.replaceSubjectAndInsert!(graphUri, subject, replacementQuads, insertQuads, options));
+    });
+  }
+
+  private async runReplacementMutation(
+    operation: 'replaceGraph' | 'replaceSubject' | 'replaceSubjectAndInsert',
+    touchedGraphs: string[],
+    options: QueryOptions | undefined,
+    execute: () => Promise<void>,
+  ): Promise<void> {
     if (!this.enabled) {
-      await this.inner.dropGraph(graphUri);
+      await execute();
       return;
     }
-    await this.inner.dropGraph(graphUri);
+    try {
+      await execute();
+    } catch (error) {
+      // A rejected replacement may have committed. Only a not-started outcome
+      // bound to this dispatch is clean; a nested post-commit probe is not.
+      if (!isStoreOperationNotStarted(error, operation)) {
+        this.scheduleFullRefresh(operation);
+      }
+      throw error;
+    }
     this.bumpMutation();
-    this.removeGraphs([graphUri], 'dropGraph');
+    await this.maintainTouchedGraphs(touchedGraphs, operation, options);
+  }
+
+  async rfc64AuthorCommitCasV1(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: QueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    return runLogicalStoreMutation(this.inner, 'rfc64AuthorCommitCasV1', options, async options => {
+      if (typeof this.inner.rfc64AuthorCommitCasV1 !== 'function') {
+        throw new UnsupportedTripleStoreCapabilityError(
+          'rfc64AuthorCommitCasV1',
+          'GraphSetIndexStore',
+        );
+      }
+      const manifest = normalizeRfc64AuthorCommitCasV1(input);
+      const source = sourceFromNormalizedRfc64AuthorCommitCasV1(manifest);
+      if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(source, options);
+      // Prepare every fallible index-maintenance input before dispatch. Once the
+      // inner capability reports `committed`, only best-effort observation and
+      // index maintenance may remain; malformed caller input must never create a
+      // committed backend mutation that this decorator cannot account for.
+      const touchedGraphs = [...manifest.touchedGraphs];
+      let result: Rfc64AuthorCommitCasResultV1;
+      try {
+        result = await this.inner.rfc64AuthorCommitCasV1(source, options);
+      } catch (error) {
+        if (!isStoreOperationNotStarted(error, 'rfc64AuthorCommitCasV1')) {
+          this.scheduleFullRefresh('rfc64AuthorCommitCasV1');
+        }
+        throw error;
+      }
+      if (result === 'conflict') return result;
+      this.bumpMutation();
+      await this.maintainTouchedGraphs(
+        touchedGraphs,
+        'rfc64AuthorCommitCasV1',
+        options,
+      );
+      return result;
+    });
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {
-    if (!this.enabled) {
-      return this.inner.listGraphs(options);
-    }
-    const graphs = await this.ensureGraphSet(options);
-    return [...graphs];
+    return [...(await this.readGraphInventory(undefined, options)).graphs];
+  }
+
+  async listGraphsSorted(options?: QueryOptions): Promise<SortedGraphCatalog> {
+    if (this.enabled) return boundGraphInventory(await this.loadCurrentSortedGraphs(options), options).graphs;
+    return createSortedUniqueStringCatalog((await this.readGraphInventory(undefined, options)).graphs.filter(Boolean));
   }
 
   async listGraphsByPrefix(prefix: string, options?: QueryOptions): Promise<string[]> {
+    return [...(await this.readGraphInventory(prefix, options)).graphs];
+  }
+
+  async readGraphInventory(prefix: string | undefined, options?: QueryOptions): Promise<MeasuredGraphInventory> {
+    // A caller pays for, and is bounded by, what it receives; the full read under it is node work.
     if (!this.enabled) {
-      if (this.inner.listGraphsByPrefix) {
-        return this.inner.listGraphsByPrefix(prefix, options);
+      const inventory = prefix === undefined ? await readGraphInventory(this.inner, options) : await readGraphInventoryByPrefix(this.inner, prefix, options);
+      return filterGraphInventory(inventory, graph => !isStorageHiddenGraph(graph));
+    }
+    const inventory = await this.loadCurrentSortedGraphs(options);
+    if (prefix === undefined) return boundGraphInventory(inventory, options);
+    // A split surrogate need not occupy a contiguous code-point-sorted range.
+    if (endsWithHighSurrogate(prefix)) return boundGraphInventory(filterGraphInventory(inventory, graph => graph.startsWith(prefix)), options);
+    const matches: string[] = [];
+    for (let index = codePointLowerBound(inventory.graphs, prefix); index < inventory.graphs.length; index += 1) {
+      const graph = inventory.graphs[index]!;
+      if (!graph.startsWith(prefix)) break;
+      matches.push(graph);
+    }
+    return boundGraphInventory(measureGraphInventory(matches), options);
+  }
+
+  async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
+    return runLogicalStoreMutation(this.inner, 'deleteBySubjectPrefix', options, async options => {
+      if (!this.enabled) {
+        return this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
       }
-      return (await this.inner.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
-    }
-    const graphs = await this.ensureGraphSet(options);
-    return [...graphs].filter((graph) => graph.startsWith(prefix));
+      const removed = await this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
+      if (removed <= 0) return removed;
+      this.bumpMutation();
+      await this.maintainTouchedGraphs([graphUri], 'deleteBySubjectPrefix', options);
+      return removed;
+    });
   }
 
-  async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> {
-    if (!this.enabled) {
-      return this.inner.deleteBySubjectPrefix(graphUri, prefix);
-    }
-    const removed = await this.inner.deleteBySubjectPrefix(graphUri, prefix);
-    if (removed <= 0) return removed;
-    this.bumpMutation();
-    await this.maintainIndex(() => this.refreshTouchedGraphs([graphUri], 'deleteBySubjectPrefix'));
-    return removed;
+  async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {
+    return this.inner.countQuads(graphUri, options);
   }
 
-  async countQuads(graphUri?: string): Promise<number> {
-    return this.inner.countQuads(graphUri);
-  }
-
-  async flush(): Promise<void> {
-    await this.inner.flush?.();
+  async flush(options?: QueryOptions): Promise<void> {
+    await this.inner.flush?.(options);
   }
 
   async close(): Promise<void> {
     await this.inner.close();
   }
 
-  private async ensureGraphSet(options?: QueryOptions): Promise<Set<string>> {
+  private async ensureGraphSet(options?: QueryOptions): Promise<ReadonlySet<string>> {
     throwIfAborted(options?.signal);
-    if (
-      this.graphs &&
-      this.revalidateMs > 0 &&
-      this.now() - this.validatedAt < this.revalidateMs
-    ) {
-      return this.graphs;
+    if (this.catalog.initialized && !this.pendingFullRefresh && this.revalidateMs > 0) {
+      const current = readsCurrentGraphCatalog(options);
+      const due = this.now() >= (current ? this.nextCurrentRevalidateAt : this.nextRevalidateAt);
+      const warm = this.revalidate === 'background' && !current;
+      if (due && warm) this.revalidateInBackground();
+      if (!due || warm) return this.catalog.current!;
     }
-    return raceAgainstAbort(
-      this.refreshIndex(this.graphs ? 'revalidate' : 'seed'),
+    return raceStoreWorkAgainstAbort(
+      this.refreshIndex(
+        this.pendingFullRefresh ?? (this.catalog.initialized ? 'revalidate' : 'seed'),
+        options,
+      ),
       options?.signal,
     );
   }
 
-  private async refreshIndex(source: GraphSetRefreshSource): Promise<Set<string>> {
-    if (this.refreshInFlight) return this.refreshInFlight;
-    const task = this.refreshIndexLoop(source);
-    this.refreshInFlight = task;
-    try {
-      return await task;
-    } finally {
-      if (this.refreshInFlight === task) this.refreshInFlight = null;
-    }
+  /** One background flight; past the internal limit it drops the catalog unless a newer one was published meanwhile, so the next read seeds cold and fails as a seed does. */
+  private revalidateInBackground(): void {
+    this.backgroundRevalidation.start(() => this.refreshIndex('revalidate', BACKGROUND_REVALIDATION), (error) => {
+      if (isStoreInternalLimitError(error)) this.clearIndex();
+    });
   }
 
-  private async refreshIndexLoop(source: GraphSetRefreshSource): Promise<Set<string>> {
+  private async refreshIndex(
+    source: GraphSetRefreshSource,
+    options?: QueryOptions,
+  ): Promise<ReadonlySet<string>> {
+    const priority = refreshPriority(source, options);
+    // A full catalog read is node work under the internal ceiling: one flight for every caller. It carries
+    // no caller's signal; each caller races its own cancellation in ensureGraphSet.
+    const scanOptions = internalCatalogReadOptions({ ...options, signal: undefined });
+    // The coordinator owns the complete promotion policy: lower-priority cold
+    // seeds/revalidations cannot capture later normal or ACK readers, while
+    // equal/lower-priority callers reuse the best in-flight scan.
+    return this.refreshCoordinator.run(priority, async (flight) => {
+      try {
+        return await this.refreshIndexLoop(source, scanOptions, flight);
+      } catch (error: unknown) {
+        // A warm revalidation over the internal ceiling fails closed, like a cold seed; any
+        // other failed warm revalidation keeps the last catalog (below).
+        if (source !== 'revalidate' || isStoreInternalLimitError(error)) throw error;
+        // Cold seeds and mutation-dirty rebuilds are strict correctness paths
+        // even if another refresh published in parallel.
+        if (!this.catalog.initialized || this.pendingFullRefresh) {
+          throw error;
+        }
+        // A newer promoted refresh already published a usable graph set. Do
+        // not let this older failed scan overwrite its healthy schedule with
+        // failure backoff.
+        if (!this.refreshCoordinator.shouldApplyFailureBackoff(flight)) return this.catalog.current!;
+        // Periodic discovery of out-of-contract writers is advisory once the
+        // write-through index is warm. Preserve that last known set and back
+        // off after a store failure instead of making every graph reader repeat
+        // the same expensive scan. Cold seeds and mutation-dirty rebuilds are
+        // correctness paths: if either condition applies by the time the scan
+        // fails, keep the original strict rejection behavior.
+        this.noteRevalidationFailure();
+        return this.catalog.current!;
+      }
+    }, graphCatalogFlightKey(scanOptions));
+  }
+
+  private async refreshIndexLoop(
+    source: GraphSetRefreshSource,
+    options: QueryOptions | undefined,
+    flight: RefreshFlight<ReadonlySet<string>>,
+  ): Promise<ReadonlySet<string>> {
     for (;;) {
+      const dirtyRebuildSource = this.pendingFullRefresh;
+      const isDirtyRebuild = dirtyRebuildSource != null;
+      const sourceForScan = dirtyRebuildSource ?? source;
       const generation = this.mutationGeneration;
-      const next = new Set((await this.inner.listGraphs()).filter(Boolean));
+      // #1549: force the bulk full-store `SELECT DISTINCT ?g` rebuild onto the
+      // BACKGROUND lane ONLY when it is a DIRTY rebuild (an opaque server-side UPDATE
+      // marked the index dirty). Such a rebuild would otherwise inherit an
+      // `ack`-priority reader's `options` and run the full scan on the scarce reserved
+      // ACK slot, head-of-line-blocking other ACK work. A SEED (cold start) or
+      // REVALIDATE refresh is genuinely part of serving the caller — an `ack` read's
+      // seed scan SHOULD use the reserved ACK lane — so it keeps the caller's
+      // priority/source. Cancellation (`signal`) is preserved either way. (With L1
+      // keeping the index warm at source, dirty rebuilds are rare.)
+      const scanOptions: QueryOptions | undefined = isDirtyRebuild
+        ? { ...options, priority: 'background', source: 'graph-set-index.rebuild' }
+        : options;
+      const scan = this.refreshCoordinator.beginScan(flight);
+      const scanStarted = this.now();
+      const discovered = await timeGraphCatalogRefresh(graphCatalogRefreshKind(sourceForScan),
+        () => readCompleteGraphInventory(this.inner, scanOptions));
+      const next = new Set(
+        discovered.graphs.filter(
+          (graph) => Boolean(graph) && !isStorageHiddenGraph(graph),
+        ),
+      );
       if (generation !== this.mutationGeneration) continue;
-      this.replaceGraphSet(next, source);
-      return this.graphs!;
+      // Priority promotion intentionally permits overlapping scans. Fence the
+      // shared cache by scan start order so an older, slower background response
+      // cannot overwrite a later ACK/normal snapshot that already published.
+      if (!this.refreshCoordinator.tryPublish(scan)) {
+        return this.catalog.current ?? next;
+      }
+      // This scan reflects every mutation up to `generation` (synchronous from
+      // here — no await — so a concurrent write can't slip between the check and
+      // the clear; if one had, it would have bumped the generation above and we
+      // would have retried, preserving the pending refresh source for the next
+      // scan attempt).
+      this.pendingFullRefresh = null;
+      if (isDirtyRebuild) {
+        this.emitDiagnostic({
+          type: 'dirty-rebuild',
+          source: dirtyRebuildSource,
+          graphCount: next.size,
+        });
+      }
+      this.replaceGraphSet(next, sourceForScan, this.now() - scanStarted);
+      return this.catalog.current!;
     }
   }
 
@@ -254,57 +689,135 @@ export class GraphSetIndexStore implements TripleStore {
     this.mutationGeneration++;
   }
 
-  private async maintainIndex(task: () => Promise<unknown>): Promise<void> {
-    try {
-      await task();
-    } catch {
-      this.clearIndex();
+  private scheduleFullRefresh(source: PendingFullRefreshSource): void {
+    this.bumpMutation();
+    this.pendingFullRefresh ??= source;
+  }
+
+  private async maintainStableGraphPresence(
+    graphs: string[],
+    source: TouchedGraphMutationSource,
+    options?: QueryOptions,
+  ): Promise<void> {
+    // hasGraph is the only operation inside this retry boundary. Applying the
+    // stable result in this same continuation leaves no await/microtask boundary
+    // where a concurrent mutation could invalidate it after the generation check.
+    for (let attempt = 0; attempt < MAINTAIN_INDEX_MAX_PROBE_RETRIES; attempt++) {
+      const generation = this.mutationGeneration;
+      try {
+        const graphPresence = await Promise.all(
+          graphs.map(async (graph) => ({
+            graph,
+            present: await this.inner.hasGraph(graph, options),
+          })),
+        );
+        if (!this.catalog.initialized) return;
+        if (generation !== this.mutationGeneration) {
+          continue;
+        }
+        this.reconcileGraphs(graphPresence, source);
+        return;
+      } catch {
+        this.clearIndex();
+        return;
+      }
     }
+    this.emitDiagnostic({
+      type: 'probe-retry-exhausted',
+      source,
+      probeCount: MAINTAIN_INDEX_MAX_PROBE_RETRIES,
+    });
+    this.scheduleFullRefresh(source);
   }
 
   private clearIndex(): void {
-    this.graphs = null;
-    this.validatedAt = 0;
+    this.catalog.clear();
+    this.resetRevalidationSchedule();
   }
 
-  private replaceGraphSet(next: Set<string>, source: GraphSetRefreshSource): void {
-    const previous = this.graphs ?? new Set<string>();
-    const added = [...next].filter((graph) => !previous.has(graph)).sort();
-    const removed = [...previous].filter((graph) => !next.has(graph)).sort();
-    this.graphs = next;
-    this.validatedAt = this.now();
+  private replaceGraphSet(next: Set<string>, source: GraphSetRefreshSource, refreshMs: number): void {
+    const { added, removed } = this.catalog.replace(next);
+    this.backgroundRevalidation.notePublished();
+    recordGraphCatalogSize(this.catalog.measure());
+    this.revalidateFailureCount = 0;
+    this.nextRevalidateAt = this.now() + graphSetRevalidationDelayMs(this.revalidateMs, refreshMs);
+    this.nextCurrentRevalidateAt = this.now() + this.revalidateMs;
     if (added.length > 0 || removed.length > 0 || source !== 'seed') {
       this.emit({ type: 'graph-set-revalidated', added, removed, source });
     }
   }
 
-  private addGraphs(graphs: string[], source: GraphSetMutationSource): void {
-    if (!this.graphs) return;
-    for (const graph of graphs) {
-      if (!graph || this.graphs.has(graph)) continue;
-      this.graphs.add(graph);
-      this.emit({ type: 'graph-added', graph, source });
+  private noteRevalidationFailure(): void {
+    // revalidateMs=0 is the strict-freshness opt-out from both cached reads and
+    // failure backoff: every read must attempt another scan, even after failure.
+    if (this.revalidateMs === 0) {
+      this.resetRevalidationSchedule();
+      return;
     }
+    // Cap the exponent before multiplication as an additional overflow guard;
+    // the configured maximum is the externally visible bound.
+    const exponent = Math.min(this.revalidateFailureCount, 30);
+    const delay = Math.min(
+      this.revalidateFailureMaxBackoffMs,
+      this.revalidateFailureBackoffMs * (2 ** exponent),
+    );
+    this.revalidateFailureCount++;
+    this.nextRevalidateAt = this.now() + delay;
+    this.nextCurrentRevalidateAt = this.nextRevalidateAt;
+  }
+
+  private resetRevalidationSchedule(): void {
+    this.revalidateFailureCount = 0;
+    this.nextRevalidateAt = 0;
+    this.nextCurrentRevalidateAt = 0;
+  }
+
+  private addGraphs(graphs: string[], source: GraphSetMutationSource): void {
+    this.reconcileGraphs(graphs.map((graph) => ({ graph, present: true })), source);
   }
 
   private removeGraphs(graphs: string[], source: GraphSetMutationSource): void {
-    if (!this.graphs) return;
-    for (const graph of graphs) {
-      if (!graph || !this.graphs.delete(graph)) continue;
+    this.reconcileGraphs(graphs.map((graph) => ({ graph, present: false })), source);
+  }
+
+  private reconcileGraphs(
+    graphPresence: ReadonlyArray<Readonly<{ graph: string; present: boolean }>>,
+    source: GraphSetMutationSource,
+  ): void {
+    if (!this.catalog.initialized) return;
+    const eligible = graphPresence.filter(
+      ({ graph, present }) => graph && (!present || !isStorageHiddenGraph(graph)),
+    );
+    const { added, removed } = this.catalog.reconcile(eligible);
+    for (const graph of added) {
+      this.emit({ type: 'graph-added', graph, source });
+    }
+    for (const graph of removed) {
       this.emit({ type: 'graph-removed', graph, source });
     }
   }
 
-  private async refreshTouchedGraphs(graphs: string[], source: GraphSetMutationSource): Promise<void> {
-    if (!this.graphs) return;
-    for (const graph of graphs) {
-      if (!graph) continue;
-      if (await this.inner.hasGraph(graph)) {
-        this.addGraphs([graph], source);
-      } else {
-        this.removeGraphs([graph], source);
-      }
+  private async loadCurrentSortedGraphs(options?: QueryOptions): Promise<MeasuredGraphInventory<SortedGraphCatalog>> {
+    for (;;) {
+      const members = await this.ensureGraphSet(options);
+      // No async boundary exists between the identity check and projection.
+      // If another continuation invalidated/replaced the catalog after
+      // ensureGraphSet() resolved, retry instead of manufacturing an empty or
+      // stale enumeration from unrelated mutable state.
+      const sorted = this.catalog.measuredFor(members);
+      if (sorted) return sorted;
+      throwIfAborted(options?.signal);
     }
+  }
+
+  private async maintainTouchedGraphs(
+    graphs: string[],
+    source: TouchedGraphMutationSource,
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (!this.catalog.initialized) return;
+    const uniqueGraphs = [...new Set(graphs.filter(Boolean))];
+    await this.maintainStableGraphPresence(uniqueGraphs, source, options);
   }
 
   private emit(event: GraphSetMutationEvent): void {
@@ -314,37 +827,31 @@ export class GraphSetIndexStore implements TripleStore {
       // Observability hooks must not make already-committed store writes fail.
     }
   }
+
+  private emitDiagnostic(event: GraphSetDiagnosticEvent): void {
+    try {
+      this.onDiagnostic?.(event);
+    } catch {
+      // Observability hooks must not make already-committed store writes fail.
+    }
+  }
 }
 
-function namedGraphsFromQuads(quads: Quad[]): string[] {
-  return [...new Set(quads.map((quad) => quad.graph).filter(Boolean))];
+function positiveFiniteMs(value: number | undefined, fallback: number): number {
+  return Number.isFinite(value) && (value as number) > 0 ? value as number : fallback;
 }
 
-function isSparqlUpdate(sparql: string): boolean {
-  const withoutPrologue = sparql
-    .trimStart()
-    .replace(/^(?:(?:#[^\r\n]*(?:\r?\n|$))|(?:PREFIX\s+(?:[A-Za-z][\w-]*)?:\s*<[^>]*>|BASE\s*<[^>]*>)\s*)+/i, '')
-    .trimStart();
-  return /^(?:INSERT|DELETE|WITH|LOAD|CLEAR|CREATE|DROP|COPY|MOVE|ADD)\b/i.test(withoutPrologue);
+function refreshPriority(
+  source: GraphSetRefreshSource,
+  options: QueryOptions | undefined,
+): StoreWorkPriority {
+  return source === 'seed' || source === 'revalidate'
+    ? options?.priority ?? 'normal'
+    : 'background';
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
   const reason = signal.reason;
   throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
-}
-
-function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-  if (!signal) return work;
-  throwIfAborted(signal);
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      const reason = signal.reason;
-      reject(reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    work.then(resolve, reject).finally(() => {
-      signal.removeEventListener('abort', onAbort);
-    });
-  });
 }

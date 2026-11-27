@@ -1,3 +1,5 @@
+import type { RandomSamplingRuntime } from '../src/random-sampling-runtime.js';
+import { resolveChainFinalityConfirmationsV1 } from '../src/chain-finality-confirmations-v1.js';
 import { describe, it, expect, beforeAll, afterAll, vi, DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy, OxigraphStore, getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, contextGraphMetaUri, sparqlString, DKGQueryEngine, sha256, EVMChainAdapter, MockChainAdapter, createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS, mintTokens, ethers, tmpdir, mkdtemp, readFile, readdir, rm, join, fileURLToPath, _wrapAgentPublisherForSeal, CapturingContextGraphChainAdapter, AsyncSignerAddressContextGraphChainAdapter, SignerListContextGraphChainAdapter, PcaCuratedRegistrationChainAdapter, NonRegisteringACKChainAdapter, FlakyRegistrationACKChainAdapter, TransientIdentityFailureChainAdapter, BrandNewCoreTransientChainAdapter, PermanentProfileFailureChainAdapter, RetryPathPermanentFailureChainAdapter, ContextAuthorizedPublisherChainAdapter, buildSnapshotFactQuads, ReferenceEvaluator, loadYaml, CCL_FACT_NS, OperationalKeyOnlyPublishChainAdapter, ExternalOperationalKeyPublishChainAdapter, AddressOnlyExternalOperationalKeyPublishChainAdapter, AsyncAddressSignMessageAsPublishChainAdapter, GenericSignMessageExternalOperationalKeyPublishChainAdapter, MultiSignerGenericSignMessagePublishChainAdapter, SingleAddressMismatchedGenericSignMessagePublishChainAdapter, SingleSignerAdapterPublishChainAdapter, ReservingAuthorityContextGraphChainAdapter, type Quad, type ChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type OnChainPublishResult, type V10PublishDirectParams } from './agent.shared';
 
 
@@ -12,6 +14,214 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await revertSnapshot(_fileSnapshot);
+});
+
+function observeRandomSamplingRuntime(agent: DKGAgent) {
+  return () => {
+    const runtime = (agent as unknown as { randomSamplingRuntime: RandomSamplingRuntime | null }).randomSamplingRuntime;
+    if (!runtime) throw new Error('Random Sampling runtime was not constructed');
+    return runtime;
+  };
+}
+
+describe('Random Sampling lifecycle gating', () => {
+  it('reports a profiled core as waiting until sharding-table admission', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 52n);
+    let sharded = false;
+    const membership = vi.spyOn(chain, 'isShardingTableMember')
+      .mockImplementation(async (identityId) => identityId === 52n && sharded);
+    const agent = await DKGAgent.create({
+      name: 'RsWaitsForStake',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      randomSamplingUseWorkerThread: false,
+      randomSamplingTickIntervalMs: 60_000,
+    });
+    const runtimeState = observeRandomSamplingRuntime(agent);
+
+
+    try {
+      await agent.start();
+
+      expect(membership).toHaveBeenCalledWith(52n);
+      expect(agent.getRandomSamplingStatus()).toMatchObject({
+        enabled: false,
+        role: 'core',
+        identityId: '52',
+        disabledReason: 'awaiting_sharding_table',
+        loop: null,
+      });
+
+      expect(runtimeState().getDiagnostics().reconciliationScheduled).toBe(true);
+
+      sharded = true;
+      await runtimeState().reconcile();
+      await vi.waitFor(
+        () => expect(agent.getRandomSamplingStatus().enabled).toBe(true),
+        { timeout: 2_000, interval: 10 },
+      );
+      expect(agent.getRandomSamplingStatus()).toMatchObject({
+        enabled: true,
+        identityId: '52',
+        disabledReason: null,
+      });
+      expect(runtimeState().getDiagnostics().reconciliationScheduled).toBe(true);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('does not retry when a legacy adapter reports Random Sampling contracts unavailable', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 53n);
+    vi.spyOn(chain, 'isRandomSamplingReady').mockReturnValue(false);
+    const agent = await DKGAgent.create({
+      name: 'RsMissingShardingTableStorage',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      randomSamplingUseWorkerThread: false,
+    });
+    const runtimeState = observeRandomSamplingRuntime(agent);
+
+    try {
+      await agent.start();
+
+      expect(agent.getRandomSamplingStatus()).toMatchObject({
+        enabled: false,
+        identityId: '53',
+        disabledReason: 'contracts_not_deployed',
+      });
+      expect(runtimeState().getDiagnostics().reconciliationScheduled).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('retries a temporary sharding-table lookup failure and starts after recovery', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 56n);
+    vi.spyOn(chain, 'isRandomSamplingReady').mockReturnValue(true);
+    const membership = vi.spyOn(chain, 'isShardingTableMember')
+      .mockRejectedValueOnce(new Error('temporary membership RPC outage'))
+      .mockResolvedValue(true);
+    const agent = await DKGAgent.create({
+      name: 'RsMembershipLookupRecovers',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      randomSamplingUseWorkerThread: false,
+      randomSamplingTickIntervalMs: 60_000,
+    });
+    const runtimeState = observeRandomSamplingRuntime(agent);
+
+
+    try {
+      await expect(agent.start()).resolves.toBeUndefined();
+
+      expect(membership).toHaveBeenNthCalledWith(1, 56n);
+      expect(agent.getRandomSamplingStatus()).toMatchObject({
+        enabled: false,
+        identityId: '56',
+        disabledReason: 'eligibility_lookup_failed',
+      });
+
+      expect(runtimeState().getDiagnostics().reconciliationScheduled).toBe(true);
+
+      await runtimeState().reconcile();
+      await vi.waitFor(
+        () => expect(agent.getRandomSamplingStatus().enabled).toBe(true),
+        { timeout: 2_000, interval: 10 },
+      );
+      expect(membership).toHaveBeenNthCalledWith(2, 56n);
+      expect(agent.getRandomSamplingStatus()).toMatchObject({
+        enabled: true,
+        identityId: '56',
+        disabledReason: null,
+      });
+      expect(runtimeState().getDiagnostics().reconciliationScheduled).toBe(true);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('checks permanent Random Sampling deployment readiness before membership RPCs', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 54n);
+    vi.spyOn(chain, 'isRandomSamplingReady').mockReturnValue(false);
+    const membership = vi.spyOn(chain, 'isShardingTableMember').mockRejectedValue(
+      new Error('temporary RPC failure that must not hide missing contracts'),
+    );
+    const agent = await DKGAgent.create({
+      name: 'RsContractsNotDeployed',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      randomSamplingUseWorkerThread: false,
+    });
+    const runtimeState = observeRandomSamplingRuntime(agent);
+
+    try {
+      await agent.start();
+
+      expect(membership).not.toHaveBeenCalled();
+      expect(agent.getRandomSamplingStatus()).toMatchObject({
+        enabled: false,
+        identityId: '54',
+        disabledReason: 'contracts_not_deployed',
+      });
+      expect(runtimeState().getDiagnostics().reconciliationScheduled).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('keeps a throwing readiness probe retryable without failing node startup', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 55n);
+    const readiness = vi.spyOn(chain, 'isRandomSamplingReady').mockImplementation(() => {
+      throw new Error('temporary readiness probe failure');
+    });
+    const membership = vi.spyOn(chain, 'isShardingTableMember');
+    const agent = await DKGAgent.create({
+      name: 'RsReadinessProbeFailure',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      randomSamplingUseWorkerThread: false,
+    });
+    const runtimeState = observeRandomSamplingRuntime(agent);
+
+    try {
+      await expect(agent.start()).resolves.toBeUndefined();
+
+      expect(membership).not.toHaveBeenCalled();
+      expect(agent.getRandomSamplingStatus()).toMatchObject({
+        enabled: false,
+        identityId: '55',
+        disabledReason: 'eligibility_lookup_failed',
+      });
+      expect(runtimeState().getDiagnostics().reconciliationScheduled).toBe(true);
+      readiness.mockReturnValue(true);
+      await runtimeState().reconcile();
+      expect(membership).toHaveBeenCalledWith(55n);
+      expect(agent.getRandomSamplingStatus()).toMatchObject({ enabled: true, identityId: '55' });
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
 });
 
 describe('DKGAgent ACK signer gating', () => {
@@ -32,6 +242,64 @@ describe('DKGAgent ACK signer gating', () => {
       });
 
       expect(agent).toBeInstanceOf(DKGAgent);
+    });
+
+    it('forwards chain finality and fee policy to the constructed EVM adapter', async () => {
+      const operational = ethers.Wallet.createRandom();
+      const agent = await DKGAgent.create({
+        name: 'ConfiguredFinalityDepth',
+        listenHost: '127.0.0.1',
+        listenPort: 0,
+        chainConfig: {
+          rpcUrl: 'http://127.0.0.1:0',
+          hubAddress: ethers.ZeroAddress,
+          operationalKeys: [operational.privateKey],
+          finalityConfirmations: 3,
+          maxFeePerGasWei: 100n,
+        },
+        nodeRole: 'edge',
+      });
+
+      expect((agent as any).chain).toBeInstanceOf(EVMChainAdapter);
+      expect((agent as any).chain.finalityConfirmations).toBe(3);
+      expect((agent as any).chain.maxFeePerGasWei).toBe(100n);
+      // The RFC-64 precommits must anchor at the SAME depth the adapter's own
+      // authority reads use, and they must read it FROM the adapter.
+      expect((agent as any).chain.getFinalityConfirmations()).toBe(3);
+      expect(resolveChainFinalityConfirmationsV1((agent as any).chain, (agent as any).config.chainConfig)).toBe(3);
+    });
+
+    it('takes the precommit finality depth from a pre-built adapter, not chainConfig', async () => {
+      // `dkg-agent-types.ts` documents `chainAdapter` as "If provided,
+      // chainConfig is ignored". Reading `chainConfig.finalityConfirmations`
+      // for the RFC-64 precommits therefore pinned them to the default while
+      // the adapter's own authority reads honoured the operator — two anchors
+      // in one process, and nothing anywhere reported the divergence.
+      const operational = ethers.Wallet.createRandom();
+      const built = await DKGAgent.create({
+        name: 'PreBuiltAdapterDepthSource',
+        listenHost: '127.0.0.1',
+        listenPort: 0,
+        chainConfig: {
+          rpcUrl: 'http://127.0.0.1:0',
+          hubAddress: ethers.ZeroAddress,
+          operationalKeys: [operational.privateKey],
+          finalityConfirmations: 7,
+        },
+        nodeRole: 'edge',
+      });
+      const prebuilt = (built as any).chain as EVMChainAdapter;
+
+      const agent = await DKGAgent.create({
+        name: 'PreBuiltAdapterDepthConsumer',
+        listenHost: '127.0.0.1',
+        listenPort: 0,
+        chainAdapter: prebuilt,
+        nodeRole: 'edge',
+      });
+
+      expect((agent as any).config.chainConfig?.finalityConfirmations).toBeUndefined();
+      expect(resolveChainFinalityConfirmationsV1((agent as any).chain, (agent as any).config.chainConfig)).toBe(7);
     });
 
 

@@ -1,15 +1,32 @@
-import type { Quad } from '@origintrail-official/dkg-storage';
-import type { GetView } from '@origintrail-official/dkg-core';
+import type {
+  Quad,
+  QueryOptions as StoreQueryOptions,
+} from '@origintrail-official/dkg-storage';
+import type { DraftAccessPolicy } from './content-partition-policy.js';
+import type { GetView, ViewQuerySemantics } from '@origintrail-official/dkg-core';
 import { TrustLevel } from '@origintrail-official/dkg-core';
+import type { QueryMaterializationBudget } from './query-store-read-context.js';
 
 export interface QueryResult {
   bindings: Array<Record<string, string>>;
   quads?: Quad[];
+  /** `merged` when a view query was answered from its read graph; absent when it was matched per asset, or had no view. */
+  semantics?: ViewQuerySemantics;
 }
 
-export interface QueryOptions {
+export interface QueryOptions extends StoreQueryOptions {
+  /**
+   * Query-wide ceiling for the cumulative decoded store results retained while
+   * evaluating one logical query. Unlike the transport-level
+   * `maxResponseBytes`, this limit is charged across every internal read.
+   */
+  maxMaterializedBytes?: number;
+  /** Request-local budget shared with pre-execution admission reads. */
+  materializationBudget?: QueryMaterializationBudget;
   contextGraphId?: string;
   timeout?: number;
+  /** Reject compatibility routing that would omit selected graphs. */
+  requireCompleteGraphScope?: boolean;
   /** When set to '_shared_memory', query runs over the context graph's shared memory graph only. */
   graphSuffix?: '_shared_memory';
   /** When true and contextGraphId is set, query runs over both data and shared memory graphs (union). */
@@ -22,8 +39,15 @@ export interface QueryOptions {
    * in the same context graph (root data, registered assertion graphs, SWM,
    * VM, and registered sub-graph content). Legacy scoped routes stay limited
    * to their selected graph set unless this is true.
+   * With `view: 'working-memory'`, a query without GRAPH clauses merges only
+   * the resolved agent's WM partitions into its default dataset, allowing
+   * joins across KAs. This does not include SWM, VM, metadata or other agents.
    */
   includeContextGraphPartitions?: boolean;
+  /** Include registered subgraph SWM metadata in scoped GRAPH-variable expansion; requires includeContextGraphPartitions. */
+  includeSharedMemoryMeta?: boolean;
+  /** Internal draft policy derived from caller identity; never accept from HTTP input. */
+  draftAccess?: DraftAccessPolicy;
   /**
    * Opt-in: allow the scoped query to explicitly reference the context
    * graph's own `_private` partition (`<cg>/_private`, or the sub-graph
@@ -37,6 +61,12 @@ export interface QueryOptions {
   includePrivate?: boolean;
   /** V10 declared state view — determines which graph(s) the query targets. */
   view?: GetView;
+  /**
+   * How a view query matches its patterns. `merged` reads the merge of the view's asset graphs
+   * outside GRAPH; `per-asset` matches inside one asset graph at a time. Without it, the node's
+   * default for the context graph applies, `per-asset` unless configured.
+   */
+  semantics?: ViewQuerySemantics;
   /** Agent address — required when view is 'working-memory' to resolve assertion graphs. */
   agentAddress?: string;
   /**
@@ -69,6 +99,13 @@ export interface QueryOptions {
    */
   excludeGraphPrefixes?: string[];
   /**
+   * Graph IRIs a query without `contextGraphId` must not read, each with every
+   * graph below it (`<iri>/...`). The store answers over its default graph and
+   * every other named graph, whatever the query's patterns; FROM / FROM NAMED
+   * are refused with `WithheldGraphQueryError`. Rejected on scoped queries.
+   */
+  withheldGraphRoots?: readonly string[];
+  /**
    * Per-subject trust floor for `verifiable-memory`. Values above
    * `SelfAttested` require every matched subject to carry an explicit
    * `http://dkg.io/ontology/trustLevel` literal at or above `minTrust`.
@@ -86,7 +123,58 @@ export interface QueryOptions {
   _minTrust?: TrustLevel;
 }
 
+export interface ResolvedKnowledgeAssetBase {
+  ual: string;
+  contextGraphId: string;
+  quads: Quad[];
+}
+
+/** The original public result contract of {@link QueryEngine.resolveKA}. */
+export interface LegacyResolveKAResult {
+  rootEntity: string;
+  rootEntities: string[];
+  contextGraphId: string;
+  quads: Quad[];
+}
+
+/** Current V10 KA model: one exact graph identified by UAL + assertion version. */
+export interface ResolvedGraphKnowledgeAsset extends ResolvedKnowledgeAssetBase {
+  contentScopeVersion: 2;
+  assertionVersion: string;
+  assertionGraph: string;
+  rootEntities: [];
+  rootEntity?: never;
+}
+
+/** Existing V10 root-scoped KAs remain queryable but are never writable. */
+export interface ResolvedLegacyKnowledgeAsset
+  extends ResolvedKnowledgeAssetBase, LegacyResolveKAResult {
+  contentScopeVersion: 1;
+  rootEntity: string;
+  rootEntities: string[];
+  assertionVersion?: never;
+  assertionGraph?: never;
+}
+
+export type ResolvedKnowledgeAsset =
+  | ResolvedGraphKnowledgeAsset
+  | ResolvedLegacyKnowledgeAsset;
+
 export interface QueryEngine {
   query(sparql: string, options?: QueryOptions): Promise<QueryResult>;
-  resolveKA(ual: string): Promise<{ rootEntity: string; rootEntities: string[]; contextGraphId: string; quads: Quad[] }>;
+  /**
+   * Backwards-compatible legacy resolver. Its required root fields remain
+   * source-compatible with callers published before graph-scoped KAs existed.
+   */
+  resolveKA(ual: string): Promise<LegacyResolveKAResult>;
+  /**
+   * Graph-aware resolver for current callers. Optional so third-party
+   * QueryEngine implementations are not broken by the additive API.
+   */
+  resolveKnowledgeAsset?(ual: string): Promise<ResolvedKnowledgeAsset>;
+}
+
+/** Query engine surface for callers that understand graph-scoped KAs. */
+export interface GraphAwareQueryEngine extends QueryEngine {
+  resolveKnowledgeAsset(ual: string): Promise<ResolvedKnowledgeAsset>;
 }

@@ -9,6 +9,13 @@ doc_type: how-to
 
 Nodes use libp2p for peer connectivity. Edge nodes behind NAT reserve relay slots so other nodes can reach them. The default network relay set is loaded from the active network config.
 
+## How an Edge Uses Its Relays
+
+- The relay list is `relay` from the node config (one relay), or else `relays` from the active network config. Operator-preferred relays are placed in front. `"relay": "none"` turns relays off.
+- An edge keeps a connection to every relay in its list and holds reservations on three of them (`relayReservationCount`, 1 to 16).
+- A node reserves only on relays in its list, and relayed connections to other nodes go through those relays only.
+- Every Core node runs a relay server. An edge uses a Core as a relay when that Core is in the edge's list.
+
 ## Inspect Peers
 
 ```bash

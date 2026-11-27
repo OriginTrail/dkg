@@ -11,7 +11,8 @@
  *   - state-summary 18-field assertion (§4.7.0)
  *   - orphan-repos check (§4.7.1): stray vs. active-daemon clone
  *   - config-sanity check (§4.7.2): nodeRole / apiPort /
- *     deprecated fields / malformed JSON
+ *     deprecated fields / malformed JSON / the same checks on a
+ *     config.yaml-only home / malformed YAML / config.json precedence
  *   - install-layout check (§4.7.3): Edge legacy slot / Core
  *     missing symlink / Core partial slot / Core `.git`-in-slot
  *   - version-skew check (§4.7.4): Edge ahead-of-daemon and
@@ -24,9 +25,15 @@
  * Production wiring (CLI flag parsing, exit codes, JSON output
  * shape) is covered separately by the integration smoke tests.
  */
-import { describe, it, expect } from 'vitest';
-import { join } from 'node:path';
-import { runDoctor, collectStateSummary, ALL_CHECK_IDS } from '../src/doctor/index.js';
+import { describe, it, expect, vi } from 'vitest';
+import { join, resolve } from 'node:path';
+import yaml from 'js-yaml';
+import {
+  runDoctor,
+  collectStateSummary,
+  formatDoctorReport,
+  ALL_CHECK_IDS,
+} from '../src/doctor/index.js';
 import type { DoctorDeps } from '../src/doctor/types.js';
 import { runOrphanReposCheck } from '../src/doctor/checks/orphan-repos.js';
 import { runConfigSanityCheck } from '../src/doctor/checks/config-sanity.js';
@@ -71,6 +78,8 @@ interface DepsOverrides {
   commands?: Record<string, { stdout?: string; stderr?: string; code: number } | null>;
   /** `process.env.DKG_HOME` value at invocation. */
   dkgHomeEnv?: string | null;
+  /** Deterministic Node.js runtime surface; defaults to the test process. */
+  runtime?: DoctorDeps['runtime'];
 }
 
 function makeDeps(over: DepsOverrides = {}): DoctorDeps {
@@ -103,6 +112,7 @@ function makeDeps(over: DepsOverrides = {}): DoctorDeps {
     monorepoRoot: over.monorepoRoot ?? null,
     extraScanRoots: over.extraScanRoots ?? [],
     skipChecks: over.skipChecks ?? [],
+    runtime: over.runtime,
 
     exists(path) {
       const trimmed = path.replace(/\/+$/, '');
@@ -189,6 +199,10 @@ describe('collectStateSummary (§4.7.0)', () => {
       },
     });
     const s = await collectStateSummary(deps);
+
+    expect(s.runtime).toHaveProperty('nodeVersion');
+    expect(s.runtime).toHaveProperty('nodeSqliteAvailable');
+    expect(s.runtime).toHaveProperty('probe');
 
     // daemon.* — 9 fields including unreachableReason
     expect(s.daemon).toHaveProperty('pid');
@@ -285,6 +299,24 @@ describe('collectStateSummary (§4.7.0)', () => {
     expect(s.autoUpdate.lastError).toMatch(/…\[truncated\]$/);
     expect(s.autoUpdate.lastError!.length).toBeLessThan(huge.length);
   });
+
+  it('reads config.yaml when there is no config.json, and config.json when both exist', async () => {
+    const config = { nodeRole: 'core', autoUpdate: { source: 'git', checkIntervalMinutes: 15, allowPrerelease: false } };
+    const fromYaml = await collectStateSummary(makeDeps({
+      fs: { '/test/.dkg/config.yaml': yaml.dump(config) },
+    }));
+    expect(fromYaml.daemon.nodeRole).toBe('core');
+    expect(fromYaml.autoUpdate).toMatchObject({ source: 'git', checkIntervalMinutes: 15, allowPrerelease: false });
+
+    const fromJson = await collectStateSummary(makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({ nodeRole: 'edge' }),
+        '/test/.dkg/config.yaml': yaml.dump(config),
+      },
+    }));
+    expect(fromJson.daemon.nodeRole).toBe('edge');
+    expect(fromJson.autoUpdate.source).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -292,8 +324,98 @@ describe('collectStateSummary (§4.7.0)', () => {
 // ---------------------------------------------------------------------------
 
 describe('orphan-repos check (§4.7.1)', () => {
-  it('flags a stray clone with OriginTrail/dkg origin as warning', async () => {
+  it('charges overlapping install and discovery roots once against the scan budget', async () => {
+    const fs: FakeFS = {
+      '/test/.dkg/config.json': JSON.stringify({ nodeRole: 'core' }),
+      '/test/.dkg/releases/current': 'symlink:a',
+      '/test/.dkg/releases/a/package.json': JSON.stringify({ name: 'dkg-v10' }),
+      '/extra/last/package.json': JSON.stringify({ name: 'dkg-v10' }),
+    };
+    for (let index = 0; index < 48; index++) {
+      fs[`/test/.dkg/releases/other-${index}/package.json`] = JSON.stringify({ name: 'dkg-v10' });
+    }
+    const deps = makeDeps({ fs, extraScanRoots: ['/extra/last'] });
+    const state = await collectStateSummary(deps);
+    state.daemon.entryPoint = '/test/.dkg/releases/a/packages/cli/dist/cli.js';
+    const readFile = vi.spyOn(deps, 'readFile');
+    const findings = await runOrphanReposCheck(deps, state);
+    expect(findings).toHaveLength(50);
+    expect(findings.some((finding) => finding.subject === '/extra/last')).toBe(true);
+    expect(readFile.mock.calls.filter(([path]) => path === '/test/.dkg/releases/a/package.json')).toHaveLength(1);
+    expect(findings.find((finding) => finding.subject === '/test/.dkg/releases/a')?.details?.relevance).toBe('active-daemon');
+  });
+
+  it('probes known install directories without recursively discovering unrelated children', async () => {
+    const deps = makeDeps({ monorepoRoot: '/install', fs: {
+      '/install/unrelated/package.json': JSON.stringify({ name: 'dkg-v10' }),
+    } });
+    const readDir = vi.spyOn(deps, 'readdir');
+    expect(await runOrphanReposCheck(deps, await collectStateSummary(deps))).toEqual([]);
+    expect(readDir).not.toHaveBeenCalledWith('/install');
+  });
+
+  it.each(['a', '/external/releases/a'])('resolves active slot %s independently of the caller directory', async (activeSlot) => {
+    const slotPath = resolve('/test/.dkg/releases', activeSlot);
     const deps = makeDeps({
+      cwd: '/work/project',
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({ nodeRole: 'core' }),
+        '/test/.dkg/releases/current': `symlink:${activeSlot}`,
+        [`${slotPath}/package.json`]: JSON.stringify({ name: 'dkg-v10' }),
+        '/work/project/a/package.json': JSON.stringify({ name: 'dkg-v10' }),
+      },
+    });
+    // Match real filesystem behavior for relative paths without changing process.cwd().
+    const { exists, readFile, readdir } = deps;
+    const probed: string[] = [];
+    deps.exists = (path) => {
+      const absolute = resolve(deps.cwd, path);
+      probed.push(absolute);
+      return exists(absolute);
+    };
+    deps.readFile = (path) => readFile(resolve(deps.cwd, path));
+    deps.readdir = (path) => readdir(resolve(deps.cwd, path));
+
+    const findings = await runOrphanReposCheck(deps, await collectStateSummary(deps));
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ subject: slotPath, details: { relevance: 'selected-install' } });
+    expect(probed.some((path) => path.startsWith('/work/project/a'))).toBe(false);
+
+    // Explicit discovery may include the unrelated checkout, but never as the selected install.
+    deps.extraScanRoots = ['/work/project'];
+    const explicit = await runOrphanReposCheck(deps, await collectStateSummary(deps));
+    expect(explicit.find((finding) => finding.subject === '/work/project/a')?.details?.relevance)
+      .toBe('explicit-scan-root');
+  });
+
+  it('ignores unrelated home clones and identifies the selected node paths (#1762)', async () => {
+    const deps = makeDeps({
+      dkgHome: '/isolated/node', dkgHomeEnv: '/isolated/node',
+      fs: {
+        '/test/Projects/unrelated/package.json': JSON.stringify({ name: 'dkg-v10' }),
+        '/isolated/node/releases/blue/package.json': JSON.stringify({ name: 'dkg-v10' }),
+      },
+    });
+    const findings = await runOrphanReposCheck(deps, await collectStateSummary(deps));
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ severity: 'info', subject: '/isolated/node/releases/blue', details: { relevance: 'selected-dkg-home' } });
+  });
+
+  it('finds the known active daemon without scanning sibling clones', async () => {
+    const deps = makeDeps({ fs: {
+      '/test/Projects/active/package.json': JSON.stringify({ name: 'dkg-v10' }),
+      '/test/Projects/sibling/package.json': JSON.stringify({ name: 'dkg-v10' }),
+    } });
+    const state = await collectStateSummary(deps);
+    state.daemon.entryPoint = '/test/Projects/active/packages/cli/dist/cli.js';
+    const findings = await runOrphanReposCheck(deps, state);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].details?.relevance).toBe('active-daemon');
+  });
+
+  it('reports explicitly requested clone discovery as informational', async () => {
+    const deps = makeDeps({
+      extraScanRoots: ['/test'],
       fs: {
         '/test/Projects/dkg/.git/config': '[remote "origin"]\n  url = https://github.com/OriginTrail/dkg.git\n',
         '/test/Projects/dkg/package.json': JSON.stringify({ name: 'doesnt-matter' }),
@@ -303,12 +425,14 @@ describe('orphan-repos check (§4.7.1)', () => {
     expect(findings.length).toBeGreaterThan(0);
     const stray = findings.find((f) => f.subject === '/test/Projects/dkg');
     expect(stray).toBeDefined();
-    expect(stray!.severity).toBe('warning');
-    expect(stray!.advisory).toMatch(/Do not 'git pull'/);
+    expect(stray!.severity).toBe('info');
+    expect(stray!.details?.relevance).toBe('explicit-scan-root');
+    expect(findings.filter((f) => f.subject === stray!.subject)).toHaveLength(1);
   });
 
   it('flags a clone via package.json name match', async () => {
     const deps = makeDeps({
+      extraScanRoots: ['/test'],
       fs: {
         '/test/repos/dkg/package.json': JSON.stringify({ name: '@origintrail-official/dkg', version: '10.0.0' }),
       },
@@ -316,11 +440,12 @@ describe('orphan-repos check (§4.7.1)', () => {
     const findings = await runOrphanReposCheck(deps, await collectStateSummary(deps));
     const m = findings.find((f) => f.subject === '/test/repos/dkg');
     expect(m).toBeDefined();
-    expect(m!.severity).toBe('warning');
+    expect(m!.severity).toBe('info');
   });
 
   it('reports the active-daemon source tree as info rather than warning', async () => {
     const deps = makeDeps({
+      extraScanRoots: ['/test'],
       fs: {
         '/test/.dkg/daemon.pid': '4242',
         '/test/Projects/dkg/.git/config': '[remote "origin"]\n  url = https://github.com/OriginTrail/dkg.git\n',
@@ -341,6 +466,7 @@ describe('orphan-repos check (§4.7.1)', () => {
 
   it('skips ignored directories (node_modules, .npm, .cache)', async () => {
     const deps = makeDeps({
+      extraScanRoots: ['/test'],
       fs: {
         // Stray DKG clone NESTED inside a node_modules tree → must be skipped.
         '/test/Projects/some-app/node_modules/dkg/.git/config':
@@ -353,6 +479,7 @@ describe('orphan-repos check (§4.7.1)', () => {
 
   it('respects .dkg-ignore-by-doctor sentinel', async () => {
     const deps = makeDeps({
+      extraScanRoots: ['/test'],
       fs: {
         '/test/some/.dkg-ignore-by-doctor': '',
         '/test/some/.git/config': '[remote "origin"]\n  url = https://github.com/OriginTrail/dkg.git\n',
@@ -368,6 +495,14 @@ describe('orphan-repos check (§4.7.1)', () => {
 // ---------------------------------------------------------------------------
 
 describe('config-sanity check (§4.7.2)', () => {
+  it('reports unsupported managed memory limits statically (#1761)', async () => {
+    const deps = makeDeps({ fs: { '/test/.dkg/config.json': JSON.stringify({ store: { backend: 'oxigraph-server', options: { memoryMaxMiB: 1024 } } }) } });
+    deps.platform = 'darwin';
+    expect(await runConfigSanityCheck(deps)).toContainEqual(expect.objectContaining({ severity: 'error', subject: 'store.options.memoryMaxMiB', message: expect.stringContaining('require Linux') }));
+    deps.platform = 'linux';
+    expect(await runConfigSanityCheck(deps)).toEqual([]);
+  });
+
   it('flags missing config as warning, not error', async () => {
     const deps = makeDeps({ fs: {} });
     const findings = await runConfigSanityCheck(deps);
@@ -382,6 +517,18 @@ describe('config-sanity check (§4.7.2)', () => {
     expect(findings.find((f) => f.severity === 'error')).toBeDefined();
   });
 
+  it('flags a config.json that is not an object as malformed JSON', async () => {
+    for (const text of ['[]', 'null']) {
+      expect(await runConfigSanityCheck(makeDeps({ fs: { '/test/.dkg/config.json': text } }))).toEqual([{
+        check: 'config-sanity',
+        severity: 'error',
+        message: 'Config file is malformed JSON: /test/.dkg/config.json',
+        advisory: 'Fix or restore the file: config.json is not a JSON object. The daemon will refuse to start until JSON parses cleanly.',
+        subject: '/test/.dkg/config.json',
+      }]);
+    }
+  });
+
   it('rejects invalid nodeRole values', async () => {
     const deps = makeDeps({
       fs: { '/test/.dkg/config.json': JSON.stringify({ nodeRole: 'lighthouse' }) },
@@ -392,6 +539,19 @@ describe('config-sanity check (§4.7.2)', () => {
     expect(e!.severity).toBe('error');
   });
 
+  it('errors on core.authorityIndex, which the daemon refuses to load', async () => {
+    const deps = makeDeps({
+      fs: { '/test/.dkg/config.json': JSON.stringify({ authorityIndex: {}, core: { authorityIndex: {} } }) },
+    });
+    expect(await runConfigSanityCheck(deps)).toEqual([{
+      check: 'config-sanity',
+      severity: 'error',
+      message: 'core.authorityIndex is not supported',
+      advisory: 'Move authorityIndex to the top level of ~/.dkg/config.json; core-snapshot mode is an edge-node option. The daemon will refuse to start until it moves.',
+      subject: 'core.authorityIndex',
+    }]);
+  });
+
   it('rejects out-of-range apiPort', async () => {
     const deps = makeDeps({
       fs: { '/test/.dkg/config.json': JSON.stringify({ apiPort: 70000 }) },
@@ -400,17 +560,156 @@ describe('config-sanity check (§4.7.2)', () => {
     expect(findings.find((f) => f.subject === 'apiPort' && f.severity === 'error')).toBeDefined();
   });
 
+  it('rejects invalid local metrics collector toggle types', async () => {
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({
+          telemetry: { metrics: { collectionEnabled: 'yes' } },
+        }),
+      },
+    });
+    const findings = await runConfigSanityCheck(deps);
+    expect(findings.find((f) =>
+      f.subject === 'telemetry.metrics.collectionEnabled' && f.severity === 'error',
+    )).toBeDefined();
+  });
+
+  it('accepts a boolean local metrics collector toggle', async () => {
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({
+          telemetry: { metrics: { collectionEnabled: false } },
+        }),
+      },
+    });
+    const findings = await runConfigSanityCheck(deps);
+    expect(findings.find((f) =>
+      f.subject === 'telemetry.metrics.collectionEnabled',
+    )).toBeUndefined();
+  });
+
   it('warns on deprecated autoUpdate fields set to non-empty values', async () => {
     const deps = makeDeps({
       fs: {
         '/test/.dkg/config.json': JSON.stringify({
-          autoUpdate: { repo: 'https://github.com/OriginTrail/dkg.git', branch: 'main' },
+          autoUpdate: {
+            source: 'npm',
+            repo: 'https://github.com/OriginTrail/dkg.git',
+            branch: 'main',
+            ref: 'refs/heads/canary',
+            sshKeyPath: '/tmp/git-key',
+            sshCommand: 'ssh -i /tmp/git-key',
+            buildTimeoutMs: { install: 600000 },
+          },
         }),
       },
     });
     const findings = await runConfigSanityCheck(deps);
     expect(findings.find((f) => f.subject === 'autoUpdate.repo')).toBeDefined();
     expect(findings.find((f) => f.subject === 'autoUpdate.branch')).toBeDefined();
+    expect(findings.find((f) => f.subject === 'autoUpdate.ref')).toBeDefined();
+    expect(findings.find((f) => f.subject === 'autoUpdate.sshKeyPath')).toBeDefined();
+    expect(findings.find((f) => f.subject === 'autoUpdate.sshCommand')).toBeDefined();
+    expect(findings.find((f) => f.subject === 'autoUpdate.buildTimeoutMs')).toBeDefined();
+  });
+
+  it('does not warn on git updater fields when autoUpdate.source is git', async () => {
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({
+          autoUpdate: {
+            source: 'git',
+            repo: 'https://github.com/OriginTrail/dkg.git',
+            branch: 'main',
+            ref: 'refs/heads/canary',
+            sshKeyPath: '/tmp/git-key',
+            sshCommand: 'ssh -i /tmp/git-key',
+            buildTimeoutMs: { install: 600000 },
+          },
+        }),
+      },
+    });
+    const findings = await runConfigSanityCheck(deps);
+    expect(findings.find((f) => f.subject === 'autoUpdate.repo')).toBeUndefined();
+    expect(findings.find((f) => f.subject === 'autoUpdate.branch')).toBeUndefined();
+    expect(findings.find((f) => f.subject === 'autoUpdate.ref')).toBeUndefined();
+    expect(findings.find((f) => f.subject === 'autoUpdate.sshKeyPath')).toBeUndefined();
+    expect(findings.find((f) => f.subject === 'autoUpdate.sshCommand')).toBeUndefined();
+    expect(findings.find((f) => f.subject === 'autoUpdate.buildTimeoutMs')).toBeUndefined();
+  });
+
+  it('warns when git tag-signature verification is enabled for a branch ref', async () => {
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({
+          autoUpdate: {
+            source: 'git',
+            repo: 'https://github.com/OriginTrail/dkg.git',
+            branch: 'main',
+            verifyTagSignature: true,
+          },
+        }),
+      },
+    });
+    const findings = await runConfigSanityCheck(deps);
+    const warning = findings.find((f) => f.subject === 'autoUpdate.verifyTagSignature');
+    expect(warning).toBeDefined();
+    expect(warning!.severity).toBe('warning');
+    expect(warning!.message).toContain('refs/heads/main');
+  });
+
+  it('does not warn when git tag-signature verification targets a tag ref', async () => {
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({
+          autoUpdate: {
+            source: 'git',
+            repo: 'https://github.com/OriginTrail/dkg.git',
+            ref: 'refs/tags/v10.0.8',
+            verifyTagSignature: true,
+          },
+        }),
+      },
+    });
+    const findings = await runConfigSanityCheck(deps);
+    expect(findings.find((f) => f.subject === 'autoUpdate.verifyTagSignature')).toBeUndefined();
+  });
+
+  it('does not warn for legacy string false tag-signature values', async () => {
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({
+          autoUpdate: {
+            source: 'git',
+            repo: 'https://github.com/OriginTrail/dkg.git',
+            branch: 'main',
+            verifyTagSignature: 'false',
+          },
+        }),
+      },
+    });
+    const findings = await runConfigSanityCheck(deps);
+    expect(findings.find((f) => f.subject === 'autoUpdate.verifyTagSignature')).toBeUndefined();
+  });
+
+  it('errors on invalid persisted tag-signature values', async () => {
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({
+          autoUpdate: {
+            source: 'git',
+            repo: 'https://github.com/OriginTrail/dkg.git',
+            branch: 'main',
+            verifyTagSignature: 'maybe',
+          },
+        }),
+      },
+    });
+    const findings = await runConfigSanityCheck(deps);
+    const error = findings.find((f) => f.subject === 'autoUpdate.verifyTagSignature');
+    expect(error).toBeDefined();
+    expect(error!.severity).toBe('error');
+    expect(error!.message).toContain('verifyTagSignature must be a boolean');
   });
 
   it('errors on checkIntervalMinutes < 1', async () => {
@@ -419,6 +718,130 @@ describe('config-sanity check (§4.7.2)', () => {
     });
     const findings = await runConfigSanityCheck(deps);
     expect(findings.find((f) => f.subject === 'autoUpdate.checkIntervalMinutes' && f.severity === 'error')).toBeDefined();
+  });
+});
+
+describe('config-sanity check on config.yaml (§4.7.2)', () => {
+  const yamlPath = '/test/.dkg/config.yaml';
+
+  // Each config is checked once as config.json and once as config.yaml.
+  const cases: Array<{
+    name: string;
+    config: Record<string, unknown>;
+    subjects: string[];
+    platform?: NodeJS.Platform;
+  }> = [
+    {
+      name: 'a valid config',
+      config: { nodeRole: 'core', apiPort: 9200, store: { backend: 'oxigraph-server', options: { memoryMaxMiB: 1024 } } },
+      subjects: [],
+    },
+    {
+      name: 'unsupported managed memory limits',
+      config: { store: { backend: 'oxigraph-server', options: { memoryMaxMiB: 1024 } } },
+      subjects: ['store.options.memoryMaxMiB'],
+      platform: 'darwin',
+    },
+    { name: 'an external store without its URL', config: { store: { backend: 'blazegraph' } }, subjects: ['store.options.url'] },
+    { name: 'core.authorityIndex', config: { core: { authorityIndex: {} } }, subjects: ['core.authorityIndex'] },
+    { name: 'an invalid nodeRole', config: { nodeRole: 'lighthouse' }, subjects: ['nodeRole'] },
+    { name: 'an out-of-range apiPort', config: { apiPort: 70000 }, subjects: ['apiPort'] },
+    {
+      name: 'a non-boolean metrics collector toggle',
+      config: { telemetry: { metrics: { collectionEnabled: 'yes' } } },
+      subjects: ['telemetry.metrics.collectionEnabled'],
+    },
+    {
+      name: 'git-only autoUpdate fields in npm mode',
+      config: { autoUpdate: { source: 'npm', repo: 'https://github.com/OriginTrail/dkg.git', branch: 'main' } },
+      subjects: ['autoUpdate.repo', 'autoUpdate.branch'],
+    },
+    {
+      name: 'tag-signature verification on a branch ref',
+      config: { autoUpdate: { source: 'git', repo: 'https://github.com/OriginTrail/dkg.git', branch: 'main', verifyTagSignature: true } },
+      subjects: ['autoUpdate.verifyTagSignature'],
+    },
+    {
+      name: 'an invalid tag-signature value',
+      config: { autoUpdate: { source: 'git', repo: 'https://github.com/OriginTrail/dkg.git', branch: 'main', verifyTagSignature: 'maybe' } },
+      subjects: ['autoUpdate.verifyTagSignature'],
+    },
+    { name: 'checkIntervalMinutes < 1', config: { autoUpdate: { checkIntervalMinutes: 0 } }, subjects: ['autoUpdate.checkIntervalMinutes'] },
+    { name: 'an unknown autoUpdate.source', config: { autoUpdate: { source: 'brew' } }, subjects: ['autoUpdate.source'] },
+  ];
+
+  it.each(cases)('reports $name in config.yaml as it does in config.json', async ({ config, subjects, platform }) => {
+    const jsonDeps = makeDeps({ fs: { '/test/.dkg/config.json': JSON.stringify(config) } });
+    const yamlDeps = makeDeps({ fs: { [yamlPath]: yaml.dump(config) } });
+    jsonDeps.platform = platform ?? 'linux';
+    yamlDeps.platform = platform ?? 'linux';
+
+    const yamlFindings = await runConfigSanityCheck(yamlDeps);
+    expect(yamlFindings.map((f) => f.subject)).toEqual(subjects);
+    // Identical findings, apart from the file the advisories name.
+    const withJsonName = JSON.parse(JSON.stringify(yamlFindings).replaceAll('config.yaml', 'config.json'));
+    expect(withJsonName).toEqual(await runConfigSanityCheck(jsonDeps));
+  });
+
+  it('names the file in the deprecated-field advisory', async () => {
+    const config = { autoUpdate: { source: 'npm', repo: 'https://github.com/OriginTrail/dkg.git' } };
+    const advisory = async (dkgHome: string, file: string, text: string) => {
+      const findings = await runConfigSanityCheck(makeDeps({ dkgHome, fs: { [join(dkgHome, file)]: text } }));
+      return findings.find((f) => f.subject === 'autoUpdate.repo')?.advisory;
+    };
+
+    // The default config.json keeps its advisory text.
+    expect(await advisory('/test/.dkg', 'config.json', JSON.stringify(config))).toBe(
+      "The 'repo' field is inert unless autoUpdate.source is 'git'. Remove it from npm-mode ~/.dkg/config.json — the daemon will continue to ignore it, but its presence is misleading to anyone reading the file.",
+    );
+    expect(await advisory('/test/.dkg', 'config.yaml', yaml.dump(config))).toContain('Remove it from npm-mode ~/.dkg/config.yaml —');
+    expect(await advisory('/test/.dkg-dev', 'config.json', JSON.stringify(config))).toContain('Remove it from npm-mode ~/.dkg-dev/config.json —');
+    expect(await advisory('/srv/dkg', 'config.yaml', yaml.dump(config))).toContain('Remove it from npm-mode /srv/dkg/config.yaml —');
+  });
+
+  it('reports a malformed config.yaml as malformed YAML', async () => {
+    const findings = await runConfigSanityCheck(makeDeps({ fs: { [yamlPath]: 'nodeRole: core\napiPort: [9200\n' } }));
+    expect(findings).toEqual([
+      expect.objectContaining({
+        check: 'config-sanity',
+        severity: 'error',
+        message: `Config file is malformed YAML: ${yamlPath}`,
+        subject: yamlPath,
+      }),
+    ]);
+    // One line, with the parser's line:column, and no mention of JSON.
+    expect(findings[0].advisory).toMatch(
+      /^Fix or restore the file: .+ \(\d+:\d+\)\. The daemon will refuse to start until YAML parses cleanly\.$/,
+    );
+    expect(findings[0].advisory).not.toContain('JSON');
+  });
+
+  it('warns on a config.yaml without settings and errors on one that is not a mapping', async () => {
+    for (const empty of ['', '# settings go here\n', '~\n']) {
+      expect(await runConfigSanityCheck(makeDeps({ fs: { [yamlPath]: empty } }))).toEqual([
+        expect.objectContaining({ severity: 'warning', message: `Config file has no settings: ${yamlPath}`, subject: yamlPath }),
+      ]);
+    }
+    for (const notMapping of ['- nodeRole: core\n', 'core\n']) {
+      expect(await runConfigSanityCheck(makeDeps({ fs: { [yamlPath]: notMapping } }))).toEqual([
+        expect.objectContaining({
+          severity: 'error',
+          message: `Config file is malformed YAML: ${yamlPath}`,
+          advisory: expect.stringContaining('config.yaml is not a YAML mapping. The daemon ignores it and starts with defaults'),
+        }),
+      ]);
+    }
+  });
+
+  it('checks config.json, not config.yaml, when both exist', async () => {
+    const withYaml = (jsonText: string) => makeDeps({
+      fs: { '/test/.dkg/config.json': jsonText, [yamlPath]: 'nodeRole: lighthouse\napiPort: 70000\n' },
+    });
+    expect(await runConfigSanityCheck(withYaml('{}'))).toEqual([]);
+    // The daemon falls back to config.yaml only when config.json is absent.
+    expect(await runConfigSanityCheck(withYaml('{ not json'))).toEqual([
+      expect.objectContaining({ severity: 'error', message: 'Config file is malformed JSON: /test/.dkg/config.json' }),
+    ]);
   });
 });
 
@@ -513,6 +936,19 @@ describe('install-layout check (§4.7.3)', () => {
     expect(findings.find((f) => f.message.includes('not inside the npm-global install'))).toBeDefined();
   });
 
+  it('Core: a node configured in config.yaml gets the Core checks, not the Edge releases advice', async () => {
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.yaml': 'nodeRole: core\n',
+        '/test/.dkg/releases/current': 'symlink:a',
+        '/test/.dkg/releases/a/packages/cli/dist/cli.js': '// active slot',
+      },
+    });
+    const state = await collectStateSummary(deps);
+    expect(state.daemon.nodeRole).toBe('core');
+    expect(await runInstallLayoutCheck(deps, state)).toEqual([]);
+  });
+
   it('Core: errors on missing current symlink', async () => {
     const deps = makeDeps({
       fs: {
@@ -551,6 +987,23 @@ describe('install-layout check (§4.7.3)', () => {
     const state = await collectStateSummary(deps);
     const findings = await runInstallLayoutCheck(deps, state);
     expect(findings.find((f) => f.message.includes("Legacy '.git' directory") && f.severity === 'warning')).toBeDefined();
+  });
+
+  it('Core: allows .git inside slots when git updater mode is configured', async () => {
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({
+          nodeRole: 'core',
+          autoUpdate: { enabled: true, source: 'git' },
+        }),
+        '/test/.dkg/releases/current': 'symlink:a',
+        '/test/.dkg/releases/a/packages/cli/dist/cli.js': '// active slot',
+        '/test/.dkg/releases/a/.git/config': '[remote "origin"]',
+      },
+    });
+    const state = await collectStateSummary(deps);
+    const findings = await runInstallLayoutCheck(deps, state);
+    expect(findings.find((f) => f.message.includes("Legacy '.git' directory"))).toBeUndefined();
   });
 });
 
@@ -591,6 +1044,38 @@ describe('version-skew check (§4.7.4)', () => {
     state.paths.npmGlobalDkg = '/usr/local/lib/node_modules/@origintrail-official/dkg';
     const findings = await runVersionSkewCheck(deps, state);
     expect(findings.find((f) => f.message.includes('Running daemon is ahead'))).toBeDefined();
+  });
+
+  it('Edge: warns when PATH resolves a stale CLI even though npm-global matches the daemon', async () => {
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({ nodeRole: 'edge' }),
+        '/home/ubuntu/.npm-global/lib/node_modules/@origintrail-official/dkg/package.json':
+          JSON.stringify({ version: '10.0.12' }),
+      },
+      apiStatus: { version: '10.0.12' },
+    });
+    const state = await collectStateSummary(deps);
+    state.paths.npmGlobalDkg =
+      '/home/ubuntu/.npm-global/lib/node_modules/@origintrail-official/dkg';
+    state.cli.globalPath = '/usr/bin/dkg';
+    state.cli.version = '10.0.5-canary.1';
+
+    const findings = await runVersionSkewCheck(deps, state);
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      check: 'version-skew',
+      severity: 'warning',
+      subject: '/usr/bin/dkg',
+      details: {
+        cliPath: '/usr/bin/dkg',
+        cliVersion: '10.0.5-canary.1',
+        daemonVersion: '10.0.12',
+      },
+    });
+    expect(findings[0].message).toContain('CLI on PATH');
+    expect(findings[0].advisory).toContain("$(npm config get prefix)/bin");
   });
 
   it('Core: warns on slot-vs-daemon mismatch', async () => {
@@ -693,6 +1178,18 @@ describe('plugin-root check (§4.7.6)', () => {
     expect(findings.find((f) => f.severity === 'error' && f.subject === '/absent/plugin.js')).toBeDefined();
   });
 
+  it('reads routePlugins from config.yaml and names that file in the advisory', async () => {
+    const config = { routePlugins: ['/absent/plugin.js'] };
+    const advisory = async (fs: FakeFS) =>
+      (await runPluginRootCheck(makeDeps({ fs }))).find((f) => f.severity === 'error' && f.subject === '/absent/plugin.js')?.advisory;
+    expect(await advisory({ '/test/.dkg/config.json': JSON.stringify(config) })).toBe(
+      'The plugin file no longer exists at the configured path. Fix the absolute path in ~/.dkg/config.json#routePlugins, or remove the entry.',
+    );
+    expect(await advisory({ '/test/.dkg/config.yaml': yaml.dump(config) })).toBe(
+      'The plugin file no longer exists at the configured path. Fix the absolute path in ~/.dkg/config.yaml#routePlugins, or remove the entry.',
+    );
+  });
+
   it('does not flag bare-name plugin installed under plugins/node_modules', async () => {
     const deps = makeDeps({
       fs: {
@@ -767,5 +1264,43 @@ describe('runDoctor orchestrator', () => {
     expect(report.findings).toEqual([]);
     expect(report.state.daemon.nodeRole).toBe('core');
     expect(report.state.paths.dkgHome).toBe('/test/.dkg');
+    const formatted = formatDoctorReport(report).split('\n');
+    expect(formatted.find((line) => line.includes('runtime.nodeVersion')))
+      .toContain(report.state.runtime.nodeVersion);
+    expect(formatted.find((line) => line.includes('runtime.nodeSqlite')))
+      .toContain(String(report.state.runtime.nodeSqliteAvailable));
+  });
+
+  describe('node-security dispatch', () => {
+    const sqlite = () => ({ DatabaseSync: class {} });
+    const unpatched = { version: 'v22.20.0', getBuiltinModule: sqlite };
+    const patched = { version: 'v22.23.5', getBuiltinModule: sqlite };
+    // Skip everything else so the exit code reflects node-security alone.
+    const otherChecks = ALL_CHECK_IDS.filter((id) => id !== 'node-security');
+
+    it('runs by default and exits 1 on an unpatched runtime', async () => {
+      expect(ALL_CHECK_IDS).toContain('node-security');
+      const report = await runDoctor(makeDeps({ runtime: unpatched, skipChecks: otherChecks }));
+      expect(report.state.runtime.nodeVersion).toBe('v22.20.0');
+      expect(report.findings).toEqual([
+        expect.objectContaining({ check: 'node-security', severity: 'warning', subject: 'v22.20.0' }),
+      ]);
+      expect(report.exitCode).toBe(1);
+    });
+
+    it('reports nothing and exits 0 on a patched runtime', async () => {
+      const report = await runDoctor(makeDeps({ runtime: patched, skipChecks: otherChecks }));
+      expect(report.findings).toEqual([]);
+      expect(report.exitCode).toBe(0);
+    });
+
+    it('is suppressed by skipChecks while the other checks still run', async () => {
+      const report = await runDoctor(makeDeps({
+        runtime: unpatched,
+        skipChecks: ['node-security'],
+        fs: { '/test/.dkg/config.json': '{}' },
+      }));
+      expect(report.findings.some((f) => f.check === 'node-security')).toBe(false);
+    });
   });
 });

@@ -32,11 +32,11 @@ function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
  * hitting the live store. Mirrors `storeWithFailingOps` in
  * storage-ack-core-unavailable.test.ts — the curated-catalog UPDATE store-
  * failure regression below drives the real persist path (parse → verify →
- * deleteByPattern → insert) up to the armed failure.
+ * targeted update → insert) up to the armed failure.
  */
 function storeWithFailingOps(
   base: OxigraphStore,
-  failingOps: readonly ('query' | 'insert' | 'dropGraph' | 'deleteByPattern')[],
+  failingOps: readonly ('query' | 'insert' | 'dropGraph' | 'deleteByPattern' | 'update')[],
 ): TripleStore {
   return new Proxy(base as unknown as TripleStore, {
     get(target, prop, receiver) {
@@ -245,13 +245,13 @@ describe('V10 UPDATE StorageACK — peer handler + collector quorum', () => {
       expect(isStorageACKDecline(ack)).toBe(false);
     });
 
-    it('curated catalog persist / deleteByPattern throws → CORE_TEMPORARILY_UNAVAILABLE ("store unavailable"), NO signed ACK', async () => {
+    it('curated catalog persist / targeted update throws → CORE_TEMPORARILY_UNAVAILABLE ("store unavailable"), NO signed ACK', async () => {
       // Dead-air regression (otReviewAgent #1408:650): a curated UPDATE with a
-      // VALID rotated catalog root whose `<cg>/_catalog` REPLACE (deleteByPattern)
+      // VALID rotated catalog root whose `<cg>/_catalog` targeted DELETE update
       // hits a closed store used to throw out of the handler → stream reset →
       // publisher no_response. It must instead reply with the transient decline.
       const onDecline = vi.fn();
-      const store = storeWithFailingOps(new OxigraphStore(), ['deleteByPattern']);
+      const store = storeWithFailingOps(new OxigraphStore(), ['update']);
       const handler = new StorageACKHandler(
         store as any,
         makeConfig(ethers.Wallet.createRandom(), 42n, { onDecline }),
@@ -313,6 +313,37 @@ describe('V10 UPDATE StorageACK — peer handler + collector quorum', () => {
       yParityAndS: ethers.hexlify(ack.coreNodeSignatureVS instanceof Uint8Array ? ack.coreNodeSignatureVS : new Uint8Array(ack.coreNodeSignatureVS)),
     });
     expect(recovered.toLowerCase()).toBe(wallet.address.toLowerCase());
+  });
+
+  it.each([
+    ['a trust-level row', makeQuad('urn:entity:1', 'http://dkg.io/ontology/trustLevel', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>')],
+    ['a subject in a reserved namespace', makeQuad('urn:dkg:file:updated', 'urn:p', 'urn:o9')],
+  ])('refuses an inline update carrying %s before signing or writing', async (_label, metadata) => {
+    const quads = [...updatedQuads, metadata];
+    const inline = new TextEncoder().encode(quads
+      .map((q) => `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`)
+      .join('\n'));
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    const signMessage = vi.spyOn(wallet, 'signMessage');
+    const handler = new StorageACKHandler(store as any, makeConfig(wallet, 42n), new TypedEventBus() as any);
+    const intent = encodeUpdateIntent({
+      kaId: kaId.toString(),
+      contextGraphId,
+      preUpdateMerkleRootCount: Number(preUpdateMerkleRootCount),
+      newMerkleRoot: computeFlatKCRoot(quads, []),
+      newByteSize: inline.length,
+      newTokenAmount: newTokenAmount.toString(),
+      mintAmount: Number(mintAmount),
+      burnTokenIds: [],
+      newMerkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+      publisherPeerId: 'publisher-0',
+      stagingQuads: inline,
+    });
+
+    await expect(handler.updateHandler(intent, fakePeerId)).rejects.toThrow(/trustLevel|reserved namespace/);
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(await store.countQuads()).toBe(0);
   });
 
   it('declines with MERKLE_MISMATCH_IN_SWM when newMerkleRoot does not match the quads', async () => {

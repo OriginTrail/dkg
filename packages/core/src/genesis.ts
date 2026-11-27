@@ -8,7 +8,7 @@
 
 const GENESIS_AGENTS_GRAPH = 'did:dkg:context-graph:agents';
 const GENESIS_ONTOLOGY_GRAPH = 'did:dkg:context-graph:ontology';
-const DEFAULT_GENESIS_ID = 'base-testnet';
+export const DEFAULT_GENESIS_ID = 'base-testnet';
 
 interface GenesisNetworkDefinition {
   subject: string;

@@ -16,7 +16,7 @@ export interface ContextGraph {
    * the local store for this CG. Distinct from `subscribed`: a CG can be
    * subscribed but never synced (no peer holds the data), and conversely a CG
    * can be synced but no longer subscribed (we caught up once and unsubscribed).
-   * Used by the Context Oracle sidebar to hide stale entries the daemon learned
+   * Used to distinguish active subscriptions from catalogue-only graphs learned
    * about via gossip but never actually interacted with.
    */
   synced?: boolean;
@@ -32,19 +32,19 @@ export interface ContextGraph {
 interface ProjectsState {
   contextGraphs: ContextGraph[];
   loading: boolean;
+  inventoryLoaded: boolean;
+  inventoryError: string | null;
   activeProjectId: string | null;
 
-  setContextGraphs: (cgs: ContextGraph[]) => void;
-  setLoading: (v: boolean) => void;
   setActiveProject: (id: string | null) => void;
 }
 
 export const useProjectsStore = create<ProjectsState>((set) => ({
   contextGraphs: [],
   loading: false,
+  inventoryLoaded: false,
+  inventoryError: null,
   activeProjectId: null,
 
-  setContextGraphs: (cgs) => set({ contextGraphs: cgs }),
-  setLoading: (v) => set({ loading: v }),
   setActiveProject: (id) => set({ activeProjectId: id }),
 }));

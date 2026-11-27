@@ -3,6 +3,7 @@ import {
   daemonState,
   resolveStandaloneInstall,
   resolveAutoUpdateEnabled,
+  resolveAutoUpdatePollingMode,
 } from '../src/daemon/state.js';
 
 // `resolveStandaloneInstall` mutates `daemonState.standaloneCache` as a side
@@ -45,6 +46,9 @@ describe('resolveStandaloneInstall', () => {
 
   describe("source === 'git' override", () => {
     it('returns false regardless of cache state', () => {
+      // "False" here means "not an npm standalone updater". Lifecycle uses
+      // resolveAutoUpdatePollingMode to distinguish git updater mode from
+      // contributor monorepo mode.
       daemonState.standaloneCache = true;
       expect(resolveStandaloneInstall('git')).toBe(false);
     });
@@ -120,7 +124,7 @@ describe('resolveAutoUpdateEnabled — integrated with the new override', () => 
     expect(daemonState.standaloneCache).toBe(true);
   });
 
-  it("treats node as monorepo when config sets autoUpdate.source = 'git', applying the monorepo default (enabled => false)", () => {
+  it("keeps source='git' disabled by default unless enabled is explicit", () => {
     const config: any = { autoUpdate: { source: 'git' } };
     expect(resolveAutoUpdateEnabled(config)).toBe(false);
     expect(daemonState.standaloneCache).toBe(false);
@@ -133,10 +137,28 @@ describe('resolveAutoUpdateEnabled — integrated with the new override', () => 
     expect(resolveAutoUpdateEnabled(config)).toBe(false);
   });
 
-  it("explicit `enabled: true` works with source='git' even though monorepo default would be false", () => {
-    // Symmetric case: dev wants their cloned monorepo node to actually
-    // auto-update from main. Default would be false; explicit true overrides.
+  it("explicit `enabled: true` works with source='git' even though the default is disabled", () => {
+    // Git mode is an explicit opt-in: source selects the updater family, while
+    // enabled still controls whether daemon polling applies updates.
     const config: any = { autoUpdate: { source: 'git', enabled: true } };
     expect(resolveAutoUpdateEnabled(config)).toBe(true);
+  });
+});
+
+describe('resolveAutoUpdatePollingMode', () => {
+  it("keeps npm as the default polling mode for standalone installs when source is unset or 'npm'", () => {
+    expect(resolveAutoUpdatePollingMode(undefined, true)).toBe('npm');
+    expect(resolveAutoUpdatePollingMode('npm', true)).toBe('npm');
+  });
+
+  it("selects git polling only for explicit source='git'", () => {
+    expect(resolveAutoUpdatePollingMode('git', false)).toBe('git');
+    expect(resolveAutoUpdatePollingMode('git', true)).toBe('git');
+  });
+
+  it('keeps monorepo checkouts out of package polling', () => {
+    expect(resolveAutoUpdatePollingMode(undefined, false)).toBe('monorepo');
+    expect(resolveAutoUpdatePollingMode('auto', false)).toBe('monorepo');
+    expect(resolveAutoUpdatePollingMode('monorepo', false)).toBe('monorepo');
   });
 });

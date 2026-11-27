@@ -97,7 +97,7 @@ R=$(api "$NODE" POST "/api/knowledge-assets/$NAME_A/vm/publish" "{\"contextGraph
 PCODE=$(code_of "$R"); PSTATUS=$(field "$(body_of "$R")" status); KAID=$(field "$(body_of "$R")" kaId)
 if [ "$PCODE" = "200" ] && { [ "$PSTATUS" = "confirmed" ] || [ "$PSTATUS" = "finalized" ]; }; then
   ok "vm/publish AUTO-REGISTERED + minted on the never-registered CG (status=$PSTATUS kaId=$KAID)"
-elif printf '%s' "$(body_of "$R")" | grep -qi 'not registered'; then
+elif grep -qi 'not registered' <<<"$(body_of "$R")"; then
   bad "vm/publish did NOT auto-register (regression): $(body_of "$R")"
 else
   bad "vm/publish failed (HTTP $PCODE status=$PSTATUS): $(body_of "$R")"

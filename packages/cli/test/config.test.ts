@@ -9,6 +9,8 @@ import { computeNetworkId } from '../../core/src/genesis.js';
 import {
   loadNetworkConfig,
   loadConfig,
+  assertAuthorityIndexConfigPlacement,
+  DkgHomeFiles,
   removePid,
   removeApiPort,
   saveConfig,
@@ -24,12 +26,280 @@ import {
   classifyMonorepoInit,
   sharedHomeInitGate,
   repoDir,
+  inferNetworkConfigNameFromChainId,
+  listBundledNetworkConfigNames,
+  loadResolvedNetworkConfig,
+  loadNetworkRegistryFromRoots,
+  resolveKnownNetworkConfigName,
   resolveNetworkConfigName,
+  resolveAutoUpdateConfig,
   resolveAutoUpdateSource,
+  resolveUpdatePreferences,
+  resolveContextGraphSubscriptionRehydrationEnabled,
+  approvalPolicyMigrationWarning,
   resolveApprovalPolicy,
   resolveChainConfig,
   resolveReadyChainConfig,
+  resolveRfc64CatalogActivations,
+  resolveRfc64PublicCatalogActivation,
+  resolveRfc64PublicCatalogActivationChainIdentityV1,
+  resolveStorageAckTiming,
 } from '../src/config.js';
+import { rfc64PublicCatalogPolicy as policy } from './helpers/rfc64-public-catalog.js';
+
+describe('raw authority index placement', () => {
+  it.each([undefined, null, false, 3, 'core', []])('preserves non-mapping core behavior for %j', (core) => {
+    expect(() => assertAuthorityIndexConfigPlacement({ core })).not.toThrow();
+  });
+
+  it('rejects an own misplaced policy before config validation', () => {
+    expect(() => assertAuthorityIndexConfigPlacement({ core: { authorityIndex: {} } }))
+      .toThrow('core.authorityIndex is not supported');
+    expect(() => assertAuthorityIndexConfigPlacement({ core: {} })).not.toThrow();
+  });
+});
+
+describe('resolveContextGraphSubscriptionRehydrationEnabled', () => {
+  it('defaults to enabled and preserves explicit config values', () => {
+    expect(resolveContextGraphSubscriptionRehydrationEnabled(undefined, undefined)).toBe(true);
+    expect(resolveContextGraphSubscriptionRehydrationEnabled(true, undefined)).toBe(true);
+    expect(resolveContextGraphSubscriptionRehydrationEnabled(false, undefined)).toBe(false);
+  });
+
+  it('lets the strict environment override win', () => {
+    for (const value of ['1', 'true', ' TRUE ']) {
+      expect(resolveContextGraphSubscriptionRehydrationEnabled(false, value)).toBe(true);
+    }
+    for (const value of ['0', 'false', ' FALSE ']) {
+      expect(resolveContextGraphSubscriptionRehydrationEnabled(true, value)).toBe(false);
+    }
+  });
+
+  it('rejects invalid environment and persisted config values', () => {
+    expect(() => resolveContextGraphSubscriptionRehydrationEnabled(true, 'yes')).toThrow(
+      'DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED must be one of 1, 0, true, or false',
+    );
+    expect(() => resolveContextGraphSubscriptionRehydrationEnabled(true, '')).toThrow(
+      'DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED',
+    );
+    expect(() => resolveContextGraphSubscriptionRehydrationEnabled('false', undefined)).toThrow(
+      'contextGraphSubscriptionRehydrationEnabled must be a boolean',
+    );
+  });
+});
+
+describe('resolveRfc64PublicCatalogActivation', () => {
+  const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430');
+
+  it('is fail-closed when omitted or explicitly disabled', () => {
+    expect(resolveRfc64PublicCatalogActivation({}, chainIdentity)).toEqual({
+      enabled: false,
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
+      selectedContextGraphs: [],
+    });
+    expect(resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: { enabled: false },
+    }, chainIdentity)).toEqual({
+      enabled: false,
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
+      selectedContextGraphs: [],
+    });
+    expect(resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: false,
+        deploymentProfile: {
+          networkId: 'otp:20430',
+          assertedAtChainId: '20430',
+          assertedAtKav10Address: `0x${'22'.repeat(20)}`,
+        },
+        autoPublish: {
+          peers: ['12D3KooIgnored'],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [policy('ignored-disabled-selection')],
+        },
+      },
+    }, chainIdentity)).toEqual({
+      enabled: false,
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
+      selectedContextGraphs: [],
+    });
+  });
+
+  it('derives the exact durable and auto-publish allowlist from the pinned manifest', () => {
+    const resolved = resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        autoPublish: {
+          peers: ['12D3KooReceiver'],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a'), policy('selected-b')],
+          retryIntervalMs: 30_000,
+        },
+      } as any,
+    }, chainIdentity);
+
+    expect(resolved).toMatchObject({
+      enabled: true,
+      selectedContextGraphs: ['selected-a', 'selected-b'],
+      autoPublish: {
+        peers: ['12D3KooReceiver'],
+      },
+    });
+  });
+
+  it('activates a valid selected manifest without a redundant enabled switch', () => {
+    const resolved = resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-by-manifest')],
+        },
+      },
+    }, chainIdentity);
+
+    expect(resolved).toMatchObject({
+      enabled: true,
+      selectedContextGraphs: ['selected-by-manifest'],
+    });
+  });
+
+  it('still rejects a non-boolean enabled value', () => {
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: 'true',
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-invalid-switch')],
+        },
+      } as any,
+    }, chainIdentity)).toThrow(/enabled must be a boolean/u);
+  });
+
+  it('keeps receiver-only activation selected while leaving auto-publish absent', () => {
+    const resolved = resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-receiver')],
+        },
+      },
+    }, chainIdentity);
+
+    expect(resolved).toMatchObject({
+      enabled: true,
+      selectedContextGraphs: ['selected-receiver'],
+      autoPublish: undefined,
+    });
+    expect(resolved.bootstrap?.acceptedPublicPolicies[0]?.policyEnvelope.payload.contextGraphId)
+      .toBe('selected-receiver');
+  });
+
+  it('rejects activation without a selected policy and rejects a second allowlist', () => {
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: { enabled: true },
+    }, chainIdentity)).toThrow(/non-empty bootstrap/u);
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        autoPublish: {
+          contextGraphIds: ['different-selection'],
+          peers: [],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: { acceptedPublicPolicies: [policy('selected-a')] },
+      } as any,
+    }, chainIdentity)).toThrow(/derived from the bootstrap manifest/u);
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a'), policy('selected-a')],
+        },
+      } as any,
+    }, chainIdentity)).toThrow(/policies must be unique by graph/u);
+  });
+
+  it('rejects unknown root activation fields instead of silently changing mode', () => {
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        autoPublsih: {
+          peers: ['12D3KooReceiver'],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a')],
+        },
+      } as any,
+    }, chainIdentity)).toThrow(/unknown fields/u);
+  });
+
+  it('rejects manifests and deployment overrides for another network', () => {
+    const activation = {
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a')],
+        },
+      },
+    };
+    expect(() => resolveRfc64PublicCatalogActivation(
+      activation,
+      resolveRfc64PublicCatalogActivationChainIdentityV1(undefined),
+    )).toThrow(/requires an effective network id/u);
+    expect(() => resolveRfc64PublicCatalogActivation(
+      activation,
+      resolveRfc64PublicCatalogActivationChainIdentityV1('none'),
+    )).toThrow(/requires a numeric EVM chain id/u);
+
+    expect(() => resolveRfc64PublicCatalogActivation(
+      activation,
+      {
+        networkId: chainIdentity.networkId,
+        evmChainId: '20431' as typeof chainIdentity.evmChainId,
+      },
+    )).toThrow(/network and EVM chain ids differ/u);
+
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a', 'base:84532')],
+        },
+      },
+    }, chainIdentity)).toThrow(/policy network differs/u);
+
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        deploymentProfile: {
+          networkId: 'base:84532',
+          assertedAtChainId: '84532',
+          assertedAtKav10Address: `0x${'22'.repeat(20)}`,
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a')],
+        },
+      },
+    }, chainIdentity)).toThrow(/deployment network differs/u);
+
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        deploymentProfile: {
+          networkId: 'otp:20430',
+          assertedAtChainId: '20431',
+          assertedAtKav10Address: `0x${'22'.repeat(20)}`,
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a')],
+        },
+      },
+    }, chainIdentity)).toThrow(/deployment EVM chain id differs/u);
+  });
+});
 
 describe('classifyMonorepoInit (dkg init monorepo home guard — issue #960)', () => {
   const npmHome = '/home/u/.dkg';
@@ -76,6 +346,61 @@ describe('sharedHomeInitGate (dkg init shared ~/.dkg opt-in — issue #960 round
   });
 });
 
+describe('resolveStorageAckTiming', () => {
+  it('returns the stock 15s handler deadline and 20s send timeout when unset', () => {
+    expect(resolveStorageAckTiming()).toEqual({
+      handlerDeadlineMs: 15_000,
+      sendTimeoutMs: 20_000,
+      maxConcurrentCollections: 1,
+    });
+  });
+
+  it('normalizes a raised handler-only deadline by preserving the 5s send margin', () => {
+    expect(resolveStorageAckTiming({ handlerDeadlineMs: 55_000 })).toEqual({
+      handlerDeadlineMs: 55_000,
+      sendTimeoutMs: 60_000,
+      maxConcurrentCollections: 1,
+    });
+  });
+
+  it('allows handlerDeadlineMs: 0 to disable the handler deadline', () => {
+    expect(resolveStorageAckTiming({ handlerDeadlineMs: 0 })).toEqual({
+      handlerDeadlineMs: 0,
+      sendTimeoutMs: 20_000,
+      maxConcurrentCollections: 1,
+    });
+    expect(resolveStorageAckTiming({ handlerDeadlineMs: 0, sendTimeoutMs: 10_000 })).toEqual({
+      handlerDeadlineMs: 0,
+      sendTimeoutMs: 10_000,
+      maxConcurrentCollections: 1,
+    });
+  });
+
+  it('defaults ACK collection concurrency to one and accepts an explicit positive limit', () => {
+    expect(resolveStorageAckTiming({ maxConcurrentCollections: 4 }).maxConcurrentCollections).toBe(4);
+    expect(() => resolveStorageAckTiming({ maxConcurrentCollections: 0 })).toThrow(
+      /storageAck\.maxConcurrentCollections must be a positive safe integer/,
+    );
+  });
+
+  it('rejects explicitly misaligned handler/send pairs', () => {
+    expect(() => resolveStorageAckTiming({
+      handlerDeadlineMs: 60_000,
+      sendTimeoutMs: 30_000,
+    })).toThrow(/storageAck\.sendTimeoutMs must be at least 5000ms greater/);
+  });
+
+  it('rejects negative handler deadline disables', () => {
+    expect(() => resolveStorageAckTiming({
+      handlerDeadlineMs: -1,
+    })).toThrow(/storageAck\.handlerDeadlineMs must be a non-negative safe integer/);
+  });
+
+  it('rejects malformed storageAck blocks instead of silently defaulting', () => {
+    expect(() => resolveStorageAckTiming('60000' as any)).toThrow(/storageAck must be an object/);
+  });
+});
+
 describe('removePid / removeApiPort (catch path)', () => {
   it('removePid does not throw when pid file does not exist (ENOENT)', async () => {
     await expect(removePid()).resolves.toBeUndefined();
@@ -101,6 +426,25 @@ describe('removePid / removeApiPort (catch path)', () => {
 });
 
 describe('loadNetworkConfig', () => {
+  it('keeps a valid requested network available when an unrelated overlay is malformed', async () => {
+    const root = join(tmpdir(), `dkg-network-registry-${randomBytes(8).toString('hex')}`);
+    await mkdir(join(root, 'network'), { recursive: true });
+    try {
+      await writeFile(join(root, 'network', 'testnet.json'), JSON.stringify({
+        networkName: 'Fixture Testnet',
+        relays: [],
+        defaultNodeRole: 'edge',
+      }));
+      await writeFile(join(root, 'network', 'experimental.json'), '{not-json');
+
+      const registry = loadNetworkRegistryFromRoots([root]);
+      expect(registry.testnet?.networkName).toBe('Fixture Testnet');
+      expect(registry.experimental).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('loads network/testnet.json with correct shape when run from repo', async () => {
     const config = await loadNetworkConfig();
     if (!config) {
@@ -146,6 +490,22 @@ describe('loadNetworkConfig', () => {
     expect(config.networkName).toBe('DKG V10 Base Testnet');
     expect((config as any).genesisId).toBe('base-testnet');
     expect(config.networkId).toBe('7449c543ff04a550b2dafa999fe8ee577a00b212023bb4d4244e8d58a4792c7b');
+    expect(config.defaultContextGraphs).toEqual([]);
+    // OT-RFC-27: the testnet Marketplace Context Graph, the default for a node whose config names none.
+    expect((config as any).marketplace).toEqual({ contextGraphId: 'testnet-marketplace' });
+  });
+
+  it('names a testnet Marketplace Context Graph id, not the placeholder', async () => {
+    const { _resetNetworkConfigCache } = await import('../src/config.js');
+    _resetNetworkConfigCache();
+    const config = await loadNetworkConfig('testnet');
+    if (!config) {
+      expect(config).toBeNull();
+      return;
+    }
+    // A format check only: the placeholder cannot ship. Whether the graph exists and admits nodes is a fact of the
+    // live testnet, checked when the id is filled in, not something a unit test can show.
+    expect((config as any).marketplace?.contextGraphId).not.toMatch(/^FILL_IN_/);
   });
 
   it('loads mainnet prep configs without activating testnet genesis or relays', async () => {
@@ -231,6 +591,8 @@ describe('loadNetworkConfig', () => {
       // must match the committed values.
       expect(cfg.networkId).not.toBe(testnetNetworkId);
       expect(cfg.relays).not.toEqual(testnetRelays);
+      // OT-RFC-27: no mainnet chain has the marketplace contracts, so no mainnet names a Marketplace Context Graph.
+      expect(cfg.marketplace).toBeUndefined();
       expect(cfg.networkName).toBe(expected.networkName);
       expect(cfg.genesisId).toBe(expected.genesisId);
       expect(cfg.networkId).toBe(expected.networkId);
@@ -382,6 +744,35 @@ describe('localAgentIntegrations config round-trip', () => {
     if (tempDir) await rm(tempDir, { recursive: true, force: true });
   });
 
+  it('keeps symmetric control-file operations bound to one immutable home', async () => {
+    const files = new DkgHomeFiles();
+    const otherHome = join(tempDir, 'other-home');
+    await mkdir(otherHome);
+    process.env.DKG_HOME = otherHome;
+    expect(Object.isFrozen(files)).toBe(true);
+    expect(files.home).toBe(tempDir);
+    expect(files.tokenPath).toBe(dkgAuthTokenPath(tempDir));
+    await writePid(222);
+    await writeApiPort(9444);
+    await files.writePid(111);
+    await files.writeApiPort(9333);
+    await files.saveConfig({ ...await files.loadConfig(), name: 'home-a' });
+    expect(files.configExists()).toBe(true);
+    expect((await files.loadConfig()).name).toBe('home-a');
+    expect(files.readConfigSync()).toMatchObject({ name: 'home-a' });
+    expect(await files.readPid()).toBe(111);
+    expect(await files.readApiPort()).toBe(9333);
+    expect(await readPid()).toBe(222);
+    expect(await readApiPort()).toBe(9444);
+    expect(configExists()).toBe(false);
+    await files.removePid();
+    await files.removeApiPort();
+    expect(await files.readPid()).toBeNull();
+    expect(await files.readApiPort()).toBeNull();
+    expect(await readPid()).toBe(222);
+    expect(await readApiPort()).toBe(9444);
+  });
+
   it('persists the generic local agent integration registry', async () => {
     await saveConfig({
       name: 'test-node',
@@ -466,9 +857,139 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(resolveNetworkConfigName(loaded)).toBe('mainnet-base');
   });
 
-  it('falls back to project default network when networkConfig is unset or blank', () => {
+  it('round-trips a bounded RFC-64 canary and advances it only after a restart edit', async () => {
+    const contextGraphId = 'restart-stable-rollout-cg';
+    await saveConfig({
+      name: 'test-node',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      rfc64Catalog: {
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'legacy',
+          contextGraphModes: { [contextGraphId]: 'shadow' },
+        },
+      },
+    });
+
+    const loaded = await loadConfig();
+    expect(loaded.rfc64Catalog?.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'legacy',
+      contextGraphModes: { [contextGraphId]: 'shadow' },
+    });
+    expect(resolveRfc64CatalogActivations(loaded, {
+      networkId: 'otp:20430',
+      evmChainId: '20430',
+    }).catalog.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'legacy',
+      contextGraphModes: { [contextGraphId]: 'shadow' },
+    });
+
+    await saveConfig({
+      ...loaded,
+      rfc64Catalog: {
+        ...loaded.rfc64Catalog,
+        rollout: {
+          ...loaded.rfc64Catalog?.rollout,
+          contextGraphModes: { [contextGraphId]: 'catalog' },
+        },
+      },
+    });
+    const restarted = await loadConfig();
+    expect(resolveRfc64CatalogActivations(restarted, {
+      networkId: 'otp:20430',
+      evmChainId: '20430',
+    }).catalog.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'legacy',
+      contextGraphModes: { [contextGraphId]: 'catalog' },
+    });
+  });
+
+  it('infers legacy network selection from a known chainId', () => {
+    expect(resolveNetworkConfigName({ chain: { chainId: 'base:84532' } })).toBe('testnet');
+    expect(resolveNetworkConfigName({ chain: { chainId: ' BASE:8453 ' } })).toBe('mainnet-base');
+    expect(resolveNetworkConfigName({ chain: { chainId: 'gnosis:100' } })).toBe('mainnet-gnosis');
+    expect(resolveNetworkConfigName({ chain: { chainId: 'neuroweb:2043' } })).toBe('mainnet-neuroweb');
+  });
+
+  it('derives legacy inference from the supplied bundled-network registry', () => {
+    expect(inferNetworkConfigNameFromChainId('fixture:42', {
+      'fixture-network': {
+        chain: {
+          type: 'evm',
+          chainId: 'fixture:42',
+          rpcUrl: 'https://fixture.invalid',
+          hubAddress: '0x0000000000000000000000000000000000000042',
+        },
+      },
+    })).toBe('fixture-network');
+  });
+
+  it('uses the same bundled registry for load-by-name and chain inference', async () => {
+    for (const name of ['testnet', 'mainnet-base', 'mainnet-gnosis'] as const) {
+      const network = await loadNetworkConfig(name);
+      expect(network).not.toBeNull();
+      expect(inferNetworkConfigNameFromChainId(network?.chain?.chainId)).toBe(name);
+    }
+  });
+
+  it('lists every bundled overlay, including networks omitted from setup menus', () => {
+    expect(listBundledNetworkConfigNames()).toEqual([
+      'mainnet-base',
+      'mainnet-gnosis',
+      'mainnet-neuroweb',
+      'testnet',
+    ]);
+  });
+
+  it('loads a legacy chain-only config through one resolved-network boundary', async () => {
+    const resolved = await loadResolvedNetworkConfig({ chain: { chainId: 'neuroweb:2043' } });
+
+    expect(resolved.name).toBe('mainnet-neuroweb');
+    expect(resolved.network?.chain?.chainId).toBe('neuroweb:2043');
+  });
+
+  it('refuses to infer an ambiguous chain shared by two overlays', () => {
+    const chain = {
+      type: 'evm' as const,
+      chainId: 'fixture:42',
+      rpcUrl: 'https://fixture.invalid',
+      hubAddress: '0x0000000000000000000000000000000000000042',
+    };
+    expect(inferNetworkConfigNameFromChainId('fixture:42', {
+      first: { chain },
+      second: { chain },
+    })).toBeUndefined();
+  });
+
+  it('keeps explicit networkConfig authoritative over chain inference', () => {
+    expect(resolveNetworkConfigName({
+      networkConfig: 'mainnet-base',
+      chain: { chainId: 'gnosis:100' },
+    })).toBe('mainnet-base');
+  });
+
+  it('infers from chain when networkConfig is blank', () => {
+    expect(resolveNetworkConfigName({
+      networkConfig: '   ',
+      chain: { chainId: 'gnosis:100' },
+    })).toBe('mainnet-gnosis');
+  });
+
+  it('falls back to project default network without a known legacy chain', () => {
     expect(resolveNetworkConfigName({})).toBe('testnet');
     expect(resolveNetworkConfigName({ networkConfig: '   ' })).toBe('testnet');
+    expect(resolveNetworkConfigName({ chain: { chainId: 'evm:31337' } })).toBe('testnet');
+  });
+
+  it('keeps unknown legacy chains distinguishable from the project fallback', () => {
+    expect(resolveKnownNetworkConfigName({})).toBeUndefined();
+    expect(resolveKnownNetworkConfigName({ chain: { chainId: 'evm:31337' } })).toBeUndefined();
+    expect(resolveKnownNetworkConfigName({ chain: { chainId: 'gnosis:100' } })).toBe('mainnet-gnosis');
   });
 
   it('round-trips relayServerCapacity through saveConfig/loadConfig (operator override)', async () => {
@@ -488,6 +1009,46 @@ describe('localAgentIntegrations config round-trip', () => {
     const loaded = await loadConfig();
     expect(loaded.nodeRole).toBe('core');
     expect(loaded.relayServerCapacity).toBe(2048);
+  });
+
+  it('round-trips explicitly trusted core authority index sources', async () => {
+    const authorityIndex = {
+      mode: 'core-snapshot' as const,
+      trustedCorePeers: ['/dns4/core.example.com/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M'],
+      maxTailBlocks: 2_000,
+      cacheEpoch: 1,
+    };
+    await saveConfig({
+      name: 'snapshot-edge',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      authorityIndex,
+    });
+
+    expect((await loadConfig()).authorityIndex).toEqual(authorityIndex);
+  });
+
+  it.each(['json', 'yaml'])('rejects misplaced core.authorityIndex in persisted %s config', async (format) => {
+    const content = format === 'json'
+      ? JSON.stringify({ core: { authorityIndex: { mode: 'core-snapshot' } } })
+      : 'core:\n  authorityIndex:\n    mode: core-snapshot\n';
+    await writeFile(join(tempDir, `config.${format}`), content, 'utf8');
+    await expect(loadConfig()).rejects.toThrow(
+      'core.authorityIndex is not supported. Move authorityIndex to the top level',
+    );
+  });
+
+  it('keeps authority index snapshot trust absent for existing configs', async () => {
+    await saveConfig({
+      name: 'existing-edge',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      relayPeers: ['/dns4/relay.example.com/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M'],
+    });
+
+    expect((await loadConfig()).authorityIndex).toBeUndefined();
   });
 
   it('round-trips relayReservationCount through saveConfig/loadConfig (operator override)', async () => {
@@ -522,6 +1083,74 @@ describe('localAgentIntegrations config round-trip', () => {
     const loaded = await loadConfig();
     expect(loaded.nodeRole).toBe('edge');
     expect(loaded.syncAgentsMeta).toBe(false);
+  });
+
+  it('round-trips the automatic system Context Graph sync override', async () => {
+    await saveConfig({
+      name: 'test-node',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      syncSystemContextGraphsOnConnect: true,
+    });
+
+    const loaded = await loadConfig();
+    expect(loaded.syncSystemContextGraphsOnConnect).toBe(true);
+  });
+
+  it('round-trips the on-demand agents phonebook kill switch', async () => {
+    await saveConfig({
+      name: 'test-node',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      onDemandAgentsPhonebook: false,
+    });
+
+    const loaded = await loadConfig();
+    expect(loaded.onDemandAgentsPhonebook).toBe(false);
+  });
+
+  it('round-trips sync snapshot limits and Context Graph priorities', async () => {
+    await saveConfig({
+      name: 'test-node',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      syncResponderSnapshotLimits: {
+        global: { rows: 500_000, bytesEstimate: 268_435_456 },
+        local: { rows: 150_000, bytesEstimate: 67_108_864 },
+      },
+      syncContextGraphPriorities: {
+        'realtime-operations': 100,
+        'default-workload': 0,
+        'bulk-archive': -20,
+      },
+    });
+
+    const loaded = await loadConfig();
+    expect(loaded.syncResponderSnapshotLimits).toEqual({
+      global: { rows: 500_000, bytesEstimate: 268_435_456 },
+      local: { rows: 150_000, bytesEstimate: 67_108_864 },
+    });
+    expect(loaded.syncContextGraphPriorities).toEqual({
+      'realtime-operations': 100,
+      'default-workload': 0,
+      'bulk-archive': -20,
+    });
+  });
+
+  it('round-trips logging.kaPublishLifecycleDebug through saveConfig/loadConfig', async () => {
+    await saveConfig({
+      name: 'test-node',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      logging: { kaPublishLifecycleDebug: true },
+    });
+
+    const loaded = await loadConfig();
+    expect(loaded.logging?.kaPublishLifecycleDebug).toBe(true);
   });
 
   it('omits relayReservationCount when not set (so DKGNode.start() applies the default)', async () => {
@@ -610,6 +1239,263 @@ describe('resolveAutoUpdateSource', () => {
   });
 });
 
+describe('resolveUpdatePreferences', () => {
+  it('preserves disabled local update policy and local precedence', () => {
+    expect(resolveUpdatePreferences(
+      {
+        autoUpdate: {
+          enabled: false,
+          source: 'npm',
+          allowPrerelease: false,
+          channel: 'mainnet',
+        },
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/dkg',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          source: 'git',
+          allowPrerelease: true,
+          channel: 'testnet',
+        },
+      },
+    )).toEqual({
+      source: 'npm',
+      allowPrerelease: false,
+      channel: 'mainnet',
+    });
+  });
+
+  it('inherits network source, channel, and prerelease policy field by field', () => {
+    expect(resolveUpdatePreferences(
+      { autoUpdate: { enabled: false } },
+      {
+        autoUpdate: {
+          enabled: false,
+          repo: 'owner/dkg',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          source: 'git',
+          allowPrerelease: false,
+          channel: 'mainnet',
+        },
+      },
+    )).toEqual({
+      source: 'git',
+      allowPrerelease: false,
+      channel: 'mainnet',
+    });
+  });
+
+  it('defaults prerelease policy when neither layer supplies preferences', () => {
+    expect(resolveUpdatePreferences(undefined, undefined)).toEqual({
+      allowPrerelease: true,
+    });
+  });
+
+  it('is the preference model consumed by automatic polling', () => {
+    const config = {
+      autoUpdate: {
+        enabled: true,
+        source: 'npm' as const,
+        allowPrerelease: false,
+      },
+    };
+    const network = {
+      autoUpdate: {
+        enabled: true,
+        repo: 'owner/dkg',
+        branch: 'main',
+        checkIntervalMinutes: 30,
+        source: 'git' as const,
+        allowPrerelease: true,
+        channel: 'mainnet',
+      },
+    };
+
+    expect(resolveAutoUpdateConfig(config, network)).toMatchObject(
+      resolveUpdatePreferences(config, network),
+    );
+  });
+});
+
+describe('resolveAutoUpdateConfig', () => {
+  it('inherits network-level tag-signature verification for git auto-update polling', () => {
+    const resolved = resolveAutoUpdateConfig(
+      {
+        autoUpdate: {
+          enabled: true,
+          source: 'git',
+        },
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/repo',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          verifyTagSignature: true,
+          source: 'git',
+        },
+      },
+    );
+
+    expect(resolved?.verifyTagSignature).toBe(true);
+  });
+
+  it('plumbs a local updateJitterMinutes through to the resolved config', () => {
+    const resolved = resolveAutoUpdateConfig(
+      { autoUpdate: { enabled: true, source: 'git', updateJitterMinutes: 10 } },
+      { autoUpdate: { enabled: true, repo: 'owner/repo', branch: 'main', checkIntervalMinutes: 30, source: 'git' } },
+    );
+    expect(resolved?.updateJitterMinutes).toBe(10);
+  });
+
+  it('inherits a network-level updateJitterMinutes default when local is unset', () => {
+    const resolved = resolveAutoUpdateConfig(
+      { autoUpdate: { enabled: true, source: 'git' } },
+      { autoUpdate: { enabled: true, repo: 'owner/repo', branch: 'main', checkIntervalMinutes: 30, updateJitterMinutes: 45, source: 'git' } },
+    );
+    expect(resolved?.updateJitterMinutes).toBe(45);
+  });
+
+  it('prefers the local updateJitterMinutes over the network default (including 0 = disable)', () => {
+    const resolved = resolveAutoUpdateConfig(
+      { autoUpdate: { enabled: true, source: 'git', updateJitterMinutes: 0 } },
+      { autoUpdate: { enabled: true, repo: 'owner/repo', branch: 'main', checkIntervalMinutes: 30, updateJitterMinutes: 45, source: 'git' } },
+    );
+    expect(resolved?.updateJitterMinutes).toBe(0);
+  });
+
+  it('omits updateJitterMinutes from the resolved config when neither layer sets it', () => {
+    const resolved = resolveAutoUpdateConfig(
+      { autoUpdate: { enabled: true, source: 'git' } },
+      { autoUpdate: { enabled: true, repo: 'owner/repo', branch: 'main', checkIntervalMinutes: 30, source: 'git' } },
+    );
+    expect(resolved).not.toHaveProperty('updateJitterMinutes');
+  });
+
+  it('preserves a local false tag-signature override over network defaults', () => {
+    const resolved = resolveAutoUpdateConfig(
+      {
+        autoUpdate: {
+          enabled: true,
+          source: 'git',
+          verifyTagSignature: false,
+        },
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/repo',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          verifyTagSignature: true,
+          source: 'git',
+        },
+      },
+    );
+
+    expect(resolved?.verifyTagSignature).toBe(false);
+  });
+
+  it('parses legacy string false tag-signature values at the config boundary', () => {
+    const resolved = resolveAutoUpdateConfig(
+      {
+        autoUpdate: {
+          enabled: true,
+          source: 'git',
+          verifyTagSignature: 'false',
+        } as any,
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/repo',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          verifyTagSignature: true,
+          source: 'git',
+        },
+      },
+    );
+
+    expect(resolved?.verifyTagSignature).toBe(false);
+  });
+
+  it('parses legacy string true tag-signature values at the config boundary', () => {
+    const resolved = resolveAutoUpdateConfig(
+      {
+        autoUpdate: {
+          enabled: true,
+          source: 'git',
+          verifyTagSignature: 'true',
+        } as any,
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/repo',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          verifyTagSignature: false,
+          source: 'git',
+        },
+      },
+    );
+
+    expect(resolved?.verifyTagSignature).toBe(true);
+  });
+
+  it('treats null tag-signature values as unset so network defaults still apply', () => {
+    const resolved = resolveAutoUpdateConfig(
+      {
+        autoUpdate: {
+          enabled: true,
+          source: 'git',
+          verifyTagSignature: null,
+        } as any,
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/repo',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          verifyTagSignature: true,
+          source: 'git',
+        },
+      },
+    );
+
+    expect(resolved?.verifyTagSignature).toBe(true);
+  });
+
+  it('rejects invalid tag-signature values instead of disabling verification', () => {
+    expect(() => resolveAutoUpdateConfig(
+      {
+        autoUpdate: {
+          enabled: true,
+          source: 'git',
+          verifyTagSignature: 'maybe',
+        } as any,
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/repo',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          verifyTagSignature: true,
+          source: 'git',
+        },
+      },
+    )).toThrow(/verifyTagSignature must be a boolean/);
+  });
+});
+
 describe('resolveChainConfig (field-level merge)', () => {
   const fullNetworkChain = {
     type: 'evm' as const,
@@ -636,12 +1522,110 @@ describe('resolveChainConfig (field-level merge)', () => {
     });
   });
 
+  it('normalizes receipt timeout with network fallback and operator precedence', () => {
+    expect(resolveChainConfig({}, {
+      chain: { ...fullNetworkChain, receiptTimeoutMs: 120_000.9 },
+    })?.receiptTimeoutMs).toBe(120_000);
+    expect(resolveChainConfig({ chain: { receiptTimeoutMs: 300_000.8 } }, {
+      chain: { ...fullNetworkChain, receiptTimeoutMs: 120_000 },
+    })?.receiptTimeoutMs).toBe(300_000);
+  });
+
+  it('validates finality confirmations with network fallback and operator precedence', () => {
+    expect(resolveChainConfig({}, {
+      chain: { ...fullNetworkChain, finalityConfirmations: 5 },
+    })?.finalityConfirmations).toBe(5);
+    expect(resolveChainConfig({ chain: { finalityConfirmations: 1 } }, {
+      chain: { ...fullNetworkChain, finalityConfirmations: 5 },
+    })?.finalityConfirmations).toBe(1);
+
+    for (const finalityConfirmations of [null, 0, -1, 1.5, Number.NaN]) {
+      expect(() => resolveChainConfig({
+        chain: { finalityConfirmations: finalityConfirmations as any },
+      }, { chain: fullNetworkChain })).toThrow(
+        /finalityConfirmations must be an integer >= 1/,
+      );
+    }
+  });
+
+  it('validates chain.indexTickMs as a positive integer with network fallback and operator precedence', () => {
+    expect(resolveChainConfig({}, { chain: fullNetworkChain })?.indexTickMs).toBeUndefined();
+    expect(resolveChainConfig({}, {
+      chain: { ...fullNetworkChain, indexTickMs: 12_000 },
+    })?.indexTickMs).toBe(12_000);
+    expect(resolveChainConfig({ chain: { indexTickMs: 3_000 } }, {
+      chain: { ...fullNetworkChain, indexTickMs: 12_000 },
+    })?.indexTickMs).toBe(3_000);
+
+    for (const indexTickMs of [null, 0, -1, 1.5, Number.NaN, '6000']) {
+      expect(() => resolveChainConfig({
+        chain: { indexTickMs: indexTickMs as any },
+      }, { chain: fullNetworkChain })).toThrow(
+        /chain\.indexTickMs must be a positive integer/,
+      );
+    }
+  });
+
+  it('resolves bounded authority reads only from an explicit boolean, with operator precedence', () => {
+    expect(resolveChainConfig({}, { chain: fullNetworkChain })?.boundedAuthorityReads).toBeUndefined();
+    expect(resolveChainConfig({}, {
+      chain: { ...fullNetworkChain, boundedAuthorityReads: true },
+    })?.boundedAuthorityReads).toBe(true);
+    expect(resolveChainConfig({ chain: { boundedAuthorityReads: false } }, {
+      chain: { ...fullNetworkChain, boundedAuthorityReads: true },
+    })?.boundedAuthorityReads).toBe(false);
+
+    for (const invalid of [null, 'true', 1, {}, []]) {
+      expect(() => resolveChainConfig({
+        chain: { boundedAuthorityReads: invalid as never },
+      }, { chain: fullNetworkChain })).toThrow(/chain\.boundedAuthorityReads must be a boolean/);
+    }
+  });
+
+  it.each([
+    'authorityReadTimeoutMs',
+    'authorityColdResolutionTimeoutMs',
+  ] as const)('validates chain.%s as a positive integer with network fallback and operator precedence', (key) => {
+    expect(resolveChainConfig({}, { chain: fullNetworkChain })?.[key]).toBeUndefined();
+    expect(resolveChainConfig({}, {
+      chain: { ...fullNetworkChain, [key]: 12_000 },
+    })?.[key]).toBe(12_000);
+    expect(resolveChainConfig({ chain: { [key]: 3_000 } }, {
+      chain: { ...fullNetworkChain, [key]: 12_000 },
+    })?.[key]).toBe(3_000);
+
+    for (const value of [null, 0, -1, 1.5, Number.NaN, '2500']) {
+      expect(() => resolveChainConfig({
+        chain: { [key]: value as any },
+      }, { chain: fullNetworkChain })).toThrow(
+        new RegExp(`chain\\.${key} must be a positive integer`),
+      );
+    }
+  });
+
+  it('rejects non-finite and sub-minimum receipt timeouts', () => {
+    for (const receiptTimeoutMs of [Number.NaN, Number.POSITIVE_INFINITY, 999]) {
+      expect(() => resolveChainConfig({ chain: { receiptTimeoutMs } }, { chain: fullNetworkChain }))
+        .toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
+    }
+  });
+
+  it('rejects an explicit null receipt timeout instead of using a fallback', () => {
+    const config = { chain: { receiptTimeoutMs: null as any } };
+
+    expect(() => resolveChainConfig(config, null))
+      .toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
+    expect(() => resolveChainConfig(config, {
+      chain: { ...fullNetworkChain, receiptTimeoutMs: 120_000 },
+    })).toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
+  });
+
   it('threads the shipped network rpcUrls defaults through to the failover engine (real overlays)', async () => {
     const { _resetNetworkConfigCache } = await import('../src/config.js');
     const overlays = [
       { name: 'mainnet-base', primary: 'https://mainnet.base.org', backups: ['https://base-rpc.publicnode.com', 'https://base.drpc.org'] },
       { name: 'mainnet-gnosis', primary: 'https://rpc.gnosischain.com', backups: ['https://gnosis-rpc.publicnode.com', 'https://gnosis.drpc.org'] },
-      { name: 'testnet', primary: 'https://sepolia.base.org', backups: ['https://base-sepolia-rpc.publicnode.com', 'https://base-sepolia.drpc.org'] },
+      { name: 'testnet', primary: 'https://sepolia.base.org', backups: ['https://base-sepolia-rpc.publicnode.com', 'https://base-testnet.api.pocket.network'] },
     ];
     for (const { name, primary, backups } of overlays) {
       _resetNetworkConfigCache();
@@ -873,6 +1857,119 @@ describe('resolveChainConfig (field-level merge)', () => {
       { chain: { ...fullNetworkChain, cgRegistryScanPageSize: 10_000 } },
     );
     expect(overridden?.cgRegistryScanPageSize).toBe(4_000);
+  });
+
+  it('merges and validates the RPC request budget per field', () => {
+    const merged = resolveChainConfig(
+      { chain: { rpcRequestBudget: { maxRequestsPerSecond: 7, maxQueueSize: 32 } } },
+      {
+        chain: {
+          ...fullNetworkChain,
+          rpcRequestBudget: {
+            maxRequestsPerSecond: 12,
+            foregroundReservePercent: 75,
+            burstRequests: 24,
+            startupJitterMs: 45_000,
+          },
+        },
+      },
+    );
+    expect(merged?.rpcRequestBudget).toEqual({
+      maxRequestsPerSecond: 7,
+      foregroundReservePercent: 75,
+      burstRequests: 24,
+      maxQueueSize: 32,
+      startupJitterMs: 45_000,
+    });
+    expect(() => resolveChainConfig(
+      { chain: { rpcRequestBudget: { foregroundReservePercent: 100 } } },
+      { chain: fullNetworkChain },
+    )).toThrow(/foregroundReservePercent/);
+    expect(() => resolveChainConfig(
+      { chain: { rpcRequestBudget: null as never } },
+      { chain: fullNetworkChain },
+    )).toThrow(/plain object/);
+    expect(() => resolveChainConfig(
+      { chain: { rpcRequestBudget: { maxRequestsPerSecond: null as never } } },
+      { chain: fullNetworkChain },
+    )).toThrow(/maxRequestsPerSecond/);
+    expect(() => resolveChainConfig(
+      {},
+      { chain: { ...fullNetworkChain, rpcRequestBudget: null as never } },
+    )).toThrow(/plain object/);
+  });
+
+  it('merges publisher funding floors with operator precedence', () => {
+    const inherited = resolveChainConfig(
+      {},
+      {
+        chain: {
+          ...fullNetworkChain,
+          minPublisherNativeWei: 123n,
+          minPublisherTracWei: 456n,
+        },
+      },
+    );
+    expect(inherited?.minPublisherNativeWei).toBe(123n);
+    expect(inherited?.minPublisherTracWei).toBe(456n);
+
+    const overridden = resolveChainConfig(
+      { chain: { minPublisherNativeWei: 789n } },
+      {
+        chain: {
+          ...fullNetworkChain,
+          minPublisherNativeWei: 123n,
+          minPublisherTracWei: 456n,
+        },
+      },
+    );
+    expect(overridden?.minPublisherNativeWei).toBe(789n);
+    expect(overridden?.minPublisherTracWei).toBe(456n);
+  });
+
+  it('normalizes and validates an operator transaction fee cap', () => {
+    const merged = resolveChainConfig(
+      { chain: { maxFeePerGasWei: '100000000' } },
+      { chain: fullNetworkChain },
+    );
+    expect(merged?.maxFeePerGasWei).toBe(100_000_000n);
+    expect(() => resolveChainConfig(
+      { chain: { maxFeePerGasWei: '0' } },
+      { chain: fullNetworkChain },
+    )).toThrow(/chain\.maxFeePerGasWei must be greater than zero/);
+  });
+
+  it('normalizes persisted (JSON/YAML) funding-floor strings and numbers to bigint', () => {
+    // What operators and the network overlay can actually produce: JSON.parse /
+    // yaml.load never yield bigints. Strings must survive above 2^53.
+    const merged = resolveChainConfig(
+      { chain: { minPublisherNativeWei: '2000000000000000000' } },
+      { chain: { ...fullNetworkChain, minPublisherTracWei: 456 } },
+    );
+    expect(merged?.minPublisherNativeWei).toBe(2_000_000_000_000_000_000n);
+    expect(merged?.minPublisherTracWei).toBe(456n);
+
+    // Operator string overrides an overlay number.
+    const overridden = resolveChainConfig(
+      { chain: { minPublisherNativeWei: '789' } },
+      { chain: { ...fullNetworkChain, minPublisherNativeWei: 123 } },
+    );
+    expect(overridden?.minPublisherNativeWei).toBe(789n);
+  });
+
+  it('rejects malformed funding-floor values at startup instead of mis-comparing silently', () => {
+    const withFloor = (chain: Record<string, unknown>) =>
+      resolveChainConfig({ chain: chain as never }, { chain: fullNetworkChain });
+    expect(() => withFloor({ minPublisherNativeWei: '0.002' }))
+      .toThrow(/chain\.minPublisherNativeWei must be a decimal wei bigint string/);
+    expect(() => withFloor({ minPublisherNativeWei: '' }))
+      .toThrow(/empty string/);
+    expect(() => withFloor({ minPublisherTracWei: -5 }))
+      .toThrow(/non-negative/);
+    expect(() => withFloor({ minPublisherNativeWei: 1e18 }))
+      .toThrow(/MAX_SAFE_INTEGER/);
+    expect(() => withFloor({ minPublisherTracWei: 1.5 }))
+      .toThrow(/MAX_SAFE_INTEGER/);
   });
 
   it('dedupes primary + backups while preserving operator priority', () => {
@@ -1191,5 +2288,78 @@ describe('resolveApprovalPolicy (YAML/JSON config → runtime ApprovalPolicy)', 
         refillBelowFraction: Number.NaN,
       }),
     ).toThrow(/must be a finite number in \[0, 1\]/);
+  });
+
+  it('passes a valid targetAllowanceMultiple through', () => {
+    expect(
+      resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: 50 }),
+    ).toEqual({
+      mode: 'replenishing',
+      targetAllowance: undefined,
+      targetAllowanceMultiple: 50,
+      refillBelowFraction: undefined,
+    });
+    // 1 is the tightest legal multiple (ceiling == this publish's cost).
+    expect(
+      resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: 1 })
+        ?.targetAllowanceMultiple,
+    ).toBe(1);
+  });
+
+  it('rejects an out-of-contract targetAllowanceMultiple loudly', () => {
+    // Fail fast rather than clamp: a multiple < 1 would put the ceiling under
+    // the publish floor on every call, so the adapter's floor clamp would fire
+    // every time and `replenishing` would silently behave as `per-publish` —
+    // the operator's chosen mode cancelled, visible only on the gas bill.
+    // Same convention as `finalityConfirmations` and the two sibling fields.
+    for (const bad of [0, -1, 2.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(
+        () => resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: bad }),
+        `expected multiple ${bad} to be rejected`,
+      ).toThrow(/targetAllowanceMultiple must be an integer >= 1/);
+    }
+    expect(() =>
+      resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: '20' as any }),
+    ).toThrow(/targetAllowanceMultiple must be an integer >= 1/);
+  });
+
+  it('carries both sizing fields through when the operator set both (adapter applies precedence)', () => {
+    // Resolution does not silently drop either field — precedence (absolute
+    // `targetAllowance` wins) is `computeApprovalAction`'s job, so the config
+    // layer stays a pure translator and the operator's file round-trips.
+    expect(
+      resolveApprovalPolicy({
+        mode: 'replenishing',
+        targetAllowance: '1000000000000000000000',
+        targetAllowanceMultiple: 5,
+      }),
+    ).toEqual({
+      mode: 'replenishing',
+      targetAllowance: 10n ** 21n,
+      targetAllowanceMultiple: 5,
+      refillBelowFraction: undefined,
+    });
+  });
+
+  it('warns only when replenishing relies on the changed implicit ceiling', () => {
+    const warning = approvalPolicyMigrationWarning({ mode: 'replenishing' });
+    expect(warning).toContain('20x the triggering publish cost');
+    expect(warning).toContain('legacy flat 1000 TRAC ceiling');
+    expect(warning).toContain('targetAllowance explicitly to retain a flat ceiling');
+    expect(warning).toContain('targetAllowanceMultiple to keep relative sizing');
+    expect(approvalPolicyMigrationWarning({
+      mode: 'replenishing',
+      refillBelowFraction: 0.25,
+    })).toBe(warning);
+    expect(approvalPolicyMigrationWarning({
+      mode: 'replenishing',
+      targetAllowance: '1000000000000000000000',
+    })).toBeUndefined();
+    expect(approvalPolicyMigrationWarning({
+      mode: 'replenishing',
+      targetAllowanceMultiple: 20,
+    })).toBeUndefined();
+    expect(approvalPolicyMigrationWarning({ mode: 'per-publish' })).toBeUndefined();
+    expect(approvalPolicyMigrationWarning(undefined)).toBeUndefined();
   });
 });

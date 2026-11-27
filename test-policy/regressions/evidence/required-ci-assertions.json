@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "method": "download-and-parse-required-shard-junit",
+  "prHeadCommit": "155b9cba50f4cb651114e593a0c06b24289a77ff",
+  "evaluatedMergeCommit": "810f8e00da64f4980c139ac3c46fb72bc5257fd5",
+  "baseCommit": "00406e3d4a7230e84a34e046b6fc069ff8d51ff0",
+  "runUrl": "https://github.com/OriginTrail/dkg/actions/runs/37229741344",
+  "buildValidation": {
+    "jobUrl": "https://github.com/OriginTrail/dkg/actions/runs/37229741344/job/111516808494",
+    "conclusion": "success",
+    "toolingTestsPassed": 449,
+    "provenRecords": [
+      "GH-2782",
+      "GH-2741"
+    ]
+  },
+  "cases": [
+    {
+      "id": "GH-2741",
+      "lane": "tornado-agent",
+      "cadence": "required",
+      "shard": "6/10",
+      "jobUrl": "https://github.com/OriginTrail/dkg/actions/runs/37229741344/job/111517782120",
+      "jobConclusion": "success",
+      "artifactUrl": "https://github.com/OriginTrail/dkg/actions/runs/37229741344/artifacts/11313770418",
+      "artifactName": "vitest-agent-6-of-10",
+      "reportPath": "agent/test-results/agent-6.xml",
+      "reportSha256": "c4991ffaf426da174ec81163dff1e883683132d738c44fbba8c31c4a111fd06e",
+      "testFile": "packages/agent/test/regression-peer-store-repair.test.ts",
+      "testSha256": "dabb9c46e829d9bc4a0fb21ab3bd3a685e88840e9226d953ccee66b4f3852446",
+      "testcase": {
+        "classname": "test/regression-peer-store-repair.test.ts",
+        "name": "Random Sampling proof-time exact repair on the real libp2p peer store > fetches the challenged asset from a provider the peer store lists as sync-capable",
+        "time": "0.011324969"
+      },
+      "exactMatches": 1,
+      "executed": true,
+      "passed": true,
+      "skipped": false,
+      "actualNodeRuntime": "v22.23.3"
+    },
+    {
+      "id": "GH-2782",
+      "lane": "tornado-agent",
+      "cadence": "required",
+      "shard": "10/10",
+      "jobUrl": "https://github.com/OriginTrail/dkg/actions/runs/37229741344/job/111517782149",
+      "jobConclusion": "success",
+      "artifactUrl": "https://github.com/OriginTrail/dkg/actions/runs/37229741344/artifacts/11312444941",
+      "artifactName": "vitest-agent-10-of-10",
+      "reportPath": "agent/test-results/agent-10.xml",
+      "reportSha256": "fe11ff14a87faeb820fdf39730850cf3d190160a2c9a3dd135f448586671f7db",
+      "testFile": "packages/agent/test/regression-on-demand-cursor.test.ts",
+      "testSha256": "fb9556de0e3e9a760b151bbda35fa123faecf520425ddd960d29dc16a7938058",
+      "testcase": {
+        "classname": "test/regression-on-demand-cursor.test.ts",
+        "name": "VM reconcile cursor follows the subscription lifetime > advances an on-demand subscription through its pending ordinals without a durable write",
+        "time": "0.137267551"
+      },
+      "exactMatches": 1,
+      "executed": true,
+      "passed": true,
+      "skipped": false,
+      "actualNodeRuntime": "v22.23.3"
+    }
+  ]
+}

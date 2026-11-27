@@ -11,9 +11,17 @@
  * via `as any`, the same convention the rest of evm-adapter.unit.test.ts uses)
  * so deleting the `signerTxSerializer.run(...)` wrap turns the suite red.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { SignerTxSerializer } from '../src/signer-tx-serializer.js';
+import {
+  ChainWriteAheadHookError,
+  getChainWriteAheadHookCause,
+  isChainWriteAheadHookError,
+} from '../src/write-ahead-hook-error.js';
+import { connectable } from './connectable.js';
+import { makeClient, retryable429 } from './rpc-failover-test-helpers.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -22,6 +30,12 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
     return impl(...args);
   };
   return Object.assign(fn, { calls });
+}
+
+function deferred<T = void>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
 }
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -45,6 +59,7 @@ const neverNull = (): never => {
 };
 const fakeReceipt = (hash: string) =>
   ({ hash, blockNumber: 1, index: 0, status: 1, logs: [] }) as unknown as ethers.TransactionReceipt;
+const V10_KA_ADDRESS = '0x' + 'aa'.repeat(20);
 
 // Minimal V10 publish params that survive `createKnowledgeAssets`'s struct
 // building so execution reaches the allowance-approve step.
@@ -87,11 +102,15 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       await tick(10);
       return { signedTx: `tx-${id}`, txHash: `0x${id}` };
     };
-    (a as any).sendSignedTransactionAndWait = recorder(async (signedTx: string) => {
+    (a as any).broadcastSignedTransactionWithRetries = recorder(async (signedTx: string) => {
       events.push(`send:${signedTx}`);
       await tick(10);
-      events.push(`done:${signedTx}`);
-      return fakeReceipt(signedTx);
+      events.push(`accepted:${signedTx}`);
+    });
+    (a as any).waitForReceiptWithFailover = recorder(async (txHash: string) => {
+      await tick(10);
+      events.push(`done:${txHash}`);
+      return fakeReceipt(txHash);
     });
 
     await Promise.all([
@@ -99,11 +118,66 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       (a as any).dispatchSerializedV10Write(signer, 'publish', undefined, build('b'), neverNull),
     ]);
 
-    // The entire build → send → done of 'a' must complete before 'b' starts.
-    expect(events).toEqual([
-      'build:a', 'send:tx-a', 'done:tx-a',
-      'build:b', 'send:tx-b', 'done:tx-b',
-    ]);
+    // Build/sign remains serialized through endpoint acceptance, but receipt
+    // polling no longer occupies the nonce lane.
+    expect(events.indexOf('build:b')).toBeGreaterThan(events.indexOf('accepted:tx-a'));
+    expect(events.indexOf('build:b')).toBeLessThan(events.indexOf('done:0xa'));
+  });
+
+  it('logs the real publish holder and update waiter through the adapter boundary', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const a = new EVMChainAdapter(minimalConfig());
+      const signer = new ethers.Wallet(DEPLOYER_PK);
+      (a as any).signerTxSerializer = new SignerTxSerializer({
+        observeAfterMs: 1_000,
+        observeIntervalMs: 1_000,
+        stallAfterMs: 2_000,
+      });
+      (a as any).broadcastSignedTransactionWithRetries = recorder(async () => undefined);
+      (a as any).waitForReceiptWithFailover = recorder(
+        async (txHash: string) => fakeReceipt(txHash),
+      );
+
+      const holdPublish = deferred();
+      const publish = (a as any).dispatchSerializedV10Write(
+        signer,
+        'publish',
+        undefined,
+        async () => {
+          await holdPublish.promise;
+          return { signedTx: 'publish', txHash: '0xpublish' };
+        },
+        neverNull,
+      );
+      const update = (a as any).dispatchSerializedV10Write(
+        signer,
+        'update',
+        undefined,
+        async () => ({ signedTx: 'update', txHash: '0xupdate' }),
+        neverNull,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      const first = warn.mock.calls.at(-1)!.join(' ');
+      expect(first).toContain('tx serializer');
+      expect(first).toContain('publish');
+      expect(first).toContain('update');
+      expect(first).not.toContain('STALL');
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(warn.mock.calls.at(-1)!.join(' ')).toContain('STALL');
+
+      holdPublish.resolve();
+      await Promise.all([publish, update]);
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it('runs writes to DIFFERENT wallets concurrently', async () => {
@@ -113,19 +187,24 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
     expect(s1.address).not.toBe(s2.address);
     const events: string[] = [];
     const build = (id: string) => async () => {
-      events.push(`build:${id}`);
+      events.push(`start:${id}`);
       await tick(20);
+      events.push(`end:${id}`);
       return { signedTx: `tx-${id}`, txHash: `0x${id}` };
     };
-    (a as any).sendSignedTransactionAndWait = recorder(async (signedTx: string) => fakeReceipt(signedTx));
+    (a as any).broadcastSignedTransactionWithRetries = recorder(async () => undefined);
+    (a as any).waitForReceiptWithFailover = recorder(async (txHash: string) => fakeReceipt(txHash));
 
     await Promise.all([
       (a as any).dispatchSerializedV10Write(s1, 'publish', undefined, build('a'), neverNull),
       (a as any).dispatchSerializedV10Write(s2, 'publish', undefined, build('b'), neverNull),
     ]);
 
-    // Both builds started before either finished → genuinely concurrent.
-    expect(events.slice(0, 2).sort()).toEqual(['build:a', 'build:b']);
+    // Both builds started before EITHER finished → genuinely concurrent. A
+    // global (single-key) serializer would produce start,end,start,end and
+    // fail here — the end-event assertions are what give this test teeth.
+    expect(events.slice(0, 2).sort()).toEqual(['start:a', 'start:b']);
+    expect(events.slice(2).sort()).toEqual(['end:a', 'end:b']);
   });
 
   it('keeps the pending nonce monotonic for same-wallet writes (the #953 regression guard)', async () => {
@@ -142,15 +221,15 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       await tick(5); // populate / sign gap
       return { signedTx: String(nonce), txHash: `0x${nonce}` };
     };
-    (a as any).sendSignedTransactionAndWait = recorder(async (signedTx: string) => {
+    (a as any).broadcastSignedTransactionWithRetries = recorder(async (signedTx: string) => {
       const nonce = Number(signedTx);
       await tick(5);
       if (nonce !== pending) {
         throw new Error(`Nonce too low: expected ${pending} but got ${nonce}`);
       }
       pending += 1;
-      return fakeReceipt(signedTx);
     });
+    (a as any).waitForReceiptWithFailover = recorder(async (txHash: string) => fakeReceipt(txHash.slice(2)));
 
     const receipts = await Promise.all([
       (a as any).dispatchSerializedV10Write(signer, 'publish', undefined, build(), neverNull),
@@ -187,15 +266,15 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       await tick(5);
       return { signedTx: String(publishNonce), txHash: `0x${publishNonce}` };
     };
-    (a as any).sendSignedTransactionAndWait = recorder(async (signedTx: string) => {
+    (a as any).broadcastSignedTransactionWithRetries = recorder(async (signedTx: string) => {
       const nonce = Number(signedTx);
       await tick(5);
       if (nonce !== pending) {
         throw new Error(`Nonce too low (publish): expected ${pending} but got ${nonce}`);
       }
       pending += 1;
-      return fakeReceipt(signedTx);
     });
+    (a as any).waitForReceiptWithFailover = recorder(async (txHash: string) => fakeReceipt(txHash.slice(2)));
 
     const receipts = await Promise.all([
       (a as any).dispatchSerializedV10Write(signer, 'publish', undefined, build(), neverNull),
@@ -265,8 +344,8 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
   it('fails closed when the WAL onBroadcast hook throws — never broadcasts', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     const signer = new ethers.Wallet(DEPLOYER_PK);
-    const send = recorder(async () => fakeReceipt('0xsent'));
-    (a as any).sendSignedTransactionAndWait = send;
+    const send = recorder(async () => undefined);
+    (a as any).broadcastSignedTransactionWithRetries = send;
     const onBroadcast = recorder(async () => {
       throw new Error('WAL disk full');
     });
@@ -283,13 +362,36 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
     expect(send.calls).toEqual([]);
   });
 
+  it('keeps the hook error as the cause of the write-ahead wrapper, message unchanged (GH#2940)', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const signer = new ethers.Wallet(DEPLOYER_PK);
+    (a as any).broadcastSignedTransactionWithRetries = recorder(async () => undefined);
+    const hookError = Object.assign(new Error('WAL disk full'), { code: 'STORE_SCHEDULER_BUSY' });
+
+    const thrown = await (a as any).dispatchSerializedV10Write(
+      signer,
+      'publish',
+      async () => { throw hookError; },
+      async () => ({ signedTx: 'tx', txHash: '0xpre' }),
+      neverNull,
+    ).catch((error: unknown) => error);
+
+    expect(thrown).toBeInstanceOf(ChainWriteAheadHookError);
+    expect(isChainWriteAheadHookError(thrown)).toBe(true);
+    // Byte-for-byte the text callers and operators already see.
+    expect((thrown as Error).message).toBe('chain:writeahead hook failed before publish broadcast: WAL disk full');
+    // The original error — identity, so its own typed contract survives — rides as `cause`.
+    expect((thrown as Error).cause).toBe(hookError);
+    expect(getChainWriteAheadHookCause(thrown)).toBe(hookError);
+  });
+
   it('a failed write does not wedge the wallet — the next same-wallet write still runs', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     const signer = new ethers.Wallet(DEPLOYER_PK);
-    (a as any).sendSignedTransactionAndWait = recorder(async (signedTx: string) => {
+    (a as any).broadcastSignedTransactionWithRetries = recorder(async (signedTx: string) => {
       if (signedTx === 'boom') throw new Error('broadcast failed');
-      return fakeReceipt(signedTx);
     });
+    (a as any).waitForReceiptWithFailover = recorder(async () => fakeReceipt('ok'));
 
     await expect(
       (a as any).dispatchSerializedV10Write(
@@ -314,7 +416,8 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
   it('invokes onNullReceipt with the pre-broadcast tx hash when the receipt is null', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     const signer = new ethers.Wallet(DEPLOYER_PK);
-    (a as any).sendSignedTransactionAndWait = recorder(async () => null);
+    (a as any).broadcastSignedTransactionWithRetries = recorder(async () => undefined);
+    (a as any).waitForReceiptWithFailover = recorder(async () => null);
 
     await expect(
       (a as any).dispatchSerializedV10Write(
@@ -327,5 +430,328 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
         },
       ),
     ).rejects.toThrow('null receipt for 0xPRE');
+  });
+});
+
+describe('sendContractTransaction — universal per-wallet serialization (Phase 1: dkg#953 across tx types)', () => {
+  it('serializes concurrent SAME-wallet standalone sends (RS/staking/PCA now hold the lock too)', async () => {
+    // Before Phase 1 these calls hit `sendContractTransaction` raw — no lock —
+    // so two same-wallet sends could read the same pending nonce. Now the
+    // public wrapper acquires `signerTxSerializer.run(signer.address, ...)`.
+    const a = new EVMChainAdapter(minimalConfig());
+    const signer = new ethers.Wallet(DEPLOYER_PK);
+    const events: string[] = [];
+    // Stub the unlocked leaf the wrapper delegates to (inside the lock).
+    (a as any).sendContractTransactionUnlocked = recorder(async (_c: unknown, method: string) => {
+      events.push(`start:${method}`);
+      await tick(10);
+      events.push(`end:${method}`);
+      return fakeReceipt(method);
+    });
+
+    await Promise.all([
+      (a as any).sendContractTransaction({}, 'createChallenge', [], signer, 'createChallenge'),
+      (a as any).sendContractTransaction({}, 'submitProof', [], signer, 'submitProof'),
+    ]);
+
+    // No overlap: the first fully completes before the second starts.
+    expect(events).toEqual([
+      'start:createChallenge', 'end:createChallenge',
+      'start:submitProof', 'end:submitProof',
+    ]);
+  });
+
+  it('runs standalone sends on DIFFERENT wallets concurrently', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const s1 = new ethers.Wallet(DEPLOYER_PK);
+    const s2 = new ethers.Wallet(OTHER_PK);
+    expect(s1.address).not.toBe(s2.address);
+    const events: string[] = [];
+    (a as any).sendContractTransactionUnlocked = recorder(async (_c: unknown, method: string) => {
+      events.push(`start:${method}`);
+      await tick(20);
+      events.push(`end:${method}`);
+      return fakeReceipt(method);
+    });
+
+    await Promise.all([
+      (a as any).sendContractTransaction({}, 'm1', [], s1, 'm1'),
+      (a as any).sendContractTransaction({}, 'm2', [], s2, 'm2'),
+    ]);
+
+    // Both started before EITHER finished → genuinely concurrent (distinct
+    // keys). A single global lock would produce start,end,start,end and fail.
+    expect(events.slice(0, 2).sort()).toEqual(['start:m1', 'start:m2']);
+    expect(events.slice(2).sort()).toEqual(['end:m1', 'end:m2']);
+  });
+
+  it('V10 approval uses the scoped in-lock sender and never re-enters the public serializer', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const signer = new ethers.Wallet(DEPLOYER_PK);
+    const tokenWithSigner = connectable({
+      allowance: recorder(async () => 0n),
+      approve: recorder(() => undefined),
+    });
+    (a as any).contracts.token = {
+      connect: recorder(() => tokenWithSigner),
+    };
+    (a as any).readContractWith = recorder(async () => 0n);
+    const publicSend = recorder(async () => {
+      throw new Error('public serializer re-entered');
+    });
+    const unlockedSend = recorder(async () => fakeReceipt('approve'));
+    (a as any).sendContractTransaction = publicSend;
+    (a as any).sendContractTransactionUnlocked = unlockedSend;
+    (a as any).broadcastSignedTransactionWithRetries = recorder(async () => undefined);
+    (a as any).waitForReceiptWithFailover = recorder(async (txHash: string) => fakeReceipt(txHash));
+
+    await (a as any).dispatchSerializedV10Write(
+      signer,
+      'publish',
+      undefined,
+      async (ctx: any) => {
+        await (a as any).ensureV10ApproveTrac(
+          signer,
+          V10_KA_ADDRESS,
+          1n,
+          'approve V10 publish TRAC',
+          false,
+          ctx.sendContractTransaction,
+        );
+        return { signedTx: 'publish', txHash: '0xpublish' };
+      },
+      neverNull,
+    );
+
+    expect(publicSend.calls).toEqual([]);
+    expect(unlockedSend.calls).toHaveLength(1);
+    expect(unlockedSend.calls[0].slice(1, 5)).toEqual([
+      'approve',
+      [V10_KA_ADDRESS, 1n],
+      signer,
+      'approve V10 publish TRAC',
+    ]);
+  });
+
+  it('forced re-approve (#888) routes through the caller-scoped approvalSender, never the public serializer', async () => {
+    // Pins the wiring `prepareV10WithAllowanceRecovery` →
+    // `ensureV10ApproveTrac(…, approvalSender)`: if the recovery path ever
+    // fell back to the default `this.sendContractTransaction`, the in-lock
+    // publish would re-enter the per-wallet serializer and self-deadlock.
+    const a = new EVMChainAdapter(minimalConfig());
+    const signer = new ethers.Wallet(DEPLOYER_PK);
+    const tokenWithSigner = connectable({});
+    (a as any).contracts.token = { connect: recorder(() => tokenWithSigner) };
+    // Stale-zero allowance read triggers the approve; the #888 post-approve
+    // confirmation poll sees the target immediately (separate read path).
+    (a as any).readContractWith = recorder(async () => 0n);
+    (a as any).confirmAllowanceVisible = recorder(async () => undefined);
+    const publicSend = recorder(async () => {
+      throw new Error('public serializer re-entered');
+    });
+    (a as any).sendContractTransaction = publicSend;
+    const scopedSend = recorder(async () => fakeReceipt('approve'));
+    let populateCalls = 0;
+    (a as any).prepareAcrossProviders = recorder(async () => {
+      populateCalls += 1;
+      if (populateCalls === 1) {
+        throw Object.assign(new Error('execution reverted'), { revert: { name: 'TooLowAllowance' } });
+      }
+      return { transaction: { nonce: 1 }, signer };
+    });
+    const signPreparedTransaction = recorder(async () => ({ signedTx: 'pub', txHash: '0xpub' }));
+    (a as any).signPreparedTransaction = signPreparedTransaction;
+
+    const result = await (a as any).prepareV10WithAllowanceRecovery(
+      signer,
+      {} as any,
+      'publish',
+      {},
+      V10_KA_ADDRESS,
+      1n,
+      'approve V10 publish TRAC (forced re-approve, #888)',
+      scopedSend,
+    );
+
+    expect(result).toEqual({ transaction: { nonce: 1 }, signer });
+    expect(populateCalls).toBe(2);
+    expect(signPreparedTransaction.calls).toEqual([]); // the publish signs the result, once
+    expect(publicSend.calls).toEqual([]);
+    expect(scopedSend.calls).toHaveLength(1);
+    expect(scopedSend.calls[0].slice(1, 2)).toEqual(['approve']);
+    expect(scopedSend.calls[0][3]).toBe(signer);
+  });
+
+  it('a publish and RS-style send serialize through publish acceptance on the same wallet (cross-type #953)', async () => {
+    // The actual Phase-1 win: RS create/submit used to bypass the per-wallet
+    // lock, so a publish rotated onto wallet #0 and a concurrent RS tx could
+    // read the same pending nonce. Now BOTH funnel through the one
+    // `signerTxSerializer` keyed by address → their send windows never interleave.
+    const a = new EVMChainAdapter(minimalConfig());
+    const signer = new ethers.Wallet(DEPLOYER_PK);
+    const events: string[] = [];
+    (a as any).broadcastSignedTransactionWithRetries = recorder(async (tx: string) => {
+      events.push(`send:${tx}`);
+      await tick(10);
+      events.push(`accepted:${tx}`);
+    });
+    (a as any).waitForReceiptWithFailover = recorder(async (txHash: string) => {
+      await tick(10);
+      events.push(`receipt:${txHash}`);
+      return fakeReceipt(txHash);
+    });
+    (a as any).sendContractTransactionUnlocked = recorder(async (_c: unknown, method: string) => {
+      events.push(`rs-start:${method}`);
+      await tick(10);
+      events.push(`rs-end:${method}`);
+      return fakeReceipt(method);
+    });
+    const publishBuild = async () => { await tick(2); return { signedTx: 'pub', txHash: '0xpub' }; };
+
+    await Promise.all([
+      (a as any).dispatchSerializedV10Write(signer, 'publish', undefined, publishBuild, neverNull),
+      (a as any).sendContractTransaction({}, 'submitProof', [], signer, 'submitProof'),
+    ]);
+
+    // The standalone transaction cannot begin before the publish bytes were
+    // accepted. It may overlap receipt polling, which is intentionally outside
+    // the nonce-critical lane.
+    expect(events.indexOf('rs-start:submitProof')).toBeGreaterThan(events.indexOf('accepted:pub'));
+  });
+});
+
+describe('rebroadcastReceiptBatch — in the lane of the wallet that signed the batch', () => {
+  // A receipt batch recorded at nonce 7 but never broadcast left its wallet's pending nonce at 7, so a write in that
+  // wallet's lane reads 7 too. These endpoints take a transaction only at its wallet's pending nonce, as a node does,
+  // and answer the pending-nonce read from the same count.
+  const signedAt = (pk: string, nonce: number, data: string) => new ethers.Wallet(pk).signTransaction({
+    type: 2, chainId: 31337, nonce, to: V10_KA_ADDRESS, data, gasLimit: 100_000n, maxFeePerGas: 2n, maxPriorityFeePerGas: 1n,
+  });
+
+  function onChain(config: Partial<EVMAdapterConfig> = {}) {
+    const a = new EVMChainAdapter(minimalConfig(config));
+    (a as any).initialized = true;
+    const pending = new Map<string, number>();
+    const pendingOf = (address: string) => pending.get(address) ?? 7;
+    const sent: string[] = [];
+    (a as any).broadcastSignedTransactionWithFailover = recorder(async (signedTx: string) => {
+      const tx = ethers.Transaction.from(signedTx);
+      if (tx.nonce !== pendingOf(tx.from!)) throw new Error(`nonce too low: ${tx.nonce}, pending ${pendingOf(tx.from!)}`);
+      pending.set(tx.from!, tx.nonce + 1);
+      sent.push(signedTx);
+    });
+    (a as any).waitForReceiptWithFailover = recorder(async (txHash: string) => fakeReceipt(txHash));
+    // The guard asks where the wallet's writes read their nonce; a read through the read provider fails the test.
+    const nonceReads: string[] = [];
+    (a as any).rpcFailover.pendingNonce = async (address: string) => {
+      nonceReads.push(address);
+      return pendingOf(address);
+    };
+    (a as any).readTipProvider = async () => { throw new Error('the guard read the read provider'); };
+    const broadcasts: unknown[][] = (a as any).broadcastSignedTransactionWithFailover.calls;
+    return { a, sent, pending, pendingOf, nonceReads, broadcasts };
+  }
+
+  /** Hold a wallet's lane, as a write that has read its nonce and not yet sent does. */
+  function holdLane(a: EVMChainAdapter, pk: string) {
+    const release = deferred();
+    const held = (a as any).signerTxSerializer.run(new ethers.Wallet(pk).address, () => release.promise, 'test hold');
+    return { release: () => release.resolve(), held };
+  }
+
+  it('waits while a write in the same lane signs at the nonce it read, then leaves that nonce to it', async () => {
+    const { a, sent, pendingOf, broadcasts } = onChain();
+    const wallet = new ethers.Wallet(DEPLOYER_PK);
+    const batch = await signedAt(DEPLOYER_PK, 7, '0xba');
+    const read = deferred();
+    const signing = deferred();
+    const publish = (a as any).dispatchSerializedV10Write(wallet, 'publish', undefined, async () => {
+      const nonce = pendingOf(wallet.address);
+      read.resolve();
+      await signing.promise;
+      const signedTx = await signedAt(DEPLOYER_PK, nonce, '0x9b');
+      return { signedTx, txHash: ethers.Transaction.from(signedTx).hash!, nonce };
+    }, neverNull);
+    await read.promise;
+    const recovery = a.rebroadcastReceiptBatch(batch);
+    await tick(10);
+    // Nothing is sent while the publish signs at nonce 7.
+    expect(sent).toEqual([]);
+    signing.resolve();
+    await Promise.all([publish, recovery]);
+    // The publish took nonce 7, so the batch is not sent at all: it could only be refused, or replace the publish.
+    expect(broadcasts).toHaveLength(1);
+    expect(sent).toHaveLength(1);
+    expect(sent).not.toContain(batch);
+  });
+
+  it("sends nothing once its wallet's pending nonce is past the batch's", async () => {
+    const { a, pending, nonceReads, broadcasts } = onChain();
+    // Another transaction holds nonce 7, pending, or the batch itself is out already.
+    const address = new ethers.Wallet(DEPLOYER_PK).address;
+    pending.set(address, 8);
+    await a.rebroadcastReceiptBatch(await signedAt(DEPLOYER_PK, 7, '0xba'));
+    expect(broadcasts).toEqual([]);
+    expect(nonceReads).toEqual([address]);
+  });
+
+  it("reads the pending nonce where its wallet's writes read theirs, so a lagging primary frees no taken nonce", async () => {
+    // Two RPCs. A publish took nonce 7 on the backup once the primary failed it, so writes now read their nonce there.
+    // The primary never saw that publish and still reports 7; the backup reports 8.
+    const a = new EVMChainAdapter(minimalConfig());
+    (a as any).initialized = true;
+    const address = new ethers.Wallet(DEPLOYER_PK).address;
+    const primary = { getTransactionCount: recorder(async () => 7) };
+    const backup = { getTransactionCount: recorder(async () => 8) };
+    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example'],
+      async (_signer: unknown, populated: any) => ({ ...populated, nonce: 7 }), { enabled: true });
+    const signer = { address, connect: (p: unknown) => ({ address, boundTo: p }) } as any;
+    const knowledgeAssets = { connect: (s: any) => ({ publish: { populateTransaction: () => (s.boundTo === primary
+      ? Promise.reject(retryable429()) : Promise.resolve({ to: V10_KA_ADDRESS, data: '0x' })) } }) } as any;
+    await client.prepareTransaction(knowledgeAssets, 'publish', [], signer, 'publish');
+    (a as any).rpcFailover = client;
+    const send = recorder(async () => undefined);
+    (a as any).broadcastSignedTransactionWithFailover = send;
+    await a.rebroadcastReceiptBatch(await signedAt(DEPLOYER_PK, 7, '0xba'));
+    expect(send.calls).toEqual([]);
+    expect(backup.getTransactionCount.calls).toEqual([[address, 'pending']]);
+    expect(primary.getTransactionCount.calls).toEqual([]);
+  });
+
+  it("sends a batch at its wallet's pending nonce once: sent again, it finds that nonce taken", async () => {
+    const { a, sent, broadcasts } = onChain();
+    const batch = await signedAt(DEPLOYER_PK, 7, '0xba');
+    await a.rebroadcastReceiptBatch(batch);
+    await a.rebroadcastReceiptBatch(batch);
+    expect(sent).toEqual([batch]);
+    expect(broadcasts).toHaveLength(1);
+  });
+
+  it('waits in the lane of the wallet that signed it, and in no other', async () => {
+    const { a, sent } = onChain({ additionalKeys: [OTHER_PK] });
+    const primary = holdLane(a, DEPLOYER_PK);
+    const other = holdLane(a, OTHER_PK);
+    const batch = await signedAt(OTHER_PK, 7, '0xba');
+    const recovery = a.rebroadcastReceiptBatch(batch);
+    await tick(10);
+    expect(sent).toEqual([]);
+    // Its own wallet's lane frees, and it is sent while the primary wallet's lane is still held.
+    other.release();
+    await tick(10);
+    expect(sent).toEqual([batch]);
+    primary.release();
+    await Promise.all([recovery, primary.held, other.held]);
+  });
+
+  it("is sent at once when none of the node's wallets signed it: there is no lane to share", async () => {
+    const { a, sent } = onChain();
+    const primary = holdLane(a, DEPLOYER_PK);
+    const batch = await signedAt(OTHER_PK, 7, '0xba');
+    const recovery = a.rebroadcastReceiptBatch(batch).then(() => 'sent', (err: Error) => err.message);
+    await tick(10);
+    expect(sent).toEqual([batch]);
+    primary.release();
+    expect(await recovery).toBe('sent');
+    await primary.held;
   });
 });

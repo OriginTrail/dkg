@@ -1,21 +1,18 @@
+import { hardhatTestEnvironment } from '../../scripts/lib/hardhat-test-env.mjs';
 import { defineConfig } from 'vitest/config';
-import { tornadoPublisherCoverage } from '../../vitest.coverage';
+import { coverageForPackage } from '../../vitest.coverage';
 
-process.env.HARDHAT_PORT = '9546';
+const hardhatEnv = hardhatTestEnvironment();
 
 export default defineConfig({
   test: {
+    allowOnly: false,
     include: ['test/**/*.test.ts'],
     exclude: ['test/publisher-evm-e2e.test.ts'],
     testTimeout: 120_000,
     globalSetup: ['../chain/test/hardhat-global-setup.ts'],
     maxWorkers: 1,
-    env: { HARDHAT_PORT: '9546' },
-    coverage: {
-      provider: 'v8',
-      reporter: ['text', 'html', 'lcov', 'json-summary'],
-      reportsDirectory: './coverage',
-      thresholds: tornadoPublisherCoverage,
-    },
+    env: hardhatEnv,
+    coverage: coverageForPackage('publisher'),
   },
 });

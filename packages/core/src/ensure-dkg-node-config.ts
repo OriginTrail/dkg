@@ -22,6 +22,7 @@
  *   - `nodeRole`: existing > network.defaultNodeRole
  *   - `contextGraphs`: existing > network defaults
  *   - `auth`: existing > { enabled: true }
+ *   - `logging.kaPublishLifecycleDebug`: existing > false
  *   - `relay`: preserved from existing if present (never pinned new)
  *   - `autoUpdate`: only mirrors `enabled` from network when existing
  *     is absent; never pins repo/branch/checkIntervalMinutes
@@ -192,6 +193,7 @@ export function ensureDkgNodeConfig(opts: EnsureDkgNodeConfigOptions): void {
     nodeRole: existing.nodeRole ?? (network.defaultNodeRole as 'edge' | 'core'),
     contextGraphs: existing.contextGraphs ?? network.defaultContextGraphs,
     auth: existing.auth ?? { enabled: true },
+    logging: existing.logging ?? { kaPublishLifecycleDebug: false },
   };
 
   // Preserve an existing relay override but never pin a new one — the

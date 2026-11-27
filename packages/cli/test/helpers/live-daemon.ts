@@ -18,6 +18,7 @@
  * Mirrors the inline harness in `daemon-http-behavior-extra.test.ts`; extracted
  * here so the de-mocked route suites share one spinner.
  */
+import { ownProcess, type OwnedProcess } from '../../../../scripts/testing/owned-process.mjs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -25,34 +26,75 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { ethers } from 'ethers';
+import type { RpcRequestGovernorPolicyInput } from '@origintrail-official/dkg-chain';
 import { getSharedContext, HARDHAT_KEYS } from '../../../chain/test/evm-test-context.js';
+import { TEST_SNAPSHOT_STORAGE } from '../../../../scripts/testing/snapshot-storage.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = join(__dirname, '..', '..', 'dist', 'cli.js');
 
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Request budget for a daemon whose chain is the suite's own loopback Hardhat
+ * node.
+ *
+ * The shipped default budget (10 rps, queue 256) exists to protect a SHARED,
+ * METERED public RPC. This harness points at a dedicated loopback Hardhat node
+ * with no such limit, so the default only makes the daemon throttle ITSELF.
+ * That matters because governor admission is awaited inside
+ * `request.getUrlFunc` (rpc-request-transport.ts), so queue wait is spent
+ * inside every RPC's own timeout window: a queued-but-healthy `eth_chainId`
+ * can burn its whole budget before it is ever dispatched. Same reasoning as
+ * status-route-rpc.test.ts.
+ *
+ * The default's start-up delay goes with it. A node holds its background
+ * requests for a random part of its first 30 s (`startupJitterMs`), so that
+ * nodes restarting together do not reach a shared endpoint at once. Against a
+ * node of its own that only makes a daemon's background chain work start at a
+ * different moment on every run, sometimes before a test's first requests and
+ * sometimes long after them.
+ */
+export const LIVE_DAEMON_RPC_REQUEST_BUDGET = Object.freeze({
+  maxRequestsPerSecond: 1_000,
+  burstRequests: 1_000,
+  startupJitterMs: 0,
+}) satisfies RpcRequestGovernorPolicyInput;
+
+/**
+ * The same address in another letter case, so a guard has to compare it
+ * case-insensitively. Returns upper case, or lower case when the EIP-55
+ * checksum already has every hex letter in upper case (about 1 in 4,000
+ * addresses). These are the two spellings EIP-55 accepts without a checksum;
+ * inverting each letter's case instead gives a bad checksum, which
+ * `ethers.isAddress` rejects. Throws for an address with no hex letters,
+ * which has no other spelling.
+ */
+export function caseVariantAddress(address: string): string {
+  const upperCase = `0x${address.slice(2).toUpperCase()}`;
+  const variant = upperCase === address ? address.toLowerCase() : upperCase;
+  if (variant === address) {
+    throw new Error(`${address} has no hex letters, so it has no other letter case`);
+  }
+  return variant;
+}
+
 export interface LiveDaemon {
   home: string;
   apiPort: number;
   listenPort: number;
   child: ChildProcess;
+  owner: OwnedProcess;
   token: string | null;
   /** `http://127.0.0.1:<apiPort>` */
   base: string;
   exitCode?: number | null;
 }
 
-// Spread ports across runs so a crashed prior run's lingering socket can't
-// collide. The cli package runs vitest single-worker, so within-run collisions
-// aren't a concern; this only guards cross-run reuse.
-let portCounter = 0;
-function uniquePort(base: number): number {
-  return base + ((portCounter++ * 7) % 900);
-}
-
 export interface StartDaemonOpts {
   authEnabled?: boolean;
+  /** Enable a real async publisher and seed its wallet file. */
+  publisherEnabled?: boolean;
   /** Extra keys merged into config.json (e.g. preset contextGraphs). */
   extraConfig?: Record<string, unknown>;
   readyTimeoutMs?: number;
@@ -62,6 +104,8 @@ export interface StartDaemonOpts {
    * pin `DKG_MAX_INFLIGHT` instead of inheriting the developer/CI value).
    */
   env?: Record<string, string | undefined>;
+  /** Seed durable daemon state after config/wallet setup but before process start. */
+  prepareHome?: (home: string) => Promise<void>;
 }
 
 /** Boot a real edge daemon against the shared Hardhat node and wait for readiness. */
@@ -73,9 +117,22 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
   }
   const authEnabled = opts.authEnabled ?? true;
   const home = await mkdtemp(join(tmpdir(), 'dkg-live-daemon-'));
-  const apiPort = uniquePort(21000);
-  const listenPort = uniquePort(21900);
-  const { rpcUrl, hubAddress } = getSharedContext();
+  // The daemon owns both ephemeral binds. Its private home supplies readiness
+  // evidence, so an unrelated HTTP listener cannot satisfy our startup check.
+  const apiPort = 0;
+  const listenPort = 0;
+  const defaultChain = Object.prototype.hasOwnProperty.call(opts.extraConfig ?? {}, 'chain')
+    ? { type: 'mock' as const }
+    : (() => {
+        const { rpcUrl, hubAddress } = getSharedContext();
+        return {
+          type: 'evm' as const,
+          rpcUrl,
+          hubAddress,
+          chainId: 'evm:31337',
+          rpcRequestBudget: LIVE_DAEMON_RPC_REQUEST_BUDGET,
+        };
+      })();
 
   await writeFile(
     join(home, 'config.json'),
@@ -88,8 +145,10 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
       relay: 'none',
       auth: { enabled: authEnabled },
       store: { backend: 'oxigraph-worker', options: { path: join(home, 'store.nq') } },
-      chain: { type: 'evm', rpcUrl, hubAddress, chainId: 'evm:31337' },
+      chain: defaultChain,
+      ...(opts.publisherEnabled ? { publisher: { enabled: true } } : {}),
       contextGraphs: [],
+      sharedMemoryPublicSnapshotStorage: TEST_SNAPSHOT_STORAGE,
       ...(opts.extraConfig ?? {}),
     }),
   );
@@ -102,6 +161,15 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
     JSON.stringify({ wallets: [{ address: coreOp.address, privateKey: coreOp.privateKey }] }, null, 2) + '\n',
     { mode: 0o600 },
   );
+  if (opts.publisherEnabled) {
+    await writeFile(
+      join(home, 'publisher-wallets.json'),
+      JSON.stringify({ wallets: [{ address: coreOp.address, privateKey: coreOp.privateKey }] }, null, 2) + '\n',
+      { mode: 0o600 },
+    );
+  }
+
+  await opts.prepareHome?.(home);
 
   const childEnv: Record<string, string | undefined> = {
     ...process.env,
@@ -116,49 +184,59 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
   for (const k of Object.keys(childEnv)) if (childEnv[k] === undefined) delete childEnv[k];
   const child = spawn('node', [CLI_ENTRY, 'daemon-worker'], {
     env: childEnv,
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
 
-  const daemon: LiveDaemon = {
-    home,
-    apiPort,
-    listenPort,
-    child,
-    token: null,
-    base: `http://127.0.0.1:${apiPort}`,
-  };
-  child.once('exit', (code) => {
-    daemon.exitCode = code;
-  });
-
-  const deadlineLoops = Math.ceil((opts.readyTimeoutMs ?? 45_000) / 500);
-  for (let i = 0; i < deadlineLoops; i++) {
-    if (child.exitCode !== null) throw new Error(`Daemon exited early with code ${child.exitCode}`);
-    try {
-      const res = await fetch(`${daemon.base}/api/status`);
-      if (res.ok) break;
-    } catch {
-      /* not ready yet */
-    }
-    await sleep(500);
-    if (i === deadlineLoops - 1) throw new Error('Daemon did not become ready in time');
+  const owner = ownProcess(child, { label: 'Live daemon' });
+  try {
+    const ready = await owner.ready(async ({ signal }) => {
+      let boundPort: number;
+      let response: Response;
+      try {
+        boundPort = Number((await readFile(join(home, 'api.port'), 'utf8')).trim());
+        if (!Number.isInteger(boundPort) || boundPort < 1 || boundPort > 65535) return undefined;
+        response = await fetch(`http://127.0.0.1:${boundPort}/api/status`, {
+          signal: AbortSignal.any([signal, AbortSignal.timeout(1000)]),
+        });
+        if (!response.ok) return undefined;
+      } catch { return undefined; }
+      let token: string | null = null;
+      if (authEnabled) {
+        try {
+          const raw = await readFile(join(home, 'auth.token'), 'utf8');
+          token = raw.split('\n').map((line) => line.trim()).find((line) => line && !line.startsWith('#')) ?? null;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+          throw error;
+        }
+        if (!token) return undefined;
+      }
+      if (opts.publisherEnabled) {
+        const status = await fetch(`http://127.0.0.1:${boundPort}/api/status`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {}, signal,
+        });
+        const body = await status.json() as { asyncPublisher?: { available?: boolean; reason?: string } };
+        if (body.asyncPublisher?.available !== true) {
+          if (body.asyncPublisher?.reason === 'publisher_starting') return undefined;
+          throw new Error(`Async publisher failed readiness: ${body.asyncPublisher?.reason ?? status.status}`);
+        }
+      }
+      return { apiPort: boundPort, base: `http://127.0.0.1:${boundPort}`, token };
+    }, { timeoutMs: opts.readyTimeoutMs ?? 45_000 });
+    const daemon: LiveDaemon = { home, listenPort, child, owner, ...ready };
+    void owner.closed.then(({ code }) => { daemon.exitCode = code; });
+    return daemon;
+  } catch (error) {
+    await owner.stop();
+    await rm(home, { recursive: true, force: true });
+    throw error;
   }
-
-  if (authEnabled) {
-    const raw = await readFile(join(home, 'auth.token'), 'utf-8');
-    daemon.token =
-      raw.split('\n').map((l) => l.trim()).find((l) => l.length > 0 && !l.startsWith('#')) ?? null;
-    if (!daemon.token) throw new Error('auth enabled but no token written');
-  }
-  return daemon;
 }
 
 /** SIGTERM the daemon, escalate to SIGKILL, and wipe its home dir. */
 export async function stopLiveDaemon(daemon: LiveDaemon | undefined): Promise<void> {
   if (!daemon) return;
-  daemon.child.kill('SIGTERM');
-  await sleep(1200);
-  if (daemon.child.exitCode === null) daemon.child.kill('SIGKILL');
+  await daemon.owner.stop();
   await rm(daemon.home, { recursive: true, force: true }).catch(() => {});
 }
 
@@ -192,6 +270,8 @@ export async function postJson(
 export interface EventStream {
   /** All SSE frames received so far (excluding heartbeat comments). */
   events: Array<{ event: string; data: any }>;
+  /** Settles when the real response body ends or the local reader is aborted. */
+  closed: Promise<void>;
   /**
    * Resolve with the first frame (past or future) matching `predicate`, or
    * reject after `timeoutMs`. Lets a test perform an op then await its event.
@@ -217,6 +297,8 @@ export async function openEventStream(daemon: LiveDaemon): Promise<EventStream> 
 
   const events: Array<{ event: string; data: any }> = [];
   const waiters: Array<{ predicate: (f: any) => boolean; resolve: (f: any) => void }> = [];
+  let markClosed!: () => void;
+  const closed = new Promise<void>((resolve) => { markClosed = resolve; });
 
   const pushFrame = (frame: { event: string; data: any }) => {
     events.push(frame);
@@ -257,10 +339,12 @@ export async function openEventStream(daemon: LiveDaemon): Promise<EventStream> 
         }
       }
     } catch { /* aborted on close() */ }
+    finally { markClosed(); }
   })();
 
   return {
     events,
+    closed,
     waitFor(predicate, timeoutMs = 8000) {
       const existing = events.find(predicate);
       if (existing) return Promise.resolve(existing);

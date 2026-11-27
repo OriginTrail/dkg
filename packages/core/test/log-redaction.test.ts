@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, expectTypeOf } from 'vitest';
 import { createLogRedactor, redactLogEntry, REDACTED } from '../src/log-redaction.js';
-import type { LogRecord } from '../src/logger.js';
+import type { CanonicalLogRecord, LogRecord } from '../src/logger.js';
 
 function rec(message: string): LogRecord {
   return { level: 'info', operationName: 'publish', operationId: 'op-1', module: 'test', message };
@@ -131,5 +131,16 @@ describe('log redaction — secrets are scrubbed before logs leave the node', ()
     expect(out.operationId).toBe('op-1');
     expect(out.operationName).toBe('publish');
     expect(out.module).toBe('test');
+  });
+
+  it('preserves the canonical level type through redaction', () => {
+    const canonical: CanonicalLogRecord = {
+      ...rec('token=secret'),
+      level: 'info',
+    };
+    const out = redact(canonical);
+
+    expectTypeOf(out).toEqualTypeOf<CanonicalLogRecord>();
+    expect(out.level).toBe('info');
   });
 });

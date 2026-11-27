@@ -1,4 +1,5 @@
 import { TrustLevel } from './memory-model.js';
+import { unwrapIri } from './sparql-terms.js';
 
 export const TRUST_LEVEL_PREDICATE = 'http://dkg.io/ontology/trustLevel';
 export const LEGACY_TRUST_LEVEL_PREDICATE = 'https://dkg.network/ontology#trustLevel';
@@ -21,8 +22,33 @@ type TrustLevelQuadLike = {
   graph: string;
 };
 
+/** Compares the predicate as the store writes it (`<iri>` is stored as `iri`). */
 export function isTrustLevelQuad(quad: Pick<TrustLevelQuadLike, 'predicate'>): boolean {
-  return TRUST_LEVEL_PREDICATES.has(quad.predicate);
+  return TRUST_LEVEL_PREDICATES.has(unwrapIri(quad.predicate));
+}
+
+/**
+ * Workspace-owner bookkeeping predicate. Stamped onto SWM quads during
+ * ingestion to record which agent owns a shared-memory entry; it is NOT part
+ * of the author's payload.
+ */
+export const WORKSPACE_OWNER_PREDICATE = 'http://dkg.io/ontology/workspaceOwner';
+
+/**
+ * A quad that lives in SWM but MUST be excluded from the KC merkle-root
+ * recompute. Trust-level annotations and workspace-owner bookkeeping are added
+ * by SWM ingestion, not by the author, so hashing them into the root diverges
+ * the publisher's root from the core responder's on the exact same content.
+ *
+ * This is the SINGLE SOURCE OF TRUTH for that exclusion set: the publisher
+ * (`DKGPublisher` SWM read) and the core responder (`StorageACKHandler`
+ * `loadSWMQuads`) both filter on it, so the two recompute paths can never
+ * drift — the drift being the 2026-07-07 `MERKLE_MISMATCH_IN_SWM` incident,
+ * where the responder hashed trust-level/workspace-owner quads the publisher
+ * had filtered out and declined every folded-private ACK.
+ */
+export function isSwmMerkleExcludedQuad(quad: Pick<TrustLevelQuadLike, 'predicate'>): boolean {
+  return isTrustLevelQuad(quad) || unwrapIri(quad.predicate) === WORKSPACE_OWNER_PREDICATE;
 }
 
 export function isTrustLevel(value: unknown): value is TrustLevel {
@@ -52,15 +78,26 @@ export function buildTrustLevelQuads(
   }));
 }
 
+/** The `code` of a {@link UserAuthoredTrustLevelError}, which routes answer with 400. */
+export const USER_AUTHORED_TRUST_LEVEL_CODE = 'USER_AUTHORED_TRUST_LEVEL';
+
+/** A write carried trust-level metadata, which only the protocol may generate. */
+export class UserAuthoredTrustLevelError extends Error {
+  readonly code = USER_AUTHORED_TRUST_LEVEL_CODE;
+
+  constructor(subject: string) {
+    super(
+      `User-authored dkg:trustLevel metadata is not allowed for subject ${subject}. ` +
+      'Trust metadata is protocol-generated after publish, endorse, or verify confirmation.',
+    );
+    this.name = 'UserAuthoredTrustLevelError';
+  }
+}
+
 export function assertNoUserAuthoredTrustLevelQuads(
   quads: Iterable<Pick<TrustLevelQuadLike, 'subject' | 'predicate'>>,
 ): void {
   for (const quad of quads) {
-    if (isTrustLevelQuad(quad)) {
-      throw new Error(
-        `User-authored dkg:trustLevel metadata is not allowed for subject ${quad.subject}. ` +
-        'Trust metadata is protocol-generated after publish, endorse, or verify confirmation.',
-      );
-    }
+    if (isTrustLevelQuad(quad)) throw new UserAuthoredTrustLevelError(quad.subject);
   }
 }

@@ -2,11 +2,29 @@ import {
   assertRdfLiteralMutf8Safe,
   assertSafeIri,
   assertSafeRdfTerm,
+  canonicalKnowledgeAssetGraphIdentitySuffix,
   escapeSparqlLiteral,
   isSafeIri,
+  type GraphKnowledgeAssetScope,
 } from '@origintrail-official/dkg-core';
-import type { TripleStore, Quad } from './triple-store.js';
+import {
+  deleteByPatternWithoutCount,
+  tryReplaceGraphAtomically,
+  type TripleStore,
+  type Quad,
+} from './triple-store.js';
 import type { ContextGraphManager } from './graph-manager.js';
+import {
+  readExactGraphPaged,
+  readExactGraphPagedWithDiscoveredCount,
+  type ReadExactGraphPagedOptions,
+} from './bounded-rdf.js';
+
+export interface KnowledgeAssetPrivateReadOptions
+  extends Omit<ReadExactGraphPagedOptions, 'expectedQuadCount' | 'outputGraph'> {
+  /** Trusted metadata count. When omitted, the store's current count is used. */
+  expectedQuadCount?: number;
+}
 
 /**
  * GH #1078 — predicate used for the per-(cg,root[,sub]) "current verifiable
@@ -163,6 +181,164 @@ export class PrivateContentStore {
       : this.graphManager.privateGraphUri(contextGraphId);
   }
 
+  /**
+   * Mutable private draft paired with one named WM lifecycle.
+   *
+   * The final assertion version is not known until finalize, so drafts cannot
+   * use the immutable `(UAL, assertionVersion)` graph yet. Keep them in a
+   * lifecycle-keyed graph under the private bucket, then atomically materialize
+   * the canonical assertion-versioned graph before exposing the seal.
+   */
+  knowledgeAssetPrivateDraftGraphUri(
+    contextGraphId: string,
+    agentAddress: string,
+    assertionName: string,
+    subGraphName?: string,
+  ): string {
+    const bucket = this.privateGraph(contextGraphId, subGraphName);
+    const identity = [agentAddress.toLowerCase(), assertionName]
+      .map((part) => encodeURIComponent(part))
+      .join(':');
+    return assertSafeIri(`${bucket}/_working_memory/${identity}`);
+  }
+
+  /** Append private triples to a mutable named-KA draft. */
+  async storeKnowledgeAssetPrivateDraftTriples(
+    contextGraphId: string,
+    agentAddress: string,
+    assertionName: string,
+    quads: readonly Quad[],
+    subGraphName?: string,
+  ): Promise<void> {
+    if (quads.length === 0) return;
+    for (const quad of quads) assertSafePrivateQuad(quad);
+    const graphUri = this.knowledgeAssetPrivateDraftGraphUri(
+      contextGraphId,
+      agentAddress,
+      assertionName,
+      subGraphName,
+    );
+    await this.withGraphWriteLock(graphUri, async () => {
+      await this.store.insert(quads.map((quad) => ({ ...quad, graph: graphUri })));
+    });
+  }
+
+  /** Read the complete mutable private draft without exposing its storage graph. */
+  async getKnowledgeAssetPrivateDraftTriples(
+    contextGraphId: string,
+    agentAddress: string,
+    assertionName: string,
+    subGraphName?: string,
+  ): Promise<Quad[]> {
+    const graphUri = this.knowledgeAssetPrivateDraftGraphUri(
+      contextGraphId,
+      agentAddress,
+      assertionName,
+      subGraphName,
+    );
+    const result = await this.store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`,
+    );
+    if (result.type !== 'quads') return [];
+    return result.quads.map((quad) => ({ ...quad, graph: '' }));
+  }
+
+  async deleteKnowledgeAssetPrivateDraft(
+    contextGraphId: string,
+    agentAddress: string,
+    assertionName: string,
+    subGraphName?: string,
+  ): Promise<void> {
+    await this.store.dropGraph(this.knowledgeAssetPrivateDraftGraphUri(
+      contextGraphId,
+      agentAddress,
+      assertionName,
+      subGraphName,
+    ));
+  }
+
+  /**
+   * Exact private content graph for one rootless KA assertion.
+   *
+   * Public VM currently materializes the latest assertion in a stable UAL-derived
+   * graph, but private content must remain addressable by the commitment that
+   * covered it. Including the assertion version prevents a v2 update from
+   * silently overwriting the private payload committed by an earlier version.
+   */
+  knowledgeAssetPrivateGraphUri(
+    contextGraphId: string,
+    scope: GraphKnowledgeAssetScope,
+    subGraphName?: string,
+  ): string {
+    const bucket = this.privateGraph(contextGraphId, subGraphName);
+    return assertSafeIri(
+      `${bucket}/${canonicalKnowledgeAssetGraphIdentitySuffix(scope.agentAddress, BigInt(scope.kaNumber))}`
+        + `/assertions/${scope.assertionVersion}`,
+    );
+  }
+
+  /**
+   * Atomically replace the complete private triple set of one graph-scoped KA.
+   * No marker triples are mixed into this graph: its contents are exactly the
+   * triples covered by the single KA-level private Merkle commitment.
+   */
+  async replaceKnowledgeAssetPrivateTriples(
+    contextGraphId: string,
+    scope: GraphKnowledgeAssetScope,
+    quads: readonly Quad[],
+    subGraphName?: string,
+  ): Promise<string> {
+    for (const quad of quads) assertSafePrivateQuad(quad);
+    const graphUri = this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName);
+    await this.withGraphWriteLock(graphUri, async () => {
+      const replaced = await tryReplaceGraphAtomically(
+        this.store,
+        graphUri,
+        quads.map((quad) => ({ ...quad, graph: graphUri })),
+      );
+      if (!replaced) {
+        throw Object.assign(
+          new Error(
+            `Triple store cannot atomically replace graph-scoped private content at ${graphUri}`,
+          ),
+          { code: 'ATOMIC_GRAPH_REPLACE_UNSUPPORTED' },
+        );
+      }
+    });
+    return graphUri;
+  }
+
+  /** Read exactly one rootless KA's private triple set. */
+  async getKnowledgeAssetPrivateTriples(
+    contextGraphId: string,
+    scope: GraphKnowledgeAssetScope,
+    subGraphName?: string,
+    readOptions?: KnowledgeAssetPrivateReadOptions,
+  ): Promise<Quad[]> {
+    const graphUri = this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName);
+    if (readOptions?.expectedQuadCount !== undefined) {
+      return readExactGraphPaged(this.store, graphUri, {
+        ...readOptions,
+        expectedQuadCount: readOptions.expectedQuadCount,
+        outputGraph: '',
+      });
+    }
+    return readExactGraphPagedWithDiscoveredCount(this.store, graphUri, {
+      ...readOptions,
+      outputGraph: '',
+    });
+  }
+
+  async deleteKnowledgeAssetPrivateTriples(
+    contextGraphId: string,
+    scope: GraphKnowledgeAssetScope,
+    subGraphName?: string,
+  ): Promise<void> {
+    await this.store.dropGraph(
+      this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName),
+    );
+  }
+
   private privateKey(contextGraphId: string, subGraphName?: string): string {
     return subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
   }
@@ -215,7 +391,7 @@ export class PrivateContentStore {
           // commitment marker. Repeated stores under the SAME commitment fall
           // through to the append+dedup path below (chunked/retry-safe).
           await this.deleteRootPrivateSlice(graphUri, rootEntity);
-          await this.store.deleteByPattern({ graph: graphUri, subject: markerSubject });
+          await deleteByPatternWithoutCount(this.store, { graph: graphUri, subject: markerSubject });
           await this.store.insert([{
             subject: markerSubject,
             predicate: PRIVATE_COMMITMENT_PRED,
@@ -275,7 +451,7 @@ export class PrivateContentStore {
       predicate,
       graph: graphUri,
     });
-    await this.store.deleteByPattern({ graph: graphUri, subject });
+    await deleteByPatternWithoutCount(this.store, { graph: graphUri, subject });
     await this.store.insert([{
       subject,
       predicate,
@@ -318,7 +494,7 @@ export class PrivateContentStore {
 
     const graphUri = this.privateStagingGraph(contextGraphId, shareOperationId, subGraphName);
     const subject = privateStageSubject(contextGraphId, shareOperationId, rootEntity, subGraphName);
-    await this.store.deleteByPattern({ graph: graphUri, subject });
+    await deleteByPatternWithoutCount(this.store, { graph: graphUri, subject });
   }
 
   async getPrivateTriples(
@@ -392,7 +568,7 @@ export class PrivateContentStore {
    */
   private async deleteRootPrivateSlice(graphUri: string, rootEntity: string): Promise<void> {
     assertSafeIri(rootEntity);
-    await this.store.deleteByPattern({ graph: graphUri, subject: rootEntity });
+    await deleteByPatternWithoutCount(this.store, { graph: graphUri, subject: rootEntity });
     await this.store.deleteBySubjectPrefix(graphUri, `${rootEntity}/.well-known/genid/`);
   }
 

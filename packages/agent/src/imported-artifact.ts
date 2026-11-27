@@ -14,6 +14,7 @@ import {
 import type { DKGAgent } from './dkg-agent.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { buildSyncRequestEnvelope, type SyncRequestEnvelope } from './sync/auth/request-build.js';
+import { claimedAgentSyncRequestSigner } from './sync/auth/request-signing.js';
 import { isSyncRequestEnvelopeBoundToPeer } from './sync/auth/request-authorize.js';
 import {
   SYNC_AUTH_MAX_AGE_MS,
@@ -23,6 +24,10 @@ import type {
   AssertionArtifactKind,
   ImportedArtifactByteStore,
 } from './dkg-agent-types.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 export const IMPORTED_ARTIFACT_AUTH_PURPOSE = 'imported-artifact:v1';
 const IMPORTED_ARTIFACT_MAX_CACHE_BYTES = 64 * 1024 * 1024;
@@ -557,7 +562,10 @@ export class ImportedArtifactMethods extends DKGAgentBase {
       return denied(req);
     }
 
-    const authorized = await this.authorizeSyncRequest(syncReq, fromPeerId);
+    const authorized = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.importedArtifactAuthorize,
+      () => this.authorizeSyncRequest(syncReq, fromPeerId),
+    );
     if (!authorized) return denied(req);
     const readSubject = await resolveImportedArtifactReadSubject(this, req, syncReq);
     if (!readSubject) return denied(req);
@@ -643,7 +651,7 @@ export class ImportedArtifactMethods extends DKGAgentBase {
           getIdentityId: () => this.chain.getIdentityId(),
           signMessage: typeof this.chain.signMessage === 'function' ? this.chain.signMessage.bind(this.chain) : undefined,
           claimedAgentAddress,
-          claimedAgentPrivateKey: claimedAgent?.privateKey,
+          claimedAgentSigner: claimedAgentSyncRequestSigner(this.config?.authorSigners, claimedAgentAddress, claimedAgent),
         })
       : new TextEncoder().encode(JSON.stringify({
           contextGraphId: params.contextGraphId,

@@ -1,0 +1,188 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1360" viewBox="0 0 1600 1360" role="img" aria-labelledby="title desc">
+  <title id="title">PR 2003 realistic 3 MiB scheduler work distribution</title>
+  <desc id="desc">Flamegraph of 1660.876 active scheduler slot-seconds sampled every 100 milliseconds on the Blazegraph node of a five-core Hardhat devnet. Four exact 3 MiB RDF payloads exercised online SWM and VM work, offline finalization, restart, durable synchronization, and VM reconciliation with 1200 milliseconds of injected Blazegraph latency. Sync-global durable work used 42.76 percent of observed slot-time, while generic blazegraph.query used 25.73 percent.</desc>
+
+  <rect width="1600" height="1360" fill="#f8fafc"/>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" fill="#0f172a">
+    <text x="80" y="64" font-size="38" font-weight="700">Realistic 3 MiB scheduler work distribution</text>
+    <text x="80" y="103" font-size="21" fill="#475569">5-core Hardhat devnet · 4 × 3 MiB RDF payloads · 577.080 s profile · +1,200 ms Blazegraph/request</text>
+
+    <g transform="translate(80 128)">
+      <rect width="330" height="82" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
+      <text x="20" y="33" font-size="25" font-weight="700">1,660.876 s</text>
+      <text x="20" y="61" font-size="16" fill="#64748b">observed active slot-time</text>
+    </g>
+    <g transform="translate(430 128)">
+      <rect width="330" height="82" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
+      <text x="20" y="33" font-size="25" font-weight="700">4,590 samples</text>
+      <text x="20" y="61" font-size="16" fill="#64748b">100 ms diagnostics snapshots</text>
+    </g>
+    <g transform="translate(780 128)">
+      <rect width="330" height="82" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
+      <text x="20" y="33" font-size="25" font-weight="700">216 / 216 VM</text>
+      <text x="20" y="61" font-size="16" fill="#64748b">all 5 nodes · watermark 0 → 4</text>
+    </g>
+    <g transform="translate(1130 128)">
+      <rect width="390" height="82" rx="10" fill="#fff7ed" stroke="#fdba74"/>
+      <text x="20" y="33" font-size="25" font-weight="700" fill="#9a3412">427.384 s · 25.73%</text>
+      <text x="20" y="61" font-size="16" fill="#c2410c">still generic blazegraph.query</text>
+    </g>
+
+    <text x="80" y="254" font-size="16" font-weight="700" fill="#64748b" letter-spacing="1.5">ALL OBSERVED ACTIVE SCHEDULER SLOTS</text>
+    <g transform="translate(80 270)">
+      <rect width="1440" height="62" rx="8" fill="#1e293b"/>
+      <text x="22" y="28" font-size="21" font-weight="700" fill="#ffffff">node 3 scheduler work</text>
+      <text x="22" y="51" font-size="16" fill="#cbd5e1">1,660.876 slot-seconds · 100.00%</text>
+    </g>
+
+    <text x="80" y="370" font-size="16" font-weight="700" fill="#64748b" letter-spacing="1.5">SCHEDULERS</text>
+    <g transform="translate(80 386)">
+      <rect width="821.850" height="72" rx="7" fill="#7c3aed"/>
+      <text x="20" y="31" font-size="21" font-weight="700" fill="#ffffff">store</text>
+      <text x="20" y="56" font-size="17" fill="#ede9fe">947.910 s · 57.07%</text>
+      <rect x="821.850" width="618.150" height="72" rx="7" fill="#2563eb"/>
+      <text x="841.850" y="31" font-size="21" font-weight="700" fill="#ffffff">sync-global</text>
+      <text x="841.850" y="56" font-size="17" fill="#dbeafe">712.966 s · 42.93%</text>
+    </g>
+
+    <text x="80" y="496" font-size="16" font-weight="700" fill="#64748b" letter-spacing="1.5">LANES</text>
+    <g transform="translate(80 512)">
+      <rect width="636.133" height="78" rx="6" fill="#8b5cf6"/>
+      <text x="18" y="32" font-size="20" font-weight="700" fill="#ffffff">store · normal</text>
+      <text x="18" y="59" font-size="16" fill="#ede9fe">733.707 s · 44.18%</text>
+
+      <rect x="636.133" width="172.259" height="78" rx="6" fill="#0d9488"/>
+      <text x="650.133" y="32" font-size="18" font-weight="700" fill="#ffffff">background</text>
+      <text x="650.133" y="59" font-size="15" fill="#ccfbf1">198.681 s · 11.96%</text>
+
+      <rect x="808.392" width="13.458" height="78" fill="#d97706"/>
+
+      <rect x="821.850" width="615.784" height="78" rx="6" fill="#3b82f6"/>
+      <text x="839.850" y="32" font-size="20" font-weight="700" fill="#ffffff">sync-global · durable</text>
+      <text x="839.850" y="59" font-size="16" fill="#dbeafe">710.237 s · 42.76%</text>
+
+      <rect x="1437.634" width="2.366" height="78" fill="#06b6d4"/>
+    </g>
+
+    <text x="80" y="628" font-size="16" font-weight="700" fill="#64748b" letter-spacing="1.5">CALLER / PROVIDER SOURCES</text>
+    <g transform="translate(80 644)">
+      <rect width="370.547" height="106" rx="6" fill="#ea580c"/>
+      <text x="16" y="31" font-size="19" font-weight="700" fill="#ffffff">blazegraph.query</text>
+      <text x="16" y="57" font-size="15" fill="#ffedd5">store · normal · generic source</text>
+      <text x="16" y="86" font-size="17" font-weight="700" fill="#ffffff">427.384 s · 25.73%</text>
+
+      <rect x="370.547" width="44.318" height="106" rx="5" fill="#a855f7"/>
+      <text x="378.547" y="35" font-size="12" font-weight="700" fill="#ffffff">recover</text>
+      <text x="378.547" y="82" font-size="13" fill="#ffffff">3.08%</text>
+
+      <rect x="414.865" width="42.834" height="106" rx="5" fill="#c026d3"/>
+      <text x="422.865" y="35" font-size="12" font-weight="700" fill="#ffffff">run</text>
+      <text x="422.865" y="82" font-size="13" fill="#ffffff">2.97%</text>
+
+      <rect x="457.699" width="42.200" height="106" rx="5" fill="#db2777"/>
+      <text x="465.699" y="35" font-size="12" font-weight="700" fill="#ffffff">cand.</text>
+      <text x="465.699" y="82" font-size="13" fill="#ffffff">2.93%</text>
+
+      <rect x="499.899" width="136.234" height="106" rx="5" fill="#64748b"/>
+      <text x="513.899" y="35" font-size="14" font-weight="700" fill="#ffffff">other normal</text>
+      <text x="513.899" y="82" font-size="14" fill="#e2e8f0">157.130 s · 9.46%</text>
+
+      <rect x="636.133" width="44.380" height="106" rx="5" fill="#059669"/>
+      <text x="644.133" y="35" font-size="12" font-weight="700" fill="#ffffff">mat.</text>
+      <text x="644.133" y="82" font-size="13" fill="#ffffff">3.08%</text>
+
+      <rect x="680.513" width="28.891" height="106" rx="4" fill="#0891b2"/>
+      <text x="686.513" y="35" font-size="11" font-weight="700" fill="#ffffff">list</text>
+      <text x="686.513" y="82" font-size="11" fill="#ffffff">2.01%</text>
+
+      <rect x="709.404" width="98.988" height="106" rx="4" fill="#0f766e"/>
+      <text x="720.404" y="35" font-size="13" font-weight="700" fill="#ffffff">other bg</text>
+      <text x="720.404" y="82" font-size="13" fill="#ccfbf1">114.172 s · 6.87%</text>
+
+      <rect x="808.392" width="13.458" height="106" fill="#d97706"/>
+
+      <rect x="821.850" width="615.784" height="106" rx="6" fill="#2563eb"/>
+      <text x="839.850" y="31" font-size="19" font-weight="700" fill="#ffffff">durable</text>
+      <text x="839.850" y="57" font-size="15" fill="#dbeafe">sync-global · durable lane</text>
+      <text x="839.850" y="86" font-size="17" font-weight="700" fill="#ffffff">710.237 s · 42.76%</text>
+
+      <rect x="1437.634" width="2.366" height="106" fill="#06b6d4"/>
+    </g>
+
+    <text x="80" y="800" font-size="25" font-weight="700">Largest observed sources</text>
+    <line x1="80" y1="822" x2="1520" y2="822" stroke="#cbd5e1"/>
+
+    <g font-size="17">
+      <text x="98" y="858" font-weight="700" fill="#475569">Scheduler / lane</text>
+      <text x="390" y="858" font-weight="700" fill="#475569">Source</text>
+      <text x="1300" y="858" text-anchor="end" font-weight="700" fill="#475569">Slot time</text>
+      <text x="1500" y="858" text-anchor="end" font-weight="700" fill="#475569">Global share</text>
+
+      <g transform="translate(0 878)">
+        <rect x="82" y="0" width="12" height="12" rx="2" fill="#2563eb"/>
+        <text x="98" y="13">sync-global / durable</text>
+        <text x="390" y="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">durable</text>
+        <text x="1300" y="13" text-anchor="end">710.237 s</text>
+        <text x="1500" y="13" text-anchor="end">42.76%</text>
+      </g>
+      <g transform="translate(0 920)">
+        <rect x="82" y="0" width="12" height="12" rx="2" fill="#ea580c"/>
+        <text x="98" y="13">store / normal</text>
+        <text x="390" y="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">blazegraph.query</text>
+        <text x="1300" y="13" text-anchor="end">427.384 s</text>
+        <text x="1500" y="13" text-anchor="end">25.73%</text>
+      </g>
+      <g transform="translate(0 962)">
+        <rect x="82" y="0" width="12" height="12" rx="2" fill="#059669"/>
+        <text x="98" y="13">store / background</text>
+        <text x="390" y="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">agent.durableSync.graphScopedMaterialization</text>
+        <text x="1300" y="13" text-anchor="end">51.187 s</text>
+        <text x="1500" y="13" text-anchor="end">3.08%</text>
+      </g>
+      <g transform="translate(0 1004)">
+        <rect x="82" y="0" width="12" height="12" rx="2" fill="#a855f7"/>
+        <text x="98" y="13">store / normal</text>
+        <text x="390" y="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">publisher.asyncPromote.recoverExpired</text>
+        <text x="1300" y="13" text-anchor="end">51.116 s</text>
+        <text x="1500" y="13" text-anchor="end">3.08%</text>
+      </g>
+      <g transform="translate(0 1046)">
+        <rect x="82" y="0" width="12" height="12" rx="2" fill="#c026d3"/>
+        <text x="98" y="13">store / normal</text>
+        <text x="390" y="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">publisher.asyncPromote.claimNext.running</text>
+        <text x="1300" y="13" text-anchor="end">49.404 s</text>
+        <text x="1500" y="13" text-anchor="end">2.97%</text>
+      </g>
+      <g transform="translate(0 1088)">
+        <rect x="82" y="0" width="12" height="12" rx="2" fill="#db2777"/>
+        <text x="98" y="13">store / normal</text>
+        <text x="390" y="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">publisher.asyncPromote.claimNext.candidates</text>
+        <text x="1300" y="13" text-anchor="end">48.673 s</text>
+        <text x="1500" y="13" text-anchor="end">2.93%</text>
+      </g>
+      <g transform="translate(0 1130)">
+        <rect x="82" y="0" width="12" height="12" rx="2" fill="#0891b2"/>
+        <text x="98" y="13">store / background</text>
+        <text x="390" y="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">sync.responder.listGraphs</text>
+        <text x="1300" y="13" text-anchor="end">33.322 s</text>
+        <text x="1500" y="13" text-anchor="end">2.01%</text>
+      </g>
+      <g transform="translate(0 1172)">
+        <rect x="82" y="0" width="12" height="12" rx="2" fill="#0f766e"/>
+        <text x="98" y="13">store / background</text>
+        <text x="390" y="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">sync.responder.readRegisteredSubGraphNames</text>
+        <text x="1300" y="13" text-anchor="end">24.335 s</text>
+        <text x="1500" y="13" text-anchor="end">1.47%</text>
+      </g>
+    </g>
+
+    <line x1="80" y1="1220" x2="1520" y2="1220" stroke="#cbd5e1"/>
+    <text x="80" y="1252" font-size="18" font-weight="700">Queue-pressure maxima</text>
+    <text x="80" y="1280" font-size="16" fill="#475569">store normal: 10 queued · 9.945 s oldest wait · 0 rejected</text>
+    <text x="620" y="1280" font-size="16" fill="#475569">sync durable: 3 queued · 71.830 s oldest wait · 114.409 s oldest active · 0 rejected</text>
+
+    <text x="80" y="1317" font-size="15" fill="#64748b">Slot-time = Σ(sample interval × active-operation count). It is concurrency-weighted, not CPU or wall time, so 1,660.876 s can exceed the 577.080 s profile.</text>
+    <text x="80" y="1342" font-size="15" fill="#64748b">1,028 snapshots failed while node 3 was intentionally offline or its API was booting; shares describe successfully observed scheduler state only.</text>
+  </g>
+</svg>

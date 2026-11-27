@@ -9,11 +9,20 @@
  * endpoint fail, this component renders nothing — it's purely additive.
  */
 import React from 'react';
-import { fetchSubGraphs, type SubGraphInfo } from '../api.js';
+import { type SubGraphInfo } from '../api.js';
+// PR #2131 review — route through api-wrapper so the chip row resolves in
+// mock mode. The direct `../api.js` import bypassed the mock/offline
+// fallback, so demo mode showed the Overview "Subgraphs" stat (already
+// wrapped) disagreeing with an empty Subgraph Explorer for the same CG.
+// Same fix as `ProjectView.tsx` ("Codex review bug F"). `withFallback`
+// only diverts when mock mode is latched, so real rejections still reach
+// the `.catch` below.
+import { api } from '../api-wrapper.js';
 import type { ProjectProfile } from '../hooks/useProjectProfile.js';
 import type { MemoryEntity, TrustLevel } from '../hooks/useMemoryEntities.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
 import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
+import { Badge } from './ds/Badge.js';
 
 export interface SubGraphBadge {
   /** Short label shown inline on the chip, e.g. "2 proposed" */
@@ -220,7 +229,7 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
   const loadSubGraphs = React.useCallback(() => {
     const requestId = ++requestIdRef.current;
     setLoading(true);
-    fetchSubGraphs(contextGraphId)
+    api.fetchSubGraphs(contextGraphId)
       .then(r => { if (requestId === requestIdRef.current) setSubGraphs(r.subGraphs ?? []); })
       .catch(() => { /* silent — leave empty */ })
       .finally(() => { if (requestId === requestIdRef.current) setLoading(false); });
@@ -253,7 +262,7 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
         return {
           slug: sg.name,
           icon: binding.icon ?? '•',
-          color: binding.color ?? '#64748b',
+          color: binding.color ?? 'var(--text-tertiary)',
           displayName: binding.displayName ?? sg.name,
           description: binding.description ?? sg.description,
           rank: binding.rank ?? 99,
@@ -319,7 +328,7 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
       <div className="v10-subgraph-bar-label">Subgraphs</div>
       <button
         type="button"
-        className={`v10-subgraph-chip${selected === null ? ' active' : ''}`}
+        className={`v10-subgraph-chip ds-filter${selected === null ? ' active' : ''}`}
         /* All chip clears the selection — no originatingLayer
            seed because the All view shows daemon-wide totals. */
         onClick={() => onSelect(null)}
@@ -336,7 +345,7 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
           <button
             key={sg.slug}
             type="button"
-            className={`v10-subgraph-chip${selected === sg.slug ? ' active' : ''}${badge ? ' has-badge' : ''}`}
+            className={`v10-subgraph-chip ds-filter${selected === sg.slug ? ' active' : ''}${badge ? ' has-badge' : ''}`}
             /* #9 polish — forward the bar's `layer` prop as the
                originating layer so the detail view's
                `enabledLayers` is seeded to match the scope the
@@ -353,10 +362,14 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
             <span className="v10-subgraph-chip-label">{sg.displayName}</span>
             <span className="v10-subgraph-chip-count">{sg.entityCount}</span>
             {badge && (
-              <span className={`v10-subgraph-chip-badge tone-${badge.tone}`}>
-                <span className="v10-subgraph-chip-badge-dot" />
+              <Badge
+                size="sm"
+                dot
+                tone={badge.tone === 'warn' ? 'warning' : badge.tone === 'danger' ? 'danger' : badge.tone === 'muted' ? 'muted' : 'neutral'}
+                className={`v10-subgraph-chip-badge tone-${badge.tone}`}
+              >
                 {badge.label}
-              </span>
+              </Badge>
             )}
           </button>
         );
@@ -367,15 +380,15 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
         return (
           <button
             type="button"
-            className={`v10-subgraph-chip v10-subgraph-chip-root${isActive ? ' active' : ''}`}
+            className={`v10-subgraph-chip ds-filter v10-subgraph-chip-root${isActive ? ' active' : ''}`}
             data-active={isActive}
             data-count={displayCount}
             /* #9 polish — Root chip carries the originating layer
                just like the named chips so a click from a layer
                page keeps the layer scope when entering Root. */
             onClick={() => onSelect(ROOT_SLUG_SENTINEL, layer)}
-            title={`Entities not in any subgraph (Context Graph root) · ${displayCount} entities${scopeSuffix}`}
-            aria-label="Entities not in any subgraph (Context Graph root)"
+            title={`Entities not in any subgraph (context graph root) · ${displayCount} entities${scopeSuffix}`}
+            aria-label="Entities not in any subgraph (context graph root)"
           >
             <span className="v10-subgraph-chip-icon">⊘</span>
             <span className="v10-subgraph-chip-label">Root</span>

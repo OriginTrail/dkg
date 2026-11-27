@@ -1,3 +1,5 @@
+import { buildEpcisQuery } from '../src/query-builder.js';
+import { EpcisQueryInputError } from '../src/index.js';
 import { describe, it, expect } from 'vitest';
 import { handleEventsQuery, EpcisQueryError, toEpcisEvent, unwrapLiteral } from '../src/handlers.js';
 import type { QueryEngine } from '../src/types.js';
@@ -42,6 +44,29 @@ function makeBindings(overrides: Partial<Record<string, string>> = {}): Record<s
 }
 
 describe('handleEventsQuery', () => {
+  it.each(['https://gs1.github.io/EPCIS/CustomEvent', 'urn:epcis:CustomEvent'])(
+    'reuses the returned extended type as the exact query filter: %s', (type) => {
+      const event = toEpcisEvent(makeBindings({ eventType: type }));
+      expect(event.type).toBe(type);
+      expect(buildEpcisQuery({ eventType: String(event.type) }, CONTEXT_GRAPH_ID))
+        .toContain(`FILTER(?eventType = <${type}>)`);
+    },
+  );
+
+  it('preserves legacy compact extension-name filters', () => {
+    expect(buildEpcisQuery({ eventType: 'CustomEvent' }, CONTEXT_GRAPH_ID))
+      .toContain('FILTER(?eventType = <https://gs1.github.io/EPCIS/CustomEvent>)');
+  });
+
+  it.each(['https://example.org/Event>', '_:blank', 'bad type'])('rejects unsafe eventType before querying: %s', async (eventType) => {
+    expect(() => buildEpcisQuery({ eventType }, CONTEXT_GRAPH_ID)).toThrow(EpcisQueryInputError);
+    const { engine, calls } = createTrackingQueryEngine([]);
+    await expect(handleEventsQuery(new URLSearchParams({ eventType }), {
+      contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH,
+    })).rejects.toMatchObject({ statusCode: 400 });
+    expect(calls).toHaveLength(0);
+  });
+
   it('returns EPCISQueryDocument envelope with reconstructed events', async () => {
     const { engine, calls } = createTrackingQueryEngine([
       makeBindings({
@@ -180,17 +205,12 @@ describe('handleEventsQuery', () => {
   it('throws EpcisQueryError with 400 when date range is invalid', async () => {
     const { engine } = createTrackingQueryEngine();
 
-    try {
-      await handleEventsQuery(
-        new URLSearchParams('epc=urn:test&from=2024-12-31T00:00:00Z&to=2024-01-01T00:00:00Z'),
-        { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
-      );
-      expect.fail('should have thrown');
-    } catch (err) {
-      expect(err).toBeInstanceOf(EpcisQueryError);
-      expect((err as EpcisQueryError).statusCode).toBe(400);
-      expect((err as EpcisQueryError).message).toMatch(/date range/i);
-    }
+    const result = handleEventsQuery(
+      new URLSearchParams('epc=urn:test&from=2024-12-31T00:00:00Z&to=2024-01-01T00:00:00Z'),
+      { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
+    );
+    await expect(result).rejects.toBeInstanceOf(EpcisQueryError);
+    await expect(result).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/date range/i) });
   });
 
   it('passes eventType filter through to SPARQL query', async () => {
@@ -234,7 +254,7 @@ describe('handleEventsQuery', () => {
       { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
     );
 
-    expect(calls[0].sparql).toContain('epcis:readPoint <urn:epc:id:sgln:4012345.00001.0>');
+    expect(calls[0].sparql).toContain('?event ?_epcis_readPoint_value <urn:epc:id:sgln:4012345.00001.0>');
   });
 
   it('passes extension configurationId and shipmentId filters through to SPARQL', async () => {
@@ -419,6 +439,11 @@ describe('toEpcisEvent', () => {
     const binding = makeBindings({ eventType: 'https://gs1.github.io/EPCIS/ObjectEvent' });
     const event = toEpcisEvent(binding);
     expect(event.type).toBe('ObjectEvent');
+  });
+
+  it('preserves the namespace of a GS1 extended event type in responses', () => {
+    expect(toEpcisEvent(makeBindings({ eventType: 'https://gs1.github.io/EPCIS/CustomEvent' })).type)
+      .toBe('https://gs1.github.io/EPCIS/CustomEvent');
   });
 
   it('strips AggregationEvent URI to short name', () => {

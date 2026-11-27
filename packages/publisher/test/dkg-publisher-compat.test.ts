@@ -68,16 +68,21 @@ describe('DKGPublisher compatibility aliases', () => {
   });
 
   it('uses onChainContextGraphId as the direct publish chain domain without remap intent', async () => {
-    const publisher = await makePublisher();
     const seenPublisherAddressCgIds: Array<bigint | undefined> = [];
     const signerAddress = '0x1111111111111111111111111111111111111111';
+    const publisher = new DKGPublisher({
+      store: new OxigraphStore(),
+      chain: new NoChainAdapter(),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherAddressResolver: async (cgId) => {
+        seenPublisherAddressCgIds.push(cgId);
+        return signerAddress;
+      },
+    });
     const internals = publisher as any;
 
-    internals.refreshChainV10Readiness = async () => true;
-    internals.resolvePublisherAddress = async (cgId?: bigint) => {
-      seenPublisherAddressCgIds.push(cgId);
-      return signerAddress;
-    };
+    internals.publisherPlanner.refreshChainV10Readiness = async () => true;
     internals.getPublisherSigner = async () => ({ address: signerAddress, source: 'test' });
     internals.chain.getEvmChainId = async () => 31337n;
     internals.chain.getKnowledgeAssetsLifecycleAddress = async () => '0x2222222222222222222222222222222222222222';

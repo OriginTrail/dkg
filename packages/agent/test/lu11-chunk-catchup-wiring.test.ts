@@ -119,7 +119,7 @@ interface SignerInternals {
   };
 }
 
-async function bootAgent(opts?: { withChainSigner?: boolean }): Promise<{
+async function bootAgent(opts?: { withChainSigner?: boolean; stripCiphertext?: boolean }): Promise<{
   agent: DKGAgent;
   internals: WiringInternals & SignerInternals;
 }> {
@@ -136,6 +136,12 @@ async function bootAgent(opts?: { withChainSigner?: boolean }): Promise<{
   const agent = await DKGAgent.create({
     name: 'CatchupWiringTest',
     chainAdapter: chain,
+    // Omit stripCiphertext unless a test explicitly overrides it so the suite
+    // continues to exercise the production default (strip ON).
+    swmHostMode: {
+      enabled: true,
+      ...(opts?.stripCiphertext !== undefined ? { stripCiphertext: opts.stripCiphertext } : {}),
+    },
   });
   const internals = agent as unknown as WiringInternals & SignerInternals;
   return { agent, internals };

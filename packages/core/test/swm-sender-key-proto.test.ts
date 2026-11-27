@@ -119,6 +119,30 @@ describe('SWM Sender Key proto', () => {
     expect(new Uint8Array(decoded.senderKeySignature)).toEqual(message.senderKeySignature);
   });
 
+  it('does not expose log-only assetUal on Sender Key wire messages', () => {
+    const assetUal = 'did:dkg:evm:31337/0x000000000000000000000000000000000000c10a/7';
+
+    const decodedPackage = decodeSwmSenderKeyPackage(encodeSwmSenderKeyPackage({
+      ...pkg,
+      assetUal,
+    } as SwmSenderKeyPackageMsg & { assetUal: string }));
+    expect((decodedPackage as { assetUal?: string }).assetUal).toBeUndefined();
+
+    const decodedAck = decodeSwmSenderKeyPackageAck(encodeSwmSenderKeyPackageAck({
+      version: SWM_SENDER_KEY_PACKAGE_VERSION,
+      type: SWM_SENDER_KEY_PACKAGE_ACK_TYPE,
+      accepted: true,
+      assetUal,
+    } as Parameters<typeof encodeSwmSenderKeyPackageAck>[0] & { assetUal: string }));
+    expect((decodedAck as { assetUal?: string }).assetUal).toBeUndefined();
+
+    const decodedMessage = decodeSwmSenderKeyMessage(encodeSwmSenderKeyMessage({
+      ...message,
+      assetUal,
+    } as SwmSenderKeyMessageMsg & { assetUal: string }));
+    expect((decodedMessage as { assetUal?: string }).assetUal).toBeUndefined();
+  });
+
   it('preserves unrecognized ACK reason codes from the wire', () => {
     const raw = SwmSenderKeyPackageAckSchema.encode(
       SwmSenderKeyPackageAckSchema.create({

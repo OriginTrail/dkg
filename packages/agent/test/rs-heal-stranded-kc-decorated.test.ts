@@ -10,26 +10,47 @@
  * in every normal daemon config → the guard silently returns → the heal never
  * runs and RS stays stuck. The bare-adapter gate tests cannot see this.
  *
- * This builds the store the way production does (factory + agent wrapper) and
+ * This builds the production decorator order around a counted adapter and
  * proves: (1) `update` propagates to the top of the stack; (2) the heal
  * actually RELOCATES through it (byte-exact root equality — if `update` were
  * dropped the guard would no-op and scoped would stay empty); (3) the wrapper's
- * cache-invalidation + the GraphSetIndex refresh fire so the new scoped graph
- * is enumerable.
+ * cache invalidation fires and the GraphSetIndex touched-graph maintenance keeps
+ * the new scoped graph enumerable without a lazy full rebuild.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
-import { createTripleStore, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import {
+  GraphSetIndexStore,
+  OxigraphStore,
+  type QueryOptions,
+  type Quad,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import { V10MerkleTree, contextGraphDataUri, contextGraphMetaUri, contextGraphLayerUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import { extractV10KCFromStore } from '@origintrail-official/dkg-random-sampling';
 import { writeMaterializedVersion } from '@origintrail-official/dkg-publisher';
 import { SwmHostModeMethods } from '../src/dkg-agent-swm-host.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
+import { recordingObserver } from './_helpers/store-mutation-recorder.js';
+import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 const ONTOLOGY_GRAPH = 'did:dkg:context-graph:ontology';
 const CONTEXT_GRAPH_ON_CHAIN_ID = 'https://dkg.network/ontology#ContextGraphOnChainId';
+
+function authoritativeTarget(onChainId: string): unknown {
+  const sub = { subscribed: true, synced: true, onChainId };
+  return {
+    sub,
+    bindingKind: 'authoritative',
+    onChainId,
+    onChainCgId: BigInt(onChainId),
+    cursor: { watermark: 0, ahead: new Map(), scanOrdinal: 1 },
+    bindingGeneration: 0,
+    watermarkBefore: 0,
+  };
+}
 
 const ESCAPE_BEARING_VALUE = 'line1\nline2\\x';
 const ROOT = 'urn:entity:strand-root';
@@ -53,9 +74,29 @@ function metaQuads(ual: string, metaGraph: string): Quad[] {
   ];
 }
 
+type ListGraphsCountingStore = TripleStore & { readonly listGraphsCalls: number };
+
+function countListGraphs(inner: TripleStore): ListGraphsCountingStore {
+  let listGraphsCalls = 0;
+  return new Proxy(inner, {
+    get(target, prop, receiver) {
+      if (prop === 'listGraphsCalls') return listGraphsCalls;
+      if (prop === 'listGraphs') {
+        return async (options?: QueryOptions) => {
+          listGraphsCalls += 1;
+          return target.listGraphs(options);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as ListGraphsCountingStore;
+}
+
 describe('healStrandedScopedKCs — through the production store decorator stack', () => {
   let store: TripleStore;
   let invalidateCount: number;
+  let countedAdapter: ListGraphsCountingStore;
 
   const TEST_CG = 'stranded-cg';
   const TEST_ONCHAIN = '7';
@@ -66,13 +107,13 @@ describe('healStrandedScopedKCs — through the production store decorator stack
 
   beforeEach(async () => {
     invalidateCount = 0;
-    // Production wrapping: createTripleStore (→ GraphSetIndexStore) then the
-    // agent's listContextGraphs cache-invalidating wrapper (DKGAgent.create).
-    const inner = await createTripleStore({ backend: 'oxigraph', graphSetIndex: true });
+    // Production wrapping order: adapter → GraphSetIndexStore → the agent's
+    // listContextGraphs cache-invalidating wrapper (DKGAgent.create).
+    countedAdapter = countListGraphs(new OxigraphStore());
+    const inner = new GraphSetIndexStore(countedAdapter);
     store = createListContextGraphsCacheInvalidatingStore(
       inner,
       () => { invalidateCount += 1; },
-      () => undefined,
     );
 
     const seedOntology = (cg: string, onChainId: string): Promise<void> => store.insert([{
@@ -97,9 +138,13 @@ describe('healStrandedScopedKCs — through the production store decorator stack
 
   async function runHeal(localCgId: string, onChainId: string): Promise<void> {
     await SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
-      { store, log: { info: () => undefined, warn: () => undefined, error: () => undefined } } as never,
+      {
+        store,
+        contextGraphBindingState: new ContextGraphBindingState(),
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
       localCgId,
-      { subscribed: true, synced: true, onChainId } as never,
+      authoritativeTarget(onChainId) as never,
     );
   }
 
@@ -107,15 +152,186 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     expect(typeof store.update).toBe('function');
   });
 
+  it('forwards atomic graph-and-subject replacement through the agent decorator', async () => {
+    const replaceGraphAndSubject = vi.fn(async () => undefined);
+    const adapter = new Proxy(new OxigraphStore(), {
+      get(target, prop, receiver) {
+        if (prop === 'replaceGraphAndSubject') return replaceGraphAndSubject;
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    let invalidations = 0;
+    const { observer, committed } = recordingObserver();
+    const wrapped = createListContextGraphsCacheInvalidatingStore(
+      adapter,
+      () => { invalidations += 1; },
+      observer,
+    );
+    const graphQuads: Quad[] = [{
+      subject: 'urn:data:s', predicate: 'urn:data:p', object: '"data"', graph: 'urn:data',
+    }];
+    const metadataQuads: Quad[] = [{
+      subject: 'urn:ual', predicate: 'urn:meta:p', object: '"meta"', graph: 'urn:meta',
+    }];
+    const options: QueryOptions = { source: 'test.atomic-replace', priority: 'background' };
+
+    await expect(wrapped.replaceGraphAndSubject?.(
+      'urn:data',
+      graphQuads,
+      'urn:meta',
+      'urn:ual',
+      metadataQuads,
+      options,
+    )).resolves.toBeUndefined();
+    expect(replaceGraphAndSubject).toHaveBeenCalledWith(
+      'urn:data',
+      graphQuads,
+      'urn:meta',
+      'urn:ual',
+      metadataQuads,
+      options,
+    );
+    expect(invalidations).toBe(1);
+    // Complete graph-and-subject replacement can delete authority facts that
+    // are absent from the replacement payload, so the mutation names the two
+    // replaced targets (the metadata one with its subject) besides the quads.
+    expect(committed).toEqual([{
+      removals: [{ graph: 'urn:data' }, { graph: 'urn:meta', subject: 'urn:ual' }],
+      quads: [...graphQuads, ...metadataQuads],
+    }]);
+
+    await wrapped.close();
+  });
+
+  it('does not advertise graph-and-subject replacement when the inner store lacks it', () => {
+    const adapter = new Proxy(new OxigraphStore(), {
+      get(target, prop, receiver) {
+        if (prop === 'replaceGraphAndSubject') return undefined;
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const wrapped = createListContextGraphsCacheInvalidatingStore(adapter, () => undefined);
+
+    expect(wrapped.replaceGraphAndSubject).toBeUndefined();
+    return wrapped.close();
+  });
+
+  it('forwards pressure telemetry and hasGraph admission options through the agent decorator', async () => {
+    const pressure = {
+      ackInflight: 1,
+      normalInflight: 2,
+      backgroundInflight: 3,
+      ackQueued: 4,
+      normalQueued: 5,
+      backgroundQueued: 6,
+      maxConcurrent: 8,
+      ackReservedSlots: 2,
+    };
+    const hasGraph = vi.fn(async () => true);
+    const adapter = new Proxy(new OxigraphStore(), {
+      get(target, prop, receiver) {
+        if (prop === 'getPressureSnapshot') return () => pressure;
+        if (prop === 'hasGraph') return hasGraph;
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const wrapped = createListContextGraphsCacheInvalidatingStore(adapter, () => undefined);
+    const controller = new AbortController();
+    const options: QueryOptions = {
+      source: 'test.ack-read',
+      priority: 'ack',
+      signal: controller.signal,
+    };
+
+    expect(wrapped.getPressureSnapshot?.()).toBe(pressure);
+    await expect(wrapped.hasGraph('urn:test:graph', options)).resolves.toBe(true);
+    expect(hasGraph).toHaveBeenCalledWith('urn:test:graph', options);
+
+    await wrapped.close();
+  });
+
+  it('forwards no-count deletes and invalidates after success or an indeterminate failure', async () => {
+    const failure = new Error('injected no-count delete failure');
+    let rejectDelete = false;
+    const countedDelete = vi.fn(async () => 1);
+    const noCountDelete = vi.fn(async () => {
+      if (rejectDelete) throw failure;
+    });
+    const adapter = new Proxy(new OxigraphStore(), {
+      get(target, prop, receiver) {
+        if (prop === 'deleteByPattern') return countedDelete;
+        if (prop === 'deleteByPatternWithoutCount') return noCountDelete;
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    let invalidations = 0;
+    const { observer, committed } = recordingObserver();
+    const wrapped = createListContextGraphsCacheInvalidatingStore(
+      adapter,
+      () => { invalidations += 1; },
+      observer,
+    );
+    const pattern = { graph: 'urn:test:no-count', subject: 'urn:test:subject' };
+    const options: QueryOptions = { source: 'test.no-count', priority: 'background' };
+
+    await expect(wrapped.deleteByPatternWithoutCount?.(pattern, options)).resolves.toBeUndefined();
+    expect(noCountDelete).toHaveBeenCalledWith(pattern, options);
+    expect(countedDelete).not.toHaveBeenCalled();
+    expect(invalidations).toBe(1);
+    expect(committed).toHaveLength(1);
+
+    rejectDelete = true;
+    await expect(wrapped.deleteByPatternWithoutCount?.(pattern, options)).rejects.toBe(failure);
+    // The adapter may have committed before losing its response. Untagged
+    // failures are indeterminate and must invalidate conservatively.
+    expect(invalidations).toBe(2);
+    expect(committed).toHaveLength(2);
+    await wrapped.close();
+  });
+
+  it('invalidates caches for query updates with dotted PREFIX labels', async () => {
+    const adapter = new OxigraphStore();
+    const queryStore = new Proxy(adapter, {
+      get(target, prop, receiver) {
+        if (prop === 'query') {
+          return async () => ({ type: 'bindings' as const, bindings: [] });
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    let invalidations = 0;
+    const { observer, committed } = recordingObserver();
+    const wrapped = createListContextGraphsCacheInvalidatingStore(
+      queryStore,
+      () => { invalidations += 1; },
+      observer,
+    );
+
+    await wrapped.query(
+      'PREFIX foaf.core: <http://xmlns.com/foaf/0.1/> ' +
+      'INSERT DATA { GRAPH <urn:g> { <urn:s> foaf.core:name "v" } }',
+    );
+
+    expect(invalidations).toBe(1);
+    expect(committed).toEqual([{ everything: true }]);
+    await wrapped.close();
+  });
+
   it('relocates the stranded KC through the full stack (heal does NOT silently no-op)', async () => {
     const ctrl = await extractV10KCFromStore(store, BigInt(CTRL_ONCHAIN), KA_ID);
     const expectedRoot = new V10MerkleTree(ctrl.leaves).root;
     await expect(extractV10KCFromStore(store, BigInt(TEST_ONCHAIN), KA_ID)).rejects.toBeTruthy();
 
-    // Seed the GraphSetIndex BEFORE the heal so we can prove the update-path
-    // refresh registers the newly-created scoped graph (not just a lazy scan).
+    // Seed the GraphSetIndex BEFORE the heal so touchedGraphs must maintain an
+    // already-populated graph index without a full rebuild.
     const graphsBefore = await store.listGraphs();
     expect(graphsBefore).not.toContain(contextGraphMetaUri(TEST_CG, TEST_ONCHAIN));
+    expect(countedAdapter.listGraphsCalls).toBe(1);
     const invalidatesBefore = invalidateCount;
 
     await runHeal(TEST_CG, TEST_ONCHAIN);
@@ -128,17 +344,131 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     // (2) the cache-invalidating wrapper's update() ran (graph-creating mutation).
     expect(invalidateCount).toBeGreaterThan(invalidatesBefore);
 
-    // (3) GraphSetIndexStore.update() refreshed the index — the new scoped
-    //     graph is now enumerable.
+    // (3) GraphSetIndexStore.update() used the declared touchedGraphs to keep the
+    //     index warm, so the new scoped graphs are enumerable without a rescan.
     const graphsAfter = await store.listGraphs();
     expect(graphsAfter).toContain(contextGraphMetaUri(TEST_CG, TEST_ONCHAIN));
     expect(graphsAfter).toContain(contextGraphDataUri(TEST_CG, TEST_ONCHAIN));
+    expect(countedAdapter.listGraphsCalls).toBe(1);
 
     // copies, never moves.
     const legacyStill = await store.query(
       `ASK { GRAPH <${contextGraphMetaUri(TEST_CG)}> { <${TEST_UAL}> <${DKG}batchId> "${KA_ID}"^^<${XSD}integer> } }`,
     );
     expect(legacyStill.type === 'boolean' && legacyStill.value).toBe(true);
+  });
+
+  it('(#1549) RS-heal INSERTs declare touchedGraphs through the decorator stack', async () => {
+    // Guard the #1549 warm-index behaviour at the call site: a regression reverting
+    // either INSERT to a plain `store.update(sparql)` would still relocate the KC
+    // (the graphsAfter/merkle assertions above stay green) but would re-dirty the
+    // graph-set index and force a full rebuild scan. Capture the update() options the
+    // heal sends through the top of the production stack and assert each INSERT
+    // declares its scoped target graph + source tag.
+    const updateCalls: Array<{ sparql: string; options?: { source?: string; touchedGraphs?: readonly string[] } }> = [];
+    const operationOptions: Array<{ method: string; options?: QueryOptions }> = [];
+    const capturing = new Proxy(store, {
+      get(target, prop, receiver) {
+        if (prop === 'query') {
+          const orig = Reflect.get(target, prop, receiver) as TripleStore['query'];
+          return (sparql: string, options?: QueryOptions) => {
+            operationOptions.push({ method: 'query', options });
+            return orig.call(target, sparql, options);
+          };
+        }
+        if (prop === 'insert') {
+          const orig = Reflect.get(target, prop, receiver) as TripleStore['insert'];
+          return (quads: Quad[], options?: QueryOptions) => {
+            operationOptions.push({ method: 'insert', options });
+            return orig.call(target, quads, options);
+          };
+        }
+        if (prop === 'deleteByPattern') {
+          const orig = Reflect.get(target, prop, receiver) as TripleStore['deleteByPattern'];
+          return (pattern: Partial<Quad>, options?: QueryOptions) => {
+            operationOptions.push({ method: 'deleteByPattern', options });
+            return orig.call(target, pattern, options);
+          };
+        }
+        if (prop === 'update') {
+          const orig = Reflect.get(target, prop, receiver) as NonNullable<TripleStore['update']>;
+          return (sparql: string, options?: { source?: string; touchedGraphs?: readonly string[] }) => {
+            updateCalls.push({ sparql, options });
+            operationOptions.push({ method: 'update', options });
+            return orig.call(target, sparql, options);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as TripleStore;
+
+    await SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      {
+        store: capturing,
+        contextGraphBindingState: new ContextGraphBindingState(),
+        rsHealCursorByCg: new Map<string, string>(),
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
+      TEST_CG,
+      authoritativeTarget(TEST_ONCHAIN) as never,
+    );
+
+    const scopedData = contextGraphDataUri(TEST_CG, TEST_ONCHAIN);
+    const scopedMeta = contextGraphMetaUri(TEST_CG, TEST_ONCHAIN);
+    const dataInsert = updateCalls.find((c) => /INSERT/i.test(c.sparql) && c.sparql.includes(scopedData));
+    const metaInsert = updateCalls.find((c) => /INSERT/i.test(c.sparql) && c.sparql.includes(scopedMeta));
+    expect(dataInsert?.options).toMatchObject({
+      priority: 'background',
+      source: 'agent.swm.rsHeal.materialize',
+      touchedGraphs: [scopedData],
+    });
+    expect(metaInsert?.options).toMatchObject({
+      priority: 'background',
+      source: 'agent.swm.rsHeal.materialize',
+      touchedGraphs: [scopedMeta],
+    });
+    expect(operationOptions.length).toBeGreaterThan(0);
+    expect(operationOptions.every(({ options }) => options?.priority === 'background')).toBe(true);
+    expect(operationOptions.every(({ options }) => options?.source?.startsWith('agent.swm.rsHeal.'))).toBe(true);
+  });
+
+  it('labels RS-heal reads by caller operation through the decorator stack', async () => {
+    const querySources: Array<string | undefined> = [];
+    const capturing = new Proxy(store, {
+      get(target, prop, receiver) {
+        if (prop === 'query') {
+          const orig = Reflect.get(target, prop, receiver) as TripleStore['query'];
+          return (
+            sparql: Parameters<TripleStore['query']>[0],
+            options?: Parameters<TripleStore['query']>[1],
+          ) => {
+            querySources.push(options?.source);
+            return orig.call(target, sparql, options);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as TripleStore;
+
+    await SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      {
+        store: capturing,
+        contextGraphBindingState: new ContextGraphBindingState(),
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
+      TEST_CG,
+      authoritativeTarget(TEST_ONCHAIN) as never,
+    );
+
+    expect(new Set(querySources.filter((source) => source?.startsWith('agent.swm.rsHeal.'))))
+      .toEqual(new Set([
+        'agent.swm.rsHeal.guard',
+        'agent.swm.rsHeal.enumerate',
+        'agent.swm.rsHeal.version.readLegacy',
+        'agent.swm.rsHeal.version.checkScoped',
+        'agent.swm.rsHeal.roots',
+        'agent.swm.rsHeal.rootPresent',
+      ]));
   });
 
   it('relocates a VM-graph-only one-shot strand through the full stack (read-both)', async () => {

@@ -1,7 +1,15 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-import { resolveDaemonEntryPoint } from '../src/cli-helpers.js';
+import {
+  resolveDaemonEntryPoint,
+  resolveDaemonNodeCommand,
+} from '../src/daemon-entrypoint.js';
+import { resolveHelperModuleNodeArgs } from '../src/own-module-path.js';
 
 /**
  * Regression guard for #962 (cli.ts split review): `resolveDaemonEntryPoint`
@@ -19,10 +27,16 @@ import { resolveDaemonEntryPoint } from '../src/cli-helpers.js';
  */
 describe('resolveDaemonEntryPoint (#962)', () => {
   const prevNoBlueGreen = process.env.DKG_NO_BLUE_GREEN;
+  const prevDkgHome = process.env.DKG_HOME;
+  let tempHome: string | undefined;
 
-  afterEach(() => {
+  afterEach(async () => {
     if (prevNoBlueGreen === undefined) delete process.env.DKG_NO_BLUE_GREEN;
     else process.env.DKG_NO_BLUE_GREEN = prevNoBlueGreen;
+    if (prevDkgHome === undefined) delete process.env.DKG_HOME;
+    else process.env.DKG_HOME = prevDkgHome;
+    if (tempHome) await rm(tempHome, { recursive: true, force: true });
+    tempHome = undefined;
   });
 
   it('returns an existing CLI entrypoint regardless of run mode', () => {
@@ -34,5 +48,84 @@ describe('resolveDaemonEntryPoint (#962)', () => {
 
     expect(entry).toMatch(/cli\.(ts|js)$/);
     expect(existsSync(entry), `daemon entrypoint must exist: ${entry}`).toBe(true);
+  });
+
+  it('builds every launch and verifier shape through one canonical command', () => {
+    process.env.DKG_NO_BLUE_GREEN = '1';
+
+    for (const daemonArg of [
+      'daemon-supervisor',
+      'daemon-worker',
+      'daemon-foreground-worker',
+      '--version',
+    ]) {
+      const command = resolveDaemonNodeCommand(daemonArg);
+      expect(command).toEqual({
+        executable: process.execPath,
+        args: [...process.execArgv, command.entryPoint, daemonArg],
+        entryPoint: resolveDaemonEntryPoint(),
+      });
+    }
+  });
+
+  async function createLegacySlot(role: 'edge' | 'core'): Promise<string> {
+    tempHome = await mkdtemp(join(tmpdir(), `dkg-${role}-entrypoint-`));
+    process.env.DKG_HOME = tempHome;
+    delete process.env.DKG_NO_BLUE_GREEN;
+    await writeFile(join(tempHome, 'config.json'), JSON.stringify({ nodeRole: role }));
+    const slotEntry = join(tempHome, 'releases', 'current', 'packages', 'cli', 'dist', 'cli.js');
+    await mkdir(join(slotEntry, '..'), { recursive: true });
+    await writeFile(slotEntry, '// stale legacy slot');
+    return slotEntry;
+  }
+
+  it('keeps an Edge --version probe on the installed CLI when legacy slots remain', async () => {
+    const legacySlotEntry = await createLegacySlot('edge');
+
+    const command = resolveDaemonNodeCommand('--version');
+
+    expect(command.entryPoint).not.toBe(legacySlotEntry);
+    expect(command.entryPoint).toMatch(/cli\.(ts|js)$/);
+    expect(command.args).toEqual([...process.execArgv, command.entryPoint, '--version']);
+  });
+
+  it('preserves the active legacy slot for Core daemon commands', async () => {
+    const legacySlotEntry = await createLegacySlot('core');
+
+    const command = resolveDaemonNodeCommand('daemon-worker');
+
+    expect(command.entryPoint).toBe(legacySlotEntry);
+    expect(command.args).toEqual([...process.execArgv, legacySlotEntry, 'daemon-worker']);
+  });
+});
+
+describe('resolveHelperModuleNodeArgs', () => {
+  it('runs a built helper directly and a source-only helper through tsx, without the daemon execArgv', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-helper-module-'));
+    try {
+      const built = join(dir, 'helper.js');
+      const source = join(dir, 'helper.ts');
+      await writeFile(source, '');
+      expect(resolveHelperModuleNodeArgs(pathToFileURL(built)))
+        .toEqual(['--import', expect.stringMatching(/\/tsx\/.*\.m?js$/), source]);
+      await writeFile(built, '');
+      expect(resolveHelperModuleNodeArgs(pathToFileURL(built))).toEqual([built]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails clearly instead of returning a path that does not exist', () => {
+    expect(() => resolveHelperModuleNodeArgs(new URL('file:///nonexistent/dkg-helper.js')))
+      .toThrow(/CLI helper module not found: \/nonexistent\/dkg-helper\.js/);
+  });
+
+  it('resolves the Oxigraph parent watchdog to a file that exists in this run mode', () => {
+    const args = resolveHelperModuleNodeArgs(
+      new URL('../src/daemon/oxigraph-parent-watchdog.js', import.meta.url),
+    );
+    const entry = args.at(-1)!;
+    expect(entry).toMatch(/oxigraph-parent-watchdog\.(ts|js)$/);
+    expect(existsSync(entry), `watchdog entry must exist: ${entry}`).toBe(true);
   });
 });

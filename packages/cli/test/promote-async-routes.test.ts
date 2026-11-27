@@ -34,6 +34,7 @@ import {
   type PromoteListFilter,
 } from '@origintrail-official/dkg-publisher';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 import { daemonState } from '../src/daemon/state.js';
 
 describe('async SWM-share queue daemon routes', () => {
@@ -72,6 +73,9 @@ describe('async SWM-share queue daemon routes', () => {
 
   function makeAgent(tokenToAddress: Record<string, string> = {}) {
     return {
+      async resolveContextGraphReadAuthority() {
+        return { outcome: 'allowed', grantScope: 'caller', source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'eligible' };
+      },
       async listContextGraphs() {
         return ['cg', 'cg-1', 'cg-2', 'graphify', 'team-graph'].map((id) => ({
           id,
@@ -118,6 +122,9 @@ describe('async SWM-share queue daemon routes', () => {
         async recoverPromoteAsync(jobId: string): Promise<void> {
           return queue.recover(jobId);
         },
+        async clearPromoteAsync(jobId: string) {
+          return (queue as TripleStoreAsyncPromoteQueue).clearTerminalJob(jobId);
+        },
       },
     };
   }
@@ -156,8 +163,10 @@ describe('async SWM-share queue daemon routes', () => {
           apiPortRef: { value: 0 },
           url,
           path: url.pathname,
-          requestToken,
           requestAgentAddress: agent.resolveAgentByToken(requestToken) ?? 'did:dkg:agent:test',
+          authentication: agent.resolveAgentByToken(requestToken)
+            ? requestAuthentication({ kind: 'agent', agentAddress: agent.resolveAgentByToken(requestToken), token: requestToken })
+            : requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);
@@ -313,7 +322,8 @@ describe('async SWM-share queue daemon routes', () => {
     });
     expect(second.status).toBe(409);
     expect(second.body.existingJobId).toBe(first.body.jobId);
-    expect(second.body.error).toMatch(/already active/i);
+    expect(second.body.observedAdmission).toBe(true);
+    expect(second.body.error).toMatch(/previously observed share admission/i);
   });
 
   it('POST /:name/swm/share-async returns 503 when the worker is disabled', async () => {
@@ -346,15 +356,15 @@ describe('async SWM-share queue daemon routes', () => {
     expect(r.body.error).toMatch(/Invalid "name"/);
   });
 
-  it('POST /:name/swm/share-async accepts an explicit entities list', async () => {
+  it('POST /:name/swm/share-async rejects an explicit entities list', async () => {
     await startRoutes(makeAgent());
     const r = await post('/api/knowledge-assets/list/swm/share-async', {
       contextGraphId: 'cg',
       entities: ['urn:dkg:entity:a', 'urn:dkg:entity:b'],
     });
-    expect(r.status).toBe(200);
-    const job = await queue.getStatus(r.body.jobId);
-    expect(job?.request.entities).toEqual(['urn:dkg:entity:a', 'urn:dkg:entity:b']);
+    expect(r.status).toBe(400);
+    expect(r.body.code).toBe('KA_ATOMIC_SHARE_REQUIRED');
+    expect(await queue.getStats()).toMatchObject({ queued: 0 });
   });
 
   // ---------------------------------------------------------------------------
@@ -557,6 +567,51 @@ describe('async SWM-share queue daemon routes', () => {
   it('POST /swm/share-jobs/:jobId/recover rejects unsafe path values before queue lookup', async () => {
     await startRoutes(makeAgent());
     const r = await post('/api/knowledge-assets/swm/share-jobs/job%3Ebad/recover', {});
+    expect(r.status).toBe(400);
+    expect(r.body.error).toMatch(/Invalid promote jobId/);
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /api/knowledge-assets/swm/share-jobs/:jobId/clear  (#1837)
+  // Atomic terminal record removal — DISTINCT from DELETE (cancel). Idempotent:
+  // already_absent is 200, not 404.
+  // ---------------------------------------------------------------------------
+
+  it('POST /swm/share-jobs/:jobId/clear clears a terminal job → 200 cleared; repeat → 200 already_absent', async () => {
+    await startRoutes(makeAgent());
+    const enq = await post('/api/knowledge-assets/clearable/swm/share-async', { contextGraphId: 'cg' });
+    await del(`/api/knowledge-assets/swm/share-jobs/${enq.body.jobId}`); // cancel → terminal 'failed'
+    expect((await queue.getStatus(enq.body.jobId))?.state).toBe('failed');
+
+    const r = await post(`/api/knowledge-assets/swm/share-jobs/${enq.body.jobId}/clear`, {});
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ outcome: 'cleared' });
+    expect(await queue.getStatus(enq.body.jobId)).toBeNull();
+
+    const again = await post(`/api/knowledge-assets/swm/share-jobs/${enq.body.jobId}/clear`, {});
+    expect(again.status).toBe(200);
+    expect(again.body).toMatchObject({ outcome: 'already_absent' });
+  });
+
+  it('POST /swm/share-jobs/:jobId/clear returns 409 for a nonterminal (queued) job, without mutation', async () => {
+    await startRoutes(makeAgent());
+    const enq = await post('/api/knowledge-assets/queued2/swm/share-async', { contextGraphId: 'cg' });
+    const r = await post(`/api/knowledge-assets/swm/share-jobs/${enq.body.jobId}/clear`, {});
+    expect(r.status).toBe(409);
+    expect(r.body).toMatchObject({ outcome: 'rejected', reason: 'nonterminal' });
+    expect((await queue.getStatus(enq.body.jobId))?.state).toBe('queued');
+  });
+
+  it('POST /swm/share-jobs/:jobId/clear returns 200 already_absent for an unknown job (idempotent)', async () => {
+    await startRoutes(makeAgent());
+    const r = await post('/api/knowledge-assets/swm/share-jobs/non-existent/clear', {});
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ outcome: 'already_absent' });
+  });
+
+  it('POST /swm/share-jobs/:jobId/clear rejects an unsafe path value before queue lookup (400)', async () => {
+    await startRoutes(makeAgent());
+    const r = await post('/api/knowledge-assets/swm/share-jobs/job%3Ebad/clear', {});
     expect(r.status).toBe(400);
     expect(r.body.error).toMatch(/Invalid promote jobId/);
   });

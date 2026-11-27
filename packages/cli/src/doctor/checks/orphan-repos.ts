@@ -1,29 +1,7 @@
-/**
- * §4.7.1 Check: orphan repository clones.
- *
- * Walks operator $HOME (plus common dev-folder children: `Projects`,
- * `repos`, `src`, `dev`, plus any operator-configured `doctor.scanRoots`)
- * up to a bounded depth, looking for directories that look like a
- * stray DKG repository clone. Each match is reported as a finding
- * with severity `warning` (or `info` if the directory IS the active
- * daemon — that's just describing reality).
- *
- * Detection signals:
- *   - `.git/config` whose `[remote "origin"]` URL contains
- *     `OriginTrail/dkg` or `origintrail-official/dkg`, OR
- *   - `package.json` whose `name` field is `@origintrail-official/dkg`
- *     or `dkg-v9` (legacy name).
- *
- * Performance constraint: the scan MUST complete in < 5 s on a
- * laptop-sized home directory. We skip `node_modules`, `.npm`,
- * `.cache`, `.npmrc`, any dot-directory other than the configured
- * roots themselves, and any directory containing a
- * `.dkg-ignore-by-doctor` sentinel.
- */
-import { join } from 'node:path';
+/** Inspect the selected node's install paths; broader discovery requires doctor.scanRoots. */
+import { dirname, join, relative, resolve, isAbsolute, sep } from 'node:path';
 import type { DoctorDeps, Finding, StateSummary } from '../types.js';
 
-const DEFAULT_SCAN_ROOT_CHILDREN = ['Projects', 'repos', 'src', 'dev'];
 const DEFAULT_MAX_DEPTH = 4;
 const IGNORE_SENTINEL = '.dkg-ignore-by-doctor';
 const SKIP_DIRECTORIES = new Set([
@@ -40,7 +18,7 @@ const SKIP_DIRECTORIES = new Set([
   'build',
 ]);
 const ORIGIN_PATTERN = /OriginTrail\/dkg|origintrail-official\/dkg/i;
-const PACKAGE_NAME_MATCHES = new Set(['@origintrail-official/dkg', 'dkg-v9']);
+const PACKAGE_NAME_MATCHES = new Set(['@origintrail-official/dkg', 'dkg-v9', 'dkg-v10']);
 
 /** A single discovered candidate. Exported for downstream consumption (e.g. CLI rendering). */
 export interface OrphanCandidate {
@@ -52,16 +30,39 @@ export interface OrphanCandidate {
   isActiveDaemon: boolean;
 }
 
-/** Compute the set of roots we will scan. */
-function resolveScanRoots(deps: DoctorDeps): string[] {
-  const roots = new Set<string>([deps.home]);
-  for (const child of DEFAULT_SCAN_ROOT_CHILDREN) {
-    roots.add(join(deps.home, child));
-  }
-  for (const extra of deps.extraScanRoots) {
-    roots.add(extra);
-  }
-  return Array.from(roots);
+function isWithin(path: string, root: string): boolean {
+  const rel = relative(root, path);
+  return rel === '' || (!rel.startsWith('..' + sep) && rel !== '..' && !isAbsolute(rel));
+}
+
+type Relevance = 'active-daemon' | 'selected-install' | 'selected-dkg-home' | 'explicit-scan-root';
+interface ScanTarget {
+  path: string;
+  mode: 'probe' | 'discover';
+  relevance: Relevance;
+}
+
+/** Known installs are exact probes; only the selected home and opt-in roots recurse. */
+function resolveScanTargets(deps: DoctorDeps, state: StateSummary): ScanTarget[] {
+  const activeSlotPath = state.paths.activeSlot
+    ? resolve(deps.dkgHome, 'releases', state.paths.activeSlot)
+    : null;
+  const targets: ScanTarget[] = [
+    ...[deps.monorepoRoot, activeSlotPath, state.paths.npmGlobalDkg]
+      .filter((path): path is string => Boolean(path))
+      .map((path): ScanTarget => ({ path: resolve(deps.cwd, path), mode: 'probe', relevance: 'selected-install' })),
+    { path: resolve(deps.cwd, deps.dkgHome), mode: 'discover', relevance: 'selected-dkg-home' },
+    ...deps.extraScanRoots.map((path): ScanTarget => ({
+      path: resolve(deps.cwd, path), mode: 'discover', relevance: 'explicit-scan-root',
+    })),
+  ];
+  const seen = new Set<string>();
+  return targets.filter((target) => {
+    const key = `${target.mode}:${target.path}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /**
@@ -110,7 +111,7 @@ async function probeDirectory(
     origin && packageName ? 'both' : origin ? 'git-origin' : 'package-name';
 
   const isActiveDaemon = daemonEntryPoint
-    ? daemonEntryPoint.startsWith(dir + '/') || daemonEntryPoint === dir
+    ? isWithin(daemonEntryPoint, dir)
     : false;
 
   return {
@@ -123,52 +124,6 @@ async function probeDirectory(
 }
 
 /**
- * Bounded recursive scan from `root` looking for candidate
- * directories. Walks depth-first up to `maxDepth` levels deep,
- * skipping ignored directory names + any directory containing the
- * `.dkg-ignore-by-doctor` sentinel.
- */
-async function scan(
-  deps: DoctorDeps,
-  root: string,
-  daemonEntryPoint: string | null,
-  candidates: OrphanCandidate[],
-  remainingBudget: { count: number; deadlineMs: number },
-  depth = 0,
-): Promise<void> {
-  if (depth > DEFAULT_MAX_DEPTH) return;
-  if (Date.now() > remainingBudget.deadlineMs) return;
-  if (remainingBudget.count <= 0) return;
-
-  if (!deps.exists(root)) return;
-  if (deps.exists(join(root, IGNORE_SENTINEL))) return;
-
-  const probed = await probeDirectory(deps, root, daemonEntryPoint);
-  if (probed) {
-    candidates.push(probed);
-    remainingBudget.count--;
-    // Don't recurse into a discovered DKG checkout — its sub-trees
-    // are uninteresting (nested node_modules, packages/, etc.).
-    return;
-  }
-
-  const entries = await deps.readdir(root);
-  for (const entry of entries) {
-    if (!entry.isDirectory) continue;
-    if (entry.name.startsWith('.') && depth > 0) {
-      // Allow dot-dirs at depth 0 (some operators keep ~/.dotfiles/
-      // organisations); skip nested dot-dirs.
-      continue;
-    }
-    if (SKIP_DIRECTORIES.has(entry.name)) continue;
-    if (entry.isSymbolicLink) continue;
-    await scan(deps, join(root, entry.name), daemonEntryPoint, candidates, remainingBudget, depth + 1);
-    if (Date.now() > remainingBudget.deadlineMs) return;
-    if (remainingBudget.count <= 0) return;
-  }
-}
-
-/**
  * Run the orphan-repos check. Returns the list of findings; the
  * orchestrator picks them up and rolls them into the report.
  */
@@ -177,39 +132,82 @@ export async function runOrphanReposCheck(
   state: StateSummary,
 ): Promise<Finding[]> {
   const findings: Finding[] = [];
-  const candidates: OrphanCandidate[] = [];
+  const candidates: Array<OrphanCandidate & { relevance: Relevance }> = [];
 
   // 5-second budget + a max-50-candidate ceiling. Both bounds are
   // belt-and-braces — DEFAULT_MAX_DEPTH and the dot-dir skip should
   // keep the scan fast on a normal home tree.
   const budget = { count: 50, deadlineMs: Date.now() + 5000 };
-  const roots = resolveScanRoots(deps);
-  for (const root of roots) {
-    await scan(deps, root, state.daemon.entryPoint, candidates, budget);
-    if (Date.now() > budget.deadlineMs) break;
-    if (budget.count <= 0) break;
+  const targets = resolveScanTargets(deps, state);
+  const daemonEntryPoint = state.daemon.entryPoint ? resolve(deps.cwd, state.daemon.entryPoint) : null;
+  const hasBudget = () => budget.count > 0 && Date.now() <= budget.deadlineMs;
+  const probes = new Map<string, { candidate: OrphanCandidate | null; descend: boolean }>();
+  // A later, deeper explicit root can extend discovery beyond an earlier root's
+  // depth limit, while completed subtrees and all exact probes remain reusable.
+  const expandedDepth = new Map<string, number>();
+
+  async function probe(path: string, relevance: Relevance) {
+    const cached = probes.get(path);
+    if (cached) return cached;
+    if (!hasBudget()) return undefined;
+    if (!deps.exists(path) || deps.exists(join(path, IGNORE_SENTINEL))) {
+      const skipped = { candidate: null, descend: false };
+      probes.set(path, skipped);
+      return skipped;
+    }
+    const candidate = await probeDirectory(deps, path, daemonEntryPoint);
+    const result = { candidate, descend: candidate === null };
+    probes.set(path, result);
+    if (candidate) {
+      candidates.push({ ...candidate, relevance: candidate.isActiveDaemon ? 'active-daemon' : relevance });
+      budget.count--;
+    }
+    return result;
   }
 
-  for (const c of candidates) {
-    if (c.isActiveDaemon) {
-      findings.push({
-        check: 'orphan-repos',
-        severity: 'info',
-        message: `DKG repository clone at ${c.path} (active daemon's source tree)`,
-        subject: c.path,
-        details: { matchedBy: c.matchedBy, isActiveDaemon: true, ...(c.origin ? { origin: c.origin } : {}), ...(c.packageName ? { packageName: c.packageName } : {}) },
-      });
-    } else {
-      findings.push({
-        check: 'orphan-repos',
-        severity: 'warning',
-        message: `Stray DKG repository clone at ${c.path}`,
-        advisory: "This is not the running daemon. Do not 'git pull' here. Run 'dkg update' instead.",
-        subject: c.path,
-        details: { matchedBy: c.matchedBy, isActiveDaemon: false, ...(c.origin ? { origin: c.origin } : {}), ...(c.packageName ? { packageName: c.packageName } : {}) },
-      });
+  async function discover(path: string, relevance: Relevance, depth = 0): Promise<void> {
+    if (depth > DEFAULT_MAX_DEPTH || !hasBudget()) return;
+    const remainingDepth = DEFAULT_MAX_DEPTH - depth;
+    if ((expandedDepth.get(path) ?? -1) >= remainingDepth) return;
+    if (!(await probe(path, relevance))?.descend) return;
+    expandedDepth.set(path, remainingDepth);
+    for (const entry of await deps.readdir(path)) {
+      if (!entry.isDirectory || entry.isSymbolicLink || SKIP_DIRECTORIES.has(entry.name)) continue;
+      if (entry.name.startsWith('.') && depth > 0) continue;
+      await discover(join(path, entry.name), relevance, depth + 1);
+      if (!hasBudget()) break;
     }
   }
 
+  // Preserve known-install provenance and budget before broader discovery starts.
+  for (const target of targets.filter((target) => target.mode === 'probe')) {
+    await probe(target.path, target.relevance);
+  }
+
+  // Probe the known daemon's ancestors directly, without traversing siblings.
+  if (daemonEntryPoint) {
+    let dir = dirname(daemonEntryPoint);
+    while (dirname(dir) !== dir && dir !== resolve(deps.cwd, deps.home) && hasBudget()) {
+      if ((await probe(dir, 'active-daemon'))?.candidate) break;
+      dir = dirname(dir);
+    }
+  }
+
+  for (const target of targets.filter((target) => target.mode === 'discover')) {
+    await discover(target.path, target.relevance);
+    if (!hasBudget()) break;
+  }
+
+  for (const c of candidates) {
+    const { relevance } = c;
+    findings.push({
+      check: 'orphan-repos',
+      severity: 'info',
+      message: `DKG repository clone at ${c.path} (${relevance})`,
+      subject: c.path,
+      details: { relevance, matchedBy: c.matchedBy, isActiveDaemon: c.isActiveDaemon,
+        ...(c.origin ? { origin: c.origin } : {}), ...(c.packageName ? { packageName: c.packageName } : {}) },
+    });
+  }
   return findings;
 }
