@@ -23,6 +23,10 @@ import { pathToFileURL } from 'node:url';
 const SETTLED_STATES = new Set(['succeeded', 'failed']);
 const SHARE_JOB_POLL_INTERVAL_MS = 5_000;
 const STATUS_REQUEST_CAP_MS = 10_000;
+// A status request starts only while this much of the wait is left. A request
+// that times out at the deadline can end a millisecond or two before it by the
+// wall clock, and a request in what is left could never be answered in time.
+const MIN_STATUS_REQUEST_MS = 50;
 
 /** Whether the daemon shared a write at once (the write endpoint's answer). */
 export function sharedAtOnce(resp) {
@@ -77,8 +81,10 @@ export async function getJsonWithin(url, { headers = {}, timeoutMs }) {
  * Polls each job's status until every job has settled (succeeded or failed) or
  * `budgetMs` has passed. The remaining budget is checked before each request,
  * and a request may take at most min(`requestCapMs`, remaining), so polling
- * ends by the deadline; a budget of 0 makes no request. Each job keeps the last
- * state it was seen in, and `settled` says whether that state is final.
+ * ends by the deadline. A request starts only while at least 50 ms of the wait
+ * are left, so a budget under 50 ms, 0 included, makes no request. Each job
+ * keeps the last state it was seen in, and `settled` says whether that state is
+ * final.
  */
 export async function pollShareRecoveries(jobs, {
   api,
@@ -96,7 +102,7 @@ export async function pollShareRecoveries(jobs, {
   polling: while (pending.length > 0) {
     for (const job of pending) {
       const remaining = deadline - now();
-      if (remaining <= 0) break polling;
+      if (remaining < MIN_STATUS_REQUEST_MS) break polling;
       job.polls = (job.polls ?? 0) + 1;
       try {
         const view = await getJson(base + job.url, {
@@ -113,7 +119,7 @@ export async function pollShareRecoveries(jobs, {
     }
     pending = pending.filter((job) => !SETTLED_STATES.has(job.state));
     const remaining = deadline - now();
-    if (pending.length === 0 || remaining <= 0) break;
+    if (pending.length === 0 || remaining < MIN_STATUS_REQUEST_MS) break;
     await sleep(Math.min(pollIntervalMs, remaining));
   }
   for (const job of jobs) job.settled = SETTLED_STATES.has(job.state);
