@@ -1020,7 +1020,9 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(resolveOnChainId).toHaveBeenCalledTimes(2);
     expect(handleChainReconciledKC).not.toHaveBeenCalled();
     expect(saveSelectedVmReconcileCursor).not.toHaveBeenCalled();
-    expect(flush).not.toHaveBeenCalled();
+    // The store-owned barrier may retire writes from an earlier pass. It does
+    // not authorize this target: no materialization or cursor commit occurred.
+    expect(flush).toHaveBeenCalledOnce();
     expect((internals as any).selectedVmReconcileCursors.get(selected)).toMatchObject({
       record: { onChainContextGraphId: '298', watermark: 0 },
       cursor: { watermark: 0 },
