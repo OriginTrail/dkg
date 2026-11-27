@@ -1,4 +1,3 @@
-import { vmReconcileDurability } from './vm-reconcile-durability.js';
 import type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryReport, SwmConnectedHostCatchupOptions, SwmConnectedHostCatchupResult } from './swm/host-catchup-types.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -4394,12 +4393,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
         scanOrdinal: target.cursor.scanOrdinal,
       };
       let pendingWatermark: number | undefined;
-      const durability = vmReconcileDurability(this);
       let result: VmReconcileEngineResult;
       let engineTimings: ReconcilePassTimings | undefined;
       const refusedReads = new VmReconcileRefusedSliceReads();
       try {
-        result = await durability.observe(() => reconcileContextGraph(
+        result = await reconcileContextGraph(
           this.createVmReconcileDeps(
             localCgId,
             lifecycleGeneration,
@@ -4415,7 +4413,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           workingCursor,
           localCgId,
           target.onChainCgId,
-        ));
+        );
       } catch (err) {
         // A rejected pass keeps what it proved (see `reconcileContextGraph`):
         // its held completions and scan position move to the live cursor, so
@@ -4432,12 +4430,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
         throw err;
       }
       if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
-      // Changed and indeterminate writes remain pending across failed passes
-      // and failed barriers. Semantic ordinal outcomes only feed telemetry.
+      // The storage barrier owns dirty/persisted generations, including writes
+      // from earlier failed passes and completed background snapshots.
       const flushStartedAt = performance.now();
-      await durability.flush(pendingWatermark !== undefined, async () => {
-        await this.store.flush?.({ priority: 'background', source: 'agent.vmReconcile.materialization.flush' });
-      });
+      await this.store.flush?.({ priority: 'background', source: 'agent.vmReconcile.materialization.flush' });
       const flushMs = performance.now() - flushStartedAt;
       if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
       const materialized = result.materialized;

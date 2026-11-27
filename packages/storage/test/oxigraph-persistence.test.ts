@@ -23,6 +23,8 @@ import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import type { Quad } from '../src/triple-store.js';
 
 const flushBarrier = vi.hoisted(() => ({
+  snapshotWrites: 0,
+  failNextSnapshot: false,
   tmpPath: null as string | null,
   onSnapshotCaptured: null as (() => void) | null,
   releaseSnapshot: null as Promise<void> | null,
@@ -34,6 +36,13 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   return {
     ...actual,
     open: async (...args: unknown[]) => {
+      if (args[1] === 'w') {
+        flushBarrier.snapshotWrites += 1;
+        if (flushBarrier.failNextSnapshot) {
+          flushBarrier.failNextSnapshot = false;
+          throw new Error('injected snapshot write failure');
+        }
+      }
       if (flushBarrier.tmpPath && String(args[0]) === flushBarrier.tmpPath && args[1] === 'w') {
         flushBarrier.onSnapshotCaptured?.();
         if (flushBarrier.releaseSnapshot) await flushBarrier.releaseSnapshot;
@@ -70,6 +79,8 @@ describe('OxigraphStore persistence', () => {
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'oxigraph-persist-'));
+    flushBarrier.snapshotWrites = 0;
+    flushBarrier.failNextSnapshot = false;
   });
 
   afterEach(() => {
@@ -78,6 +89,67 @@ describe('OxigraphStore persistence', () => {
     flushBarrier.releaseSnapshot = null;
     flushBarrier.onSnapshotCommitted = null;
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* */ }
+  });
+
+  it.each(['explicit', 'background'] as const)('does not rewrite a generation already persisted by %s flush', async owner => {
+    const path = join(dir, 'store.nq');
+    const store = new OxigraphStore(path, { flushDelayMs: owner === 'explicit' ? 60_000 : 0 });
+    try {
+      await store.insert(SAMPLE);
+      if (owner === 'explicit') await store.flush();
+      else await vi.waitFor(() => expect(existsSync(path)).toBe(true));
+      await store.flush(); // Also waits for a background snapshot still syncing its directory.
+      await store.flush();
+      expect(flushBarrier.snapshotWrites).toBe(1);
+      const reopened = new OxigraphStore(path);
+      try { expect(await reopened.countQuads()).toBe(SAMPLE.length); }
+      finally { await reopened.close(); }
+      expect(flushBarrier.snapshotWrites).toBe(1); // Hydrated data starts clean too.
+    } finally { await store.close(); }
+    expect(flushBarrier.snapshotWrites).toBe(1);
+  });
+
+  it('keeps a failed snapshot dirty for the next barrier without another mutation', async () => {
+    const path = join(dir, 'store.nq');
+    const store = new OxigraphStore(path, { flushDelayMs: 60_000 });
+    try {
+      await store.insert(SAMPLE.slice(0, 1));
+      await store.flush();
+      await store.insert(SAMPLE.slice(1));
+      flushBarrier.failNextSnapshot = true;
+      await expect(store.flush()).rejects.toThrow('injected snapshot write failure');
+      await store.flush();
+      await store.flush();
+      expect(flushBarrier.snapshotWrites).toBe(3); // Original, failed attempt, successful retry.
+      const reopened = new OxigraphStore(path, { readOnly: true });
+      try { expect(await reopened.countQuads()).toBe(SAMPLE.length); }
+      finally { await reopened.close(); }
+    } finally { await store.close(); }
+  });
+
+  it('leaves writes arriving during a snapshot dirty until a later barrier', async () => {
+    const path = join(dir, 'store.nq');
+    const store = new OxigraphStore(path, { flushDelayMs: 60_000 });
+    let captured!: () => void, release!: () => void;
+    const snapshot = new Promise<void>(resolve => { captured = resolve; });
+    flushBarrier.tmpPath = `${path}.tmp`;
+    flushBarrier.onSnapshotCaptured = captured;
+    flushBarrier.releaseSnapshot = new Promise<void>(resolve => { release = resolve; });
+    try {
+      await store.insert(SAMPLE.slice(0, 1));
+      const first = store.flush();
+      await snapshot;
+      await store.insert(SAMPLE.slice(1));
+      release();
+      await first;
+      expect(flushBarrier.snapshotWrites).toBe(1);
+      await store.flush();
+      await store.flush();
+      expect(flushBarrier.snapshotWrites).toBe(2);
+      const reopened = new OxigraphStore(path, { readOnly: true });
+      try { expect(await reopened.countQuads()).toBe(SAMPLE.length); }
+      finally { await reopened.close(); }
+    } finally { release(); await store.close(); }
   });
 
   it('close() persists data; a fresh instance hydrates it back', async () => {

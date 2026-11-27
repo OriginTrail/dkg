@@ -9,8 +9,8 @@
  *
  * - The nudge for the node's own just-confirmed registration starts no pass;
  *   the periodic sweep reconciles the ordinal.
- * - A pass that only finds its ordinals already in VM and saves no watermark
- *   skips the flush; the pass that saves the watermark still flushes first.
+ * - Every successful pass awaits the storage barrier before saving a watermark.
+ *   Storage itself avoids rewriting a generation already persisted.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter, buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
@@ -171,19 +171,19 @@ describe('VM reconcile after this node\'s own publish', () => {
     return { pass, flush, head, saveSelectedVmReconcileCursor, internals, chain, selected, originalOrdinal };
   }
 
-  it('skips the flush for a pass that found its ordinal already in VM, and flushes before the watermark', async () => {
+  it('awaits the storage barrier even for an already-local pass, before any watermark', async () => {
     const { pass, flush, head, saveSelectedVmReconcileCursor } = await selectedTarget('AlreadyLocal', 'already');
 
     // The ordinal is complete but not yet five blocks deep: no watermark, nothing written.
     await expect(pass()).resolves.toMatchObject({ watermarkBefore: 0, watermarkAfter: 0 });
-    expect(flush).not.toHaveBeenCalled();
+    expect(flush).toHaveBeenCalledOnce();
     expect(saveSelectedVmReconcileCursor).not.toHaveBeenCalled();
 
     head.block = 106;
     await expect(pass()).resolves.toMatchObject({ watermarkBefore: 0, watermarkAfter: 1 });
-    expect(flush).toHaveBeenCalledOnce();
+    expect(flush).toHaveBeenCalledTimes(2);
     expect(saveSelectedVmReconcileCursor).toHaveBeenCalledOnce();
-    expect(flush.mock.invocationCallOrder[0]!)
+    expect(flush.mock.invocationCallOrder[1]!)
       .toBeLessThan(saveSelectedVmReconcileCursor.mock.invocationCallOrder[0]!);
   });
 
@@ -315,7 +315,7 @@ describe('VM reconcile after this node\'s own publish', () => {
     release();
     await expect(retry).resolves.toMatchObject({ watermarkBefore: 0, watermarkAfter: 0 });
     await f.pass();
-    expect(f.flush).toHaveBeenCalledTimes(2); // A successful barrier clears the debt.
+    expect(f.flush).toHaveBeenCalledTimes(3); // Storage decides whether another snapshot is needed.
   });
 
   it('flushes fetched writes when real recovery revalidation reports already', async () => {
