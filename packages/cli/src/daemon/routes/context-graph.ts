@@ -1,6 +1,7 @@
 import { handlePublicSnapshotJob } from './public-snapshot-job.js';
 import { handlePublicCheckpointJob } from './public-checkpoint-job.js';
 import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
+import { parseContextGraphListQuery } from './context-graph-list-query.js';
 // daemon/routes/context-graph.ts
 //
 // Route handlers for context-graph (+ contextGraph, sub-graph) CRUD, participants, join flow, manifest publish/install.
@@ -2419,10 +2420,16 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     }
   }
 
-  // GET /api/context-graph/list
+  // GET /api/context-graph/list — `named`, `system` and `onChain` are opt-in
+  // filters (#3919); without them the answer is the one it always was.
   if (req.method === "GET" && path === "/api/context-graph/list") {
+    const listQuery = parseContextGraphListQuery(url.searchParams);
+    if (!listQuery.ok) {
+      return jsonResponse(res, 400, { error: listQuery.error, code: listQuery.code });
+    }
     const contextGraphs = await agent.listContextGraphs({
       callerAgentAddress: requestAgentAddress ?? null,
+      ...(listQuery.filter ? { filter: listQuery.filter } : {}),
     });
     return jsonResponse(res, 200, {
       contextGraphs,

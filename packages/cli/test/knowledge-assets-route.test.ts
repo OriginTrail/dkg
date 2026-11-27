@@ -36,6 +36,8 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer } from 'node:http';
+import { hexlify } from 'ethers';
+import { computeStructuredKCRootV10 } from '@origintrail-official/dkg-publisher';
 import {
   startLiveDaemon,
   stopLiveDaemon,
@@ -473,6 +475,61 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
 
   // ── wm/finalize ───────────────────────────────────────────────────
   describe('wm/finalize', () => {
+    it('conditionally seals an edited shared asset and returns the original seal on a repeated request', async () => {
+      const client = await registerAgentClient('guarded-author');
+      const contextGraphId = `guarded-${Date.now().toString(36)}`;
+      await createRegisteredAgentContextGraph(client, contextGraphId);
+      const name = 'conditional-edit';
+      const path = '/api/knowledge-assets/' + name;
+      const base = { contextGraphId };
+      const rows = ['original', 'addition'].map(value => ({
+        subject: 'urn:example:asset', predicate: 'urn:example:value', object: '"' + value + '"', graph: '',
+      }));
+      expect((await client.post('/api/knowledge-assets', { ...base, name })).status).toBe(201);
+      expect((await client.post(path + '/wm/write', { ...base, quads: [rows[0]] })).status).toBe(200);
+      const source = await client.post(path + '/wm/finalize', base);
+      expect(source.status).toBe(200);
+      const shared = await shareToSwm(client.post, name, base, client.get);
+      expect(shared.status, JSON.stringify(shared.body)).toBe(200);
+      expect((await client.post(path + '/wm/pull-from', { ...base, layer: 'swm', onConflict: 'replace' })).status).toBe(200);
+      expect((await client.post(path + '/wm/write', { ...base, quads: [rows[1]] })).status).toBe(200);
+      const getDescriptor = () => client.get(path + '?contextGraphId=' + contextGraphId);
+      const before = (await getDescriptor()).body;
+      const predecessorId = before.currentShareOperationId ?? before.events.slice().reverse().find((event: { type: string; shareOperationId?: string }) => event.type === 'promoted' && event.shareOperationId)?.shareOperationId;
+      const body = {
+        ...base, expectedAuthorAddress: client.agentAddress.toLowerCase(),
+        expectedWmAssertionGraph: before.assertionGraph,
+        expectedPredecessor: { reservedUal: source.body.kaUal, swmAssertionRoot: source.body.merkleRoot,
+          ...(predecessorId ? { shareOperationId: predecessorId } : {}) },
+        expectedTarget: { merkleRoot: hexlify(computeStructuredKCRootV10(rows, []).root), publicTripleCount: 2, privateTripleCount: 0 },
+      };
+      const guarded = path + '/wm/finalize-guarded';
+      const other = await registerAgentClient('different-author');
+      expect((await client.post(guarded, { ...body, expectedAuthorAddress: other.agentAddress,
+        expectedPredecessor: { ...body.expectedPredecessor, reservedUal: body.expectedPredecessor.reservedUal.replace(client.agentAddress.toLowerCase(), other.agentAddress.toLowerCase()) },
+      })).status).toBe(403);
+      const malformed = await client.post(guarded, { ...body, expectedTarget: {} });
+      expect(malformed.status).toBe(400);
+      const withOperation = (id: unknown) => ({ ...body, expectedPredecessor: { ...body.expectedPredecessor, shareOperationId: id } });
+      for (const malformedId of [null, 123, '', '  ', 'x'.repeat(257), 'a\0b', '\ud800']) {
+        expect((await client.post(guarded, withOperation(malformedId))).status).toBe(400);
+      }
+      const differentOperation = await client.post(guarded, withOperation('share/op+1'));
+      expect(differentOperation.status).toBe(409);
+      expect(differentOperation.body.code).toBe('FINALIZE_PRECONDITION_FAILED');
+      const stale = await client.post(guarded, { ...body, expectedTarget: { ...body.expectedTarget, privateTripleCount: 1 } });
+      expect(stale.status).toBe(409);
+      expect(stale.body).toEqual({ code: 'FINALIZE_PRECONDITION_FAILED', error: 'Finalize preconditions no longer match this draft' });
+      expect((await getDescriptor()).body).toEqual(before);
+      const sealed = await client.post(guarded, body);
+      expect(sealed.status, JSON.stringify(sealed.body)).toBe(200);
+      expect(sealed.body).toMatchObject({ outcome: 'sealed', publicTripleCount: 2, privateTripleCount: 0,
+        seal: { merkleRoot: body.expectedTarget.merkleRoot, kaUal: source.body.kaUal, assertionVersion: '1' } });
+      const replay = await client.post(guarded, body);
+      expect(replay.status).toBe(200);
+      expect(replay.body).toEqual({ ...sealed.body, outcome: 'already_sealed' });
+    }, 120_000);
+
     it('seals the draft and returns the full real seal payload', async () => {
       await createKa(REG, 'seal');
       await write(REG, 'seal', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);

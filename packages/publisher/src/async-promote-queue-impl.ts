@@ -1,10 +1,11 @@
+import { retireFailedPromote, type PromoteRetirementApproval } from './promote-job-retirement.js';
 import type { PromoteLockOperation } from './promote-lock-timing.js';
 import { bindUnstartedPromoteJob } from './bind-promote-recovery.js';
 import type { PromoteRecoveryBinding } from './promote-recovery-binding.js';
 import { reconcileRetainedShareUnlocked, validateShareReconciliationInput, type ShareReconciliationInput } from './share-reconciliation.js';
 import { readShareCompletionEvidence, type ShareCompletionEvidence } from './share-completion-evidence.js';
 import { promoteSuccessTransition } from './async-promote-success.js';
-import { persistPromoteJobWithEvidence, type PromotePersistenceResult } from './promote-admission-persistence.js';
+import { persistPromoteJobWithEvidence, type PromoteJobWriteDurability, type PromotePersistenceResult } from './promote-admission-persistence.js';
 import { PromoteAdmissionCoordinator, PromoteAdmissionError, type PromoteAdmissionAttempt } from './promote-admission.js';
 import { recordUnstartedPromoteAttempt, isRetiredBoundRejection } from './promote-no-effect-rejection.js';
 import { FIND_ACTIVE_CONFLICT_SOURCE, createPromoteOwnershipReader, hasUnfinishedBoundObligation, readPromoteOwnershipCandidates, promoteOwnershipLookup, storedPromoteLaneScope, type PromoteConflictLookup } from './async-promote-ownership.js';
@@ -71,6 +72,19 @@ import {
 
 type ActivationConflict = { kind: 'pending'; error: PromoteAdmissionError }
   | { kind: 'durable'; job: PromoteJob; error: PromoteJobConflictError };
+
+/**
+ * Whether a commit marker write waits for disk. Lease recovery reads an unbound job's markers to decide
+ * whether its promote may have started, so they must be on disk before the worker goes on. A bound job
+ * is reclaimed and its admitted operation replayed whatever its markers say (`reconcileExpiredRunning`),
+ * and its success write waits for a flush: `succeedWithShareEvidence` sets `swmInserted` in that write and
+ * requires `promoteStarted` in the stored job, and `succeed` requires `swmInserted`. Its markers reach
+ * disk with that write, so a durable share waits for two whole-snapshot writes of an embedded store: at
+ * admission and at success.
+ */
+function commitMarkerDurability(job: PromoteJob): PromoteJobWriteDurability {
+  return isBoundPromoteJob(job) ? 'next-flush' : 'flush';
+}
 
 export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteTerminalJobClearer {
   // A managed-store recovery can legitimately reject every heartbeat and
@@ -237,6 +251,17 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     return filter.limit && filter.limit > 0 ? sorted.slice(0, Math.floor(filter.limit)) : sorted;
   }
 
+  async retireFailedJob(jobId: string, approval?: PromoteRetirementApproval) {
+    return this.withMutationLock('retirement', async () => {
+      if (this.admissions.hasPendingJob(jobId)) return { outcome: 'ineligible' as const };
+      try {
+        return await retireFailedPromote(this.store, this.graphUri, jobId, this.now, approval);
+      } finally {
+        if (approval) this.admissions.invalidate(jobId);
+      }
+    });
+  }
+
   async cancel(jobId: string): Promise<void> {
     await this.withMutationLock('cancel', async () => {
       await this.ensureGraph();
@@ -389,7 +414,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         [step]: true,
       };
       const updated: PromoteJob = { ...job, updatedAt: this.now(), commitMarker: marker };
-      await this.writeJob(updated);
+      await this.writeJob(updated, commitMarkerDurability(updated));
     });
   }
 
@@ -648,15 +673,15 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     return job;
   }
 
-  private async writeJob(job: PromoteJob): Promise<void> {
-    const result = await this.writeJobWithEvidence(job);
+  private async writeJob(job: PromoteJob, durability: PromoteJobWriteDurability = 'flush'): Promise<void> {
+    const result = await this.writeJobWithEvidence(job, durability);
     if (!result.ok) throw result.cause;
   }
 
-  private async writeJobWithEvidence(job: PromoteJob): Promise<PromotePersistenceResult> {
+  private async writeJobWithEvidence(job: PromoteJob, durability: PromoteJobWriteDurability = 'flush'): Promise<PromotePersistenceResult> {
     this.nextIdleClaimAt = 0;
     this.admissions.invalidate(job.jobId);
-    const result = await persistPromoteJobWithEvidence(this.store, this.graphUri, job);
+    const result = await persistPromoteJobWithEvidence(this.store, this.graphUri, job, durability);
     if (result.ok) this.admissions.observe(job);
     return result;
   }

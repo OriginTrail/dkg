@@ -605,10 +605,8 @@ export class EndorseVerifyMethods extends DKGAgentBase {
       //   2. Public CGs: fall back to the gossip-eligible member set
       //      (live topic subscribers), which still narrows the broadcast
       //      versus "every connected libp2p peer".
-      // Downstream `probeShardingTableMembership` continues to filter
-      // approvals by sharding-table membership before they count toward
-      // quorum, so this only changes WHO RECEIVES the proposal, not
-      // who can vote.
+      // `resolveEligibleApprover` below decides which approvals count, so
+      // this only changes WHO RECEIVES the proposal, not who can vote.
       getParticipantPeers: async (contextGraphId: string) => {
         try {
           const enumeration = await this.getOrCreateCGMemberEnumerator().enumerate(contextGraphId);
@@ -627,6 +625,12 @@ export class EndorseVerifyMethods extends DKGAgentBase {
           );
           return [];
         }
+      },
+      // Count only approvals step 6 keeps: a sharding-table identity other than the proposer's own vote.
+      resolveEligibleApprover: async (approverAddress: string) => {
+        const id = await this.resolveVerifyApprovalIdentityId(approverAddress);
+        if (id <= 0n || (proposerEligible && id === this.identityId)) return null;
+        return (await probeShardingTableMembership(id)) ? id : null;
       },
       log: (msg: string) => this.log.info(ctx, msg),
     });
@@ -750,13 +754,8 @@ export class EndorseVerifyMethods extends DKGAgentBase {
   }
 
   async resolveVerifyApprovalIdentityId(this: DKGAgent, approverAddress: string): Promise<bigint> {
-    // Post-SPEC_CG_MEMORY_MODEL: identity resolution is whatever the
-    // chain adapter exposes via `getIdentityIdForAddress`. The legacy
-    // candidate-set probe against per-CG `participantIdentityId`
-    // triples was a pre-LU2 affordance and has been removed (Codex
-    // PR #595 round-5: stop using legacy roster as a verify filter).
-    // Modern responders that want to be counted MUST stamp their
-    // identityId in the VerifyApproval payload.
+    // Post-SPEC_CG_MEMORY_MODEL: the identity is whatever the chain adapter's
+    // `getIdentityIdForAddress` returns for the address an approval recovers to.
     if (typeof (this.chain as any).getIdentityIdForAddress !== 'function') {
       return 0n;
     }

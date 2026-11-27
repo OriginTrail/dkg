@@ -131,6 +131,7 @@ export default defineConfig({
       'test/async-promote-share-lane-trace.test.ts',
       'test/async-promote-claim-order.test.ts',
       'test/async-promote-retention.test.ts',
+      'test/promote-job-retirement.test.ts',
       'test/async-promote-retention-holds.test.ts',
       'test/async-promote-retention-modes.test.ts',
       'test/async-promote-retention.property.test.ts',

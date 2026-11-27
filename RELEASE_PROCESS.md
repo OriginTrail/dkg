@@ -194,6 +194,10 @@ pnpm release:certify-install --bundle "$BUNDLE" --commit "$COMMIT" --version "$V
 Logs and diagnostic data survive failures; owned containers, networks and chain
 processes are stopped. SIGINT/SIGTERM cancel active commands, attempt every owned
 resource cleanup and retain an `INCOMPLETE` receipt; cleanup errors are recorded.
+Each Docker cleanup command (removing a container or network, copying a layout's
+data out) may run for 180 s, or for `DKG_PACKAGE_CERTIFICATION_CLEANUP_TIMEOUT_MS`
+milliseconds when that is set. One that fails or runs longer leaves the attempt
+`INCOMPLETE`. A host short on memory can need minutes to remove a container.
 Final verification checks a prospective PASS receipt in memory; only successful
 verification permits atomically replacing the durable INCOMPLETE receipt with PASS.
 The initial receipt is written before execution, so SIGKILL or host loss also

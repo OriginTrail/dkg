@@ -348,6 +348,8 @@ export interface TripleStore {
    * fall back to `insert(quads)` for already-stored terms.
    */
   update?(sparql: string, options?: UpdateOptions): Promise<void>;
+  /** One SPARQL DELETE/INSERT WHERE passed to update() evaluates and commits as one backend transaction. */
+  readonly atomicSparqlModify?: true;
 
   countQuads(graphUri?: string, options?: QueryOptions): Promise<number>;
 
@@ -389,6 +391,14 @@ export function findTripleStoreCapability<T>(
     candidate = (candidate as { innerStore?: unknown }).innerStore;
   }
   return null;
+}
+
+/** Discover backend atomicity, but retain the outer mutation and persistence boundaries. */
+export function supportsAtomicSparqlModify(store: TripleStore): boolean {
+  const owner = findTripleStoreCapability(store, (candidate): candidate is TripleStore =>
+    typeof candidate === 'object' && candidate !== null
+    && (candidate as Partial<TripleStore>).atomicSparqlModify === true);
+  return !!owner && typeof store.update === 'function' && (!owner.flush || typeof store.flush === 'function');
 }
 
 /** Keep the outer decorator path, discovering only the backend's lifetime owner. */

@@ -373,6 +373,7 @@ describe('VerifyCollector approval digest', () => {
       proposerSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
       requiredSignatures: 2,
       timeoutMs: 5000,
+      allowPartial: true,
     });
     return result.approvals.map((approval) => approval.approverAddress);
   }
@@ -387,8 +388,115 @@ describe('VerifyCollector approval digest', () => {
     ['another chain', (root: Uint8Array) => computeVerifyApprovalDigest(1n, DOMAIN.contractAddress, 42n, 100n, root)],
     ['another deployment', (root: Uint8Array) => computeVerifyApprovalDigest(DOMAIN.chainId, '0x00000000000000000000000000000000000000a2', 42n, 100n, root)],
     ['another batch', (root: Uint8Array) => computeVerifyApprovalDigest(DOMAIN.chainId, DOMAIN.contractAddress, 42n, 101n, root)],
-  ])('does not attribute an approval signed over %s to its signer', async (_name, digestFor) => {
+  ])('does not count an approval signed over %s', async (_name, digestFor) => {
     const wallet = new ethers.Wallet(ethers.Wallet.createRandom().privateKey);
-    expect(await approverOf((proposal) => digestFor(proposal.merkleRoot), wallet)).not.toContain(wallet.address);
+    expect(await approverOf((proposal) => digestFor(proposal.merkleRoot), wallet)).toEqual([]);
+  });
+});
+
+/**
+ * An approval counts only when its approver signed this proposal's digest and, when the caller
+ * says who may approve, the approver is an eligible identity not counted yet. Collection ends early
+ * only on approvals that count, so a fast approval that would be dropped later cannot stop it
+ * before slower eligible approvals arrive.
+ */
+describe('VerifyCollector counts only approvals it can attribute', () => {
+  const merkleRoot = ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('attributed-root')));
+  const wallets = () => Array.from({ length: 4 }, () => new ethers.Wallet(ethers.Wallet.createRandom().privateKey));
+
+  /** Answers each peer after its delay, signed by its wallet over `digestFor` and naming `named` as approver. */
+  type Answer = { wallet: ethers.Wallet; delayMs: number; digestFor?: (root: Uint8Array) => Uint8Array; named?: string };
+  function collectorFor(answers: Record<string, Answer>, resolveEligibleApprover?: (address: string) => Promise<bigint | null>) {
+    return new VerifyCollector({
+      sendP2P: async (peerId, _protocol, data) => {
+        const proposal = decodeVerifyProposal(data);
+        const answer = answers[peerId]!;
+        await new Promise((resolve) => setTimeout(resolve, answer.delayMs));
+        const digest = (answer.digestFor ?? approvalDigest)(proposal.merkleRoot);
+        const sig = answer.wallet.signingKey.sign(ethers.hashMessage(digest));
+        return encodeVerifyApproval({
+          proposalId: proposal.proposalId,
+          agentSignatureR: ethers.getBytes(sig.r),
+          agentSignatureVS: ethers.getBytes(sig.yParityAndS),
+          approverAddress: answer.named ?? answer.wallet.address,
+        });
+      },
+      getParticipantPeers: () => Object.keys(answers),
+      ...(resolveEligibleApprover ? { resolveEligibleApprover } : {}),
+    });
+  }
+  const collect = (collector: VerifyCollector, requiredSignatures: number, allowPartial = false) => collector.collect({
+    contextGraphId: 'test-cg',
+    contextGraphIdOnChain: 42n,
+    signingDomain: DOMAIN,
+    verifiableMemoryId: 1n,
+    batchId: 100n,
+    merkleRoot,
+    entities: [],
+    proposerSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+    requiredSignatures,
+    timeoutMs: 5000,
+    allowPartial,
+  });
+
+  it('keeps collecting past a faster approval in an earlier signing format', async () => {
+    const [older, current] = wallets();
+    const collector = collectorFor({
+      'peer-older': { wallet: older!, delayMs: 0, digestFor: (root) => computeACKDigest(42n, root) },
+      'peer-current': { wallet: current!, delayMs: 30 },
+    });
+    const result = await collect(collector, 2);
+    expect(result.quorumReached).toBe(true);
+    expect(result.approvals.map((approval) => approval.approverAddress)).toEqual([current!.address]);
+  });
+
+  it('does not count an approval whose signature is not by the approver it names', async () => {
+    const [signer, named] = wallets();
+    const result = await collect(collectorFor({ 'peer-a': { wallet: signer!, delayMs: 0, named: named!.address } }), 2, true);
+    expect(result).toMatchObject({ approvals: [], quorumReached: false });
+  });
+
+  it('counts only approvers the resolver accepts, each identity once', async () => {
+    const [first, sameIdentity, ineligible, second] = wallets();
+    const identities = new Map<string, bigint | null>([
+      [first!.address, 7n], [sameIdentity!.address, 7n], [ineligible!.address, null], [second!.address, 9n],
+    ]);
+    const resolved: string[] = [];
+    const collector = collectorFor({
+      'peer-first': { wallet: first!, delayMs: 0 },
+      'peer-same-identity': { wallet: sameIdentity!, delayMs: 10 },
+      'peer-ineligible': { wallet: ineligible!, delayMs: 20 },
+      'peer-second': { wallet: second!, delayMs: 40 },
+    }, async (address) => {
+      resolved.push(address);
+      return identities.get(address) ?? null;
+    });
+    const result = await collect(collector, 3);
+    expect(result.quorumReached).toBe(true);
+    expect(result.approvals.map(({ approverAddress, identityId }) => [approverAddress, identityId])).toEqual([
+      [first!.address, 7n], [second!.address, 9n],
+    ]);
+    expect(resolved).toEqual([first!.address, sameIdentity!.address, ineligible!.address, second!.address]);
+  });
+
+  it('does not count an approver the resolver cannot check', async () => {
+    const [unchecked, eligible] = wallets();
+    const collector = collectorFor({
+      'peer-unchecked': { wallet: unchecked!, delayMs: 0 },
+      'peer-eligible': { wallet: eligible!, delayMs: 20 },
+    }, async (address) => {
+      if (address === unchecked!.address) throw new Error('RPC down');
+      return 11n;
+    });
+    const result = await collect(collector, 2);
+    expect(result.approvals.map(({ approverAddress, identityId }) => [approverAddress, identityId])).toEqual([[eligible!.address, 11n]]);
+  });
+
+  it('reports no quorum when no approval it receives can count', async () => {
+    const [a, b] = wallets();
+    const answers = { 'peer-a': { wallet: a!, delayMs: 0 }, 'peer-b': { wallet: b!, delayMs: 10 } };
+    const noneEligible = async () => null;
+    expect(await collect(collectorFor(answers, noneEligible), 2, true)).toMatchObject({ approvals: [], quorumReached: false });
+    await expect(collect(collectorFor(answers, noneEligible), 2)).rejects.toThrow(/verify_insufficient: got 0\/1/);
   });
 });

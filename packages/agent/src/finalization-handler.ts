@@ -86,7 +86,7 @@ import {
   type VerifiedExactGraphContent,
 } from './exact-graph-content-verifier.js';
 import type {
-  FinalizedSwmTwinCatalogProjectionEvidence,
+  FinalizedSwmTwinProjectionEvidence, FinalizedSwmTwinProjectionAuthority,
   RetireConfirmedGraphScopedSwmTwinIfOrphaned,
 } from
   './sync/requester/finalized-swm-twin-reconciliation.js';
@@ -163,7 +163,10 @@ type GraphScopedMaterializationEnvelope = Pick<
 }>;
 
 /** Immutable queued assertion envelope supplied only after receipt/seal validation. */
-type TrustedGraphScopedAssertionEvidence = VerifiedGraphScopedFinalizationEvidence;
+type TrustedGraphScopedAssertionEvidence = VerifiedGraphScopedFinalizationEvidence & {
+  /** Original operation rows, when recovered locally after the queued receipt was verified. */
+  operationSnapshot?: { shareOperationId: string; quads: Quad[] };
+};
 
 function resolveGraphScopedAccessEnvelope(
   head: GraphScopedMaterializationEnvelope,
@@ -191,7 +194,7 @@ export interface FinalizationHandlerOptions {
   retireConfirmedGraphScopedSwmTwinIfOrphaned?:
     RetireConfirmedGraphScopedSwmTwinIfOrphaned;
   reconcileConfirmedGraphScopedSwmTwin?: (
-    evidence: Readonly<FinalizedSwmTwinCatalogProjectionEvidence>,
+    evidence: Readonly<FinalizedSwmTwinProjectionEvidence>,
     ctx: OperationContext,
   ) => Promise<void>;
   lifecycleLogOptions?: FinalizationLifecycleLogOptions;
@@ -1064,28 +1067,15 @@ export class FinalizationHandler {
     contextGraphId: string;
     scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
     layer: MemoryLayer.SharedWorkingMemory | MemoryLayer.VerifiableMemory;
-    publicTripleCount: number;
-    privateMerkleRoot?: Uint8Array;
-    expectedMerkleRoot: Uint8Array;
-    expectedPublicQuadsDigest?: string;
     subGraphName?: string;
-  }): Promise<ExactGraphScopedLayerVerification> {
-    const graphUri = knowledgeAssetLayerGraphUri(
-      input.contextGraphId,
-      input.layer,
-      input.scope,
-      input.subGraphName,
-    );
+  } & Pick<Parameters<typeof verifyExactGraphContent>[1],
+    'publicTripleCount' | 'privateMerkleRoot' | 'expectedMerkleRoot' | 'expectedPublicQuadsDigest' | 'operationQuads'
+  >): Promise<ExactGraphScopedLayerVerification> {
+    const { contextGraphId, layer, scope, subGraphName, ...commitments } = input;
     return verifyExactGraphContent(this.store, {
-      graphUri,
-      publicTripleCount: input.publicTripleCount,
-      ...(input.privateMerkleRoot
-        ? { privateMerkleRoot: input.privateMerkleRoot }
-        : {}),
-      expectedMerkleRoot: input.expectedMerkleRoot,
-      ...(input.expectedPublicQuadsDigest
-        ? { expectedPublicQuadsDigest: input.expectedPublicQuadsDigest }
-        : {}),
+      ...commitments,
+      expectedPublicQuadsDigest: commitments.expectedPublicQuadsDigest || undefined,
+      graphUri: knowledgeAssetLayerGraphUri(contextGraphId, layer, scope, subGraphName),
       source: 'agent.finalization.verifyExactLayer',
     });
   }
@@ -1422,6 +1412,15 @@ export class FinalizationHandler {
       this.log.warn(ctx, `Chain-reconcile: invalid private commitment for graph-scoped KA ${ual}`);
       return 'no-swm';
     }
+    const reconcileTwin = (verification: VerifiedGraphScopedLayer) => {
+      const snapshot = trustedAssertionEvidence?.operationSnapshot;
+      const digest = verification.equivalentOperationDigest;
+      const authority: FinalizedSwmTwinProjectionAuthority = snapshot && digest
+        ? { arrival: 'recovered-operation', shareOperationId: snapshot.shareOperationId, operationDigest: digest }
+        : { arrival: 'catalog' };
+      return this.reconcileConfirmedSwmTwin({ contextGraphId, scope, head, verification, authority,
+        expectedMerkleRoot: merkleRoot, subGraphName, ctx });
+    };
     const vmVerification = await this.verifyExactGraphScopedLayer({
       contextGraphId,
       scope,
@@ -1432,6 +1431,7 @@ export class FinalizationHandler {
       expectedPublicQuadsDigest: trustedAssertionEvidence
         ? trustedAssertionEvidence.publicQuadsDigest
         : workspaceHead?.publicQuadsDigest,
+      operationQuads: trustedAssertionEvidence?.operationSnapshot?.quads,
       subGraphName,
     });
     if (vmVerification.status === 'verified') {
@@ -1462,15 +1462,7 @@ export class FinalizationHandler {
           scope,
           materializedVersion,
         });
-        await this.reconcileConfirmedSwmTwin({
-          contextGraphId,
-          scope,
-          head,
-          verification: vmVerification,
-          expectedMerkleRoot: merkleRoot,
-          subGraphName,
-          ctx,
-        });
+        await reconcileTwin(vmVerification);
         this.log.info(ctx, `Chain-reconcile: ${ual} already has exact VM content and metadata`);
         return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
       }
@@ -1492,15 +1484,7 @@ export class FinalizationHandler {
             scope,
             materializedVersion,
           });
-          await this.reconcileConfirmedSwmTwin({
-            contextGraphId,
-            scope,
-            head,
-            verification: vmVerification,
-            expectedMerkleRoot: merkleRoot,
-            subGraphName,
-            ctx,
-          });
+          await reconcileTwin(vmVerification);
           this.log.info(
             ctx,
             `Chain-reconcile: ${ual} retains fail-closed access without assertion evidence`,
@@ -1573,11 +1557,8 @@ export class FinalizationHandler {
           ctx,
         });
       }
-      // A confirmed publish may have committed the exact VM graph before its
-      // graph-scoped metadata survived a crash. Reapply only the metadata tail:
-      // SWM writers use a different lock, so this recovery path must not delete
-      // a potentially newer staged assertion.
-      return this.repairExactGraphScopedVmMetadata({
+      // The VM graph may have survived a crash before its metadata was written.
+      const repaired = await this.repairExactGraphScopedVmMetadata({
         contextGraphId,
         scope,
         verifiedQuads: vmVerification.quads,
@@ -1588,6 +1569,10 @@ export class FinalizationHandler {
         preserveNewerWorkspaceLifecycle,
         ctx,
       });
+      if (repaired === 'already-confirmed' && vmVerification.equivalentOperationDigest && !preserveNewerWorkspaceLifecycle) {
+        await reconcileTwin(vmVerification);
+      }
+      return repaired;
     }
 
     const swmVerification = await this.verifyExactGraphScopedLayer({
@@ -1600,6 +1585,7 @@ export class FinalizationHandler {
       expectedPublicQuadsDigest: trustedAssertionEvidence
         ? trustedAssertionEvidence.publicQuadsDigest
         : workspaceHead?.publicQuadsDigest,
+      operationQuads: trustedAssertionEvidence?.operationSnapshot?.quads,
       subGraphName,
     });
     if (swmVerification.status === 'count-mismatch') {
@@ -1668,14 +1654,10 @@ export class FinalizationHandler {
         blockNumber: evidenceBlockNumber,
         materializedVersion,
       },
-      ...(trustedAssertionEvidence
-        ? {
-            access: {
-              accessPolicy: trustedAssertionEvidence.accessPolicy,
-              allowedPeers: trustedAssertionEvidence.allowedPeers,
-            },
-          }
-        : {}),
+      access: {
+        accessPolicy: trustedAssertionEvidence.accessPolicy,
+        allowedPeers: trustedAssertionEvidence.allowedPeers,
+      },
       subGraphName,
       source: 'chain-reconcile',
       ctx,
@@ -1688,6 +1670,7 @@ export class FinalizationHandler {
       );
       return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
     }
+    if (swmVerification.equivalentOperationDigest && !preserveNewerWorkspaceLifecycle) await reconcileTwin(swmVerification);
     this.log.info(
       ctx,
       `Chain-reconcile: promoted exact graph-scoped SWM assertion to VM for ${ual} (ka=${kaId})`,
@@ -1884,6 +1867,7 @@ export class FinalizationHandler {
     scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
     head: GraphScopedMaterializationEnvelope;
     verification: VerifiedGraphScopedLayer;
+    authority?: FinalizedSwmTwinProjectionAuthority;
     expectedMerkleRoot: Uint8Array;
     subGraphName?: string;
     ctx: OperationContext;
@@ -1898,6 +1882,7 @@ export class FinalizationHandler {
       kaUal: input.scope.ual,
       assertionVersion: input.scope.assertionVersion,
       publicQuadsDigest: workspacePublicQuadsDigest(input.verification.quads),
+      ...(input.authority ?? { arrival: 'catalog' as const }),
       publicQuadsCount: input.head.publicTripleCount,
       privateTripleCount: input.head.privateTripleCount,
       ...(input.head.privateMerkleRoot === undefined

@@ -14,14 +14,14 @@ it('splits contention from actual HTTP work, preserving queue failure and privat
   const scheduler = new StorePriorityScheduler({ maxConcurrent: 1, controlId: 'store-control-share', queueWaitTimeoutMs: 2000 });
   let headersObserved!: () => void;
   const clientHeaders = new Promise<void>(resolve => { headersObserved = resolve; });
+  // Keep a generous pause for busy runners, and start the body interval only
+  // after the client has observed the headers.
   const server = createServer(async (_req, res) => {
-    await delay(20);
+    await delay(80);
     res.writeHead(200);
     res.write('yes');
-    // Measure the body interval from the client's observed headers, not the
-    // server write: transport/scheduling can consume the entire server delay.
     await clientHeaders;
-    await delay(20);
+    await delay(80);
     res.end();
   });
   server.listen(0,'127.0.0.1'); await once(server,'listening');
