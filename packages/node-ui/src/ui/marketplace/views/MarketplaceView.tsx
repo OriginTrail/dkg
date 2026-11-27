@@ -67,7 +67,7 @@ function StorefrontPage({ identityId, catalog, onBack }: { identityId: number; c
   const label = (serviceId: string) => modelName(catalog.services.find((x) => x.serviceId === serviceId)?.label ?? serviceId);
   return (
     <div className="mkt-frame" data-testid="mkt-storefront" data-seller={identityId}>
-      <button type="button" className="mkt-linkbtn mkt-xs" data-copy="catalog.back" onClick={onBack}>{copy('catalog.back')}</button>
+      <button type="button" className="ds-btn ds-ghost ds-sm" data-copy="catalog.back" onClick={onBack}>{copy('catalog.back')}</button>
       {s.data && <PageHeader title={sellerName(s.data.identityId)} badge={<SellerChip available={s.data.available} />} />}
       <div className="ds-card mkt-card">
         {s.err && !s.data ? <ErrorCard err={s.err} onRetry={s.reload} /> : null}
@@ -127,7 +127,7 @@ function ServicePage({ service, catalog, onBack, onSeller }: { service: Service;
   const fx = detail?.fx ?? catalog.fx;
   return (
     <div className="mkt-frame" data-testid="mkt-model-page" data-service={service.serviceId}>
-      <button type="button" className="mkt-linkbtn mkt-xs" data-copy="catalog.back" onClick={onBack}>{copy('catalog.back')}</button>
+      <button type="button" className="ds-btn ds-ghost ds-sm" data-copy="catalog.back" onClick={onBack}>{copy('catalog.back')}</button>
       <PageHeader title={modelName(service.label)}
         badge={covered && <Badge tone="success" data-copy="catalog.covered">{copy('catalog.covered', { trac: fmtTrac(covered.left) })}</Badge>} />
       <div className="ds-card mkt-card">

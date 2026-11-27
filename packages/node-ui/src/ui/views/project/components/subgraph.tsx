@@ -1668,7 +1668,7 @@ export function SubGraphDetailView({
             );
           })}
           {hasAnyFilter && (
-            <button type="button" className="v10-subgraph-filter-reset" onClick={resetFilters}>
+            <button type="button" className="ds-btn ds-ghost ds-sm v10-subgraph-filter-reset" onClick={resetFilters}>
               Reset filters
             </button>
           )}

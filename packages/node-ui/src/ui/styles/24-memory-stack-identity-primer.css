@@ -36,7 +36,7 @@
   font-weight: 500;
   text-transform: none;
   letter-spacing: 0;
-  color: var(--text-ghost);
+  color: var(--text-tertiary);
   font-size: var(--fs-micro);
 }
 .v10-memstack-row {
@@ -72,7 +72,7 @@
 }
 .v10-memstack-project-status {
   margin-top: var(--space-6);
-  font-size: var(--fs-micro); color: var(--text-ghost);
+  font-size: var(--fs-micro); color: var(--text-tertiary);
   font-style: italic;
 }
 .v10-memstack-project-status.error { color: var(--text-danger); }
@@ -112,7 +112,7 @@
 }
 .v10-memstack-cell-t-lbl {
   font-size: var(--fs-micro);
-  color: var(--text-ghost);
+  color: var(--text-tertiary);
   text-transform: uppercase;
   letter-spacing: var(--ls-caps);
 }
@@ -138,11 +138,11 @@
 .v10-memstack-cell-recent-time {
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
-  color: var(--text-ghost);
+  color: var(--text-tertiary);
   white-space: nowrap;
 }
 .v10-memstack-cell-empty-hint {
-  font-size: var(--fs-micro); color: var(--text-ghost);
+  font-size: var(--fs-micro); color: var(--text-tertiary);
   font-style: italic;
   padding: var(--space-4) 0;
   flex: 1;
@@ -216,20 +216,6 @@
 .v10-vm-identity-opid {
   color: var(--text-tertiary);
   font-size: var(--fs-micro);
-}
-.v10-vm-identity-copy {
-  padding: 1px var(--space-6);
-  background: none;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-xs);
-  color: var(--text-tertiary);
-  font-size: var(--fs-micro);
-  cursor: pointer;
-  font-family: var(--font-sans);
-  transition: border-color var(--motion-base), color var(--motion-base);
-}
-.v10-vm-identity-copy:hover {
-  border-color: var(--border-strong); color: var(--text-primary);
 }
 
 /* Inline attribution inside each Provenance Trail event

@@ -272,6 +272,11 @@
   --motion-fast: .12s;
   --motion-base: .15s;
   --motion-slow: .3s;
+  /* Outlines drawn inside an element (no layout shift), and backdrop blur. */
+  --ring-default: inset 0 0 0 1px var(--border-default);
+  --ring-strong: inset 0 0 0 1px var(--border-strong);
+  --blur-sm: 2px;
+  --blur-md: 6px;
   --space-2: 2px;
   --space-4: 4px;
   --space-6: 6px;

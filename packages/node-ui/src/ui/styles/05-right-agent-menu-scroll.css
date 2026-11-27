@@ -159,7 +159,7 @@
 .v10-select-menu:focus { outline: none; }
 .v10-select-menu-above {
   transform: translateY(-100%);
-  margin-top: -4px;
+  margin-top: calc(-1 * var(--space-4));
 }
 .v10-select-menu-below {
   margin-top: var(--space-4);
@@ -235,7 +235,7 @@
   z-index: 5;
   /* Negative top margin so the pill overlays the previous message instead
      of forcing extra vertical space when invisible. */
-  margin-top: -32px;
+  margin-top: calc(-1 * var(--space-32));
   margin-bottom: 0;
 }
 .v10-scroll-to-bottom.visible {

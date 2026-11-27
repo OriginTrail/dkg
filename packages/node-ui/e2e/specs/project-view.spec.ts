@@ -21,7 +21,7 @@ test.describe('Project View (rc.12)', () => {
   });
 
   test('refresh button is visible in layer switcher', async ({ page }) => {
-    await expect(page.getByRole('button', { name: 'Refresh context graph data' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Refresh context graph', exact: true })).toBeVisible();
   });
 
   test('overview shows project overview card', async ({ page }) => {
@@ -56,7 +56,7 @@ test.describe('Project View (rc.12)', () => {
   });
 
   test('refresh button click does not crash the view', async ({ page }) => {
-    await page.getByRole('button', { name: 'Refresh context graph data' }).click();
+    await page.getByRole('button', { name: 'Refresh context graph', exact: true }).click();
     await expect(page.locator('.v10-project-strip').filter({ hasText: PRIMARY_CG })).toBeVisible();
   });
 

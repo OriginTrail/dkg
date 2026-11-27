@@ -26,13 +26,13 @@ test.describe('unavailable node recovery', () => {
         await expect(recovery).toContainText('Live node data could not be loaded');
         await expect(page.getByText(/mock-node-agent|my-dkg-node/i)).toHaveCount(0);
         await expect(page.locator('.v10-header, .v10-app-body')).toHaveCount(0);
-        await expect(recovery.getByRole('button', { name: 'Retry connection' })).toBeVisible();
+        await expect(recovery.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
       };
       await assertRecovery();
       const beforeRetry = probes;
       await Promise.all([
         page.waitForEvent('load'),
-        page.getByRole('button', { name: 'Retry connection' }).click(),
+        page.getByRole('button', { name: 'Retry', exact: true }).click(),
       ]);
       await assertRecovery();
       expect(probes).toBeGreaterThan(beforeRetry);
@@ -65,7 +65,7 @@ test.describe('unavailable node recovery', () => {
 
     await Promise.all([
       page.waitForEvent('load'),
-      recovery.getByRole('button', { name: 'Retry connection' }).click(),
+      recovery.getByRole('button', { name: 'Retry', exact: true }).click(),
     ]);
     await expect.poll(() => page.evaluate(
       () => (window as { __DKG_USING_MOCKS__?: boolean }).__DKG_USING_MOCKS__,

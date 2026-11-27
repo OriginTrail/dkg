@@ -79,7 +79,7 @@
   border-radius: var(--radius-pill);
   background: var(--bg-elevated);
   color: var(--text-secondary);
-  box-shadow: inset 0 0 0 1px var(--border-default);
+  box-shadow: var(--ring-default);
   font-family: var(--font-sans);
   font-size: var(--fs-micro);
   font-weight: 700;
@@ -280,7 +280,7 @@
   border: 0;
   border-radius: var(--radius-control);
   background: var(--bg-elevated);
-  box-shadow: inset 0 0 0 1px var(--border-default);
+  box-shadow: var(--ring-default);
   overflow: visible;
 }
 .ds-seg-item {
@@ -308,7 +308,7 @@
 .ds-seg-item.active, .ds-seg-item[aria-pressed="true"] {
   background: var(--bg-active);
   color: var(--text-primary);
-  box-shadow: inset 0 0 0 1px var(--border-strong);
+  box-shadow: var(--ring-strong);
 }
 .ds-seg-item:is(:focus-visible, .dsp-focus) {
   outline: 2px solid var(--focus-ring);
@@ -513,6 +513,10 @@ button.ds-crumb:hover { color: var(--text-primary); text-decoration: underline; 
 /* Plain buttons have no flex gap, so the icon brings its own. */
 button:not(.ds-btn) > .lucide-refresh-cw { margin-right: var(--space-6); }
 .ds-spin { animation: ds-spin 1s linear infinite; }
+/* A message with its Retry beside it: the button stays outside the sentence, 8px away,
+   and drops below the text when the row is narrow. */
+.ds-retry-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); }
+.ds-retry-row.ds-center { justify-content: center; }
 @keyframes ds-spin { to { transform: rotate(360deg); } }
 
 /* Action outcome: what a promote or publish came to (lib/actionOutcome.ts).

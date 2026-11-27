@@ -527,7 +527,7 @@ export function LayerGraphPanel({
       {loadedNodeCount > 3000 && <div className="v10-graph-legend" role="status">
         <span>{showAllLoadedNodes ? `Showing all ${formatNumber(loadedNodeCount)} loaded nodes.`
           : 'This large graph shows one connected view of up to 3,000 nodes.'}</span>
-        <button onClick={() => setExpandedNodes(showAllLoadedNodes ? null : expansionScope)}>
+        <button type="button" className="ds-btn ds-ghost ds-sm" onClick={() => setExpandedNodes(showAllLoadedNodes ? null : expansionScope)}>
           {showAllLoadedNodes ? 'Use smaller graph view' : `Show all loaded nodes (${formatNumber(loadedNodeCount)})`}
         </button>
       </div>}

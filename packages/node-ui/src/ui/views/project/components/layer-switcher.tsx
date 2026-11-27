@@ -142,7 +142,7 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
           <span className="v10-layer-action-icon"><Upload size={12} /></span>
           <span className="v10-layer-action-label">Import</span>
         </button>
-        <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onRefresh} aria-label="Refresh context graph data">
+        <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onRefresh} aria-label="Refresh context graph">
           <span className="v10-layer-action-icon"><RefreshCw size={12} /></span>
         </button>
       </div>

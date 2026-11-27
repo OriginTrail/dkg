@@ -36,9 +36,9 @@ export function JsonViewer({ value, label = 'JSON' }: { value: object; label?: s
     <div className="v10-json-toolbar">
       <span className="v10-json-caption">JSON <span>{count} {Array.isArray(value) ? 'items' : 'keys'}</span></span>
       <div className="v10-json-actions">
-        <button type="button" onClick={() => toggleAll(false)}>Expand all</button>
-        <button type="button" onClick={() => toggleAll(true)}>Collapse all</button>
-        <button type="button" onClick={copy}>Copy JSON</button>
+        <button type="button" className="ds-btn ds-ghost ds-sm" onClick={() => toggleAll(false)}>Expand all</button>
+        <button type="button" className="ds-btn ds-ghost ds-sm" onClick={() => toggleAll(true)}>Collapse all</button>
+        <button type="button" className="ds-btn ds-ghost ds-sm" onClick={copy}>Copy JSON</button>
       </div>
       {copyStatus && <span className="v10-json-copy-status" role="status">{copyStatus}</span>}
     </div>

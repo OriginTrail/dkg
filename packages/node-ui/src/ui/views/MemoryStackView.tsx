@@ -67,7 +67,7 @@ export function MemoryStackView() {
           {(!inventoryLoading && !inventoryError || contextGraphs.length > 0) && <> {visible.length} visible context graph{visible.length === 1 ? '' : 's'} · hidden context graphs are skipped.</>}
       </>} />
 
-      {inventoryError && <div className="v10-stale-banner" role="alert">
+      {inventoryError && <div className="v10-modal-warning ds-card-nested ds-retry-row v10-page-note" role="alert">
         <span>{inventoryErrorMessage({ listError, identityError: identity.error, hasGraphs: contextGraphs.length > 0 })}</span>
         {!inventoryLoading && <RetryButton className="v10-retry-btn" onClick={() => { void refreshContextGraphInventory(true); }} />}
       </div>}
@@ -162,7 +162,7 @@ function MemoryStackRow({ cg }: { cg: ContextGraph }) {
         {memory.error && (
           <div className="v10-memstack-project-status error">{memory.error}</div>
         )}
-        <MemoryReadStatus memory={memory} />
+        <MemoryReadStatus memory={memory} inset />
       </div>
       {LAYERS.map(L => {
         const bucket = byLayer[L.key];
@@ -234,7 +234,7 @@ function LayerCell({
           ))}
         </ul>
       ) : (
-        <div className="v10-memstack-cell-empty-hint">{partial ? 'No entries in the loaded preview' : `Nothing in ${tabPrefix.toUpperCase()} yet`}</div>
+        <div className="v10-memstack-cell-empty-hint">{partial ? 'Nothing here in what’s loaded so far' : `Nothing in ${tabPrefix.toUpperCase()} yet`}</div>
       )}
       {!isEmpty && (
         <button

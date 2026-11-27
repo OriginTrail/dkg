@@ -9,7 +9,8 @@ import { publishProjectManifest } from '../../lib/projectManifest.js';
 import { WireWorkspacePanel } from '../Workspace/WireWorkspacePanel.js';
 import { useModalDismiss } from './useModalDismiss.js';
 import { CG_NAME_MAX_LENGTH, sanitiseCgName, validateCgName } from './cgNameValidation.js';
-import { ChevronRight, X, RefreshCw } from 'lucide-react';
+import { ChevronRight, X } from 'lucide-react';
+import { RetryButton } from '../ds/RetryButton.js';
 
 function slugify(str: string): string {
   return str
@@ -572,9 +573,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
         <div className="v10-modal-footer">
           <button className="v10-modal-btn ds-btn" onClick={onClose}>Cancel</button>
           {identityError && (
-            <button className="v10-modal-btn ds-btn" onClick={loadAgentIdentity} disabled={identityLoading}>
-              {identityLoading ? 'Retrying…' : <><RefreshCw size={12} />Retry loading agent</>}
-            </button>
+            <RetryButton size="md" className="v10-modal-btn" onClick={() => { void loadAgentIdentity(); }} disabled={identityLoading} />
           )}
           <button
             className="v10-modal-btn primary ds-btn ds-primary"

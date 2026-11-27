@@ -21,9 +21,10 @@ import type {
 } from '../../hooks/useNotificationsFeed.js';
 import { AgentDot } from '../AgentDot.js';
 import { ContextGraphChip } from '../ds/ContextGraphChip.js';
-import { BadgePercent, Check, KeyRound, Plus, X, RefreshCw } from 'lucide-react';
+import { BadgePercent, Check, KeyRound, Plus, X } from 'lucide-react';
 import { LayerGlyph } from '../ds/Badge.js';
 import { formatDateTime, bpsToPercent, truncateAddress } from '../../lib/format.js';
+import { RetryButton } from '../ds/RetryButton.js';
 
 /** `shortId` — never render a blank CG name (ui-brief §3 / UX §3). */
 function cgLabel(name: string | undefined, cgId: string): string {
@@ -110,11 +111,9 @@ export function JoinRequestRow({
           </span>
         </div>
         {phase.kind === 'error' && (
-          <div className="v10-notif-row-error" role="status" aria-live="polite">
-            {phase.message}{' '}
-            <button type="button" className="v10-notif-retry" onClick={() => run(phase.action)}>
-              <RefreshCw size={12} />Retry
-            </button>
+          <div className="v10-notif-row-error ds-retry-row" role="status" aria-live="polite">
+            <span>{phase.message}</span>
+            <RetryButton onClick={() => run(phase.action)} />
           </div>
         )}
         {/* Visually-hidden in-flight announcement so SR users hear the action
