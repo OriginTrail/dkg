@@ -91,13 +91,15 @@ describe('RawLogScanner', () => {
   });
 
   it('does not advance cursor or dedupe when the batch callback fails', async () => {
-    const entry = log(4, 0);
-    const provider = providerFor({ heads: [5, 5], logs: [[entry], [entry]] });
+    const entry = log(6, 0);
+    const provider = providerFor({ heads: [5, 10, 20, 20], logs: [[entry], [entry]] });
     const scanner = new RawLogScanner({ label: 'transactional scan', readProvider: provider.readProvider, reorgBufferBlocks: 1 });
+    await scanner.seed(() => false);
     await expect(scanner.scan({ address: ADDRESS, topics: [] }, {
       onLogs: logs => { expect(logs).toEqual([entry]); throw new Error('retry batch'); },
     })).rejects.toThrow('retry batch');
     expect((await scan(scanner, { address: ADDRESS, topics: [] }))?.logs).toEqual([entry]);
+    expect(provider.getLogs.mock.calls[1][0]).toMatchObject({ fromBlock: 5, toBlock: 20 });
     expect((await scan(scanner, { address: ADDRESS, topics: [] }))?.logs).toEqual([]);
   });
 
@@ -110,7 +112,7 @@ describe('RawLogScanner', () => {
       reorgBufferBlocks: 1,
     });
 
-    const batch = await scan(scanner, 
+    const batch = await scan(scanner,
       { address: ADDRESS, topics: [] },
       { isAborted: () => true },
     );

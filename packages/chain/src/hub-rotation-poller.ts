@@ -78,6 +78,7 @@ export class HubRotationPoller {
 
   stop(): void {
     this.generation++;
+    this.failures.clear();
     this.inFlight = null;
     if (this.timer) {
       clearInterval(this.timer);
@@ -108,7 +109,10 @@ export class HubRotationPoller {
     const binding = this.binding;
     if (!this.started || !binding || binding.topics.length === 0 || generation !== this.generation) return;
 
-    if (this.logSource !== undefined && await this.pollOnceFromLog(generation)) return;
+    if (this.logSource !== undefined && await this.pollOnceFromLog(generation)) {
+      if (this.started && generation === this.generation) this.failures.clear();
+      return;
+    }
     await this.scanner.scan({ address: binding.hubAddress, topics: binding.topics }, {
       isAborted: () => !this.started || generation !== this.generation,
       onLogs: logs => {
@@ -118,6 +122,9 @@ export class HubRotationPoller {
         }
       },
     });
+    // Successful dispatch commits scanner dedupe; failed batches retain their
+    // quarantine across retries. No per-log failure state survives progress.
+    if (this.started && generation === this.generation) this.failures.clear();
   }
 
   private async recordInitialHead(generation: number): Promise<void> {
@@ -141,11 +148,12 @@ export class HubRotationPoller {
   }
 
   private dispatchName(identity: string, name: string): void {
+    if ((this.failures.get(identity) ?? 0) >= 3) return;
     try { this.onContractName(name); this.failures.delete(identity); }
     catch (error) {
       const attempts = (this.failures.get(identity) ?? 0) + 1;
       if (attempts < 3) { this.failures.set(identity, attempts); throw error; }
-      this.failures.delete(identity);
+      this.failures.set(identity, attempts);
       this.onDispatchFailure(name, error);
     }
   }

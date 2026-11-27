@@ -934,6 +934,32 @@ describe('HubRotationPoller', () => {
     }
   });
 
+  it('quarantines each failing record across batch retries so later rotations progress', async () => {
+    const iface = hubInterface();
+    const badNames = Array.from({ length: 10 }, (_, i) => `Broken${i}`);
+    const logs = [...badNames, 'Healthy'].map((name, i) =>
+      rotationLog(iface, 'ContractChanged', name, 1001, (i + 1).toString(16).padStart(2, '0')));
+    let head = 1000;
+    const provider = { getBlockNumber: async () => head,
+      getLogs: async (filter: any) => logsInRange(logs, filter) };
+    const delivered = vi.fn((name: string) => { if (name !== 'Healthy') throw new Error(name); });
+    const warning = vi.fn();
+    const poller = new HubRotationPoller({ readProvider: async (_label, fn) => fn(provider as any),
+      intervalMs: 30_000, reorgBufferBlocks: 50, onContractName: delivered, onDispatchFailure: warning });
+    try {
+      poller.start(hubContract(iface), HUB_ADDRESS);
+      await flushAsyncWork();
+      head = 1001;
+      for (let retry = 0; retry < 20; retry++) await expect(poller.pollOnce()).rejects.toThrow(/Broken/);
+      await poller.pollOnce();
+      for (const name of badNames) expect(delivered.mock.calls.filter(call => call[0] === name)).toHaveLength(3);
+      expect(delivered.mock.calls.filter(call => call[0] === 'Healthy')).toHaveLength(1);
+      expect(warning).toHaveBeenCalledTimes(10);
+      await poller.pollOnce();
+      expect(delivered).toHaveBeenCalledTimes(31);
+    } finally { poller.stop(); }
+  });
+
   it('refuses a partial Hub rotation event ABI before scheduling reads', async () => {
     const iface = hubInterface([
       'event NewContract(string contractName, address newContractAddress)',
