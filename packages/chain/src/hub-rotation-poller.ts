@@ -1,40 +1,27 @@
-import { Contract, ethers, type JsonRpcProvider } from 'ethers';
 import type { ChainEventLogHubRotationWindow } from './chain-event-log-binding.js';
-import { RPC_LOG_SCAN_TIMEOUT_MS } from './evm-adapter-constants.js';
-import { readAdaptiveEvmLogRange } from './evm-log-range.js';
-import type { ReadOpts } from './rpc-failover-client.js';
-import { withRpcRequestTimeout } from './rpc-request-transport.js';
+import { Contract, ethers } from 'ethers';
+import {
+  RawLogScanner, rawLogIdentity, canonicalLogIdentity,
+  type RawLogScanReadProvider,
+} from './raw-log-scanner.js';
 
-export type HubRotationReadProvider = <T>(
-  label: string,
-  fn: (provider: JsonRpcProvider) => Promise<T>,
-  opts?: ReadOpts,
-) => Promise<T>;
+export type HubRotationReadProvider = RawLogScanReadProvider;
 
-/**
- * The node's ONE chain log, asked for the same window this poller used to
- * fetch for itself. `undefined` means the log cannot prove it holds it.
- */
-export type HubRotationLogSource = (
-  lastScannedBlock: number | undefined,
-  reorgBufferBlocks: number,
-) => Promise<ChainEventLogHubRotationWindow | undefined>;
+export type HubRotationLogSource = (last: number | undefined, buffer: number) => Promise<ChainEventLogHubRotationWindow | undefined>;
 
 export interface HubRotationPollerConfig {
   readProvider: HubRotationReadProvider;
   intervalMs: number;
   reorgBufferBlocks: number;
-  onContractName: (name: string) => void;
   /**
-   * Where a pass gets its rotations. Consulted PER PASS, not once at start, so
-   * the moment the tick has coverage this poller stops touching the chain —
-   * and a log that is still cold, or that has fallen behind its own floor,
-   * degrades to the scan below rather than to a missed rotation.
-   *
-   * The two sources are mutually exclusive within a pass: there is never a
-   * configuration in which the Hub is scanned twice for one window.
+   * MUST be idempotent: the scan commits per batch, so a throw anywhere in a
+   * batch re-delivers that whole batch on the next poll (see `RawLogScanner`'s
+   * at-least-once contract). After three failures a record is quarantined with
+   * a warning to preserve progress. `applyHubRotationEventName` is idempotent.
    */
+  onContractName: (name: string) => void;
   logSource?: HubRotationLogSource;
+  onDispatchFailure?: (name: string, error: unknown) => void;
 }
 
 interface HubRotationBinding {
@@ -43,32 +30,30 @@ interface HubRotationBinding {
   topics: string[];
 }
 
-type HubRotationLogWithIdentity = ethers.Log & {
-  blockHash?: unknown;
-  index?: unknown;
-  logIndex?: unknown;
-};
-
 export class HubRotationPoller {
-  private readonly readProvider: HubRotationReadProvider;
   private readonly intervalMs: number;
-  private readonly reorgBufferBlocks: number;
   private readonly onContractName: (name: string) => void;
+  private readonly scanner: RawLogScanner;
+  private readonly failures = new Map<string, number>();
   private readonly logSource: HubRotationLogSource | undefined;
+  private readonly onDispatchFailure: (name: string, error: unknown) => void;
   private timer: ReturnType<typeof setInterval> | null = null;
   private inFlight: Promise<void> | null = null;
-  private lastScannedBlock: number | undefined;
   private binding: HubRotationBinding | undefined;
-  private readonly seenLogIds = new Map<string, number>();
   private started = false;
   private generation = 0;
 
   constructor(config: HubRotationPollerConfig) {
-    this.readProvider = config.readProvider;
     this.intervalMs = config.intervalMs;
-    this.reorgBufferBlocks = config.reorgBufferBlocks;
-    this.onContractName = config.onContractName;
     this.logSource = config.logSource;
+    this.onDispatchFailure = config.onDispatchFailure ?? ((name, error) => console.warn(
+      `Hub rotation callback failed three times for ${name}; quarantining this log so later rotations continue`, error));
+    this.onContractName = config.onContractName;
+    this.scanner = new RawLogScanner({
+      label: 'Hub rotation poll',
+      readProvider: config.readProvider,
+      reorgBufferBlocks: config.reorgBufferBlocks,
+    });
   }
 
   get isStarted(): boolean {
@@ -93,6 +78,7 @@ export class HubRotationPoller {
 
   stop(): void {
     this.generation++;
+    this.failures.clear();
     this.inFlight = null;
     if (this.timer) {
       clearInterval(this.timer);
@@ -119,153 +105,56 @@ export class HubRotationPoller {
     };
   }
 
-  /**
-   * Every poller read is a background TIP probe at the ~stickiness-TTL cadence:
-   * preference-TRANSPARENT so a poll tick never re-probes/clears the preferred
-   * backend the read/write paths rely on, and so head/logs stay canonical-fresh
-   * (not a lagging sticky backend's lower tip). Owns the transport-internal
-   * `skipPreferred` opt-out ONCE so the call sites below read by INTENT (tip
-   * probe), not by the double-negative flag. Mirrors the adapter's `readTipProvider`.
-   */
-  private readTip<T>(
-    label: string,
-    fn: (provider: JsonRpcProvider) => Promise<T>,
-    opts?: ReadOpts,
-  ): Promise<T> {
-    return this.readProvider(label, fn, { ...opts, skipPreferred: true });
-  }
-
-  /**
-   * Read the window out of the one log, or say the log could not answer it.
-   *
-   * ZERO chain requests on this path: that is the whole point, and it is the
-   * measured retirement of the `Hub_rotation_poll_getBlockNumber` /
-   * `Hub_rotation_poll_getLogs` pair. The stored row's (blockHash, logIndex)
-   * identity is the same one used by the live fallback: it remains stable
-   * across overlapping reads of one fork and changes for every reorg
-   * replacement, including a binding replaced by a removal of the same name
-   * and address.
-   */
-  private async pollOnceFromLog(generation: number): Promise<boolean> {
-    const logSource = this.logSource;
-    if (logSource === undefined) return false;
-    let window: ChainEventLogHubRotationWindow | undefined;
-    try {
-      window = await logSource(this.lastScannedBlock, this.reorgBufferBlocks);
-    } catch {
-      // A broken optional log path is the same refusal as a cold or lagging
-      // log: preserve Hub invalidation by paying for the live scan below.
-      return false;
-    }
-    if (window === undefined) return false;
-    if (!this.started || generation !== this.generation) return true;
-
-    if (this.lastScannedBlock == null) {
-      // BASELINE, and the listener enforces it for itself rather than trusting
-      // the window to be empty. Its live counterpart never replays history
-      // because its first read is a head; the log holds real history, so a
-      // listener that dispatched its first window would re-invalidate every
-      // Hub binding the backfill has walked in — on every restart.
-      this.lastScannedBlock = window.throughBlockNumber;
-      this.pruneSeenLogs(window.throughBlockNumber);
-      return true;
-    }
-
-    for (const rotation of window.rotations) {
-      const identity = this.canonicalLogIdentity(rotation.blockHash, rotation.logIndex);
-      if (this.seenLogIds.has(identity)) continue;
-      this.seenLogIds.set(identity, rotation.blockNumber);
-      this.onContractName(rotation.contractName);
-    }
-    this.lastScannedBlock = Math.max(this.lastScannedBlock, window.throughBlockNumber);
-    this.pruneSeenLogs(window.throughBlockNumber);
-    return true;
-  }
-
   async pollOnce(generation = this.generation): Promise<void> {
     const binding = this.binding;
     if (!this.started || !binding || binding.topics.length === 0 || generation !== this.generation) return;
 
-    // The `logSource !== undefined` test is deliberately SYNCHRONOUS: an
-    // adapter with no log must reach its first chain read on the same turn it
-    // always did, with no microtask inserted ahead of it.
-    if (this.logSource !== undefined && await this.pollOnceFromLog(generation)) return;
-
-    const previousLastScannedBlock = this.lastScannedBlock;
-    const head = await this.readTip(
-      'Hub rotation poll getBlockNumber',
-      (provider) => provider.getBlockNumber(),
-      { policy: 'watchdogPointRead' },
-    );
-    if (!this.started || generation !== this.generation) return;
-    const fromBlock = this.scanFromBlock(previousLastScannedBlock, head);
-    // After a long gap (a suspended host) the window can exceed a provider's
-    // eth_getLogs span cap; fit it rather than failing every poll until restart.
-    // A fitted window is several requests, so the watchdog deadline bounds each
-    // physical request (a hung backend still fails over, or fails the poll, after
-    // RPC_LOG_SCAN_TIMEOUT_MS on a one-RPC node too) instead of the whole attempt:
-    // one 30s budget over a split window would abort a slow-but-healthy catch-up
-    // and replay it every interval.
-    const logs = await this.readTip<ethers.Log[]>(
-      'Hub rotation poll getLogs',
-      (provider) => readAdaptiveEvmLogRange({
-        provider,
-        fromBlock,
-        toBlock: head,
-        read: (rangeFrom, rangeTo) => withRpcRequestTimeout(
-          RPC_LOG_SCAN_TIMEOUT_MS,
-          `Hub rotation poll getLogs [${rangeFrom}, ${rangeTo}]`,
-          () => provider.getLogs({
-            address: binding.hubAddress,
-            fromBlock: rangeFrom,
-            toBlock: rangeTo,
-            topics: [binding.topics],
-          }),
-        ),
-      }),
-      { policy: 'durablePagedLogScan' },
-    );
-    if (!this.started || generation !== this.generation) return;
-
-    this.dispatchLogs(binding.hub, logs);
-    this.lastScannedBlock = previousLastScannedBlock == null
-      ? head
-      : Math.max(previousLastScannedBlock, head);
-    this.pruneSeenLogs(head);
+    if (this.logSource !== undefined && await this.pollOnceFromLog(generation)) {
+      if (this.started && generation === this.generation) this.failures.clear();
+      return;
+    }
+    await this.scanner.scan({ address: binding.hubAddress, topics: binding.topics }, {
+      isAborted: () => !this.started || generation !== this.generation,
+      onLogs: logs => {
+        for (const log of logs) {
+          const name = this.contractNameFromLog(binding.hub, log);
+          if (name) this.dispatchName(rawLogIdentity(log), name);
+        }
+      },
+    });
+    // Successful dispatch commits scanner dedupe; failed batches retain their
+    // quarantine across retries. No per-log failure state survives progress.
+    if (this.started && generation === this.generation) this.failures.clear();
   }
 
   private async recordInitialHead(generation: number): Promise<void> {
     if (!this.started || generation !== this.generation) return;
-    // The log answers the baseline too, so a node whose tick is already
-    // running never spends a head probe just to learn where "now" is.
     if (this.logSource !== undefined && await this.pollOnceFromLog(generation)) return;
-    const head = await this.readTip(
-      'Hub rotation poll initial getBlockNumber',
-      (provider) => provider.getBlockNumber(),
-      { policy: 'watchdogPointRead' },
-    );
-    if (!this.started || generation !== this.generation) return;
-    this.lastScannedBlock = this.lastScannedBlock == null
-      ? head
-      : Math.max(this.lastScannedBlock, head);
+    await this.scanner.seed(() => !this.started || generation !== this.generation);
   }
 
-  private scanFromBlock(previousLastScannedBlock: number | undefined, head: number): number {
-    if (previousLastScannedBlock == null) {
-      return Math.max(0, head - this.reorgBufferBlocks);
-    }
-    const candidateFromBlock = previousLastScannedBlock + 1 - this.reorgBufferBlocks;
-    const recentFromBlock = head - this.reorgBufferBlocks;
-    return Math.max(0, Math.min(candidateFromBlock, recentFromBlock));
+  private async pollOnceFromLog(generation: number): Promise<boolean> {
+    const source = this.logSource;
+    if (!source) return false;
+    return this.scanner.scanStoredWindow(async (after, buffer) => {
+      try {
+        const window = await source(after, buffer);
+        return window && { head: window.throughBlockNumber, logs: window.rotations };
+      } catch { return undefined; } // A cold/broken optional index falls back to live RPC.
+    }, log => canonicalLogIdentity(log.blockHash, log.logIndex), {
+      isAborted: () => !this.started || generation !== this.generation,
+      onLogs: logs => { for (const log of logs) this.dispatchName(canonicalLogIdentity(log.blockHash, log.logIndex), log.contractName); },
+    });
   }
 
-  private dispatchLogs(hub: Contract, logs: ethers.Log[]): void {
-    for (const log of logs) {
-      const identity = this.logIdentity(log);
-      if (this.seenLogIds.has(identity)) continue;
-      this.rememberLog(identity, log);
-      const contractName = this.contractNameFromLog(hub, log);
-      if (contractName) this.onContractName(contractName);
+  private dispatchName(identity: string, name: string): void {
+    if ((this.failures.get(identity) ?? 0) >= 3) return;
+    try { this.onContractName(name); this.failures.delete(identity); }
+    catch (error) {
+      const attempts = (this.failures.get(identity) ?? 0) + 1;
+      if (attempts < 3) { this.failures.set(identity, attempts); throw error; }
+      this.failures.set(identity, attempts);
+      this.onDispatchFailure(name, error);
     }
   }
 
@@ -298,37 +187,4 @@ export class HubRotationPoller {
     });
   }
 
-  private logIdentity(log: ethers.Log): string {
-    const maybe = log as HubRotationLogWithIdentity;
-    const blockHash = typeof maybe.blockHash === 'string' ? maybe.blockHash : undefined;
-    const index = typeof maybe.index === 'number'
-      ? maybe.index
-      : typeof maybe.logIndex === 'number'
-        ? maybe.logIndex
-        : undefined;
-    if (blockHash && index != null) {
-      return this.canonicalLogIdentity(blockHash, index);
-    }
-    return [
-      log.blockNumber,
-      index ?? 'unknown',
-      log.topics.join(','),
-      log.data,
-    ].join(':');
-  }
-
-  private canonicalLogIdentity(blockHash: string, logIndex: number): string {
-    return `${blockHash.toLowerCase()}:${logIndex}`;
-  }
-
-  private rememberLog(identity: string, log: ethers.Log): void {
-    this.seenLogIds.set(identity, log.blockNumber);
-  }
-
-  private pruneSeenLogs(head: number): void {
-    const earliestBufferedBlock = Math.max(0, head - this.reorgBufferBlocks);
-    for (const [identity, blockNumber] of this.seenLogIds) {
-      if (blockNumber < earliestBufferedBlock) this.seenLogIds.delete(identity);
-    }
-  }
 }

@@ -139,6 +139,123 @@ describe('HubRotationPoller', () => {
     }
   });
 
+  it('never issues the wide log scan when stop lands during the head read', async () => {
+    const iface = hubInterface();
+    const rotation = rotationLog(iface, 'ContractChanged', 'ContextGraphs', 1_000, '71');
+    let releaseHead!: () => void;
+    let headEntered!: () => void;
+    const headGate = new Promise<void>((resolve) => { releaseHead = resolve; });
+    const headEnteredPromise = new Promise<void>((resolve) => { headEntered = resolve; });
+    let headReads = 0;
+    const provider = {
+      getBlockNumber: vi.fn(async () => {
+        headReads += 1;
+        // The first read is the poller's non-blocking startup baseline; gate the
+        // poll's own head probe so stop() can land while it is in flight.
+        if (headReads >= 2) {
+          headEntered();
+          await headGate;
+        }
+        return 1_000;
+      }),
+      getLogs: vi.fn(async () => [rotation]),
+    };
+    const onContractName = vi.fn();
+    const poller = new HubRotationPoller({
+      readProvider: async (_label, fn) => fn(provider as any),
+      intervalMs: 30_000,
+      reorgBufferBlocks: 50,
+      onContractName,
+    });
+
+    try {
+      poller.start(hubContract(iface), HUB_ADDRESS);
+      await flushAsyncWork();
+      const pendingPoll = poller.pollOnce();
+      await headEnteredPromise;
+
+      poller.stop();
+      releaseHead();
+      await pendingPoll;
+
+      expect(provider.getLogs).not.toHaveBeenCalled();
+      expect(onContractName).not.toHaveBeenCalled();
+    } finally {
+      poller.stop();
+    }
+  });
+
+  it('quarantines a repeated dispatch failure so later blocks still converge', async () => {
+    const iface = hubInterface();
+    const bad = rotationLog(iface, 'ContractChanged', 'ShardingTable', 1_000, '72', 0);
+    const later = rotationLog(iface, 'ContractChanged', 'ContextGraphs', 1_001, '73', 0);
+    let head = 1_000;
+    const provider = { getBlockNumber: vi.fn(async () => head), getLogs: vi.fn(async () => head === 1_000 ? [bad] : [bad, later]) };
+    const onContractName = vi.fn((name: string) => { if (name === 'ShardingTable') throw new Error('permanent callback failure'); });
+    const onDispatchFailure = vi.fn();
+    const poller = new HubRotationPoller({ readProvider: async (_label, fn) => fn(provider as any),
+      intervalMs: 30_000, reorgBufferBlocks: 50, onContractName, onDispatchFailure });
+    try {
+      poller.start(hubContract(iface), HUB_ADDRESS); await flushAsyncWork();
+      await expect(poller.pollOnce()).rejects.toThrow('permanent callback failure');
+      await expect(poller.pollOnce()).rejects.toThrow('permanent callback failure');
+      head = 1_001;
+      await poller.pollOnce();
+      expect(onContractName).toHaveBeenCalledWith('ContextGraphs');
+      expect(onDispatchFailure).toHaveBeenCalledTimes(1);
+      await poller.pollOnce();
+      expect(onContractName).toHaveBeenCalledTimes(4);
+    } finally { poller.stop(); }
+  });
+
+  it('re-delivers the whole batch when a dispatch callback throws (at-least-once)', async () => {
+    const iface = hubInterface();
+    const first = rotationLog(iface, 'ContractChanged', 'ContextGraphs', 1_000, '72', 0);
+    const second = rotationLog(iface, 'ContractChanged', 'ShardingTable', 1_000, '72', 1);
+    const provider = {
+      getBlockNumber: vi.fn(async () => 1_000),
+      getLogs: vi.fn(async () => [first, second]),
+    };
+    let failOnShardingTable = true;
+    const onContractName = vi.fn((name: string) => {
+      if (failOnShardingTable && name === 'ShardingTable') throw new Error('consumer blew up');
+    });
+    const poller = new HubRotationPoller({
+      readProvider: async (_label, fn) => fn(provider as any),
+      intervalMs: 30_000,
+      reorgBufferBlocks: 50,
+      onContractName,
+    });
+
+    try {
+      poller.start(hubContract(iface), HUB_ADDRESS);
+      await flushAsyncWork();
+
+      await expect(poller.pollOnce()).rejects.toThrow('consumer blew up');
+      expect(onContractName.mock.calls.map(([name]) => name)).toEqual([
+        'ContextGraphs',
+        'ShardingTable',
+      ]);
+
+      // Nothing was committed, so the next poll replays the batch from the top —
+      // including the log that already dispatched successfully.
+      failOnShardingTable = false;
+      await poller.pollOnce();
+      expect(onContractName.mock.calls.map(([name]) => name)).toEqual([
+        'ContextGraphs',
+        'ShardingTable',
+        'ContextGraphs',
+        'ShardingTable',
+      ]);
+
+      // Once a batch commits, its logs stay deduped.
+      await poller.pollOnce();
+      expect(onContractName).toHaveBeenCalledTimes(4);
+    } finally {
+      poller.stop();
+    }
+  });
+
   it('recovers after a failed periodic poll', async () => {
     vi.useFakeTimers({ now: 0 });
     const hub = hubContract();
@@ -815,6 +932,32 @@ describe('HubRotationPoller', () => {
     } finally {
       poller.stop();
     }
+  });
+
+  it('quarantines each failing record across batch retries so later rotations progress', async () => {
+    const iface = hubInterface();
+    const badNames = Array.from({ length: 10 }, (_, i) => `Broken${i}`);
+    const logs = [...badNames, 'Healthy'].map((name, i) =>
+      rotationLog(iface, 'ContractChanged', name, 1001, (i + 1).toString(16).padStart(2, '0')));
+    let head = 1000;
+    const provider = { getBlockNumber: async () => head,
+      getLogs: async (filter: any) => logsInRange(logs, filter) };
+    const delivered = vi.fn((name: string) => { if (name !== 'Healthy') throw new Error(name); });
+    const warning = vi.fn();
+    const poller = new HubRotationPoller({ readProvider: async (_label, fn) => fn(provider as any),
+      intervalMs: 30_000, reorgBufferBlocks: 50, onContractName: delivered, onDispatchFailure: warning });
+    try {
+      poller.start(hubContract(iface), HUB_ADDRESS);
+      await flushAsyncWork();
+      head = 1001;
+      for (let retry = 0; retry < 20; retry++) await expect(poller.pollOnce()).rejects.toThrow(/Broken/);
+      await poller.pollOnce();
+      for (const name of badNames) expect(delivered.mock.calls.filter(call => call[0] === name)).toHaveLength(3);
+      expect(delivered.mock.calls.filter(call => call[0] === 'Healthy')).toHaveLength(1);
+      expect(warning).toHaveBeenCalledTimes(10);
+      await poller.pollOnce();
+      expect(delivered).toHaveBeenCalledTimes(31);
+    } finally { poller.stop(); }
   });
 
   it('refuses a partial Hub rotation event ABI before scheduling reads', async () => {

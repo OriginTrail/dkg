@@ -2277,9 +2277,12 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     };
     await expect(a.startHubRotationListener()).resolves.toBeUndefined();
 
-    expect(provider.getBlockNumber.calls).toEqual([[]]);
-    expect(provider.getLogs.calls).toEqual([]);
-    expect(a.hubRotationPoller.isStarted).toBe(true);
+    try {
+      // The optional indexed source is consulted asynchronously before live fallback.
+      await vi.waitFor(() => expect(provider.getBlockNumber.calls).toEqual([[]]));
+      expect(provider.getLogs.calls).toEqual([]);
+      expect(a.hubRotationPoller.isStarted).toBe(true);
+    } finally { a.hubRotationPoller.stop(); }
   });
 
   it('startHubRotationListener refuses partial Hub rotation event ABI', async () => {

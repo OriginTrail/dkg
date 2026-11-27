@@ -1,3 +1,4 @@
+import { readTip } from './rpc-tip-read.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -1820,20 +1821,13 @@ export class EVMChainAdapterBase {
     return this.rpcFailover.read(rpcReadDescriptor(label, opts), fn, opts);
   }
 
-  /**
-   * Raw PROVIDER read for a TIP-SENSITIVE value — the current head / `latest`
-   * block / any read that must stay canonical-fresh and preference-transparent
-   * (a lagging endpoint-stickiness backend would make the tip non-monotonic
-   * across calls). This is the POSITIVE freshness intent at the call site, so
-   * callers pick `readTipProvider` by meaning instead of remembering the
-   * transport-internal `skipPreferred` opt-out on a plain `readProvider`.
-   */
+  /** Tip-sensitive reads use the shared preference-transparent RPC policy. */
   protected readTipProvider<T>(
     label: string,
     fn: (provider: JsonRpcProvider) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T> {
-    return this.readProvider(label, fn, { ...opts, skipPreferred: true });
+    return readTip(this.readProvider.bind(this), label, fn, opts);
   }
 
   /**
