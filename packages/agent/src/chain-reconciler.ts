@@ -210,7 +210,7 @@ export interface ReconcileResult {
    * result can still repair metadata or follow recovery writes; this counter
    * alone is not a durability signal. The host observes store mutations.
    */
-  materialized?: number;
+  materialized: number;
   pending: number;
   processed: number;
   /**
@@ -386,6 +386,7 @@ export async function reconcileContextGraph(
       head,
       watermark: before,
       reconciled: 0,
+      materialized: 0,
       pending: 0,
       processed: 0,
       hasMore: false,

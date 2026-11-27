@@ -4440,7 +4440,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       });
       const flushMs = performance.now() - flushStartedAt;
       if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
-      const materialized = result.materialized ?? 0;
+      const materialized = result.materialized;
       let watermarkMs = 0;
       if (pendingWatermark !== undefined) {
         const watermarkStartedAt = performance.now();
