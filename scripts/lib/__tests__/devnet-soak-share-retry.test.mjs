@@ -124,28 +124,49 @@ test('a node whose API cannot be found fails in the CLI\'s words, with the defau
   assert.ok(run.rows[0].out.includes(`Daemon is not running at ${path.join(run.devnet, 'node1')}.`), run.rows[0].out);
 });
 
-// The summary on a made-up publish log: the PUBLISH lines by section.
-async function publishLines(t, rows, restartWindow) {
+// The soak's other inputs, made up so that every other check passes: four
+// cores that submitted proofs, two edge nodes that stayed disabled, score
+// events for every core, and stake that did not shrink. The publish log alone
+// then decides whether the lane passes.
+const CORES = [1, 2, 3, 4];
+const stakeSnapshot = (epoch) => JSON.stringify({
+  epoch: String(epoch), blockNumber: epoch * 100, perDelegator: [],
+  perCore: CORES.map((n) => ({ identityId: String(n), v10StakeWei: String(10n ** 23n), epochScorePerStake: '1', netNodeEpochRewards: '0' })),
+});
+const observerSnapshot = JSON.stringify({ ts: '2026-11-26T10:30:00Z', perNode: [
+  ...CORES.map((n) => ({ node: n, rs: { enabled: true, identityId: String(n), loop: { submittedCount: 3 } } })),
+  ...[5, 6].map((n) => ({ node: n, rs: { enabled: false, loop: null } })),
+] });
+const chainEvents = CORES.flatMap((n) => [
+  { event: 'EpochNodeValidProofsCountIncremented', args: ['1', String(n), '1'] },
+  { event: 'NodeEpochScoreAdded', args: ['1', String(n), '0', '10'] },
+]);
+
+// The summary on a made-up publish log: its exit status, every line of its
+// Fail section, and the PUBLISH lines of its Pass and Warn sections.
+async function summarize(t, rows, restartWindow) {
   const dir = mkdtempSync(path.join(tmpdir(), 'dkg-soak-summary-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const file = (name, text) => { writeFileSync(path.join(dir, name), text); return path.join(dir, name); };
-  const stake = JSON.stringify({ epoch: '1', blockNumber: 1, perCore: [], perDelegator: [] });
+  const lines = (records) => records.map((record) => JSON.stringify(record)).join('\n') + '\n';
   const env = {
-    ...process.env, OUT_DIR: dir, TIMESERIES: path.join(dir, 'none.jsonl'), EVENTS_LOG: path.join(dir, 'none.jsonl'),
-    PUBLISH_LOG: file('publish.jsonl', rows.map((row) => JSON.stringify(row)).join('\n') + '\n'),
+    ...process.env, OUT_DIR: dir,
+    TIMESERIES: file('timeseries.jsonl', `${observerSnapshot}\n`), EVENTS_LOG: file('chain-events.jsonl', lines(chainEvents)),
+    PUBLISH_LOG: file('publish.jsonl', lines(rows)),
     RESTART_WINDOW_FILE: restartWindow ? file('restart-window.json', JSON.stringify(restartWindow)) : path.join(dir, 'none.json'),
-    STAKE_BEFORE: file('stake-before.json', stake), STAKE_AFTER: file('stake-after.json', stake),
+    STAKE_BEFORE: file('stake-before.json', stakeSnapshot(1)), STAKE_AFTER: file('stake-after.json', stakeSnapshot(2)),
     DELEGATORS_FILE: file('delegators.json', '[]'), FINDINGS: path.join(dir, 'summary.md'),
     ROUND: '9', DURATION_SEC: '600', NUM_CORES: '4', NUM_EDGE: '2',
   };
-  await collect(spawn(process.execPath, [SUMMARY], { env, stdio: 'ignore', timeout: 30_000 }));
+  const { status } = await collect(spawn(process.execPath, [SUMMARY], { env, stdio: 'ignore', timeout: 30_000 }));
   const sections = { Pass: [], Warn: [], Fail: [] };
   let section;
   for (const line of readFileSync(env.FINDINGS, 'utf8').split('\n')) {
     section = /^## (\w+)/.exec(line)?.[1] ?? section;
-    if (line.startsWith('- PUBLISH')) sections[section].push(line.slice(2));
+    if (sections[section] && line.startsWith('- ')) sections[section].push(line.slice(2));
   }
-  return sections;
+  const publish = (entries) => entries.filter((entry) => entry.startsWith('PUBLISH'));
+  return { status, Fail: sections.Fail, Pass: publish(sections.Pass), Warn: publish(sections.Warn) };
 }
 const at = (i) => `2026-11-26T10:${String(i).padStart(2, '0')}:00Z`;
 const attempts = (count, overrides = {}) => Array.from({ length: count }, (_, i) => ({
@@ -154,27 +175,31 @@ const attempts = (count, overrides = {}) => Array.from({ length: count }, (_, i)
 }));
 const followedJob = (state = 'succeeded') => ({ job: 'job-1', state, settled: true, attempts: 2, polls: 13, waited_s: 64 });
 
-test('one publish in ten needing its share followed is a warning; more fails the lane', async (t) => {
-  const two = await publishLines(t, attempts(20, { 3: { share_retries: 1 }, 11: { share_recovery: followedJob() } }));
+test('one publish in ten needing its share followed passes with a warning; more fails the lane', async (t) => {
+  // The control: a clean log passes, so nothing else in the made-up inputs fails.
+  const clean = await summarize(t, attempts(20));
+  assert.deepEqual([clean.status, clean.Fail, clean.Warn], [0, [], []]);
+
+  const two = await summarize(t, attempts(20, { 3: { share_retries: 1 }, 11: { share_recovery: followedJob() } }));
+  assert.deepEqual([two.status, two.Fail], [0, []]);
   assert.deepEqual(two.Warn, ['PUBLISH followed 1 retryable share answer(s) and 1 share job(s) on 2 publish(es): i3 node4 x1 ok, i11 node4 x0 job succeeded 64s ok']);
-  assert.deepEqual(two.Fail, []);
   assert.match(two.Pass.join('\n'), /PUBLISH success rate excluding planned restart window 20\/20/);
 
-  const three = await publishLines(t, attempts(20, { 3: { share_retries: 2 }, 11: { share_retries: 1, share_recovery: followedJob() }, 15: { share_retries: 2 } }));
-  assert.deepEqual(three.Fail, ['PUBLISH followed 5 retryable share answer(s) and 1 share job(s) on 3 publish(es): i3 node4 x2 ok, i11 node4 x1 job succeeded 64s ok, i15 node4 x2 ok (more than 1 publish in 10)']);
+  const three = await summarize(t, attempts(20, { 3: { share_retries: 2 }, 11: { share_retries: 1, share_recovery: followedJob() }, 15: { share_retries: 2 } }));
+  assert.deepEqual([three.status, three.Fail], [1, ['PUBLISH followed 5 retryable share answer(s) and 1 share job(s) on 3 publish(es): i3 node4 x2 ok, i11 node4 x1 job succeeded 64s ok, i15 node4 x2 ok (more than 1 publish in 10)']]);
 
-  const failedJob = await publishLines(t, attempts(20, { 7: { status: 'fail', rc: 1, share_recovery: followedJob('failed') } }));
+  const failedJob = await summarize(t, attempts(20, { 7: { status: 'fail', rc: 1, share_recovery: followedJob('failed') } }));
+  assert.deepEqual([failedJob.status, failedJob.Fail], [1, ['PUBLISH success rate excluding planned restart window 19/20 (blocking failures=1, total failures=1)']]);
   assert.deepEqual(failedJob.Warn, ['PUBLISH followed 0 retryable share answer(s) and 1 share job(s) on 1 publish(es): i7 node4 x0 job failed 64s fail']);
-  assert.match(failedJob.Fail.join('\n'), /PUBLISH success rate excluding planned restart window 19\/20 \(blocking failures=1/);
 
   // A log written before these fields existed has nothing to report.
-  const older = await publishLines(t, attempts(20).map((row) => {
+  const older = await summarize(t, attempts(20).map((row) => {
     const written = { ...row };
     delete written.share_retries;
     delete written.share_recovery;
     return written;
   }));
-  assert.deepEqual([older.Warn, older.Fail], [[], []]);
+  assert.deepEqual([older.status, older.Fail, older.Warn], [0, [], []]);
 });
 
 test('a failure the planned restart excuses is reported but left out of the rate', async (t) => {
@@ -182,9 +207,9 @@ test('a failure the planned restart excuses is reported but left out of the rate
   // One of each needed its share followed: 1 of the 18 counted attempts, not 2 of 18.
   const seconds = (i) => Date.parse(at(i)) / 1000;
   const excused = { node: 2, status: 'fail', rc: 143, out: 'terminated' };
-  const run = await publishLines(t, attempts(20, { 5: { ...excused, share_retries: 1 }, 6: excused, 12: { share_recovery: followedJob() } }),
+  const run = await summarize(t, attempts(20, { 5: { ...excused, share_retries: 1 }, 6: excused, 12: { share_recovery: followedJob() } }),
     { node: 2, stopTs: seconds(5), apiReadyTs: seconds(7), graceSec: 45 });
-  assert.deepEqual(run.Fail, []);
+  assert.deepEqual([run.status, run.Fail], [0, []]);
   assert.deepEqual(run.Warn, ['PUBLISH followed 1 retryable share answer(s) and 1 share job(s) on 2 publish(es): i5 node2 x1 fail, i12 node1 x0 job succeeded 64s ok']);
   assert.match(run.Pass.join('\n'), /PUBLISH tolerated 2 failure\(s\) during planned node2 restart window/);
   assert.match(run.Pass.join('\n'), /PUBLISH success rate excluding planned restart window 18\/18/);
