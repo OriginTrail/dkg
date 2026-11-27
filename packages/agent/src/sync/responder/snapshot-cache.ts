@@ -34,11 +34,12 @@ export type SyncRow = Readonly<{ s: string; p: string; o: string; g: string }>;
 // then rejected.
 //
 // Why raised from 64,000 / 32 MiB: a CG whose `_meta` crossed the old ceiling
-// fell off the in-memory predicate (filterDurableMetaSnapshotRows) onto the
-// SPARQL fallback (buildDurableMetaRowsQuery), whose assertion-name branch is
-// O(candidates x assertionName-lifecycles) and is re-paid per page. Measured on
-// mainnet that fallback exceeded a 120s server-side query deadline; fifa was
-// only 1.19x over the row cap and 1.08x over the byte cap when it fell off.
+// fell off the in-memory predicate (filterDurableMetaSnapshotRows) onto a
+// store-side filter and sort of the whole metadata graph that was re-paid per
+// page. Measured on mainnet that fallback exceeded a 120s server-side query
+// deadline; fifa was only 1.19x over the row cap and 1.08x over the byte cap
+// when it fell off. A graph past these caps now pages from a session plan
+// (durable-meta-plan.ts) whose page cost follows the page.
 export const SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS = 200_000;
 export const SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE = 96 * 1024 * 1024;
 export const SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS = 500;
