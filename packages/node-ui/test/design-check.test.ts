@@ -386,6 +386,19 @@ describe('design check', () => {
     }
   });
 
+  it('checks the uses of a changed variable definition, reported at the change', () => {
+    const found = (css: string, changed: number[]) => checkText(system, css, 'src/ui/styles/x.css', { known: new Set(), keepLine: (l) => changed.includes(l) })
+      .filter((f: { offScale?: boolean }) => f.offScale)
+      .map((f: { line: number; prop?: string; value: string; usedAt?: number }) => `${f.line} ${f.prop} ${f.value} used ${f.usedAt}`);
+    // Only --gap (line 2) changed; the gap on line 3 reads it.
+    expect(found('.x {\n  --gap: 10px;\n  gap: var(--gap);\n}', [2])).toEqual(['2 gap 10px used 3']);
+    // Through an alias: --pad reads --gap, padding reads --pad.
+    expect(found('.x {\n  --gap: 10px;\n  --pad: var(--gap);\n  padding: var(--pad);\n}', [2])).toEqual(['2 padding 10px used 4']);
+    // An on-system change, or no change, reports nothing.
+    expect(found('.x {\n  --gap: var(--space-8);\n  gap: var(--gap);\n}', [2])).toEqual([]);
+    expect(found('.x {\n  --gap: 10px;\n  gap: var(--gap);\n}', [])).toEqual([]);
+  });
+
   it('checks a UI stylesheet\'s own variables where they are used', () => {
     const off = (css: string) => checkText(system, css, 'src/ui/styles/x.css', { known: new Set(['--gap', '--set-at-runtime']) })
       .filter((f: { offScale?: boolean }) => f.offScale).map((f: { kind: string; value: string }) => `${f.kind} ${f.value}`);
@@ -593,10 +606,13 @@ describe('design check', () => {
       git('config', 'diff.mnemonicPrefix', 'true');
       git('config', 'diff.relative', 'true');
       writeFileSync(join(styles, 'a.css'), '.old { padding: 10px; }\n');
+      writeFileSync(join(styles, 'c.css'), '.c {\n  --gap: var(--space-8);\n  gap: var(--gap);\n}\n');
       git('add', '-A');
       git('commit', '-q', '-m', 'base');
       git('checkout', '-q', '-b', 'feature');
       writeFileSync(join(styles, 'a.css'), '.old { padding: 10px; }\n.new { gap: 10px; }\n');
+      // Only the definition changes: the unchanged gap that reads it is reported at line 2.
+      writeFileSync(join(styles, 'c.css'), '.c {\n  --gap: 10px;\n  gap: var(--gap);\n}\n');
       git('commit', '-q', '-am', 'feature');
       writeFileSync(join(styles, 'b.css'), '.u {\n  padding:\n    10px;\n}\n');
       // A name git would quote and escape without -z (core.quotePath is on by default).
@@ -606,7 +622,7 @@ describe('design check', () => {
       const run = spawnSync(process.execPath, [SCRIPT, '--changed', 'main', '--json'], { cwd: pkg, encoding: 'utf8', env: { ...process.env, DESIGN_CHECK_PKG: pkg } });
       const results = JSON.parse(run.stdout) as { file: string; findings: { line: number; prop: string; offScale?: boolean }[] }[];
       const found = results.flatMap((r) => r.findings.filter((f) => f.offScale).map((f) => `${r.file}:${f.line} ${f.prop}`));
-      expect(found.sort()).toEqual(['src/ui/styles/a.css:2 gap', 'src/ui/styles/b.css:2 padding', 'src/ui/styles/café.css:1 padding']);
+      expect(found.sort()).toEqual(['src/ui/styles/a.css:2 gap', 'src/ui/styles/b.css:2 padding', 'src/ui/styles/c.css:2 gap', 'src/ui/styles/café.css:1 padding']);
       expect(run.status).toBe(1);
     } finally {
       rmSync(repo, { recursive: true, force: true });

@@ -39,7 +39,7 @@ export { declarations, parseColour };
  * @property {boolean} [mockup]    a design not yet built: its own variables and components are checked too
  */
 /** @typedef {CheckOptions & { keepLine?: (line: number) => boolean }} TextOptions only lines `keepLine` keeps are checked (--changed) */
-/** A finding where it is in a file. `written` is the value as written, when a variable was put in. @typedef {Finding & { line: number, prop?: string, written?: string }} Reported */
+/** A finding where it is in a file. `written` is the value as written, when a variable was put in; `usedAt` is the line of a use reported at the variable definition that changed it (--changed). @typedef {Finding & { line: number, prop?: string, written?: string, usedAt?: number }} Reported */
 
 // DESIGN_CHECK_PKG points the check at another copy of the package: the tests use it
 // to run --changed against a git repository of their own.
@@ -465,11 +465,52 @@ export function checkText(system, text, file, { known, mockup = false, keepLine 
     list.push({ value: d.value, scope: d.scope });
     defs.set(d.prop, list);
   }
+  /** A declaration counts as changed when any line it spans is: `padding:\n  10px;` with only the value edited. @param {{ line: number, endLine: number }} d */
+  const isChanged = (d) => {
+    for (let l = d.line; l <= d.endLine; l++) if (keepLine(l)) return true;
+    return false;
+  };
+  // With --changed, a variable whose definition changed changes every use of it, through
+  // aliases too (`--pad: var(--gap)`): the line of the first changed definition it depends on.
+  /** @type {Map<string, number | null>} */
+  const changedVia = new Map();
+  /** @param {string} name @param {Set<string>} open @returns {number | null} */
+  const changedLine = (name, open = new Set()) => {
+    if (changedVia.has(name)) return changedVia.get(name) ?? null;
+    if (open.has(name)) return null;
+    open.add(name);
+    let line = null;
+    for (const def of decls) {
+      if (def.prop !== name) continue;
+      if (isChanged(def)) { line = def.line; break; }
+      for (const r of varRefs(parseValue(def.value))) { line = changedLine(r.name, open); if (line !== null) break; }
+      if (line !== null) break;
+    }
+    changedVia.set(name, line);
+    return line;
+  };
   for (const d of decls) {
-    // A declaration counts as changed when any line it spans is: `padding:\n  10px;` with only the value edited.
-    let changed = false;
-    for (let l = d.line; l <= d.endLine && !changed; l++) changed = keepLine(l);
-    if (!changed) continue;
+    const changed = isChanged(d);
+    // An unchanged use is checked when a variable it reads was changed, and reported at that change.
+    let via = null;
+    if (!changed && !d.prop.startsWith('--')) {
+      for (const r of varRefs(parseValue(d.value))) { via = changedLine(r.name); if (via !== null) break; }
+    }
+    if (!changed && via === null) continue;
+    if (via !== null) {
+      /** @type {Set<string>} */
+      const seenVia = new Set();
+      for (const resolved of resolveVars(d.value, defs, d.scope)) {
+        if (resolved === d.value) continue;
+        for (const f of checkDeclaration(system, d.prop, resolved, { known: knownHere, mockup })) {
+          const key = `${f.kind}\0${f.value}\0${f.use}`;
+          if (seenVia.has(key)) continue;
+          seenVia.add(key);
+          findings.push({ line: via, prop: d.prop, ...f, written: d.value, usedAt: d.line });
+        }
+      }
+      continue;
+    }
     // A token set to a value it doesn't have in 00-theme.css, in a mock-up or in the UI's own
     // stylesheets: `.x { --bg-surface: magenta }` changes the system outside the system.
     // (00-theme.css itself is never checked.)

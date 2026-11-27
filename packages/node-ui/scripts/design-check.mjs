@@ -115,7 +115,7 @@ function main(argv) {
       console.log(`\n── ${title} ──`);
       for (const r of rows) {
         console.log(`\n${r.file}`);
-        for (const f of r.findings) console.log(`  ${String(f.line).padStart(4)}  ${f.kind.padEnd(10)} ${(f.prop ? `${f.prop}: ` : '') + f.value}${f.written ? ` (written ${f.written})` : ''}\n        → ${f.use}`);
+        for (const f of r.findings) console.log(`  ${String(f.line).padStart(4)}  ${f.kind.padEnd(10)} ${(f.prop ? `${f.prop}: ` : '') + f.value}${f.written ? ` (written ${f.written}${f.usedAt ? ` on line ${f.usedAt}` : ''})` : ''}\n        → ${f.use}`);
       }
     }
     console.log('');
