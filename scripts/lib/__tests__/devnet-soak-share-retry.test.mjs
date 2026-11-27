@@ -1,40 +1,32 @@
-// The RS soak's publish loop and summary step (scripts/devnet-soak-rs.sh), run
-// as the soak writes them, with a stand-in CLI: a share the node answers as
-// retryable is shared again on the same draft, a bounded number of times, and
-// the summary reports every repeat and fails a lane that needed too many.
+// The RS soak's publisher (scripts/devnet-soak-rs-publisher.sh) and summary
+// (scripts/devnet-soak-rs-summary.mjs), run as the soak runs them. The
+// publisher creates and shares each draft through the share step, publishes
+// it once the share is done, and logs how the share was followed; the summary
+// reports every publish whose share needed following, and fails a lane that
+// needed it for more than one publish in ten.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { once } from 'node:events';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { createPendingAnswer, ownerConflictAnswer, prerequisiteAnswer, sharedAnswer, standInNode } from './devnet-soak-rs-stand-ins.mjs';
 
-const soak = readFileSync(new URL('../../devnet-soak-rs.sh', import.meta.url), 'utf8');
-function between(start, end) {
-  const from = soak.indexOf(start);
-  assert.ok(from >= 0, `the soak script has ${JSON.stringify(start)}`);
-  const to = soak.indexOf(end, from + start.length);
-  assert.ok(to >= 0, `the soak script closes ${JSON.stringify(start)}`);
-  return soak.slice(from + start.length, to);
-}
-// What the soak writes to publisher-loop.sh, and the summary step's Node script.
-const publisherLoop = between(`cat > "$OUT_DIR/publisher-loop.sh" <<'EOLOOP'\n`, '\nEOLOOP\n');
-const summaryScript = between(`NUM_EDGE="$NUM_EDGE" \\\nnode -e '\n`, `\n'`);
+const PUBLISHER = fileURLToPath(new URL('../../devnet-soak-rs-publisher.sh', import.meta.url));
+const SUMMARY = fileURLToPath(new URL('../../devnet-soak-rs-summary.mjs', import.meta.url));
+const REPO_ROOT = path.dirname(path.dirname(PUBLISHER));
+// macOS ships bash 3.2 as /bin/bash, and the soak has to run there.
+const BASH = existsSync('/bin/bash') ? '/bin/bash' : 'bash';
+const DATE = ['/bin/date', '/usr/bin/date'].find((file) => existsSync(file));
 
-// The CLI as `node "$CLI_JS" ka <command> <name> ...` runs it: each call is
-// recorded with its DKG_HOME (and, for create, the first line of its input);
-// the n-th call of a command gets that command's n-th planned answer.
+// The CLI as `node "$CLI_JS" ka publish <name> ...` runs it: each call is
+// recorded with its DKG_HOME, and the n-th call gets the n-th planned answer.
 const standInCli = `const fs = require('node:fs');
-const args = process.argv.slice(2);
-const record = { args, home: process.env.DKG_HOME };
-if (args[1] === 'create') {
-  const input = args[args.indexOf('--input-file') + 1];
-  record.input = fs.existsSync(input) ? fs.readFileSync(input, 'utf8').split('\\n')[0] : null;
-}
-fs.appendFileSync(process.env.SOAK_CALLS, JSON.stringify(record) + '\\n');
-const seen = fs.readFileSync(process.env.SOAK_CALLS, 'utf8').trim().split('\\n')
-  .filter((line) => JSON.parse(line).args[1] === args[1]).length;
-const answers = JSON.parse(fs.readFileSync(process.env.SOAK_PLAN, 'utf8'))[args[1]] ?? [[97, 'unplanned ' + args[1]]];
+fs.appendFileSync(process.env.SOAK_CALLS, JSON.stringify({ args: process.argv.slice(2), home: process.env.DKG_HOME }) + '\\n');
+const seen = fs.readFileSync(process.env.SOAK_CALLS, 'utf8').trim().split('\\n').length;
+const answers = JSON.parse(process.env.SOAK_PUBLISH);
 const [exit, text] = answers[Math.min(seen, answers.length) - 1];
 (exit === 0 ? process.stdout : process.stderr).write(text + '\\n');
 process.exit(exit);
@@ -42,101 +34,111 @@ process.exit(exit);
 // sleep records each wait and returns at once. The publish interval (7 s) ends
 // the run: after it, date +%s answers past the end of the soak.
 const standInSleep = '#!/bin/sh\necho "$1" >> "$SOAK_WAITS"\nif [ "$1" = 7 ]; then : > "$SOAK_WAITS.interval"; fi\n';
-const standInDate = '#!/bin/sh\nif [ "$1" = "+%s" ] && [ -e "$SOAK_WAITS.interval" ]; then echo 9999999999; exit 0; fi\nexec /bin/date "$@"\n';
+const standInDate = `#!/bin/sh\nif [ "$1" = "+%s" ] && [ -e "$SOAK_WAITS.interval" ]; then echo 9999999999; exit 0; fi\nexec ${DATE} "$@"\n`;
 
-async function publishOnce(t, plan) {
-  const dir = mkdtempSync(join(tmpdir(), 'dkg-soak-share-'));
+async function collect(child) {
+  let stdout = '';
+  let stderr = '';
+  child.stdout?.on('data', (chunk) => { stdout += chunk; });
+  child.stderr?.on('data', (chunk) => { stderr += chunk; });
+  const [status] = await once(child, 'close');
+  return { status, stdout, stderr };
+}
+const jsonLines = (file) => readFileSync(file, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+
+// One publish attempt of round 9 on node 1, against a stand-in node API.
+async function publishOnce(t, plan, { publish = [[0, 'published']], apiPort = true } = {}) {
+  const dir = mkdtempSync(path.join(tmpdir(), 'dkg-soak-publisher-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const bin = join(dir, 'bin'), out = join(dir, 'out'), devnet = join(dir, 'devnet'), cli = join(dir, 'dkg-cli.cjs');
-  mkdirSync(bin); mkdirSync(out);
-  writeFileSync(join(bin, 'sleep'), standInSleep, { mode: 0o755 });
-  writeFileSync(join(bin, 'date'), standInDate, { mode: 0o755 });
+  const bin = path.join(dir, 'bin');
+  const out = path.join(dir, 'out');
+  const devnet = path.join(dir, 'devnet');
+  const cli = path.join(dir, 'dkg-cli.cjs');
+  for (const directory of [bin, out, path.join(devnet, 'node1')]) mkdirSync(directory, { recursive: true });
+  const node = await standInNode(t, plan);
+  if (apiPort) writeFileSync(path.join(devnet, 'node1', 'api.port'), `${node.port}\n`);
+  writeFileSync(path.join(bin, 'sleep'), standInSleep, { mode: 0o755 });
+  writeFileSync(path.join(bin, 'date'), standInDate, { mode: 0o755 });
   writeFileSync(cli, standInCli);
-  const files = { SOAK_PLAN: join(dir, 'plan.json'), SOAK_CALLS: join(dir, 'calls.jsonl'), SOAK_WAITS: join(dir, 'waits.log') };
-  writeFileSync(files.SOAK_PLAN, JSON.stringify(plan));
+  const files = { SOAK_CALLS: path.join(dir, 'calls.jsonl'), SOAK_WAITS: path.join(dir, 'waits.log') };
   writeFileSync(files.SOAK_CALLS, '');
   writeFileSync(files.SOAK_WAITS, '');
-  const result = await new Promise((resolve, reject) => {
-    // The loop's arguments: repo, devnet, output, CLI, interval, end, token, round.
-    const child = spawn('bash', ['-c', publisherLoop, 'publisher-loop.sh', dir, devnet, out, cli, '7', '9999999998', 'fixture-token', '9'],
-      { env: { ...process.env, ...files, PATH: `${bin}${delimiter}${process.env.PATH}` } });
-    let stderr = '';
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', reject);
-    child.on('close', (status) => resolve({ status, stderr }));
+  // The publisher's arguments: repo, devnet, output, CLI, interval, end, token,
+  // round. A run that never ends is stopped after a minute.
+  const child = spawn(BASH, [PUBLISHER, REPO_ROOT, devnet, out, cli, '7', '9999999998', 'fixture-token', '9'], {
+    env: {
+      ...process.env, ...files, SOAK_PUBLISH: JSON.stringify(publish), SOAK_SHARE_RECOVERY_WAIT_SEC: '20',
+      PATH: [bin, path.dirname(process.execPath), process.env.PATH].join(path.delimiter),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000,
   });
-  const lines = (file) => readFileSync(file, 'utf8').split('\n').filter(Boolean);
-  const waits = lines(files.SOAK_WAITS);
+  const result = await collect(child);
   return {
-    result, devnet,
-    rows: lines(join(out, 'publish.jsonl')).map((line) => JSON.parse(line)),
-    calls: lines(files.SOAK_CALLS).map((line) => JSON.parse(line)),
-    waits: waits.filter((wait) => wait !== '7').map(Number),
-    intervals: waits.filter((wait) => wait === '7').length,
+    result, devnet, requests: node.requests,
+    rows: jsonLines(path.join(out, 'publish.jsonl')), calls: jsonLines(files.SOAK_CALLS),
+    waits: readFileSync(files.SOAK_WAITS, 'utf8').split('\n').filter(Boolean),
   };
 }
 
-const retryable = 'A promote prerequisite is temporarily unavailable';
-const createRefused = [1, `Knowledge asset create/share completed partially for "x" in devnet-test: phase=swm-share ${retryable}`];
-const shareRefused = [1, retryable];
-const answer = (text) => [0, text];
-const summary = (run) => [run.calls.map((call) => call.args[1]), run.waits, run.rows.map((row) => [row.status, row.rc, row.share_retries])];
-
-test('a share the node answers as retryable is shared again on the same draft, then published', async (t) => {
-  const run = await publishOnce(t, { create: [createRefused], share: [shareRefused, answer('shared')], publish: [answer('published')] });
+test('a prerequisite failure, then a pending owner, then a recovery that succeeds reaches the publish', async (t) => {
+  const run = await publishOnce(t, { create: [prerequisiteAnswer()], share: [ownerConflictAnswer('job-7')], jobs: { 'job-7': ['succeeded'] } });
   assert.equal(run.result.status, 0, run.result.stderr);
-  assert.deepEqual(summary(run), [['create', 'share', 'share', 'publish'], [1, 2], [['ok', 0, 2]]]);
-  const [create, ...rest] = run.calls;
-  const name = create.args[2];
+  assert.equal(run.rows.length, 1);
+  const [row] = run.rows;
+  const name = run.requests[0].body.name;
   assert.match(name, /^soak-9-0-/);
-  assert.deepEqual(create.args, ['ka', 'create', name, '--context-graph-id', 'devnet-test', '--input-file', create.args[6], '--share']);
-  assert.match(create.input, /^<urn:soak:r9:i0:/, 'the loop wrote the draft it creates');
-  for (const call of rest) assert.deepEqual(call.args, ['ka', call.args[1], name, '--context-graph-id', 'devnet-test']);
-  assert.ok(run.calls.every((call) => call.home === join(run.devnet, 'node1')), 'every step goes to the same node');
-  assert.equal(run.intervals, 1);
-  assert.deepEqual([run.rows[0].node, run.rows[0].cg], [1, 'devnet-test']);
-  assert.match(run.rows[0].out, /retryable share answer followed: ka share, retry 1\n/);
-  assert.match(run.rows[0].out, /retryable share answer followed: ka share, retry 2\nshared\npublished/);
+  assert.deepEqual(run.requests.map(({ method, path: route, auth }) => `${method} ${route} ${auth}`), [
+    'POST /api/knowledge-assets Bearer fixture-token',
+    `POST /api/knowledge-assets/${name}/swm/share Bearer fixture-token`,
+    'GET /api/knowledge-assets/swm/share-jobs/job-7 Bearer fixture-token',
+  ]);
+  assert.equal(run.requests[0].body.quads[0].subject, row.subject, 'the draft is the fixture the loop wrote');
+  assert.deepEqual(run.calls, [{ args: ['ka', 'publish', name, '--context-graph-id', 'devnet-test'], home: path.join(run.devnet, 'node1') }]);
+  assert.deepEqual([row.status, row.rc, row.node, row.cg, row.share_retries], ['ok', 0, 1, 'devnet-test', 1]);
+  assert.deepEqual([row.share_recovery.job, row.share_recovery.state, row.share_recovery.settled], ['job-7', 'succeeded', true]);
+  assert.match(row.out, /SHARE_OWNER_CONFLICT[\s\S]*share job job-7: succeeded[\s\S]*\npublished$/);
+  assert.deepEqual(run.waits, ['7'], 'the loop itself waits only its publish interval');
 });
 
-test('a node that keeps answering retryable gets five more shares, and nothing is published', async (t) => {
-  const run = await publishOnce(t, { create: [createRefused], share: [shareRefused], publish: [answer('published')] });
+test('a share job that fails leaves the draft unpublished, and the attempt failed', async (t) => {
+  const run = await publishOnce(t, { create: [createPendingAnswer('job-8')], jobs: { 'job-8': ['failed'] } });
   assert.equal(run.result.status, 0, run.result.stderr);
-  assert.deepEqual(summary(run), [['create', 'share', 'share', 'share', 'share', 'share'], [1, 2, 3, 4, 5], [['fail', 1, 5]]]);
+  assert.deepEqual(run.calls, []);
+  assert.deepEqual(run.rows.map((row) => [row.status, row.rc, row.share_retries, row.share_recovery?.state]), [['fail', 1, 0, 'failed']]);
 });
 
-test('no other failure is shared again', async (t) => {
-  for (const [plan, expected] of [
-    [{ create: [[1, 'Daemon is not running']] }, [['create'], [], [['fail', 1, 0]]]],
-    [{ create: [createRefused], share: [[1, 'Context graph not found']] }, [['create', 'share'], [1], [['fail', 1, 1]]]],
-    [{ create: [createRefused], share: [answer('shared')], publish: [[1, 'VM publish failed']] }, [['create', 'share', 'publish'], [1], [['fail', 1, 1]]]],
-    [{ create: [answer('created and shared')], publish: [answer('published')] }, [['create', 'publish'], [], [['ok', 0, 0]]]],
-  ]) {
-    const run = await publishOnce(t, plan);
-    assert.equal(run.result.status, 0, run.result.stderr);
-    assert.deepEqual(summary(run), expected, JSON.stringify(plan));
-  }
+test('a share the node finishes at once is published, and a failed publish fails the attempt', async (t) => {
+  const shared = await publishOnce(t, { create: [sharedAnswer(201)] });
+  assert.equal(shared.calls.length, 1);
+  assert.deepEqual(shared.rows.map((row) => [row.status, row.rc, row.share_retries, row.share_recovery]), [['ok', 0, 0, null]]);
+
+  const refused = await publishOnce(t, { create: [sharedAnswer(201)] }, { publish: [[1, 'VM publish failed']] });
+  assert.deepEqual(refused.rows.map((row) => [row.status, row.rc, row.share_retries]), [['fail', 1, 0]]);
+  assert.match(refused.rows[0].out, /\nVM publish failed$/);
 });
 
-// The summary step on a made-up publish log: the PUBLISH lines by section.
+test('a node whose API cannot be found fails in the CLI\'s words, with the default share fields', async (t) => {
+  const run = await publishOnce(t, { create: [sharedAnswer(201)] }, { apiPort: false });
+  assert.deepEqual([run.requests, run.calls], [[], []]);
+  assert.deepEqual(run.rows.map((row) => [row.status, row.rc, row.share_retries, row.share_recovery]), [['fail', 1, 0, null]]);
+  assert.ok(run.rows[0].out.includes(`Daemon is not running at ${path.join(run.devnet, 'node1')}.`), run.rows[0].out);
+});
+
+// The summary on a made-up publish log: the PUBLISH lines by section.
 async function publishLines(t, rows, restartWindow) {
-  const dir = mkdtempSync(join(tmpdir(), 'dkg-soak-summary-'));
+  const dir = mkdtempSync(path.join(tmpdir(), 'dkg-soak-summary-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const file = (name, text) => { writeFileSync(join(dir, name), text); return join(dir, name); };
+  const file = (name, text) => { writeFileSync(path.join(dir, name), text); return path.join(dir, name); };
   const stake = JSON.stringify({ epoch: '1', blockNumber: 1, perCore: [], perDelegator: [] });
   const env = {
-    ...process.env, TIMESERIES: join(dir, 'none.jsonl'), EVENTS_LOG: join(dir, 'none.jsonl'),
+    ...process.env, OUT_DIR: dir, TIMESERIES: path.join(dir, 'none.jsonl'), EVENTS_LOG: path.join(dir, 'none.jsonl'),
     PUBLISH_LOG: file('publish.jsonl', rows.map((row) => JSON.stringify(row)).join('\n') + '\n'),
-    RESTART_WINDOW_FILE: restartWindow ? file('restart-window.json', JSON.stringify(restartWindow)) : join(dir, 'none.json'),
+    RESTART_WINDOW_FILE: restartWindow ? file('restart-window.json', JSON.stringify(restartWindow)) : path.join(dir, 'none.json'),
     STAKE_BEFORE: file('stake-before.json', stake), STAKE_AFTER: file('stake-after.json', stake),
-    DELEGATORS_FILE: file('delegators.json', '[]'), FINDINGS: join(dir, 'summary.md'),
+    DELEGATORS_FILE: file('delegators.json', '[]'), FINDINGS: path.join(dir, 'summary.md'),
     ROUND: '9', DURATION_SEC: '600', NUM_CORES: '4', NUM_EDGE: '2',
   };
-  await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['-e', summaryScript], { env, stdio: 'ignore' });
-    child.on('error', reject);
-    child.on('close', resolve);
-  });
+  await collect(spawn(process.execPath, [SUMMARY], { env, stdio: 'ignore', timeout: 30_000 }));
   const sections = { Pass: [], Warn: [], Fail: [] };
   let section;
   for (const line of readFileSync(env.FINDINGS, 'utf8').split('\n')) {
@@ -148,40 +150,42 @@ async function publishLines(t, rows, restartWindow) {
 const at = (i) => `2026-11-26T10:${String(i).padStart(2, '0')}:00Z`;
 const attempts = (count, overrides = {}) => Array.from({ length: count }, (_, i) => ({
   ts: at(i), cg: 'devnet-test', node: (i % 4) + 1, i, subject: `urn:soak:r9:i${i}`,
-  status: 'ok', rc: 0, share_retries: 0, elapsed_s: 3, out: 'published', ...overrides[i],
+  status: 'ok', rc: 0, share_retries: 0, share_recovery: null, elapsed_s: 3, out: 'published', ...overrides[i],
 }));
+const followedJob = (state = 'succeeded') => ({ job: 'job-1', state, settled: true, attempts: 2, polls: 13, waited_s: 64 });
 
-test('one publish in ten needing a repeat is a warning; more fails the lane', async (t) => {
-  const two = await publishLines(t, attempts(20, { 3: { share_retries: 1 }, 11: { share_retries: 1 } }));
-  assert.deepEqual(two.Warn, ['PUBLISH followed 2 retryable share answer(s) on 2 publish(es): i3 node4 x1 ok, i11 node4 x1 ok']);
+test('one publish in ten needing its share followed is a warning; more fails the lane', async (t) => {
+  const two = await publishLines(t, attempts(20, { 3: { share_retries: 1 }, 11: { share_recovery: followedJob() } }));
+  assert.deepEqual(two.Warn, ['PUBLISH followed 1 retryable share answer(s) and 1 share job(s) on 2 publish(es): i3 node4 x1 ok, i11 node4 x0 job succeeded 64s ok']);
   assert.deepEqual(two.Fail, []);
   assert.match(two.Pass.join('\n'), /PUBLISH success rate excluding planned restart window 20\/20/);
 
-  const three = await publishLines(t, attempts(20, { 3: { share_retries: 2 }, 11: { share_retries: 2 }, 15: { share_retries: 2 } }));
-  assert.deepEqual(three.Fail, ['PUBLISH followed 6 retryable share answer(s) on 3 publish(es): i3 node4 x2 ok, i11 node4 x2 ok, i15 node4 x2 ok (more than 1 publish in 10)']);
+  const three = await publishLines(t, attempts(20, { 3: { share_retries: 2 }, 11: { share_retries: 1, share_recovery: followedJob() }, 15: { share_retries: 2 } }));
+  assert.deepEqual(three.Fail, ['PUBLISH followed 5 retryable share answer(s) and 1 share job(s) on 3 publish(es): i3 node4 x2 ok, i11 node4 x1 job succeeded 64s ok, i15 node4 x2 ok (more than 1 publish in 10)']);
 
-  const exhausted = await publishLines(t, attempts(20, { 7: { status: 'fail', rc: 1, share_retries: 5, out: retryable } }));
-  assert.deepEqual(exhausted.Warn, ['PUBLISH followed 5 retryable share answer(s) on 1 publish(es): i7 node4 x5 fail']);
-  assert.match(exhausted.Fail.join('\n'), /PUBLISH success rate excluding planned restart window 19\/20 \(blocking failures=1/);
+  const failedJob = await publishLines(t, attempts(20, { 7: { status: 'fail', rc: 1, share_recovery: followedJob('failed') } }));
+  assert.deepEqual(failedJob.Warn, ['PUBLISH followed 0 retryable share answer(s) and 1 share job(s) on 1 publish(es): i7 node4 x0 job failed 64s fail']);
+  assert.match(failedJob.Fail.join('\n'), /PUBLISH success rate excluding planned restart window 19\/20 \(blocking failures=1/);
 
-  // A log written before share_retries existed has no repeats to report.
+  // A log written before these fields existed has nothing to report.
   const older = await publishLines(t, attempts(20).map((row) => {
     const written = { ...row };
     delete written.share_retries;
+    delete written.share_recovery;
     return written;
   }));
   assert.deepEqual([older.Warn, older.Fail], [[], []]);
 });
 
-test('a failure the planned restart excuses is reported but left out of the repeat rate', async (t) => {
+test('a failure the planned restart excuses is reported but left out of the rate', async (t) => {
   // 20 attempts: 18 succeed and two fail while node 2 is stopped on purpose.
-  // One of each needed a repeat: 1 of the 18 counted attempts, not 2 of 18.
+  // One of each needed its share followed: 1 of the 18 counted attempts, not 2 of 18.
   const seconds = (i) => Date.parse(at(i)) / 1000;
   const excused = { node: 2, status: 'fail', rc: 143, out: 'terminated' };
-  const run = await publishLines(t, attempts(20, { 5: { ...excused, share_retries: 1 }, 6: excused, 12: { share_retries: 1 } }),
+  const run = await publishLines(t, attempts(20, { 5: { ...excused, share_retries: 1 }, 6: excused, 12: { share_recovery: followedJob() } }),
     { node: 2, stopTs: seconds(5), apiReadyTs: seconds(7), graceSec: 45 });
   assert.deepEqual(run.Fail, []);
-  assert.deepEqual(run.Warn, ['PUBLISH followed 2 retryable share answer(s) on 2 publish(es): i5 node2 x1 fail, i12 node1 x1 ok']);
+  assert.deepEqual(run.Warn, ['PUBLISH followed 1 retryable share answer(s) and 1 share job(s) on 2 publish(es): i5 node2 x1 fail, i12 node1 x0 job succeeded 64s ok']);
   assert.match(run.Pass.join('\n'), /PUBLISH tolerated 2 failure\(s\) during planned node2 restart window/);
   assert.match(run.Pass.join('\n'), /PUBLISH success rate excluding planned restart window 18\/18/);
 });
