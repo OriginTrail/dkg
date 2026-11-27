@@ -13,6 +13,8 @@
 #     spreads KCs across two registered context graphs, distributing
 #     publishes round-robin across all 4 core nodes' APIs (so the
 #     publisher path is exercised on every node, not just node 1).
+#     A share the daemon refuses as temporarily unavailable is sent
+#     again, bounded, before the publication counts as failed.
 #   - Stake & reward accounting: 10 distinct wallets stake on the 4
 #     core identities (asymmetrically — cores 1+2 carry 100k each,
 #     cores 3+4 carry 75k each). We snapshot
@@ -389,15 +391,18 @@ cat > "$OUT_DIR/publisher-loop.sh" <<'EOLOOP'
 # Publishes a steady workload of default-graph RDF fixtures across the two registered
 # CGs and round-robin across all 4 core nodes. Times are second-resolution —
 # BSD `date` (macOS) does not honour `%N`, and bashs $((...)) cannot eat a
-# literal "N", so we deliberately stick to whole seconds.
+# literal "N", so we deliberately stick to whole seconds. A share the daemon
+# refuses as temporarily unavailable is sent again, bounded (see
+# devnet-soak-publish-helpers.sh); `share_repeats` records how often.
 set -uo pipefail
 REPO_ROOT="$1"; DEVNET_DIR="$2"; OUT_DIR="$3"; CLI_JS="$4"
 PUBLISH_INTERVAL_SEC="$5"; END_TS="$6"; AUTH_TOKEN="$7"; ROUND="$8"
 PUBLISH_LOG="$OUT_DIR/publish.jsonl"
 : > "$PUBLISH_LOG"
+source "$REPO_ROOT/scripts/devnet-soak-publish-helpers.sh" || exit 1
 CGS=("devnet-test" "devnet-isolation")
 NODES=(1 2 3 4)
-TMP=$(mktemp -d -t soak-pub)
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/soak-pub.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 i=0
 while [ "$(date +%s)" -lt "$END_TS" ]; do
@@ -413,9 +418,9 @@ while [ "$(date +%s)" -lt "$END_TS" ]; do
 <${subj}> <urn:soak:emittedAt> "$(date -u +%Y-%m-%dT%H:%M:%SZ)" .
 EOF
   start_s=$(date +%s)
-  rc=0
-  out=$(DKG_HOME="$DEVNET_DIR/node${node_idx}" node "$CLI_JS" ka create "$ka_name" --context-graph-id "$cg" --input-file "$fixture" --share 2>&1 \
-    && DKG_HOME="$DEVNET_DIR/node${node_idx}" node "$CLI_JS" ka publish "$ka_name" --context-graph-id "$cg" 2>&1) || rc=$?
+  devnet_soak_publish_once "$node_idx" "$cg" "$ka_name" "$fixture"
+  rc=$DEVNET_SOAK_RC
+  out=$DEVNET_SOAK_OUT
   end_s=$(date +%s)
   status="ok"
   [ "$rc" -ne 0 ] && status="fail"
@@ -424,8 +429,8 @@ EOF
   # `out` capture can contain arbitrary CLI stderr; pipe it through python for
   # a guaranteed-valid string literal.
   out_json=$(printf '%s' "$out" | python3 -c 'import sys,json;print(json.dumps(sys.stdin.read()))')
-  printf '{"ts":"%s","cg":"%s","node":%d,"i":%d,"subject":"%s","status":"%s","rc":%d,"elapsed_s":%d,"out":%s}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$cg" "$node_idx" "$i" "$subj" "$status" "$rc" "$elapsed_s" "$out_json" \
+  printf '{"ts":"%s","cg":"%s","node":%d,"i":%d,"subject":"%s","status":"%s","rc":%d,"elapsed_s":%d,"share_repeats":%d,"out":%s}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$cg" "$node_idx" "$i" "$subj" "$status" "$rc" "$elapsed_s" "$DEVNET_SOAK_SHARE_REPEATS" "$out_json" \
     >> "$PUBLISH_LOG"
   rm -f "$fixture"
   i=$((i + 1))
@@ -774,6 +779,15 @@ if (effectivePubTotal > 0 && blockingPubFailures.length === 0 && pubOk / effecti
   ok.push("PUBLISH success rate excluding planned restart window " + pubOk + "/" + effectivePubTotal + " (" + Math.round(100*pubOk/effectivePubTotal) + "%) >= 90%");
 } else {
   fail.push("PUBLISH success rate excluding planned restart window " + pubOk + "/" + effectivePubTotal + " (blocking failures=" + blockingPubFailures.length + ", total failures=" + pubFail + ")");
+}
+// The publisher loop sends a share again when the daemon refused it as
+// temporarily unavailable, so such a publication fails only when the repeats
+// did not get it shared. Name the ones a repeat saved: more refused shares
+// stay visible here although they no longer fail the check above.
+const repeatedSharePubs = pubLines.filter(p => p.status === "ok" && Number(p.share_repeats ?? 0) > 0);
+if (repeatedSharePubs.length > 0) {
+  warn.push("PUBLISH " + repeatedSharePubs.length + " publication(s) shared only after their share, refused as temporarily unavailable, was sent again ("
+    + repeatedSharePubs.map(p => "i=" + p.i + " node" + p.node + " " + p.cg + " repeats=" + p.share_repeats).join(", ") + ")");
 }
 
 // 2. RS prover: take the PEAK submittedCount per node across the whole
