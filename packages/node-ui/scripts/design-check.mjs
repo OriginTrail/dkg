@@ -18,6 +18,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PKG, UI, buildSystem, checkText, inUi, isExempt, readTokens, runtimeProps, walk } from './design-core.mjs';
+import { fails } from './design-suggest.mjs';
 
 // The checks themselves are in design-core.mjs; this is the command line around them.
 export * from './design-core.mjs';
@@ -101,14 +102,14 @@ function main(argv) {
     const n = Object.values(kinds).reduce((a, b) => a + b, 0);
     return { n, text: Object.entries(kinds).map(([k, c]) => `${c} ${k}`).join(', ') };
   };
-  const off = count((f) => f.offScale);
-  const named = count((f) => !f.offScale);
+  const off = count(fails);
+  const named = count((f) => !fails(f));
 
   if (json) {
     process.stdout.write(JSON.stringify(results, null, 2) + '\n');
   } else {
     // What fails first: values not written as the system's tokens. Then heights that match a token, which may be layout.
-    for (const [title, pick] of [['Not on the design system', (f) => f.offScale], ['Heights that match a token (use it if this is a control, badge or row)', (f) => !f.offScale]]) {
+    for (const [title, pick] of [['Not on the design system', fails], ['Heights that match a token (use it if this is a control, badge or row)', (f) => !fails(f)]]) {
       const rows = results.map((r) => ({ file: r.file, findings: r.findings.filter(pick) })).filter((r) => r.findings.length);
       if (!rows.length) continue;
       console.log(`\n── ${title} ──`);

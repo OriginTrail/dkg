@@ -11,7 +11,23 @@ import { WEIGHTS } from './design-rules.mjs';
  * The scales a suggestion picks from, built from the tokens in 00-theme.css.
  * @typedef {{ radius: Step[], space: Step[], fontSize: Step[], height: Step[], lineHeight: Step[], z: Step[], motion: Step[] }} Scales
  */
-/** What the check reports for one value. `offScale` findings fail it: a value off the system, or one on it written as a literal instead of its token. @typedef {{ kind: string, value: string, use: string, offScale?: boolean }} Finding */
+/**
+ * What a finding is about. Every kind fails the check except a height, which may be
+ * layout and only gets a suggestion.
+ * @typedef {'corner' | 'spacing' | 'type size' | 'weight' | 'line height' | 'layer' | 'motion' | 'colour' | 'token' | 'shadow' | 'component' | 'css'} BlockingKind
+ * @typedef {BlockingKind | 'height'} FindingKind
+ */
+/**
+ * What the check reports for one value. A blocking finding (a value off the system, or one
+ * on it written as a literal instead of its token) carries `offScale: true`, which the JSON
+ * output keeps; a height never does, so the type says which is which.
+ * @typedef {{ kind: BlockingKind, value: string, use: string, offScale: true }} BlockingFinding
+ * @typedef {{ kind: 'height', value: string, use: string }} AdvisoryFinding
+ * @typedef {BlockingFinding | AdvisoryFinding} Finding
+ */
+
+/** Whether a finding fails the check: everything but a height. @param {Finding} f @returns {f is BlockingFinding} */
+export const fails = (f) => f.kind !== 'height';
 
 export const ADD = 'or, if this is a new rule, add a token (DESIGN.md · Adding to the system)';
 
@@ -35,8 +51,8 @@ export function nearest(scale, value, up = false) {
 
 /**
  * The token for a number on a scale, or the nearest one and that the system may need a new one.
- * @param {string} kind @param {Step[]} scale @param {number} value @param {string} [unit] @param {boolean} [up]
- * @returns {{ kind: string, use: string, offScale?: boolean }}
+ * @param {BlockingKind} kind @param {Step[]} scale @param {number} value @param {string} [unit] @param {boolean} [up]
+ * @returns {{ kind: BlockingKind, use: string, offScale: true }}
  */
 export function scaleRule(kind, scale, value, unit = 'px', up = false) {
   const hit = scale.find((t) => t.value === value);

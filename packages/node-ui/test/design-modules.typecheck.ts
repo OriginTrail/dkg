@@ -35,6 +35,13 @@ for (const hit of classify('gap', '10px')) {
 const step = { name: '--space-8', value: 8 };
 const scales: Scales = { radius: [step], space: [step], fontSize: [step], height: [step], lineHeight: [step], z: [step], motion: [step] };
 export const finding: Finding | null = suggest(scales, { kind: 'spacing', value: '10px', n: 10, up: false });
+export const advisory: Finding = { kind: 'height', value: '32px', use: 'var(--h-control-md)' };
+// @ts-expect-error: every kind but a height fails, so it must say so
+export const unflagged: Finding = { kind: 'spacing', value: '10px', use: 'var(--space-8)' };
+// @ts-expect-error: a height is a suggestion, never a failure
+export const blockingHeight: Finding = { kind: 'height', value: '32px', use: 'var(--h-control-md)', offScale: true };
+// @ts-expect-error: a kind the check doesn't report
+export const unknownKind: Finding = { kind: 'size', value: '10px', use: '', offScale: true };
 // @ts-expect-error: a suggestion needs every scale
 suggest({ space: [step] }, { kind: 'spacing', value: '10px', n: 10, up: false });
 

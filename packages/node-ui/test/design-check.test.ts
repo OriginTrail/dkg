@@ -501,6 +501,21 @@ describe('design check', () => {
     expect(f).toMatchObject({ line: 2, kind: 'css', offScale: true });
   });
 
+  it('reads an unspaced * in calc() as multiplication, like a spaced one', () => {
+    const kinds = (prop: string, value: string) => classify(prop, value).map((h: { kind: string; value: string }) => `${h.kind} ${h.value}`);
+    for (const [prop, spaced, unspaced, expected] of [
+      ['gap', 'calc(2 * 10px)', 'calc(2*10px)', ['spacing 10px']],
+      ['font-size', 'calc(15px * 1)', 'calc(15px*1)', ['type size 15px']],
+      ['border-radius', 'calc(10px * 2)', 'calc(10px*2)', ['corner 10px']],
+    ] as const) {
+      expect(kinds(prop, unspaced), unspaced).toEqual(expected);
+      expect(kinds(prop, unspaced)).toEqual(kinds(prop, spaced));
+    }
+    // A negative number and a custom property's name are still one word each.
+    expect(kinds('margin', 'calc(-2*var(--space-8))')).toEqual([]);
+    expect(kinds('gap', 'calc(var(--space-8)*2)')).toEqual([]);
+  });
+
   it('reads CSS values with delimiters in quotes, and comments in values', () => {
     const found = (css: string) => checkText(system, css, 'x.css', { known: new Set() })
       .filter((f: { offScale?: boolean }) => f.offScale).map((f: { prop?: string; value: string }) => `${f.prop} ${f.value}`);

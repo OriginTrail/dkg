@@ -32,7 +32,8 @@ export function parseValue(text) {
       if (/\s/.test(c)) {
         while (i < text.length && /\s/.test(text[i])) i++;
         out.push({ type: 'space', value: text.slice(start, i), start, end: i });
-      } else if (c === ',' || c === '/') {
+      } else if (c === ',' || c === '/' || c === '*') {
+        // `*` is calc()'s multiplication, which needs no spaces: `2*10px` is 2 times 10px. (`+` and `-` do.)
         out.push({ type: 'div', value: c, start, end: ++i });
       } else if (c === '"' || c === "'") {
         i++;
@@ -40,7 +41,7 @@ export function parseValue(text) {
         i = Math.min(i + 1, text.length);
         out.push({ type: 'string', value: text.slice(start, i), start, end: i });
       } else {
-        while (i < text.length && !/[\s,/()"']/.test(text[i])) i++;
+        while (i < text.length && !/[\s,/*()"']/.test(text[i])) i++;
         const word = text.slice(start, i);
         if (text[i] !== '(') { out.push({ type: 'word', value: word, start, end: i }); continue; }
         i++; // past "("
