@@ -1,3 +1,4 @@
+import { finalizationRecoveryTransaction } from './finalization-recovery-sqlite-transaction.js';
 import type { DatabaseSync } from 'node:sqlite';
 import { VerifiedGraphScopedFinalizationEvidenceCodec } from './finalization-graph-envelope.js';
 import {
@@ -355,7 +356,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       publisherPeerId.length === 0
       || publisherPeerId.trim() !== publisherPeerId
     ) return Promise.resolve({ status: 'conflict' });
-    return this.mutate(() => {
+    return this.mutate(() => this.transaction<FinalizationRecoverySettledPublisherUpgradeResult>(() => {
       if (this.#closed) return { status: 'closed' };
       const row = this.database.prepare(
         'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
@@ -373,6 +374,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       if (current.publisherUpgradePending) {
         return { status: 'existing', entry: current };
       }
+      const now = this.#policy.now();
       const result = this.database.prepare(`
         UPDATE finalization_inbox_v1
         SET trusted_publisher_peer_id = ?,
@@ -386,25 +388,18 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
           )
       `).run(
         publisherPeerId,
-        this.#policy.now(),
+        now,
         key,
         generation,
         publisherPeerId,
       );
       if (result.changes === 0) return { status: 'conflict' };
-      const updated = this.database.prepare(
-        'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
-      ).get(key);
-      if (!updated) return { status: 'missing' };
-      const updatedEntry = finalizationRecoveryRowToEntry(updated);
-      if (updatedEntry.state !== 'SETTLED' || !updatedEntry.verifiedEvidence) {
-        throw new Error('Finalization inbox settled upgrade lost verified evidence');
-      }
       return {
         status: 'recorded',
-        entry: updatedEntry,
+        entry: { ...current, trustedPublisherPeerId: publisherPeerId,
+          publisherUpgradePending: true, updatedAt: now },
       };
-    });
+    }));
   }
 
   rearmSettledWithTrustedPublisher(
@@ -549,7 +544,6 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       if (
         (entry.state === 'VERIFIED' || entry.state === 'SETTLED')
         && entry.generation === fields.generation
-        && entry.verifiedEvidence
         && VerifiedGraphScopedFinalizationEvidenceCodec.same(
           entry.verifiedEvidence,
           fields.verifiedEvidence,
@@ -701,6 +695,12 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       if (this.#closed) return false;
       let changed = false;
       this.transaction(() => {
+        if (state === 'SETTLED') {
+          const row = this.database.prepare('SELECT * FROM finalization_inbox_v1 WHERE key = ?').get(key);
+          if (!row) return;
+          const current = finalizationRecoveryRowToEntry(row);
+          if (current.generation !== generation || current.state !== 'VERIFIED') return;
+        }
         const now = this.#policy.now();
         const result = this.database.prepare(`
           UPDATE finalization_inbox_v1
@@ -714,8 +714,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
               updated_at = ?
           WHERE key = ? AND generation = ?
             AND state IN ('RECEIVED','VERIFIED','REORGED')
-            AND (? != 'SETTLED' OR verified_evidence_json IS NOT NULL)
-        `).run(state, state, lastError ?? null, now, key, generation, state);
+        `).run(state, state, lastError ?? null, now, key, generation);
         changed = result.changes > 0;
         this.pruneWithinTransaction(now);
       });
@@ -864,20 +863,8 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     return run;
   }
 
-  private transaction(operation: () => void): void {
-    let open = false;
-    try {
-      this.database.exec('BEGIN IMMEDIATE');
-      open = true;
-      operation();
-      this.database.exec('COMMIT');
-      open = false;
-    } catch (error) {
-      if (open) {
-        try { this.database.exec('ROLLBACK'); } catch { /* retain transaction failure */ }
-      }
-      throw error;
-    }
+  private transaction<T>(operation: () => T): T {
+    return finalizationRecoveryTransaction(this.database, operation);
   }
 
   private prune(): void {

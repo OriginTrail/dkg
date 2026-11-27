@@ -73,12 +73,6 @@ export function finalizationRecoveryRowToEntry(
     : VerifiedGraphScopedFinalizationEvidenceCodec.parse(
       JSON.parse(String(row.verified_evidence_json)),
     );
-  const evidenceState = state === 'VERIFIED' || state === 'SETTLED';
-  if (evidenceState && !verifiedEvidence) {
-    throw new Error(
-      'Finalization inbox verified row has no evidence',
-    );
-  }
   if (state === 'RECEIVED' && verifiedEvidence) {
     throw new Error('Finalization inbox unverified row has verified evidence');
   }
@@ -156,11 +150,12 @@ export function finalizationRecoveryRowToEntry(
     createdAt: asSafeInteger(row.created_at, 'created_at'),
     updatedAt: asSafeInteger(row.updated_at, 'updated_at'),
   };
-  if (evidenceState) {
+  if (state === 'VERIFIED' || state === 'SETTLED') {
+    if (!verifiedEvidence) throw new Error('Finalization inbox verified row has no evidence');
     return {
       ...base,
-      state: state as 'VERIFIED' | 'SETTLED',
-      verifiedEvidence: verifiedEvidence!,
+      state,
+      verifiedEvidence,
     };
   }
   if (state === 'SUPERSEDED' || state === 'REJECTED' || state === 'UNSUPPORTED') {

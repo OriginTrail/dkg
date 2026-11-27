@@ -180,6 +180,22 @@ describe('finalization recovery verified-evidence transition planner', () => {
     )).toEqual({ status: 'conflict' });
   });
 
+  it.each(['SUPERSEDED', 'REJECTED', 'UNSUPPORTED'] as const)(
+    'rejects retained evidence in terminal %s', state => {
+      expect(planFinalizationRecoveryVerifiedEvidenceTransition(
+        entry({ state, verifiedEvidence: evidence() }), 0,
+        { evidence: evidence(), placement: 'original' },
+      )).toEqual({ status: 'conflict' });
+    },
+  );
+
+  it.each(['VERIFIED', 'SETTLED'] as const)('rejects malformed %s without evidence', state => {
+    expect(planFinalizationRecoveryVerifiedEvidenceTransition(
+      entry({ state, verifiedEvidence: undefined }), 0,
+      { evidence: evidence(), placement: 'original' },
+    )).toEqual({ status: 'conflict' });
+  });
+
   it('does not depend on block hash equality for immutable identity checks', () => {
     expect(planFinalizationRecoveryVerifiedEvidenceTransition(
       entry(),

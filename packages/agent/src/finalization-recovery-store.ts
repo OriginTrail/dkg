@@ -142,6 +142,7 @@ export function planFinalizationRecoveryVerifiedEvidenceTransition(
   const { evidence } = commit;
   if (current.generation !== generation) return { status: 'conflict' };
   if (current.state === 'VERIFIED' || current.state === 'SETTLED') {
+    if (!current.verifiedEvidence) return { status: 'conflict' };
     return VerifiedGraphScopedFinalizationEvidenceCodec.same(
       current.verifiedEvidence,
       evidence,

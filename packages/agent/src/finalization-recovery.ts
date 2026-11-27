@@ -1,3 +1,4 @@
+import { transitionFinalizationRecoveryEntry } from './finalization-recovery-transition.js';
 import type { CanonicalFinalizationReceipt, CanonicalFinalizationReceiptResolution, ChainAdapter, EventFilter } from '@origintrail-official/dkg-chain';
 import { decodeFinalizationMessage, getMetrics, GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
@@ -1690,26 +1691,7 @@ export class FinalizationRecovery<
     state: 'SETTLED' | 'SUPERSEDED' | 'REJECTED' | 'UNSUPPORTED',
     reason?: string,
   ): Promise<boolean> {
-    const store = this.getStore();
-    if (!store) return false;
-    try {
-      const changed = await store.transition(entry.key, entry.generation, state, reason);
-      // A refused SETTLED write means the row lost its CAS or never persisted
-      // verified evidence; the caller discards the result, so say so here.
-      if (!changed && state === 'SETTLED') {
-        this.log.warn(
-          `Finalization recovery inbox refused to settle ${entry.ual}: `
-            + 'generation lost or verified evidence missing',
-        );
-      }
-      return changed;
-    } catch (error) {
-      this.log.warn(
-        `Finalization recovery transition to ${state} failed for ${entry.ual}: `
-          + `${error instanceof Error ? error.message : String(error)}`,
-      );
-      return false;
-    }
+    return transitionFinalizationRecoveryEntry(this.getStore(), entry, state, reason, this.log);
   }
 
   private async replaySettled(
