@@ -70,4 +70,16 @@ describe('ACK candidate selection with the cores\' track record', () => {
     expect(plan.peers).toEqual(['core-d', ...CORES.slice(0, 4)]);
     expect(plan.diagnostics.some((d) => d.reason === 'ineligible-signer')).toBe(false);
   });
+  it('uses the same non-default quorum for direct selection and discovered rounds', async () => {
+    const coordinator = coordinatorWithCores();
+    coordinator.recordRoundOutcomes(CORES.slice(0, 3).map(peerId => ({
+      peerId, outcome: { kind: 'ineligible-signer' as const, reason: 'not-in-sharding-table' },
+    })));
+    const local = { peerId: 'self', available: false };
+    const direct = coordinator.selectCandidates({ connectedPeers: [...CORES, 'relay-1'],
+      protocol: PROTOCOL_STORAGE_ACK, requiredACKs: 2 }, local);
+    expect(direct.peers).toEqual(['core-c', 'core-d']);
+    expect(await round(coordinator, 2, local)).toEqual(direct);
+  });
+
 });

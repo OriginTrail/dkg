@@ -976,10 +976,10 @@ export class ACKCollector {
                 async (span) => {
                   const ok = await this.deps.verifyIdentity!(recoveredAddress, identityId, { signal: lifetime.signal });
                   // Legacy boolean verifier surfaces no structured reason; an
-                  // invalid result maps to the generic registration gate.
-                  span.setAttribute('dkg.verify_result', ok ? 'valid' : 'key-not-registered');
+                  // false can also mean an RPC failure; it cannot prove signer ineligibility.
+                  span.setAttribute('dkg.verify_result', ok ? 'valid' : 'unknown');
                   getMetrics().ackVerifyTotal.add(1, {
-                    result: ok ? 'valid' : 'key-not-registered',
+                    result: ok ? 'valid' : 'unknown',
                   });
                   return ok;
                 },
@@ -987,9 +987,9 @@ export class ACKCollector {
               );
               if (roundIsOver()) return null;
               if (!valid) {
-                peerStatuses.recordSignerFailure(peerId, 'key-not-registered');
+                peerStatuses.recordACKValidation(peerId, 'ACK_VERIFY:unknown');
                 getMetrics().ackPeerTotal.add(1, { result: 'rejected' });
-                log(`[ACKCollector] Signer ${recoveredAddress.slice(0, 10)}... not registered for identity ${identityId} — rejecting ACK from ${peerId.slice(-8)}`);
+                log(`[ACKCollector] Signer ${recoveredAddress.slice(0, 10)}... could not be verified for identity ${identityId} — rejecting ACK from ${peerId.slice(-8)}`);
                 return null;
               }
             }

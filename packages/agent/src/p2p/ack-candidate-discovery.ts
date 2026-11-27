@@ -2,7 +2,6 @@ import { PROTOCOL_STORAGE_ACK, STORAGE_ACK_PROTOCOLS, isStorageACKProtocol, type
 import { PeerCapabilityRegistry, type PeerCapabilityRound } from './peer-capability.js';
 import {
   ACKPeerTrackRecord,
-  DEFAULT_REQUIRED_ACKS,
   selectCanonicalACKCandidateUniverse,
   selectCanonicalACKCandidatePeersWithDiagnostics,
   type ACKCanonicalCandidatePeerSelectionInput,
@@ -118,10 +117,9 @@ export class ACKCandidateDiscoveryCoordinator {
   }
 
   selectCandidates(
-    input: Omit<ACKCanonicalCandidatePeerSelectionInput, 'capability' | 'selfPeerId' | 'localCandidate'>,
+    input: Omit<ACKCanonicalCandidatePeerSelectionInput, 'capability' | 'selfPeerId' | 'localCandidate' | 'trackRecord'>,
     localCandidate: LocalACKCandidate,
     snapshot: ACKCapabilitySnapshot = snapshotACK(this.registry.beginRound()),
-    requiredACKs: number = DEFAULT_REQUIRED_ACKS,
   ): ACKCanonicalCandidatePeerSelectionResult {
     const requestedProtocolPeers = input.protocol && input.protocol !== PROTOCOL_STORAGE_ACK
       ? snapshot.supportByProtocol.get(input.protocol)
@@ -130,7 +128,6 @@ export class ACKCandidateDiscoveryCoordinator {
       ...input,
       localCandidate,
       trackRecord: this.trackRecord,
-      requiredACKs,
       capability: { mode: 'require', corePeers: snapshot.corePeerIds, requestedProtocolPeers },
     });
   }
@@ -202,7 +199,7 @@ export class ACKCandidateDiscoveryCoordinator {
       ackCandidatePeerIds: ports.ackCandidatePeerIds,
       preferredACKPeerIds: ports.preferredACKPeerIds,
       verifiedSameNetworkPeerIds: ports.verifiedSameNetworkPeerIds(),
-      protocol: requestedProtocol,
-    }, ports.localCandidate, snapshotACK(round), ports.requiredACKs);
+      protocol: requestedProtocol, requiredACKs: ports.requiredACKs,
+    }, ports.localCandidate, snapshotACK(round));
   }
 }

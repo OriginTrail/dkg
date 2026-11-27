@@ -150,7 +150,7 @@ describe('ACK rounds with the track record', () => {
   }
 
   /** One round over the pool; `plan` stands in for the agent's candidate selection. */
-  async function round(plan: (pool: string[]) => string[], record?: ACKPeerTrackRecord) {
+  async function round(plan: (pool: string[]) => string[], record?: ACKPeerTrackRecord, legacy?: { fails: boolean; pool: string[] }) {
     const sends: string[] = [];
     const checks: bigint[] = [];
     const deps: ACKCollectorDeps = {
@@ -161,7 +161,7 @@ describe('ACK rounds with the track record', () => {
         await sleep(replyAfterMs.get(peerId)!);
         return peerId === 'busy' ? decline() : signedACK(peerId);
       },
-      getConnectedCorePeers: async () => plan([...wallets.keys()]),
+      getConnectedCorePeers: async () => plan(legacy?.pool ?? [...wallets.keys()]),
       verifyIdentityDetailed: async (_signer, identityId) => {
         checks.push(identityId);
         await sleep(20);
@@ -169,6 +169,11 @@ describe('ACK rounds with the track record', () => {
       },
       ...(record ? { onPeerOutcomes: (reports: readonly ACKPeerOutcomeReport[]) => record.record(reports) } : {}),
     };
+    if (legacy) {
+      delete deps.verifyIdentityDetailed;
+      // Legacy adapter wrappers return false when the underlying RPC throws.
+      deps.verifyIdentity = async (_signer, identityId) => !(legacy.fails && identityId === 19n);
+    }
     const startedAt = performance.now();
     const result = await new ACKCollector(deps).collect({
       merkleRoot, contextGraphId: CG_ID, contextGraphIdStr: CG_STR, publisherPeerId: 'edge', publicByteSize: 100n,
@@ -197,4 +202,16 @@ describe('ACK rounds with the track record', () => {
     expect(record.outcome('non-member')).toEqual({ kind: 'ineligible-signer', reason: 'not-in-sharding-table' });
     expect(record.outcome('busy')).toEqual({ kind: 'declined', code: 'CORE_TEMPORARILY_UNAVAILABLE' });
   });
+  it('retries a recovered core after an ambiguous legacy verification failure', async () => {
+    const record = new ACKPeerTrackRecord();
+    const planned = (pool: string[]) => record.plan(pool, 2).peers;
+    await round(planned, record, { fails: true, pool: ['non-member', 'fast-1', 'fast-2', 'slow'] });
+    expect(record.outcome('non-member')).toEqual({ kind: 'declined', code: 'ACK_VERIFY:unknown' });
+    // The failed core is now healthy, and a previously successful core has left.
+    expect(planned(['non-member', 'fast-2', 'slow'])).toContain('non-member');
+    const next = await round(planned, record, { fails: false, pool: ['non-member', 'fast-2', 'slow'] });
+    expect(next.acks.sort()).toEqual(['fast-2', 'non-member']);
+    expect(record.outcome('non-member')?.kind).toBe('valid');
+  });
+
 });

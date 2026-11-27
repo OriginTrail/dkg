@@ -3243,8 +3243,8 @@ export class DKGAgent extends DKGAgentBase {
       verifiedSameNetworkPeerIds: this.networkAdmissionCoordinator.enabled
         ? this.networkAdmissionCoordinator.verifiedSameNetworkPeerIds()
         : undefined,
-      protocol,
-    }, this.localACKCandidate(), undefined, requiredACKs);
+      protocol, requiredACKs,
+    }, this.localACKCandidate());
     return this.logACKCandidatePlan(selection, protocol, requiredACKs);
   }
 
