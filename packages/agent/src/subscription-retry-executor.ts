@@ -1,4 +1,4 @@
-import type { SubscriptionRecoveryCoordinator, SubscriptionRecoveryLease } from './subscription-recovery-owner.js';
+import type { SubscriptionRecoveryCoordinator, SubscriptionRecoveryLease, SubscriptionRecoveryAttempt } from './subscription-recovery-owner.js';
 import { runBoundedOperation, createAbortError, BoundedOperationTimeoutError } from './bounded-operation.js';
 
 export interface SubscriptionRetryRow<T> {
@@ -9,9 +9,7 @@ export interface SubscriptionRetryRow<T> {
   checking: boolean;
   readonly order: number;
 }
-export interface SubscriptionRetryLease {
-  readonly owner: SubscriptionRecoveryLease;
-  isCurrent(): boolean;
+export interface SubscriptionRetryLease extends SubscriptionRecoveryAttempt {
   check<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T>;
 }
 interface SubscriptionRetryPolicy<T> {
@@ -92,7 +90,7 @@ export class SubscriptionRetryExecutor<T> {
       row.checking = true; this.#checking += 1;
       const owner = this.#owners.get(row.id)!;
       const lease: SubscriptionRetryLease = {
-        owner,
+        signal: owner.signal,
         isCurrent: () => this.#valid(row),
         check: async work => {
           const timeoutMs = Math.min(this.policy.checkTimeoutMs, row.expiresAt - this.policy.now());

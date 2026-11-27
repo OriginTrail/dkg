@@ -1,4 +1,4 @@
-import type { SubscriptionRecoveryCoordinator, SubscriptionRecoveryLease } from './subscription-recovery-owner.js';
+import type { SubscriptionRecoveryCoordinator, SubscriptionRecoveryAttempt } from './subscription-recovery-owner.js';
 import { sameDurableSubscriptionIntent } from './context-graph-subscription-policy.js';
 // SPDX-License-Identifier: Apache-2.0
 import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
@@ -15,8 +15,6 @@ export type SubscriptionRecoveryOutcome =
 
 /** Row policy is shared by the periodic and startup-name-binding schedulers. */
 export interface SubscriptionRecoveryRowPorts {
-  readonly recovery: SubscriptionRecoveryCoordinator;
-  isCurrent(): boolean;
   dormancy(id: string): ContextGraphDormancyReason | undefined;
   revision(id: string): number;
   subscription(id: string): ContextGraphSub | undefined;
@@ -32,19 +30,25 @@ export interface SubscriptionRecoveryRowPorts {
     isCurrent: () => boolean): Promise<void>;
 }
 
+/** Coordination belongs to schedulers, outside the row transaction. */
+export interface SubscriptionRecoverySchedulingPorts extends SubscriptionRecoveryRowPorts {
+  readonly recovery: SubscriptionRecoveryCoordinator;
+  isCurrent(): boolean;
+}
+
 function hasIntent(row: ContextGraphSubscriptionRecord | null): row is ContextGraphSubscriptionRecord {
   return row !== null && (row.subscribed || row.coreHosted === true);
 }
 
-/** The scheduler owns a ready lease until this row transaction has retired. */
+/** The scheduler supplies its complete attempt lifetime through transaction retirement. */
 export async function recoverPersistedSubscriptionRow(
-  id: string, ports: SubscriptionRecoveryRowPorts, owner: SubscriptionRecoveryLease,
+  id: string, ports: SubscriptionRecoveryRowPorts, attempt: SubscriptionRecoveryAttempt,
   options: { snapshot?: { row: ContextGraphSubscriptionRecord | null; revision: number };
     reason?: ContextGraphDormancyReason; verifiedOnChainId?: string } = {},
 ): Promise<SubscriptionRecoveryOutcome> {
-  const signal = owner.signal;
+  const signal = attempt.signal;
   const { snapshot, reason = 'authorityUnavailable', verifiedOnChainId } = options;
-  const current = () => owner.isCurrent() && ports.isCurrent() && ports.dormancy(id) === reason;
+  const current = () => attempt.isCurrent() && ports.dormancy(id) === reason;
   if (!current()) return { kind: 'done' };
   const revision = snapshot?.revision ?? ports.revision(id);
   const row = snapshot ? snapshot.row : await ports.load(id);
