@@ -53,7 +53,7 @@ export interface ACKCollectorDeps {
    * may return a synchronous pool for backward compatibility or await network
    * admission; consumers must always await the result.
    */
-  getConnectedCorePeers: (protocol: string, requiredACKs: number) => string[] | Promise<string[]>;
+  getConnectedCorePeers: (protocol?: string, requiredACKs?: number) => string[] | Promise<string[]>;
   /**
    * Boolean ACK signer pre-flight. Backward-compatible legacy entry
    * point — when only this is provided the rejection log surfaces a
