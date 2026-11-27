@@ -1,4 +1,3 @@
-import { DEFAULT_REQUIRED_ACKS } from './ack-collector.js';
 import type { ACKPeerTrackRecord } from './ack-peer-track-record.js';
 import { PROTOCOL_STORAGE_ACK, isStorageACKProtocol, type StorageACKProtocol } from '@origintrail-official/dkg-core';
 
@@ -20,8 +19,8 @@ export interface ACKCanonicalCandidatePeerSelectionInput {
   capability?: ACKCapabilitySelectionPolicy;
   protocol?: StorageACKProtocol;
   selfPeerId?: string;
-  /** Apply round history to eligible remotes before projecting peers and diagnostics. */
-  trackRecord?: Pick<ACKPeerTrackRecord, 'plan'>;
+  /** History filtering always carries the quorum of this round. */
+  history?: { trackRecord: Pick<ACKPeerTrackRecord, 'plan'>; requiredACKs: number };
   requiredACKs?: number;
 }
 
@@ -185,8 +184,8 @@ export function selectCanonicalACKCandidatePeersWithDiagnostics(
   });
 
   const eligibleRemote = flattenTiers(tiers, preferredACKPeers);
-  const plan = input.trackRecord?.plan(eligibleRemote,
-    Math.max(1, (input.requiredACKs ?? DEFAULT_REQUIRED_ACKS) - Number(input.localCandidate?.available === true)));
+  const plan = input.history?.trackRecord.plan(eligibleRemote,
+    Math.max(1, input.history.requiredACKs - Number(input.localCandidate?.available === true)));
   const remotePeers = plan?.peers ?? eligibleRemote;
   const ineligible = plan?.ineligible ?? new Set<string>();
   const diagnosticOrder = plan

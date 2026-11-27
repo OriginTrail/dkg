@@ -117,7 +117,7 @@ export class ACKCandidateDiscoveryCoordinator {
   }
 
   selectCandidates(
-    input: Omit<ACKCanonicalCandidatePeerSelectionInput, 'capability' | 'selfPeerId' | 'localCandidate' | 'trackRecord'>,
+    input: Omit<ACKCanonicalCandidatePeerSelectionInput, 'capability' | 'selfPeerId' | 'localCandidate' | 'history'> & { requiredACKs: number },
     localCandidate: LocalACKCandidate,
     snapshot: ACKCapabilitySnapshot = snapshotACK(this.registry.beginRound()),
   ): ACKCanonicalCandidatePeerSelectionResult {
@@ -127,7 +127,7 @@ export class ACKCandidateDiscoveryCoordinator {
     return selectCanonicalACKCandidatePeersWithDiagnostics({
       ...input,
       localCandidate,
-      trackRecord: this.trackRecord,
+      history: { trackRecord: this.trackRecord, requiredACKs: input.requiredACKs },
       capability: { mode: 'require', corePeers: snapshot.corePeerIds, requestedProtocolPeers },
     });
   }

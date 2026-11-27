@@ -53,7 +53,7 @@ export interface ACKCollectorDeps {
    * may return a synchronous pool for backward compatibility or await network
    * admission; consumers must always await the result.
    */
-  getConnectedCorePeers: (protocol?: string) => string[] | Promise<string[]>;
+  getConnectedCorePeers: (protocol: string, requiredACKs: number) => string[] | Promise<string[]>;
   /**
    * Boolean ACK signer pre-flight. Backward-compatible legacy entry
    * point — when only this is provided the rejection log surfaces a
@@ -242,7 +242,7 @@ export class ACKCollector {
     requiredACKs: number,
   ): Promise<string[]> {
     try {
-      return await this.deps.getConnectedCorePeers(protocol);
+      return await this.deps.getConnectedCorePeers(protocol, requiredACKs);
     } catch (err) {
       if (err instanceof QuorumUnmetError) throw err;
       const message = err instanceof Error ? err.message : String(err);

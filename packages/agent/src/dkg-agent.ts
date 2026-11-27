@@ -3171,13 +3171,13 @@ export class DKGAgent extends DKGAgentBase {
   private async getACKCandidatePeersAfterAdmission(
     protocol: string | undefined,
     ctx: OperationContext,
+    requiredACKs: number,
   ): Promise<string[]> {
     const connectedPeers = this.connectedPeerIds();
     const requestedProtocol = protocol ?? PROTOCOL_STORAGE_ACK;
     if (!isStorageACKProtocol(requestedProtocol)) {
       throw new Error(`Unsupported StorageACK protocol: ${requestedProtocol}`);
     }
-    const requiredACKs = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
     const selection = await this.ackCandidateDiscovery.resolveRound({
       connectedPeers,
       ackCandidatePeerIds: this.config.ackCandidatePeerIds,
@@ -3289,9 +3289,9 @@ export class DKGAgent extends DKGAgentBase {
         await this.gossip.publish(topic, data);
       },
       sendP2P: this.createACKSendP2P(timeoutMs),
-      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeersAfterAdmission(
+      getConnectedCorePeers: (protocol: string, requiredACKs: number) => this.getACKCandidatePeersAfterAdmission(
         protocol,
-        this.ackOperationContext(protocol),
+        this.ackOperationContext(protocol), requiredACKs,
       ),
       log: options.log,
       onPeerOutcomes: (reports) => this.ackCandidateDiscovery.recordRoundOutcomes(reports),
@@ -3373,9 +3373,9 @@ export class DKGAgent extends DKGAgentBase {
         await this.gossip.publish(topic, data);
       },
       sendP2P: this.createACKSendP2P(undefined, expectedHead),
-      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeersAfterAdmission(
+      getConnectedCorePeers: (protocol: string, requiredACKs: number) => this.getACKCandidatePeersAfterAdmission(
         protocol,
-        this.ackOperationContext(protocol),
+        this.ackOperationContext(protocol), requiredACKs,
       ),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint, options) => {
@@ -3519,9 +3519,9 @@ export class DKGAgent extends DKGAgentBase {
         await this.gossip.publish(topic, data);
       },
       sendP2P: this.createACKSendP2P(undefined, expectedHead),
-      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeersAfterAdmission(
+      getConnectedCorePeers: (protocol: string, requiredACKs: number) => this.getACKCandidatePeersAfterAdmission(
         protocol,
-        this.ackOperationContext(protocol),
+        this.ackOperationContext(protocol), requiredACKs,
       ),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint, options) => {

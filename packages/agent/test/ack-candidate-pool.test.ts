@@ -40,7 +40,7 @@ type AgentInternals = {
   };
   lastKnownRequiredACKs?: number;
   getPeerProtocols(peerId: string): Promise<string[]>;
-  getACKCandidatePeersAfterAdmission(protocol: string | undefined, ctx: unknown): Promise<string[]>;
+  getACKCandidatePeersAfterAdmission(protocol: string | undefined, ctx: unknown, requiredACKs: number): Promise<string[]>;
   router: { probeProtocol(peerId: string, protocol: string): Promise<'supported' | 'unsupported' | 'unavailable'> } | null;
   storageAckEndpoint: {
     dispatch(protocol: string, data: Uint8Array, peerId: string): Promise<Uint8Array>;
@@ -128,7 +128,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
   it('rejects an unknown ACK protocol at both public candidate boundaries', async () => {
     const a = await buildAgent({ confirmedCores: [CORE[0]], connected: [CORE[0]] });
     expect(() => a.getACKCandidatePeers('/dkg/test/unknown')).toThrow(/Unsupported StorageACK protocol/);
-    await expect(a.getACKCandidatePeersAfterAdmission('/dkg/test/unknown', createOperationContext('publish')))
+    await expect(a.getACKCandidatePeersAfterAdmission('/dkg/test/unknown', createOperationContext('publish'), a.lastKnownRequiredACKs ?? 3))
       .rejects.toThrow(/Unsupported StorageACK protocol/);
   });
 
@@ -166,6 +166,16 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     expect(a.getACKCandidatePeers()).toEqual([CORE[0]]);
     a.peerCapabilityRegistry.observe(CORE[1], { source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK_V2] });
     expect((a.peerCapabilityRegistry.supportsCore(CORE[1]) && a.peerCapabilityRegistry.supports(CORE[1], PROTOCOL_STORAGE_ACK_V2))).toBe(false);
+  });
+
+  it('forwards the collector quorum through the transport even when the agent cache differs', async () => {
+    const agent = await buildAgent({ confirmedCores: CORE, connected: CORE, lastKnownRequiredACKs: 99 });
+    const runtime = agent as unknown as DKGAgent;
+    const discovery = (runtime as unknown as { ackCandidateDiscovery: { resolveRound: (input: unknown) => Promise<unknown> } }).ackCandidateDiscovery;
+    const resolve = vi.spyOn(discovery, 'resolveRound').mockResolvedValue({ peers: CORE, diagnostics: [] });
+    const transport = runtime.createACKTransportFactory()();
+    await transport.getConnectedCorePeers(PROTOCOL_STORAGE_ACK, 2);
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ requiredACKs: 2 }));
   });
 
   it('excludes connected edges from a 3-core pool', async () => {
@@ -221,7 +231,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
       },
     };
 
-    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([CORE[0]]);
+    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'), a.lastKnownRequiredACKs ?? 3)).toEqual([CORE[0]]);
     expect(preflightCalls).toEqual([[CORE[0]]]);
     expect(preflightCalls.flat()).not.toContain(EDGE[0]);
     expect(a.peerCapabilityRegistry.supportsCore(EDGE[0])).toBe(false);
@@ -245,9 +255,9 @@ describe('getACKCandidatePeers — core-only candidates', () => {
       },
     };
 
-    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([]);
+    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'), a.lastKnownRequiredACKs ?? 3)).toEqual([]);
     ackHandlerRegistered = true; // The cached identify record stays populated and unchanged.
-    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([CORE[0]]);
+    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'), a.lastKnownRequiredACKs ?? 3)).toEqual([CORE[0]]);
     expect(probe).toHaveBeenCalledWith(CORE[0], PROTOCOL_STORAGE_ACK);
     expect(preflightPeers).toEqual([CORE[0]]);
   });
@@ -290,7 +300,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     });
     a.router = { probeProtocol: probe };
 
-    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([remotePeerId]);
+    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'), a.lastKnownRequiredACKs ?? 3)).toEqual([remotePeerId]);
     expect(sequence).toEqual(['identity', 'capability']);
     expect(probe).toHaveBeenCalledWith(remotePeerId, PROTOCOL_STORAGE_ACK);
   });
@@ -318,7 +328,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
       }),
     };
 
-    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([CORE[3]]);
+    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'), a.lastKnownRequiredACKs ?? 3)).toEqual([CORE[3]]);
     expect(probe).toHaveBeenCalledWith(CORE[3], PROTOCOL_STORAGE_ACK);
   });
 
@@ -343,7 +353,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
       preflightPeerAdmission: async (peerIds) => ({ checked: [...peerIds].length, admitted: 0, unresolved: 0 }),
     };
 
-    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([]);
+    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'), a.lastKnownRequiredACKs ?? 3)).toEqual([]);
     expect(probe).toHaveBeenCalledTimes(32);
     expect(peak).toBe(4);
     expect(active).toBe(0);
@@ -364,7 +374,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     a.router = { probeProtocol: probe };
     installOpenACKAdmission(a);
 
-    const candidates = await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'));
+    const candidates = await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'), a.lastKnownRequiredACKs ?? 3);
     expect(candidates).toEqual([a.peerId, ...CORE.slice(0, 3)]);
     expect(probe).toHaveBeenCalledWith(CORE[2], PROTOCOL_STORAGE_ACK);
     // If either identified core fails to ACK, the extra discovered core still
@@ -389,7 +399,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     a.router = { probeProtocol: probe };
     installOpenACKAdmission(a);
 
-    const candidates = await a.getACKCandidatePeersAfterAdmission(PROTOCOL_STORAGE_UPDATE_ACK_V2, createOperationContext('update'));
+    const candidates = await a.getACKCandidatePeersAfterAdmission(PROTOCOL_STORAGE_UPDATE_ACK_V2, createOperationContext('update'), a.lastKnownRequiredACKs ?? 3);
     expect(candidates.slice(0, 3)).toEqual([a.peerId, ...upgraded]);
     expect(candidates).toHaveLength(6);
     for (const peerId of upgraded) {
@@ -408,7 +418,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     a.router = { probeProtocol: probe };
     installOpenACKAdmission(a);
 
-    expect(await a.getACKCandidatePeersAfterAdmission(PROTOCOL_STORAGE_UPDATE_ACK, createOperationContext('update'))).toEqual([CORE[0], CORE[1]]);
+    expect(await a.getACKCandidatePeersAfterAdmission(PROTOCOL_STORAGE_UPDATE_ACK, createOperationContext('update'), a.lastKnownRequiredACKs ?? 3)).toEqual([CORE[0], CORE[1]]);
     expect(probe).toHaveBeenCalledWith(EDGE[0], PROTOCOL_STORAGE_UPDATE_ACK);
     expect(probe).toHaveBeenCalledWith(CORE[0], PROTOCOL_STORAGE_ACK);
     expect(a.peerCapabilityRegistry.supportsCore(EDGE[0])).toBe(false);
@@ -437,7 +447,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     a.router = { probeProtocol: probe };
     installOpenACKAdmission(a);
 
-    const candidates = await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'));
+    const candidates = await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'), a.lastKnownRequiredACKs ?? 3);
     expect(candidates).toEqual([...advertised, ...healthy]);
     expect(probe).toHaveBeenCalledTimes(3);
   });
@@ -453,10 +463,10 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     a.router = { probeProtocol: probe };
     installOpenACKAdmission(a);
 
-    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([a.peerId]);
+    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'), a.lastKnownRequiredACKs ?? 3)).toEqual([a.peerId]);
     expect(probe).toHaveBeenCalledTimes(32);
     expect(probe.mock.calls.map(([peerId]) => peerId)).not.toContain(unknown[39]);
-    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([a.peerId, unknown[39]]);
+    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'), a.lastKnownRequiredACKs ?? 3)).toEqual([a.peerId, unknown[39]]);
     expect(probe.mock.calls.slice(32).map(([peerId]) => peerId)).toContain(unknown[39]);
     expect(probe.mock.calls.length - 32).toBeLessThanOrEqual(32);
   });
@@ -481,7 +491,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     a.router = { probeProtocol: probe };
     installOpenACKAdmission(a);
 
-    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([a.peerId, unknown[39]]);
+    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'), a.lastKnownRequiredACKs ?? 3)).toEqual([a.peerId, unknown[39]]);
     expect(probe.mock.calls[0]?.[0]).toBe(unknown[39]);
     expect(probe).toHaveBeenCalledTimes(4);
     expect(peak).toBe(4);
