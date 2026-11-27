@@ -3,7 +3,7 @@ import {
   assertSafeIri,
   assertSafeRdfTerm,
 } from '@origintrail-official/dkg-core/sparql-safe';
-import { canonicalBlankNodeIdMap } from '@origintrail-official/dkg-core/dist/crypto/canonicalize.js';
+import { canonicalBlankNodeIdMap } from '@origintrail-official/dkg-core/verification';
 import { isBlankNode } from './skolemize.js';
 
 /**

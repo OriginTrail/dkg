@@ -1,10 +1,8 @@
 import { normalizeGraphScopedHex32 as normalizeHex32 } from "./graph-scoped-root.js";
 import { createHash } from 'node:crypto';
 import {
-  GRAPH_KA_CONTENT_SCOPE_VERSION,
-  parseDeterministicKnowledgeAssetUal,
-} from '@origintrail-official/dkg-core/dist/ka-content-scope.js';
-import { parseGraphScopedAssertionSealCandidate } from '@origintrail-official/dkg-core/dist/assertion-seal.js';
+  GRAPH_KA_CONTENT_SCOPE_VERSION, parseDeterministicKnowledgeAssetUal, parseGraphScopedAssertionSealCandidate
+} from '@origintrail-official/dkg-core/verification';
 import {
   parseWireGraphKnowledgeAssetStructure,
   computeFlatKCRootV10 as computeStructuredKCRoot,

@@ -71,6 +71,11 @@
       "types": "./dist/graph-computer-protocol.d.ts",
       "import": "./dist/graph-computer-protocol.js",
       "default": "./dist/graph-computer-protocol.js"
+    },
+    "./verification": {
+      "types": "./dist/verification.d.ts",
+      "import": "./dist/verification.js",
+      "default": "./dist/verification.js"
     }
   },
   "scripts": {

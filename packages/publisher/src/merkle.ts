@@ -1,7 +1,6 @@
-import { sha256 } from '@origintrail-official/dkg-core/dist/crypto/hashing.js';
-import { MerkleTree } from '@origintrail-official/dkg-core/dist/crypto/merkle.js';
-import { hashTriple, hashTripleV10 } from '@origintrail-official/dkg-core/dist/crypto/canonicalize.js';
-import { V10MerkleTree, structuredKARootV10 } from '@origintrail-official/dkg-core/dist/crypto/v10-merkle.js';
+import {
+  sha256, MerkleTree, hashTriple, hashTripleV10, V10MerkleTree, structuredKARootV10
+} from '@origintrail-official/dkg-core/verification';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 /**
@@ -76,7 +75,7 @@ export function computePrivateRootV10(privateQuads: Quad[]): Uint8Array | undefi
 // The canonical structured-root logic + sentinels live in dkg-core
 // (`structuredKARootV10`), so publisher, prover, and the on-chain verifier
 // cannot drift. Re-exported here for callers that read the sentinels directly.
-export { SENTINEL_NO_PRIVATE_V10, SENTINEL_NO_PUBLIC_V10 } from '@origintrail-official/dkg-core/dist/crypto/v10-merkle.js';
+export { SENTINEL_NO_PRIVATE_V10, SENTINEL_NO_PUBLIC_V10 } from '@origintrail-official/dkg-core/verification';
 
 /**
  * V10 per-KA **STRUCTURED** commitment — `root = hashPair(publicRoot, privateDataHash)`
