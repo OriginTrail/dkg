@@ -537,6 +537,7 @@ export default defineConfig({
       "test/context-graph-registration-resolution.test.ts",
       "test/context-graph-list-concurrency.test.ts",
       "test/context-graph-list-wire-only.test.ts",
+      "test/context-graph-list-filter.test.ts",
       "test/cg-resolve-refresh.test.ts",
       "test/private-cg-membership-bootstrap.test.ts",
       "test/participant-join-approval-proof.test.ts",
