@@ -4,7 +4,7 @@
 import type ts from 'typescript';
 import { parseColour } from '../scripts/colour.mjs';
 import { parseValue, readValue } from '../scripts/css-value.mjs';
-import { classify, declarations, resolveVars, type Hit, type Kind } from '../scripts/design-rules.mjs';
+import { classify, declarations, readSource, resolveVars, type Hit, type Kind, type SourceDocument } from '../scripts/design-rules.mjs';
 import { suggest, type Finding, type Scales } from '../scripts/design-suggest.mjs';
 import { attrsOf, parseTsx, walkJsx, type Declaration, type Jsx } from '../scripts/jsx.mjs';
 import { jsxElements } from './helpers/jsx.js';
@@ -66,3 +66,9 @@ walkJsx(tree, (node: Jsx, ancestors: Jsx[]) => {
 // @ts-expect-error: ancestors are JSX elements, not strings
 walkJsx(tree, (_node: Jsx, ancestors: string[]) => void ancestors);
 export const where: string = [...jsxElements(tree)][0].where;
+
+// One reading of a file gives both rule families what they need.
+export const doc: SourceDocument = readSource('<button style="gap: 8px">Save</button>', '.html');
+export const firstTag: string | undefined = doc.tags[0]?.name;
+// @ts-expect-error: an element's attributes are strings (or null when set at runtime), not the reader's offsets
+export const attrOffset: number = doc.tags[0].attrs.get('style')!.start;

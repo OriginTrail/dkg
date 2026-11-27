@@ -1,9 +1,9 @@
 // @ts-check
 // Reads an HTML mock-up once: its opening tags with their attributes, and the bodies of
 // its <style> blocks, each with where it is in the file. Comments in markup are skipped,
-// so commented-out markup isn't read; `<!--` in raw text (a script, a style) is text. Both the
-// declaration reader (scripts/design-rules.mjs: style attributes and <style> blocks) and
-// the component rules (scripts/design-core.mjs) read HTML through this, and nothing else.
+// so commented-out markup isn't read; `<!--` in raw text (a script, a style) is text.
+// readSource (scripts/design-rules.mjs) reads a mock-up through this once, for both the
+// declaration rules and the component rules, and nothing else reads HTML.
 // Attribute values are decoded as a browser decodes them (`ds&#45;btn` is ds-btn), with
 // a map back to where each character is in the file. Checked by tsc (tsconfig.type-tests.json).
 import { decodeHTMLAttribute } from 'entities';

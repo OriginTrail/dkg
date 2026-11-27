@@ -9,11 +9,10 @@ import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node
 import { fileURLToPath } from 'node:url';
 import { NAMED_COLOURS, parseColour } from './colour.mjs';
 import { CssReadError, cssDeclarations } from './css.mjs';
-import { classify, declarations, lineIndex, resolveVarsFrom } from './design-rules.mjs';
+import { classify, declarations, lineIndex, readSource, resolveVarsFrom } from './design-rules.mjs';
 import { literalWords, readValue, varRefs, walkValue } from './css-value.mjs';
-import { readHtml } from './html.mjs';
 import { ADD, suggest } from './design-suggest.mjs';
-import { attrText, attrsOf, classNames, customPropertyNames, opening, parseTsx, tagName, walkJsx } from './jsx.mjs';
+import { customPropertyNames } from './jsx.mjs';
 
 export { declarations, parseColour };
 
@@ -336,12 +335,7 @@ export function checkDeclaration(system, prop, value, { known, mockup = false } 
 // Components a mock-up rebuilds that the system already has. Each rule reads the whole
 // opening tag, so a tag that already has the shared class passes.
 
-/**
- * An element as the component rules see it, from HTML or from JSX: its tag name, where
- * it starts, its classes and its attributes (a string, '' when bare, null when set at
- * runtime). `source` is how it's written, for the report.
- * @typedef {{ name: string, source: string, index: number, classes: string[], attrs: Map<string, string | null> }} Tag
- */
+/** An element as the component rules see it (design-rules.mjs · readSource). @typedef {import('./design-rules.mjs').Tag} Tag */
 
 /** A class named for the thing (card, stat-card), not one that only starts with it (card-body). @param {string[]} classes @param {string} words */
 const endsWith = (classes, words) => classes.some((c) => new RegExp(`(${words})$`).test(c));
@@ -377,38 +371,14 @@ const COMPONENT_RULES = [
   },
 ];
 
-/** HTML opening tags, from the same reader the declaration check uses (scripts/html.mjs). @param {string} html @returns {Tag[]} */
-function htmlTags(html) {
-  return readHtml(html).tags.map((t) => {
-    /** @type {Map<string, string | null>} */
-    const attrs = new Map([...t.attrs].map(([k, a]) => [k, a.value]));
-    return { name: t.name, source: t.source, index: t.index, classes: (attrs.get('class') ?? '').split(/\s+/).filter(Boolean), attrs };
-  });
-}
-
-/** JSX elements, read with the shared parser (scripts/jsx.mjs). A capitalised component (<Button>) is a system part already. @param {string} text @param {string} ext @returns {Tag[]} */
-function jsxTags(text, ext) {
-  const tree = parseTsx(text, `inline${ext}`);
-  /** @type {Tag[]} */
-  const out = [];
-  walkJsx(tree, (node) => {
-    const name = tagName(node);
-    if (!/^[a-z]/.test(name)) return;
-    /** @type {Map<string, string | null>} */
-    const attrs = new Map();
-    for (const [key, attr] of attrsOf(node)) attrs.set(key, attrText(attr));
-    const index = node.getStart(tree);
-    out.push({ name, source: opening(node).getText(tree), index, classes: classNames(node), attrs });
-  });
-  return out;
-}
-
-/** @param {string} text @param {string} ext @param {(line: number) => boolean} keepLine @returns {Reported[]} */
-function checkMarkup(text, ext, keepLine) {
+/**
+ * The component rules over a file's elements, read once with its declarations (readSource).
+ * @param {Tag[]} tags @param {string} text @param {(line: number) => boolean} keepLine @returns {Reported[]}
+ */
+function checkMarkup(tags, text, keepLine) {
   const lineOf = lineIndex(text);
   /** @type {Reported[]} */
   const out = [];
-  const tags = ext === '.tsx' || ext === '.jsx' ? jsxTags(text, ext) : htmlTags(text);
   for (const tag of tags) {
     for (const rule of COMPONENT_RULES) {
       if (!rule.flags(tag)) continue;
@@ -433,9 +403,12 @@ export function checkText(system, text, file, { known, mockup = false, keepLine 
   const ext = extname(file).toLowerCase();
   /** @type {Reported[]} */
   const findings = [];
+  // The file is read once: its declarations for the value rules, its elements for the component rules.
   let decls;
+  /** @type {Tag[]} */
+  let tags;
   try {
-    decls = declarations(text, ext);
+    ({ declarations: decls, tags } = readSource(text, ext));
   } catch (error) {
     if (!(error instanceof CssReadError)) throw error;
     // CSS the parser can't read can't be checked: say where, so it gets fixed first. The
@@ -518,6 +491,6 @@ export function checkText(system, text, file, { known, mockup = false, keepLine 
   // In shipped code, test/ds-classes.test.ts and test/button-classes.test.ts already check
   // components with the context they need. A mock-up has no such tests, so it gets the hints here.
   // Commented-out HTML renders nothing, so it isn't checked; offsets stay where they were.
-  if (mockup && ext !== '.css') findings.push(...checkMarkup(text, ext, keepLine));
+  if (mockup) findings.push(...checkMarkup(tags, text, keepLine));
   return findings.sort((a, b) => a.line - b.line);
 }

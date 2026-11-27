@@ -160,12 +160,12 @@ function literalValue(name, init) {
 /**
  * Every literal declaration in the JSX `style` objects of a file, in source order,
  * with kebab-case properties and React's px units.
- * @param {string} text
+ * @param {string | ts.SourceFile} text the source, or its tree already read by parseTsx
  * @param {string} [fileName]
  * @returns {Declaration[]}
  */
 export function styleDeclarations(text, fileName = 'inline.tsx') {
-  const tree = parseTsx(text, fileName);
+  const tree = typeof text === 'string' ? parseTsx(text, fileName) : text;
   /** @param {number} pos */
   const lineOf = (pos) => tree.getLineAndCharacterOfPosition(pos).line + 1;
   /** @type {Declaration[]} */

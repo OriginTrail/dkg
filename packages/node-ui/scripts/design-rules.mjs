@@ -8,9 +8,20 @@
 import { CssReadError, cssDeclarations } from './css.mjs';
 import { literalWords, parseValue, readValue, varRefs } from './css-value.mjs';
 import { readHtml } from './html.mjs';
-import { styleDeclarations } from './jsx.mjs';
+import { attrText, attrsOf, classNames, opening, parseTsx, styleDeclarations, tagName, walkJsx } from './jsx.mjs';
 
 /** @typedef {import('./jsx.mjs').Declaration} Declaration */
+/**
+ * An element as the component rules see it, from HTML or from JSX: its tag name, where
+ * it starts, its classes and its attributes (a string, '' when bare, null when set at
+ * runtime). `source` is how it's written, for the report.
+ * @typedef {{ name: string, source: string, index: number, classes: string[], attrs: Map<string, string | null> }} Tag
+ */
+/**
+ * A file read once, for both rule families: its declarations (in line order) and the
+ * elements it draws (HTML tags, or lower-case JSX elements; none in a stylesheet).
+ * @typedef {{ declarations: Declaration[], tags: Tag[] }} SourceDocument
+ */
 
 /**
  * A literal value a rule covers. Each kind carries what its rule needs: `n` is the
@@ -149,6 +160,20 @@ export function lineIndex(text) {
  * @throws {import('./css.mjs').CssReadError} when a stylesheet or style block can't be read
  */
 export function declarations(text, ext) {
+  return readSource(text, ext).declarations;
+}
+
+/**
+ * A file read once: its declarations (as `declarations` describes them) and its elements,
+ * so the declaration rules and the component rules work from the same reading. HTML is
+ * read by scripts/html.mjs, JSX parsed once by scripts/jsx.mjs. A capitalised JSX
+ * component (<Button>) is a system part already, so it isn't a tag here.
+ * @param {string} text
+ * @param {string} ext the file's extension, with its dot
+ * @returns {SourceDocument}
+ * @throws {import('./css.mjs').CssReadError} when a stylesheet or style block can't be read
+ */
+export function readSource(text, ext) {
   const lineAt = lineIndex(text);
   /** @type {Declaration[]} */
   const out = [];
@@ -173,20 +198,34 @@ export function declarations(text, ext) {
       out.push({ prop: d.prop, value: d.value, line: lineAt(place(d.start)), endLine: lineAt(place(d.end)), scope });
     }
   };
-  if (ext === '.css') { cssIn(text, 0); return out; }
+  /** @type {Tag[]} */
+  const tags = [];
+  if (ext === '.css') { cssIn(text, 0); return { declarations: out, tags }; }
   if (ext === '.tsx' || ext === '.jsx') {
-    out.push(...styleDeclarations(text, `inline${ext}`));
+    const tree = parseTsx(text, `inline${ext}`);
+    out.push(...styleDeclarations(tree));
+    walkJsx(tree, (node) => {
+      const name = tagName(node);
+      if (!/^[a-z]/.test(name)) return;
+      /** @type {Map<string, string | null>} */
+      const attrs = new Map();
+      for (const [key, attr] of attrsOf(node)) attrs.set(key, attrText(attr));
+      tags.push({ name, source: opening(node).getText(tree), index: node.getStart(tree), classes: classNames(node), attrs });
+    });
   } else {
     const doc = readHtml(text);
     for (const style of doc.styles) cssIn(style.css, style.start);
-    // A style attribute's declarations share one scope: the attribute's own.
     for (const tag of doc.tags) {
+      // A style attribute's declarations share one scope: the attribute's own. The value is
+      // read as the browser reads it, with character references decoded.
       const style = tag.attrs.get('style');
-      // The value as the browser reads it, with character references decoded.
       if (style) cssIn(style.value, style.start, style.start, style.offsetAt);
+      /** @type {Map<string, string | null>} */
+      const attrs = new Map([...tag.attrs].map(([k, a]) => [k, a.value]));
+      tags.push({ name: tag.name, source: tag.source, index: tag.index, classes: (attrs.get('class') ?? '').split(/\s+/).filter(Boolean), attrs });
     }
   }
-  return out.sort((a, b) => a.line - b.line);
+  return { declarations: out.sort((a, b) => a.line - b.line), tags };
 }
 
 /**
