@@ -588,6 +588,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
   private nextRunnable(): QueueEntry<unknown> | undefined {
     const candidates = this.dispatchPolicy.candidates({
       maxConcurrent: this.maxConcurrent, lanePolicy: this.nonAckLanePolicy,
+      ackReservedSlots: this.ackReservedSlots, ackQueued: this.queues.ack.length,
       shareSingleOrdinarySlot: this.shareSingleOrdinarySlot,
       normalInflight: this.normalInflight, backgroundInflight: this.backgroundInflight,
       normalQueued: this.queues.normal.length, backgroundQueued: this.queues.background.length,
@@ -621,7 +622,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
   }
 
   private start(entry: QueueEntry<unknown>): void {
-    this.dispatchPolicy.started(entry.priority, this.shareSingleOrdinarySlot && this.queues.background.length > 0);
+    this.dispatchPolicy.started(entry.priority, this.shareSingleOrdinarySlot && this.queues.background.length > 0, this.queues.ack.length > 0);
     this.cleanupQueuedEntry(entry);
     this.increment(entry.priority);
     const startedAt = this.now();

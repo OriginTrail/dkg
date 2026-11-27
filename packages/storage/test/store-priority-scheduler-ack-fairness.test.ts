@@ -73,6 +73,26 @@ class SchedulerScenario {
 }
 
 describe('ACK saturation fairness', () => {
+  it('gives queued ACKs a bounded turn when ordinary floors fill all unreserved capacity', async () => {
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 0,
+      healthReservedSlots: 0, normalReservedSlots: 1, backgroundReservedSlots: 1 });
+    const scenario = new SchedulerScenario(scheduler);
+    scenario.enqueueBlocked('normal', 1);
+    scenario.enqueueBlocked('background', 1);
+    scenario.enqueueBlocked('ack', 1);
+    scenario.enqueueBlocked('normal', 10);
+    scenario.enqueueBlocked('background', 10);
+    try {
+      await tick();
+      scenario.expectSnapshot({ normalInflight: 1, backgroundInflight: 1, ackQueued: 1 });
+      scenario.release('normal', 0); await tick();
+      scenario.release('background', 0); await tick();
+      scenario.release('normal', 1); await tick();
+      scenario.expectStarted(['normal-0', 'background-0', 'normal-1', 'background-1', 'ack-0']);
+      scenario.expectSnapshot({ ackInflight: 1, ackQueued: 0, normalQueued: 9, backgroundQueued: 9 });
+    } finally { await scenario.finish(); }
+  });
+
   it('starts queued normal work while the ACK queue stays saturated', async () => {
     const scheduler = new StorePriorityScheduler({ maxConcurrent: 3, ackReservedSlots: 1, healthReservedSlots: 0, backgroundReservedSlots: 0 });
     const scenario = new SchedulerScenario(scheduler);

@@ -40,6 +40,8 @@ export function normalizeNonAckLanePolicy(
 
 interface DispatchState {
   maxConcurrent: number;
+  ackReservedSlots: number;
+  ackQueued: number;
   lanePolicy: NonAckLanePolicy;
   shareSingleOrdinarySlot: boolean;
   normalInflight: number;
@@ -52,9 +54,11 @@ interface DispatchState {
 export class StoreDispatchPolicy {
   private singleSlotCursor: StoreWorkPriority | undefined;
   private contendedNormalDispatches = 0;
+  private dispatchesWhileAckQueued = 0;
 
   candidates(state: DispatchState): readonly StoreWorkPriority[] {
     if (state.backgroundQueued === 0) this.contendedNormalDispatches = 0;
+    if (state.ackQueued === 0) this.dispatchesWhileAckQueued = 0;
     const { lanePolicy } = state;
     const backgroundOwed = state.backgroundQueued > 0 && (
       state.backgroundInflight < lanePolicy.backgroundFloor
@@ -71,10 +75,16 @@ export class StoreDispatchPolicy {
     if (normalOwed) owed.push('normal');
     // A floor cannot consume the only ordinary slot ahead of a queued health probe.
     const first: StoreWorkPriority[] = owed.length ? ['health', ...owed] : [];
+    // Without a physical ACK reserve, restoring ordinary floors cannot occupy
+    // every completion forever. Give waiting ACKs a turn after two other starts.
+    if (state.maxConcurrent > 1 && state.ackReservedSlots === 0 && state.ackQueued > 0
+      && this.dispatchesWhileAckQueued >= 2) first.unshift('ack');
     return [...first, ...STORE_WORK_PRIORITIES.filter(lane => !first.includes(lane))];
   }
 
-  started(priority: StoreWorkPriority, backgroundContended: boolean): void {
+  started(priority: StoreWorkPriority, backgroundContended: boolean, ackContended: boolean): void {
+    if (priority === 'ack') this.dispatchesWhileAckQueued = 0;
+    else if (ackContended) this.dispatchesWhileAckQueued += 1;
     this.singleSlotCursor = priority;
     if (priority === 'background') this.contendedNormalDispatches = 0;
     else if (priority === 'normal' && backgroundContended) this.contendedNormalDispatches += 1;
