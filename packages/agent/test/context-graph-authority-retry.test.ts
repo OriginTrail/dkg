@@ -2371,7 +2371,14 @@ describe('Context Graph subscription rehydration startup authority budget (#2815
       updatedAt: 1,
     };
     const capped = vi.fn();
-    const activate = vi.fn();
+    const subscriptions = new Map();
+    const owner = createTestSubscriptionActivations({ subscribedContextGraphs: subscriptions,
+      contextGraphSubscriptionDormancyById: dormancyById, contextGraphSubscriptionRehydrationStatus: status });
+    const install = vi.fn(() => { throw new Error('A capped row must not be installed'); });
+    const activate = vi.fn(async () => { await owner.activate(row, {
+      install, remove: vi.fn(), rollbackNetworkEffects: vi.fn(), trackSync: vi.fn(), subscribe: vi.fn(),
+      persistMembership: vi.fn(), persistBinding: async () => undefined, commit: vi.fn(),
+    }, { respectActivationCap: true }); });
 
     await recoverDeferredContextGraphSubscriptionAuthorities(new AbortController().signal, {
       store: {
@@ -2383,7 +2390,7 @@ describe('Context Graph subscription rehydration startup authority budget (#2815
       dormancyById,
       transitionDormancy: (id: string, reason: any) => { if (reason === undefined) dormancyById.delete(id); else dormancyById.set(id, reason); },
       persistRevisions: new Map(),
-      subscriptions: new Map(),
+      subscriptions,
       getStatus: () => status,
       isCurrent: () => true,
       touchStatus: () => undefined,
@@ -2395,7 +2402,8 @@ describe('Context Graph subscription rehydration startup authority budget (#2815
       capped,
     });
 
-    expect(activate).not.toHaveBeenCalled();
+    expect(activate).toHaveBeenCalledTimes(1);
+    expect(install).not.toHaveBeenCalled();
     expect(dormancyById.get(row.id)).toBe('activationCap');
     expect(capped).toHaveBeenCalledWith(row.id);
   });

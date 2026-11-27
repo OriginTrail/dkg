@@ -9,13 +9,11 @@ import type {
   ContextGraphSubscriptionRehydrationInternalStatus,
   ContextGraphSubscriptionStore,
 } from './dkg-agent-types.js';
-import {
-  contextGraphDormancyAfterAuthority,
-  type ContextGraphDormancyReason,
-} from './context-graph-subscription-dormancy.js';
+import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
 import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
+import { recoverUnavailableSubscriptionRow, type SubscriptionRecoveryRowPorts } from './context-graph-subscription-recover-row.js';
 import type { RollingSubscriptionChecks } from './context-graph-subscription-rolling-checks.js';
 
 const MAX_CONCURRENT_DEFERRED_ROW_LOADS = 4;
@@ -108,6 +106,8 @@ export interface PersistedContextGraphSubscriptionActivationPorts {
 export type PersistSubscriptionActivationRepair = (isCurrent?: () => boolean) => Promise<void>;
 
 export interface PersistedContextGraphSubscriptionActivationOptions {
+  /** Reserve recovery capacity synchronously before installing a provisional row. */
+  readonly respectActivationCap?: boolean;
   readonly onChainId?: string;
   readonly restorePendingMeta?: boolean;
   readonly rollbackSlotRelease?: ContextGraphSubscriptionRollbackSlotRelease;
@@ -145,6 +145,12 @@ export interface DeferredContextGraphSubscriptionAuthorityRecoveryPorts {
    * restart.
    */
   capped(contextGraphId: string): void;
+  /**
+   * Another owner is asking about this row now (rows the startup pass left
+   * dormant without their chain name binding are asked again within seconds).
+   * The pass leaves it alone until that owner lets it go.
+   */
+  heldElsewhere?(contextGraphId: string): boolean;
 }
 
 /** Executes one fenced pass over only the authority-unavailable durable rows. */
@@ -155,7 +161,7 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
   const status = ports.getStatus();
   if (!status?.rehydrationEnabled || !ports.isCurrent()) return;
   const candidateIds = [...ports.dormancyById]
-    .filter(([, reason]) => reason === 'authorityUnavailable')
+    .filter(([id, reason]) => reason === 'authorityUnavailable' && ports.heldElsewhere?.(id) !== true)
     .map(([id]) => id)
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   const snapshotRows = async (): Promise<ReadonlyMap<string, ContextGraphSubscriptionRecord>> => (
@@ -212,106 +218,30 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
   // and commit one candidate at a time: distinct graphs cannot share a flight,
   // and collecting every result before activation would make a ready bound row
   // wait behind later cold rows for up to 120s each.
-  for (const { contextGraphId, revision, candidate } of candidates) {
-    if (
-      !ports.isCurrent()
-      || ports.dormancyById.get(contextGraphId) !== 'authorityUnavailable'
-    ) continue;
-    if (candidate === null) {
-      ports.clearStatus(contextGraphId);
-      continue;
-    }
-    if (!candidate.subscribed && candidate.coreHosted !== true) {
-      ports.clearStatus(contextGraphId);
-      continue;
-    }
-    const coldCandidate = !hasCanonicalDurableBinding(candidate);
-
-    const authority = await ports.resolveAuthority(candidate, signal);
-    if (!ports.isCurrent()) return;
-    // One cold lookup may consume the full finalized-name discovery budget.
-    // Advance even when it remains unavailable so a stable prefix cannot
-    // starve later rows across recurring passes. Bound rows are attempted
-    // first and do not consume this per-pass cold budget.
-    if (coldCandidate && ports.coldCursor !== undefined) {
-      ports.coldCursor.afterContextGraphId = advanceColdCursor(
-        ports.coldCursor.afterContextGraphId,
-        contextGraphId,
-      );
-    }
-    if (
-      ports.dormancyById.get(contextGraphId) !== 'authorityUnavailable'
-      || (ports.persistRevisions.get(contextGraphId) ?? 0) !== revision
-    ) continue;
-    if (authority.outcome !== 'allowed') {
-      // A denial and a chain-unknown id retire the row for this process;
-      // anything else stays unavailable and is asked again on a later pass.
-      const { outcome, reason } = authority;
-      const dormancy = contextGraphDormancyAfterAuthority({ outcome, reason });
-      if (dormancy !== 'authorityUnavailable') {
-        ports.transitionDormancy(contextGraphId, dormancy);
-        ports.touchStatus();
+  const rowPorts: SubscriptionRecoveryRowPorts = {
+    isCurrent: ports.isCurrent,
+    dormancy: id => ports.dormancyById.get(id),
+    revision: id => ports.persistRevisions.get(id) ?? 0,
+    subscription: id => ports.subscriptions.get(id),
+    load: id => ports.store.load ? ports.store.load(id) : snapshotRows().then(rows => rows.get(id) ?? null),
+    resolveAuthority: async (row, readSignal) => {
+      const answer = await ports.resolveAuthority(row, readSignal);
+      if (!hasCanonicalDurableBinding(row) && ports.coldCursor) {
+        ports.coldCursor.afterContextGraphId = advanceColdCursor(ports.coldCursor.afterContextGraphId, row.id);
       }
-      continue;
-    }
-
-    // Built-in stores expose indexed load(). A custom loadAll-only store must
-    // perform this fresh scan after each asynchronous authority decision: the
-    // scan is the only available fence against an external row replacement,
-    // and reusing the pre-read snapshot could resurrect stale intent.
-    const currentRow = ports.store.load === undefined
-      ? (await snapshotRows()).get(contextGraphId) ?? null
-      : await ports.store.load(contextGraphId);
-    if (!ports.isCurrent()) return;
-    if (currentRow === null) {
-      ports.clearStatus(contextGraphId);
-      continue;
-    }
-    if (!currentRow.subscribed && currentRow.coreHosted !== true) {
-      ports.clearStatus(contextGraphId);
-      continue;
-    }
-    const currentSubscription = ports.subscriptions.get(contextGraphId);
-    if (
-      ports.dormancyById.get(contextGraphId) !== 'authorityUnavailable'
-      || (ports.persistRevisions.get(contextGraphId) ?? 0) !== revision
-      || currentSubscription?.subscribed === true
-      || currentSubscription?.coreHosted === true
-      || currentRow.id !== candidate.id
-      || currentRow.onChainId !== candidate.onChainId
-      || currentRow.onChainHash !== candidate.onChainHash
-    ) {
-      continue;
-    }
-
-    const currentStatus = ports.getStatus();
-    const activatedUserRows = currentStatus === null
-      ? 0
-      : Math.max(0, currentStatus.activated - currentStatus.hostedActivated);
-    if (
-      currentRow.coreHosted !== true
-      && currentStatus !== null
-      && currentStatus.activationCap > 0
-      && activatedUserRows >= currentStatus.activationCap
-    ) {
-      ports.transitionDormancy(contextGraphId, 'activationCap');
-      ports.capped(contextGraphId);
-      ports.touchStatus();
-      continue;
-    }
-
-    try {
-      await ports.activate(
-        currentRow,
-        authority.onChainId?.toString() ?? currentRow.onChainId,
-        revision,
-      );
-    } catch (error) {
-      if (ports.isCurrent()) ports.warn(contextGraphId, error);
-      continue;
-    }
+      return answer;
+    },
+    clear: ports.clearStatus,
+    retire: (id, reason) => { ports.transitionDormancy(id, reason); ports.touchStatus(); },
+    capped: id => { ports.transitionDormancy(id, 'activationCap'); ports.capped(id); ports.touchStatus(); },
+    activate: (row, onChainId, revision) => ports.activate(row, onChainId, revision),
+  };
+  for (const { contextGraphId, revision, candidate } of candidates) {
+    const outcome = await recoverUnavailableSubscriptionRow(contextGraphId, rowPorts, signal, { row: candidate, revision });
+    if (outcome.kind === 'retry' && outcome.activationFailed) ports.warn(contextGraphId, new Error(outcome.why));
     if (!ports.isCurrent()) return;
   }
+
 }
 
 export function rehydratedSubscriptionReachedSafeState(

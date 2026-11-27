@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { AgentWorkLifetime } from './agent-work-lifetime.js';
+import { SubscriptionActivationCapacityError } from './context-graph-subscription-activation-capacity.js';
 import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { accountSubscriptionChanges, type SubscriptionAccountingChange } from './context-graph-subscription-accounting.js';
 import { rehydratedSubscriptionReachedSafeState, type PersistedContextGraphSubscriptionActivationOptions, type PersistedContextGraphSubscriptionActivationPorts } from './context-graph-subscription-authority-recovery.js';
@@ -117,6 +118,7 @@ export interface SubscriptionActivationPorts {
 export class ContextGraphSubscriptionActivations {
   constructor(private readonly ports: SubscriptionActivationPorts) {}
   private readonly pending = new Map<string, ActivationAttempt>();
+  private readonly recoveryReservations = new Set<string>();
   // Startup uses the same incremental transitions as retries, but only publishes
   // the completed report once the startup lifecycle finishes its authority pass.
   private startupAccounting: ContextGraphSubscriptionRehydrationInternalStatus | null = null;
@@ -266,6 +268,24 @@ export class ContextGraphSubscriptionActivations {
   /** One retry owns installation, repair, network effects, rollback and commit. */
   async activate(row: ContextGraphSubscriptionRecord, ports: PersistedContextGraphSubscriptionActivationPorts,
     options: PersistedContextGraphSubscriptionActivationOptions = {}): Promise<ContextGraphSub> {
+    const reserved = options.respectActivationCap === true && row.coreHosted !== true;
+    if (reserved) {
+      if (this.recoveryReservations.has(row.id)) throw changed();
+      const status = this.startupAccounting ?? this.ports.getStatus();
+      const installing = [...this.pending.values()].filter(attempt =>
+        attempt.phase.kind === 'installing' && attempt.phase.subscription.coreHosted !== true
+        && !this.recoveryReservations.has(attempt.intent.id)).length;
+      if (status && status.activationCap > 0
+        && Math.max(0, status.activated - status.hostedActivated) + installing + this.recoveryReservations.size >= status.activationCap) {
+        throw new SubscriptionActivationCapacityError();
+      }
+      this.recoveryReservations.add(row.id);
+    }
+    try { return await this.activateOwned(row, ports, options); }
+    finally { if (reserved) this.recoveryReservations.delete(row.id); }
+  }
+  private async activateOwned(row: ContextGraphSubscriptionRecord, ports: PersistedContextGraphSubscriptionActivationPorts,
+    options: PersistedContextGraphSubscriptionActivationOptions): Promise<ContextGraphSub> {
     const attempt = this.attemptFor(row);
     if (attempt.phase.kind !== 'queued') throw changed();
     const previous = this.ports.subscribedContextGraphs.get(row.id);
