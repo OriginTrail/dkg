@@ -115,6 +115,7 @@ export function respondPublicationPricingPolicyError(res: RequestContext["res"],
 
 const ASSERTION_CODE_STATUS: ReadonlyMap<string, number> = new Map([
   ['KA_ASSERTION_ALREADY_FINALIZED', 409],
+  ['FINALIZE_PRECONDITION_FAILED', 409],
   ['KA_PROMOTE_ACK_REQUIREMENT_CONFLICT', 409],
   ['KA_SHARE_AUTHOR_MISMATCH', 409],
   ['KA_SHARE_INVENTORY_SIGNER_UNAVAILABLE', 422],

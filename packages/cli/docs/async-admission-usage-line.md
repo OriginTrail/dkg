@@ -243,7 +243,7 @@ the variable in the daemon's environment and restart.
 
 | Variable | Log line | What it records |
 | --- | --- | --- |
-| `DKG_ASYNC_PROMOTE_ADMISSION_TRACE=1` | `async_promote_admission {...}` | Share admission phases: event kind (`phase_settled` or `deadline`), phase, elapsed ms and outcome. No names, IDs or payloads |
+| `DKG_ASYNC_PROMOTE_ADMISSION_TRACE=1` | `async_promote_admission {...}`, plus the `async_share_*` timing events | Share admission phases: event kind (`phase_settled` or `deadline`), phase, elapsed ms and outcome. The timing events add node-generated request IDs, process-local lock holder IDs and hashed loopback ports, but no names, graph or job IDs, or payloads. See `packages/publisher/docs/async-queue-internals.md` |
 | `DKG_ASYNC_PUBLISH_TRACE=1` | `async_publish_claim_trace {...}` | Publisher claim-lock wait and hold, wallet-ownership decisions, lock changes and worker outcomes. Wallets are hashed; job IDs are kept |
 
 ## OpenTelemetry

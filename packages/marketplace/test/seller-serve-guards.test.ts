@@ -106,6 +106,16 @@ function wire(request: ServiceRequest, body: InferenceBody = BODY) {
 
 const codeOf = (r: ServeResponse) => (r.ok ? 'ok' : r.code);
 
+/**
+ * Counts the calls that have reached their subscription's lock, where a call waits for the calls before it: the
+ * point a test holds a later call at.
+ */
+function lockEntries(of: Seller): () => number {
+  const lock = (of as unknown as { lock: { run: (key: string, fn: () => Promise<unknown>) => Promise<unknown> } }).lock;
+  const run = vi.spyOn(lock, 'run');
+  return () => run.mock.calls.filter(([key]) => key === subscriptionId).length;
+}
+
 /** Wait until `done`, for 5 seconds at most: the calls write and sync files on the way. */
 async function until(done: () => boolean): Promise<void> {
   for (let i = 0; i < 1_000 && !done(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
@@ -168,12 +178,12 @@ describe('a request near its expiry', () => {
     let entered = false;
     backend.entered = () => { entered = true; };
     backend.takes = 20;
-    const budgets = vi.spyOn(chain, 'getBudgets');
+    const entries = lockEntries(seller);
     const first = seller.serve(wire(await requestFor({ nonce: 0n })), BUYER_PEER);
     await until(() => entered);
     // Taken while the first runs: 30 seconds left then, 10 once the first is done.
     const second = seller.serve(wire(await requestFor({ nonce: 1n, expiry: now + 30 })), BUYER_PEER);
-    await until(() => budgets.mock.calls.length === 2);
+    await until(() => entries() === 2);
     await new Promise((resolve) => setImmediate(resolve));
     release();
     expect(codeOf(await first)).toBe('ok');
@@ -204,11 +214,11 @@ describe('a repeat of a call served', () => {
     backend.hold = new Promise<void>((resolve) => { release = resolve; });
     let entered = false;
     backend.entered = () => { entered = true; };
-    const budgets = vi.spyOn(chain, 'getBudgets');
+    const entries = lockEntries(seller);
     const first = seller.serve(wire(request), BUYER_PEER);
     await until(() => entered);
     const retry = seller.serve(wire(request), BUYER_PEER);
-    await until(() => budgets.mock.calls.length === 2);
+    await until(() => entries() === 2);
     await new Promise((resolve) => setImmediate(resolve));
     release();
     const answer = await first;

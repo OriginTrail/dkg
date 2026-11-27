@@ -12,7 +12,7 @@ import {
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, StoreOperationTimeoutError, type Quad, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { buildStoreControlPath, selectStoreScheduler, setStoreControlPathForTesting, StorePriorityScheduler, OxigraphStore, StoreOperationTimeoutError, type Quad, type QueryOptions } from '@origintrail-official/dkg-storage';
 import { LocalContextGraphProvenance } from '../../agent/src/local-context-graph-provenance.js';
 import { ContextGraphResolveMethods } from '../../agent/src/dkg-agent-cg-resolve.js';
 import {
@@ -131,7 +131,7 @@ async function seamAgent(options: { now?: () => number; unresolvedWindowMs?: num
       laterHolds.push({ reached: reachedNext, gate: nextGate });
       return { reached: reachedPromise, release: releaseNext };
     },
-    resolve: async (caller: typeof SCOPED = SCOPED) => {
+    resolve: async (caller: typeof SCOPED & { asyncAdmission?: boolean } = SCOPED) => {
       const { res, out } = captureRes();
       const id = await resolveRequiredWriteContextGraphId(provider as never, CG, res, caller);
       return { id, out };
@@ -148,10 +148,93 @@ function whileHeld<T>(pending: Promise<T>): Promise<T> {
   return Promise.race([pending, timeout]).finally(() => clearTimeout(timer));
 }
 
+/**
+ * Runs every store read of the probe, queries and graph listings alike, on the scheduler its options select:
+ * the held shared one, or the reserved one. Returns the sources of the reads that used the reserved one.
+ */
+function routeStoreReads(store: any, shared: StorePriorityScheduler): string[] {
+  const protectedReads: string[] = [];
+  const route = <T>(source: string, options: unknown, run: () => Promise<T>): Promise<T> => {
+    const scheduler = selectStoreScheduler(shared, typeof options === 'object' && options !== null ? options as QueryOptions : undefined);
+    if (scheduler !== shared) protectedReads.push(source);
+    return scheduler.run('normal', source, run);
+  };
+  const query = store.query.bind(store);
+  store.query = (sparql: string, options?: QueryOptions) => route(options?.source ?? 'query', options, () => query(sparql, options));
+  for (const name of ['listGraphs', 'listGraphsByPrefix', 'hasGraph']) {
+    const original = typeof store[name] === 'function' ? store[name].bind(store) : undefined;
+    if (original) store[name] = (...args: unknown[]) => route(name, args.at(-1), () => original(...args));
+  }
+  return protectedReads;
+}
+
 beforeEach(() => { configureWritePreflightCoalescing({}, { info: () => {}, warn: () => {} }); });
 afterEach(() => { configureWritePreflightCoalescing({}, { info: () => {}, warn: () => {} }); });
 
 describe('concurrent write preflights with the real probe', () => {
+  it('completes a fresh admission for a synced graph while an ordinary probe for the same caller is queued', async () => {
+    const seam = await seamAgent();
+    seam.release();
+    // A subscribed, synced public graph needs no content read, so only the two reserved reads remain.
+    seam.subs.set(CG, { subscribed: true, synced: true });
+    const shared = new StorePriorityScheduler({ maxConcurrent: 1, queueWaitTimeoutMs: 15_000 });
+    setStoreControlPathForTesting(buildStoreControlPath({ share: 0, publisher: 0, preflight: 1 }, shared));
+    let release!: () => void;
+    const held = shared.run('normal', 'fixture.read', () => new Promise<void>(resolve => { release = resolve; }));
+    const protectedReads = routeStoreReads(seam.store, shared);
+    const ordinary = seam.resolve();
+    try {
+      // Every other store read would wait behind the held shared read.
+      expect((await whileHeld(seam.resolve({ ...SCOPED, asyncAdmission: true }))).id).toBe(CG);
+      expect(protectedReads.sort()).toEqual(['agent.contextGraph.exists', DECLARATION_SOURCE]);
+    } finally {
+      release();
+      await Promise.all([held, ordinary]);
+      setStoreControlPathForTesting(undefined);
+    }
+  });
+
+  it('still runs the content read of a graph that is not synced on the shared scheduler', async () => {
+    const seam = await seamAgent();
+    seam.release();
+    const shared = new StorePriorityScheduler({ maxConcurrent: 1, queueWaitTimeoutMs: 15_000 });
+    setStoreControlPathForTesting(buildStoreControlPath({ share: 0, publisher: 0, preflight: 1 }, shared));
+    let release!: () => void;
+    const held = shared.run('normal', 'fixture.read', () => new Promise<void>(resolve => { release = resolve; }));
+    const protectedReads = routeStoreReads(seam.store, shared);
+    const admission = seam.resolve({ ...SCOPED, asyncAdmission: true });
+    try {
+      const waited = await Promise.race([admission.then(() => false), new Promise<boolean>(resolve => setTimeout(() => resolve(true), 500))]);
+      expect(waited).toBe(true);
+    } finally {
+      release();
+      await held;
+    }
+    try {
+      expect((await admission).id).toBe(CG);
+      expect(protectedReads.sort()).toEqual(['agent.contextGraph.exists', DECLARATION_SOURCE]);
+    } finally {
+      setStoreControlPathForTesting(undefined);
+    }
+  });
+
+  it('reuses a completed positive check across lanes and invalidates it on a policy change', async () => {
+    configureWritePreflightCoalescing({ [WRITE_PREFLIGHT_CACHE_ENV]: '1' }, { info() {}, warn() {} });
+    setStoreControlPathForTesting(buildStoreControlPath({ share: 0, publisher: 0, preflight: 1 }));
+    try {
+      const seam = await seamAgent();
+      seam.release();
+      expect((await seam.resolve()).id).toBe(CG);
+      expect((await seam.resolve({ ...SCOPED, asyncAdmission: true })).id).toBe(CG);
+      expect(seam.declarationReads()).toBe(1);
+      await seam.store.insert([policyQuad('private', contextGraphMetaGraphUri(CG))]);
+      expect((await seam.resolve({ ...SCOPED, asyncAdmission: true })).id).toBeNull();
+      expect(seam.declarationReads()).toBe(2);
+    } finally {
+      setStoreControlPathForTesting(undefined);
+    }
+  });
+
   it('read the store once for callers that arrive together, and again once the probe is over', async () => {
     const seam = await seamAgent();
     const first = seam.resolve();
