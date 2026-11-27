@@ -220,7 +220,7 @@ async function buildHarness(stack: Stack): Promise<Harness> {
     maxConcurrent: 4, ackReservedSlots: 1, healthReservedSlots: 1, normalReservedSlots: 1, backgroundReservedSlots: 1,
     queueLimits: 64, queueWaitTimeoutMs: 30_000,
   });
-  const path = buildStoreControlPath({ share: 1, publisher: 2 }, shared);
+  const path = buildStoreControlPath({ share: 1, publisher: 2, preflight: 1 }, shared);
   record(shared, 'shared');
   for (const queue of STORE_CONTROL_QUEUES) record(path[queue]!, queue);
   blazegraphScheduler = shared;
@@ -232,7 +232,7 @@ async function buildHarness(stack: Stack): Promise<Harness> {
   const inject = (queues: readonly StoreControlQueue[]) =>
     setStoreControlPathForTesting(Object.fromEntries(queues.map((queue) => [queue, path[queue]])) as StoreControlPath);
   const schedulers = (): Array<['shared' | StoreControlQueue, StorePriorityScheduler]> =>
-    [['shared', shared], ['share', path.share!], ['publisher', path.publisher!]];
+    [['shared', shared], ['share', path.share!], ['publisher', path.publisher!], ['preflight', path.preflight!]];
   const observe: Harness['observe'] = async (call, options, ambient) => {
     for (const [, scheduler] of schedulers()) scheduler.stats.takeIntervalQueueWaits();
     recorded = [];
@@ -295,7 +295,7 @@ describe('AC1 (2): control options route every scheduler run to the queue\'s own
         // The real schedulers agree: all started in the queue's control lane, none on the shared one.
         expect(on.lanes.shared, context).toEqual([]);
         expect(on.lanes[queue], context).toEqual(on.runs.map(() => 'control'));
-        expect(on.lanes[queue === 'share' ? 'publisher' : 'share'], context).toEqual([]);
+        for (const other of STORE_CONTROL_QUEUES.filter(other => other !== queue)) expect(on.lanes[other], context).toEqual([]);
 
         // Path on, but only the other queue's instance: this queue's call resolves like an untagged one.
         h.inject(STORE_CONTROL_QUEUES.filter((other) => other !== queue));
@@ -319,7 +319,7 @@ describe('AC1 (2): control options route every scheduler run to the queue\'s own
           .toEqual(bare.runs.map(sharedLane));
         expect(off.lanes, context).toEqual(untagged.lanes);
         expect(off.lanes, context).toEqual(bare.lanes);
-        expect(off.lanes.share.length + off.lanes.publisher.length, context).toBe(0);
+        expect(off.lanes.share.length + off.lanes.publisher.length + off.lanes.preflight.length, context).toBe(0);
         // With no priority set by the tag, the lane is the ambient default, else normal.
         expect(off.runs.map(sharedLane), context).toEqual(off.runs.map(() => ambient ?? 'normal'));
       }
@@ -433,7 +433,7 @@ describe('option-less calls', () => {
         for (const ambient of AMBIENTS) {
           const bare = await h.observe(call, undefined, ambient);
           expect(bare.runs).toHaveLength(0);
-          expect(bare.lanes).toEqual({ shared: [], share: [], publisher: [] });
+          expect(bare.lanes).toEqual({ shared: [], share: [], publisher: [], preflight: [] });
         }
       }
     },

@@ -1,6 +1,7 @@
 import { GraphComputer } from '@origintrail-official/dkg-graph-computer';
 import { fetchStatus, fetchContextGraphs, readProfileQueryCatalog } from '../../api.js';
 import { get } from '../../http.js';
+import { currentApiToken } from '../../lib/apiToken.js';
 
 export interface ProgramAgent { address: string; name: string }
 export const fetchProgramAgents = () => get<{ agents: ProgramAgent[]; defaultAddress: string }>('/api/programs/agents');
@@ -14,12 +15,15 @@ export async function fetchProgramGraphs(): Promise<ProgramGraph[]> {
 }
 export const fetchProgramQueries = readProfileQueryCatalog;
 
-/** Use the existing authenticated node session; custody and graph rights are checked on the node. */
+/**
+ * Use the existing authenticated node session, whether the node served the token with the page or the
+ * operator entered it; custody and graph rights are checked on the node.
+ */
 export async function programClient(address: string): Promise<GraphComputer> {
-  const token = (window as any).__DKG_TOKEN__;
+  const token = currentApiToken();
   if (typeof token !== 'string' || !token) throw new Error('An authenticated node session is required.');
   const status = await fetchStatus();
-  if ((window as any).__DKG_TOKEN__ !== token) throw new Error('Node session changed. Reopen the Program editor.');
+  if (currentApiToken() !== token) throw new Error('Node session changed. Reopen the Program editor.');
   if (typeof status.peerId !== 'string') throw new Error('Node identity is unavailable.');
   return new GraphComputer({ nodeUrl: window.location.origin, peerId: status.peerId,
     localAgent: { address, authToken: token }, retries: 0, timeoutMs: 150_000 });
