@@ -6,7 +6,7 @@ import { accountSubscriptionChanges, type SubscriptionAccountingChange } from '.
 import { rehydratedSubscriptionReachedSafeState, type PersistedContextGraphSubscriptionActivationOptions, type PersistedContextGraphSubscriptionActivationPorts } from './context-graph-subscription-authority-recovery.js';
 import type { ContextGraphSub, ContextGraphSubscriptionRecord, ContextGraphSubscriptionRehydrationInternalStatus } from './dkg-agent-types.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
-import { contextGraphSubscriptionAdmissionPremisesEqual, isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
+import { sameSubscriptionIntent, sameDurableSubscriptionIntent, contextGraphSubscriptionAdmissionPremisesEqual, isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
 
 type Dormancy = ReadonlyMap<string, ContextGraphDormancyReason>;
 function applyDormancy(dormancy: Map<string, ContextGraphDormancyReason>, id: string, after: ContextGraphDormancyReason | undefined): void {
@@ -20,13 +20,6 @@ export function isCommittedSubscription(
   return Boolean((row?.subscribed || row?.coreHosted) && !dormancy.has(id));
 }
 
-function sameIntent(left: ContextGraphSubscriptionRecord, right: ContextGraphSubscriptionRecord): boolean {
-  return left.id === right.id && left.subscribed === right.subscribed
-    && (left.coreHosted === true) === (right.coreHosted === true) && left.syncScoped === right.syncScoped;
-}
-function sameDurableIntent(left: ContextGraphSubscriptionRecord, right: ContextGraphSubscriptionRecord): boolean {
-  return sameIntent(left, right) && left.onChainId === right.onChainId && left.onChainHash === right.onChainHash;
-}
 type ActivationOutcome = { kind: 'committed'; subscription: ContextGraphSub } | { kind: 'cancelled' };
 type ActivationPhase = { kind: 'queued' } | { kind: 'installing'; subscription: ContextGraphSub }
   | { kind: 'settled'; outcome: ActivationOutcome };
@@ -181,8 +174,8 @@ export class ContextGraphSubscriptionActivations {
   }
   private attemptFor(row: ContextGraphSubscriptionRecord): ActivationAttempt {
     const current = this.pending.get(row.id);
-    if (current && (sameDurableIntent(current.intent, row)
-      || (current.repaired && sameDurableIntent(current.repaired, row)))) return current;
+    if (current && (sameDurableSubscriptionIntent(current.intent, row)
+      || (current.repaired && sameDurableSubscriptionIntent(current.repaired, row)))) return current;
     this.cancel(row.id);
     const attempt: ActivationAttempt = { intent: { ...row }, phase: { kind: 'queued' }, listeners: new Set() };
     this.pending.set(row.id, attempt);
@@ -350,7 +343,7 @@ export class ContextGraphSubscriptionActivations {
     // Preserving independent Core custody can add hosting to the saved row.
     // That is not a binding repair of this attempt's member intent; canonical
     // commit still validates the custody transfer before applying it.
-    if (sameIntent(attempt.intent, record)) attempt.repaired = { ...record };
+    if (sameSubscriptionIntent(attempt.intent, record)) attempt.repaired = { ...record };
   }
   /** One owner commits bookkeeping, settles waiters, then publishes activation. */
   private commit(attempt: ActivationAttempt, write: (id: string) => ContextGraphSub): ContextGraphSub {
