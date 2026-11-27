@@ -40,7 +40,6 @@ import {
 } from './finalized-publish-options.js';
 import { parseRegisterPcaAgentResult, type RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { CPU_PROFILE_PATH, cpuProfileRequestTimeoutMs, type CpuProfileResult } from './cpu-profile-wire.js';
-import type { Dispatcher } from 'undici';
 import { DaemonOutcomeUnknownError } from './daemon-outcome-unknown-error.js';
 import { longRequestDispatcher } from './daemon/local-agent-channel-fetch.js';
 import { READ_GRAPHS_PATH, READ_GRAPHS_REQUEST_TIMEOUT_MS, readGraphsStatusPath, type ReadGraphsAction, type ReadGraphsRequest } from './read-graphs-wire.js';
@@ -58,6 +57,7 @@ import type {
   ContextGraphOnChainReferenceNote,
 } from './catchup-status.js';
 import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
+import { REPEATS_ON_ANY_AUTHORITY_ANSWER, REPEATS_ON_OWN_AUTHORITY_ANSWER, authorityRetryWaitMs, type RequestDeadline } from './api-client-authority-retry.js';
 import {
   resolveDaemonRequestDeadlines,
   type DaemonRequestDeadlines,
@@ -76,18 +76,6 @@ const VERIFY_DEFAULT_COLLECTION_TIMEOUT_MS = 30 * 60_000;
 const REQUEST_CARRIED_TIMEOUT_MARGIN_MS = 30_000;
 
 export { DaemonOutcomeUnknownError };
-
-interface RequestDeadline {
-  /** Overrides the method's default deadline. */
-  timeoutMs?: number;
-  /**
-   * Set on the long Knowledge Asset mutations: a timeout then throws
-   * {@link DaemonOutcomeUnknownError} carrying this hint.
-   */
-  outcomeUnknownHint?: string;
-  /** For a request that may run past undici's 300 s header and body timers: a dispatcher whose timers outlast the deadline. */
-  dispatcher?: Dispatcher;
-}
 
 /**
  * Whether a failed request got no daemon answer: the client deadline expired,
@@ -1106,7 +1094,7 @@ export class ApiClient {
       // letting normal author resolution publish a different author.
       ...(selectedAuthorAgentAddress !== undefined ? { selectedAuthorAgentAddress } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
-    }, knowledgeAssetMutationDeadline(name, contextGraphId, subGraphName));
+    }, { ...knowledgeAssetMutationDeadline(name, contextGraphId, subGraphName), repeatOn: REPEATS_ON_OWN_AUTHORITY_ANSWER });
   }
 
   async knowledgeAssetPublishAsync(
@@ -1668,15 +1656,8 @@ export class ApiClient {
     body: unknown;
     nextPageUrl: string | null;
   }> {
-    return this.withDeadline('GET', path, {}, async (signal) => {
-      const res = await fetch(`${this.baseUrl}${path}`, {
-        headers: this.authHeaders(),
-        signal,
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: res.statusText }));
-        throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(body, res.statusText), body);
-      }
+    return this.withDeadline('GET', path, {}, async (signal, remainingMs) => {
+      const res = await this.fetchOk(path, { headers: this.authHeaders() }, REPEATS_ON_ANY_AUTHORITY_ANSWER, signal, remainingMs);
       const body = (await res.json()) as unknown;
       const linkHeader = res.headers.get('Link') ?? res.headers.get('link');
       const nextPageUrl = parseNextLink(linkHeader);
@@ -1710,11 +1691,11 @@ export class ApiClient {
       subGraphName: opts?.subGraphName,
       verifiedGraph: opts?.verifiedGraph,
       minTrust: opts?.minTrust,
-    });
+    }, { repeatOn: REPEATS_ON_ANY_AUTHORITY_ANSWER });
   }
 
   async readQueryCatalog(contextGraphId: string): Promise<QueryCatalogReadResponse> {
-    return this.post('/api/profile/query-catalog/read', { contextGraphId });
+    return this.post('/api/profile/query-catalog/read', { contextGraphId }, { repeatOn: REPEATS_ON_ANY_AUTHORITY_ANSWER });
   }
 
   async queryRemote(peerId: string, request: {
@@ -1737,7 +1718,7 @@ export class ApiClient {
     gasConsumed?: number;
     error?: string;
   }> {
-    return this.post('/api/query-remote', { peerId, ...request });
+    return this.post('/api/query-remote', { peerId, ...request }, { repeatOn: REPEATS_ON_ANY_AUTHORITY_ANSWER });
   }
 
   async subscribeToContextGraph(contextGraphId: string, options?: {
@@ -1818,7 +1799,7 @@ export class ApiClient {
       includeWorkspace: options?.includeSharedMemory,
       syncMode: options?.syncMode ?? 'always-on',
       forceCatchup: options?.forceCatchup,
-    });
+    }, { repeatOn: REPEATS_ON_ANY_AUTHORITY_ANSWER });
   }
 
   /**
@@ -2469,14 +2450,30 @@ export class ApiClient {
   }
 
   private async send<T>(path: string, init: RequestInit, deadline: RequestDeadline = {}): Promise<T> {
-    return this.withDeadline(init.method ?? 'GET', path, deadline, async (signal) => {
-      const res = await fetch(`${this.baseUrl}${path}`, { ...init, signal, ...(deadline.dispatcher ? { dispatcher: deadline.dispatcher } : {}) } as RequestInit);
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({ error: res.statusText }));
-        throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
-      }
+    const method = init.method ?? 'GET';
+    const repeatOn = deadline.repeatOn ?? (method === 'GET' ? REPEATS_ON_ANY_AUTHORITY_ANSWER : []);
+    return this.withDeadline(method, path, deadline, async (signal, remainingMs) => {
+      const res = await this.fetchOk(path, { ...init, ...(deadline.dispatcher ? { dispatcher: deadline.dispatcher } : {}) }, repeatOn, signal, remainingMs);
       return (await res.json()) as T;
     });
+  }
+
+  /** The request's first answer that is not an error, repeating an answer in `repeatOn` within its bound. */
+  private async fetchOk(
+    path: string,
+    init: RequestInit,
+    repeatOn: readonly string[],
+    signal: AbortSignal,
+    remainingMs: () => number,
+  ): Promise<Response> {
+    for (let retry = 0; ; retry += 1) {
+      const res = await fetch(`${this.baseUrl}${path}`, { ...init, signal });
+      if (res.ok) return res;
+      const data = await res.json().catch(() => ({ error: res.statusText }));
+      const waitMs = authorityRetryWaitMs(res, data, retry, repeatOn, remainingMs());
+      if (waitMs === null) throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
   }
 
   /**
@@ -2490,12 +2487,13 @@ export class ApiClient {
     method: string,
     path: string,
     deadline: RequestDeadline,
-    run: (signal: AbortSignal) => Promise<T>,
+    run: (signal: AbortSignal, remainingMs: () => number) => Promise<T>,
   ): Promise<T> {
     const timeoutMs = deadline.timeoutMs ?? this.deadlines.timeoutMsFor({ method, path });
     const signal = AbortSignal.timeout(timeoutMs);
+    const expiresAt = Date.now() + timeoutMs;
     try {
-      return await run(signal);
+      return await run(signal, () => expiresAt - Date.now());
     } catch (err) {
       if (deadline.outcomeUnknownHint !== undefined && isUnansweredRequest(err, signal)) {
         throw new DaemonOutcomeUnknownError(method, path, timeoutMs, deadline.outcomeUnknownHint);

@@ -3,8 +3,8 @@
 // the request body is pinned here without a devnet: a new option (`assertionName`)
 // must not change what a query that does not use it sends, and the three response
 // shapes and the status-and-body diagnostics must keep working for all of them.
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { buildQueryBody, queryNode, type DevnetNode, type QueryOpts } from './harness.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { buildQueryBody, postJson, queryNode, type DevnetNode, type QueryOpts } from './harness.js';
 
 const NODE = { num: 3, apiPort: 9203, authToken: 'secret-token' } as unknown as DevnetNode;
 
@@ -111,5 +111,94 @@ describe('queryNode', () => {
 
     await expect(queryNode(NODE, 'SELECT ?s WHERE { ?s ?p ?o }'))
       .rejects.toThrow('unrecognised /api/query response shape on node3: {"unexpected":"shape"}');
+  });
+
+  describe('the retryable authority 503', () => {
+    const UNAVAILABLE = { error: 'temporarily unavailable', code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: true };
+    const SERVED = new Response(JSON.stringify({ result: { bindings: [ROW] } }));
+
+    /** Answer each request with the next of `answers` (the last repeats), and note when it came. */
+    function scripted(answers: Array<() => Response>) {
+      const sentAt: number[] = [];
+      const start = Date.now();
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        sentAt.push(Date.now() - start);
+        return answers[Math.min(sentAt.length - 1, answers.length - 1)]();
+      }));
+      return sentAt;
+    }
+    const unavailable = (retryAfter?: string) => () => new Response(JSON.stringify(UNAVAILABLE), {
+      status: 503, ...(retryAfter === undefined ? {} : { headers: { 'Retry-After': retryAfter } }),
+    });
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    it('sends the same query again no sooner than Retry-After asks, and returns the rows it then gets', async () => {
+      const sentAt = scripted([unavailable('3'), unavailable('3'), () => SERVED.clone()]);
+
+      const rows = queryNode(NODE, 'SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: 'cg' });
+      await vi.advanceTimersByTimeAsync(2_999);
+      expect(sentAt).toEqual([0]);
+      await vi.advanceTimersByTimeAsync(3_001);
+
+      await expect(rows).resolves.toEqual([ROW]);
+      expect(sentAt).toEqual([0, 3_000, 6_000]);
+      const bodies = vi.mocked(fetch).mock.calls.map(([, init]) => init?.body);
+      expect(new Set(bodies).size).toBe(1);
+    });
+
+    it('backs off on its own when no Retry-After is given', async () => {
+      const sentAt = scripted([unavailable(), unavailable(), unavailable(), () => SERVED.clone()]);
+
+      const rows = queryNode(NODE, 'SELECT ?s WHERE { ?s ?p ?o }');
+      await vi.advanceTimersByTimeAsync(7_000);
+
+      await expect(rows).resolves.toEqual([ROW]);
+      expect(sentAt).toEqual([0, 1_000, 3_000, 7_000]);
+    });
+
+    it('fails with the status and body when the retries run out', async () => {
+      const sentAt = scripted([unavailable('1')]);
+
+      const rows = queryNode(NODE, 'SELECT ?s WHERE { ?s ?p ?o }');
+      const refused = expect(rows).rejects.toThrow(/query on node3 failed \(503\): .*CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE/);
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      await refused;
+      expect(sentAt).toEqual([0, 1_000, 3_000, 7_000, 15_000]);
+    });
+
+    it('does not wait out a Retry-After longer than its bound', async () => {
+      const sentAt = scripted([unavailable('120')]);
+
+      await expect(queryNode(NODE, 'SELECT ?s WHERE { ?s ?p ?o }')).rejects.toThrow('failed (503)');
+      expect(sentAt).toEqual([0]);
+    });
+
+    it.each([
+      ['a busy store', 503, { error: 'busy', code: 'STORE_SCHEDULER_BUSY', retryable: true }],
+      ['the code without the retryable mark', 503, { error: 'x', code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE' }],
+      ['the same body under another status', 500, UNAVAILABLE],
+      ['a refusal', 403, { error: 'Not authorized' }],
+    ])('does not repeat %s', async (_label, status, json) => {
+      const requests = answering(status, json);
+
+      await expect(queryNode(NODE, 'SELECT ?s WHERE { ?s ?p ?o }')).rejects.toThrow(`failed (${status})`);
+      expect(requests).toHaveLength(1);
+    });
+
+    it('leaves postJson to report the answer as it came, for a suite that checks the status itself', async () => {
+      const sentAt = scripted([unavailable('3')]);
+
+      await expect(postJson(NODE, '/api/query', { sparql: 'x' })).resolves.toEqual({ status: 503, json: UNAVAILABLE });
+      expect(sentAt).toEqual([0]);
+    });
   });
 });
