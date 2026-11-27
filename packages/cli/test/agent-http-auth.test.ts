@@ -9,7 +9,7 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { authenticateHttpRequest, authenticatedAgentAddress, canAdministerNode } from '../src/auth.js';
-import { normalizeOperatorAgentAddresses } from '../src/agent-http-auth.js';
+import { ENCRYPTION_ENROLLMENT_ACTIVATION_PATH, isKnownAgentKeySigner, normalizeOperatorAgentAddresses } from '../src/agent-http-auth.js';
 import { signAgentHttpHeaders, createAgentHttpClient, type AgentHttpRequest } from '../src/agent-http-signing.js';
 import { SqliteAgentHttpNonceStore } from '../src/agent-http-nonce-store.js';
 import { readBody } from '../src/daemon/http-utils.js';
@@ -17,20 +17,27 @@ import { createRequestActor } from '../src/daemon/routes/context.js';
 
 const wallet = new ethers.Wallet('0x' + '01'.padStart(64, '0'));
 const other = new ethers.Wallet('0x' + '02'.padStart(64, '0'));
+/** A valid key that is neither registered on the node nor an operator agent. */
+const stranger = new ethers.Wallet('0x' + '03'.padStart(64, '0'));
+const registeredByDefault = (address: string) => [wallet.address, other.address].includes(address);
 const cleanup: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
 
-async function signed(overrides: Partial<AgentHttpRequest> = {}) {
+async function signed(overrides: Partial<AgentHttpRequest> = {}, signer: ethers.Wallet = wallet) {
   const input: AgentHttpRequest = {
-    agentAddress: wallet.address, method: 'POST', targetPeerId: 'peer-receiver',
+    agentAddress: signer.address, method: 'POST', targetPeerId: 'peer-receiver',
     path: '/api/example?a=1&b=%2F', contentType: 'application/json',
     body: Buffer.from('{"value":42}'), timestamp: String(Date.now()),
     nonce: randomBytes(24).toString('hex'), ...overrides,
   };
-  const headers = signAgentHttpHeaders(input, wallet.signingKey);
+  const headers = signAgentHttpHeaders(input, signer.signingKey);
   return { ...input, headers };
 }
-async function fixture(operator = false, authEnabled = true) {
+async function fixture(
+  operator = false,
+  authEnabled = true,
+  isRegisteredAgent: (address: string) => boolean = registeredByDefault,
+) {
   const dir = mkdtempSync(join(tmpdir(), 'agent-http-'));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   let db = new Database(join(dir, 'auth.sqlite3'));
@@ -42,7 +49,7 @@ async function fixture(operator = false, authEnabled = true) {
       const auth = await authenticateHttpRequest({
         req, res, authEnabled, validTokens: new Set(['agent-token', 'operator-token']),
         resolveAgentByToken: (token) => token === 'agent-token' ? wallet.address : undefined,
-        agentKey: { targetPeerId: 'peer-receiver', nonces, operatorAgentAddresses: operator ? [wallet.address] : [] },
+        agentKey: { targetPeerId: 'peer-receiver', nonces, operatorAgentAddresses: operator ? [wallet.address] : [], isRegisteredAgent },
       });
       if (!auth.allowed) return;
       const actor = createRequestActor(auth, () => other.address);
@@ -235,6 +242,81 @@ describe('shared agent-key HTTP authentication', () => {
   it('rejects a signer configured as another agent', async () => {
     const req = await signed();
     expect(() => signAgentHttpHeaders({ ...req, agentAddress: other.address }, wallet.signingKey)).toThrow('Signing key does not match');
+  });
+
+  it('refuses a valid signature from a key that is not a registered or operator agent', async () => {
+    const f = await fixture();
+    const response = await f.send(await signed({}, stranger));
+    expect(response.status).toBe(401);
+    expect(response.body.code).toBe('AGENT_HTTP_AGENT_UNKNOWN');
+    expect(f.dispatched()).toBe(0);
+  });
+
+  it('refuses an unknown key from its headers, without waiting for its body', async () => {
+    const f = await fixture();
+    const req = await signed({}, stranger);
+    const port = Number(new URL(f.baseUrl).port);
+    const response = await new Promise<{ status: number; body: any }>((resolve, reject) => {
+      const pending = request({
+        hostname: '127.0.0.1', port, method: 'POST', path: req.path,
+        // Announces a 1 MiB body that is never sent.
+        headers: { ...req.headers, 'content-length': String(1024 * 1024) },
+      }, (res) => {
+        const chunks: Buffer[] = []; res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          pending.destroy();
+          try { resolve({ status: res.statusCode!, body: JSON.parse(Buffer.concat(chunks).toString()) }); } catch (error) { reject(error); }
+        });
+      });
+      pending.on('error', () => { /* destroyed after the answer */ });
+      pending.flushHeaders();
+    });
+    expect(response.status).toBe(401);
+    expect(response.body.code).toBe('AGENT_HTTP_AGENT_UNKNOWN');
+    expect(f.dispatched()).toBe(0);
+  });
+
+  it('does not consume the nonce of a request it refuses as unknown', async () => {
+    let registered = false;
+    const f = await fixture(false, true, (address) => registered && address === stranger.address);
+    const req = await signed({}, stranger);
+    expect((await f.send(req)).body.code).toBe('AGENT_HTTP_AGENT_UNKNOWN');
+    registered = true;
+    expect((await f.send(req)).status).toBe(200);
+  });
+
+  it('refuses an agent removed while its request body was being read', async () => {
+    let checks = 0;
+    const f = await fixture(false, true, () => { checks += 1; return checks === 1; });
+    expect((await f.send(await signed())).body.code).toBe('AGENT_HTTP_AGENT_UNKNOWN');
+    expect(f.dispatched()).toBe(0);
+  });
+
+  it('waits for an asynchronous signer check before reading the body', async () => {
+    const f = await fixture(false, true, async (address) => address === stranger.address);
+    expect((await f.send(await signed({}, stranger))).status).toBe(200);
+    expect((await f.send(await signed({}, wallet))).body.code).toBe('AGENT_HTTP_AGENT_UNKNOWN');
+  });
+
+  it('knows a registered agent anywhere, and an enrollment recipient only on the activation route', async () => {
+    const pending = new Set([stranger.address]);
+    const agent = {
+      getLocalAgentMode: (address: string) => (address === wallet.address ? 'self-sovereign' : undefined),
+      hasPendingEncryptionKeyEnrollment: async (address: string) => pending.has(address),
+    };
+    expect(isKnownAgentKeySigner(agent, wallet.address, '/api/query')).toBe(true);
+    expect(isKnownAgentKeySigner(agent, stranger.address, '/api/query')).toBe(false);
+    expect(isKnownAgentKeySigner(agent, other.address, '/api/query')).toBe(false);
+    await expect(isKnownAgentKeySigner(agent, stranger.address, ENCRYPTION_ENROLLMENT_ACTIVATION_PATH)).resolves.toBe(true);
+    await expect(isKnownAgentKeySigner(agent, other.address, ENCRYPTION_ENROLLMENT_ACTIVATION_PATH)).resolves.toBe(false);
+    expect(isKnownAgentKeySigner(agent, stranger.address, '/api/agent/encryption-enrollments')).toBe(false);
+  });
+
+  it('accepts an operator agent that is not registered as a local agent', async () => {
+    const f = await fixture(true, true, () => false);
+    const response = await f.send(await signed({ path: '/api/admin/routes' }));
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ caller: wallet.address, admin: true });
   });
 
   it('validates explicit operator addresses without granting defaults', () => {

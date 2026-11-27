@@ -13,8 +13,10 @@ export default defineConfig({
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
           'test/async-share-bound-recovery.test.ts',
+          'test/async-share-completion-lock.test.ts',
           'test/write-preflight-diagnostics.test.ts',
           'test/durable-synchronous-share.test.ts',
+          'test/durable-share-snapshot-writes.test.ts',
           'test/durable-private-payload-recovery.test.ts',
           'test/durable-gossip-signer-lookup.test.ts',
           'test/durable-share-preparation-race.test.ts',
@@ -25,6 +27,7 @@ export default defineConfig({
           'test/public-snapshot-job.test.ts',
           'test/public-checkpoint-job.test.ts',
           'test/public-checkpoint-config.test.ts',
+          'test/daemon-api-exposure-warning.test.ts',
           'test/snapshot-job-isolation.test.ts',
           'test/sync-checkpoint-command.test.ts',
           'test/core-chain-cache-config.test.ts',
@@ -150,6 +153,7 @@ export default defineConfig({
           'test/daemon/routes/plugins.test.ts',
           'test/daemon-pca-routes.test.ts',
           'test/knowledge-assets-error-mapping.test.ts',
+          'test/share-job-retirement.test.ts',
           'test/knowledge-assets-publish-authority-route.test.ts',
           'test/promote-admission-route.test.ts',
           'test/async-share-control-busy-admission.test.ts',
@@ -489,9 +493,12 @@ export default defineConfig({
           'test/daemon-prime-agent.test.ts',
           'test/daemon-prime-agent-persistence.test.ts',
           'test/daemon-sse-final-frame.test.ts',
+          // Proxy keepalives on the Hermes and OpenClaw chat streams (#3886).
+          'test/local-agent-sse-keepalive.test.ts',
           'test/chain-discovery-scan-mode.test.ts',
           'test/chain-discovery-scan-storage.test.ts',
           'test/context-graph-list-cli.test.ts',
+          'test/context-graph-list-filter-route.test.ts',
           'test/historical-context-graph-discovery.test.ts',
           'test/context-graph-subscriptions-route.test.ts',
           'test/context-graph-authority-route.test.ts',
@@ -506,6 +513,7 @@ export default defineConfig({
           // config type and loader, and the daemon configuring the path before any store call. No hardhat.
           'test/store-control-path-config.test.ts',
           'test/daemon-store-control-path-wiring.test.ts',
+          'test/daemon-api-bind-guard.test.ts',
         ],
     testTimeout: runsDaemonHttpBehavior ? 120_000 : 60_000,
     globalSetup: runsDaemonHttpBehavior ? ['../chain/test/hardhat-global-setup.ts'] : [],

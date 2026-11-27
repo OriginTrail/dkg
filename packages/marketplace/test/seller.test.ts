@@ -383,7 +383,9 @@ describe('a call', () => {
     backend.next = new UpstreamError('the backend answered 500');
     // The backend's detail stays with the seller.
     expect(await seller.serve(wire(await requestFor(id)))).toEqual({ ok: false, code: 'UpstreamError', retry: true });
-    const later = wire(await requestFor(id, { nonce: 1n }));
+    // A chain read that fails: the first read of a subscription the seller has not read yet.
+    const unread = await fund(ethers.getAddress(`0x${'b4'.repeat(20)}`));
+    const later = wire(await requestFor(unread));
     vi.spyOn(chain, 'getSubscription').mockRejectedValueOnce(new Error('socket hang up'));
     expect(await seller.serve(later)).toEqual({ ok: false, code: 'Unavailable', retry: true });
   });

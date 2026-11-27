@@ -1,4 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -8,16 +9,114 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  HEALTHY_WORKER_UPTIME_MS,
+  MAX_CRASH_RESTARTS,
+  decideWorkerExit,
   describeWorkerExit,
   maybeStartSupervisorLivenessWatcher,
   runDaemonSupervisor,
   runForegroundSupervisor,
-  runForegroundWorkerIteration,
+  runWorkerIteration,
 } from '../src/cli-supervisor.js';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
-import { resolveLivenessShutdownGraceMs } from '../src/daemon/supervisor-liveness.js';
+import {
+  LIVENESS_CONSECUTIVE_FAILURES_TO_KILL,
+  LIVENESS_PROBE_INTERVAL_MS,
+  LIVENESS_PROBE_TIMEOUT_MS,
+  resolveLivenessShutdownGraceMs,
+} from '../src/daemon/supervisor-liveness.js';
 
 const execFileAsync = promisify(execFile);
+
+const GIVING_UP = 'giving up after 5 crashes with no worker running 10 min between them: '
+  + 'no new worker will start, and the node stays down until it is started again; the supervisor exits with code';
+
+/** The line a supervisor logs for one worker's exit, from the decision it takes. */
+function exitLine(
+  code: number | null,
+  crashes: number,
+  options: { signal?: NodeJS.Signals; uptimeMs?: number; stopping?: boolean; pid?: number } = {},
+): string {
+  const decision = decideWorkerExit({ code, uptimeMs: options.uptimeMs ?? 1_000 }, crashes, { stopping: options.stopping });
+  return describeWorkerExit({ pid: 'pid' in options ? options.pid : 7, code, signal: options.signal ?? null }, decision);
+}
+
+interface PlannedRun {
+  /** How long the worker runs on the fake clock before it ends. */
+  readonly upMs: number;
+  readonly code?: number | null;
+  readonly signal?: NodeJS.Signals;
+  /** The worker cannot start: its spawn emits `error` instead of `exit`. */
+  readonly spawnError?: true;
+}
+
+/**
+ * Workers that run on a fake clock: each one ends as `plan` says once the clock
+ * has moved on by its `upMs`, and a supervisor's sleep moves the clock too.
+ */
+function plannedWorkers(plan: readonly PlannedRun[]) {
+  let clockMs = 0;
+  let started = 0;
+  const sleeps: number[] = [];
+  return {
+    now: () => clockMs,
+    sleep: async (ms: number) => {
+      sleeps.push(ms);
+      clockMs += ms;
+    },
+    spawnWorker: () => {
+      const run = plan[started];
+      started += 1;
+      if (run === undefined) throw new Error(`worker ${started} was not planned`);
+      const child = Object.assign(new EventEmitter(), { pid: 100 + started, kill: () => true });
+      setImmediate(() => {
+        clockMs += run.upMs;
+        if (run.spawnError) child.emit('error', new Error('spawn ENOENT'));
+        else child.emit('exit', run.code ?? null, run.signal ?? null);
+      });
+      return child as unknown as ReturnType<typeof spawn>;
+    },
+    started: () => started,
+    sleeps,
+  };
+}
+
+class SupervisorExit extends Error {
+  constructor(readonly code: number | undefined) {
+    super(`process.exit(${code})`);
+  }
+}
+
+/** Run a supervisor over `plan` and resolve with the code its process would end with. */
+type PlannedSupervisor = (workers: ReturnType<typeof plannedWorkers>) => Promise<number | undefined>;
+
+const plannedSupervisors: ReadonlyArray<{ name: string; run: PlannedSupervisor }> = [
+  {
+    name: 'a detached supervisor',
+    run: (workers) => runDaemonSupervisor({ now: workers.now, sleep: workers.sleep, spawnWorker: workers.spawnWorker }),
+  },
+  {
+    name: 'a foreground supervisor',
+    run: async (workers) => {
+      vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+        throw new SupervisorExit(code);
+      }) as typeof process.exit);
+      try {
+        await runForegroundSupervisor(process.env, {
+          now: workers.now,
+          sleep: workers.sleep,
+          spawnWorker: workers.spawnWorker,
+          clearApiPort: async () => {},
+          startWorkerLiveness: async () => () => {},
+        });
+      } catch (error) {
+        if (error instanceof SupervisorExit) return error.code;
+        throw error;
+      }
+      throw new Error('the foreground supervisor returned without exiting');
+    },
+  },
+];
 
 /**
  * A home whose active release is `workerCode`, a stand-in for the worker, which
@@ -63,26 +162,124 @@ describe('a supervisor says how its worker ended', () => {
   });
 
   it('names the exit code or signal, and what happens next', () => {
-    const exit = (code: number | null, signal: NodeJS.Signals | null = null) => ({ pid: 7, code, signal });
-    expect(describeWorkerExit(exit(null, 'SIGKILL'), 0, 5))
+    expect(exitLine(null, 0, { signal: 'SIGKILL' }))
       .toBe('[supervisor] worker 7 ended with signal SIGKILL; crash 1 of 5, starting a new worker');
-    expect(describeWorkerExit(exit(3), 3, 5))
+    expect(exitLine(3, 3))
       .toBe('[supervisor] worker 7 ended with exit code 3; crash 4 of 5, starting a new worker');
-    expect(describeWorkerExit(exit(3), 4, 5))
-      .toBe('[supervisor] worker 7 ended with exit code 3; giving up after 5 crashes: no new worker will start, and the node stays down until it is started again');
-    expect(describeWorkerExit(exit(75), 4, 5))
+    expect(exitLine(3, 4))
+      .toBe(`[supervisor] worker 7 ended with exit code 3; ${GIVING_UP} 3`);
+    expect(exitLine(null, 4, { signal: 'SIGTRAP' }))
+      .toBe(`[supervisor] worker 7 ended with signal SIGTRAP; ${GIVING_UP} 1`);
+    expect(exitLine(75, 4))
       .toBe('[supervisor] worker 7 ended with exit code 75; restart requested, starting a new worker');
-    expect(describeWorkerExit(exit(0), 4, 5))
+    expect(exitLine(0, 4))
       .toBe('[supervisor] worker 7 ended with exit code 0; clean stop, the supervisor stops too');
-    expect(describeWorkerExit({ pid: undefined, code: 1, signal: null }, 0, 5, { stopping: true }))
+    expect(exitLine(1, 0, { stopping: true, pid: undefined }))
       .toBe('[supervisor] worker unknown ended with exit code 1; the supervisor was asked to stop');
   });
 
+  it('says when a healthy run made the crashes before it stop counting', () => {
+    expect(exitLine(3, 4, { uptimeMs: HEALTHY_WORKER_UPTIME_MS }))
+      .toBe('[supervisor] worker 7 ended with exit code 3; crash 1 of 5 (it ran 10 min or more, so the 4 crashes before it no longer count), starting a new worker');
+    expect(exitLine(null, 1, { signal: 'SIGTRAP', uptimeMs: 3 * 3_600_000 }))
+      .toBe('[supervisor] worker 7 ended with signal SIGTRAP; crash 1 of 5 (it ran 10 min or more, so the crash before it no longer counts), starting a new worker');
+    expect(exitLine(3, 0, { uptimeMs: HEALTHY_WORKER_UPTIME_MS }))
+      .toBe('[supervisor] worker 7 ended with exit code 3; crash 1 of 5, starting a new worker');
+  });
+
   it('marks a forced exit, whichever the worker meant to do', () => {
-    expect(describeWorkerExit({ pid: 7, code: 175, signal: null }, 0, 5))
+    expect(exitLine(175, 0))
       .toBe('[supervisor] worker 7 ended with exit code 175 (forced: its shutdown did not finish); restart requested, starting a new worker');
-    expect(describeWorkerExit({ pid: 7, code: 100, signal: null }, 0, 5))
+    expect(exitLine(100, 0))
       .toBe('[supervisor] worker 7 ended with exit code 100 (forced: its shutdown did not finish); clean stop, the supervisor stops too');
+  });
+
+  it('decides what follows an exit: only crashes close together count, and giving up is a failure', () => {
+    const quick = HEALTHY_WORKER_UPTIME_MS - 1;
+    expect(MAX_CRASH_RESTARTS).toBe(5);
+    expect(decideWorkerExit({ code: 3, uptimeMs: quick }, 3))
+      .toEqual({ reason: 'crashed', next: 'restart', crashes: 4, delayMs: 1_000, forgiven: 0 });
+    expect(decideWorkerExit({ code: 3, uptimeMs: quick }, 4))
+      .toEqual({ reason: 'gave-up', next: 'stop', exitCode: 3, crashes: 5 });
+    expect(decideWorkerExit({ code: null, uptimeMs: 0 }, 4))
+      .toEqual({ reason: 'gave-up', next: 'stop', exitCode: 1, crashes: 5 });
+    expect(decideWorkerExit({ code: 3, uptimeMs: HEALTHY_WORKER_UPTIME_MS }, 4))
+      .toEqual({ reason: 'crashed', next: 'restart', crashes: 1, delayMs: 1_000, forgiven: 4 });
+    expect(decideWorkerExit({ code: 175, uptimeMs: 0 }, 4))
+      .toEqual({ reason: 'restart-requested', next: 'restart', crashes: 0, delayMs: 250 });
+    expect(decideWorkerExit({ code: 100, uptimeMs: 0 }, 4))
+      .toEqual({ reason: 'clean-stop', next: 'stop', exitCode: 0 });
+    expect(decideWorkerExit({ code: null, uptimeMs: 0 }, 4, { stopping: true }))
+      .toEqual({ reason: 'asked-to-stop', next: 'stop', exitCode: 0 });
+    expect(decideWorkerExit({ code: 3, uptimeMs: 0 }, 4, { stopping: true }))
+      .toEqual({ reason: 'asked-to-stop', next: 'stop', exitCode: 3 });
+  });
+
+  it('a healthy run is longer than the liveness watchdog takes to kill a worker, also one that is shutting down', () => {
+    const watchdogKillMs = LIVENESS_CONSECUTIVE_FAILURES_TO_KILL * LIVENESS_PROBE_INTERVAL_MS + LIVENESS_PROBE_TIMEOUT_MS;
+    expect(HEALTHY_WORKER_UPTIME_MS).toBeGreaterThan(watchdogKillMs);
+    expect(HEALTHY_WORKER_UPTIME_MS).toBeGreaterThan(
+      resolveLivenessShutdownGraceMs(resolveShutdownPolicy(undefined).hardTimeoutMs) + watchdogKillMs,
+    );
+  });
+
+  describe.each(plannedSupervisors)('$name, on a fake clock', ({ run }) => {
+    it('keeps restarting workers that crash after a healthy run, however many', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const workers = plannedWorkers([
+        ...Array.from({ length: 7 }, () => ({ upMs: HEALTHY_WORKER_UPTIME_MS, signal: 'SIGTRAP' as const })),
+        { upMs: 1_000, code: 0 },
+      ]);
+      await withStandInWorker('', async (_home, supervisorLines) => {
+        await expect(run(workers)).resolves.toBe(0);
+        expect(workers.started()).toBe(8);
+        expect(workers.sleeps).toEqual(Array.from({ length: 7 }, () => 1_000));
+        const lines = await supervisorLines();
+        expect(lines).toEqual([
+          '[supervisor] worker N ended with signal SIGTRAP; crash 1 of 5, starting a new worker',
+          ...Array.from({ length: 6 }, () => '[supervisor] worker N ended with signal SIGTRAP; crash 1 of 5 (it ran 10 min or more, so the crash before it no longer counts), starting a new worker'),
+          '[supervisor] worker N ended with exit code 0; clean stop, the supervisor stops too',
+        ]);
+      });
+    });
+
+    it('counts quick crashes again after a healthy run, and gives up after 5 quick ones with a non-zero exit', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const quick = { upMs: HEALTHY_WORKER_UPTIME_MS - 1, code: 3 };
+      const workers = plannedWorkers([quick, quick, quick, quick, { upMs: HEALTHY_WORKER_UPTIME_MS, code: 3 }, quick, quick, quick, quick]);
+      await withStandInWorker('', async (_home, supervisorLines) => {
+        await expect(run(workers)).resolves.toBe(3);
+        expect(workers.started()).toBe(9);
+        expect(await supervisorLines()).toEqual([
+          ...[1, 2, 3, 4].map((crash) => `[supervisor] worker N ended with exit code 3; crash ${crash} of 5, starting a new worker`),
+          '[supervisor] worker N ended with exit code 3; crash 1 of 5 (it ran 10 min or more, so the 4 crashes before it no longer count), starting a new worker',
+          ...[2, 3, 4].map((crash) => `[supervisor] worker N ended with exit code 3; crash ${crash} of 5, starting a new worker`),
+          `[supervisor] worker N ended with exit code 3; ${GIVING_UP} 3`,
+        ]);
+      });
+    });
+
+    it('gives up with exit code 1 after 5 quick crashes by signal', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const workers = plannedWorkers(Array.from({ length: 5 }, () => ({ upMs: 60_000, signal: 'SIGKILL' as const })));
+      await withStandInWorker('', async (_home, supervisorLines) => {
+        await expect(run(workers)).resolves.toBe(1);
+        expect(workers.started()).toBe(5);
+        expect((await supervisorLines()).at(-1)).toBe(`[supervisor] worker N ended with signal SIGKILL; ${GIVING_UP} 1`);
+      });
+    });
+
+    it('counts a worker that cannot start as a crash with exit code 1', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const workers = plannedWorkers([{ upMs: 0, spawnError: true }, { upMs: 1_000, code: 0 }]);
+      await withStandInWorker('', async (_home, supervisorLines) => {
+        await expect(run(workers)).resolves.toBe(0);
+        expect(await supervisorLines()).toEqual([
+          '[supervisor] worker N ended with exit code 1; crash 1 of 5, starting a new worker',
+          '[supervisor] worker N ended with exit code 0; clean stop, the supervisor stops too',
+        ]);
+      });
+    });
   });
 
   it('a detached supervisor logs each worker that ended, in order, and keeps its restart policy', async () => {
@@ -95,7 +292,7 @@ describe('a supervisor says how its worker ended', () => {
         'else process.exit(0);',
       ].join('\n'),
       async (home, supervisorLines) => {
-        await expect(runDaemonSupervisor()).resolves.toBeUndefined();
+        await expect(runDaemonSupervisor()).resolves.toBe(0);
         expect(await readFile(join(home, 'starts'), 'utf8')).toBe('4');
         expect(await supervisorLines()).toEqual([
           '[supervisor] worker N ended with signal SIGKILL; crash 1 of 5, starting a new worker',
@@ -107,15 +304,15 @@ describe('a supervisor says how its worker ended', () => {
     );
   }, 30_000);
 
-  it('a detached supervisor says so when it gives up after 5 crashes, and still stops as before', async () => {
+  it('a detached supervisor says so when it gives up after 5 quick crashes, and ends with a non-zero code', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     await withStandInWorker('process.exit(1);', async (home, supervisorLines) => {
-      await expect(runDaemonSupervisor()).resolves.toBeUndefined();
+      await expect(runDaemonSupervisor()).resolves.toBe(1);
       expect(await readFile(join(home, 'starts'), 'utf8')).toBe('5');
       const lines = await supervisorLines();
       expect(lines).toHaveLength(5);
       expect(lines[3]).toBe('[supervisor] worker N ended with exit code 1; crash 4 of 5, starting a new worker');
-      expect(lines[4]).toBe('[supervisor] worker N ended with exit code 1; giving up after 5 crashes: no new worker will start, and the node stays down until it is started again');
+      expect(lines[4]).toBe(`[supervisor] worker N ended with exit code 1; ${GIVING_UP} 1`);
     });
   }, 30_000);
 
@@ -123,7 +320,7 @@ describe('a supervisor says how its worker ended', () => {
     const warned = vi.spyOn(console, 'warn').mockImplementation(() => {});
     await withStandInWorker('process.exit(start === 1 ? 75 : 0);', async (home) => {
       await mkdir(join(home, 'daemon.log'));
-      await expect(runDaemonSupervisor()).resolves.toBeUndefined();
+      await expect(runDaemonSupervisor()).resolves.toBe(0);
       expect(await readFile(join(home, 'starts'), 'utf8')).toBe('2');
       expect(warned).toHaveBeenCalledWith(expect.stringContaining('ended with exit code 0'));
     });
@@ -131,11 +328,6 @@ describe('a supervisor says how its worker ended', () => {
 
   it('a foreground supervisor logs it too, before it exits', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
-    class SupervisorExit extends Error {
-      constructor(readonly code: number | undefined) {
-        super(`process.exit(${code})`);
-      }
-    }
     vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new SupervisorExit(code);
     }) as typeof process.exit);
@@ -150,11 +342,11 @@ describe('a supervisor says how its worker ended', () => {
 
   it('a foreground worker iteration reports its pid and signal, and a worker that cannot start as exit code 1', async () => {
     await withStandInWorker("process.kill(process.pid, 'SIGKILL');", async () => {
-      const killed = await runForegroundWorkerIteration({ childEnv: process.env, livenessConfig: { enabled: false, shutdownGraceMs: 0 } });
+      const killed = await runWorkerIteration({ childEnv: process.env, livenessConfig: { enabled: false, shutdownGraceMs: 0 } });
       expect(killed).toMatchObject({ rawExitCode: null, signal: 'SIGKILL', forced: false, originalExitCode: null });
       expect(killed.pid).toEqual(expect.any(Number));
     });
-    await expect(runForegroundWorkerIteration({
+    await expect(runWorkerIteration({
       childEnv: process.env,
       livenessConfig: { enabled: false, shutdownGraceMs: 0 },
       dependencies: {
@@ -269,7 +461,7 @@ describe('foreground supervisor restart command', () => {
       process.env.DKG_HOME = root;
       process.env.DKG_SUPERVISOR_LIVENESS_PROBE = 'off';
 
-      await expect(runDaemonSupervisor()).resolves.toBeUndefined();
+      await expect(runDaemonSupervisor()).resolves.toBe(0);
     } finally {
       if (savedDkgHome === undefined) delete process.env.DKG_HOME;
       else process.env.DKG_HOME = savedDkgHome;
@@ -337,7 +529,7 @@ describe('foreground supervisor restart command', () => {
         DKG_SHUTDOWN_HARD_TIMEOUT_MS: '60000',
       };
 
-      await expect(runForegroundWorkerIteration({
+      await expect(runWorkerIteration({
         childEnv: env,
         dependencies: {
           clearApiPort: async () => { throw new Error('stale port cleanup failed'); },

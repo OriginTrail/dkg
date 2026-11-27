@@ -238,7 +238,7 @@ ordering. Schedulers with multiple ordinary slots retain their capacity reserves
 
 ### Queue control path
 
-The async share and publisher queues can run their own store calls on two small
+The async share and publisher queues can run their own store calls on small
 schedulers of their own, beside the shared one, so queue
 bookkeeping never waits behind client reads or data-plane work. The shared
 scheduler's lanes, limits and `StorePressureSnapshot` are unchanged; the
@@ -267,7 +267,7 @@ and sets no priority. When the queue's path is on, the `blazegraph` and
 `sparql-http` adapters run the call on that queue's scheduler in one fixed lane
 that is reported as `control` (in the `503` body's `priority`, metric
 attributes, the backpressure registry under `store-control-share` /
-`store-control-publisher`, and the queue-wait stats), whatever `priority` or
+`store-control-publisher` / `store-control-preflight`, and the queue-wait stats), whatever `priority` or
 ambient `withDefaultStoreWorkPriority` lane the caller has. When it is off, the
 call resolves exactly like the same call without the tag. Embedded Oxigraph
 backends run no store scheduler and so never use the path, whatever its
@@ -275,7 +275,7 @@ setting.
 
 | Setting | Default | Purpose |
 |---|---:|---|
-| `DKG_STORE_CONTROL_RESERVED_SLOTS` | unset | `0` turns the path off. `share:1,publisher:2` sets the slots per queue (caps: share 1, publisher 2; a queue left out gets 0; a higher number is clamped with a warning). A malformed value, or a variable that is set but blank, is refused with a warning and leaves the path off. An explicit value is honoured on any host and with any backend. Wins over the config value when set. Read once at start. |
+| `DKG_STORE_CONTROL_RESERVED_SLOTS` | unset | `0` turns the path off. `share:1,publisher:2` sets the slots per queue (caps: share 1, publisher 2, preflight 1; a queue left out gets 0; a higher number is clamped with a warning). A malformed value, or a variable that is set but blank, is refused with a warning and leaves the path off. An explicit value is honoured on any host and with any backend. Wins over the config value when set. Read once at start. |
 | node config `store.controlReservedSlots` | absent | The same values (also the number `0`), used when the variable is unset. A malformed value (`null`, `true`, any number but `0` included) is refused with a warning that names the key and leaves the path off. Read by the daemon only. |
 
 With neither setting, the default is share 1 + publisher 2 for
@@ -284,6 +284,19 @@ a node whose configured backend is `blazegraph` or managed `oxigraph-server`
 (`availableParallelism()`), and off for every other node: 2 or fewer CPUs,
 `sparql-http` (any other SPARQL store) and any other backend. A malformed value
 never falls through to the other setting or to the default.
+
+To reserve one additional slot for fresh graph checks before async sharing and
+publishing, include `preflight:1` alongside the desired queue settings (for
+example, `share:1,publisher:2,preflight:1`); a queue left out gets 0, so
+`preflight:1` alone turns the share and publisher slots off. Both routes share
+that slot. It handles the exact declaration and existence queries. Catalog
+fallback, content discovery (needed for a graph that is not subscribed and
+synced), the private-graph caller-access read and later publish checks keep
+their existing scheduling. With the write-preflight cache on
+(`DKG_WRITE_PREFLIGHT_CACHE`), cached positive answers still skip the reads.
+An occupied store backend can still delay execution after the scheduler admits
+a query. The embedded Oxigraph backends never use the slot. Remove `preflight`
+from the setting to stop reserving it. Changes take effect on restart.
 
 The daemon calls `configureStoreControlPath({ backend, configured })` with the
 node's `store.backend` (the configured name, so managed Oxigraph is

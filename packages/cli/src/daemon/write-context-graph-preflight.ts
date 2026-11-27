@@ -206,6 +206,7 @@ export async function evaluateExactWritePreflight(
     allowLocalExactFallback: boolean;
     /** The second pass after a readiness wait: it must not join a probe that began before the wait ended. */
     freshProbe?: boolean;
+    asyncAdmission?: boolean;
   },
 ): Promise<ExactPreflightDecision> {
   const {
@@ -230,6 +231,7 @@ export async function evaluateExactWritePreflight(
     const exact = await probeWritePreflight(agent, candidateId, callerAgentAddress, {
       accepts: fastAccepts,
       fresh: opts.freshProbe,
+      asyncAdmission: opts.asyncAdmission,
     });
     const probe = exact.probe;
     // Fast-accept wins even under a degraded store (it never rests on UNKNOWN

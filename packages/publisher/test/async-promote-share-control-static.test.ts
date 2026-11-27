@@ -31,6 +31,8 @@ import {
   type OptionsClass,
   type SourceText,
 } from './_helpers/share-control-static.js';
+import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
+import { NOW, STARTED, mk, put } from './_helpers/share-retention-fixtures.js';
 import { driveRetentionWorkload } from './_helpers/share-retention-workload.js';
 import { driveShareWorkload } from './_helpers/share-control-workload.js';
 
@@ -55,6 +57,7 @@ const SITE_FILES: Readonly<Record<string, readonly OptionsClass[]>> = {
   [`${SRC}async-promote-queue-impl.ts`]: ['control'],
   [`${SRC}bound-promote-job.ts`]: ['control'],
   [`${SRC}share-reconciliation.ts`]: ['control'],
+  [`${SRC}promote-job-retirement.ts`]: ['control'],
   [`${SRC}promote-job-page.ts`]: ['control'],
   [`${SRC}promote-job-listing.ts`]: ['control'],
   [`${SRC}promote-post-commit-sweep.ts`]: [],
@@ -125,7 +128,8 @@ describe('every site the scan found is observed by the recorder in a driven scen
   const scanned = sources.flatMap((file) => labelOccurrences(file).map((o) => o.label));
   // The retention sweep's sites are driven by their own scenario below (the share workload does not run a sweep).
   const retentionLabels = scanned.filter((l) => l.startsWith('publisher.asyncPromote.retention.')).sort();
-  const controlLabels = scanned.filter((l) => l !== SHARE_OWNERSHIP_READER_SOURCE && l !== SHARE_QUEUE_USAGE_SOURCE && !retentionLabels.includes(l)).sort();
+  const retirementLabels = fileLabels(`${SRC}promote-job-retirement.ts`).sort();
+  const controlLabels = scanned.filter((l) => l !== SHARE_OWNERSHIP_READER_SOURCE && l !== SHARE_QUEUE_USAGE_SOURCE && !retentionLabels.includes(l) && !retirementLabels.includes(l)).sort();
 
   it.each([
     { name: 'atomic', atomic: true, hidden: [] as string[] },
@@ -141,6 +145,29 @@ describe('every site the scan found is observed by the recorder in a driven scen
     expect(onGraph.filter((call) => shareRowOf(call, [DEFAULT_PROMOTE_CONTROL_GRAPH_URI]) === 'control').every((call) => call.options?.controlQueue === 'share')).toBe(true);
     expect(rowLabels('ownership-reader')).toEqual([SHARE_OWNERSHIP_READER_SOURCE]);
     expect(rowLabels('queue-usage')).toEqual([SHARE_QUEUE_USAGE_SOURCE]);
+  });
+
+  it('routes retirement preview, archive write and receipt observation through the share control queue', async () => {
+    const inner = new OxigraphStore();
+    await put(inner, mk('retirement', 'failed', { bound: true, commitMarker: STARTED,
+      attempt: { count: 1, maxRetries: 5, lastError: {
+        classification: 'fatal', retryable: false, recordedAt: NOW, message: 'store timeout',
+      } },
+    }));
+    const recorder = recordShareStore(inner);
+    const queue = new TripleStoreAsyncPromoteQueue(recorder.store);
+    await withControlPath(true, async () => {
+      const preview = await queue.retireFailedJob('retirement');
+      if (preview.outcome !== 'eligible') throw new Error(`unexpected preview: ${preview.outcome}`);
+      const receipt = await queue.retireFailedJob('retirement', { expectedJobSha256: preview.jobSha256, acceptUnknownEffects: true });
+      expect(receipt.outcome).toBe('retired');
+      expect((await queue.retireFailedJob('retirement')).outcome).toBe('observed');
+    });
+    const calls = recorder.calls.filter(call => call.method === 'query' || call.method === 'update');
+    expect(calls.some(call => call.method === 'query')).toBe(true);
+    expect(calls.filter(call => call.method === 'update')).toHaveLength(1);
+    expect([...new Set(calls.map(call => call.source))].sort()).toEqual(retirementLabels);
+    expect(calls.every(call => call.options?.controlQueue === 'share' && call.options.priority === undefined)).toBe(true);
   });
 
   it.each(['report', 'delete'] as const)('retention sweep (%s mode): its verify and delete sites are control rows, its scan a background row, and the scan found no other label', async (mode) => {

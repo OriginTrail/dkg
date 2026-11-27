@@ -381,6 +381,14 @@ function composeOwnedRowsBytes(rows: readonly SwmAuthorInventoryRowV1[]): Uint8A
   return UTF8.encode(`[${parts.join(',')}]`);
 }
 
+/** Detach caller-owned input at a wire boundary. Codec-owned immutable rows already meet this contract. */
+export function detachSwmAuthorInventoryRowsV1(
+  rows: readonly SwmAuthorInventoryRowV1[],
+): readonly SwmAuthorInventoryRowV1[] {
+  if (isOwnedRowSet(rows)) return rows;
+  return parseCanonicalSwmAuthorInventoryRowsV1(canonicalizeSwmAuthorInventoryRowsBytesV1(rows));
+}
+
 export function parseCanonicalSwmAuthorInventoryRowsV1(
   input: string | Uint8Array,
   options: StrictJsonParseOptions = {},

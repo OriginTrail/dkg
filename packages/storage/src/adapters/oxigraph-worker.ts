@@ -163,6 +163,7 @@ type WorkerLifecycle =
 const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>(['closed', 'gave_up', 'in_memory_lost']);
 
 export class OxigraphWorkerStore implements TripleStore, ReadGraphCapableAdapter {
+  readonly atomicSparqlModify = true as const;
   readonly readGraphCapabilities = OXIGRAPH_WORKER_READ_GRAPH_CAPABILITIES;
   readonly graphEnumerationVisibility = storeGraphEnumerationVisibility;
   readonly sparqlEngine = 'oxigraph' as const;
