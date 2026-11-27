@@ -6,7 +6,6 @@ import { hasStoreOperationOutcome, type StoreOperation } from '../store-operatio
 import type { QueryOptions } from '../triple-store.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { isDefinitiveSparqlUpdateRejectionV1, isSparqlHttpResponseError } from './sparql-http-response-error.js';
-import { workStoppedError } from '../query-work-stop.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
 
 /** Execution evidence stays private to one adapter's asynchronous lifetime. */
@@ -245,14 +244,4 @@ export function snapshotManagedRecoveryCapability(
     readState: readState.value as () => SparqlHttpRecoveryState,
     recover: recover.value as (operation: StoreOperation) => void,
   });
-}
-
-/** A newer ready runtime generation proves a supervised restart completed. */
-export function errorAfterManagedQueryRecovery(
-  error: unknown, options: { signal?: AbortSignal; workDeadline?: number } | undefined,
-  before: ManagedOxigraphRuntimeStateV1 | null, after: ManagedOxigraphRuntimeStateV1 | null,
-): unknown {
-  return options?.workDeadline !== undefined && before && after && !after.recovering
-    && after.generation > before.generation
-    ? workStoppedError('oxigraph-server', error, options) : error;
 }

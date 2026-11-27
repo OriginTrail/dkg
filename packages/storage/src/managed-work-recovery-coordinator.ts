@@ -32,6 +32,7 @@ export interface ManagedWorkRetentionV1 {
 interface RetainedWork {
   readonly operation: StoreOperation;
   readonly deadline: number;
+  readonly token: ManagedWorkRecoveryTokenV1;
 }
 
 interface RetainedGeneration {
@@ -60,6 +61,7 @@ export class ManagedWorkRecoveryCoordinatorV1 {
   readonly #options: ManagedWorkRecoveryCoordinatorOptionsV1;
   #lifecycleGeneration = 0;
   readonly #generations = new Map<number, RetainedGeneration>();
+  readonly #endedTokens = new WeakSet<ManagedWorkRecoveryTokenV1>();
   #armed?: {
     readonly timer: ReturnType<typeof setTimeout>;
     readonly read: RetainedWork;
@@ -76,6 +78,18 @@ export class ManagedWorkRecoveryCoordinatorV1 {
       lifecycleGeneration: this.#lifecycleGeneration,
       storeGeneration: state.generation,
     });
+  }
+
+  /** Evidence for the generation captured at dispatch, never for scheduler admission. */
+  hasEnded(token: ManagedWorkRecoveryTokenV1 | null): boolean {
+    if (token === null || token.lifecycleGeneration !== this.#lifecycleGeneration) return false;
+    const state = this.#readState();
+    return this.#endedTokens.has(token) || this.#legacyGenerationEnded(token.storeGeneration, state);
+  }
+
+  #legacyGenerationEnded(generation: number, state: ManagedOxigraphRuntimeStateV1 | null): boolean {
+    return this.#options.capability?.completion === 'generation-change'
+      && state !== null && !state.recovering && state.generation > generation;
   }
 
   retain(
@@ -119,6 +133,7 @@ export class ManagedWorkRecoveryCoordinatorV1 {
     const read: RetainedWork = {
       operation,
       deadline,
+      token,
     };
     let record = this.#generations.get(token.storeGeneration);
     if (!record) {
@@ -152,8 +167,9 @@ export class ManagedWorkRecoveryCoordinatorV1 {
     for (const record of Array.from(this.#generations.values())) this.#retire(record);
   }
 
-  #retire(record: RetainedGeneration): void {
+  #retire(record: RetainedGeneration, ended = false): void {
     if (this.#generations.get(record.generation) !== record) return;
+    if (ended) for (const read of record.operations) this.#endedTokens.add(read.token);
     this.#generations.delete(record.generation);
     try { record.observation?.dispose?.(); } catch { /* Observation cannot prevent completion or reuse. */ }
     record.activity?.release();
@@ -214,7 +230,7 @@ export class ManagedWorkRecoveryCoordinatorV1 {
       if (lifetime !== this.#lifecycleGeneration || this.#generations.get(record.generation) !== record
         || record.observation !== observation) return;
       if (phase === 'terminated' || phase === 'reopened') {
-        this.#retire(record);
+        this.#retire(record, true);
       } else if (phase === 'cancelled' || phase === 'stopped') {
         record.observation = undefined;
         try { observation.dispose?.(); } catch { /* Cancellation still retains its activity fence. */ }
@@ -242,7 +258,7 @@ export class ManagedWorkRecoveryCoordinatorV1 {
       ) {
         if (this.#options.capability?.completion === 'generation-change') {
           for (const record of this.#generations.values()) {
-            if (record.generation !== state.generation) this.#retire(record);
+            if (this.#legacyGenerationEnded(record.generation, state)) this.#retire(record, true);
           }
         }
         return state;
