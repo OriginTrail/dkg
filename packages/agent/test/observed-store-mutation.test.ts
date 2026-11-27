@@ -61,3 +61,33 @@ describe('operation-scoped mutation observation', () => {
     expect((await clean).mutated).toBe(false);
   });
 });
+
+describe('pending reconcile durability', () => {
+  it('retains indeterminate writes when the observed pass rejects', async () => {
+    const { vmReconcileDurability } = await import('../src/vm-reconcile-durability.js');
+    const durability = vmReconcileDurability({});
+    const execute = createObservedStoreMutation(() => {});
+    await expect(durability.observe(() => execute(async () => { throw new Error('response lost'); }, Boolean,
+      { everything: true }, 'update'))).rejects.toThrow('response lost');
+    const flush = vi.fn(async () => {});
+    await durability.flush(false, flush);
+    expect(flush).toHaveBeenCalledOnce();
+  });
+  it('keeps writes made during a pending flush for the next barrier', async () => {
+    const { vmReconcileDurability } = await import('../src/vm-reconcile-durability.js');
+    const durability = vmReconcileDurability({});
+    const execute = createObservedStoreMutation(() => {});
+    const write = () => durability.observe(() => execute(async () => true, Boolean));
+    await write();
+    let release!: () => void;
+    const flush = vi.fn(async () => {});
+    flush.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+    const first = durability.flush(false, flush);
+    await write();
+    release(); await first;
+    await durability.flush(false, flush);
+    expect(flush).toHaveBeenCalledTimes(2);
+    await durability.flush(false, flush);
+    expect(flush).toHaveBeenCalledTimes(2);
+  });
+});

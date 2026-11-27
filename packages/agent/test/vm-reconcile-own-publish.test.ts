@@ -156,7 +156,12 @@ describe('VM reconcile after this node\'s own publish', () => {
     const originalOrdinal = agent.reconcileChainOrdinal.bind(agent);
     (internals as any).reconcileChainOrdinal = vi.fn(async (
       _cg: string, _onChain: bigint, _ordinal: number, headBlock: number | undefined,
-    ) => outcome === 'pending' ? { status: 'pending' } : { status: outcome, blockNumber: headBlock ?? 0 });
+    ) => {
+      if (outcome === 'reconciled') await internals.store.insert([{
+        subject: 'urn:observed:write', predicate: 'urn:observed:predicate', object: '"value"', graph: 'urn:observed:graph',
+      }]);
+      return outcome === 'pending' ? { status: 'pending' } : { status: outcome, blockNumber: headBlock ?? 0 };
+    });
     (internals as any).healStrandedScopedKCs = vi.fn(async () => undefined);
     const flush = vi.fn(async () => undefined);
     internals.store.flush = flush;
@@ -219,6 +224,29 @@ describe('VM reconcile after this node\'s own publish', () => {
     expect(f.saveSelectedVmReconcileCursor).not.toHaveBeenCalled();
     await expect(f.store.query(`ASK { GRAPH <did:dkg:context-graph:${f.selected}/_meta> {
       <${f.scope.ual}> <http://dkg.io/ontology/status> "confirmed" } }`)).resolves.toMatchObject({ type: 'boolean', value: true });
+  });
+
+  it('retries a failed durability barrier when the next pass is read-only already', async () => {
+    const f = await realCopyFixture('RetryFailedBarrier');
+    await f.stage();
+    await f.store.insert([{ ...f.triple, graph: knowledgeAssetVerifiedMemoryGraph(f.selected, f.scope) }]);
+    await f.store.dropGraph(knowledgeAssetSharedMemoryGraph(f.selected, f.scope));
+    f.flush.mockRejectedValueOnce(new Error('disk full'));
+    await expect(f.pass()).rejects.toThrow('disk full');
+    // No new writes or watermark are needed on retry; the earlier repair is
+    // still visible in memory but has never crossed a successful barrier.
+    agent!.reconcileChainOrdinal = vi.fn(async () => ({ status: 'already', blockNumber: 100 }));
+    let release!: () => void;
+    f.flush.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+    let finished = false;
+    const retry = f.pass().then((result: unknown) => { finished = true; return result; });
+    await vi.waitFor(() => expect(f.flush).toHaveBeenCalledTimes(2));
+    expect(finished).toBe(false);
+    expect(f.saveSelectedVmReconcileCursor).not.toHaveBeenCalled();
+    release();
+    await expect(retry).resolves.toMatchObject({ watermarkBefore: 0, watermarkAfter: 0 });
+    await f.pass();
+    expect(f.flush).toHaveBeenCalledTimes(2); // A successful barrier clears the debt.
   });
 
   it('flushes fetched writes when real recovery revalidation reports already', async () => {

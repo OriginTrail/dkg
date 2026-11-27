@@ -1,4 +1,4 @@
-import { observeStoreMutations } from './internal/observed-store-mutation.js';
+import { vmReconcileDurability } from './vm-reconcile-durability.js';
 import type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryReport, SwmConnectedHostCatchupOptions, SwmConnectedHostCatchupResult } from './swm/host-catchup-types.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -4394,12 +4394,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
         scanOrdinal: target.cursor.scanOrdinal,
       };
       let pendingWatermark: number | undefined;
-      let passMutatedStore = false;
+      const durability = vmReconcileDurability(this);
       let result: VmReconcileEngineResult;
       let engineTimings: ReconcilePassTimings | undefined;
       const refusedReads = new VmReconcileRefusedSliceReads();
       try {
-        const observed = await observeStoreMutations(() => reconcileContextGraph(
+        result = await durability.observe(() => reconcileContextGraph(
           this.createVmReconcileDeps(
             localCgId,
             lifecycleGeneration,
@@ -4416,8 +4416,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
           localCgId,
           target.onChainCgId,
         ));
-        result = observed.result;
-        passMutatedStore = observed.mutated;
       } catch (err) {
         // A rejected pass keeps what it proved (see `reconcileContextGraph`):
         // its held completions and scan position move to the live cursor, so
@@ -4434,20 +4432,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
         throw err;
       }
       if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
-      // Semantic `already` outcomes can repair metadata or follow fetched data.
-      // Observe actual store writes across scan and recovery; only a read-only
-      // pass with no watermark can omit the whole-store durability barrier.
-      let flushMs = 0;
-      const materialized = result.materialized ?? result.reconciled;
-      if (passMutatedStore || materialized > 0 || pendingWatermark !== undefined) {
-        const flushStartedAt = performance.now();
-        await this.store.flush?.({
-          priority: 'background',
-          source: 'agent.vmReconcile.materialization.flush',
-        });
-        flushMs = performance.now() - flushStartedAt;
-        if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
-      }
+      // Changed and indeterminate writes remain pending across failed passes
+      // and failed barriers. Semantic ordinal outcomes only feed telemetry.
+      const flushStartedAt = performance.now();
+      await durability.flush(pendingWatermark !== undefined, async () => {
+        await this.store.flush?.({ priority: 'background', source: 'agent.vmReconcile.materialization.flush' });
+      });
+      const flushMs = performance.now() - flushStartedAt;
+      if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
+      const materialized = result.materialized ?? 0;
       let watermarkMs = 0;
       if (pendingWatermark !== undefined) {
         const watermarkStartedAt = performance.now();

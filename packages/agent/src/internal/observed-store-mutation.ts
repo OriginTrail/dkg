@@ -5,16 +5,20 @@ import { readStoreOperationExecutionGeneration, isStoreOperationNotStarted, type
 import type { StoreMutation, StoreMutationObserver } from './store-mutation.js';
 
 /** Writes performed by this asynchronous operation, independent of its semantic result. */
-const mutationScopes = new AsyncLocalStorage<{ changed: boolean }>();
-export async function observeStoreMutations<T>(work: () => Promise<T>): Promise<{ result: T; mutated: boolean }> {
-  const parent = mutationScopes.getStore();
-  const scope = { changed: false };
-  try {
-    const result = await mutationScopes.run(scope, work);
-    return { result, mutated: scope.changed };
-  } finally {
-    if (parent && scope.changed) parent.changed = true;
+interface MutationScope { changed: boolean; parent?: MutationScope; onMutation?: () => void }
+const mutationScopes = new AsyncLocalStorage<MutationScope>();
+function markMutated(scope: MutationScope | undefined): void {
+  for (let current = scope; current; current = current.parent) {
+    current.changed = true;
+    current.onMutation?.();
   }
+}
+export async function observeStoreMutations<T>(
+  work: () => Promise<T>, onMutation?: () => void,
+): Promise<{ result: T; mutated: boolean }> {
+  const scope: MutationScope = { changed: false, parent: mutationScopes.getStore(), onMutation };
+  const result = await mutationScopes.run(scope, work);
+  return { result, mutated: scope.changed };
 }
 
 /**
@@ -71,7 +75,7 @@ export function createObservedStoreMutation(
       // not change; every indeterminate outcome must invalidate fail-closed.
       const indeterminate = operation === undefined
         ? mutation !== undefined : !isStoreOperationNotStarted(error, operation);
-      if (indeterminate) { if (scope) scope.changed = true; invalidate(); }
+      if (indeterminate) { markMutated(scope); invalidate(); }
       const generation = operation === undefined ? undefined : readStoreOperationExecutionGeneration(error, operation);
       const outcome = indeterminate ? 'indeterminate' : 'unchanged';
       if (generation === undefined) settle?.(outcome);
@@ -79,7 +83,7 @@ export function createObservedStoreMutation(
       throw error;
     }
     const didChange = changed(result);
-    if (didChange) { if (scope) scope.changed = true; invalidate(); }
+    if (didChange) { markMutated(scope); invalidate(); }
     settle?.(didChange ? 'changed' : 'unchanged');
     return result;
   };
