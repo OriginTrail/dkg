@@ -11,7 +11,7 @@ import { cp, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AccessKeys, BUYER_LEDGER_FILE, BuyerLedger, Journal, type HeldReceipt, type KeptReceipt, type KeyRecord } from '../src/index.js';
+import { AccessKeys, BUYER_LEDGER_FILE, BuyerLedger, Journal, type HeldReceipt, type KeptReceipt, type OpenReceipt, type KeyRecord } from '../src/index.js';
 
 const FIXTURE = join(__dirname, 'fixtures', 'legacy-buyer-journals');
 const SUB = (n: number) => `0x${n.toString(16).padStart(64, '0')}`;
@@ -24,6 +24,8 @@ const jsonl = (entries: unknown[]) => entries.map((e) => `${JSON.stringify(e)}\n
 const ledgerLines = async () => (await readFile(join(dir, BUYER_LEDGER_FILE), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
 
 /** A call of `epoch` on subscription `sub`, nonce `nonce`: accepted with a receipt worth `value`, or open. */
+function callOf(epoch: number, sub: string, nonce: number, value?: undefined, keyId?: string): OpenReceipt;
+function callOf(epoch: number, sub: string, nonce: number, value: bigint, keyId?: string): KeptReceipt;
 function callOf(epoch: number, sub: string, nonce: number, value?: bigint, keyId = KEY.keyId): HeldReceipt {
   return {
     callId: `0x${(epoch * 1_000 + nonce).toString(16).padStart(64, '0')}`, epoch, subscriptionId: sub, budgetIndex: 0, seller: '1', keyId,
@@ -35,7 +37,7 @@ function callOf(epoch: number, sub: string, nonce: number, value?: bigint, keyId
   };
 }
 /** The same call accepted with its receipt, worth `value`. */
-const keptOf = (epoch: number, sub: string, nonce: number, value: bigint, keyId = KEY.keyId) => callOf(epoch, sub, nonce, value, keyId) as KeptReceipt;
+const keptOf = (epoch: number, sub: string, nonce: number, value: bigint, keyId = KEY.keyId) => callOf(epoch, sub, nonce, value, keyId);
 
 /** The journals the ledger replaces, the fixture's subscription of epoch 3, and its two keys. */
 const LEGACY = ['buyer-receipts.jsonl', 'buyer-nonces.jsonl', 'access-keys.jsonl'];

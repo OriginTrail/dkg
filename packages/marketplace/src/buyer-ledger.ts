@@ -38,7 +38,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { CallBook, exposureOf, type HeldReceipt, type KeptReceipt } from './gateway-book.js';
+import { CallBook, exposureOf, type HeldReceipt, type KeptReceipt, type OpenReceipt, type UnresolvedReceipt } from './gateway-book.js';
 import { Journal, KeyedLock } from './journal.js';
 import type { KeptKey } from './keys.js';
 import type { ReconciledRow } from './reconcile.js';
@@ -219,7 +219,7 @@ export class BuyerLedger {
   }
 
   /** A call's first record: on disk before it is sent, and counted only then. A call that cannot be written down is not sent. */
-  async recordSent(r: HeldReceipt): Promise<void> {
+  async recordSent(r: OpenReceipt): Promise<void> {
     await this.load();
     await this.append({ type: 'call', ...r });
     this.calls.record(r);
@@ -252,7 +252,7 @@ export class BuyerLedger {
    * still held, then on disk; a write that fails still leaves it counted while
    * the node runs.
    */
-  async recordUnresolved(r: HeldReceipt): Promise<void> {
+  async recordUnresolved(r: UnresolvedReceipt): Promise<void> {
     await this.load();
     this.epochs.add(r.epoch);
     this.calls.record(r);

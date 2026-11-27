@@ -77,7 +77,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { NO_FX, type Fx } from './config.js';
 import type { BuyerLedger } from './buyer-ledger.js';
-import { exposureOf, isKept, type HeldReceipt } from './gateway-book.js';
+import { exposureOf, isKept, type HeldReceipt, type OpenReceipt, type UnresolvedReceipt } from './gateway-book.js';
 import { CallerGone, Turns, TurnsFull, type TurnLimits } from './gateway-turns.js';
 import type { AccessKey, AccessKeys } from './keys.js';
 import { serviceIdOf } from './offers.js';
@@ -163,7 +163,7 @@ export interface GatewayDeps {
   log?: (message: string) => void;
 }
 
-export type { HeldReceipt, KeptReceipt } from './gateway-book.js';
+export type { HeldReceipt, KeptReceipt, OpenReceipt, UnresolvedReceipt } from './gateway-book.js';
 
 /** How many calls `activity` answers. */
 const ACTIVITY_LIMIT = 200;
@@ -477,7 +477,7 @@ export class Gateway {
       }
       // The last moment its client's leaving stops the call.
       if (c.signal?.aborted) return gone();
-      const kept: HeldReceipt = {
+      const kept: OpenReceipt = {
         callId, epoch: c.times.epoch, subscriptionId: c.subscriptionId, budgetIndex: c.budgetIndex, seller: route.seller.toString(), keyId,
         request: requestToWire(request), signature, state: 'open',
       };
@@ -500,7 +500,7 @@ export class Gateway {
     domain: MarketplaceDomain,
     request: ServiceRequest,
     message: Uint8Array,
-    kept: HeldReceipt,
+    kept: OpenReceipt,
     used: bigint,
   ): Promise<GatewayAnswer> {
     const router = this.deps.router;
@@ -601,7 +601,7 @@ export class Gateway {
   }
 
   /** A call its seller refused or never answered, kept; past `MAX_UNSETTLED_PER_SELLER` in its epoch, the seller is out for the rest of it. */
-  private async keepUnsettled(r: HeldReceipt): Promise<void> {
+  private async keepUnsettled(r: UnresolvedReceipt): Promise<void> {
     this.unsettled(r);
     await this.ledger.recordUnresolved(r);
   }

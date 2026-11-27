@@ -43,6 +43,9 @@ export interface HeldReceipt {
   problem?: string;
 }
 
+export type OpenReceipt = HeldReceipt & { state: 'open' };
+export type UnresolvedReceipt = HeldReceipt & { state: 'open' | 'refused' };
+
 export type KeptReceipt = HeldReceipt & { state: 'held'; receipt: ReceiptWire };
 
 export const isKept = (r: HeldReceipt): r is KeptReceipt => r.state === 'held' && r.receipt !== undefined;
