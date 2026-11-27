@@ -490,6 +490,7 @@ export default defineConfig({
           // Real DKGAgent + real chat-memory stack behind a real HTTP server; no hardhat.
           'test/openclaw-persist-turn.e2e.test.ts',
           'test/daemon-hermes.test.ts',
+          'test/hermes-response-timeout-config.test.ts',
           'test/daemon-prime-agent.test.ts',
           'test/daemon-prime-agent-persistence.test.ts',
           'test/daemon-sse-final-frame.test.ts',
