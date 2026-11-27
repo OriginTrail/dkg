@@ -24,6 +24,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 import {
   AccessKeys,
+  BUYER_LEDGER_FILE,
   Buyer,
   BuyerStore,
   Gateway,
@@ -68,6 +69,9 @@ const call = (chat: unknown = CHAT, g: Gateway = gateway) => g.chatCompletion(ca
 
 const backend: Connector = { kind: 'openai', complete: async () => ({ content: 'synthetic answer', promptTokens: 7, completionTokens: 5 }) };
 const body = (a: GatewayAnswer) => a.body as any;
+/** The ledger's records of one kind, oldest first. */
+const ledgerLines = async (type: string) => (await readFile(join(dir, 'buyer', BUYER_LEDGER_FILE), 'utf8')).trim().split('\n').map((l) => JSON.parse(l))
+  .filter((e) => e.type === type);
 
 async function setUp(value = 10n ** 6n, models: string[] = [MODEL]): Promise<void> {
   // One mock chain for both ends: the node's wallet buys, and its identity sells.
@@ -96,7 +100,7 @@ async function setUp(value = 10n ** 6n, models: string[] = [MODEL]): Promise<voi
   });
   keys = new AccessKeys(join(dir, 'buyer'));
   gatewayDeps = {
-    chain, buyerWallet: NODE.address, store: buyer.store, router, keys, dir: join(dir, 'buyer'),
+    chain, buyerWallet: NODE.address, store: buyer.store, router, keys,
     send: async (_peer, payload) => {
       if (!reachable) throw new Error('unreachable');
       const answer = await seller.serve(decodeMessage(payload));
@@ -133,7 +137,7 @@ describe('a call through the gateway', () => {
       marketplace: { serviceId: SERVICE, seller: Number(seller.gate.identityId), units: 12, value: '120' },
     });
     // The next call gets the next nonce; a restart remembers it.
-    const restarted = new Gateway(gatewayDeps);
+    const restarted = new Gateway({ ...gatewayDeps, keys: new AccessKeys(join(dir, 'buyer')) });
     await restarted.load();
     expect((await call(CHAT, restarted)).status).toBe(200);
   });
@@ -143,7 +147,7 @@ describe('a call through the gateway', () => {
     await setUp(10n ** 6n, [MODEL, other]);
     const answers = await Promise.all([call(), call({ ...CHAT, model: other })]);
     expect(answers.map((a) => a.status)).toEqual([200, 200]);
-    const nonces = (await readFile(join(dir, 'buyer', 'buyer-nonces.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l).nonce);
+    const nonces = (await ledgerLines('nonce')).map((l) => l.nonce);
     expect(nonces.sort()).toEqual(['0', '1']);
   });
 
@@ -563,20 +567,19 @@ describe('landing, reconciliation and pruning', () => {
     expect(await gateway.reconciliation(epoch)).toEqual({ epoch, final: true, rows });
     await gateway.tick();
     // Two calls, each with its record from before it was sent and what came back in its place.
-    const records = (await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+    const records = await ledgerLines('call');
     expect(records.map((r) => r.state)).toEqual(['open', 'held', 'open', 'refused']);
     expect(new Set(records.map((r) => r.callId)).size).toBe(2);
     mock.__advanceEpoch();
     await gateway.tick();
     // Its rows kept, its receipts and nonce counters gone, and the keys' costs folded in. The call whose receipt the
     // node refused landed too: its key is charged the most its request allowed (620), all the node can tell of it.
-    const receipts = (await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
-    expect(receipts).toEqual([{ type: 'final', epoch, rows }]);
-    expect((await readFile(join(dir, 'buyer', 'buyer-nonces.jsonl'), 'utf8')).trim()).toBe('');
-    const keyLines = (await readFile(join(dir, 'buyer', 'access-keys.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
-    expect(keyLines).toMatchObject([{ type: 'make', spent: '740' }]);
+    expect(await ledgerLines('final')).toEqual([{ type: 'final', epoch, rows }]);
+    expect(await ledgerLines('call')).toEqual([]);
+    expect(await ledgerLines('nonce')).toEqual([]);
+    expect(await ledgerLines('key')).toMatchObject([{ type: 'key', spent: '740' }]);
     expect((await keys.list())[0]).toMatchObject({ spent: '740', lastUsedAt: expect.any(Number) });
-    const restarted = new Gateway(gatewayDeps);
+    const restarted = new Gateway({ ...gatewayDeps, keys: new AccessKeys(join(dir, 'buyer')) });
     await restarted.load();
     expect(await restarted.reconciliation(epoch)).toEqual({ epoch, final: true, rows });
   });
@@ -597,12 +600,16 @@ describe('landing, reconciliation and pruning', () => {
   it('keeps a revocation when it folds the keys', async () => {
     await setUp();
     const { key } = await keys.make({ label: 'revoked', budget: 1n, services: null, rps: 1, expiresAt: null }, 5);
-    await keys.charge(caller.key.keyId, 7n, 6);
+    expect((await call()).status).toBe(200);
     await keys.revoke(key.keyId, 9);
     const before = await keys.list();
-    await keys.compact();
+    // The keys are folded when an epoch is made final.
+    mock.__advanceEpoch();
+    mock.__advanceEpoch();
+    await gateway.tick();
     expect(await keys.list()).toEqual(before);
-    const lines = (await readFile(join(dir, 'buyer', 'access-keys.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
-    expect(lines.map((l) => l.type)).toEqual(['make', 'make', 'revoke']);
+    expect((await ledgerLines('key')).map((l) => l.keyId)).toEqual([caller.key.keyId, key.keyId]);
+    expect((await ledgerLines('revoke')).map((l) => l.keyId)).toEqual([key.keyId]);
+    expect(await new AccessKeys(join(dir, 'buyer')).list()).toEqual(before);
   });
 });
