@@ -29,6 +29,7 @@
  * the paced owners, as before.
  */
 
+import { checkSubscriptionAuthority } from './subscription-authority-check.js';
 import { recoverPersistedSubscriptionRow, type SubscriptionRecoveryRowPorts } from './context-graph-subscription-recover-row.js';
 import { SubscriptionRetryExecutor, type SubscriptionRetryRow, type SubscriptionRetryLease } from './subscription-retry-executor.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
@@ -137,7 +138,7 @@ export class StorageAckDemandActivations {
     const outcome = await recoverPersistedSubscriptionRow(row.id, {
       ...this.ports,
       isCurrent: () => lease.isCurrent() && demand.onChainId === onChainId,
-      resolveAuthority: saved => lease.check(signal => this.ports.resolveAuthority(saved, signal)),
+      resolveAuthority: saved => checkSubscriptionAuthority(lease, signal => this.ports.resolveAuthority(saved, signal)),
     }, this.ports.signal, { reason, verifiedOnChainId: onChainId });
     if (outcome.kind === 'done') return undefined;
     if (outcome.kind === 'activated') {

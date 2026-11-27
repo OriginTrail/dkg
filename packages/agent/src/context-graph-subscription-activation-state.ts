@@ -280,17 +280,19 @@ export class ContextGraphSubscriptionActivations {
     if (reserved) {
       if (this.recoveryReservations.has(row.id)) throw changed();
       const status = this.startupAccounting ?? this.ports.getStatus();
-      const installing = [...this.pending.values()].filter(attempt =>
-        attempt.phase.kind === 'installing' && this.countsAgainstActivationCap({ id: attempt.intent.id, coreHosted: attempt.phase.subscription.coreHosted })
-        && !this.recoveryReservations.has(attempt.intent.id)).length;
-      const exemptActive = [...this.capExemptIds].filter(id =>
-        this.ports.contextGraphSubscriptionRehydrationAccountedIds.has(id)
-        && isCommittedSubscription(this.ports.subscribedContextGraphs, this.ports.contextGraphSubscriptionDormancyById, id)
-        && this.ports.subscribedContextGraphs.get(id)?.coreHosted !== true).length;
-      const active = Math.max(0, (status?.activated ?? 0) - (status?.hostedActivated ?? 0) - exemptActive);
-      if (status && status.activationCap > 0
-        && active + installing + this.recoveryReservations.size >= status.activationCap) {
-        throw new SubscriptionActivationCapacityError();
+      // Capacity is the union of committed rows and in-flight ownership. A
+      // just-committed attempt may still hold its lease until its promise retires.
+      const occupied = new Set(this.recoveryReservations);
+      for (const id of this.ports.contextGraphSubscriptionRehydrationAccountedIds) {
+        if (!this.ports.contextGraphSubscriptionDormancyById.has(id)) occupied.add(id);
+      }
+      for (const attempt of this.pending.values()) {
+        if (attempt.phase.kind === 'installing') occupied.add(attempt.intent.id);
+      }
+      for (const id of occupied) {
+        if (!this.countsAgainstActivationCap({ id, coreHosted: this.ports.subscribedContextGraphs.get(id)?.coreHosted })) occupied.delete(id);
+      }
+      if (status && status.activationCap > 0 && occupied.size >= status.activationCap) {        throw new SubscriptionActivationCapacityError();
       }
       this.recoveryReservations.add(row.id);
     }

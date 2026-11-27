@@ -1,6 +1,4 @@
-import { runBoundedOperation, isBoundedOperationTimeoutError } from './bounded-operation.js';
-import { contextGraphReadAuthorityDependencyOf, unavailableContextGraphReadAuthorityDecision,
-  type ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
+import { runBoundedOperation, createAbortError, BoundedOperationTimeoutError } from './bounded-operation.js';
 
 export interface SubscriptionRetryRow<T> {
   readonly id: string;
@@ -12,8 +10,7 @@ export interface SubscriptionRetryRow<T> {
 }
 export interface SubscriptionRetryLease {
   isCurrent(): boolean;
-  check(work: (signal: AbortSignal) => Promise<ContextGraphReadAuthorityDecision | undefined>):
-    Promise<ContextGraphReadAuthorityDecision | undefined>;
+  check<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T>;
 }
 interface SubscriptionRetryPolicy<T> {
   signal: AbortSignal;
@@ -87,15 +84,10 @@ export class SubscriptionRetryExecutor<T> {
         isCurrent: () => this.#valid(row),
         check: async work => {
           const timeoutMs = Math.min(this.policy.checkTimeoutMs, row.expiresAt - this.policy.now());
-          if (!this.#valid(row) || timeoutMs <= 0) return undefined;
-          try {
-            return await runBoundedOperation(work, { timeoutMs, signal: this.policy.signal,
-              label: 'Persisted subscription authority' });
-          } catch (error) {
-            if (this.policy.signal.aborted || isBoundedOperationTimeoutError(error)) return undefined;
-            return unavailableContextGraphReadAuthorityDecision('legacy-local', 'unexpected-authority-error',
-              contextGraphReadAuthorityDependencyOf(error));
-          }
+          if (!this.#valid(row)) throw createAbortError('Subscription retry retired');
+          if (timeoutMs <= 0) throw new BoundedOperationTimeoutError('Subscription retry', 0);
+          return runBoundedOperation(work, { timeoutMs, signal: this.policy.signal,
+            label: 'Subscription retry' });
         },
       };
       const run = Promise.resolve().then(() => this.#valid(row) ? this.policy.attempt(row, lease) : undefined)

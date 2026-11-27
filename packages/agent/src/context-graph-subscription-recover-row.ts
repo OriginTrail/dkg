@@ -18,7 +18,7 @@ export interface SubscriptionRecoveryRowPorts {
   revision(id: string): number;
   subscription(id: string): ContextGraphSub | undefined;
   load(id: string): Promise<ContextGraphSubscriptionRecord | null>;
-  resolveAuthority(row: ContextGraphSubscriptionRecord, signal: AbortSignal): Promise<ContextGraphReadAuthorityDecision | undefined>;
+  resolveAuthority(row: ContextGraphSubscriptionRecord, signal: AbortSignal): Promise<ContextGraphReadAuthorityDecision>;
   clear(id: string, revoked?: boolean): void;
   retire(id: string, reason: ContextGraphDormancyReason, authority?: Exclude<ContextGraphReadAuthorityDecision, { outcome: 'allowed' }>): void;
   unavailable?(id: string, authority: Exclude<ContextGraphReadAuthorityDecision, { outcome: 'allowed' }>): void;
@@ -50,7 +50,6 @@ export async function recoverPersistedSubscriptionRow(
   const bound = verifiedOnChainId === undefined || row.onChainId !== undefined ? row : { ...row, onChainId: verifiedOnChainId };
   const authority = await ports.resolveAuthority(bound, signal);
   if (!current()) return { kind: 'done' };
-  if (authority === undefined) return { kind: 'retry', why: 'authority check did not answer before its deadline' };
   const fresh = await ports.load(id);
   if (!current()) return { kind: 'done' };
   if (!hasIntent(fresh)) { ports.clear(id, fresh !== null); return { kind: 'done' }; }

@@ -35,6 +35,7 @@
  * leaves the rows held here alone until then.
  */
 
+import { checkSubscriptionAuthority } from './subscription-authority-check.js';
 import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
 import { recoverPersistedSubscriptionRow, type SubscriptionRecoveryRowPorts } from './context-graph-subscription-recover-row.js';
 import { SubscriptionRetryExecutor, type SubscriptionRetryRow, type SubscriptionRetryLease } from './subscription-retry-executor.js';
@@ -146,7 +147,7 @@ export class PersistedSubscriptionNameBindingRetry {
     held.checks += 1;
     const outcome = await recoverPersistedSubscriptionRow(row.id, {
       ...this.ports, isCurrent: lease.isCurrent,
-      resolveAuthority: saved => lease.check(signal => this.ports.resolveAuthority(saved, signal)),
+      resolveAuthority: saved => checkSubscriptionAuthority(lease, signal => this.ports.resolveAuthority(saved, signal)),
     }, this.ports.signal);
     held.lastCheckAt = this.#now();
     if (outcome.kind === 'done') return undefined;

@@ -15,6 +15,7 @@
  * nothing but the ordering.
  */
 
+import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -95,8 +96,7 @@ export class StorageAckRecentGraphs {
   readonly #io: StorageAckRecentGraphsIo;
   readonly #entries = new Map<string, StorageAckRecentGraph>();
   #loaded: Promise<void> | undefined;
-  #writing: Promise<void> | undefined;
-  #writeAgain = false;
+  readonly #writer: CoalescingRecurringTask;
   #warnedWrite = false;
 
   constructor(options: StorageAckRecentGraphsOptions = {}) {
@@ -106,6 +106,10 @@ export class StorageAckRecentGraphs {
     this.#maxGraphs = options.maxGraphs ?? STORAGE_ACK_RECENT_GRAPHS_MAX;
     this.#ttlMs = options.ttlMs ?? STORAGE_ACK_RECENT_GRAPH_TTL_MS;
     this.#io = options.io ?? nodeIo;
+    this.#writer = new CoalescingRecurringTask({
+      runPass: async () => { await this.load(); await this.#write(); return 'idle'; },
+      onError: error => this.#warnWrite(error), closingMessage: 'Recent graph writer closed',
+    });
   }
 
   /** Read the saved list once. Never rejects; an unreadable file is left out. */
@@ -141,9 +145,7 @@ export class StorageAckRecentGraphs {
   }
 
   /** Settles once every write asked for so far has finished. */
-  async whenWritten(): Promise<void> {
-    while (this.#writing !== undefined) await this.#writing;
-  }
+  whenWritten(): Promise<void> { return this.#writer.whenIdle(); }
 
   #trim(now: number): void {
     for (const [id, entry] of this.#entries) {
@@ -187,27 +189,13 @@ export class StorageAckRecentGraphs {
   }
 
   #scheduleWrite(): void {
-    if (this.#path === undefined) return;
-    if (this.#writing !== undefined) {
-      this.#writeAgain = true;
-      return;
-    }
-    const writing = this.#writeLoop().finally(() => {
-      if (this.#writing !== writing) return;
-      this.#writing = undefined;
-      // A note can arrive after the loop's last check but before this retirement.
-      if (this.#writeAgain) this.#scheduleWrite();
-    });
-    this.#writing = writing;
+    if (this.#path !== undefined) this.#writer.request();
   }
 
-  async #writeLoop(): Promise<void> {
-    // Merge the saved list first, so an early write cannot drop it.
-    await this.load();
-    do {
-      this.#writeAgain = false;
-      await this.#write();
-    } while (this.#writeAgain);
+  #warnWrite(error: unknown): void {
+    if (this.#warnedWrite) return;
+    this.#warnedWrite = true;
+    this.#warn(`Could not save the recently ACK-requested graphs: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   async #write(): Promise<void> {
@@ -221,9 +209,7 @@ export class StorageAckRecentGraphs {
       this.#warnedWrite = false;
     } catch (error) {
       await this.#io.remove?.(staged).catch(() => undefined);
-      if (this.#warnedWrite) return;
-      this.#warnedWrite = true;
-      this.#warn(`Could not save the recently ACK-requested graphs: ${error instanceof Error ? error.message : String(error)}`);
+      this.#warnWrite(error);
     }
   }
 }

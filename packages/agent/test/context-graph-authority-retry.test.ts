@@ -2371,9 +2371,10 @@ describe('Context Graph subscription rehydration startup authority budget (#2815
       updatedAt: 1,
     };
     const capped = vi.fn();
-    const subscriptions = new Map();
+    const subscriptions = new Map([['already-active', { subscribed: true, synced: true, syncMode: 'always-on' }]]);
     const owner = createTestSubscriptionActivations({ subscribedContextGraphs: subscriptions,
-      contextGraphSubscriptionDormancyById: dormancyById, contextGraphSubscriptionRehydrationStatus: status });
+      contextGraphSubscriptionDormancyById: dormancyById, contextGraphSubscriptionRehydrationStatus: status,
+      contextGraphSubscriptionRehydrationAccountedIds: new Set([row.id, 'already-active']) });
     const install = vi.fn(() => { throw new Error('A capped row must not be installed'); });
     const activate = vi.fn(async () => { await owner.activate(row, {
       install, remove: vi.fn(), rollbackNetworkEffects: vi.fn(), trackSync: vi.fn(), subscribe: vi.fn(),

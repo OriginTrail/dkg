@@ -11,7 +11,7 @@ import type { ContextGraphDormancyReason } from '../src/context-graph-subscripti
 const row = (id: string, coreHosted = false): ContextGraphSubscriptionRecord => ({
   id, subscribed: true, synced: true, syncScoped: true, coreHosted,
 });
-function fixture(rows: ContextGraphSubscriptionRecord[]) {
+function fixture(rows: ContextGraphSubscriptionRecord[], cap = 1, publish: (id: string) => void = () => {}) {
   const live = new Map<string, ContextGraphSub>();
   const dormancy = new Map<string, ContextGraphDormancyReason>();
   let status: ContextGraphSubscriptionRehydrationInternalStatus | null = null;
@@ -21,10 +21,10 @@ function fixture(rows: ContextGraphSubscriptionRecord[]) {
     contextGraphSubscriptionRehydrationPendingIds: pending, contextGraphSubscriptionRehydrationSlotIds: slots,
     contextGraphSubscriptionRehydrationAccountedIds: new Set(),
     getStatus: () => status, setStatus: next => { status = next; },
-    slotReleased: () => {}, clearPersistRevision: () => {}, publish: () => {},
+    slotReleased: () => {}, clearPersistRevision: () => {}, publish,
   });
   owner.reset(rows);
-  owner.beginRehydration(rows, { rehydrationEnabled: true, systemExcluded: 0, activationCap: 1 });
+  owner.beginRehydration(rows, { rehydrationEnabled: true, systemExcluded: 0, activationCap: cap });
   owner.completeRehydration();
   const ports: PersistedContextGraphSubscriptionActivationPorts = {
     install: vi.fn(record => {
@@ -42,6 +42,19 @@ function fixture(rows: ContextGraphSubscriptionRecord[]) {
 }
 
 describe('authority recovery activation capacity', () => {
+  it('counts a committed activation once while its outer reservation is retiring', async () => {
+    const a = row('a'), b = row('b'), c = row('c');
+    let second: Promise<ContextGraphSub> | undefined;
+    const f = fixture([a, b, c], 2, id => {
+      if (id === 'a') second = f.owner.activate(b, f.ports, { respectActivationCap: true });
+    });
+    await f.owner.activate(a, f.ports, { respectActivationCap: true });
+    await expect(second).resolves.toMatchObject({ subscribed: true });
+    expect(f.status().activated).toBe(2);
+    await expect(f.owner.activate(c, f.ports, { respectActivationCap: true }))
+      .rejects.toBeInstanceOf(SubscriptionActivationCapacityError);
+  });
+
   it.each([true, false])('accounts for installing recovery/rolling work while hosted recovery stays exempt (reserved=%s)', async reserved => {
     const a = row('a'), b = row('b'), hosted = row('hosted', true);
     const f = fixture([a, b, hosted]);
@@ -78,9 +91,11 @@ describe('authority recovery activation capacity', () => {
 
 
 describe('demand and rolling activation share commit ownership', () => {
-  it.each([false, true])('never adopts a provisional demand row (preparation fails=%s)', async failPreparation => {
+  it.each(['success', 'failed', 'retired'] as const)('never adopts a provisional demand row (outcome=%s)', async outcome => {
+    const failPreparation = outcome === 'failed', retired = outcome !== 'success';
     const target = { ...row('overlap'), onChainId: '1' };
-    const f = fixture([target]);
+    const published = vi.fn();
+    const f = fixture([target], 1, published);
     f.owner.transition({ id: target.id, kind: 'dormancy', reason: 'activationCap' });
     const authority = { outcome: 'allowed' as const, grantScope: 'public' as const,
       source: 'registered-chain' as const, reason: 'open-context-graph', metadataBootstrap: 'forbidden' as const, onChainId: 1n };
@@ -107,7 +122,7 @@ describe('demand and rolling activation share commit ownership', () => {
       signal: controller.signal, isCurrent: () => !controller.signal.aborted,
       dormancy: id => f.dormancy.get(id), revision: () => 0, subscription: id => f.live.get(id),
       load: async () => ({ ...target }), resolveAuthority: async () => authority,
-      activate: async (record, onChainId, isCurrent) => { await f.owner.activate(record, f.ports, {
+      activate: async (record, onChainId, _revision, isCurrent) => { await f.owner.activate(record, f.ports, {
         onChainId, isCurrent, prepare: async () => { beginPreparation(); await held;
           if (failPreparation) throw new Error('reconciliation failed'); },
       }); },
@@ -119,12 +134,13 @@ describe('demand and rolling activation share commit ownership', () => {
     answer(); await rolling;
     expect(isCommittedSubscription(f.live, f.dormancy, target.id)).toBe(false);
     expect(f.status().activated).toBe(0);
+    if (retired) controller.abort();
     release();
-    if (failPreparation) controller.abort();
     await demand.whenIdle();
-    expect(isCommittedSubscription(f.live, f.dormancy, target.id)).toBe(!failPreparation);
-    expect(f.status().activated).toBe(failPreparation ? 0 : 1);
-    if (failPreparation) expect(f.live.has(target.id)).toBe(false);
+    expect(isCommittedSubscription(f.live, f.dormancy, target.id)).toBe(!retired);
+    expect(f.status().activated).toBe(retired ? 0 : 1);
+    expect(published).toHaveBeenCalledTimes(retired ? 0 : 1);
+    if (retired) expect(f.live.has(target.id)).toBe(false);
   });
   it('preserves independently accepted hosting when an earlier provisional activation fails', async () => {
     const a = row('a'), f = fixture([a]);
