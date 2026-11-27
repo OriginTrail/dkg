@@ -77,7 +77,7 @@ function main(argv) {
     targets = new Map();
     for (const a of args.length ? args : [UI]) {
       const p = resolve(process.cwd(), a);
-      if (!existsSync(p)) { console.error(`design-check: no such file: ${a}`); process.exit(2); }
+      if (!existsSync(p)) { console.error(`design-check: no such file: ${a}`); process.exitCode = 2; return; }
       for (const f of statSync(p).isDirectory() ? walk(p) : [p]) targets.set(f, null);
     }
   }
@@ -129,8 +129,9 @@ function main(argv) {
       console.log('  3. show it on the reference page (ui/design-system.html)');
     }
   }
-  // Only values off the system fail: a number that is on the scale is allowed in code today.
-  process.exit(off.n && !noFail ? 1 : 0);
+  // Everything but a height fails: an off-system value, or one on the system written as a literal.
+  // exitCode, not exit(): a piped --json report is written asynchronously and must finish first.
+  process.exitCode = off.n && !noFail ? 1 : 0;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main(process.argv.slice(2));

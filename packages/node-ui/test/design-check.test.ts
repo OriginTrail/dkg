@@ -605,6 +605,24 @@ describe('design check', { timeout: 60_000 }, () => {
     }
   });
 
+  it('writes a --json report larger than a pipe buffer in full before exiting', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'design-check-json-'));
+    try {
+      const file = join(dir, 'big.css');
+      // 2,000 off-system colours: a report of several hundred kB, far over a 64 kB pipe buffer.
+      writeFileSync(file, Array.from({ length: 2000 }, (_, i) => `.c${i} { color: #ff00${(i % 256).toString(16).padStart(2, '0')}; }`).join('\n'));
+      for (const flags of [['--json'], ['--json', '--no-fail']]) {
+        const run = spawnSync(process.execPath, [SCRIPT, ...flags, file], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+        expect(run.stdout.length).toBeGreaterThan(64 * 1024);
+        const report = JSON.parse(run.stdout) as { findings: unknown[] }[];
+        expect(report[0].findings).toHaveLength(2000);
+        expect(run.status).toBe(flags.includes('--no-fail') ? 0 : 1);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // --changed against a git repository of its own: a tracked stylesheet with a value off
   // the system on an old line and on a new one, and an untracked stylesheet.
   it('reports CSS it cannot read when any line of it changed, wherever the parser points', () => {
