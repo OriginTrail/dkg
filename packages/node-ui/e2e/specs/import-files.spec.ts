@@ -40,7 +40,7 @@ async function openProjectTab(page: Page, name: string) {
 async function openImportModal(page: Page) {
   // Layer switcher renders inside the active project view. Wait for
   // it before clicking — the project tab content lazy-loads.
-  const importBtn = page.locator('button[aria-label="Import into Context Graph"]');
+  const importBtn = page.locator('button[aria-label="Import into context graph"]');
   await expect(importBtn).toBeVisible({ timeout: 10_000 });
   await importBtn.click();
 }

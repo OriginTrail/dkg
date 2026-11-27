@@ -15,6 +15,7 @@ function recorder<A extends unknown[], R>(impl: (...a: A) => R) {
 }
 import {
   DKGAgent,
+  agentFromPrivateKey,
   type ContextGraphMembershipRecord,
   type ContextGraphMembershipStore,
   type ContextGraphSub,
@@ -1901,7 +1902,7 @@ describe('listContextGraphs merge', () => {
       });
 
       await expect(agent.listContextGraphs({ callerAgentAddress: null }))
-        .rejects.toThrow('ontology/agents definition scan');
+        .rejects.toMatchObject({ code: 'CONTEXT_GRAPH_LIST_BUDGET_EXCEEDED', retryable: true, timeoutMs: 1 });
       await scanSettled;
       expect(sawAbort).toBe(true);
     } finally {
@@ -2230,7 +2231,9 @@ describe('listContextGraphs merge', () => {
     await agent.start();
 
     const owner = agent.getDefaultAgentAddress()!;
-    const member = ethers.Wallet.createRandom().address;
+    const memberRecord = agentFromPrivateKey(ethers.Wallet.createRandom().privateKey, 'member');
+    const member = memberRecord.agentAddress;
+    await (agent as any).persistAgentToStore(memberRecord);
     await agent.createContextGraph({
       id: 'cached-invite-cg',
       name: 'Cached Invite',

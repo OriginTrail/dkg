@@ -56,7 +56,7 @@ import {
   type HeldValue,
   type Seller,
 } from '@origintrail-official/dkg-marketplace';
-import type { BuyerLimits } from '@origintrail-official/dkg-chain';
+import { isHubBindingNotFoundError, type BuyerLimits } from '@origintrail-official/dkg-chain';
 import { canAdministerNode } from '../../auth.js';
 import { jsonResponse, readBody, respondIfChainRpcTransportError, sanitizeRpcMessage, SMALL_BODY_BYTES } from '../http-utils.js';
 import type { RequestContext } from './context.js';
@@ -64,6 +64,14 @@ import { handleMarketplaceGatewayRoutes } from './marketplace-gateway.js';
 import { isMarketplaceGatewayRoute } from './marketplace-gateway-paths.js';
 
 const PREFIX = '/api/marketplace';
+
+/**
+ * A view's `accountsError` is a chain read's error message. Like an error body, it must not carry RPC URLs, which
+ * can hold an API key: they are stripped here, as `sanitizeRpcMessage` strips them from error bodies.
+ */
+function withRedactedAccountsError<V extends { accountsError?: string }>(view: V): V {
+  return view.accountsError === undefined ? view : { ...view, accountsError: sanitizeRpcMessage(view.accountsError) };
+}
 
 // The status of a refusal by its kind. Any other refusal, the contracts' and
 // the seller's `EpochStarted` among them, is a conflict with the chain's state
@@ -246,8 +254,8 @@ async function answer(buyer: Buyer, method: string, route: string, ctx: RequestC
     const asked = url.searchParams.get('epoch');
     return gatewayOf(ctx).reconciliation(asked === null ? epoch : parseEpoch(asked, epoch));
   }
-  if (method === 'GET' && route === '/funding') return fundingView(buyer);
-  if (method === 'GET' && route === '/accounts') return accountsView(buyer);
+  if (method === 'GET' && route === '/funding') return withRedactedAccountsError(await fundingView(buyer));
+  if (method === 'GET' && route === '/accounts') return withRedactedAccountsError(await accountsView(buyer));
   if (method === 'GET' && route === '/accounts/contracts') return contractsView(buyer);
 
   // GET, POST /keys and POST /keys/{keyId}/revoke: the gateway's access keys, the node admin's alone.
@@ -319,7 +327,7 @@ export async function handleMarketplaceRoutes(ctx: RequestContext): Promise<void
     if (err instanceof PlanError || err instanceof URIError) return refuse(res, 'InvalidRequest', err.message);
     const refusal = refusalOf(err);
     if (refusal) return refuse(res, refusal.code, `${refusal.code}(${refusal.args.join(', ')})`, refusal.args);
-    if (err instanceof Error && /^Hub\w*NotFoundError$/.test(err.name)) {
+    if (isHubBindingNotFoundError(err)) {
       return refuse(res, 'MarketplaceOff', 'The chain has no marketplace contracts');
     }
     if (respondIfChainRpcTransportError(res, err, { retryable: true })) return;

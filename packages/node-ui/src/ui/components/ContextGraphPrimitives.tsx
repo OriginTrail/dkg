@@ -1,9 +1,10 @@
 import React from 'react';
 import type { ReactNode } from 'react';
+import { Loader2 } from 'lucide-react';
 
 type ContextGraphLayer = 'wm' | 'swm' | 'vm';
 
-export type EmptyStateTone = 'neutral' | ContextGraphLayer | 'danger' | 'query' | 'warning';
+export type EmptyStateTone = 'neutral' | ContextGraphLayer | 'danger' | 'query' | 'warning' | 'success';
 
 type EmptyStateAction = {
   label: string;
@@ -15,16 +16,17 @@ type EmptyStateAction = {
 
 const EMPTY_STATE_ACCENTS: Record<EmptyStateTone, string> = {
   neutral: 'var(--border-strong)',
-  wm: 'var(--layer-working, #64748b)',
-  swm: 'var(--layer-shared, #f59e0b)',
-  vm: 'var(--layer-verified, #22c55e)',
+  wm: 'var(--layer-working)',
+  swm: 'var(--layer-shared)',
+  vm: 'var(--layer-verified)',
   danger: 'var(--text-danger)',
-  query: '#38bdf8',
+  query: 'var(--text-secondary)', // navigation, not a layer: neutral
   // Warning tone (PCA edge/fall-through empty states). Resolves to the same
-  // `--text-warning` token as `.badge-warn` / `.v10-modal-warning` — the
-  // theme-aware amber (#fbbf24 dark / #92400e light), NOT the SWM
-  // `--layer-shared` #f59e0b layer-identity accent used by the `swm` tone.
+  // `--text-warning` token as the warning Badge / `.v10-modal-warning` — the
+  // theme-aware amber (#fbbf24 dark / #8e4706 light), NOT the SWM
+  // `--layer-shared` layer-identity accent used by the `swm` tone.
   warning: 'var(--text-warning)',
+  success: 'var(--text-success)',
 };
 
 export function toneForLayer(layer: ContextGraphLayer): EmptyStateTone {
@@ -39,6 +41,7 @@ export function EmptyState({
   tone = 'neutral',
   compact = false,
   inline = false,
+  busy = false,
   className = '',
 }: {
   icon?: ReactNode;
@@ -48,6 +51,8 @@ export function EmptyState({
   tone?: EmptyStateTone;
   compact?: boolean;
   inline?: boolean;
+  /** Still loading: shows a spinner in place of the icon and tells screen readers. */
+  busy?: boolean;
   className?: string;
 }) {
   const style = {
@@ -57,15 +62,16 @@ export function EmptyState({
   return (
     <div
       className={[
-        'v10-empty-state',
+        'v10-empty-state ds-card',
         compact ? 'compact' : '',
         inline ? 'inline' : '',
         className,
       ].filter(Boolean).join(' ')}
       data-tone={tone}
+      role={busy ? 'status' : undefined}
       style={style}
     >
-      {icon && <div className="v10-empty-state-icon" aria-hidden="true">{icon}</div>}
+      {(icon || busy) && <div className="v10-empty-state-icon" aria-hidden="true">{busy ? <Loader2 size={16} className="ds-spin" /> : icon}</div>}
       <div className="v10-empty-state-copy">
         <div className="v10-empty-state-title">{title}</div>
         {description && <div className="v10-empty-state-desc">{description}</div>}
@@ -75,7 +81,7 @@ export function EmptyState({
               <button
                 key={action.label}
                 type="button"
-                className={`v10-empty-state-action ${action.variant ?? 'secondary'}`}
+                className={`v10-empty-state-action ${action.variant ?? 'secondary'} ds-btn ds-sm${action.variant === 'primary' ? ' ds-primary' : ''}`}
                 onClick={action.onClick}
                 data-testid={action.testId}
               >
@@ -127,7 +133,7 @@ export function StatStrip({
       {items.map((item, index) => (
         <div
           key={item.id ?? index}
-          className="v10-stat-strip-cell"
+          className="v10-stat-strip-cell ds-card-nested"
           data-stat-id={item.id}
           title={item.tooltip}
         >

@@ -5,7 +5,7 @@
  * `enabled` is true.
  */
 import { ethers } from 'ethers';
-import type { ConnectorSettings } from './connector.js';
+import { MAX_TOKENS_FIELDS, type ConnectorSettings } from './connector.js';
 import { DEFAULT_LANDING, type LandingSettings } from './landing.js';
 import { serviceIdOf } from './offers.js';
 import { DEFAULT_STOP_SERVING_SECONDS } from './seller.js';
@@ -104,14 +104,20 @@ export interface SellerServiceConfig {
   /** By default weights-pinned for a llama.cpp backend, upstream-claimed for another. */
   provenance?: 'weights-pinned' | 'upstream-claimed';
   tokenizerBundle?: string;
+  /**
+   * Whether the service takes OpenAI tool calls, said in its quotes. On by default for an `openai` backend, off for
+   * llama.cpp, whose server takes tools only when it runs with a tool-calling chat template.
+   */
+  tools?: boolean;
   backend: ConnectorSettings;
 }
 
-export interface ResolvedSellerService extends Omit<SellerServiceConfig, 'pricePerUnit' | 'capacity' | 'provenance'> {
+export interface ResolvedSellerService extends Omit<SellerServiceConfig, 'pricePerUnit' | 'capacity' | 'provenance' | 'tools'> {
   serviceId: string;
   pricePerUnit: bigint;
   capacity: number | null;
   provenance: 'weights-pinned' | 'upstream-claimed';
+  tools: boolean;
 }
 
 export interface ResolvedSellerConfig {
@@ -193,12 +199,23 @@ export function resolveSellerConfig(config: MarketplaceConfig | undefined): Reso
     if (b.apiKeyEnv !== undefined && !/^[A-Z_][A-Z0-9_]*$/.test(b.apiKeyEnv)) {
       throw new Error(`${at}.backend.apiKeyEnv must name an environment variable`);
     }
+    if (s.tools !== undefined && typeof s.tools !== 'boolean') throw new Error(`${at}.tools must be true or false`);
+    if (b.maxTokensField !== undefined && !MAX_TOKENS_FIELDS.includes(b.maxTokensField)) {
+      throw new Error(`${at}.backend.maxTokensField must be max_tokens or max_completion_tokens`);
+    }
+    if (b.temperature !== undefined && b.temperature !== null && (typeof b.temperature !== 'number' || !Number.isFinite(b.temperature) || b.temperature < 0 || b.temperature > 2)) {
+      throw new Error(`${at}.backend.temperature must be a number from 0 to 2, or null to send none`);
+    }
+    if (b.reasoningEffortWithTools !== undefined && (typeof b.reasoningEffortWithTools !== 'string' || !/^[a-z]{1,16}$/.test(b.reasoningEffortWithTools))) {
+      throw new Error(`${at}.backend.reasoningEffortWithTools must be a reasoning effort, such as none or low`);
+    }
     return {
       model: s.model,
       serviceId,
       pricePerUnit: BigInt(s.pricePerUnit),
       capacity,
       provenance: s.provenance ?? (b.kind === 'llamacpp' ? 'weights-pinned' : 'upstream-claimed'),
+      tools: s.tools ?? b.kind === 'openai',
       ...(s.tokenizerBundle ? { tokenizerBundle: s.tokenizerBundle } : {}),
       backend: b,
     };

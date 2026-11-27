@@ -22,7 +22,7 @@
  */
 import { join } from 'node:path';
 import { Journal, KeyedLock, setAside } from './journal.js';
-import { receiptFromWire, requestFromWire, type ReceiptWire, type ServiceRequestWire } from './wire.js';
+import { receiptFromWire, requestFromWire, serveResultFromWire, serveUsageFromWire, type ReceiptWire, type ServeResult, type ServeUsage, type ServiceRequestWire } from './wire.js';
 
 /** One served call, as the ledger keeps it. */
 export interface ServedCall {
@@ -36,7 +36,10 @@ export interface ServedCall {
   signature: string;
   receipt: ReceiptWire;
   receiptSignature: string;
-  result: { content: string };
+  /** Text, or tool calls with text or none: what the receipt commits to. */
+  result: ServeResult;
+  /** How its units split; absent from calls served before it was kept. */
+  usage?: ServeUsage;
   /** The peer that sent the call, as its connection authenticated it: the only one its answer goes to again. */
   peerId?: string;
 }
@@ -142,7 +145,7 @@ export class SellerLedger {
       this.log?.(`[marketplace] the seller's ledger ${file} could not be read (${messageOf(err)}); it was moved to ${aside}, and the ledger starts empty`);
       return;
     }
-    const kept = entries.filter(wellFormed);
+    const kept = entriesFrom(entries);
     for (const entry of kept) this.apply(entry);
     const left = entries.length - kept.length;
     if (left === 0) return;
@@ -269,7 +272,7 @@ export class SellerLedger {
         const { summary, batches } = this.epochReport(epoch);
         kept.push({ type: 'summary', summary, batches: batches.filter((b) => b.state === 'landed').map(({ signedTx: _signed, ...b }) => ({ ...b, digests: [] })) });
       }
-      for (const entry of (await this.journal.read()).filter(wellFormed)) {
+      for (const entry of entriesFrom(await this.journal.read())) {
         const epoch = this.epochOf(entry);
         if (entry.type !== 'summary' && !(epoch !== undefined && ended.has(epoch))) kept.push(entry);
       }
@@ -379,17 +382,25 @@ const isDecimal = (v: unknown): v is string => typeof v === 'string' && /^\d+$/.
 const isStrings = (v: unknown): v is string[] => Array.isArray(v) && v.every(isString);
 const isNonce = (v: unknown) => v === null || isWhole(v);
 
-/** A served call as landing reads it: its request and receipt as the wire takes them. */
-function isServedCall(e: Record<string, unknown>): boolean {
+/**
+ * A served call as landing reads it, or `null`: its request and receipt as the wire takes them, and its result and
+ * usage as the wire decodes them, in their places, so a well-formed line written again is the same line.
+ */
+function servedCallFrom(e: Record<string, unknown>): Entry | null {
+  let result: ServeResult;
   try {
     requestFromWire(e.request);
     receiptFromWire(e.receipt);
+    result = serveResultFromWire(e.result);
   } catch {
-    return false;
+    return null;
   }
-  return isString(e.requestDigest) && isString(e.subscriptionId) && isWhole(e.budgetIndex) && isWhole(e.epoch)
-    && isString(e.signature) && isString(e.receiptSignature) && isRecord(e.result) && isString(e.result.content)
+  const usage = e.usage === undefined ? undefined : serveUsageFromWire(e.usage);
+  const ok = isString(e.requestDigest) && isString(e.subscriptionId) && isWhole(e.budgetIndex) && isWhole(e.epoch)
+    && isString(e.signature) && isString(e.receiptSignature)
+    && (e.usage === undefined || usage !== undefined)
     && (e.peerId === undefined || isString(e.peerId));
+  return ok ? ({ ...e, result, ...(usage ? { usage } : {}) } as Entry) : null;
 }
 
 function isBatchRecord(b: unknown): boolean {
@@ -398,25 +409,36 @@ function isBatchRecord(b: unknown): boolean {
 }
 
 /**
- * Whether an entry read back from the journal has the shape its type needs:
- * one that does not would stop every tick that reads it. An entry of a type
- * this version does not know is kept, and ignored.
+ * A line read back from the journal as the entry the ledger keeps, or `null` for one that lacks the shape of its type:
+ * one that did not would stop every tick that reads it. The one way in from the journal, for the load and a prune
+ * alike: a served call is decoded (`servedCallFrom`), every other known entry checked and kept as it is, and an entry of
+ * a type this version does not know is kept, and ignored.
  */
-function wellFormed(e: unknown): e is Entry {
-  if (!isRecord(e)) return false;
+function entryFrom(e: unknown): Entry | null {
+  if (!isRecord(e)) return null;
+  const checked = (ok: boolean) => (ok ? (e as Entry) : null);
   switch (e.type) {
-    case 'served': return isServedCall(e);
+    case 'served': return servedCallFrom(e);
     case 'sent':
-      return isString(e.batchId) && isWhole(e.epoch) && isWhole(e.at) && isString(e.hash) && isString(e.wallet) && isNonce(e.nonce) && isStrings(e.digests)
-        && (e.signedTx === undefined || isString(e.signedTx));
-    case 'speedup': return isString(e.batchId) && isString(e.hash);
+      return checked(isString(e.batchId) && isWhole(e.epoch) && isWhole(e.at) && isString(e.hash) && isString(e.wallet) && isNonce(e.nonce)
+        && isStrings(e.digests) && (e.signedTx === undefined || isString(e.signedTx)));
+    case 'speedup': return checked(isString(e.batchId) && isString(e.hash));
     case 'landed':
-      return (e.batchId === null || isString(e.batchId)) && isStrings(e.digests) && isRecord(e.counted) && Object.values(e.counted).every(isDecimal)
-        && (e.tx === null || (isRecord(e.tx) && isString(e.tx.hash) && isWhole(e.tx.blockNumber) && isDecimal(e.tx.gasUsed)));
-    case 'reverted': return isString(e.batchId);
-    case 'refused': return isString(e.digest) && isString(e.fault);
-    case 'missed': return isStrings(e.digests);
-    case 'summary': return isRecord(e.summary) && isWhole(e.summary.epoch) && isRecord(e.summary.counts) && Array.isArray(e.batches) && e.batches.every(isBatchRecord);
-    default: return isString(e.type);
+      return checked((e.batchId === null || isString(e.batchId)) && isStrings(e.digests) && isRecord(e.counted) && Object.values(e.counted).every(isDecimal)
+        && (e.tx === null || (isRecord(e.tx) && isString(e.tx.hash) && isWhole(e.tx.blockNumber) && isDecimal(e.tx.gasUsed))));
+    case 'reverted': return checked(isString(e.batchId));
+    case 'refused': return checked(isString(e.digest) && isString(e.fault));
+    case 'missed': return checked(isStrings(e.digests));
+    case 'summary':
+      return checked(isRecord(e.summary) && isWhole(e.summary.epoch) && isRecord(e.summary.counts) && Array.isArray(e.batches) && e.batches.every(isBatchRecord));
+    default: return checked(isString(e.type));
   }
+}
+
+/** The lines read back from the journal as the entries the ledger keeps, those that lack their shape left out. */
+function entriesFrom(lines: readonly unknown[]): Entry[] {
+  return lines.flatMap((line) => {
+    const entry = entryFrom(line);
+    return entry ? [entry] : [];
+  });
 }

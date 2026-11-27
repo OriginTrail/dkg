@@ -158,6 +158,25 @@ describe('/api/query answers for its time limit', () => {
     expect(JSON.parse(res.body).error).toContain('may still be running');
   });
 
+  it('rejects a successful synchronous query after the deadline before its timer can fire', async () => {
+    let now = performance.now();
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const query = vi.fn(async (_sparql: string, options: QueryOptions) => {
+      now = options.workDeadline! + 1;
+      expect(options.signal?.aborted).toBe(false);
+      return { bindings: [] };
+    });
+    const res = new ResponseStub(); const track = tracker();
+    try {
+      await handleQueryRoutes(routeContext('/api/query', new RequestStub({
+        sparql: 'SELECT ?s WHERE { ?s ?p ?o }', timeoutMs: 1_000,
+      }), res, { query }, track));
+      expect(res.statusCode).toBe(504);
+      expect(JSON.parse(res.body)).toMatchObject({ code: 'QUERY_TIME_LIMIT_EXCEEDED', stopped: false });
+      expect(track.complete).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); }
+  });
+
   it('refuses a timeoutMs above the node limit before any store work', async () => {
     configureApiQueryTimeLimit('2000', { info() {}, warn() {} });
     const query = vi.fn();

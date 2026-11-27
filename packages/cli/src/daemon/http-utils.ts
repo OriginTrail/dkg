@@ -21,6 +21,7 @@ import {
   validateContextGraphId,
   validateSubGraphName,
   isSafeIri,
+  isSparqlTermValidationError, USER_AUTHORED_TRUST_LEVEL_CODE,
   PCA_FUNDING_UNKNOWN_CODE,
   PCA_FUNDING_UNKNOWN_MESSAGE,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
@@ -29,7 +30,8 @@ import {
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { enrichEvmError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
-import { type DKGAgent } from '@origintrail-official/dkg-agent';
+import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { isListContextGraphsBudgetExceeded } from '@origintrail-official/dkg-agent/context-graph-list-budget-error';
 import {
   STORE_OPERATION_TIMEOUT_CODE,
   isStoreSchedulerBusyError,
@@ -45,6 +47,7 @@ import { enforceSignedRequestPostBody } from '../auth.js';
 import { knownNotWritableAnswer, resolveAwaitingWriteReadiness, type ContextGraphSubscriptionReader, type KnownNotWritable, type WriteReadinessOutcome } from './context-graph-write-readiness.js';
 import type { CorsAllowlist } from './state.js';
 import { admissionStep, noteAdmissionResponse } from './async-admission-trace.js';
+import { isStoreInternalLimit, storeInternalLimitResponseBody } from './store-internal-limit.js';
 
 export function isPayloadTooLargeError(err: unknown): err is PayloadTooLargeError {
   if (err instanceof PayloadTooLargeError) return true;
@@ -88,9 +91,9 @@ export interface StoreUnavailableClassification {
 }
 
 /**
- * Pure store-failure classification. Routes with partial-success context can
- * extend `body` before rendering it instead of losing that context through the
- * ordinary all-or-nothing responder below.
+ * Store-failure classification. Routes with partial-success context can extend
+ * `body` before rendering it instead of losing that context through the
+ * ordinary all-or-nothing responder below. A node-side limit logs its line here.
  */
 export function classifyStoreUnavailable(
   err: unknown,
@@ -109,6 +112,7 @@ export function classifyStoreUnavailable(
     };
   }
 
+  if (isStoreInternalLimit(err)) return { outcome: 'indeterminate', body: storeInternalLimitResponseBody(err) };
   if (!isStoreOperationTimeoutError(err)) return null;
   const outcome = err.outcome ?? 'indeterminate';
   return {
@@ -248,11 +252,11 @@ export function respondIfPcaFundingUnknown(res: ServerResponse, err: unknown): b
 
 /**
  * Map a thrown request error to the daemon's top-level HTTP response — the
- * single neutral place that rethrowing lifecycle publish routes
- * and the lifecycle catch agree on status codes: 413 payload-too-large; 400 for
- * SyntaxError / reserved-namespace / NO_FUNDED_PUBLISHER_WALLET; 503 for
- * inconclusive PCA funding; otherwise a 500
- * with the EVM-decoded message. Unit-testable in isolation.
+ * single neutral place that rethrowing lifecycle publish routes and the
+ * lifecycle catch agree on status codes: 413 payload-too-large; 400 for
+ * SyntaxError / reserved-namespace / refused RDF term / user-authored trust
+ * metadata / NO_FUNDED_PUBLISHER_WALLET; 503 for inconclusive PCA funding;
+ * otherwise a 500 with the EVM-decoded message. Unit-testable in isolation.
  */
 export function respondWithDaemonError(res: ServerResponse, err: any): void {
   if (res.headersSent || res.writableEnded) return;
@@ -267,12 +271,20 @@ export function respondWithDaemonError(res: ServerResponse, err: any): void {
     (typeof err?.message === 'string' && err.message.includes('reserved namespace'))
   ) {
     jsonResponse(res, 400, { error: err.message });
+  } else if (isSparqlTermValidationError(err) || err?.code === USER_AUTHORED_TRUST_LEVEL_CODE) {
+    jsonResponse(res, 400, { error: err.message, code: err.code });
   } else if (isNoFundedPublisherWalletLike(err)) {
     // Funded-wallet selection found no operational wallet with gas + TRAC — a
     // user-actionable funding condition (4xx), not a server bug.
     jsonResponse(res, 400, noFundedPublisherWalletBody(typeof err?.message === 'string' ? err.message : String(err)));
   } else if (respondIfPcaFundingUnknown(res, err)) {
     // A rethrowing publish path has the same retryable verdict as /vm/publish.
+  } else if (isListContextGraphsBudgetExceeded(err)) {
+    res.setHeader('Retry-After', '1');
+    jsonResponse(res, 503, {
+      error: 'Context graph listing is temporarily busy; retry the request',
+      code: err.code, retryable: true,
+    });
   } else if (respondIfStoreUnavailable(res, err)) {
     // Store admission pressure and adapter deadlines are transient. The typed
     // response preserves whether work never started or may have completed.
@@ -914,6 +926,7 @@ async function resolveWriteContextGraphIdOnce(
     writePreflightDiagnostics?: WritePreflightDiagnostics;
     /** Set by the re-resolve after a readiness wait: the exact probe must not share one that began before it. */
     freshProbe?: boolean;
+    asyncAdmission?: boolean;
     /** Caller-owned rendering for validation/store unavailability, never permission or readiness refusals. */
     renderUnavailable?: UnavailableResponseRenderer;
   } = {},
@@ -944,6 +957,7 @@ async function resolveWriteContextGraphIdOnce(
     isBareCandidateId,
     allowLocalExactFallback: opts.allowLocalExactFallback === true,
     freshProbe: opts.freshProbe,
+    asyncAdmission: opts.asyncAdmission,
   });
   if (exactDecision.kind === "accept") return candidateId;
   if (exactDecision.kind === "rejectUnknown") {

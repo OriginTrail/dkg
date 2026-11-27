@@ -26,7 +26,7 @@ export interface WorkerAdmissionTicket {
 
 type Waiter =
   | { readonly kind: 'ordinary'; readonly admit: (ticket: WorkerAdmissionTicket) => void }
-  | { readonly kind: 'exclusive'; readonly admit: (release: () => void) => void; readonly owned: () => void };
+  | { readonly kind: 'exclusive'; readonly admit: (ticket: WorkerAdmissionTicket) => void; readonly owned: () => void };
 
 export class WorkerAdmission {
   #inflight = 0;
@@ -41,17 +41,17 @@ export class WorkerAdmission {
 
   /** Queue an operation in arrival order. Never admitted once it gives up. */
   enter(signal: AbortSignal | undefined, timeoutMs: number, timeoutError: () => Error): Promise<WorkerAdmissionTicket> {
-    return this.#wait<WorkerAdmissionTicket>('ordinary', signal, timeoutMs, timeoutError);
+    return this.#wait('ordinary', signal, timeoutMs, timeoutError);
   }
 
-  /** Own the worker once everything admitted before has settled; resolves with `release`. */
-  own(signal: AbortSignal | undefined, timeoutMs: number, timeoutError: () => Error): Promise<() => void> {
-    return this.#wait<() => void>('exclusive', signal, timeoutMs, timeoutError);
+  /** Own the worker once everything admitted before has settled; resolves with the same idempotent lease as ordinary admission. */
+  own(signal: AbortSignal | undefined, timeoutMs: number, timeoutError: () => Error): Promise<WorkerAdmissionTicket> {
+    return this.#wait('exclusive', signal, timeoutMs, timeoutError);
   }
 
-  #wait<T>(kind: Waiter['kind'], signal: AbortSignal | undefined, timeoutMs: number, timeoutError: () => Error): Promise<T> {
+  #wait(kind: Waiter['kind'], signal: AbortSignal | undefined, timeoutMs: number, timeoutError: () => Error): Promise<WorkerAdmissionTicket> {
     if (signal?.aborted) return Promise.reject(asAbortError(signal.reason));
-    return new Promise<T>((resolve, reject) => {
+    return new Promise<WorkerAdmissionTicket>((resolve, reject) => {
       let state: 'queued' | 'draining' | 'settled' = 'queued';
       let timer: ReturnType<typeof setTimeout> | undefined;
       const settle = () => {
@@ -59,7 +59,7 @@ export class WorkerAdmission {
         if (timer) clearTimeout(timer);
         signal?.removeEventListener('abort', onAbort);
       };
-      const admit = (value: unknown) => { settle(); resolve(value as T); };
+      const admit = (ticket: WorkerAdmissionTicket) => { settle(); resolve(ticket); };
       const waiter: Waiter = kind === 'ordinary'
         ? { kind, admit }
         : { kind, admit, owned: () => { state = 'draining'; } };
@@ -98,7 +98,7 @@ export class WorkerAdmission {
         this.#owned = false;
         this.#pump();
       };
-      const grant = () => { this.#drained = null; head.admit(release); };
+      const grant = () => { this.#drained = null; head.admit({ done: release }); };
       if (this.#inflight === 0) grant();
       else this.#drained = grant;
     }
@@ -141,13 +141,13 @@ export async function runStoppableRead<T>(
   const { signal } = options;
   const boundMs = (): number => boundByWorkDeadline(host.operationTimeoutMs, options.workDeadline);
   const timeoutError = () => createOxigraphWorkerTimeoutError(method, boundMs());
-  let release: () => void;
+  let lease: WorkerAdmissionTicket;
   try {
-    release = await host.admission.own(signal, boundMs(), timeoutError);
+    lease = await host.admission.own(signal, boundMs(), timeoutError);
   } catch (cause) {
     throw new QueryWorkStoppedError(BACKEND, 'not_started', cause);
   }
-  // The worker is ours until `release`. A caller that leaves before the read is
+  // The worker is ours until `lease.done`. A caller that leaves before the read is
   // posted is answered at once; the worker is released when the barrier ends.
   let releaseAfter = null as Promise<unknown> | null;
   try {
@@ -170,7 +170,7 @@ export async function runStoppableRead<T>(
       throw new QueryWorkStoppedError(BACKEND, 'stopped', signal?.aborted ? signal.reason : error);
     }
   } finally {
-    if (releaseAfter) void releaseAfter.finally(release);
-    else release();
+    if (releaseAfter) void releaseAfter.finally(lease.done);
+    else lease.done();
   }
 }

@@ -37,6 +37,8 @@ test('Node 26 routing covers callers, helpers, shared dependencies, runtime and 
     'packages/chain/src/strict-current-finalized-evm-rpc-client.ts',
     'packages/chain/src/evm-adapter.ts',
     'packages/chain/test/rpc-http1-dispatcher.unit.test.ts',
+    'packages/chain/node26/rpc-http1-dispatcher.test.ts',
+    'packages/chain/vitest.node26.config.ts',
     'packages/chain/test/helpers/local-tls.ts',
     'packages/chain/test/helpers/chain-rpc-fetch-child.mjs',
     'packages/chain/test/fixtures/localhost-tls/localhost-cert.pem',
@@ -64,11 +66,28 @@ test('the Node 26 runner builds every workspace package the lane loads, since th
   const loaded = [
     'packages/chain/src/rpc-http1-dispatcher.ts',
     'packages/chain/test/rpc-http1-dispatcher.unit.test.ts',
+    'packages/chain/node26/rpc-http1-dispatcher.test.ts',
+    'packages/chain/vitest.node26.config.ts',
     'packages/chain/test/helpers/local-tls.ts',
     'packages/chain/test/helpers/chain-rpc-fetch-child.mjs',
   ].flatMap((file) => [...read(file).matchAll(/from ['"](@origintrail-official\/[^'"/]+)/g)].map((match) => match[1]));
   const built = NODE26_WORKSPACE_BUILDS.map((workspace) => JSON.parse(read(`${workspace}/package.json`)).name);
   assert.deepEqual([...new Set(loaded)].sort(), [...built].sort());
+});
+
+test('the isolated transport suite has a required Node 26 inventory obligation', async () => {
+  const { discoverTestSurface, secondaryRoutes } = await import('../test-inventory-surface.mjs');
+  const files = discoverTestSurface(REPO_ROOT, ['packages/chain/node26']);
+  const registrations = JSON.parse(read('test-policy/test-routes.json'))
+    .filter((route) => route.pattern.startsWith('packages/chain/node26/'));
+  assert.deepEqual(files, ['packages/chain/node26/rpc-http1-dispatcher.test.ts']);
+  const routes = secondaryRoutes(files, registrations);
+  for (const file of files) {
+    assert.equal(routes.get(file)?.lane, 'chain-rpc-node26');
+    assert.equal(routes.get(file)?.cadence, 'required');
+    assert.equal(routes.get(file)?.command, 'node scripts/ci/run-chain-rpc-node26.mjs');
+  }
+  assert.match(read('scripts/ci/run-chain-rpc-node26.mjs'), /'--config', 'vitest\.node26\.config\.ts'/);
 });
 
 test('irrelevant and docs-only PRs explicitly omit Node 26; full and release dispatch require it', () => {
@@ -228,7 +247,13 @@ test('the configured protected-history controller enforces selection and actual 
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout);
   };
-  for (const file of ['packages/chain/src/rpc-http1-dispatcher.ts', 'packages/chain/test/helpers/local-tls.ts', 'pnpm-lock.yaml', '.nvmrc']) {
+  for (const file of [
+    'packages/chain/src/rpc-http1-dispatcher.ts',
+    'packages/chain/test/helpers/local-tls.ts',
+    'packages/chain/node26/rpc-http1-dispatcher.test.ts',
+    'packages/chain/vitest.node26.config.ts',
+    'pnpm-lock.yaml', '.nvmrc',
+  ]) {
     assert.equal(pinnedPlan('pull_request', file).lanes.chain_rpc_node26, true, file);
   }
   for (const event of ['merge_group', 'push', 'schedule', 'workflow_dispatch']) {
@@ -277,6 +302,6 @@ test('one reusable implementation serves primary CI and manual candidate diagnos
   assert.match(run.run, /run-chain-rpc-node26\.mjs/);
   assert.equal(transport.jobs.transport.outputs.evidence, '${{ steps.transport.outputs.evidence }}');
   assert.ok(transport.jobs.transport.steps.some((step) => step.with?.['node-version'] === 26));
-  assert.match(read('packages/chain/test/rpc-http1-dispatcher.unit.test.ts'), /runChainRpcChild\(server.url, \{\}\)/);
+  assert.match(read('packages/chain/node26/rpc-http1-dispatcher.test.ts'), /runChainRpcChild\(server.url, \{\}\)/);
   assert.match(read('scripts/ci/run-chain-rpc-node26.mjs'), /spawnSync\(process.execPath/);
 });

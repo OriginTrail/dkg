@@ -2375,6 +2375,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         [metaGraph],
         {
           source: 'agent.cg.removeSubGraph.registration',
+          writtenGraphs: [metaGraph],
         },
       );
       if (!updated) {

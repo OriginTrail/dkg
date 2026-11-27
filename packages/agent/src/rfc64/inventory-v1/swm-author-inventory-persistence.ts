@@ -43,6 +43,7 @@ import {
   swmAuthorRowParametersV1,
   type SqlRowV1,
 } from './swm-author-inventory-sql-codec.js';
+import { StoredSwmRowsCacheV1 } from './swm-author-inventory-stored-rows.js';
 
 type SwmInventoryErrorCodeV1 = SwmAuthorInventoryErrorCodeV1;
 
@@ -164,7 +165,13 @@ function planSwmAuthorInventoryCommitV1(
  * @internal
  */
 export class SwmAuthorInventoryPersistenceV1 {
+  private readonly verifiedRows = new StoredSwmRowsCacheV1();
+
   constructor(private readonly host: SwmAuthorInventoryPersistenceHostV1) {}
+
+  clearVerifiedRows(): void {
+    this.verifiedRows.clear();
+  }
 
   read(key: EncodedSwmAuthorInventoryKeyV1): SwmAuthorInventorySnapshotV1 | null {
     return this.readStored(key)?.snapshot ?? null;
@@ -225,7 +232,10 @@ export class SwmAuthorInventoryPersistenceV1 {
       scope: key.scope,
       author: key.author,
     }) as SqlRowV1 | undefined);
-    if (headRow === undefined) return null;
+    if (headRow === undefined) {
+      this.verifiedRows.remember(key);
+      return null;
+    }
     const rowsQuery = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.getSwmAuthorRows);
     const storedRows = this.host.statement(() => rowsQuery.all({
       scope: key.scope,
@@ -233,11 +243,7 @@ export class SwmAuthorInventoryPersistenceV1 {
     }) as SqlRowV1[]);
     try {
       const { head } = decodeStoredHead(headRow, key.scope, key.author);
-      const rows = Object.freeze(
-        storedRows
-          .map(decodeStoredSwmAuthorInventoryRowV1)
-          .sort(compareSwmAuthorInventoryRowsV1),
-      );
+      const { rows, cache } = this.verifiedRows.decode(key, storedRows);
       const snapshot = Object.freeze({ head, rows });
       assertSwmAuthorInventorySnapshotBindingV1(snapshot);
       const expectedHead = headRow.expected_head_digest === null
@@ -265,6 +271,7 @@ export class SwmAuthorInventoryPersistenceV1 {
         && rows.some(({ kaUal }) => kaUal === mutationKaUal)
         ? 'exact-merge' as const
         : 'mutation' as const;
+      this.verifiedRows.remember(key, cache);
       return Object.freeze({
         snapshot,
         expectedHead,

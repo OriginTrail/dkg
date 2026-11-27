@@ -30,7 +30,8 @@ const KEY_LIFETIME_SECONDS = 3_600;
  * the next key revokes it, so at most one playground key per browser is live.
  */
 export const PLAYGROUND_KEY_STORAGE = 'dkg-marketplace-playground-key';
-const KEY_ID_RE = /^dkgmk_[0-9a-f]{8}$/;
+/** A key's id: 16 hex digits after the prefix, as a node makes them since 10.1.x, or 8, as 10.1.0 made them. */
+const KEY_ID_RE = /^dkgmk_(?:[0-9a-f]{16}|[0-9a-f]{8})$/;
 
 function lastKeyId(): string | null {
   try {
@@ -221,14 +222,14 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
   const fund = () => { askPlans({ kind: 'compose' }); go('plans'); };
   const topUp = (id: string) => { askPlans({ kind: 'top-up', serviceId: id }); go('plans'); };
 
-  if (subs.err && !subs.data) return <div className="mkt-card" data-testid="mkt-playground" data-state="error"><ErrorCard err={subs.err} onRetry={subs.reload} /></div>;
-  if (!subs.data) return <div className="mkt-card mkt-muted" data-testid="mkt-playground" data-state="loading" data-copy="state.loading">{copy('state.loading')}</div>;
+  if (subs.err && !subs.data) return <div className="ds-card mkt-card" data-testid="mkt-playground" data-state="error"><ErrorCard err={subs.err} onRetry={subs.reload} /></div>;
+  if (!subs.data) return <div className="ds-card mkt-card mkt-muted" data-testid="mkt-playground" data-state="loading" data-copy="state.loading">{copy('state.loading')}</div>;
   if (!current || budgets.length === 0) {
     return (
-      <div className="mkt-card" data-testid="mkt-playground" data-state="no-plan">
+      <div className="ds-card mkt-card" data-testid="mkt-playground" data-state="no-plan">
         <div data-copy="play.nosub">{copy('play.nosub')}</div>
         <div className="mkt-fork">
-          <button type="button" className="mkt-btn mkt-btn--primary" data-testid="mkt-play-fund" data-copy="play.fund.cta" onClick={fund}>{copy('play.fund.cta')}</button>
+          <button type="button" className="ds-btn ds-primary" data-testid="mkt-play-fund" data-copy="play.fund.cta" onClick={fund}>{copy('play.fund.cta')}</button>
         </div>
       </div>
     );
@@ -240,14 +241,14 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
     <>
       <span className="mkt-sec mkt-sm" data-copy="play.fork.switch">{copy('play.fork.switch')}</span>
       {others.map((b) => (
-        <button type="button" key={b.serviceId} className="mkt-chipbtn" data-testid={`mkt-fork-switch-${b.serviceId}`} data-copy="play.remaining"
+        <button type="button" key={b.serviceId} className="ds-btn ds-sm" data-testid={`mkt-fork-switch-${b.serviceId}`} data-copy="play.remaining"
           onClick={() => { setServiceId(b.serviceId); setFork(null); }}>{copy('play.remaining', { model: label(b.serviceId), pct: pctLeftOf(b) })}</button>
       ))}
     </>
   ) : null;
 
   return (
-    <div className="mkt-card" data-testid="mkt-playground" data-mode="chat">
+    <div className="ds-card mkt-card" data-testid="mkt-playground" data-mode="chat">
       <div className="mkt-mhead">
         <span className="mkt-sec mkt-sm" data-copy="play.epoch">{copy('play.epoch', { n: current.epoch, t: relAt(current.endsAt) })}</span>
         <span className="mkt-muted mkt-xs" data-copy="play.service">{copy('play.service')}</span>
@@ -256,7 +257,7 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
         {budgets.map((b) => {
           const on = selected?.serviceId === b.serviceId;
           return (
-            <button type="button" key={b.serviceId} role="radio" aria-checked={on} className={on ? 'on' : ''} data-copy="play.remaining" data-testid={`mkt-chip-${b.serviceId}`}
+            <button type="button" key={b.serviceId} role="radio" aria-checked={on} className={on ? 'ds-filter active' : 'ds-filter'} data-copy="play.remaining" data-testid={`mkt-chip-${b.serviceId}`}
               onClick={() => { setServiceId(b.serviceId); setFork(null); }}>
               {copy('play.remaining', { model: label(b.serviceId), pct: pctLeftOf(b) })}
             </button>
@@ -293,7 +294,7 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
           <div className="mkt-forkinline" data-testid="mkt-fork-ceiling">
             <strong data-copy="play.fork.ceiling">{copy('play.fork.ceiling')}</strong>
             <div className="mkt-fork">
-              <button type="button" className="mkt-btn mkt-btn--primary" data-testid="mkt-fork-topup" data-copy="fork.topup" onClick={() => topUp(fork.serviceId)}>{copy('fork.topup')}</button>
+              <button type="button" className="ds-btn ds-primary" data-testid="mkt-fork-topup" data-copy="fork.topup" onClick={() => topUp(fork.serviceId)}>{copy('fork.topup')}</button>
               {fork.nextEpochAt != null && <span className="mkt-sec mkt-sm" data-copy="play.fork.wait">{copy('play.fork.wait', { t: relAt(fork.nextEpochAt) })}</span>}
               {switchChips}
             </div>
@@ -303,7 +304,7 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
           <div className="mkt-forkinline" data-testid="mkt-fork-fund">
             <strong data-copy="play.fork.fund">{copy('play.fork.fund')}</strong>
             <div className="mkt-fork">
-              <button type="button" className="mkt-btn mkt-btn--primary" data-copy="play.fund.cta" onClick={fund}>{copy('play.fund.cta')}</button>
+              <button type="button" className="ds-btn ds-primary" data-copy="play.fund.cta" onClick={fund}>{copy('play.fund.cta')}</button>
               {switchChips}
             </div>
           </div>
@@ -315,9 +316,9 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
         )}
       </div>
       <div className="mkt-inputrow">
-        <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void send(); }} data-testid="mkt-play-input"
+        <input className="ds-input mkt-input" value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void send(); }} data-testid="mkt-play-input"
           aria-label={copy('play.composer')} placeholder={copy('play.composer')} />
-        <button type="button" className="mkt-btn mkt-btn--primary" data-testid="mkt-play-send" data-copy="ctl.send" disabled={busy || !!sendDisabledKey}
+        <button type="button" className="ds-btn ds-primary" data-testid="mkt-play-send" data-copy="ctl.send" disabled={busy || !!sendDisabledKey}
           title={sendDisabledKey ? copy(sendDisabledKey) : undefined} onClick={() => { void send(); }}>
           {busy ? copy('state.working') : copy('ctl.send')}
         </button>

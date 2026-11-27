@@ -13,10 +13,11 @@ import {
   type SparqlRewriteResult,
 } from './sparql-rewrite-result.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
-import { applyGraphDataset } from './sparql-graph-dataset.js';
+import { applyGraphDataset, withDatasetClauses } from './sparql-graph-dataset.js';
 import { graphSubselectLimit } from './sparql-subselect-limit.js';
 import { renderDedupPattern } from './sparql-dedup-pattern-source.js';
 import { analyzeDedupPattern } from './sparql-dedup-pattern.js';
+import { variablesOutsideHeldGraphGuards } from './sparql-held-graph-guard.js';
 import { hasTopLevelDefaultGraphPattern } from './sparql-default-graph-pattern.js';
 import { createGraphAccess, type GraphAccess } from './sparql-graph-access.js';
 import { createBlankNodeRenamer, createVariableAllocator, type VariableAllocator } from './sparql-rewrite-names.js';
@@ -117,6 +118,22 @@ export function assertExplicitGraphIrisAllowed(
   }
 }
 
+/** Merge only the already-authorized partitions into a default dataset.
+ * The caller's dataset clauses are rejected before this host-owned rewrite.
+ * This supports joins between KAs without exposing any other named graph.
+ */
+export function mergeDefaultGraphDataset(
+  scope: PreparedGraphScope,
+  graphUris: readonly string[],
+): GraphScopeRewriteResult {
+  if (scope.hasGraphClause || scope.hasDatasetClause || graphUris.length === 0) {
+    return unsupported('strategy-rejected');
+  }
+  const source = withDatasetClauses(scope, graphUris, 'FROM');
+  return source === null
+    ? unsupported('missing-where')
+    : ready(transitionGraphScope(scope, source));
+}
 export function wrapWithGraph(
   scope: PreparedGraphScope,
   graphUri: string,
@@ -161,6 +178,8 @@ export function wrapWithGraphUnion(
 interface ProjectedGraphPattern {
   readonly pattern: string;
   readonly distinct?: boolean;
+  /** What the subselect projects when the caller's pattern has no variables: a private variable, never bound. */
+  readonly emptyProjection?: string;
 }
 
 function wrapWithProjectedGraphSubselect(
@@ -184,11 +203,11 @@ function wrapWithProjectedGraphSubselect(
   if (hasUnion) return unsupported('nested-union');
   const built = buildPattern(inner, graphs);
   if (!built) return unsupported('strategy-rejected');
-  const { pattern, distinct } = built;
+  const { pattern, distinct, emptyProjection } = built;
 
-  const innerVariables = scope.whereVariables;
-  if (innerVariables.length === 0) return unsupported('no-projected-variables');
-  const variables = innerVariables.map(variable => variable.source).join(' ');
+  const innerVariables = variablesOutsideHeldGraphGuards(scope);
+  const variables = innerVariables.length ? innerVariables.map(variable => variable.source).join(' ') : emptyProjection;
+  if (!variables) return unsupported('no-projected-variables');
   const replacement = `{ SELECT ${distinct ? 'DISTINCT ' : ''}${variables} WHERE { ${pattern} }${graphSubselectLimit(scope)} }`;
   return ready(transitionGraphScope(
     scope,
@@ -209,8 +228,21 @@ function buildDeduplicatedGraphPattern(
   const movedFilters = filters;
   // Every retained row evaluates each moved FILTER once. Hidden blank-node
   // variables stay private across graph selection and replay.
-  const inner = renderDedupPattern(scope, movedFilters, allocate);
-  const variables = scope.whereVariables.map(variable => variable.source).join(' ');
+  const callerVariables = variablesOutsideHeldGraphGuards(scope).map(variable => variable.source);
+  // A mapping is read from one graph. The caller's variables are the mapping; blank nodes, like paths, then
+  // repeat as often as the chosen graph holds them. Without caller variables the blank nodes are the mapping:
+  // a mirrored match is read once, and distinct blank matches each. A collection's list nodes have no private
+  // variable, and a path group is not told apart from a collection here: without caller variables, a pattern
+  // that holds either keeps one branch per graph.
+  if (!callerVariables.length && holdsParenthesis(scope, movedFilters)) return null;
+  const { pattern: inner, blankVariables } = renderDedupPattern(scope, movedFilters, allocate, callerVariables.length === 0);
+  // A pattern without caller variables projects one private variable, so its rows are read through this route too
+  // and keep their multiplicity. Blazegraph counts no row that binds no variable, so the variable is bound, except
+  // where the query projects every variable (`*`): there the rows themselves are the answer, and stay empty.
+  const emptyProjection = callerVariables.length ? undefined : allocate('__dkgNoVariable');
+  const bindEmpty = emptyProjection && !projectsEveryVariable(scope) ? ` BIND(true AS ${emptyProjection})` : '';
+  const variables = callerVariables.length ? callerVariables.join(' ') : emptyProjection!;
+  const keys = (callerVariables.length ? callerVariables : blankVariables).join(' ');
   const filterVariables = movedFilters.map((_filter, index) => allocate(`__dkgDedupFilter${index}`));
   // BIND evaluates on every retained row on the right of the rejoin. A raw
   // FILTER can be pushed onto the grouped left side by either engine, sampling
@@ -224,17 +256,46 @@ function buildDeduplicatedGraphPattern(
   const matchGraph = distinct ? graph : allocate('__dkgDedupMatchGraph');
   const candidate = access.candidate(inner, matchGraph);
   if (distinct) {
-    if (!movedFilters.length) return { pattern: candidate, distinct };
+    if (!movedFilters.length) return { pattern: `${candidate}${bindEmpty}`, distinct, emptyProjection };
     const trailing = filterVariables.map(variable => `FILTER(${variable})`).join(' ');
-    return { pattern: `{ SELECT DISTINCT ${variables} WHERE { ${candidate} } } ${filterBindings} ${trailing}` };
+    return { pattern: `{ SELECT DISTINCT ${variables} WHERE { ${candidate}${bindEmpty} } } ${filterBindings} ${trailing}`, emptyProjection };
   }
   // Choose one graph deterministically and replay its hidden-path multiplicity.
   // The access implementation owns the barriers required by its backend plan.
-  const replay = access.replay(inner, graph, variables, bindings);
+  const replay = access.replay(inner, graph, keys, bindings);
   const trailing = filterVariables.map(variable => `FILTER(${variable})`).join(' ');
-  return {
-    pattern: `{ SELECT ${variables} (MIN(${matchGraph}) AS ${graph}) WHERE { ${candidate} } GROUP BY ${variables} } ${replay} ${trailing}`,
-  };
+  // Without keys all matches form one group, and no match still leaves its row with an unbound graph, which
+  // the replay must never read: that row is dropped before the replay joins.
+  const chosen = keys
+    ? `{ SELECT ${keys} (MIN(${matchGraph}) AS ${graph}) WHERE { ${candidate} } GROUP BY ${keys} }`
+    : `{ { SELECT (MIN(${matchGraph}) AS ${graph}) WHERE { ${candidate} } } FILTER(BOUND(${graph})) }`;
+  return { pattern: `${chosen} ${replay} ${trailing}${bindEmpty}`, emptyProjection };
+}
+
+/** Whether the pattern holds a parenthesis outside its FILTERs: a collection or a path group. */
+function holdsParenthesis(scope: PreparedGraphScope, filters: readonly { readonly start: number; readonly end: number }[]): boolean {
+  const { tokens } = scope.prepared;
+  for (let index = scope.where!.openingTokenIndex + 1; index < scope.where!.closingTokenIndex; index++) {
+    const token = tokens[index];
+    if (token.kind !== 'symbol' || token.logicalValue !== '(') continue;
+    if (!filters.some(range => token.start >= range.start && token.start < range.end)) return true;
+  }
+  return false;
+}
+
+/** Whether the query projects every in-scope variable: `SELECT *` or `DESCRIBE *`, not the `*` of `COUNT(*)`. */
+function projectsEveryVariable(scope: PreparedGraphScope): boolean {
+  if ((scope.operation !== 'SELECT' && scope.operation !== 'DESCRIBE') || !scope.where) return false;
+  const { tokens } = scope.prepared;
+  let depth = 0;
+  for (let index = scope.prepared.prologue.endTokenIndex + 1; index < scope.where.openingTokenIndex; index++) {
+    const token = tokens[index];
+    if (token.kind !== 'symbol') continue;
+    if (token.logicalValue === '(') depth += 1;
+    else if (token.logicalValue === ')') depth -= 1;
+    else if (token.logicalValue === '*' && depth === 0) return true;
+  }
+  return false;
 }
 
 /** Scope a graph set, reading each mapping from one graph even when several hold it. */
@@ -309,13 +370,20 @@ export function rewriteGraphRoute(
   policy: GraphSetRoutingPolicy,
   fallbackPolicy: 'compatibility' | 'preserve-scope' = 'compatibility',
   engine: SparqlEngineFamily | null = null,
+  /** Receives the graphs the rewrite it returns reads: the set, or the fallback graph alone. */
+  routed?: (graphs: readonly string[]) => void,
 ): GraphScopeRewriteResult {
   if (graphUris.length > 0) {
     const selected = rewriteGraphSet(scope, graphUris, policy, engine);
-    if (selected.kind === 'ready') return selected;
+    if (selected.kind === 'ready') {
+      routed?.(graphUris);
+      return selected;
+    }
     if (fallbackPolicy === 'preserve-scope' && graphUris.some(graph => graph !== fallbackGraphUri)) return selected;
   }
-  return rewriteSingleGraph(scope, fallbackGraphUri, engine);
+  const single = rewriteSingleGraph(scope, fallbackGraphUri, engine);
+  if (single.kind === 'ready') routed?.([fallbackGraphUri]);
+  return single;
 }
 
 /**
@@ -437,11 +505,18 @@ function graphVariablesAreTopLevel(scope: PreparedGraphScope): boolean {
 /**
  * Constrain every caller-supplied GRAPH variable to the authorized graph set.
  * All structural decisions use the same prepared token coordinates as the
- * dataset and explicit-GRAPH authorization checks above.
+ * dataset and explicit-GRAPH authorization checks above. With `boundByDataset`
+ * the read's dataset holds exactly these graphs, so the checks run and no
+ * VALUES list is written.
  */
 export function constrainGraphVariablesToAllowedSet(
   scope: PreparedGraphScope,
   allowedGraphs: readonly string[],
+  { boundByDataset = false, allowDefaultGraphPatterns = false }: {
+    boundByDataset?: boolean;
+    /** A merged view query reads patterns outside GRAPH from its own default graph, beside GRAPH portions. */
+    allowDefaultGraphPatterns?: boolean;
+  } = {},
 ): GraphScopeRewriteResult {
   if (nestedSelectContainsGraphVariable(scope)) {
     throw new ScopedQueryViolationError(
@@ -457,7 +532,7 @@ export function constrainGraphVariablesToAllowedSet(
       'GRAPH variables must appear at the top level of scoped local queries',
     );
   }
-  if (hasTopLevelDefaultGraphPattern(scope)) {
+  if (!allowDefaultGraphPatterns && hasTopLevelDefaultGraphPattern(scope)) {
     throw new ScopedQueryViolationError(
       'GRAPH variables cannot be mixed with default-graph triple patterns on scoped local queries',
     );
@@ -467,7 +542,7 @@ export function constrainGraphVariablesToAllowedSet(
   const variablesNeedingConstraint = scope.graphVariables.filter(
     (variable) => !callerGraphValuesAreAuthorized(scope, variable.logicalName, allowed),
   );
-  if (variablesNeedingConstraint.length === 0) {
+  if (variablesNeedingConstraint.length === 0 || boundByDataset) {
     return ready(transitionGraphScope(scope, scope.source));
   }
 

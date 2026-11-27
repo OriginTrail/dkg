@@ -67,6 +67,7 @@ export class BlazegraphReadStop {
   readonly serverDeadlineMs: number;
   #dispatched = false;
   #done = false;
+  #cancellation: Promise<boolean> | undefined;
   #detach: (() => void) | null = null;
 
   constructor(
@@ -92,7 +93,7 @@ export class BlazegraphReadStop {
     if (this.queryId === null || this.#detach) return;
     const cancel = () => {
       this.#detach = null;
-      if (!this.#done) void cancelBlazegraphQuery(this.endpoint, this.queryId!);
+      if (!this.#done) this.#cancellation = cancelBlazegraphQuery(this.endpoint, this.queryId!);
     };
     signal.addEventListener('abort', cancel, { once: true });
     this.#detach = () => signal.removeEventListener('abort', cancel);
@@ -106,7 +107,9 @@ export class BlazegraphReadStop {
   }
 
   /** The error a read rejects with: stopped when its caller left or its limit passed. */
-  failed(error: unknown, signal: AbortSignal | undefined): unknown {
+  async failed(error: unknown, signal: AbortSignal | undefined): Promise<unknown> {
+    // A deadline/header or attempted POST alone does not prove the engine stopped.
+    if (this.#dispatched && !(await this.#cancellation)) return error;
     return workStoppedError('blazegraph', error, { signal, workDeadline: this.workDeadline },
       this.#dispatched ? 'stopped' : 'not_started');
   }

@@ -18,22 +18,23 @@ function hangingEndpoint() {
   return aborted;
 }
 
-function managedStore() {
-  const recover = vi.fn();
+function managedStore(completion: 'pending' | 'reopened' = 'pending') {
+  let state = { recovering: false, generation: 0 };
+  const recover = vi.fn(() => { state = { recovering: completion !== 'reopened', generation: 1 }; });
   const store = createManagedOxigraphSparqlStoreV1(
     { queryEndpoint: 'http://127.0.0.1:7878/query', timeout: 10_000 },
-    { getRecoveryState: () => ({ recovering: false, generation: 0 }), onClientTimeout: recover },
+    { getRecoveryState: () => state, onClientTimeout: recover },
   );
   return { store, recover };
 }
 
 describe('SPARQL HTTP read with a work deadline', () => {
-  it('managed: reclaims the read with a restart at its limit, not at the store timeout', async () => {
+  it('managed: requests recovery at the deadline without claiming a pending restart completed', async () => {
     hangingEndpoint();
     const { store, recover } = managedStore();
     const startedAt = performance.now();
     await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }', { workDeadline: performance.now() + 150 }))
-      .rejects.toMatchObject({ code: 'QUERY_WORK_STOPPED', outcome: 'stopped', backend: 'oxigraph-server' });
+      .rejects.toMatchObject({ code: 'STORE_OPERATION_TIMEOUT' });
     expect(performance.now() - startedAt).toBeLessThan(5_000);
     expect(recover).toHaveBeenCalled();
     await store.close();
@@ -48,13 +49,23 @@ describe('SPARQL HTTP read with a work deadline', () => {
     const pending = store.query('SELECT ?s WHERE { ?s ?p ?o }', { workDeadline: performance.now() + 400, signal: controller.signal });
     await new Promise((resolve) => setTimeout(resolve, 50));
     controller.abort(reason);
-    await expect(pending).rejects.toMatchObject({ code: 'QUERY_WORK_STOPPED', outcome: 'stopped', cause: reason });
+    await expect(pending).rejects.toBe(reason);
     expect(recover).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(recover).toHaveBeenCalled(), { timeout: 5_000, interval: 20 });
     const reclaimedAfter = performance.now() - startedAt;
     expect(reclaimedAfter).toBeGreaterThanOrEqual(350);
     expect(reclaimedAfter).toBeLessThan(5_000);
     await store.close();
+  });
+
+  it('managed: reports stopped only once recovery has reopened a newer generation', async () => {
+    hangingEndpoint();
+    const { store, recover } = managedStore('reopened');
+    try {
+      await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }', { workDeadline: performance.now() + 50 }))
+        .rejects.toMatchObject({ code: 'QUERY_WORK_STOPPED', outcome: 'stopped', backend: 'oxigraph-server' });
+      expect(recover).toHaveBeenCalled();
+    } finally { await store.close(); }
   });
 
   it('generic: hangs up at the limit and does not claim the endpoint stopped', async () => {

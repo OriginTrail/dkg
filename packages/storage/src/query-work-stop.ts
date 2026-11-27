@@ -1,3 +1,4 @@
+import type { ManagedOxigraphRuntimeStateV1 } from './managed-oxigraph-runtime-store.js';
 /**
  * A read's own time limit, and the answer a store gives when the limit ended
  * the read's work and not only the caller's wait.
@@ -80,4 +81,14 @@ export function workStoppedError(
   const limitPassed = options.workDeadline !== undefined && performance.now() >= options.workDeadline;
   if (!callerLeft && !limitPassed) return error;
   return new QueryWorkStoppedError(backend, outcome, callerLeft ? options.signal!.reason : error);
+}
+
+/** A newer ready runtime generation proves a supervised restart completed. */
+export function errorAfterManagedQueryRecovery(
+  error: unknown, options: { signal?: AbortSignal; workDeadline?: number } | undefined,
+  before: ManagedOxigraphRuntimeStateV1 | null, after: ManagedOxigraphRuntimeStateV1 | null,
+): unknown {
+  return options?.workDeadline !== undefined && before && after && !after.recovering
+    && after.generation > before.generation
+    ? workStoppedError('oxigraph-server', error, options) : error;
 }

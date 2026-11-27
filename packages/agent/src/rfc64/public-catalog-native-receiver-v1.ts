@@ -83,6 +83,27 @@ import type { Rfc64PublicCatalogNativeCommittedHeadTokenV1 } from
   './public-catalog-native-committed-head-token-v1.js';
 export type { Rfc64PublicCatalogNativeCommittedHeadTokenV1 } from
   './public-catalog-native-committed-head-token-v1.js';
+import type {
+  Rfc64PublicCatalogNativeAdmissionPlanV1,
+  Rfc64PublicCatalogNativeAppliedHeadLifecycleV1,
+  Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
+  Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1,
+  Rfc64PublicCatalogNativePostHeadExtensionV1,
+  Rfc64PublicCatalogNativePrecommitRowPlanV1,
+  Rfc64PublicCatalogNativePrecommitTransactionV1,
+} from './public-catalog-native-precommit-v1.js';
+export type {
+  Rfc64PublicCatalogNativeAdmissionHandlerV1,
+  Rfc64PublicCatalogNativeAdmissionPlanV1,
+  Rfc64PublicCatalogNativeAppliedHeadLifecycleV1,
+  Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
+  Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1,
+  Rfc64PublicCatalogNativeBeforeAppliedHeadCommitResultV1,
+  Rfc64PublicCatalogNativePostHeadExtensionV1,
+  Rfc64PublicCatalogNativePrecommitRowPlanV1,
+  Rfc64PublicCatalogNativePrecommitTransactionV1,
+  Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1,
+} from './public-catalog-native-precommit-v1.js';
 import { assertRfc64ExactIssuerSignatureProofV1 } from './catalog-transport-wire-v1-internal.js';
 import {
   readVerifiedAuthorCatalogRowAuthorshipV1,
@@ -200,7 +221,8 @@ export interface Rfc64PublicCatalogNativeReceiverOptionsV1<
    * Final fail-closed same-process barrier. It runs after the exact SWM
    * post-read and before the durable applied-head CAS. A rejection leaves the
    * head unapplied so a later synchronization can idempotently repair SWM and
-   * any consumer-specific side effects performed by an earlier attempt.
+   * any consumer-specific side effects performed by an earlier attempt. Its
+   * optional `admit` runs first, before the boundary lease and any SWM mutation.
    */
   readonly beforeAppliedHeadCommit?:
     Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1<TPostHeadExtension>;
@@ -252,79 +274,6 @@ export interface Rfc64PublicCatalogNativeReceiverResourceStatsV1 {
   readonly kaBundleNetworkFetches: number;
   readonly kaBundleCacheBytes: number;
   readonly kaBundleNetworkBytes: number;
-}
-
-/** Process-local verified row capabilities withheld from serializable receiver evidence. */
-export interface Rfc64PublicCatalogNativePrecommitRowPlanV1 {
-  readonly authorship: VerifiedAuthorCatalogRowAuthorshipV1;
-  readonly sealBinding: VerifiedCatalogSealBindingV1;
-  /** Exact graph-neutral digest of the verified projection activated into SWM. */
-  readonly publicQuadsDigest: string;
-}
-
-/** Generic same-process barrier plan executed after semantic post-read and before head CAS. */
-export interface Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1 {
-  readonly catalogScope: Readonly<AuthorCatalogScopeV1>;
-  /** Exact accepted-current generation that authorized every fetched byte. */
-  readonly policyDigest: Digest32V1;
-  readonly catalogHeadDigest: Digest32V1;
-  readonly inventoryDigest: Digest32V1;
-  /** Strictly increasing by mathematical KA ID. */
-  readonly rows: readonly Readonly<Rfc64PublicCatalogNativePrecommitRowPlanV1>[];
-}
-
-/** Side effects that become durable only when the catalog head CAS succeeds. */
-export interface Rfc64PublicCatalogNativePrecommitTransactionV1 {
-  /** Finalize rollback-capable side effects after the exact head is durable. */
-  commit(): void | Promise<void>;
-  rollback(cause?: unknown): Promise<void>;
-}
-
-/** Neutral operation-owned extension returned only after post-head work settles. */
-export type Rfc64PublicCatalogNativePostHeadExtensionV1 =
-  Readonly<Record<string, unknown>>;
-
-/** A rollback-capable primary precommit, before any post-head coordination. */
-export interface Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1 {
-  (
-    plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
-    signal: AbortSignal,
-  ): Promise<void | Rfc64PublicCatalogNativePrecommitTransactionV1>;
-}
-
-/**
- * Explicit two-domain lifecycle returned by a precommit coordinator.
- * `transaction` owns only rollback-capable work. `afterAppliedHead` runs after
- * the head, transaction, and durable post-read are final; a failure is
- * reported without predecessor rollback and an exact replay retries the hook.
- */
-export interface Rfc64PublicCatalogNativeAppliedHeadLifecycleV1<
-  TPostHeadExtension extends object = Rfc64PublicCatalogNativePostHeadExtensionV1,
-> {
-  readonly kind: 'rfc64-public-catalog-native-applied-head-lifecycle-v1';
-  readonly transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null;
-  readonly afterAppliedHead: ((
-    committedHead: Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1>,
-  ) => void
-    | TPostHeadExtension
-    | Promise<void | TPostHeadExtension>) | null;
-}
-
-/** Backward-compatible root receiver result plus the explicit post-head lifecycle. */
-export type Rfc64PublicCatalogNativeBeforeAppliedHeadCommitResultV1<
-  TPostHeadExtension extends object = Rfc64PublicCatalogNativePostHeadExtensionV1,
-> =
-  | void
-  | Rfc64PublicCatalogNativePrecommitTransactionV1
-  | Rfc64PublicCatalogNativeAppliedHeadLifecycleV1<TPostHeadExtension>;
-
-export interface Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1<
-  TPostHeadExtension extends object = Rfc64PublicCatalogNativePostHeadExtensionV1,
-> {
-  (
-    plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
-    signal: AbortSignal,
-  ): Promise<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitResultV1<TPostHeadExtension>>;
 }
 
 export interface Rfc64PublicCatalogNativeActivationEvidenceV1 {
@@ -436,6 +385,10 @@ export class Rfc64PublicCatalogNativeReceiverV1<
         && typeof options.beforeAppliedHeadCommit !== 'function'
       )
       || (
+        options.beforeAppliedHeadCommit?.admit !== undefined
+        && typeof options.beforeAppliedHeadCommit.admit !== 'function'
+      )
+      || (
         options.resolveColdBootstrapLegacySwmGraphAllowlist !== undefined
         && typeof options.resolveColdBootstrapLegacySwmGraphAllowlist !== 'function'
       )
@@ -468,6 +421,31 @@ export class Rfc64PublicCatalogNativeReceiverV1<
       kaBundleCacheBytes: this.#kaBundleCacheBytes,
       kaBundleNetworkBytes: this.#kaBundleNetworkBytes,
     });
+  }
+
+  /**
+   * Ask the precommit's row-independent half, after the head has verified and
+   * before the boundary lease or any SWM mutation. A head refused here leaves
+   * SWM untouched, so concurrent readers never see its rows come and go.
+   */
+  private async admitBeforeSemanticTransitionV1(
+    plan: Readonly<Rfc64PublicCatalogNativeAdmissionPlanV1>,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    const precommit = this.options.beforeAppliedHeadCommit;
+    if (precommit?.admit === undefined) return;
+    const admissionSignal = signal ?? new AbortController().signal;
+    try {
+      throwIfAborted(admissionSignal);
+      await precommit.admit(Object.freeze(plan), admissionSignal);
+    } catch (cause) {
+      if (admissionSignal.aborted && cause === admissionSignal.reason) throw cause;
+      fail(
+        'catalog-native-receiver-activation',
+        'catalog applied-head precommit rejected the head before activation',
+        cause,
+      );
+    }
   }
 
   private async runBeforeAppliedHeadCommitV1(
@@ -771,6 +749,11 @@ export class Rfc64PublicCatalogNativeReceiverV1<
     } catch (cause) {
       fail('catalog-native-receiver-catalog', 'verified genesis objects could not be staged', cause);
     }
+    await this.admitBeforeSemanticTransitionV1({
+      catalogScope: trustedCatalogScope,
+      policyDigest: announcement.policyDigest,
+      catalogHeadDigest: head.objectDigest as Digest32V1,
+    }, signal);
 
     const legacySwmBoundaryLease = await acquireLegacySwmBoundaryReceiverLeaseV1(
       trustedCatalogScope,
@@ -1174,6 +1157,11 @@ export class Rfc64PublicCatalogNativeReceiverV1<
         cause,
       );
     }
+    await this.admitBeforeSemanticTransitionV1({
+      catalogScope: trustedCatalogScope,
+      policyDigest: announcement.policyDigest,
+      catalogHeadDigest: head.objectDigest as Digest32V1,
+    }, signal);
 
     // The durable applied-head points at the only catalog closure allowed to
     // own materialization removals. Reconstruct and re-authorize that exact

@@ -7,58 +7,24 @@
 .v10-identity-wallet-header {
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-12);
 }
 
 .v10-identity-wallet-description,
 .v10-identity-wallet-status {
-  margin: 10px 0 0;
-  font-size: var(--font-size-caption);
-  line-height: 1.5;
+  margin: var(--space-8) 0 0;
+  font-size: var(--fs-label);
+  line-height: var(--lh-body);
   color: var(--text-tertiary);
 }
 
 .v10-identity-wallet-status {
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   color: var(--text-secondary);
 }
 
-.v10-identity-wallet-btn {
-  padding: 6px 12px;
-  border: 1px solid var(--border-default);
-  border-radius: 7px;
-  background: var(--bg-surface);
-  color: var(--text-secondary);
-  font-size: var(--font-size-label);
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.v10-identity-wallet-btn:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.v10-identity-wallet-btn.compact {
-  min-height: 32px;
-  padding: 4px 10px;
-}
-
-.v10-identity-wallet-btn.primary {
-  border-color: var(--accent-blue);
-  background: var(--accent-blue);
-  color: var(--text-on-accent);
-}
-
-.v10-identity-wallet-btn:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-}
-
-.v10-identity-wallet-btn:focus-visible {
-  outline: 2px solid var(--text-link);
-  outline-offset: 1px;
-}
+.v10-identity-wallet-btn.ds-btn { max-width: 100%; height: auto; min-height: var(--h-control-md); white-space: normal; }
+.v10-identity-wallet-btn:disabled { opacity: var(--opacity-disabled); }
 
 .v10-identity-wallet-counts,
 .v10-identity-wallet-signer,
@@ -67,16 +33,15 @@
 .v10-identity-wallet-confirm {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-8);
   flex-wrap: wrap;
 }
 
 .v10-identity-wallet-signer {
   justify-content: space-between;
-  padding: 10px;
-  margin-bottom: 14px;
+  padding: var(--pad-nested);
+  margin-bottom: var(--space-12);
   border: 1px solid var(--border-subtle);
-  border-radius: 8px;
   background: var(--bg-surface);
 }
 
@@ -87,23 +52,23 @@
 }
 
 .v10-identity-wallet-known {
-  margin: 14px 0;
+  margin: var(--space-12) 0;
 }
 
 .v10-identity-wallet-subtitle {
-  margin: 0 0 8px;
-  font-size: var(--font-size-caption);
+  margin: 0 0 var(--space-8);
+  font-size: var(--fs-label);
   font-weight: 700;
   color: var(--text-secondary);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--ls-caps);
 }
 
 .v10-identity-wallet-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-top: 10px;
+  gap: var(--space-6);
+  margin-top: var(--space-8);
   max-width: none;
 }
 
@@ -114,32 +79,31 @@
 .v10-identity-wallet-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 14px;
+  gap: var(--space-12);
+  margin-top: var(--space-12);
 }
 
 .v10-identity-wallet-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-8);
   min-width: 0;
-  padding: 14px;
+  padding: var(--pad-compact);
   border: 1px solid var(--border-subtle);
-  border-radius: 8px;
   background: var(--bg-surface);
 }
 
-.v10-identity-wallet-card h4 {
+.v10-identity-wallet-card h3 {
   margin: 0;
-  font-size: var(--font-size-ui);
+  font-size: var(--fs-body);
   color: var(--text-primary);
 }
 
 .v10-identity-wallet-card p,
 .v10-identity-wallet-card label {
   margin: 0;
-  font-size: var(--font-size-caption);
-  line-height: 1.45;
+  font-size: var(--fs-label);
+  line-height: var(--lh-body);
   color: var(--text-tertiary);
 }
 
@@ -154,26 +118,18 @@
 }
 
 .v10-identity-wallet-confirm {
-  margin-top: 12px;
+  margin-top: var(--space-12);
 }
 
 .v10-identity-wallet-confirm > span:first-child {
   flex: 1 1 360px;
   overflow-wrap: anywhere;
 }
-
-@media (max-width: 720px) {
-  .v10-identity-wallet-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .v10-identity-wallet-signer {
+.v10-center-content[data-narrow] .v10-identity-wallet-grid {
+    grid-template-columns: 1fr; }
+.v10-center-content[data-narrow] .v10-identity-wallet-signer {
     align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .v10-identity-wallet-known .v10-wallet-trailing {
+    flex-direction: column; }
+.v10-center-content[data-narrow] .v10-identity-wallet-known .v10-wallet-trailing {
     width: 100%;
-    margin-left: 0;
-  }
-}
+    margin-left: 0; }

@@ -110,7 +110,7 @@ export function respondQueryTimeLimitExceeded(res: ServerResponse, limitMs: numb
     code: QUERY_TIME_LIMIT_EXCEEDED_CODE,
     error: stopped
       ? `The query ran past its time limit of ${limitMs} ms, and the node stopped it.`
-      : `The query ran past its time limit of ${limitMs} ms. This store cannot stop a running query, so it may still be running.`,
+      : `The query ran past its time limit of ${limitMs} ms. The node could not confirm that the store stopped this query, so it may still be running.`,
     timeLimitMs: limitMs,
     stopped,
     retryable: false,

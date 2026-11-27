@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 import { ethers } from 'ethers';
-import { ChainRpcTransportError, MockChainAdapter, marketplaceChainOf, type MarketplaceChainAdapter } from '@origintrail-official/dkg-chain';
+import { ChainRpcTransportError, HubContractNotFoundError, MockChainAdapter, marketplaceChainOf, type MarketplaceChainAdapter } from '@origintrail-official/dkg-chain';
 import { AccessKeys, Buyer, BuyerStore, Gateway, Router, Seller, parsePlan, signServiceOffer } from '@origintrail-official/dkg-marketplace';
 import { ApiClient } from '../src/api-client.js';
 import { registerMarketplaceCommand } from '../src/commands/marketplace.js';
@@ -390,7 +390,7 @@ describe('the marketplace routes', () => {
     const times = vi.spyOn(chain, 'getEpochTimes');
     times.mockRejectedValueOnce(new ChainRpcTransportError('RPC_TIMEOUT', 'timed out after 30000ms'));
     expect(await api('GET', '/api/marketplace/subscriptions')).toMatchObject({ status: 504, body: { code: 'TIMEOUT', retryable: true } });
-    times.mockRejectedValueOnce(Object.assign(new Error('Contract "Chronos" not found in Hub'), { name: 'HubContractNotFoundError' }));
+    times.mockRejectedValueOnce(new HubContractNotFoundError('Chronos', '0x0000000000000000000000000000000000000001'));
     expect(await api('GET', '/api/marketplace/subscriptions')).toMatchObject({ status: 503, body: { code: 'MarketplaceOff' } });
     times.mockRejectedValueOnce(new Error('call failed at https://rpc.example/key'));
     const failed = await api('GET', '/api/marketplace/subscriptions');
@@ -411,6 +411,36 @@ describe('the marketplace routes', () => {
     expect((await api('POST', `/api/marketplace/accounts/${accountId}/buyers/${SIGNER.address}/limits`, { ...limits, maxCostPerEpoch: String(6n * TRAC) })).status).toBe(200);
     expect((await api('DELETE', `/api/marketplace/accounts/${accountId}/buyers/${SIGNER.address}`)).status).toBe(200);
     expect((await chain.getGrant(accountId, SIGNER.address))!.revokedAt).toBeGreaterThan(0);
+  });
+
+  it('answer an account-list read that failed after the wait as pending, with the RPC URLs of its error stripped', async () => {
+    const listBuyerAccounts = chain.listBuyerAccounts.bind(chain);
+    const fails: Array<(err: Error) => void> = [];
+    chain.listBuyerAccounts = () => new Promise<bigint[]>((_resolve, reject) => { fails.push(reject); });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      // The first view stops waiting after 5 s; the read then fails with an error that names a keyed RPC URL.
+      const first = api('GET', '/api/marketplace/funding');
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await first).toMatchObject({ status: 200, body: { accountsPending: true } });
+      fails[0]!(new Error('RPC_ENDPOINTS_EXHAUSTED: every endpoint failed (https://rpc.example/v2/PRIVATE_KEY_123, https://backup.example/key/SECOND_KEY)'));
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The next views cannot wait either: they say the last read failed, without the URLs.
+      for (const path of ['/api/marketplace/funding', '/api/marketplace/accounts']) {
+        const answer = api('GET', path);
+        await vi.advanceTimersByTimeAsync(5_000);
+        const { status, body } = await answer;
+        expect(status).toBe(200);
+        expect(body.accountsPending).toBe(true);
+        expect(body.accountsError).toContain('RPC_ENDPOINTS_EXHAUSTED');
+        expect(body.accountsError).toContain('[rpc]');
+        expect(JSON.stringify(body)).not.toMatch(/PRIVATE_KEY_123|SECOND_KEY|rpc\.example|backup\.example/);
+      }
+    } finally {
+      vi.useRealTimers();
+      chain.listBuyerAccounts = listBuyerAccounts;
+    }
   });
 });
 

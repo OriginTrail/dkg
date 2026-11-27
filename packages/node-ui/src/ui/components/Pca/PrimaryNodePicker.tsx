@@ -1,5 +1,7 @@
 import React, { useId, useMemo, useState } from 'react';
 import { formatWeiToTrac } from './format.js';
+import { Check, RefreshCw } from 'lucide-react';
+import { Loading } from '../ds/Loading.js';
 
 // The picker's prop type is intentionally separate from the API's `DesignatableNode`: the picker
 // doesn't display `ask`, but the API always returns it (and requires it). This type is a structural
@@ -109,7 +111,7 @@ export function PrimaryNodePicker({
     if (!raw) return;
     const match = nodes.find((n) => n.identityId === raw || n.nodeId.toLowerCase() === raw.toLowerCase());
     if (!match) {
-      setPasteErr('Not a staked sharding-table node.');
+      setPasteErr('Not an active Core node.');
       return;
     }
     select(match);
@@ -136,17 +138,17 @@ export function PrimaryNodePicker({
       </p>
 
       {loading ? (
-        <p className="v10-pca-create-hint" role="status">Loading staked nodes…</p>
+        <Loading label="Loading Core nodes…" />
       ) : error ? (
-        <div className="v10-modal-warning" role="alert" data-testid="pca-primary-node-error">
-          Couldn’t load the staked-node list — a primary node is required to create.{' '}
+        <div className="v10-modal-warning ds-card-nested" role="alert" data-testid="pca-primary-node-error">
+          Couldn’t load the list of Core nodes. A primary node is required to create a PCA.{' '}
           <button
             type="button"
-            className="v10-pca-card-btn"
+            className="v10-pca-card-btn ds-btn"
             data-testid="pca-primary-node-retry"
             onClick={onRetry}
           >
-            Retry
+            <RefreshCw size={12} />Retry
           </button>
           {/* Surface the best-effort default (core fell back to its own id) so it isn't
               invisible while the list is down. */}
@@ -157,7 +159,7 @@ export function PrimaryNodePicker({
           )}
         </div>
       ) : nodes.length === 0 ? (
-        <p className="v10-pca-create-hint" role="status">No staked nodes found.</p>
+        <p className="v10-pca-create-hint" role="status">No Core nodes found.</p>
       ) : (
         <>
           <div className={['v10-pca-node-picker-combo', selectedSummary ? 'has-selection' : ''].filter(Boolean).join(' ')}>
@@ -167,7 +169,7 @@ export function PrimaryNodePicker({
               aria-expanded={open}
               aria-controls={open ? listboxId : undefined}
               aria-autocomplete="list"
-              aria-label="Search staked nodes"
+              aria-label="Search Core nodes"
               aria-describedby={selectedSummaryId}
               aria-required={required}
               aria-invalid={required && value === ''}
@@ -176,10 +178,10 @@ export function PrimaryNodePicker({
                   ? `${listboxId}-opt-${shown[activeIdx].identityId}`
                   : undefined
               }
-              className="v10-form-input"
+              className="v10-form-input ds-input"
               data-testid="pca-primary-node-search"
               value={query}
-              placeholder={selectedSummary ?? 'Search staked nodes by id…'}
+              placeholder={selectedSummary ?? 'Search Core nodes by ID…'}
               autoComplete="off"
               onFocus={() => setOpen(true)}
               onChange={(e) => {
@@ -190,7 +192,7 @@ export function PrimaryNodePicker({
               onKeyDown={onKeyDown}
             />
             {open && (
-              <ul role="listbox" id={listboxId} aria-label="Staked sharding-table nodes" className="v10-pca-node-picker-list">
+              <ul role="listbox" id={listboxId} aria-label="Active Core nodes" className="v10-pca-node-picker-list">
                 {shown.map((n, i) => {
                   const selected = n.identityId === value;
                   const isOwn = ownIdentityId != null && n.identityId === ownIdentityId;
@@ -202,7 +204,7 @@ export function PrimaryNodePicker({
                       aria-selected={selected}
                       data-testid="pca-primary-node-option"
                       className={[
-                        'v10-pca-node-picker-option',
+                        'v10-pca-node-picker-option ds-card-nested',
                         i === activeIdx ? 'active' : '',
                         selected ? 'selected' : '',
                       ]
@@ -218,13 +220,13 @@ export function PrimaryNodePicker({
                       <span className="v10-pca-node-picker-peer" title={n.nodeId}>
                         {n.nodeId}
                       </span>
-                      <span className="badge" title="Node labels are not verified — match on id">
+                      <span className="ds-badge ds-sm" title="Node labels are not verified — match on id">
                         unverified
                       </span>
                       <span className="v10-pca-node-picker-stake">
                         {formatWeiToTrac(n.stake)} TRAC staked
                       </span>
-                      {isOwn && <span className="v10-pca-node-picker-own">✓ this node</span>}
+                      {isOwn && <span className="v10-pca-node-picker-own"><Check size={12} /> this node</span>}
                     </li>
                   );
                 })}
@@ -239,7 +241,7 @@ export function PrimaryNodePicker({
           </div>
 
           {selectedSummary && (
-            <div className="v10-pca-node-picker-selected" data-testid="pca-primary-node-selected" id={selectedSummaryId} role="status">
+            <div className="v10-pca-node-picker-selected ds-card-nested" data-testid="pca-primary-node-selected" id={selectedSummaryId} role="status">
               <span>Selected primary node</span>
               <strong>
                 Node #{value}
@@ -253,7 +255,7 @@ export function PrimaryNodePicker({
           <div className="v10-pca-node-picker-paste">
             <input
               type="text"
-              className="v10-form-input"
+              className="v10-form-input ds-input"
               data-testid="pca-primary-node-paste"
               value={pasteVal}
               placeholder="…or paste a node id"
@@ -272,7 +274,7 @@ export function PrimaryNodePicker({
             />
             <button
               type="button"
-              className="v10-pca-card-btn"
+              className="v10-pca-card-btn ds-btn"
               data-testid="pca-primary-node-paste-use"
               onClick={usePastedId}
             >
@@ -293,7 +295,7 @@ export function PrimaryNodePicker({
             </p>
           ) : (
             pickedOther && (
-              <p className="v10-pca-create-warn" role="status" data-testid="pca-primary-node-heads-up">
+              <p className="v10-pca-create-warn ds-card-nested" role="status" data-testid="pca-primary-node-heads-up">
                 Reward weight will go to node #{value} instead of this node.
               </p>
             )

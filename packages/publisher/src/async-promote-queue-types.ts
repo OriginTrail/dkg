@@ -312,6 +312,8 @@ export interface AsyncPromoteQueue {
   heartbeat(jobId: string, claimToken: string): Promise<void>;
   recordCommitMarker(jobId: string, claimToken: string, step: PromoteCommitMarkerStep): Promise<void>;
   succeed(jobId: string, claimToken: string, result: PromoteResult): Promise<void>;
+  /** Atomically record the SWM marker and success for a started, bound job with producer proof. */
+  succeedWithShareEvidence?(jobId: string, claimToken: string, result: PromoteResult & { shareEvidence: ShareCompletionEvidence }): Promise<void>;
   fail(jobId: string, claimToken: string, error: PromoteAttemptError): Promise<PromoteFailureTransition>;
   // Startup / lifecycle.
   recoverOnStartup(): Promise<PromoteRecoverySummary>;

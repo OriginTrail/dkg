@@ -1,0 +1,44 @@
+.v10-json-viewer {
+  min-width: 0;
+  max-width: 100%;
+  margin: var(--space-6) 0;
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-nested);
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  word-break: normal;
+  --w-rjv-font-family: var(--font-mono);
+  --w-rjv-background-color: transparent;
+  --w-rjv-color: var(--text-primary);
+  --w-rjv-key-string: var(--text-primary);
+  --w-rjv-key-number: var(--text-tertiary);
+  --w-rjv-line-color: var(--border-default);
+  --w-rjv-arrow-color: var(--text-tertiary);
+  --w-rjv-info-color: var(--text-tertiary);
+  --w-rjv-curlybraces-color: var(--text-tertiary);
+  --w-rjv-brackets-color: var(--text-tertiary);
+  --w-rjv-quotes-color: var(--text-tertiary);
+  --w-rjv-quotes-string-color: var(--text-success);
+  --w-rjv-type-string-color: var(--text-success);
+  --w-rjv-type-url-color: var(--text-link);
+  --w-rjv-type-int-color: var(--text-link);
+  --w-rjv-type-float-color: var(--text-link);
+  --w-rjv-type-boolean-color: var(--text-warning);
+  --w-rjv-type-null-color: var(--text-tertiary);
+}
+.v10-json-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); padding: var(--space-8) var(--space-12); border-bottom: 1px solid var(--border-subtle); background: var(--bg-surface); }
+.v10-json-caption { margin-right: auto; font-family: var(--font-mono); font-size: var(--fs-micro); font-weight: 600; letter-spacing: var(--ls-caps); }
+.v10-json-caption span { margin-left: var(--space-6); color: var(--text-tertiary); font-weight: 400; letter-spacing: 0; }
+.v10-json-actions { display: flex; flex-wrap: wrap; gap: var(--space-4); }
+.v10-json-viewer .v10-json-actions button { padding: var(--space-4) var(--space-6); border: 1px solid transparent; border-radius: var(--radius-xs); background: transparent; color: var(--text-secondary); font-family: var(--font-sans); font-size: var(--fs-label); cursor: pointer; }
+.v10-json-viewer .v10-json-actions button:hover { background: var(--bg-hover); color: var(--text-primary); }
+.v10-json-viewer .v10-json-toggle { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 18px; padding: 0; margin-right: var(--space-2); border: 0; border-radius: var(--radius-hair); background: transparent; color: var(--text-tertiary); cursor: pointer; }
+.v10-json-viewer .v10-json-toggle:hover { color: var(--text-primary); background: var(--bg-hover); }
+.v10-json-viewer button:focus-visible, .v10-json-tree:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.v10-json-copy-status { font-size: var(--fs-micro); color: var(--text-secondary); }
+.v10-json-tree { padding: var(--space-12) var(--space-16); max-height: 420px; overflow: auto; scrollbar-gutter: stable; }
+/* The library's view takes our type: label size, loose lines. */
+.v10-json-tree-view { font-size: var(--fs-label); line-height: var(--lh-loose); }
+/* The viewer library's own container: let long lines scroll instead of wrapping. */
+.v10-json-tree > :first-child { min-width: max-content; }

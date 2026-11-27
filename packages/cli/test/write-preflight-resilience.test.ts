@@ -38,6 +38,7 @@ import {
   WRITE_PREFLIGHT_CHAIN_RESCUE_TIMEOUT_MS,
 } from '../src/daemon/http-utils.js';
 import { ContextGraphResolveMethods } from '../../agent/src/dkg-agent-cg-resolve.js';
+import { LocalContextGraphProvenance } from '../../agent/src/local-context-graph-provenance.js';
 import type { ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-agent';
 import { OxigraphWorkerStore, createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
@@ -84,6 +85,7 @@ function agentHarness(
     store,
     config: {},
     subscribedContextGraphs: subs,
+    localContextGraphProvenance: new LocalContextGraphProvenance(),
     chain,
     contextGraphExists: resolveProto.contextGraphExists,
     contextGraphHasLocalContent: resolveProto.contextGraphHasLocalContent,

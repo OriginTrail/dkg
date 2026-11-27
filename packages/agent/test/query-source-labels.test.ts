@@ -477,12 +477,15 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
 });
 
 
-it.each(['finalized-name-absence-unaccepted', 'authority-circuit-open'])(
-  'keeps %s retryable for strict reads of an absent graph', async reason => {
+it.each([
+  ['finalized-name-absence-unaccepted', 'as a denied read', { code: 'QUERY_ACCESS_DENIED' }],
+  ['authority-circuit-open', 'retryable', { code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: true, reason: 'authority-circuit-open' }],
+] as const)(
+  'answers a strict read of an absent graph with %s %s', async (reason, _answer, strict) => {
     const fixture = runtimePrivateQueryAgent({ subscribed: false });
     Object.assign(fixture.agent, {
       resolveContextGraphReadAuthority: async () => ({ outcome: 'unavailable', source: 'registered-chain', reason }),
-      localContextGraphProvenance: { hasLocalCreate: () => false },
+      keepsContextGraphLocally: () => false,
       contextGraphExists: async () => false,
     });
     const query = () => QueryMethods.prototype.query.call(fixture.agent as never,
@@ -490,7 +493,7 @@ it.each(['finalized-name-absence-unaccepted', 'authority-circuit-open'])(
     await expect(query()).resolves.toEqual({ bindings: [] });
     await expect(QueryMethods.prototype.query.call(fixture.agent as never,
       'SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: 'absent-graph', accessDenied: 'error' }))
-      .rejects.toMatchObject({ code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: true, reason });
+      .rejects.toMatchObject(strict);
     expect(fixture.queryEngine.query).not.toHaveBeenCalled();
   },
 );

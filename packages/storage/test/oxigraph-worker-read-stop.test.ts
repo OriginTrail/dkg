@@ -1,10 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Worker } from 'node:worker_threads';
 import { OxigraphWorkerStore, type Quad } from '../src/index.js';
-import { WorkerAdmission } from '../src/adapters/oxigraph-worker-admission.js';
+import { WorkerAdmission, runStoppableRead, type StoppableReadHost } from '../src/adapters/oxigraph-worker-admission.js';
 
 // A time-limited read on the embedded worker store must stop the WORK, not only
 // the caller's wait: the engine cannot interrupt a query, so the store replaces
@@ -246,7 +246,7 @@ describe('WorkerAdmission', () => {
     const release = await owned;
     await new Promise((resolve) => setImmediate(resolve));
     expect(order).toEqual(['owner']);
-    release();
+    release.done();
     (await later).done();
     expect(order).toEqual(['owner', 'later']);
     expect(admission.tryEnter()).not.toBeNull();
@@ -258,12 +258,12 @@ describe('WorkerAdmission', () => {
     const releaseFirst = await admission.own(undefined, 0, noTimeout);
     const queued = admission.enter(undefined, 0, noTimeout).then((ticket) => { order.push('queued'); return ticket; });
     const second = admission.own(undefined, 0, noTimeout).then((release) => { order.push('second'); return release; });
-    releaseFirst();
+    releaseFirst.done();
     const ticket = await queued;
     await new Promise((resolve) => setImmediate(resolve));
     expect(order).toEqual(['queued']);
     ticket.done();
-    (await second)();
+    (await second).done();
     expect(order).toEqual(['queued', 'second']);
   });
 
@@ -278,7 +278,7 @@ describe('WorkerAdmission', () => {
     controller.abort(reason);
     await expect(leaving).rejects.toBe(reason);
     await expect(timedOut).rejects.toThrow('waited too long');
-    releaseFirst();
+    releaseFirst.done();
     (await staying).done();
     expect(admission.tryEnter()).not.toBeNull();
   });
@@ -293,5 +293,38 @@ describe('WorkerAdmission', () => {
     earlier.done();
     ticket.done();
     expect(admission.tryEnter()).not.toBeNull();
+  });
+});
+
+
+describe('stoppable read cancellation during its persistence barrier', () => {
+  it.each(['deadline', 'abort'] as const)('holds admission until persistence settles after %s', async end => {
+    const admission = new WorkerAdmission();
+    let finish!: () => void, began!: () => void;
+    const barrier = new Promise<void>(resolve => { finish = resolve; });
+    const started = new Promise<void>(resolve => { began = resolve; });
+    const controller = new AbortController();
+    const replaceWorker = vi.fn(async () => true);
+    const methods: string[] = [];
+    const host: StoppableReadHost = { admission, operationTimeoutMs: 0, replaceWorker,
+      async post<T>(method: string): Promise<T> {
+        methods.push(method); began();
+        await barrier; return undefined as T;
+      } };
+    const read = runStoppableRead(host, 'query', ['SELECT * WHERE {}'], {
+      signal: controller.signal, workDeadline: performance.now() + (end === 'deadline' ? 30 : 10_000),
+    });
+    const outcome = expect(read).rejects.toMatchObject({ code: 'QUERY_WORK_STOPPED', outcome: 'not_started' });
+    await started;
+    let admitted = false;
+    const queued = admission.enter(undefined, 0, () => new Error('unexpected timeout'))
+      .then(lease => { admitted = true; return lease; });
+    if (end === 'abort') controller.abort(new Error('caller left'));
+    await outcome;
+    expect(admitted).toBe(false); expect(methods).toEqual(['persistBarrier']);
+    expect(replaceWorker).not.toHaveBeenCalled();
+    finish(); (await queued).done();
+    expect(admitted).toBe(true); expect(methods).toEqual(['persistBarrier']);
+    expect(replaceWorker).not.toHaveBeenCalled();
   });
 });

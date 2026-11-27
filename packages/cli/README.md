@@ -73,8 +73,8 @@ once at boot; an invalid value keeps the default, with a warning. A request may
 lower it with `timeoutMs` in its body, an integer from 1000, never raise it;
 any other value gets 400.
 
-At the limit the node stops the query's work in the store, not only its wait,
-and a caller that disconnects first stops it too:
+At the limit the node requests termination where the backend supports it.
+A caller that disconnects first also triggers cancellation:
 
 | Store | How the query is stopped |
 | --- | --- |
@@ -85,7 +85,8 @@ and a caller that disconnects first stops it too:
 
 A query its limit ended returns HTTP 504 with
 `code: "QUERY_TIME_LIMIT_EXCEEDED"`, `timeLimitMs`, and `stopped`, which says
-whether the store stopped the query or may still be running it.
+whether termination was confirmed (or the query never started). Failed cancellation
+or a restart still in progress returns `stopped: false`; the query may still run.
 
 On the `oxigraph-worker` store this has a cost for every limited query, not
 only a stopped one: the query runs alone, and waits first for any pending write
@@ -93,6 +94,52 @@ to reach disk, which is a dump of the whole store. A stop reloads the whole
 store file. Other store operations wait meanwhile; on a large store either
 takes seconds. `POST /api/query/bounded` keeps its own short deadline, which
 ends only the wait.
+
+## Rust/Wasm semantic runtime (Phase 0)
+
+The semantic runtime is an experimental, default-off Phase 0 gate. When
+explicitly enabled, the daemon verifies the packaged Wasm hash and ABI, starts
+it in a bounded Worker Thread, and requires a successful restore handshake
+before continuing graph activation:
+
+```json
+{
+  "semanticRuntime": {
+    "enabled": true,
+    "watchdogMs": 100
+  }
+}
+```
+
+For direct Program invocation, the operator must also select one DKG-published execution policy. Tenant-approved `programBindings` use their local binding as authority and do not require a published policy or tool offer; see [tenant Program bindings](../../docs/architecture/tenant-program-bindings.md). For direct invocation:
+
+```json
+{
+  "semanticRuntime": {
+    "enabled": true,
+    "watchdogMs": 100,
+    "operatorPolicyIri": "urn:sr:policy:operator-codex"
+  }
+}
+```
+
+`GET /api/semantic-runtime/resolve?contextGraphId=...&programIri=...&programLayer=vm` exposes the
+effective authority used by the native Program panel: Program requirements,
+operator Tool offers, the selected policy, and locally installed and enabled
+adapters. `POST /api/programs/execute` requires
+`{ "contextGraphId": "...", "programIri": "...", "invocationId": "<UUID>",
+"programLayer": "wm|swm|vm", "executionLayer": "wm|swm|vm" }`.
+It loads the Program from the explicitly selected memory layer and executes its
+admitted plan in the packaged Wasm runtime. The current closed adapter registry supports
+`agent/investigate@1` through Codex or the configured OpenAI-compatible LLM;
+undeclared or unavailable effects fail closed.
+
+A successful response is returned only after the exact LLM output and its
+SHA-256 hash have been stored as an `sr:Execution` Knowledge Asset in the
+selected layer of the same Context Graph. The response contains `executionIri`,
+`executionLayer`, and `persisted: true`; `executionUal` is present only for VM.
+Reusing the same invocation UUID resumes the durable effect journal and does
+not repeat an already completed LLM call. A retry cannot change either layer.
 
 ## RDF file input
 
@@ -794,3 +841,5 @@ for the design rationale, threat model, and stability guarantees.
 - `@origintrail-official/dkg-chain` — blockchain abstraction
 - `@origintrail-official/dkg-node-store` — durable protocol state (outbox, sync checkpoints, cursors, KA numbers, chain log) the daemon composes
 - `@origintrail-official/dkg-node-ui` — web dashboard serving
+
+Tenant-configured invoke-only operations can load a pinned Program from a separate Context Graph while keeping the data graph private. See [tenant Program bindings](../../docs/architecture/tenant-program-bindings.md) for setup, API calls, activation and revocation.

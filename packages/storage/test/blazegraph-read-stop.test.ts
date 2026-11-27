@@ -95,7 +95,7 @@ describe('BlazegraphStore read with a work deadline', () => {
   });
 
   it('gives up at the work deadline when it comes before the store timeout', async () => {
-    answer = (_request, signal) => new Promise((_resolve, reject) => {
+    answer = (request, signal) => request.url.includes('?cancelQuery') ? Promise.resolve(new Response('', { status: 200 })) : new Promise((_resolve, reject) => {
       signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
     });
     const store = new BlazegraphStore(ENDPOINT, { timeout: 30_000 });
@@ -105,4 +105,30 @@ describe('BlazegraphStore read with a work deadline', () => {
     expect(performance.now() - startedAt).toBeLessThan(5_000);
     await expect.poll(() => sent.some((request) => request.url.includes('?cancelQuery&queryId='))).toBe(true);
   });
+  it.each(['failed-cancel', 'unhintable'] as const)('does not claim termination for %s', async mode => {
+    answer = (request, signal) => request.url.includes('?cancelQuery')
+      ? Promise.resolve(new Response('', { status: 503 }))
+      : new Promise((_resolve, reject) => { signal?.addEventListener('abort', () => reject(signal.reason), { once: true }); });
+    const store = new BlazegraphStore(ENDPOINT, { timeout: 30_000 });
+    const sparql = mode === 'unhintable' ? 'DESCRIBE <urn:x>' : 'SELECT ?s WHERE { ?s ?p ?o }';
+    const error = await store.query(sparql, { workDeadline: performance.now() + 50 }).catch(error => error);
+    expect(error).not.toMatchObject({ code: 'QUERY_WORK_STOPPED' });
+    expect(sent.filter(request => request.url.includes('?cancelQuery')).length).toBe(mode === 'unhintable' ? 0 : 1);
+  });
+
+  it('waits for cancellation acknowledgement before confirming termination', async () => {
+    let acknowledge!: (response: Response) => void;
+    const cancellation = new Promise<Response>(resolve => { acknowledge = resolve; });
+    answer = (request, signal) => request.url.includes('?cancelQuery') ? cancellation
+      : new Promise((_resolve, reject) => { signal?.addEventListener('abort', () => reject(signal.reason), { once: true }); });
+    const store = new BlazegraphStore(ENDPOINT, { timeout: 30_000 });
+    let settled = false;
+    const pending = store.query('SELECT ?s WHERE { ?s ?p ?o }', { workDeadline: performance.now() + 50 })
+      .catch(error => { settled = true; return error; });
+    await expect.poll(() => sent.length).toBe(2);
+    expect(settled).toBe(false);
+    acknowledge(new Response('', { status: 200 }));
+    await expect(pending).resolves.toMatchObject({ code: 'QUERY_WORK_STOPPED', outcome: 'stopped' });
+  });
+
 });

@@ -6,11 +6,11 @@ export class ProjectViewPage {
 
   constructor(page: Page) {
     this.page = page;
-    this.root = page.locator('.v10-project-view, .v10-center-content');
+    this.root = page.locator('.v10-center-content');
   }
 
   async getProjectName() {
-    const header = this.root.locator('.v10-pv-header h2, .v10-project-name').first();
+    const header = this.root.locator('.v10-project-strip-heading').first();
     return header.textContent();
   }
 
@@ -19,7 +19,7 @@ export class ProjectViewPage {
   }
 
   async clickRefresh() {
-    await this.root.locator('button').filter({ hasText: '↻' }).first().click();
+    await this.root.getByRole('button', { name: /refresh/i }).first().click();
   }
 
   async switchSubTab(tab: 'Timeline' | 'Graph' | 'Knowledge') {
