@@ -1,31 +1,10 @@
-/**
- * #1411 — silent PCA full-price fall-through warning.
- *
- * The on-chain PCA discount (`KnowledgeAssetsV10.publish`) applies only when
- * the signer is a registered, non-expired PCA agent AND
- * `p.epochs == lockDurationEpochs`. Any miss silently falls through to a
- * FULL-price direct wallet spend with no revert — historically with no signal
- * at all. `DKGPublisher.publish()` now emits a post-confirmation `log.warn`
- * whenever a registered PCA agent's publish did NOT draw on the PCA
- * (`onChainResult.convictionCostCovered` absent). This is LOG-ONLY — no
- * publish behavior changes.
- *
- * These cases pin that warning:
- *   1. Explicit lifetime ≠ lock → WARN (epochs-mismatch reason).
- *   2. Default-path underfunded PCA → WARN (generic reason).
- *   3. Covered publish (`convictionCostCovered` present) → NO warn.
- *   4. Non-PCA signer on the explicit path → NO warn.
- *   5. Eligibility probe throws on the explicit path → NO warn, publish succeeds.
- *
- * Self-contained harness (mirrors `publisher-no-random-wallet.test.ts`): the
- * shared seal/ACK ceremony comes from `./_helpers/*`, the chain doubles are
- * local so this regression file runs standalone in the unit lane
- * (`vitest.unit.config.ts`).
- */
+/** Post-confirmation PCA observations must be bounded and describe receipt facts.
+ * Missing CostCovered alone does not establish PCA failure or wallet spending:
+ * registration escrow is consumed before the contract's PCA funding branch. */
 import { describe, it, expect, vi } from 'vitest';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import { TypedEventBus, DKGEvent, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import {
   MockChainAdapter,
   type OnChainPublishResult,
@@ -102,7 +81,7 @@ class PcaProbeChain extends AdapterSigningChain {
   }
 }
 
-async function makePublisher(chain: PcaProbeChain, wallet: ethers.Wallet): Promise<DKGPublisher> {
+async function makePublisher(chain: PcaProbeChain, wallet: ethers.Wallet, eventBus = new TypedEventBus()): Promise<DKGPublisher> {
   const keypair = await generateEd25519Keypair();
   const chainId = await chain.getEvmChainId();
   const kav10Address = await chain.getKnowledgeAssetsLifecycleAddress();
@@ -110,7 +89,7 @@ async function makePublisher(chain: PcaProbeChain, wallet: ethers.Wallet): Promi
     new DKGPublisher({
       store: new OxigraphStore(),
       chain,
-      eventBus: new TypedEventBus(),
+      eventBus,
       keypair,
       publisherNodeIdentityId: 1n,
     }),
@@ -140,10 +119,10 @@ function spyPublisherWarn(publisher: DKGPublisher) {
 function pcaFallthroughWarns(warnSpy: ReturnType<typeof spyPublisherWarn>): string[] {
   return warnSpy.mock.calls
     .map((c) => String(c[1]))
-    .filter((m) => m.includes('PCA discount NOT applied'));
+    .filter((m) => m.includes('PCA coverage not reported'));
 }
 
-describe('DKGPublisher: warns on silent PCA full-price fall-through (#1411)', () => {
+describe('DKGPublisher: bounded PCA receipt observations (#1411)', () => {
   it('WARNS (epochs-mismatch reason) when an explicit lifetime does not match the PCA lock', async () => {
     const wallet = new ethers.Wallet(TEST_KEY);
     const chain = new PcaProbeChain(wallet);
@@ -188,7 +167,7 @@ describe('DKGPublisher: warns on silent PCA full-price fall-through (#1411)', ()
     expect(result.status).toBe('confirmed');
     const warns = pcaFallthroughWarns(warnSpy);
     expect(warns).toHaveLength(1);
-    expect(warns[0]).toContain('could not cover this publish');
+    expect(warns[0]).toContain('receipt alone does not establish a PCA funding failure');
     expect(warns[0]).not.toContain('does not match'); // generic, not epochs-mismatch
     expect(warns[0]).toContain(`accountId=${accountId}`);
   });
@@ -215,7 +194,7 @@ describe('DKGPublisher: warns on silent PCA full-price fall-through (#1411)', ()
     expect(result.status).toBe('confirmed');
     const warns = pcaFallthroughWarns(warnSpy);
     expect(warns).toHaveLength(1);
-    expect(warns[0]).toContain('could not cover this publish');
+    expect(warns[0]).toContain('receipt alone does not establish a PCA funding failure');
     expect(warns[0]).not.toContain('does not match'); // matched epochs → NOT the mismatch branch
     expect(warns[0]).toContain(`accountId=${accountId}`);
   });
@@ -286,6 +265,36 @@ describe('DKGPublisher: warns on silent PCA full-price fall-through (#1411)', ()
     expect((await publisher.publish({ contextGraphId: '1', quads: quads('planned-pca') })).status).toBe('confirmed');
     expect(eligibility).not.toHaveBeenCalled();
     expect(pcaFallthroughWarns(warn)).toEqual([expect.stringContaining('accountId=77')]);
+  });
+
+  it.each(['account', 'lock'] as const)('finishes confirmation and emits KC_PUBLISHED when the diagnostic %s read never settles', async getter => {
+    const wallet = new ethers.Wallet(TEST_KEY), chain = new PcaProbeChain(wallet);
+    const { accountId } = await chain.createPublishingConvictionAccount(1n);
+    await chain.registerPublishingConvictionAgent(accountId, wallet.address);
+    const bus = new TypedEventBus(), published = vi.fn();
+    bus.on(DKGEvent.KC_PUBLISHED, published);
+    const publisher = await makePublisher(chain, wallet, bus);
+    const warn = spyPublisherWarn(publisher);
+    if (getter === 'account') vi.spyOn(chain, 'getConvictionAgentAccountId').mockImplementation(() => new Promise(() => {}));
+    else vi.spyOn(chain, 'getConvictionAccountLockDurationEpochs').mockImplementation(() => new Promise(() => {}));
+    const result = await publisher.publish({ contextGraphId: '1', quads: quads(`stalled-${getter}`), publishEpochs: 5 });
+    expect(result.status).toBe('confirmed');
+    expect(published).toHaveBeenCalledOnce();
+    expect(pcaFallthroughWarns(warn)).toEqual([]);
+  }, 5_000);
+
+  it('does not infer wallet spending or failed PCA coverage from an escrow-compatible receipt', async () => {
+    const wallet = new ethers.Wallet(TEST_KEY), chain = new PcaProbeChain(wallet);
+    chain.pcaLockDurationEpochs = 24;
+    const { accountId } = await chain.createPublishingConvictionAccount(ethers.parseEther('10000'));
+    await chain.registerPublishingConvictionAgent(accountId, wallet.address);
+    const publisher = await makePublisher(chain, wallet), warn = spyPublisherWarn(publisher);
+    // The adapter currently exposes only CostCovered. Its absence is also the
+    // projection of a fully escrow-funded receipt; no other funding claim is possible.
+    expect((await publisher.publish({ contextGraphId: '1', quads: quads('escrow-compatible'), publishEpochs: 24 })).status).toBe('confirmed');
+    const message = pcaFallthroughWarns(warn)[0]!;
+    expect(message).toContain('registration escrow may have funded');
+    expect(message).not.toMatch(/FULL price|direct wallet spend|could not cover|underfunded|expired/);
   });
 
 });
