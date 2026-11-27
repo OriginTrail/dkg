@@ -1,6 +1,6 @@
 import type { ServerResponse } from 'node:http';
 import { startRequestAbortLifecycle } from '@origintrail-official/dkg-core';
-import { classifyQueryWorkTermination } from '@origintrail-official/dkg-storage';
+import { classifyQueryWorkTermination, QueryWorkTerminationUnconfirmedError } from '@origintrail-official/dkg-storage';
 import { jsonResponse } from './http-utils.js';
 
 /**
@@ -97,6 +97,39 @@ export function startApiQueryTimeLimit(limitMs: number, caller: AbortSignal): Ap
     expired: () => lifecycle.deadline.aborted || performance.now() >= deadlineAt,
     release: () => lifecycle.release(),
   };
+}
+
+/** Give cooperative stores at most five additional seconds to confirm physical termination. */
+const API_QUERY_TERMINATION_GRACE_MS = 5_000;
+
+/** Bound the HTTP wait even when a custom backend ignores cancellation. */
+export function awaitApiQueryResult<T>(work: Promise<T>, limit: ApiQueryTimeLimit | undefined, caller: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let grace: ReturnType<typeof setTimeout> | undefined;
+    const finish = (outcome: { ok: true; value: T } | { ok: false; error: unknown }): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(grace);
+      caller.removeEventListener('abort', disconnected);
+      limit?.signal.removeEventListener('abort', expired);
+      if (outcome.ok) resolve(outcome.value); else reject(outcome.error);
+    };
+    const disconnected = (): void => finish({ ok: false, error: caller.reason });
+    const expired = (): void => {
+      if (settled || grace !== undefined || !limit?.expired()) return;
+      grace = setTimeout(() => finish({ ok: false,
+        error: new QueryWorkTerminationUnconfirmedError(limit.signal.reason),
+      }), Math.max(0, limit.deadlineAt + API_QUERY_TERMINATION_GRACE_MS - performance.now()));
+      grace.unref?.();
+    };
+    // Both handlers remain attached after a fallback response: late settlement
+    // cannot write another response or become an unhandled rejection.
+    void work.then(value => finish({ ok: true, value }), error => finish({ ok: false, error }));
+    caller.addEventListener('abort', disconnected, { once: true });
+    limit?.signal.addEventListener('abort', expired, { once: true });
+    if (caller.aborted) disconnected(); else if (limit?.expired()) expired();
+  });
 }
 
 /**

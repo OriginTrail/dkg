@@ -120,6 +120,72 @@ describe('the node time limit for /api/query', () => {
 });
 
 describe('/api/query answers for its time limit', () => {
+  it.each(['resolve', 'reject'] as const)('bounds an uncooperative asynchronous query and observes late %s', async outcome => {
+    vi.useFakeTimers();
+    let resolve!: (value: { bindings: unknown[] }) => void, reject!: (error: Error) => void;
+    const pending = new Promise<{ bindings: unknown[] }>((yes, no) => { resolve = yes; reject = no; });
+    const query = vi.fn((_sparql: string, _options: QueryOptions) => pending);
+    const res = new ResponseStub(), track = tracker();
+    const settle = () => outcome === 'resolve' ? resolve({ bindings: [] }) : reject(new Error('late backend failure'));
+    const route = handleQueryRoutes(routeContext('/api/query', new RequestStub({
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }', timeoutMs: 1_000,
+    }), res, { query }, track));
+    try {
+      await vi.waitFor(() => expect(query).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(6_000); // 1 s work limit plus at most 5 s to confirm termination.
+      expect(res.statusCode).toBe(504); // Assert before settling the uncooperative backend.
+      expect(query.mock.calls[0]![1].signal?.aborted).toBe(true);
+      expect(JSON.parse(res.body)).toMatchObject({ code: 'QUERY_TIME_LIMIT_EXCEEDED', stopped: false });
+      await route;
+      const response = res.body;
+      settle(); await Promise.resolve(); await Promise.resolve();
+      expect(res.body).toBe(response);
+      expect(track.fail).toHaveBeenCalledOnce();
+      expect(track.complete).not.toHaveBeenCalled();
+    } finally { settle(); await route; vi.useRealTimers(); }
+  });
+
+  it('allows confirmed termination during the bounded grace period', async () => {
+    vi.useFakeTimers();
+    const query = vi.fn((_sparql: string, options: QueryOptions) => new Promise((_resolve, reject) => {
+      options.signal!.addEventListener('abort', () => setTimeout(() => reject(
+        new QueryWorkStoppedError('custom-backend', 'stopped', options.signal!.reason)), 500), { once: true });
+    }));
+    const res = new ResponseStub();
+    try {
+      const route = handleQueryRoutes(routeContext('/api/query', new RequestStub({
+        sparql: 'SELECT ?s WHERE { ?s ?p ?o }', timeoutMs: 1_000,
+      }), res, { query }));
+      await vi.waitFor(() => expect(query).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(res.statusCode).toBe(0);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(res.statusCode).toBe(504);
+      await route;
+      expect(JSON.parse(res.body)).toMatchObject({ stopped: true });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('retires a disconnected caller immediately during termination grace', async () => {
+    vi.useFakeTimers();
+    let release!: (value: { bindings: unknown[] }) => void;
+    const query = vi.fn(() => new Promise<{ bindings: unknown[] }>(resolve => { release = resolve; }));
+    const req = new RequestStub({ sparql: 'SELECT ?s WHERE { ?s ?p ?o }', timeoutMs: 1_000 });
+    const res = new ResponseStub(), track = tracker();
+    const route = handleQueryRoutes(routeContext('/api/query', req, res, { query }, track));
+    try {
+      await vi.waitFor(() => expect(query).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(1_000);
+      req.aborted = true; req.emit('aborted');
+      await Promise.resolve(); await Promise.resolve();
+      expect(res.writableEnded).toBe(true);
+      await route;
+      expect(res.statusCode).toBe(0);
+      expect(track.cancel).toHaveBeenCalledOnce();
+      expect(track.fail).not.toHaveBeenCalled();
+    } finally { release({ bindings: [] }); await route; vi.useRealTimers(); }
+  });
+
   it('bounds the local-first registration-status read before reaching the query engine', async () => {
     vi.useFakeTimers();
     const registrationRead = vi.fn((_sparql: string, options?: QueryOptions) => new Promise((_resolve, reject) => {

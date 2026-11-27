@@ -86,7 +86,12 @@ A caller that disconnects first also triggers cancellation:
 A query its limit ended returns HTTP 504 with
 `code: "QUERY_TIME_LIMIT_EXCEEDED"`, `timeLimitMs`, and `stopped`, which says
 whether termination was confirmed (or the query never started). Failed cancellation
-or a restart still in progress returns `stopped: false`; the query may still run.
+or a restart still in progress returns `stopped: false`; the query may still run. The HTTP
+wait allows at most five additional seconds for termination confirmation, then
+returns `stopped: false` even if an asynchronous backend ignores cancellation.
+A late backend result or failure remains observed and cannot change that response.
+Synchronous in-process work that blocks the event loop cannot be preempted by
+this response timer; use a worker or managed backend for execution limits.
 
 On the `oxigraph-worker` store this has a cost for every limited query, not
 only a stopped one: the query runs alone, and waits first for any pending write

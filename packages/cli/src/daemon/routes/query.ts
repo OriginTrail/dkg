@@ -347,7 +347,7 @@ import {
   type StoreQueryRequestLifecycle,
 } from '../store-query-lifecycle.js';
 import {
-  requestQueryTimeLimitMs, respondQueryTimeLimitExceeded, startApiQueryTimeLimit, type ApiQueryTimeLimit,
+  awaitApiQueryResult, requestQueryTimeLimitMs, respondQueryTimeLimitExceeded, startApiQueryTimeLimit, type ApiQueryTimeLimit,
 } from '../api-query-time-limit.js';
 
 
@@ -686,7 +686,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
 
       let result;
       try {
-        result = await agent.query(sparql, {
+        result = await awaitApiQueryResult(agent.query(sparql, {
           contextGraphId,
           chainEvidenceMode: parsed.chainEvidenceMode,
           graphSuffix,
@@ -716,7 +716,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
           // branch doesn't accept it; it's landing via the agent-side fixes.
           minTrust: minTrust as TrustLevel | undefined,
           operationCtx: ctx,
-        });
+        }), timeLimit, queryLifecycle.signal);
         if (timeLimit?.expired()) throw new Error('Query completed after its monotonic deadline');
       } finally {
         queryLifecycle?.dispose();
