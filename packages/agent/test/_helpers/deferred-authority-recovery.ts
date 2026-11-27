@@ -1,3 +1,4 @@
+import type { SubscriptionRecoveryCoordinator } from '../../src/subscription-recovery-owner.js';
 // SPDX-License-Identifier: Apache-2.0
 import { recoverDeferredContextGraphSubscriptionAuthorities as recover,
   type DeferredContextGraphSubscriptionAuthorityRecoveryCursor } from '../../src/context-graph-subscription-authority-recovery.js';
@@ -35,19 +36,15 @@ export interface TestDeferredRecoveryPorts {
    * restart.
    */
   capped(contextGraphId: string): void;
-  /**
-   * Another owner is asking about this row now (rows the startup pass left
-   * dormant without their chain name binding are asked again within seconds).
-   * The pass leaves it alone until that owner lets it go.
-   */
-  heldElsewhere?(contextGraphId: string): boolean;
+  readonly recovery?: SubscriptionRecoveryCoordinator;
 }
 
 export function recoverDeferredContextGraphSubscriptionAuthorities(signal: AbortSignal, ports: TestDeferredRecoveryPorts): Promise<void> {
   return recover(signal, {
     store: ports.store, dormancyById: ports.dormancyById, coldCursor: ports.coldCursor,
-    getStatus: ports.getStatus, warn: ports.warn, heldElsewhere: ports.heldElsewhere,
+    getStatus: ports.getStatus, warn: ports.warn,
     row: {
+      recovery: ports.recovery,
       isCurrent: ports.isCurrent, dormancy: id => ports.dormancyById.get(id),
       revision: id => ports.persistRevisions.get(id) ?? 0,
       subscription: id => ports.subscriptions.get(id),

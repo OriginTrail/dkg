@@ -1,3 +1,4 @@
+import type { SubscriptionRecoveryCoordinator, SubscriptionRecoveryLease } from './subscription-recovery-owner.js';
 import { runBoundedOperation, createAbortError, BoundedOperationTimeoutError } from './bounded-operation.js';
 
 export interface SubscriptionRetryRow<T> {
@@ -9,10 +10,13 @@ export interface SubscriptionRetryRow<T> {
   readonly order: number;
 }
 export interface SubscriptionRetryLease {
+  readonly owner?: SubscriptionRecoveryLease;
   isCurrent(): boolean;
   check<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T>;
 }
 interface SubscriptionRetryPolicy<T> {
+  recovery?: SubscriptionRecoveryCoordinator;
+  priority?: number;
   signal: AbortSignal;
   isCurrent(): boolean;
   eligible(row: Readonly<SubscriptionRetryRow<T>>): boolean;
@@ -30,6 +34,7 @@ interface SubscriptionRetryPolicy<T> {
  * Policy owners retain their own backoff, wake-up and idle-window rules. */
 export class SubscriptionRetryExecutor<T> {
   readonly #rows = new Map<string, SubscriptionRetryRow<T>>();
+  readonly #owners = new Map<string, SubscriptionRecoveryLease>();
   readonly #idle = new Set<() => void>();
   #timer: ReturnType<typeof setTimeout> | undefined;
   #checking = 0;
@@ -40,6 +45,12 @@ export class SubscriptionRetryExecutor<T> {
 
   take(id: string, value: T, expiresAt: number): boolean {
     if (!this.current() || this.#rows.has(id) || this.#rows.size >= this.policy.maxRows) return false;
+    const owner = this.policy.recovery?.claim(id, this.policy.priority ?? 0, this.policy.signal);
+    if (this.policy.recovery && !owner) return false;
+    if (owner) {
+      this.#owners.set(id, owner);
+      owner.signal.addEventListener('abort', () => this.#pump(), { once: true });
+    }
     this.#rows.set(id, { id, value, expiresAt, dueAt: this.policy.now(), checking: false, order: this.#order++ });
     this.#pump();
     return true;
@@ -65,10 +76,11 @@ export class SubscriptionRetryExecutor<T> {
   #retire(row: SubscriptionRetryRow<T>): void {
     if (this.#rows.get(row.id) !== row) return;
     this.#rows.delete(row.id);
+    this.#owners.get(row.id)?.release(); this.#owners.delete(row.id);
     this.policy.retired(row, this.policy.now() >= row.expiresAt);
   }
   #valid(row: SubscriptionRetryRow<T>): boolean {
-    return this.current() && this.#rows.get(row.id) === row
+    return this.current() && (this.#owners.get(row.id)?.isCurrent() ?? true) && this.#rows.get(row.id) === row
       && this.policy.now() < row.expiresAt && this.policy.eligible(row);
   }
 
@@ -80,17 +92,19 @@ export class SubscriptionRetryExecutor<T> {
     for (const row of due) {
       if (this.#checking >= this.policy.maxConcurrent) break;
       row.checking = true; this.#checking += 1;
+      const owner = this.#owners.get(row.id);
       const lease: SubscriptionRetryLease = {
+        owner,
         isCurrent: () => this.#valid(row),
         check: async work => {
           const timeoutMs = Math.min(this.policy.checkTimeoutMs, row.expiresAt - this.policy.now());
           if (!this.#valid(row)) throw createAbortError('Subscription retry retired');
           if (timeoutMs <= 0) throw new BoundedOperationTimeoutError('Subscription retry', 0);
-          return runBoundedOperation(work, { timeoutMs, signal: this.policy.signal,
+          return runBoundedOperation(work, { timeoutMs, signal: owner?.signal ?? this.policy.signal,
             label: 'Subscription retry' });
         },
       };
-      const run = Promise.resolve().then(() => this.#valid(row) ? this.policy.attempt(row, lease) : undefined)
+      const run = Promise.resolve(owner?.ready).then(() => this.#valid(row) ? this.policy.attempt(row, lease) : undefined)
         .then(next => { if (next === undefined) this.#retire(row); else row.dueAt = next; })
         .catch(error => { this.policy.failed(row, error); this.#retire(row); })
         .finally(() => { row.checking = false; this.#checking -= 1; this.#pump(); });

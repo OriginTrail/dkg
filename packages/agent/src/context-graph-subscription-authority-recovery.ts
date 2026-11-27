@@ -1,3 +1,4 @@
+import type { SubscriptionRecoveryCoordinator } from './subscription-recovery-owner.js';
 // SPDX-License-Identifier: Apache-2.0
 
 import { createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
@@ -123,7 +124,6 @@ export interface DeferredContextGraphSubscriptionAuthorityRecoveryPorts {
   readonly row: SubscriptionRecoveryRowPorts;
   getStatus(): ContextGraphSubscriptionRehydrationInternalStatus | null;
   warn(id: string, error: unknown): void;
-  heldElsewhere?(id: string): boolean;
 }
 
 /** Executes one fenced pass over only the authority-unavailable durable rows. */
@@ -134,7 +134,7 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
   const status = ports.getStatus();
   if (!status?.rehydrationEnabled || !ports.row.isCurrent()) return;
   const candidateIds = [...ports.dormancyById]
-    .filter(([id, reason]) => reason === 'authorityUnavailable' && ports.heldElsewhere?.(id) !== true)
+    .filter(([id, reason]) => reason === 'authorityUnavailable' && ports.row.recovery?.has(id) !== true)
     .map(([id]) => id)
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   const snapshotRows = async (): Promise<ReadonlyMap<string, ContextGraphSubscriptionRecord>> => (
@@ -260,6 +260,7 @@ export async function activateRollingSubscriptionPromotion(
 
 /** Rolling promotion owns candidate ordering and generation fences. */
 export interface RollingSubscriptionPromotionPorts {
+  readonly recovery?: SubscriptionRecoveryCoordinator;
   readonly store?: Pick<ContextGraphSubscriptionStore, 'load' | 'loadAll'>;
   getStatus(): Pick<ContextGraphSubscriptionRehydrationInternalStatus, 'rehydrationEnabled' | 'activationCap'> | null;
   isCurrent(signal: AbortSignal): boolean;
@@ -317,15 +318,16 @@ export async function promoteDormantContextGraphSubscriptions(
       if (ports.contextGraphSubscriptionRehydrationSlotIds.size >= status.activationCap) break;
 
       const outcome = await recoverPersistedSubscriptionRow(contextGraphId, {
+        recovery: ports.recovery,
         isCurrent: () => ports.isCurrent(signal) && ports.contextGraphSubscriptionRehydrationPendingIds.has(contextGraphId),
         dormancy: id => ports.contextGraphSubscriptionDormancyById.get(id),
         revision: id => ports.contextGraphSubscriptionPersistRevisions.get(id) ?? 0,
         subscription: id => ports.subscribedContextGraphs.get(id),
         load: loadRow,
         clear: (id, revoked) => revoked ? ports.recordContextGraphSubscriptionClear([], [id]) : ports.recordContextGraphSubscriptionClear([id]),
-        resolveAuthority: row => pass.read(() => ports.resolveAuthority({
+        resolveAuthority: (row, readSignal) => pass.read(() => ports.resolveAuthority({
           contextGraphId: row.id, onChainId: row.onChainId, onChainHash: row.onChainHash,
-        }, signal).catch((error: unknown) => unavailableContextGraphReadAuthorityDecision(
+        }, readSignal).catch((error: unknown) => unavailableContextGraphReadAuthorityDecision(
           'legacy-local', 'unexpected-authority-error', contextGraphReadAuthorityDependencyOf(error)))),
         retire: (id, reason, authority) => {
           if (authority) pass.leftDormant(id, authority);

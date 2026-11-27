@@ -1,3 +1,4 @@
+import { subscriptionRecoveryCoordinatorOf } from './subscription-recovery-owner.js';
 // SPDX-License-Identifier: Apache-2.0
 import { join } from 'node:path';
 import { PersistedSubscriptionNameBindingRetry, persistedSubscriptionNameBindingRetryOf } from './context-graph-subscription-name-binding-retry.js';
@@ -22,6 +23,7 @@ export class SubscriptionRecoveryMethods extends DKGAgentBase {
       if (status) this.contextGraphSubscriptionRehydrationStatus = { ...status, updatedAt: Date.now() };
     };
     return {
+      recovery: subscriptionRecoveryCoordinatorOf(this),
       isCurrent,
       dormancy: id => this.contextGraphSubscriptionDormancyById.get(id),
       revision: id => this.contextGraphSubscriptionPersistRevisions.get(id) ?? 0,

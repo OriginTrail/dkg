@@ -97,6 +97,7 @@ export class StorageAckDemandActivations {
     this.#idleMs = options.idleMs ?? STORAGE_ACK_DEMAND_IDLE_MS;
     this.#maxMs = options.maxMs ?? STORAGE_ACK_DEMAND_MAX_MS;
     this.#executor = new SubscriptionRetryExecutor({
+      recovery: ports.recovery, priority: 2,
       signal: ports.signal, isCurrent: () => ports.isCurrent(), now: this.#now,
       maxRows: options.maxRows ?? STORAGE_ACK_DEMAND_MAX_ROWS,
       maxConcurrent: options.maxConcurrent ?? STORAGE_ACK_DEMAND_MAX_CONCURRENT,
@@ -139,7 +140,7 @@ export class StorageAckDemandActivations {
       ...this.ports,
       isCurrent: () => lease.isCurrent() && demand.onChainId === onChainId,
       resolveAuthority: saved => checkSubscriptionAuthority(lease, signal => this.ports.resolveAuthority(saved, signal)),
-    }, this.ports.signal, { reason, verifiedOnChainId: onChainId });
+    }, this.ports.signal, { reason, verifiedOnChainId: onChainId, owner: lease.owner });
     if (outcome.kind === 'done') return undefined;
     if (outcome.kind === 'activated') {
       this.ports.log.info(`Activated persisted context-graph subscription "${row.id}" for StorageACK requests `

@@ -100,6 +100,7 @@ export class PersistedSubscriptionNameBindingRetry {
     this.#maxPauseMs = options.maxPauseMs ?? NAME_BINDING_RETRY_MAX_PAUSE_MS;
     this.#windowMs = options.windowMs ?? NAME_BINDING_RETRY_WINDOW_MS;
     this.#executor = new SubscriptionRetryExecutor({
+      recovery: ports.recovery, priority: 1,
       signal: ports.signal, isCurrent: () => ports.isCurrent(), now: this.#now,
       maxRows: options.maxRows ?? NAME_BINDING_RETRY_MAX_ROWS,
       maxConcurrent: options.maxConcurrent ?? NAME_BINDING_RETRY_MAX_CONCURRENT,
@@ -149,7 +150,7 @@ export class PersistedSubscriptionNameBindingRetry {
     const outcome = await recoverPersistedSubscriptionRow(row.id, {
       ...this.ports, isCurrent: lease.isCurrent,
       resolveAuthority: saved => checkSubscriptionAuthority(lease, signal => this.ports.resolveAuthority(saved, signal)),
-    }, this.ports.signal);
+    }, this.ports.signal, { owner: lease.owner });
     held.lastCheckAt = this.#now();
     if (outcome.kind === 'done') return undefined;
     if (outcome.kind === 'activated') {

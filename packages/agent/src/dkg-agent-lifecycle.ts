@@ -1,3 +1,4 @@
+import { subscriptionRecoveryCoordinatorOf } from './subscription-recovery-owner.js';
 import { exactRecoveryActionOutcome } from './sync/durable-recovery-action.js';
 import { runGraphOwnedDurableRecovery, type AgentGraphOwnedRecoveryRequest } from './durable-recovery-owned-round.js';
 import { installReadGraphWorkingMemoryIdentity } from './read-graph-view-source.js';
@@ -539,7 +540,6 @@ import {
 } from './context-graph-subscription-dormancy.js';
 import {
   isChainNameBindingUnavailable,
-  peekPersistedSubscriptionNameBindingRetry,
 } from './context-graph-subscription-name-binding-retry.js';
 import {
   activateRollingSubscriptionPromotion,
@@ -8818,7 +8818,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       } },
       warn: (id, error) => this.log.warn(ctx,
         `Deferred persisted context-graph subscription "${id}" after authority recovery: ${error instanceof Error ? error.message : String(error)}`),
-      heldElsewhere: id => peekPersistedSubscriptionNameBindingRetry(this)?.holds(id) === true,
     });
   }
 
@@ -8831,6 +8830,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    */
   async promoteDormantContextGraphSubscriptions(this: DKGAgent, signal: AbortSignal): Promise<'rearm' | 'idle'> {
     return promoteDormantContextGraphSubscriptions({
+      recovery: subscriptionRecoveryCoordinatorOf(this),
       store: this.config.contextGraphSubscriptionStore,
       getStatus: () => this.contextGraphSubscriptionRehydrationStatus,
       isCurrent: (ownerSignal) => this.started

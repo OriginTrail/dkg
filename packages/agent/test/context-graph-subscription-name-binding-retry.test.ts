@@ -1,3 +1,4 @@
+import { SubscriptionRecoveryCoordinator } from '../src/subscription-recovery-owner.js';
 import { recoverDeferredContextGraphSubscriptionAuthorities as recoverRows } from '../src/context-graph-subscription-authority-recovery.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -498,6 +499,8 @@ describe('background recovery and the name-binding retry', () => {
       ['held', 'authorityUnavailable'],
       ['other', 'authorityUnavailable'],
     ]);
+    const recovery = new SubscriptionRecoveryCoordinator();
+    recovery.claim('held', 1, new AbortController().signal);
     const loaded: string[] = [];
     const resolved: string[] = [];
     const activated: string[] = [];
@@ -523,7 +526,7 @@ describe('background recovery and the name-binding retry', () => {
       activate: async (r) => { activated.push(r.id); dormancy.delete(r.id); },
       warn: () => undefined,
       capped: () => undefined,
-      heldElsewhere: (id) => id === 'held',
+      recovery,
     });
 
     expect(loaded).not.toContain('held');

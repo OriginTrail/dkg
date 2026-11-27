@@ -1,3 +1,4 @@
+import type { SubscriptionRecoveryCoordinator, SubscriptionRecoveryLease } from './subscription-recovery-owner.js';
 import { sameDurableSubscriptionIntent } from './context-graph-subscription-policy.js';
 // SPDX-License-Identifier: Apache-2.0
 import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
@@ -14,6 +15,7 @@ export type SubscriptionRecoveryOutcome =
 
 /** Row policy is shared by the periodic and startup-name-binding schedulers. */
 export interface SubscriptionRecoveryRowPorts {
+  readonly recovery?: SubscriptionRecoveryCoordinator;
   isCurrent(): boolean;
   dormancy(id: string): ContextGraphDormancyReason | undefined;
   revision(id: string): number;
@@ -38,7 +40,22 @@ function hasIntent(row: ContextGraphSubscriptionRecord | null): row is ContextGr
 export async function recoverPersistedSubscriptionRow(
   id: string, ports: SubscriptionRecoveryRowPorts, signal: AbortSignal,
   options: { snapshot?: { row: ContextGraphSubscriptionRecord | null; revision: number };
-    reason?: ContextGraphDormancyReason; verifiedOnChainId?: string } = {},
+    reason?: ContextGraphDormancyReason; verifiedOnChainId?: string; owner?: SubscriptionRecoveryLease } = {},
+): Promise<SubscriptionRecoveryOutcome> {
+  const owner = options.owner ?? ports.recovery?.claim(id, 0, signal);
+  if (ports.recovery && !owner) return { kind: 'again' };
+  try {
+    await owner?.ready;
+    return await recoverOwnedSubscriptionRow(id, owner ? {
+      ...ports, isCurrent: () => owner.isCurrent() && ports.isCurrent(),
+    } : ports, owner?.signal ?? signal, options);
+  } finally { if (!options.owner) owner?.release(); }
+}
+
+async function recoverOwnedSubscriptionRow(
+  id: string, ports: SubscriptionRecoveryRowPorts, signal: AbortSignal,
+  options: { snapshot?: { row: ContextGraphSubscriptionRecord | null; revision: number };
+    reason?: ContextGraphDormancyReason; verifiedOnChainId?: string },
 ): Promise<SubscriptionRecoveryOutcome> {
   const { snapshot, reason = 'authorityUnavailable', verifiedOnChainId } = options;
   const current = () => !signal.aborted && ports.isCurrent() && ports.dormancy(id) === reason;

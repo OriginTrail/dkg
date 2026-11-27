@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { SubscriptionRecoveryCoordinator } from '../src/subscription-recovery-owner.js';
+import { PersistedSubscriptionNameBindingRetry } from '../src/context-graph-subscription-name-binding-retry.js';
+import { recoverPersistedSubscriptionRow, type SubscriptionRecoveryRowPorts } from '../src/context-graph-subscription-recover-row.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ContextGraphSubscriptionActivations, isCommittedSubscription } from '../src/context-graph-subscription-activation-state.js';
 import { StorageAckDemandActivations } from '../src/storage-ack-demand-activation.js';
 import { promoteDormantContextGraphSubscriptions } from '../src/context-graph-subscription-authority-recovery.js';
@@ -91,8 +94,43 @@ describe('authority recovery activation capacity', () => {
 
 
 describe('demand and rolling activation share commit ownership', () => {
-  it.each(['success', 'failed', 'retired'] as const)('never adopts a provisional demand row (outcome=%s)', async outcome => {
-    const failPreparation = outcome === 'failed', retired = outcome !== 'success';
+  afterEach(() => { vi.useRealTimers(); });
+  it('rolls back failed preparation while current and commits exactly once on demand retry', async () => {
+    vi.useFakeTimers();
+    const target = { ...row('retry'), onChainId: '1' }, published = vi.fn();
+    const f = fixture([target], 1, published);
+    f.owner.transition({ id: target.id, kind: 'dormancy', reason: 'activationCap' });
+    const controller = new AbortController(), prepare = vi.fn()
+      .mockRejectedValueOnce(new Error('reconciliation failed')).mockResolvedValue(undefined);
+    const activate = vi.fn(async (record, onChainId, _revision, isCurrent) => {
+      await f.owner.activate(record, f.ports, { onChainId, isCurrent, prepare });
+    });
+    const demand = new StorageAckDemandActivations({
+      signal: controller.signal, isCurrent: () => true,
+      dormancy: id => f.dormancy.get(id), revision: () => 0, subscription: id => f.live.get(id),
+      load: async () => ({ ...target }), resolveAuthority: async () => ({ outcome: 'allowed', grantScope: 'public',
+        source: 'registered-chain', reason: 'open-context-graph', metadataBootstrap: 'forbidden', onChainId: 1n }),
+      activate, clear: () => {}, capped: () => {}, retire: () => {}, track: () => {},
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    }, { retryMinMs: 10, retryMaxMs: 10 });
+    demand.request(target.id, '1');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(controller.signal.aborted).toBe(false);
+    expect(activate).toHaveBeenCalledOnce();
+    await expect(activate.mock.results[0]!.value).rejects.toThrow('reconciliation failed');
+    expect(f.live.has(target.id)).toBe(false);
+    expect(f.status().activated).toBe(0);
+    expect(published).not.toHaveBeenCalled();
+    expect(demand.size).toBe(1);
+    await vi.advanceTimersByTimeAsync(10);
+    await demand.whenIdle();
+    expect(activate).toHaveBeenCalledTimes(2);
+    expect(isCommittedSubscription(f.live, f.dormancy, target.id)).toBe(true);
+    expect(f.status().activated).toBe(1);
+    expect(published).toHaveBeenCalledOnce();
+  });
+  it.each(['success', 'retired'] as const)('never adopts a provisional demand row (outcome=%s)', async outcome => {
+    const retired = outcome === 'retired';
     const target = { ...row('overlap'), onChainId: '1' };
     const published = vi.fn();
     const f = fixture([target], 1, published);
@@ -124,7 +162,7 @@ describe('demand and rolling activation share commit ownership', () => {
       load: async () => ({ ...target }), resolveAuthority: async () => authority,
       activate: async (record, onChainId, _revision, isCurrent) => { await f.owner.activate(record, f.ports, {
         onChainId, isCurrent, prepare: async () => { beginPreparation(); await held;
-          if (failPreparation) throw new Error('reconciliation failed'); },
+        },
       }); },
       clear: () => {}, retire: (id, reason) => f.owner.transition({ id, kind: 'dormancy', reason }),
       track: () => {}, log: { info: () => {}, warn: () => {}, debug: () => {} },
@@ -156,4 +194,67 @@ describe('demand and rolling activation share commit ownership', () => {
     expect(f.live.get('a')?.coreHosted).toBe(true);
   });
 
+});
+
+
+describe('one recovery owner across scheduling policies', () => {
+  afterEach(() => { vi.useRealTimers(); });
+  it.each([
+    ['authority', false], ['preparation', false], ['authority', true], ['preparation', true],
+  ] as const)('upgrades stalled %s to verified ACK demand (shutdown=%s)', async (phase, shutdown) => {
+    vi.useFakeTimers();
+    const target = row('shared-owner'), published = vi.fn(), f = fixture([target], 1, published);
+    const recovery = new SubscriptionRecoveryCoordinator(), controller = new AbortController();
+    let release!: () => void, answer!: (value: any) => void;
+    const preparing = new Promise<void>(resolve => { release = resolve; });
+    const lookup = new Promise<any>(resolve => { answer = resolve; });
+    const allowed = { outcome: 'allowed' as const, grantScope: 'public' as const, source: 'registered-chain' as const,
+      reason: 'open-context-graph', metadataBootstrap: 'forbidden' as const, onChainId: 1n };
+    let originalReadSignal: AbortSignal | undefined;
+    const resolveAuthority = vi.fn(async (record, signal) => {
+      if (!record.onChainId && phase === 'authority') { originalReadSignal = signal; return lookup; }
+      return allowed;
+    });
+    const prepare = vi.fn(async () => { if (phase === 'preparation' && prepare.mock.calls.length === 1) await preparing; });
+    const ports: SubscriptionRecoveryRowPorts = {
+      recovery, isCurrent: () => !controller.signal.aborted,
+      dormancy: id => f.dormancy.get(id), revision: () => 0, subscription: id => f.live.get(id),
+      load: async () => ({ ...target }), resolveAuthority,
+      activate: async (record, onChainId, _revision, isCurrent) => {
+        await f.owner.activate(record, f.ports, { onChainId, isCurrent, prepare, respectActivationCap: true });
+      },
+      clear: () => {}, capped: () => {}, retire: () => {},
+    };
+    const scheduled = { ...ports, signal: controller.signal, track: () => {},
+      log: { info: () => {}, warn: () => {}, debug: () => {} } };
+    const retry = new PersistedSubscriptionNameBindingRetry(scheduled);
+    retry.take([target.id]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolveAuthority).toHaveBeenCalledOnce();
+    // The periodic owner consults the same key, including during retry backoff.
+    await expect(recoverPersistedSubscriptionRow(target.id, ports, controller.signal)).resolves.toEqual({ kind: 'again' });
+    expect(resolveAuthority).toHaveBeenCalledOnce();
+    const demand = new StorageAckDemandActivations(scheduled);
+    expect(demand.request(target.id, '1')).toBe(true);
+    if (shutdown) controller.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    if (phase === 'authority') expect(originalReadSignal?.aborted).toBe(true);
+    if (phase === 'preparation') {
+      // Demand owns the key but cannot read/install until the old activation
+      // finishes compensating its provisional row.
+      expect(resolveAuthority).toHaveBeenCalledOnce();
+      expect(published).not.toHaveBeenCalled();
+    }
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.all([retry.whenIdle(), demand.whenIdle()]);
+    answer(allowed); // Even an uncooperative old lookup cannot commit late.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(published).toHaveBeenCalledTimes(shutdown ? 0 : 1);
+    expect(f.status().activated).toBe(shutdown ? 0 : 1);
+    expect(isCommittedSubscription(f.live, f.dormancy, target.id)).toBe(!shutdown);
+    expect(recovery.has(target.id)).toBe(false);
+    expect(resolveAuthority).toHaveBeenCalledTimes(shutdown ? 1 : 2);
+    if (!shutdown) expect(resolveAuthority.mock.calls[1]![0]).toMatchObject({ onChainId: '1' });
+  });
 });
