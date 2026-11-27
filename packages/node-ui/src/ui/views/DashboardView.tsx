@@ -1,10 +1,12 @@
 import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react';
-import { Lock, Globe, Share2, TrendingUp, UsersRound, Wallet, Check, Diamond, RefreshCw } from 'lucide-react';
+import { Lock, Globe, Share2, TrendingUp, UsersRound, Wallet, Check, Diamond } from 'lucide-react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
 import { chooseTab as openTab } from '../lib/shellNavigation.js';
 import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
 import { useMyContextGraphs } from '../hooks/useMyContextGraphs.js';
+import { INVENTORY_ERROR_SHORT, inventoryErrorMessage } from '../lib/inventory-copy.js';
+import { RetryButton } from '../components/ds/RetryButton.js';
 import { useMemoryEntities } from '../hooks/useMemoryEntities.js';
 import { useMemoryCounts } from './project/helpers.js';
 import { useNodeEvents } from '../hooks/useNodeEvents.js';
@@ -28,10 +30,26 @@ import { StatTile } from '../components/ds/StatTile.js';
 // Single user-facing description shown inside the My Context Graphs
 // card (one line, no separate footnote — round-2 feedback: the split
 // copy + divider read as misplaced).
-const CG_DEFINITION =
-  'Context graphs you created or joined — scoped knowledge domains with ' +
-  'configurable access (private, curated and peer-shared, or public) where ' +
-  'agents build and collaborate on shared context with verifiable provenance.';
+/** "default on DKG V10 Base Mainnet": node name and network, read from the node. The chain
+ *  is added only when the network name doesn't already carry it. */
+export function nodeSubtitle(name?: string | null, network?: string | null, chain?: string | null): string {
+  const node = name || 'DKG Node';
+  if (!network) return chain ? `${node} on ${chain}` : node;
+  const withChain = chain && !network.toLowerCase().includes(chain.toLowerCase()) ? `${network} (${chain})` : network;
+  return `${node} on ${withChain}`;
+}
+
+const CG_ABOUT =
+  'A context graph is a shared space for knowledge on one topic. You choose who can access it: ' +
+  'private, curated and peer-shared, or public. Inside it, agents build and collaborate on shared ' +
+  'context, with verifiable provenance for everything they add.';
+const SIZE_ABOUT =
+  'Totals across your context graphs, summed over Working Memory, Shared Working Memory and ' +
+  'Verifiable Memory. Knowledge Assets are entities published to Verifiable Memory.';
+const SIZE_PARTIAL_ABOUT =
+  'Your context graphs may hold more entities, and the triple total can rise or fall as layers load.';
+const AGENTS_ABOUT =
+  'Unique agents, your own and others, that are allow-listed and collaborating across your context graphs.';
 
 // Memory-layer palette + labels + concise tooltip descriptions
 // (README "three memory layers" + MemoryStackView desc). Colours are
@@ -457,8 +475,10 @@ export function DashboardView() {
   const { myCgs, identity, identityLoading, cgsError, identityError, inventoryLoading, inventoryError, retry } = useMyContextGraphs();
   const inventoryFailed = Boolean(inventoryError);
   const cgsResolving = inventoryLoading && myCgs.length === 0;
+  // "~" is approximate (the last list loaded); "+" is a floor that can still grow.
   const graphCount = inventoryFailed ? (myCgs.length ? `~${myCgs.length}` : '—') : myCgs.length;
-  const emptyInventoryMessage = inventoryFailed ? 'Context graph inventory is unavailable.'
+  // A failed load is said once, in the banner, not again in each card.
+  const emptyInventoryMessage = inventoryFailed ? null
     : cgsResolving ? 'Loading context graphs…' : 'No context graphs yet.';
 
   const [reports, setReports] = useState<Record<string, CgReport>>({});
@@ -591,27 +611,23 @@ export function DashboardView() {
     <div className="ds-page v10-dashboard">
       <PageHeader
         title="Dashboard"
-        description={<>
-          {status?.name || 'DKG Node'} · {status?.networkName || 'network'}
-          {wb?.chainId != null ? ` · ${chainInfo(wb.chainId).name}` : ''}
-        </>}
+        description={nodeSubtitle(status?.name, status?.networkName, wb?.chainId != null ? chainInfo(wb.chainId).name : null)}
       />
 
       {inventoryFailed ? (
-        <div role="alert" className="v10-cg-empty">
-          {cgsError ? 'Context graph list could not be loaded. ' : ''}
-          {identityError ? 'Agent identity could not be loaded. ' : ''}
-          {myCgs.length ? 'Showing the last available graphs; counts may be incomplete. ' : 'Graph availability is unknown. '}
-          <button type="button" disabled={inventoryLoading} onClick={() => { void retry(); }}><RefreshCw size={12} />Retry</button>
+        <div role="alert" className="v10-stale-banner">
+          <span>{inventoryErrorMessage({ listError: cgsError, identityError, hasGraphs: myCgs.length > 0 })}</span>
+          {!inventoryLoading && <RetryButton className="v10-retry-btn" onClick={() => { void retry(); }} />}
         </div>
       ) : null}
       <div className="v10-dash-stats v10-dash-stats-3">
         <StatTile
           className="v10-anim-mount"
-          label="My context graphs"
+          label="Context graphs"
           icon={<Share2 size={14} aria-hidden />}
           value={cgsResolving ? <span className="v10-stat-loading">loading…</span> : graphCount}
-          sub={CG_DEFINITION}
+          sub="Created by you or joined."
+          about={CG_ABOUT}
         >
           {agg.hasCgs && !cgsResolving ? (
             <RoleBar
@@ -625,6 +641,7 @@ export function DashboardView() {
           className="v10-anim-mount"
           label="Context graph size"
           icon={<TrendingUp size={14} aria-hidden />}
+          about={agg.hasCgs ? (agg.sizePartial ? `${SIZE_ABOUT} ${SIZE_PARTIAL_ABOUT}` : SIZE_ABOUT) : undefined}
         >
           {!agg.hasCgs ? (
             <div className="v10-stat-empty">—</div>
@@ -655,13 +672,13 @@ export function DashboardView() {
               <LayerLegend />
             </div>
           )}
-          <div className="stat-sub">
-            {agg.hasCgs
-              ? (agg.sizePartial
-                  ? 'Partial preview — some memory layers are capped or unavailable. Context graphs may contain more entities; triple totals may increase or decrease as layers load.'
-                  : 'Totals across all your context graphs, summed over Working, Shared Working & Verifiable Memory. Knowledge Assets are entities that have been published to Verifiable Memory.')
-              : emptyInventoryMessage}
-          </div>
+          {(agg.hasCgs || emptyInventoryMessage) && (
+            <div className="stat-sub">
+              {agg.hasCgs
+                ? (agg.sizePartial ? 'Partial: some layers are capped or unavailable.' : 'Across all three memory layers.')
+                : emptyInventoryMessage}
+            </div>
+          )}
         </StatTile>
         <StatTile
           className="v10-anim-mount"
@@ -674,12 +691,13 @@ export function DashboardView() {
               // Partial (a probe failed or a public graph's membership
               // is unmeasurable) → "~" so the count doesn't read as an
               // exact figure that silently excludes those graphs (Codex).
-              : agg.agentsPartial ? `~${agg.agentCount}` : agg.agentCount}
+              : agg.agentsPartial ? `${agg.agentCount}+` : agg.agentCount}
           sub={!agg.hasCgs
             ? emptyInventoryMessage
             : agg.agentsPartial
-              ? 'Some context graphs could not report agents; count is partial.'
-              : "Unique agents — your own and others' — allow-listed and collaborating across your context graphs."}
+              ? 'Some context graphs couldn’t report their agents.'
+              : 'Agents with access to your context graphs.'}
+          about={agg.hasCgs ? AGENTS_ABOUT : undefined}
         >
           {agg.hasCgs && !agg.agentsLoading && agg.agentList.length > 0 && (
             <div className="v10-stat-agents">
@@ -701,7 +719,7 @@ export function DashboardView() {
           {cgsResolving ? (
             <Loading label="Loading context graphs…" className="v10-cg-empty" />
           ) : inventoryFailed && myCgs.length === 0 ? (
-            <p className="v10-cg-empty">Context graphs could not be confirmed. Retry the failed request above.</p>
+            <p className="v10-cg-empty">{INVENTORY_ERROR_SHORT}</p>
           ) : myCgs.length === 0 ? (
             <p className="v10-cg-empty">
               No context graphs yet — create or join one from the sidebar.

@@ -22,12 +22,22 @@ export interface WalletConnectControlProps {
   testId?: string;
   description?: React.ReactNode;
   purpose?: 'transaction' | 'message';
+  /** Controls that sit on the same row, before the connect button or the connected wallet,
+   *  such as the PCA ID check. Notes, the provider picker and errors stay below the row. */
+  leading?: React.ReactNode;
+}
+
+/** The wallet's action row: `leading` controls, then the wallet's own control. */
+function withLeading(leading: React.ReactNode, control: React.ReactNode) {
+  if (leading == null || leading === false) return control;
+  return <div className="v10-wallet-connect-row">{leading}{control}</div>;
 }
 
 export function WalletConnectControl({
   className = '',
   testId = 'wallet-connect',
   purpose = 'transaction',
+  leading,
   description = (
     <>Hardware wallet recommended. Verify every transaction on the signing device before confirming.</>
   ),
@@ -54,7 +64,7 @@ export function WalletConnectControl({
   if (address) {
     return (
       <div className={['v10-wallet-connect', className].filter(Boolean).join(' ')}>
-        {purpose === 'message' ? <div className="program-wallet-address"><code>{address}</code> <button type="button" onClick={disconnect}>Disconnect</button></div> : <WalletPill />}
+        {withLeading(leading, purpose === 'message' ? <div className="program-wallet-address"><code>{address}</code> <button type="button" onClick={disconnect}>Disconnect</button></div> : <WalletPill />)}
         <p className="v10-wallet-note">
           One active wallet in v1. Disconnect to switch accounts or providers.
         </p>
@@ -86,17 +96,19 @@ export function WalletConnectControl({
 
   return (
     <div className={['v10-wallet-connect', className].filter(Boolean).join(' ')}>
-      <button
-        type="button"
-        className="v10-wallet-connect-btn ds-btn"
-        data-testid={testId}
-        onClick={onMainClick}
-        aria-expanded={pickerOpen}
-      >
-        {busyKey ? <Loader2 size={14} aria-hidden="true" /> : <Wallet size={14} aria-hidden="true" />}
-        <span>{busyKey ? 'Connecting...' : 'Connect wallet'}</span>
-        {discovered.length !== 1 && <ChevronDown size={14} aria-hidden="true" />}
-      </button>
+      {withLeading(leading, (
+        <button
+          type="button"
+          className="v10-wallet-connect-btn ds-btn"
+          data-testid={testId}
+          onClick={onMainClick}
+          aria-expanded={pickerOpen}
+        >
+          {busyKey ? <Loader2 size={14} aria-hidden="true" /> : <Wallet size={14} aria-hidden="true" />}
+          <span>{busyKey ? 'Connecting...' : 'Connect wallet'}</span>
+          {discovered.length !== 1 && <ChevronDown size={14} aria-hidden="true" />}
+        </button>
+      ))}
       <p className="v10-wallet-note">
         {description}
       </p>

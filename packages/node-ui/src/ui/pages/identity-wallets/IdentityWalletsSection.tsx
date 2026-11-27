@@ -59,15 +59,19 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
         <div>
           <h2 className="card-title">Node identity wallets</h2>
           <p className="v10-identity-wallet-description">
-            Register and rotate operational or admin keys for node identity{' '}
-            {data?.hasProfile ? data.identityId : '—'}.
+            {data?.hasProfile && data.identityId != null
+              ? <>Register and rotate operational or admin keys for node identity {data.identityId}.</>
+              : <>Register and rotate operational or admin keys for this node’s identity.</>}{' '}
             You sign every change with your connected admin wallet. Its private key stays in that wallet and never reaches the node.
           </p>
         </div>
-        <div className="v10-identity-wallet-counts" aria-label="Identity wallet counts">
-          <Badge tone="role" size="sm">{summary?.operationalCount ?? '—'} operational</Badge>
-          <Badge tone="role" size="sm">{summary?.adminCount ?? '—'} admin</Badge>
-        </div>
+        {/* The counts show once they load; a dash in a sentence reads as a broken value. */}
+        {summary?.operationalCount != null && summary?.adminCount != null && (
+          <div className="v10-identity-wallet-counts" aria-label="Identity wallet counts">
+            <Badge tone="role" size="sm">{summary.operationalCount} operational</Badge>
+            <Badge tone="role" size="sm">{summary.adminCount} admin</Badge>
+          </div>
+        )}
       </div>
 
       <div className="card-body">

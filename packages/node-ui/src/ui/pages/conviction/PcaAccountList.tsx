@@ -1,5 +1,5 @@
 import React, { useId, useState } from 'react';
-import { HealthChip, formatExpiryShort, formatPcaTrac, truncateAddress } from '../../components/Pca/index.js';
+import { HealthChip, WalletConnectControl, formatExpiryShort, formatPcaTrac, truncateAddress } from '../../components/Pca/index.js';
 import { RetryButton } from '../../components/ds/RetryButton.js';
 import type { ResolvedPcaAccount } from '../../hooks/usePcaOverview.js';
 import type { DiscoveredPca } from '../../hooks/useDiscoveredPcas.js';
@@ -168,11 +168,11 @@ function CheckById({ onCheck }: { onCheck: (id: string) => void }) {
     onCheck(id);
   };
   return (
-    <>
+    <div className="v10-pca-check">
       <div className="v10-pca-overview-cta-group">
         <input
           type="text"
-          className="v10-form-input ds-input ds-sm"
+          className="v10-form-input ds-input"
           data-testid="pca-check-input"
           value={value}
           onChange={(e) => setValue(e.target.value)}
@@ -182,12 +182,12 @@ function CheckById({ onCheck }: { onCheck: (id: string) => void }) {
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? errorId : undefined}
         />
-        <button type="button" className="v10-pca-card-btn ds-btn ds-sm" data-testid="pca-check-submit" onClick={submit}>
+        <button type="button" className="v10-pca-card-btn ds-btn" data-testid="pca-check-submit" onClick={submit}>
           Check
         </button>
       </div>
       {error && <p id={errorId} className="v10-pca-crux-error" role="alert">{error}</p>}
-    </>
+    </div>
   );
 }
 
@@ -228,9 +228,10 @@ export function PcaAccountList({
 
   return (
     <section className="v10-pca-section" data-testid="pca-list">
-      <div className="v10-pca-section-head">
+      <div className="v10-pca-section-head v10-pca-section-head-stacked">
         <h3 className="v10-pca-section-title">{hasRows || loading ? 'PCAs' : 'Already have a PCA?'}</h3>
-        <CheckById onCheck={onCheckId} />
+        {/* Two ways to find your PCAs, on one row: the ID check, then Connect wallet. */}
+        <WalletConnectControl className="compact" testId="pca-wallet-connect" leading={<CheckById onCheck={onCheckId} />} />
       </div>
       {loading && !hasRows && <div className="card ds-card v10-pca-card v10-pca-card-skeleton" aria-hidden="true" />}
       {hasRows && (

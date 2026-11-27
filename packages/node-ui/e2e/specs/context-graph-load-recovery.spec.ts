@@ -12,11 +12,12 @@ for (const endpoint of ['/api/context-graph/list', '/api/agent/identity']) {
     await shell.goto();
     const dashboardRoot = page.locator('.v10-dashboard');
     const sidebar = page.locator('.v10-panel-left').last();
-    await expect(dashboardRoot.getByRole('alert')).toContainText('could not be loaded');
-    await expect(sidebar.getByRole('alert')).toContainText('unavailable');
+    await expect(dashboardRoot.getByRole('alert')).toContainText('Couldn’t load');
+    await expect(sidebar.getByRole('alert')).toContainText('Couldn’t load context graphs');
     await expect(sidebar).not.toContainText('No context graphs yet');
     await expect(dashboardRoot).not.toContainText('No context graphs yet');
-    const count = dashboardRoot.locator('.stat-card').filter({ hasText: 'My context graphs' }).locator('.stat-value');
+    const count = dashboardRoot.locator('.stat-card')
+      .filter({ has: page.locator('.stat-label', { hasText: /^Context graphs$/ }) }).locator('.stat-value');
     await expect(count).not.toHaveText('0');
 
     await page.unroute(route);

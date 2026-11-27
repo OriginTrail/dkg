@@ -18,12 +18,12 @@ test.describe('Dashboard (rc.12)', () => {
     await page.locator('.ds-page-desc').waitFor({ state: 'visible', timeout: 10_000 });
     const text = (await dashboard.subtitle.textContent())?.trim() ?? '';
     expect(text.length).toBeGreaterThan(0);
-    // The subtitle separates node name and network with a separator — both halves present.
-    expect(text).toMatch(/\S+\s*[·|—-]\s*\S+/);
+    // The subtitle reads "<node> on <network>" — both halves present.
+    expect(text).toMatch(/\S+ on \S+/);
   });
 
   test('shows My Context Graphs stat card', async ({ page }) => {
-    await expect(page.locator('.stat-label').filter({ hasText: 'My context graphs' })).toBeVisible();
+    await expect(page.locator('.stat-label').filter({ hasText: /^Context graphs$/ })).toBeVisible();
   });
 
   test('shows Context Graph size stat card', async ({ page }) => {
@@ -59,14 +59,14 @@ test.describe('Dashboard (rc.12)', () => {
 
   test('renders exactly the three rc.12 stat cards', async ({ dashboard }) => {
     const labels = (await dashboard.getStatCards()).map((s) => s.label);
-    expect(labels).toEqual(['My context graphs', 'Context graph size', 'Collaborating agents']);
+    expect(labels).toEqual(['Context graphs', 'Context graph size', 'Collaborating agents']);
   });
 
   test('"My Context Graphs" stat value equals the number of CG rows', async ({ dashboard }) => {
     await dashboard.waitForCgRowsLoaded();
     const rowCount = await dashboard.cgRows.count();
     expect(rowCount).toBeGreaterThanOrEqual(2);
-    const stat = (await dashboard.getStatCards()).find((s) => s.label === 'My context graphs');
+    const stat = (await dashboard.getStatCards()).find((s) => s.label === 'Context graphs');
     expect(stat?.value.trim()).toBe(String(rowCount));
   });
 

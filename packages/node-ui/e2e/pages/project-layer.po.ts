@@ -16,13 +16,13 @@ export class ProjectLayerPage {
       await tab.click();
       await expect(tab).toHaveClass(/active/);
       return this.page.locator('.v10-center-content .v10-memory-explorer').filter({
-        has: this.page.getByRole('button', { name: projectName }),
+        has: this.page.locator('.v10-project-strip-name', { hasText: projectName }),
       });
     }
     const label = (await this.page.locator(sel.center.activeTab).getAttribute('title'))?.trim();
     if (label && !label.includes('Dashboard')) {
       return this.page.locator('.v10-center-content .v10-memory-explorer').filter({
-        has: this.page.getByRole('button', { name: label }),
+        has: this.page.locator('.v10-project-strip-name', { hasText: label }),
       });
     }
     return this.page.locator('.v10-center-content .v10-memory-explorer').last();

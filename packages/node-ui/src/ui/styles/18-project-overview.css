@@ -225,9 +225,12 @@
   --po-layer-color: var(--border-strong);
   min-width: 0;
   min-height: 58px;
-  display: flex;
-  align-items: center;
-  gap: var(--space-8);
+  /* Stacked: number and layer name, the description under them, the count below. */
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: start;
+  column-gap: var(--space-8);
+  row-gap: var(--space-4);
   padding: var(--pad-nested);
   border: 1px solid var(--po-layer-border, color-mix(in srgb, var(--po-layer-color) 28%, var(--border-default)));
   background: var(--po-layer-bg, color-mix(in srgb, var(--po-layer-color) 6%, var(--bg-surface)));
@@ -260,6 +263,8 @@
   font-weight: 700;
 }
 .v10-po-pipeline-step-copy {
+  grid-column: 2;
+  align-self: center;
   display: flex;
   flex: 1 1 auto;
   min-width: 0;
@@ -278,6 +283,7 @@
   line-height: var(--lh-snug);
 }
 .v10-po-pipeline-step-count {
+  grid-column: 2;
   flex: 0 0 auto;
   white-space: nowrap;
   color: var(--text-secondary);
@@ -285,7 +291,7 @@
   font-size: var(--fs-label);
   font-weight: 700;
   overflow-wrap: anywhere;
-  text-align: right;
+  text-align: left;
 }
 
 /* Primer footer (§4.2.1) — quiet last-row escape hatch. No card
@@ -373,3 +379,8 @@
 .v10-project-note { color: var(--text-tertiary); font-size: var(--fs-control); margin-bottom: var(--space-8); }
 
 .v10-po-pipeline-step.layer-tone-wm, .v10-po-pipeline-step.layer-tone-swm, .v10-po-pipeline-step.layer-tone-vm { --po-layer-color: var(--layer-tone); }
+
+/* At a glance: the numbers take the stat card's type (DESIGN.md: large numbers use --fs-display). */
+.v10-po-stat-strip .v10-stat-strip-value { font-family: var(--font-sans); font-size: var(--fs-display); line-height: 1; }
+/* Recent activity is a section like the others here: sentence case, the section title's type. */
+.v10-overview-activity .v10-activity-feed-title { color: var(--text-primary); font-weight: 700; text-transform: none; letter-spacing: 0; }

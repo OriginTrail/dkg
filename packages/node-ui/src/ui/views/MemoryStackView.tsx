@@ -25,7 +25,8 @@ import { MemoryReadStatus } from '../components/MemoryReadStatus.js';
 import { ContextGraphMark } from '../context-graph-colors.js';
 import { LayerGlyph } from '../components/ds/Badge.js';
 import { Loading } from '../components/ds/Loading.js';
-import { RefreshCw } from 'lucide-react';
+import { RetryButton } from '../components/ds/RetryButton.js';
+import { inventoryErrorMessage } from '../lib/inventory-copy.js';
 import { formatNumber } from '../lib/format.js';
 import { PageHeader } from '../components/ds/PageHeader.js';
 
@@ -67,9 +68,8 @@ export function MemoryStackView() {
       </>} />
 
       {inventoryError && <div className="v10-stale-banner" role="alert">
-        <span>{listError ? 'Context graphs unavailable. ' : ''}{identity.error ? 'Agent identity unavailable. ' : ''}
-          {contextGraphs.length > 0 ? 'Showing the last available context graphs.' : 'Context graph inventory is unknown.'}</span>
-        <button type="button" className="v10-retry-btn ds-btn ds-sm" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}><RefreshCw size={12} />Retry context graphs</button>
+        <span>{inventoryErrorMessage({ listError, identityError: identity.error, hasGraphs: contextGraphs.length > 0 })}</span>
+        {!inventoryLoading && <RetryButton className="v10-retry-btn" onClick={() => { void refreshContextGraphInventory(true); }} />}
       </div>}
       {inventoryLoading && contextGraphs.length === 0 && <Loading label="Loading context graphs…" />}
       {visible.length === 0 ? (!inventoryError && !inventoryLoading && (
