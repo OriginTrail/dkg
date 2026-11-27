@@ -23,11 +23,13 @@ async function connectClient(repoRoot, home, auth) {
   return ApiClient.connect({ connection: { home, token: auth, port: 'home' } });
 }
 
-function publishCli(cli, home, name, contextGraphId, env) {
+function publishCli(cli, home, name, contextGraphId, auth, env) {
+  const connectionEnv = { ...env, DKG_HOME: home, DKG_AUTH_TOKEN: auth };
+  delete connectionEnv.DKG_API_PORT;
   return new Promise(resolveResult => {
     let out = '', settled = false;
     const child = spawn(process.execPath, [cli, 'ka', 'publish', name, '--context-graph-id', contextGraphId], {
-      env: { ...env, DKG_HOME: home }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 300_000,
+      env: connectionEnv, stdio: ['ignore', 'pipe', 'pipe'], timeout: 300_000,
     });
     child.stdout.on('data', data => { out += data; }); child.stderr.on('data', data => { out += data; });
     const finish = result => { if (!settled) { settled = true; resolveResult(result); } };
@@ -61,7 +63,7 @@ export async function runPublisher(options, { now = Date.now, sleep = delay, sig
           readJob: (reference, options) => client.knowledgeAssetShareJob(reference, options) }),
       });
       if (shared) {
-        const result = await publishCli(cli, home, name, cg, env); rc = result.rc; log(result.out);
+        const result = await publishCli(cli, home, name, cg, auth, env); rc = result.rc; log(result.out);
       }
     } catch (error) { log(`[soak] attempt: ${error instanceof Error ? error.message : String(error)}`); }
     const row = { ts: new Date(now()).toISOString(), cg, node, i, subject, status: rc === 0 ? 'ok' : 'fail', rc,

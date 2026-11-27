@@ -133,20 +133,20 @@ test('a final answer is not shared again', async () => {
     { shared: false, shareRetries: 1, recovery: null, requests: ['create', 'share'], waits: [1000], followed: [] });
 });
 
-// pollShareRecoveries on a made-up clock: a 5 s poll interval, and a job that
+// pollShareRecoveryJobs on a made-up clock: a 5 s poll interval, and a job that
 // fails its first attempt and succeeds when the queue retries it a minute later.
 async function followOnClock(states, budgetMs = DEFAULT_RECOVERY_WAIT_SEC * 1000) {
   let clock = 0;
   const seen = [];
   const record = await followShareJob({ jobId: 'job-3', url: jobUrl('job-3') }, {
-    api: 'http://node.test/', auth: 'fixture-token', budgetMs,
+    budgetMs,
+    readJob: async ({ jobId, url }, { timeoutMs }) => {
+      seen.push([jobId, url, timeoutMs]);
+      return { jobId, state: states(clock), attempts: clock < 62_000 ? 1 : 2 };
+    },
     pollOptions: {
       now: () => clock,
       sleep: async (ms) => { clock += ms; },
-      getJson: async (url, { headers }) => {
-        seen.push([url, headers.Authorization]);
-        return { jobId: 'job-3', state: states(clock), attempts: clock < 62_000 ? 1 : 2 };
-      },
     },
   });
   return { record, seen };
@@ -156,7 +156,8 @@ test('a share job is followed through its first retry, about a minute later', as
   const retried = (ms) => (ms < 2_000 ? 'running' : ms < 62_000 ? 'failed_retrying' : ms < 64_000 ? 'running' : 'succeeded');
   const { record, seen } = await followOnClock(retried);
   assert.deepEqual(record, { job: 'job-3', state: 'succeeded', settled: true, attempts: 2, polls: 14, waited_s: 65 });
-  assert.deepEqual(seen[0], [`http://node.test${jobUrl('job-3')}`, 'Bearer fixture-token']);
+  assert.deepEqual(seen[0].slice(0, 2), ['job-3', jobUrl('job-3')]);
+  assert.ok(seen.every(([, , timeoutMs]) => timeoutMs > 0 && timeoutMs <= DEFAULT_RECOVERY_WAIT_SEC * 1000));
 
   const failed = await followOnClock((ms) => (ms < 62_000 ? 'failed_retrying' : 'failed'));
   assert.deepEqual([failed.record.state, failed.record.settled, failed.record.waited_s], ['failed', true, 65]);

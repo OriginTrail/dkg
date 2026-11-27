@@ -43,7 +43,7 @@ async function collect(child) {
 const jsonLines = (file) => readFileSync(file, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
 
 // One publish attempt of round 9 on node 1, against a stand-in node API.
-async function publishOnce(t, plan, { publish = [[0, 'published']], apiPort = true } = {}) {
+async function publishOnce(t, plan, { publish = [[0, 'published']], apiPort = true, cliSource = standInCli, ambient = {} } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), 'dkg-soak-publisher-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
@@ -53,7 +53,7 @@ async function publishOnce(t, plan, { publish = [[0, 'published']], apiPort = tr
   for (const directory of [bin, out, path.join(devnet, 'node1')]) mkdirSync(directory, { recursive: true });
   const node = await standInNode(t, plan);
   if (apiPort) writeFileSync(path.join(devnet, 'node1', 'api.port'), `${node.port}\n`);
-  writeFileSync(cli, standInCli);
+  writeFileSync(cli, cliSource);
   const files = { SOAK_CALLS: path.join(dir, 'calls.jsonl'), SOAK_WAITS: path.join(dir, 'waits.log') };
   writeFileSync(files.SOAK_CALLS, '');
   writeFileSync(files.SOAK_WAITS, '');
@@ -61,7 +61,7 @@ async function publishOnce(t, plan, { publish = [[0, 'published']], apiPort = tr
   const endTs = Math.floor(clock / 1000) + 10;
   await runPublisher({ repoRoot: REPO_ROOT, devnetDir: devnet, outDir: out, cli, intervalSec: 7,
     endTs, auth: 'fixture-token', round: 9,
-    env: { ...process.env, ...files, SOAK_PUBLISH: JSON.stringify(publish), SOAK_SHARE_RECOVERY_WAIT_SEC: '20' },
+    env: { ...process.env, ...ambient, ...files, SOAK_PUBLISH: JSON.stringify(publish), SOAK_SHARE_RECOVERY_WAIT_SEC: '20' },
   }, { now: () => clock, sleep: async ms => {
     if (ms === 7000) { clock = endTs * 1000; writeFileSync(files.SOAK_WAITS, '7\n'); }
   } });
@@ -251,4 +251,25 @@ test('a failure the planned restart excuses is reported but left out of the rate
   assert.deepEqual(run.Warn, ['PUBLISH followed 1 retryable share answer(s) and 1 share job(s) on 2 publish(es): i5 node2 x1 fail, i12 node1 x0 job succeeded 64s ok']);
   assert.match(run.Pass.join('\n'), /PUBLISH tolerated 2 failure\(s\) during planned node2 restart window/);
   assert.match(run.Pass.join('\n'), /PUBLISH success rate excluding planned restart window 18\/18/);
+});
+
+
+test('publish uses the same home and credentials as share despite conflicting ambient connection variables', async t => {
+  const other = await standInNode(t, { jobs: { 'publish-connection': ['succeeded'] } });
+  const clientModule = new URL('../../../packages/cli/dist/api-client.js', import.meta.url).href;
+  const cliSource = `(async () => {
+    const { ApiClient } = await import(${JSON.stringify(clientModule)});
+    const client = await ApiClient.connect();
+    await client.knowledgeAssetShareJob('publish-connection');
+    console.log('published');
+  })().catch(error => { console.error(error); process.exitCode = 1; });`;
+  const run = await publishOnce(t, { create: [sharedAnswer(201)], jobs: { 'publish-connection': ['succeeded'] } }, {
+    cliSource, ambient: { DKG_API_PORT: String(other.port), DKG_AUTH_TOKEN: 'wrong-token' },
+  });
+  assert.equal(run.rows[0].status, 'ok', run.rows[0].out);
+  assert.deepEqual(run.requests.map(({ method, path: route, auth }) => [method, route, auth]), [
+    ['POST', '/api/knowledge-assets', 'Bearer fixture-token'],
+    ['GET', '/api/knowledge-assets/swm/share-jobs/publish-connection', 'Bearer fixture-token'],
+  ]);
+  assert.deepEqual(other.requests, []);
 });

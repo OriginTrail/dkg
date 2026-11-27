@@ -26,7 +26,7 @@ export interface ShareJobsListResult {
   complete?: boolean;
 }
 
-export type ShareJobReference = string | { jobId?: string | null; url?: string };
+export type ShareJobReference = string | { jobId: string; url?: string } | { jobId?: string | null; url: string };
 
 /** Retained recovery URLs stay relative to this client's daemon and canonical job route. */
 export function shareJobPath(reference: ShareJobReference): string {
