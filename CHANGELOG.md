@@ -9,50 +9,105 @@ All notable changes to the DKG V10 node are documented here. The format is based
 - `localAgentIntegrations.hermes.responseTimeoutMs` configures the Hermes response
   deadline for streaming and non-streaming requests (default 900000 ms, maximum
   86400000 ms).
+### Fixed
+
+- A git-based update whose build fails now logs the last 30 lines of stdout
+  and stderr, so an error reported by pnpm identifies the failed package.
+  Output excerpts are bounded and terminal control sequences are stripped.
+
+## [10.1.3] - 2026-11-27
+
+10.1.3 fixes problems found since 10.1.2. Publications confirmed on chain
+no longer stay pending over a different spelling of the same text, shares
+on the default store finish sooner, and Hermes and OpenClaw chat streams
+stay open behind proxies. A node's supervisor no longer gives up for good
+after crashes spread over weeks. Operators can retire an obsolete failed
+share, clients can seal a draft only if it is still the one they read, and
+the context-graph list takes opt-in filters.
+
+### Added
+
+- Node operators can retire one obsolete failed share job without running
+  it again. `GET /api/knowledge-assets/swm/share-jobs/{jobId}/retire` shows
+  the job's graph, asset, agent, seal and operation, and a `POST` to the
+  same path with the job's digest and an acknowledgment of unknown effects
+  retires it. The node checks the job again, keeps a durable retirement
+  receipt and takes the job out of the share queue. Other callers get
+  `403`, a changed job `409`, and a store without atomic conditional
+  updates `501`. See "When a failed share is obsolete" in the async queue
+  operations guide.
+- `POST /api/knowledge-assets/{name}/wm/finalize-guarded` seals a
+  working-memory draft only if it is still the draft the caller read. The
+  caller names the author, graph, predecessor, and the digest and counts of
+  the public and private draft. A stale request answers `409`, and the same
+  request again recovers the original seal. The existing finalize route is
+  unchanged.
+- `GET /api/context-graph/list` takes three opt-in query parameters:
+  `named=true` lists only the graphs the node knows by name, `system=false`
+  leaves out the system graphs, and `onChain=false` leaves the `onChain`
+  field out of each row. A request without them gets the same answer as
+  before, and any other value answers `400` with
+  `CONTEXT_GRAPH_LIST_FILTER_INVALID`.
 
 ### Changed
 
-- Nodes no longer serve the legacy publish protocol `/dkg/10.0.0/publish`,
-  which nothing has sent on since publishing moved to the V10 lifecycle and
-  StorageACK. Tentative publishes that an earlier version journaled are
-  still restored at start, and confirmed or expired as before.
-- VERIFY approvals (`dkg verify`, `POST /api/verify`) use a new signing
-  format. Approvers and proposers on earlier versions do not count each
-  other's approvals, so until every approver runs this release, a batch
-  reaches quorum only among upgraded nodes and is otherwise stamped
-  partially verified or self-attested, as when approvals are missing.
-- The daemon does not start when API authentication is off
-  (`auth.enabled: false`) and `apiHost` is not a loopback address, such as
-  `0.0.0.0`, `::`, a LAN address or a host name other than `localhost`.
-  `daemon.log` says why the node stopped: turn authentication back on, or
-  set `apiHost` to `127.0.0.1`.
-- Blazegraph setup no longer reuses or restarts an existing DKG Blazegraph
-  container that publishes its port beyond this host's loopback interface
-  (`0.0.0.0`, `::`, another address, or the host's network), as containers
-  created before 7 Aug 2026 do. Setup stops and says how to recreate the
-  container on `127.0.0.1`: with `docker rm -f <container>` and setup again
-  when the journal is in the container's named volume, and after a backup
-  otherwise. To check a running node, `docker port <container>` should list
-  only `127.0.0.1`.
-- The daemon logs a `WARNING` at start-up when `apiHost` is not a loopback
-  address, and a second one when CORS allows every origin there:
-  `apiHost: "0.0.0.0"` with `corsOrigins` unset, or `corsOrigins: "*"`.
-  Keep the API on `127.0.0.1`, reach the node from elsewhere through a
-  reverse proxy that terminates TLS, and set `corsOrigins` to the origins
-  that need the API.
-- Gossip runs on gossipsub 17.2.1 (was 16.1.1), which limits the topic
-  subscriptions it records for each peer. The node records up to 2 MiB of
-  topics per peer on the mainnets, about 1,500 to 1,850 DKG topics, and
-  8 MiB elsewhere, about 6,000 to 7,400. gossipsub's 1 MiB default holds
-  fewer than a testnet Core node subscribes to. The node leaves a peer out
-  of its publishes on topics beyond the limit. Nodes on 16.1.1 and 17.2.1
-  share one gossip mesh.
+- On the default embedded store (`oxigraph-worker`), a share waits for two
+  whole-store snapshot writes instead of three, and an async share for four
+  instead of five. On a store of 310,000 quads, sharing a small asset took
+  a median of 2.3 s instead of 3.2 s. Blazegraph and `oxigraph-server`
+  persist each write anyway, so nothing changes there.
+- The node UI uses React Router 7.18.6, which includes the upstream
+  security fixes for links, navigation and redirects.
 
-## [10.1.1] - Unreleased
+### Fixed
 
-10.1.1 is the first 10.1 release for mainnet: nodes moving from 10.0.27
-also get everything in 10.1.0 below. It fixes problems found while 10.1.0
-ran on testnet, in the Marketplace, the MCP server and the public catalog.
+- A publication confirmed on chain no longer stays pending when the store
+  returns a literal spelled differently from the original, such as decoded
+  Unicode in place of an N-Triples escape. Recovery checks the original
+  operation snapshot against the recorded counts, the sealed Merkle root
+  and every triple, and finishes the publication with its original asset,
+  version and transaction. It sends no new transaction.
+- Durable recovery on a Core keeps a graph-scoped copy the node already
+  holds, and logs `outcome=unchanged`, instead of writing every asset
+  again. This takes most of the store work off busy Cores, so they answer
+  StorageACKs sooner.
+- A VERIFY proposer counts an approval only from an approver that
+  submission accepts: one signed in the current format by the address it
+  names, with an identity in the sharding table other than the proposer's
+  own. Approvals that submission would drop no longer end collection early,
+  so a batch reaches quorum when enough eligible approvals arrive in time.
+- An owed public share is kept when the node can't read its graph's access
+  policy, and goes out on a later pass. Before, a passing store error
+  deleted it. It still expires after 30 minutes, and a share for a private
+  graph is still dropped.
+- The daemon supervisor forgives earlier crashes once a worker has run for
+  10 minutes, so crashes spread over weeks no longer leave a node down for
+  good. Five crashes with no 10-minute run between them still stop it, and
+  the supervisor then exits with a non-zero code instead of 0, so a service
+  manager sees the failure.
+- Hermes and OpenClaw chat streams stay connected behind reverse proxies
+  and CDNs while the agent works with tools before it writes. The daemon
+  sends the response head at once, with `Cache-Control: no-cache,
+  no-transform` and `X-Accel-Buffering: no`, and a keepalive comment every
+  15 s.
+- The MCP share tool (`dkg_knowledge_asset_share`) names a pending catalog
+  handoff in its reply, with its reason and the recovery job that completes
+  it, as `dkg ka share` does.
+
+### Tests and tooling
+
+- Package certification allows 180 s for each Docker cleanup step, and
+  `DKG_PACKAGE_CERTIFICATION_CLEANUP_TIMEOUT_MS` sets another limit.
+- The devnet SWM soak counts a write as accepted once its retryable share
+  job has succeeded.
+
+## [10.1.2] - 2026-11-23
+
+10.1.2 is the first 10.1 release for mainnet: nodes moving from 10.0.27
+also get everything in 10.1.0 below. 10.1.1 was prepared but not
+published, so its changes are listed here. It fixes problems found while
+10.1.0 ran on testnet, in the Marketplace, the MCP server and the public
+catalog.
 It gives the node UI a new design system and makes a scoped query cost what
 the context graph it reads costs. It also adds merged view queries and a
 developer preview of Graph Computer Programs, both off until a node turns
@@ -126,6 +181,41 @@ no marketplace contracts yet.
 
 ### Changed
 
+- Nodes no longer serve the legacy publish protocol `/dkg/10.0.0/publish`,
+  which nothing has sent on since publishing moved to the V10 lifecycle and
+  StorageACK. Tentative publishes that an earlier version journaled are
+  still restored at start, and confirmed or expired as before.
+- VERIFY approvals (`dkg verify`, `POST /api/verify`) use a new signing
+  format. Approvers and proposers on earlier versions do not count each
+  other's approvals, so until every approver runs this release, a batch
+  reaches quorum only among upgraded nodes and is otherwise stamped
+  partially verified or self-attested, as when approvals are missing.
+- The daemon does not start when API authentication is off
+  (`auth.enabled: false`) and `apiHost` is not a loopback address, such as
+  `0.0.0.0`, `::`, a LAN address or a host name other than `localhost`.
+  `daemon.log` says why the node stopped: turn authentication back on, or
+  set `apiHost` to `127.0.0.1`.
+- Blazegraph setup no longer reuses or restarts an existing DKG Blazegraph
+  container that publishes its port beyond this host's loopback interface
+  (`0.0.0.0`, `::`, another address, or the host's network), as containers
+  created before 7 Aug 2026 do. Setup stops and says how to recreate the
+  container on `127.0.0.1`: with `docker rm -f <container>` and setup again
+  when the journal is in the container's named volume, and after a backup
+  otherwise. To check a running node, `docker port <container>` should list
+  only `127.0.0.1`.
+- The daemon logs a `WARNING` at start-up when `apiHost` is not a loopback
+  address, and a second one when CORS allows every origin there:
+  `apiHost: "0.0.0.0"` with `corsOrigins` unset, or `corsOrigins: "*"`.
+  Keep the API on `127.0.0.1`, reach the node from elsewhere through a
+  reverse proxy that terminates TLS, and set `corsOrigins` to the origins
+  that need the API.
+- Gossip runs on gossipsub 17.2.1 (was 16.1.1), which limits the topic
+  subscriptions it records for each peer. The node records up to 2 MiB of
+  topics per peer on the mainnets, about 1,500 to 1,850 DKG topics, and
+  8 MiB elsewhere, about 6,000 to 7,400. gossipsub's 1 MiB default holds
+  fewer than a testnet Core node subscribes to. The node leaves a peer out
+  of its publishes on topics beyond the limit. Nodes on 16.1.1 and 17.2.1
+  share one gossip mesh.
 - A scoped query costs what the context graph it reads costs: it finds its
   graphs in the node's graph catalog instead of listing the whole store. A
   caller's byte budget covers only the reads made for its own query.

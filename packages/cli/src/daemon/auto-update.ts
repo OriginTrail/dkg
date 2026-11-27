@@ -74,6 +74,7 @@ import {
   fetchNpmDistTags,
 } from '../update/npm-registry.js';
 import { cleanGeneratedOutputs, cleanStaleWorkspacePackages } from './auto-update-workspace-clean.js';
+import { buildStepFailureSummary, buildStepOutputLines } from './auto-update-build-output.js';
 import {
   checkForNpmVersionUpdate as checkForNpmVersionUpdateShared,
   getCurrentCliVersion as getCurrentCliVersionShared,
@@ -738,8 +739,9 @@ export async function runBuildStep(
       (typeof err?.message === 'string' && /timed? ?out/i.test(err.message));
     opts.log(
       `Auto-update: build step "${opts.label}" failed after ${elapsedMs}ms` +
-        `${timedOut ? ` (timeout ${opts.timeoutMs}ms)` : ''} — ${err?.message ?? String(err)}`,
+        `${timedOut ? ` (timeout ${opts.timeoutMs}ms)` : ''} — ${buildStepFailureSummary(err)}`,
     );
+    for (const line of buildStepOutputLines(opts.label, err)) opts.log(line);
     if (timedOut) {
       sweepOrphanBuildProcesses(opts.cwd, opts.log);
     }
@@ -1179,12 +1181,12 @@ async function _performUpdateInner(
       );
     } catch (markItDownErr: any) {
       log(
-        `Auto-update: MarkItDown staging failed in slot ${target} — ${markItDownErr.message}. Continuing without document conversion on this node.`,
+        `Auto-update: MarkItDown staging failed in slot ${target} — ${buildStepFailureSummary(markItDownErr)}. Continuing without document conversion on this node.`,
       );
     }
   } catch (err: any) {
     log(
-      `Auto-update: build failed in slot ${target} — ${err.message}. Active slot untouched.`,
+      `Auto-update: build failed in slot ${target} — ${buildStepFailureSummary(err)}. Active slot untouched.`,
     );
     return "failed";
   }
