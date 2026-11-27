@@ -130,6 +130,7 @@ export const RELEASE_CLI_RUNTIME_PACKAGE_CLOSURE = Object.freeze([
   { name: '@origintrail-official/dkg-graph-viz', path: 'packages/graph-viz/dist' },
   { name: '@origintrail-official/dkg-http-utils', path: 'packages/http-utils/dist' },
   { name: '@origintrail-official/dkg-local-llm', path: 'packages/local-llm/dist' },
+  { name: '@origintrail-official/dkg-marketplace', path: 'packages/marketplace/dist' },
   { name: '@origintrail-official/dkg-mcp', path: 'packages/mcp-dkg/dist' },
   { name: '@origintrail-official/dkg-node-store', path: 'packages/node-store/dist' },
   { name: '@origintrail-official/dkg-node-ui', path: 'packages/node-ui/dist' },

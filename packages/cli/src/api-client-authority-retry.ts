@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { Dispatcher } from 'undici';
+
 import {
   DAEMON_AUTHORITY_UNAVAILABLE_CODE,
   DAEMON_RETRYABLE_AUTHORITY_CODES,
@@ -28,6 +30,8 @@ const AUTHORITY_RETRY_DEADLINE_MARGIN_MS = 1_000;
 export interface RequestDeadline {
   /** Overrides the method's default deadline. */
   timeoutMs?: number;
+  /** Keep transport header/body timers beyond a long request's application deadline. */
+  dispatcher?: Dispatcher;
   /**
    * Set on the long Knowledge Asset mutations: a timeout then throws
    * `DaemonOutcomeUnknownError` carrying this hint.

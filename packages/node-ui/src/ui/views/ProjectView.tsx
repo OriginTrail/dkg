@@ -1,9 +1,11 @@
-import { useMemo, useState, useCallback, useEffect, useRef } from 'react';
+import { useMemo, useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import { useFetch } from '../hooks.js';
+import { ProgramEditorDialog } from '../components/Programs/ProgramEditorDialog.js';
 import { useMemoryEntityDetails } from '../hooks/useMemoryEntityDetails.js';
 import { api } from '../api-wrapper.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
-import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
+import { VmReceiptsProvider, useVmReceiptsResource } from '../hooks/useVmReceipts.js';
+import { isUserFacingSubGraph } from '../lib/subGraphs.js';
 import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
 import {
@@ -20,7 +22,7 @@ import { ActivityFeed } from '../components/ActivityFeed.js';
 import { MemoryReadStatus } from '../components/MemoryReadStatus.js';
 import { SubGraphBar } from '../components/SubGraphBar.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from '../lib/contextGraphPrimer.js';
-import { useTabsStore } from '../stores/tabs.js';
+import { chooseTab as openTab } from '../lib/shellNavigation.js';
 import { shouldFetchSwmAttribution, useCanonicalTriples, type LayerView, type LayerContentTab, type SubGraphTab } from './project/helpers.js';
 import {
   ProjectHeaderStrip,
@@ -36,10 +38,13 @@ import {
   ContextGraphQueryView,
   LayerDetailView,
 } from './project/components.js';
+import { RefreshCw } from 'lucide-react';
+import { Loading } from '../components/ds/Loading.js';
 
 interface ProjectViewProps {
   contextGraphId: string;
 }
+
 
 type MemoryLayerView = Extract<LayerView, 'wm' | 'swm' | 'vm'>;
 type ParticipantsStatus = 'loading' | 'ok' | 'error';
@@ -103,13 +108,17 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     [],
     30_000,
   );
+  // One receipt load per graph, shared by the VM header facts and graph anchors.
+  const vmReceipts = useVmReceiptsResource(contextGraphId);
   const [showImport, setShowImport] = useState(false);
+  const [showProgramEditor, setShowProgramEditor] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [activeLayer, setActiveLayer] = useState<LayerView>('overview');
   const [showQueryCatalog, setShowQueryCatalog] = useState(false);
   const [selectedUri, setSelectedUri] = useState<string | null>(null);
   useEffect(() => {
     setShowQueryCatalog(false);
+    setShowProgramEditor(false);
   }, [contextGraphId]);
   const [participantsState, setParticipantsState] = useState<ParticipantsState>({
     contextGraphId: null,
@@ -210,13 +219,12 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     DEFAULT_LAYER_TABS,
   );
   const [subGraphTabs, setSubGraphTabs] = useState<Record<string, SubGraphTab>>({});
-  const pageRef = useRef<HTMLElement | null>(null);
+  const pageRef = useRef<HTMLDivElement | null>(null);
   const detailOriginRef = useRef<DetailOrigin | null>(null);
   const pendingScrollRestoreRef = useRef<DetailOrigin['scroll'] | null>(null);
   const participantsRequestRef = useRef(0);
   const profile = useProjectProfile(contextGraphId);
   const agentsData = useAgents(contextGraphId);
-  const openTab = useTabsStore((s) => s.openTab);
   const { data: currentAgent, loading: currentAgentLoading, error: currentAgentError } = useCurrentAgent();
 
   const currentScrollKey = useCallback(() => {
@@ -469,6 +477,26 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const detailRead = useMemoryEntityDetails(contextGraphId, selectedUri, selectedLayerContext, includeQueryCatalogInMemory, rawMemory);
   const { entity: selectedEntity, entities: detailEntities, triples: detailTriples } = detailRead;
 
+  // Context Graph navigation happens inside one persistent ProjectView, so the
+  // shell-level page transition cannot distinguish its layers, subgraphs,
+  // entities, or content tabs. Replay a scoped animation on the existing page
+  // element instead of keying/remounting it; graph state and scroll restoration
+  // remain intact while each internal destination gets a visual transition.
+  const contextPageTransitionKey = selectedEntity
+    ? `entity:${selectedUri ?? selectedEntity.uri}`
+    : activeSubGraph
+      ? `subgraph:${activeSubGraph}:${subGraphTabs[activeSubGraph] ?? 'items'}`
+      : isMemoryLayerView(activeLayer)
+        ? `layer:${activeLayer}:${layerContentTabs[activeLayer]}`
+        : `layer:${activeLayer}`;
+  useLayoutEffect(() => {
+    const page = pageRef.current;
+    if (!page) return;
+    page.classList.remove('v10-context-page-enter');
+    void page.offsetWidth;
+    page.classList.add('v10-context-page-enter');
+  }, [contextPageTransitionKey]);
+
   // Route a sub-graph chip click to the sub-graph page. Selecting "All"
   // (null) exits the page back to the current layer view, or overview if
   // we were already on one. The optional `originatingLayer` carries the
@@ -682,20 +710,20 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     if (cgError || (cgData && !cgLoading)) {
       return (
         <div className="v10-view-placeholder">
-          <p style={{ color: 'var(--text-tertiary)', fontSize: 12, marginBottom: 10 }}>
+          <p className="v10-project-note">
             {cgError
               ? cgAuthError
                 ? cgError
-                : 'Failed to load context graph.'
+                : 'Couldn’t load context graph.'
               : 'Context graph not found.'}
           </p>
           {cgAuthError ? (
-            <button type="button" className="v10-retry-btn" onClick={() => window.location.reload()}>
-              Refresh page
+            <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={() => window.location.reload()}>
+              <RefreshCw size={12} />Refresh page
             </button>
           ) : (
-            <button type="button" className="v10-retry-btn" onClick={refreshContextGraphs}>
-              Retry
+            <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={refreshContextGraphs}>
+              <RefreshCw size={12} />Retry
             </button>
           )}
         </div>
@@ -703,7 +731,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     }
     return (
       <div className="v10-view-placeholder">
-        <p style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>Loading context graph...</p>
+        <Loading label="Loading context graph…" />
       </div>
     );
   }
@@ -739,6 +767,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
 
   return (
     <ProjectProfileContext.Provider value={profile}>
+    <VmReceiptsProvider value={vmReceipts}>
     <AgentsContext.Provider value={agentsContextValue}>
     <div className="v10-memory-explorer">
       <MemoryReadStatus memory={rawMemory} />
@@ -752,15 +781,15 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           {cgAuthError ? (
             <>
               <span>{cgError}</span>
-              <button type="button" className="v10-retry-btn" onClick={() => window.location.reload()}>
-                Refresh page
+              <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={() => window.location.reload()}>
+                <RefreshCw size={12} />Refresh page
               </button>
             </>
           ) : (
             <>
               <span>Couldn’t refresh context-graph data — showing last known values.</span>
-              <button type="button" className="v10-retry-btn" onClick={refreshContextGraphs}>
-                Retry
+              <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={refreshContextGraphs}>
+                <RefreshCw size={12} />Retry
               </button>
             </>
           )}
@@ -785,16 +814,17 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         onSwitch={handleLayerSwitch}
         onShare={() => setShowShare(true)}
         onImport={() => setShowImport(true)}
-        onRefresh={rawMemory.refresh}
+        onNewProgram={() => setShowProgramEditor(true)}
+        onRefresh={() => { rawMemory.refresh(); vmReceipts.refresh(); }}
       />
 
-      <main className="v10-memory-explorer-page" data-view={activePage} data-cg-scroll-key="page" ref={pageRef}>
+      <div className="v10-memory-explorer-page v10-context-page-enter" data-view={activePage} data-cg-scroll-key="page" ref={pageRef}>
       {selectedUri && (detailRead.loading || detailRead.error || detailRead.partial || !selectedEntity) && (
         <div className="v10-layer-action-note" role="status">
           {detailRead.loading ? 'Loading resource details…' : detailRead.error ?? (detailRead.partial
             ? 'The resource detail read reached its limit. Some relationships may be missing. Use a narrower query to inspect them.'
             : 'This resource is referenced here, but has no details in this view.')}
-          {detailRead.error && <button onClick={detailRead.refresh}>Retry resource details</button>}
+          {detailRead.error && <button onClick={detailRead.refresh}><RefreshCw size={12} />Retry resource details</button>}
           {!selectedEntity && <button onClick={handleDetailClose}>Close resource</button>}
         </div>
       )}
@@ -807,7 +837,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           onNavigate={handleNavigate}
           onClose={handleDetailClose}
           contextGraphId={contextGraphId}
-          onRefresh={() => { rawMemory.refresh(); detailRead.refresh(); }}
+          onRefresh={() => { rawMemory.refresh(); detailRead.refresh(); vmReceipts.refresh(); }}
         />
       )}
 
@@ -852,7 +882,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       )}
 
       {/* Overview View — S2 finalize section order (§4.2.1):
-          identity row + At a glance + Knowledge Pipeline + Participant
+          identity row + At a glance + Knowledge pipeline + Participant
           agents live inside ProjectOverviewCard. Pending join requests
           is a peer section below it (curator-only). Recent activity
           moves to the last content row before the primer escape hatch
@@ -881,7 +911,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             onParticipantsChanged={refreshParticipants}
           />
           {rawMemory.loading && (
-            <div className="v10-me-loading"><div className="v10-me-loading-text">Loading memory...</div></div>
+            <Loading block label="Loading memory…" />
           )}
           {rawMemory.error && (
             <div className="v10-me-error">Error: {rawMemory.error}</div>
@@ -956,7 +986,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         </>
       )}
 
-      </main>
+      </div>
 
       <ImportFilesModal
         open={showImport}
@@ -964,6 +994,8 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         contextGraphId={cg.id}
         contextGraphName={cg.name}
       />
+      <ProgramEditorDialog open={showProgramEditor} contextGraphId={contextGraphId} onClose={() => setShowProgramEditor(false)}
+        onSaved={rawMemory.refresh} onExecution={(iri, layer) => { setShowProgramEditor(false); handleNavigate(iri, undefined, layer); }} />
       <ShareProjectModal
         open={showShare}
         onClose={() => setShowShare(false)}
@@ -972,6 +1004,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       />
     </div>
     </AgentsContext.Provider>
+    </VmReceiptsProvider>
     </ProjectProfileContext.Provider>
   );
 }

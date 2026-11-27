@@ -106,6 +106,69 @@ dkg publisher clear failed
 
 It keeps failed jobs that may still have a transaction on chain.
 
+## Updating from 10.0.27
+
+10.1.0 needs no new setting. A node that does not opt in to the marketplace
+gets no store migration or schema change, and its `config.json` works as it
+is.
+
+- **The NeuroSymbolic Marketplace is available on testnet.** Its contracts
+  are deployed on Base Sepolia, and a node opts in through `config.json`:
+  - Buying: set `marketplace.enabled` to `true`. The node then buys
+    inference through its OpenAI-compatible gateway under
+    `/api/marketplace/v1`, which takes `dkgmk_` access keys.
+  - Selling: set `marketplace.seller.enabled` to `true` and configure an
+    inference backend for each service under `marketplace.seller.services`.
+    A seller serves only while its node is a Core Node.
+  - Sellers publish their offers to the Verifiable Memory of the
+    Marketplace Context Graph, and buyers read them there. Publishing an
+    offer is a publish on chain and costs TRAC; until an offer is listed,
+    its offering's `listing` in `GET /api/marketplace/seller` says why. A
+    testnet node uses the testnet Marketplace Context Graph,
+    `testnet-marketplace`, by default; set `marketplace.contextGraphId`
+    only to use another graph.
+  - With both unset, the node starts no marketplace work, and the
+    `/api/marketplace` routes answer that the marketplace is off.
+  - On mainnet the marketplace stays inactive until its contracts are
+    deployed there.
+- **What the marketplace does when it is busy or fails to start.**
+  - A busy gateway answers with a `Retry-After` header: 429 `budget_busy`
+    when too many calls wait on one service, or 503 `gateway_busy` when the
+    gateway holds as many calls as it takes. A client should wait that long
+    and try again.
+  - Subscription top-ups are idempotent per key. A top-up that carries an
+    `idempotencyKey` is sent at most once for that key, and a repeat gets
+    the first answer, also after a restart.
+  - If buying or selling fails to start, that part stays off and the node
+    keeps running. The log says why.
+- **The node UI has a new look.** Its Marketplace section stays hidden
+  until you open the node UI once with `?marketplace` in its address; that
+  browser then keeps showing it.
+- **RPC usage diagnostics report vocabulary version 4.**
+  `GET /api/diagnostics/rpc-usage` reports `consumerVocabularyVersion` 4,
+  which adds the marketplace's contract lookups and views to its consumer
+  labels. A tool that reads the snapshot and pins those labels should
+  accept version 4.
+- **A new optional setting for new Edges, `publicSnapshotBootstrap`.** It
+  sets up the experimental public snapshot bootstrap for a new Edge and
+  refuses a data directory that is already in use, so it does not affect a
+  node that updates. Leave it unset unless you are setting up a new Edge
+  this way.
+- **A new optional setting for nodes with a remote signer,
+  `chain.signer.nodeHeldAuthor`.** It is off by default. With it on, the
+  node's own agent keys author, and the remote signer signs payer
+  transactions only; see
+  [Authors held on the node](external-signer.md#authors-held-on-the-node).
+
+Going back to 10.0.27 works with `dkg rollback`. No store moves to a new
+schema in 10.1.0, so `dkg rollback` leaves the stores as they are. 10.0.27
+ignores the `marketplace` block in `config.json` and the `marketplace`
+folder in the node's data directory. On a node that sells, run
+`dkg marketplace seller land` before you roll back: a seller's receipts
+land only during their epoch. 10.0.27 refuses `chain.signer.nodeHeldAuthor`
+as an unknown setting and does not start with it, so remove it from
+`config.json` before you roll back.
+
 ## Updating from 10.0.26
 
 The first release after 10.0.26 changes two things to check before you update.
@@ -135,12 +198,13 @@ you start 10.0.26 that you installed by hand, run
 
 ## Node.js security releases
 
-Node.js 22.23.4, 24.22.1 and 26.12.1, released on 21 October 2026, fix
-CVE-2026-111497, an out-of-bounds write in the Brotli decoder that Node.js
-bundles. Upgrade Node.js on every host that runs a node to one of these
-releases or a later one on the same line. The 23 and 25 lines get no fix:
-move to 22, 24 or 26. A running node keeps the Node.js it started with, so
-restart it after the upgrade.
+Run every node on Node.js 22.23.5, 24.22.3 or 26.13.1, or a later release on
+the same line. These are the
+[Node.js security releases of 11 November 2026](https://nodejs.org/en/blog/vulnerability/november-2026-security-releases),
+and they include the fixes of the earlier security releases on their line.
+`dkg start` and `dkg doctor` warn when a node runs an older release. The 23
+and 25 lines get no fixes: move to 22, 24 or 26. A running node keeps the
+Node.js it started with, so restart it after the upgrade.
 
 On a host that installs Node.js from NodeSource packages:
 
@@ -154,5 +218,8 @@ Then restart the node: `dkg stop` and `dkg start`, or restart the service that
 runs it. `dkg status` shows the Node.js release the running daemon uses on its
 `Runtime:` line.
 
-From 10.0.26 a node also refuses Brotli-encoded responses on its outbound HTTP
-requests. That is defence in depth and does not replace the upgrade.
+The earlier Node.js security releases of 21 October 2026 (22.23.4, 24.22.1 and
+26.12.1) fixed CVE-2026-111497, an out-of-bounds write in the Brotli decoder
+that Node.js bundles. From 10.0.26 a node also refuses Brotli-encoded responses
+on its outbound HTTP requests. That is defence in depth and does not replace
+the upgrade.

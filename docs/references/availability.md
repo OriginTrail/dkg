@@ -25,6 +25,7 @@ Use the running node's version and discovered capabilities. A supported baseline
 | [Local models](../use-dkg/local-llm.md) | released baseline | 10.0.23 | Source reviewed; model execution pending | DKG maintainers | 2026-10-13 |
 | [External signer](../use-dkg/external-signer.md) | source only | Not a released baseline | Merged after the validated 10.0.23 release ([PR #3177](https://github.com/OriginTrail/dkg/pull/3177)); runtime verification and a released minimum remain unclaimed | DKG maintainers | 2026-10-14 |
 | [Neuro-symbolic reasoning, GNNs, and marketplace direction](../how-dkg-works/roadmap-and-convergence.md) | proposal | Not a released baseline | Public architecture and RFC reviewed; integrated reasoning/GNN services not claimed as released | DKG maintainers | 2026-10-14 |
+| [Single-job queue cleanup CLI](../use-dkg/async-publisher-wallets.md) | source only | testnet-canary | CLI subprocess and authenticated loopback HTTP regression coverage; daemon refusal and offline-write boundaries covered | DKG maintainers | 2026-11-05 |
 <!-- END GENERATED: capabilities -->
 
 The recorded runtime checks used an isolated, unfunded Edge node, the published 10.0.23 package, Oxigraph, and testnet configuration with relays disabled. They establish local CLI/HTTP behavior, not peer replication, a framework conversation, production load, or paid on-chain publication. See the [validation record](https://github.com/OriginTrail/dkg/blob/main/docs/reports/docs-builder-validation.md).

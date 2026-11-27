@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
+import { SparqlTermValidationError } from '@origintrail-official/dkg-core';
 import { SparqlHttpStore } from '../src/index.js';
 import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
@@ -17,14 +18,19 @@ it('never claims that an aborted statement with an invalid term was sent', async
       queryEndpoint: 'http://aborted.test/query',
       updateEndpoint: 'http://aborted.test/update',
     });
-    await expect(store.dropGraph('http://ex.org/g^x', { signal: AbortSignal.abort() })).rejects.toThrow();
+    // A query keeps observe mode: the term is rendered, and the aborted call never dispatches it.
+    await expect(store.hasGraph('http://ex.org/g^x', { signal: AbortSignal.abort() })).rejects.toThrow();
+    // An update refuses the term before anything is built.
+    await expect(store.dropGraph('http://ex.org/g^y', { signal: AbortSignal.abort() }))
+      .rejects.toThrow(SparqlTermValidationError);
 
     expect(fetch).not.toHaveBeenCalled();
-    expect(observed.counted).toHaveLength(1);
+    expect(observed.counted).toHaveLength(2);
     expect(observed.warnings).toEqual([
       expect.stringContaining('Rendered it in the pre-validation form (observe mode)'),
+      expect.stringContaining('Rejected it (reject mode)'),
     ]);
-    expect(observed.warnings[0]).not.toMatch(/\bsent\b/i);
+    for (const warning of observed.warnings) expect(warning).not.toMatch(/\bsent\b/i);
   } finally {
     observed.restore();
   }

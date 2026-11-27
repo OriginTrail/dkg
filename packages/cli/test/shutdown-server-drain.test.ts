@@ -53,6 +53,7 @@ function shutdownCleanup(
 ): Promise<void> {
   const noop = async () => undefined;
   return runProducerQuiescentTeardown(buildProducerQuiescentTeardownSteps({
+    stopSemanticRuntime: async () => {},
     closeHttpServer: () => closeDaemonHttpServer(server, detachedResponses),
     closeEntitySearch: noop,
     closeLocalLlm: noop,
@@ -224,6 +225,7 @@ describe('HTTP callback draining during bounded shutdown', () => {
 
     const noop = async () => undefined;
     const cleanup = runProducerQuiescentTeardown(buildProducerQuiescentTeardownSteps({
+    stopSemanticRuntime: async () => {},
       closeHttpServer: () => closeDaemonHttpServer(server, detachedResponses),
       closeEntitySearch: noop,
     closeLocalLlm: noop,

@@ -786,8 +786,37 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
 
     const res = await localServer.call('dkg_knowledge_asset_share', { name: 'doc' });
     expect(res.isError).toBeFalsy();
-    expect(res.content[0].text).toContain('sealed:true, publish-ready');
+    expect(res.content[0].text).toBe("Shared complete knowledge asset 'doc' (project 'test-cg') to SWM (sealed:true, publish-ready).");
     expect(res.content[0].text).not.toContain('NOT publish-ready');
+  });
+
+  it('share names a pending catalog handoff and the recovery job that completes it, as the CLI does (#3364)', async () => {
+    const catalogHandoff = {
+      state: 'pending' as const,
+      reason: 'inactive-lane',
+      recoveryJobId: 'share-job-7',
+      recoveryStatusUrl: '/api/knowledge-assets/swm/share-jobs/share-job-7',
+    };
+    const replyTo = async (handoff: typeof catalogHandoff | Omit<typeof catalogHandoff, 'recoveryStatusUrl'>) => {
+      const localClient = new FakeClient({
+        knowledgeAssetShare: async () => ({
+          swmShared: true, promotedCount: 2, sealed: true, publishReady: true, shareOperationId: 'op-7', catalogHandoff: handoff,
+        }),
+      });
+      const localServer = new FakeServer();
+      registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+      const res = await localServer.call('dkg_knowledge_asset_share', { name: 'doc' });
+      expect(res.isError).toBeFalsy();
+      return res.content[0].text;
+    };
+
+    expect(await replyTo(catalogHandoff)).toBe(
+      "Shared complete knowledge asset 'doc' (project 'test-cg') to SWM (sealed:true, publish-ready). "
+      + 'Its catalog handoff is still pending (inactive-lane): recovery job share-job-7 completes it. '
+      + 'Follow it with dkg ka share-job share-job-7 or GET /api/knowledge-assets/swm/share-jobs/share-job-7.',
+    );
+    const { recoveryStatusUrl: _url, ...withoutUrl } = catalogHandoff;
+    expect(await replyTo(withoutUrl)).toMatch(/recovery job share-job-7 completes it\. Follow it with dkg ka share-job share-job-7\.$/);
   });
 
   it('share replaces obsolete UNSEALED_SHARE_BLOCKED recovery with atomic guidance (#1116)', async () => {

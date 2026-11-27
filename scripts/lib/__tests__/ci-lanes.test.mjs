@@ -19,6 +19,7 @@ test('topology keeps weighted runners, bounded supporting concurrency and utilit
   assert.equal(COVERAGE_JOBS['tornado-core']['http-utils'], 1);
   assert.equal(COVERAGE_JOBS['tornado-core']['rdf-utils'], 1);
   assert.equal(COVERAGE_JOBS['kosava-supporting']['kafka-source'], 1);
+  assert.equal(COVERAGE_JOBS['kosava-supporting'].marketplace, 1);
 });
 test('every executable topology lane has explicit inventory semantics', () => {
   for (const { job } of Object.values(CI_LANE_TOPOLOGY)) {
@@ -98,7 +99,7 @@ test('bounded supporting execution finishes every lane after failures and except
   } });
   assert.equal(status, 1);
   assert.equal(peak, 3);
-  assert.deepEqual(finished.sort(), Object.keys(COVERAGE_JOBS['kosava-supporting']).sort());
+  assert.deepEqual(finished.sort(), [...ciJobRow('kosava-supporting', 0).packages].sort());
   assert.equal(await runVitestLanes('bura-supporting', 3, { execute: async () => 0 }), 0);
   await assert.rejects(runVitestLanes('tornado-agent'), /unsharded/);
   await assert.rejects(runVitestLanes('kosava-supporting', 0), /concurrency/);

@@ -245,7 +245,7 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import {
   createRetireConfirmedGraphScopedSwmTwinIfOrphaned,
-  reconcileFinalizedSwmTwinFromCatalogProjection,
+  reconcileFinalizedSwmTwinFromProjection,
 } from
   './sync/requester/finalized-swm-twin-reconciliation.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
@@ -2125,7 +2125,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
             };
           })(),
           reconcileConfirmedGraphScopedSwmTwin: async (evidence, ctx) => {
-            const retirement = await reconcileFinalizedSwmTwinFromCatalogProjection({
+            const retirement = await reconcileFinalizedSwmTwinFromProjection({
               store: this.store,
               writeLocks: this.writeLocks,
               evidence,

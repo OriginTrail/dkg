@@ -1051,6 +1051,7 @@ describe('A11 — instrumentation never breaks the route or the drain', () => {
  */
 const TEARDOWN_ORDER = [
   'closeServer',
+  'stopSemanticRuntime',
   'closeEntitySearch',
   'closeLocalLlm',
   'drainCatchupJobs',
@@ -1087,6 +1088,7 @@ describe('A24 — producer-quiescent teardown order', () => {
     await runProducerQuiescentTeardown({
       ...steps,
       closeServer: async () => { events.push('closeServer'); },
+      stopSemanticRuntime: async () => { events.push('stopSemanticRuntime'); },
       closeEntitySearch: async () => { events.push('closeEntitySearch'); },
       closeLocalLlm: async () => { events.push('closeLocalLlm'); },
       drainCatchupJobs: async () => { await sleep(1); events.push('drainCatchupJobs'); },
@@ -1349,6 +1351,7 @@ describe('A24 — teardown WIRING: every slot dispatches to the dep it names', (
         closeHttpServer: async () => {
           calls.push('closeHttpServer');
         },
+        stopSemanticRuntime: async () => { calls.push('stopSemanticRuntime'); },
         closeEntitySearch: async () => { calls.push('closeEntitySearch'); },
         closeLocalLlm: async () => {
           calls.push('closeLocalLlm');
@@ -1411,6 +1414,7 @@ describe('A24 — teardown WIRING: every slot dispatches to the dep it names', (
     // the sequencer's per-step guard covers each of them individually.
     expect(dispatched).toEqual([
       ['closeServer', ['closeHttpServer']],
+      ['stopSemanticRuntime', ['stopSemanticRuntime']],
       ['closeEntitySearch', ['closeEntitySearch']],
       ['closeLocalLlm', ['closeLocalLlm']],
       ['drainCatchupJobs', ['drainCatchupJobs']],

@@ -68,7 +68,11 @@ export function isRetryableContextGraphAuthorityUnavailableReason(
 
 export type ContextGraphAgentGateAuthority =
   | { kind: 'ungated' }
-  | { kind: 'available'; agentAddresses: string[] }
+  /**
+   * `conclusive`: the addresses are the graph's authoritative roster (its chain
+   * roster, or an accepted owner-signed one), which local metadata cannot widen.
+   */
+  | { kind: 'available'; agentAddresses: string[]; conclusive?: true }
   | {
       kind: 'unavailable';
       reason: ContextGraphAgentGateUnavailableReason;

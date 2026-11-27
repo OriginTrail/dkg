@@ -18,6 +18,8 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 
+import { buildOpenClawChannelHeaders } from './openclaw-channel-headers.js';
+export { buildOpenClawChannelHeaders, isOpenClawLoopbackUrl } from './openclaw-channel-headers.js';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   contextGraphAssertionUri,
@@ -331,7 +333,7 @@ export async function probeOpenClawChannelHealth(
 
     try {
       const healthRes = await fetch(target.healthUrl, {
-        headers: buildOpenClawChannelHeaders(target, bridgeAuthToken, { Accept: 'application/json' }),
+        headers: buildOpenClawChannelHeaders(target, bridgeAuthToken, target.healthUrl, { Accept: 'application/json' }),
         signal: AbortSignal.timeout(timeoutMs),
       });
       const body = await healthRes.text().catch(() => '');
@@ -510,15 +512,6 @@ export function shouldTryNextOpenClawTarget(status: number): boolean {
   return status === 404 || status === 405 || status === 501 || status === 503;
 }
 
-export function buildOpenClawChannelHeaders(
-  target: OpenClawChannelTarget,
-  bridgeAuthToken: string | undefined,
-  baseHeaders: Record<string, string> = {},
-): Record<string, string> {
-  if (target.name !== "bridge" || !bridgeAuthToken) return baseHeaders;
-  return { ...baseHeaders, "x-dkg-bridge-token": bridgeAuthToken };
-}
-
 export async function ensureOpenClawBridgeAvailable(
   target: OpenClawChannelTarget,
   bridgeAuthToken: string | undefined,
@@ -551,7 +544,7 @@ export async function ensureOpenClawBridgeAvailable(
 
   try {
     const healthRes = await fetch(target.healthUrl, {
-      headers: buildOpenClawChannelHeaders(target, bridgeAuthToken, {
+      headers: buildOpenClawChannelHeaders(target, bridgeAuthToken, target.healthUrl, {
         Accept: "application/json",
       }),
       signal: AbortSignal.timeout(3_000),

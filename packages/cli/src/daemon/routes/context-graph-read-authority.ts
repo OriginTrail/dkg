@@ -5,6 +5,7 @@ import {
   type ContextGraphAuthorityRpcSite,
 } from '@origintrail-official/dkg-chain';
 import { admitContextGraphReadCaller, type ContextGraphCallerReadAdmission } from '@origintrail-official/dkg-agent/dist/context-graph-read-authority.js';
+import { denyUnheldContextGraphRead } from '@origintrail-official/dkg-agent/dist/unheld-context-graph-read.js';
 import { resolveKnowledgeAssetRead, resolveKnowledgeAssetReadTarget, type KnowledgeAssetReadInput, type KnowledgeAssetReadTarget } from '@origintrail-official/dkg-agent/dist/knowledge-asset-read-resolution.js';
 import {
   jsonResponse,
@@ -24,14 +25,20 @@ export function hasNodeOperatorReadAccess(ctx: RequestContext): boolean {
     || (authentication.mode === 'disabled' && authentication.principal.kind === 'anonymous');
 }
 
-/** One caller-bound authority gate for daemon reads outside the scoped query engine. */
+/**
+ * One caller-bound authority gate for daemon reads outside the scoped query
+ * engine. A context graph this node holds nothing of is refused as a private
+ * one the caller may not read; while the chain cannot be read, the answer
+ * stays the retryable one every context graph gets.
+ */
 export async function requireContextGraphReadAuthority(
   ctx: RequestContext,
   contextGraphId: unknown,
   site: ContextGraphAuthorityRpcSite = CONTEXT_GRAPH_AUTHORITY_RPC_SITES.query,
 ): Promise<boolean> {
   return (await requireReadAuthority(ctx, contextGraphId, site, async (id, callerAgentAddress, signal) => ({
-    ...admitContextGraphReadCaller(await ctx.agent.resolveContextGraphReadAuthority(id, { callerAgentAddress, signal }), callerAgentAddress),
+    ...admitContextGraphReadCaller(await denyUnheldContextGraphRead(ctx.agent, id,
+      await ctx.agent.resolveContextGraphReadAuthority(id, { callerAgentAddress, signal }), { accessDenied: 'error', signal }), callerAgentAddress),
     value: true,
   }), async () => true)) !== null;
 }
@@ -44,7 +51,7 @@ export async function requireKnowledgeAssetRead(
   return requireReadAuthority(ctx, input.cg, CONTEXT_GRAPH_AUTHORITY_RPC_SITES.query, async (cg, callerAgentAddress, signal) => {
     const resolution = await resolveKnowledgeAssetRead(ctx.agent, { ...input, cg }, { callerAgentAddress, signal });
     return { ...resolution, value: resolution.target };
-  }, () => resolveKnowledgeAssetReadTarget(ctx.agent, input));
+  }, signal => resolveKnowledgeAssetReadTarget(ctx.agent, input, { signal }));
 }
 
 async function requireReadAuthority<T>(
@@ -52,15 +59,19 @@ async function requireReadAuthority<T>(
   contextGraphId: unknown,
   site: ContextGraphAuthorityRpcSite,
   resolveAuthority: (id: string, caller: string | undefined, signal: AbortSignal) => Promise<ContextGraphCallerReadAdmission & { value: T }>,
-  operatorValue: () => Promise<T>,
+  operatorValue: (signal: AbortSignal) => Promise<T>,
 ): Promise<T | null> {
   if (!validateRequiredContextGraphId(contextGraphId, ctx.res)) return null;
   const validatedId = contextGraphId as string;
   const actor = actorFromRequestContext(ctx);
-  if (hasNodeOperatorReadAccess(ctx)) return operatorValue();
   const lifecycle = createStoreQueryRequestLifecycle(ctx.req, ctx.res, 'api.context_graph.read_authority');
   try {
     lifecycle.signal.throwIfAborted();
+    if (hasNodeOperatorReadAccess(ctx)) {
+      const value = await operatorValue(lifecycle.signal);
+      lifecycle.signal.throwIfAborted();
+      return value;
+    }
     const resolution = await withRpcUsageSite(site, () => resolveAuthority(
       validatedId, actor.authenticatedAgentAddress, lifecycle.signal,
     ));

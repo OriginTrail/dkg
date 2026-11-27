@@ -16,6 +16,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   DKGAgent,
+  agentFromPrivateKey,
   computeWorkspaceEncryptionKeysAttestationDigest,
   signAgentDelegation,
   type ContextGraphJoinPolicyAuditEvent,
@@ -971,7 +972,7 @@ describe('context graph open enrollment policy', () => {
     })));
     (agent as any).contextGraphMetaProjection.markDirty(contextGraphId);
     expect((await agent.getCgMeta(contextGraphId)).allowedAgents.map((address: string) => address.toLowerCase()))
-      .toContain(listedElsewhere.agentAddress.toLowerCase());
+      .not.toContain(listedElsewhere.agentAddress.toLowerCase());
     const request = await agent.signJoinRequest(contextGraphId, listedElsewhere.agentAddress);
     await expect(agent.processIncomingJoinRequest(contextGraphId, request, listedElsewhere.name, agent.peerId))
       .resolves.toMatchObject({ status: 'pending' });
@@ -1062,6 +1063,7 @@ describe('context graph open enrollment policy', () => {
     await createPrivateCg(agent, contextGraphId, owner.agentAddress);
 
     const member = ethers.Wallet.createRandom();
+    await (agent as any).persistAgentToStore(agentFromPrivateKey(member.privateKey, 'member'));
     await agent.inviteAgentToContextGraph(contextGraphId, member.address, owner.agentAddress);
     const delegateePeerId = '12D3KooWOpenEnrollmentMemberPeer';
     const delegateeOpKey = ethers.Wallet.createRandom().address;

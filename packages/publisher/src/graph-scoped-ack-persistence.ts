@@ -6,6 +6,7 @@ import { tryReplaceGraphWithDurableRootCompanionAtomically, type DurableRootAtom
 import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
 import { acceptIncomingPublicQuads } from './incoming-public-copy.js';
 import { generateKnowledgeAssetShareMetadata } from './metadata.js';
+import { assertWritableQuadTerms } from './validation.js';
 import { storageAckOperationId, storageAckOwedCopiesByScopeQuery, STORAGE_ACK_LEDGER_PREDICATES, STORAGE_ACK_LEDGER_GRAPH, xsdDateTimeLiteral, storageAckLedgerRecordUpdate, storageAckLedgerEntryQuads, type StorageAckLedgerEntry } from './storage-ack-ledger.js';
 import { planStorageAckHeadPersistence, type StorageAckRequestContext } from './storage-ack-head-policy.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
@@ -85,7 +86,13 @@ function graphACKStoreOptions(source: string, signal?: AbortSignal): QueryOption
   return { priority: 'ack', source, ...(signal ? { signal } : {}) };
 }
 
+/**
+ * A malformed term is a bad request, not a store outage: the ACK handlers run
+ * this before the store wrapper, so the request is refused (stream reset), not
+ * declined as a transient failure.
+ */
 export function assertPersistQuadTermsSafe(quads: Quad[]): void {
+  assertWritableQuadTerms(quads);
   for (const q of quads) {
     assertSafeIri(q.subject);
     assertSafeIri(q.predicate);
@@ -599,6 +606,7 @@ export class GraphScopedACKPersistence {
           // graph-set index current with one bounded probe; an undeclared
           // update makes the next graph listing rescan the whole store.
           touchedGraphs: [STORAGE_ACK_LEDGER_GRAPH],
+          writtenGraphs: [STORAGE_ACK_LEDGER_GRAPH],
         },
       );
       return;

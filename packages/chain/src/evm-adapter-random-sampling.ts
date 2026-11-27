@@ -174,17 +174,11 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
 
   /**
    * Send an RS write (createChallenge / submitProof) through a rotation-selected
-   * REGISTERED operational wallet, with a self-heal for STALE eligibility. If
-   * the chosen wallet reverts `ProfileDoesntExist` — its operational key was
-   * removed out-of-band (a second instance sharing the identity, or a direct
-   * admin `removeKey` tx), so this process's `registeredOperationalAddresses`
-   * set is stale and the wallet now resolves to identity 0 on-chain — evict it
-   * from the set, drop its cached identityId, and retry ONCE on the primary
-   * signer (pool[0], the always-registered identity anchor). The revert is a
-   * pre-state-change modifier check (`RandomSampling.sol` `profileExists`), so
-   * the retry is idempotent. Best-effort: if the revert does not decode, this
-   * is a no-op and the original error propagates unchanged — never worse than
-   * the pre-rotation pinning.
+   * REGISTERED operational wallet, with the stale-eligibility self-heal of
+   * `sendFromRegisteredSigner` (`RandomSampling.sol` checks `profileExists`
+   * before any state change). Best-effort: if the revert does not decode, the
+   * original error propagates unchanged — never worse than the pre-rotation
+   * pinning.
    */
   protected async sendRandomSamplingTx(
     contract: ethers.Contract,
@@ -193,20 +187,9 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
     label: string,
     opts?: GasLimitBufferOptions,
   ): Promise<ethers.TransactionReceipt> {
-    const signer = await this.nextRandomSamplingSigner();
-    try {
-      return await this.sendContractTransaction(contract, method, args, signer, label, opts);
-    } catch (err) {
-      if (
-        signer.address.toLowerCase() !== this.signer.address.toLowerCase() &&
-        enrichEvmError(err) === 'ProfileDoesntExist'
-      ) {
-        this.registeredOperationalAddresses.delete(signer.address.toLowerCase());
-        this.clearIdentityIdForAddress(signer.address);
-        return this.sendContractTransaction(contract, method, args, this.signer, label, opts);
-      }
-      throw err;
-    }
+    return this.sendFromRegisteredSigner(
+      (signer) => this.sendContractTransaction(contract, method, args, signer, label, opts),
+    );
   }
 
   async createChallenge(): Promise<CreateChallengeResult> {

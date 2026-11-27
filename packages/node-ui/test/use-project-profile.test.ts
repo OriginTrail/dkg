@@ -209,7 +209,7 @@ describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () 
     expect(binding!.slug).toBe(ROOT_SLUG_SENTINEL);
     expect(binding!.displayName).toBe('Root');
     expect(binding!.icon).toBe('⊘');
-    expect(binding!.description).toBe('Entities not in any subgraph (Context Graph root)');
+    expect(binding!.description).toBe('Entities not in any subgraph (context graph root)');
   });
 
   it('keeps the daemon-resolved binding path intact for non-Root slugs', async () => {
@@ -225,9 +225,17 @@ describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () 
     expect(binding!.slug).toBe('recipes');
     expect(binding!.displayName).toBe('recipes');
     expect(binding!.icon).toBe('•');
+    // Fallbacks are theme-free data: no colour, and the same result whatever
+    // the document's theme class; consumers apply their own neutral.
+    expect(binding!.color).toBeUndefined();
+    document.documentElement.classList.add('light');
+    try {
+      expect(captured!.forSubGraph('recipes')).toEqual(binding);
+      expect(captured!.forType('urn:type:Unknown').color).toBeUndefined();
+    } finally { document.documentElement.classList.remove('light'); }
   });
 
-  it('keeps a hostile context graph id inside one literal at every profile query sink', async () => {
+  it('keeps a hostile Context Graph id inside one literal at every profile query sink', async () => {
     const contextGraphId = ['cg-', '\\', '"', '\n', '") } UNION { ?s ?p ?o } #'].join('');
     const prefix = `did:dkg:context-graph:${contextGraphId}/meta`;
     const expectedFilter = `FILTER(strstarts(str(?g), ${JSON.stringify(prefix)}))`;

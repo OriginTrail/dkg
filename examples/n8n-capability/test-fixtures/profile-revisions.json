@@ -1,0 +1,12 @@
+{
+  "dkg-read/source": "a747a2f3beeab8ac0c95e45459a72b34cf0c6b25270795c44b7816eb81ae7553",
+  "dkg-read/native": "c66205e1817408e9698018d0e9067f032c7d7f64d662a7ba350a2401bc323a9d",
+  "invoke-dkg-program/source": "ccfdee4129e66269c17d4dedb9cf6f91fadedf3f701c16e0bb892a726cae4533",
+  "invoke-dkg-program/native": "250fd4993b8e928e98ab9762b1bb035b8a4cbb66458b1bb7042e64bb0472b4fe",
+  "dkg-write/source": "2da8b51831e94b7d6065b93a782bc26ef7a02051c50bf6589b0d86f10a29f310",
+  "dkg-write/native": "5666843f1361b2a17989489539389e0dcce96670dfb6e8936131f0d0b0fcbf4c",
+  "profile/revision": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "studio/source": "fb0be93b41f611abc3b0b4c749f784e20bf0c5027015e6be633be9891597d939",
+  "studio/native": "d3c1d946121d8c189a71a9ed611a08d645c5c06c09a1e6dbae0dd46c2e8af31d",
+  "studio/kaRef": "urn:demo:nos:studio:123e4567-e89b-42d3-a456-426614174099:784f40d0cafc599cfdf3"
+}

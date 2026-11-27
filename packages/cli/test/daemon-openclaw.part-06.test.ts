@@ -335,7 +335,8 @@ describe('OpenClaw channel routing helpers', () => {
         'http://bridge.local:9301/health',
         'http://gateway.local:3030/api/dkg-channel/health',
       ]);
-      expect(requested[0].headers).toMatchObject({
+      // The bridge here is on another host, so the node-operator token is not sent to it.
+      expect(requested[0].headers ?? {}).not.toMatchObject({
         'x-dkg-bridge-token': 'bridge-token',
       });
       expect(requested[1].headers ?? {}).not.toMatchObject({

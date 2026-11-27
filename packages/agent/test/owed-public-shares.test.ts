@@ -352,13 +352,77 @@ describe('a share into a graph that is no longer public', () => {
     expect(h.infos.filter((line) => line.includes('not public now'))).toHaveLength(3);
   });
 
-  it('is dropped unsent when the graph\'s access policy cannot be read', async () => {
+  it('is kept, and not sent, while the graph\'s access policy cannot be read, until it expires', async () => {
     const h = harness({ holders: () => [CORE_1], isPublic: async () => { throw new Error('store unavailable'); } });
     h.owe('op-1', { holder: true });
+    h.owe('op-2', { holder: true });
     await h.store.tick();
     expect(h.sent).toEqual([]);
     expect(h.holderLookups).toEqual([]);
+    expect(h.store.size).toBe(2);
+    expect(h.publicLookups).toEqual([GRAPH]);
+    expect(h.infos).toEqual([
+      `SWM shares into "${GRAPH}" kept for a later pass, not sent now: whether the graph is public cannot be read: store unavailable`,
+    ]);
+    expect(h.store.snapshot().map((share) => share.attempts)).toEqual([0, 0]);
+    expect(h.isScheduled()).toBe(true);
+
+    h.clock.now += OWED_PUBLIC_SHARE_TTL_MS;
+    await h.fire();
+    expect(h.sent).toEqual([]);
     expect(h.store.size).toBe(0);
+    expect(h.warnings).toEqual([expect.stringContaining('2 SWM shares given up after 30 min')]);
+  });
+
+  it('goes out on the next pass when a read of the graph\'s access policy failed once', async () => {
+    let reads = 0;
+    const h = harness({
+      holders: () => [CORE_1],
+      owners: () => [OWNER],
+      isPublic: async () => {
+        reads += 1;
+        if (reads === 1) throw new Error('store busy');
+        return true;
+      },
+    });
+    h.owe('op-1', { holder: true, owner: true });
+    await h.store.tick();
+    expect(h.sent).toEqual([]);
+    expect(h.store.size).toBe(1);
+
+    await h.fire();
+    expect(h.sent.map(({ peerId, shareOperationId, attempt }) => ({ peerId, shareOperationId, attempt }))).toEqual([
+      { peerId: CORE_1, shareOperationId: 'op-1', attempt: 1 },
+      { peerId: OWNER, shareOperationId: 'op-1', attempt: 1 },
+    ]);
+    expect(h.store.size).toBe(0);
+  });
+
+  it('is kept, and not sent, on an answer that is neither public nor private', async () => {
+    const h = harness({ holders: () => [CORE_1], isPublic: async () => undefined as unknown as boolean });
+    h.owe('op-1', { holder: true });
+    await h.store.tick();
+    expect(h.sent).toEqual([]);
+    expect(h.store.size).toBe(1);
+    expect(h.infos).toEqual([expect.stringContaining('cannot be read: the answer was undefined')]);
+  });
+
+  it('does not let shares of a graph that cannot be read take the places of a pass', async () => {
+    const h = harness({
+      holders: () => [CORE_1],
+      isPublic: async (contextGraphId) => {
+        if (contextGraphId === OTHER_GRAPH) throw new Error('store unavailable');
+        return true;
+      },
+    });
+    for (let index = 0; index < OWED_PUBLIC_SHARES_PER_PASS + 1; index += 1) {
+      h.owe(`op-unreadable-${index}`, { holder: true, contextGraphId: OTHER_GRAPH });
+    }
+    h.owe('op-public', { holder: true });
+    await h.store.tick();
+    expect(h.sent.map((sent) => sent.shareOperationId)).toEqual(['op-public']);
+    expect(h.store.size).toBe(OWED_PUBLIC_SHARES_PER_PASS + 1);
+    expect(h.infos.filter((line) => line.includes('cannot be read'))).toHaveLength(1);
   });
 });
 

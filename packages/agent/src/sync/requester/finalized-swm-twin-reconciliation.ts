@@ -21,7 +21,7 @@ import {
   type PublishedKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
 import {
-  GraphManager,
+  GraphManager, ExactGraphReadError, readExactGraph as readBoundedGraph,
   deleteByPatternWithoutCount,
   invalidateSwmMaterializationWitness,
   type Quad,
@@ -81,6 +81,12 @@ export interface FinalizedSwmTwinCatalogProjectionEvidence {
   /** Author-signed assertion root carried by the verified catalog seal. */
   readonly expectedMerkleRoot: string;
 }
+
+export type FinalizedSwmTwinProjectionAuthority =
+  | { readonly arrival: 'catalog' }
+  | { readonly arrival: 'recovered-operation'; readonly shareOperationId: string; readonly operationDigest: string };
+
+export type FinalizedSwmTwinProjectionEvidence = FinalizedSwmTwinCatalogProjectionEvidence & FinalizedSwmTwinProjectionAuthority;
 
 export interface ConfirmedGraphScopedSwmOrphanCandidate {
   readonly contextGraphId: string;
@@ -268,13 +274,22 @@ export async function reconcileFinalizedSwmTwinFromDescriptor(params: {
  * process-local proof directly: exact verified projection digest/count plus
  * the author-signed private and aggregate commitments from the catalog seal.
  */
-export async function reconcileFinalizedSwmTwinFromCatalogProjection(params: {
+interface ProjectionReconciliation<E> {
   readonly store: TripleStore;
   readonly writeLocks: Map<string, Promise<void>>;
-  readonly evidence: Readonly<FinalizedSwmTwinCatalogProjectionEvidence>;
+  readonly evidence: Readonly<E>;
   readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
-}): Promise<FinalizedSwmTwinReconciliationOutcome> {
-  const evidence = evidenceFromCatalogProjection(params.evidence);
+}
+
+/** Catalog activation owns a catalog projection, never a queued operation. */
+export function reconcileFinalizedSwmTwinFromCatalogProjection(params: ProjectionReconciliation<FinalizedSwmTwinCatalogProjectionEvidence>) {
+  return reconcileFinalizedSwmTwinFromProjection({ ...params, evidence: { ...params.evidence, arrival: 'catalog' } });
+}
+
+export async function reconcileFinalizedSwmTwinFromProjection(
+  params: ProjectionReconciliation<FinalizedSwmTwinProjectionEvidence>,
+): Promise<FinalizedSwmTwinReconciliationOutcome> {
+  const evidence = evidenceFromProjection(params.evidence);
   const outcome = await reconcileFinalizedSwmTwinEvidence({
     store: params.store,
     writeLocks: params.writeLocks,
@@ -291,6 +306,7 @@ interface CommonFinalizedSwmTwinEvidence extends FinalizedSwmTwinRetirement {
   readonly swmMetaGraph: string;
   readonly headSubject: string;
   readonly expectedVmDigest: string;
+  readonly expectedSwmCommitmentDigest: string;
   readonly expectedPublicQuadsCount: number;
   readonly privateTripleCount: number;
   readonly privateMerkleRoot?: string;
@@ -313,10 +329,32 @@ interface CatalogArrivalFinalizedSwmTwinEvidence extends CommonFinalizedSwmTwinE
   readonly expectedMerkleRoot: string;
 }
 
+interface RecoveredOperationTwinEvidence extends CommonFinalizedSwmTwinEvidence {
+  readonly arrival: 'recovered-operation';
+  readonly shareOperationId: string;
+  readonly expectedMerkleRoot: string;
+}
+
 type FinalizedSwmTwinEvidence =
   | VmArrivalFinalizedSwmTwinEvidence
   | SwmArrivalFinalizedSwmTwinEvidence
-  | CatalogArrivalFinalizedSwmTwinEvidence;
+  | CatalogArrivalFinalizedSwmTwinEvidence
+  | RecoveredOperationTwinEvidence;
+
+/** Called under the SWM writer lock. Each arrival chooses its head fence and matching reader together. */
+async function prepareLockedTwinReads(store: TripleStore, evidence: FinalizedSwmTwinEvidence) {
+  const readStoredLayer = (graph: string) => readExactGraph(store, graph);
+  if (evidence.arrival === 'catalog' || evidence.arrival === 'swm') {
+    return { readLayer: readStoredLayer };
+  }
+  const exactHead = await readFinalizedTwinSwmHead(store, {
+    metaGraph: evidence.swmMetaGraph, headSubject: evidence.headSubject,
+  });
+  if (exactHead.kind !== 'exact') return { refusal: 'head-missing-or-ambiguous' as const };
+  if (evidence.arrival === 'vm') return { exactHead, readLayer: readStoredLayer };
+  if (exactHead.shareOperationId !== evidence.shareOperationId) return { refusal: 'swm-commitment-mismatch' as const };
+  return { exactHead, readLayer: (graph: string) => readOperationLayer(store, graph, evidence.expectedPublicQuadsCount) };
+}
 
 async function reconcileFinalizedSwmTwinEvidence(params: {
   readonly store: TripleStore;
@@ -332,22 +370,16 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
   );
 
   return withKeyedLocks(params.writeLocks, [lockKey], async () => {
-    // VM-first arrival has nothing to retire without an exact SWM head. Check
-    // under the shared SWM write lock before rereading the complete VM payload;
-    // a later SWM arrival runs its own symmetric reconciliation after commit.
-    const vmArrivalHead = evidence.arrival === 'vm'
-      ? await readFinalizedTwinSwmHead(params.store, {
-          metaGraph: evidence.swmMetaGraph,
-          headSubject: evidence.headSubject,
-        })
-      : undefined;
-    if (vmArrivalHead && vmArrivalHead.kind !== 'exact') return 'head-missing-or-ambiguous';
+    const inputs = await prepareLockedTwinReads(params.store, evidence);
+    if (inputs.refusal) return inputs.refusal;
+    const { readLayer, exactHead } = inputs;
 
     // A public-byte match alone is insufficient: VM graph names are stable
     // across assertion versions and a private-only update can preserve every
     // public quad. Require the current VM control plane to prove the exact
     // confirmed assertion and private commitment before considering deletion.
-    const vmQuads = await readExactGraph(params.store, evidence.vmGraph);
+    const vmQuads = await readLayer(evidence.vmGraph);
+    if (!vmQuads) return 'vm-changed';
     const vmDigest = workspacePublicQuadsDigest(vmQuads);
     if (vmDigest !== evidence.expectedVmDigest) return 'vm-changed';
     const vmMetadata = await readExactVmMetadata(params.store, evidence);
@@ -355,7 +387,7 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
       return 'vm-metadata-mismatch';
     }
 
-    const head = vmArrivalHead ?? await readFinalizedTwinSwmHead(params.store, {
+    const head = exactHead ?? await readFinalizedTwinSwmHead(params.store, {
       metaGraph: evidence.swmMetaGraph,
       headSubject: evidence.headSubject,
     });
@@ -365,7 +397,8 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
       // under the same KA lock; a missing head here means a concurrent VM-first
       // reconciliation completed after that lock was released. Suppressing the
       // outer bulk metadata append prevents resurrection of a dangling head.
-      const swmQuads = await readExactGraph(params.store, evidence.swmGraph);
+      const swmQuads = await readLayer(evidence.swmGraph);
+      if (!swmQuads) return 'content-mismatch';
       if (swmQuads.length === 0) {
         return head.kind === 'inexact' ? 'inexact-head-without-data' : 'already-retired-finalized';
       }
@@ -385,7 +418,8 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
     if (!swmCommitmentMatchesEvidence(swmCommitment, evidence)) {
       return 'swm-commitment-mismatch';
     }
-    const swmQuads = await readExactGraph(params.store, evidence.swmGraph);
+    const swmQuads = await readLayer(evidence.swmGraph);
+    if (!swmQuads) return 'content-mismatch';
     // Retirement drops the SWM graph before its metadata. If that second step
     // failed, re-enter the idempotent retirement callback to finish metadata
     // cleanup instead of permanently returning early on an absent graph.
@@ -457,6 +491,7 @@ function evidenceFromVmCommitment(asset: FinalizedVmAssetCommitment): VmArrivalF
     swmMetaGraph,
     headSubject: `${asset.ual}#dkg-swm-head`,
     expectedVmDigest: asset.publicQuadsDigest,
+    expectedSwmCommitmentDigest: asset.publicQuadsDigest,
     expectedPublicQuadsCount,
     privateTripleCount,
     ...(privateMerkleRoot === undefined ? {} : { privateMerkleRoot }),
@@ -505,6 +540,7 @@ function evidenceFromSwmDescriptor(
     swmMetaGraph: descriptor.metaGraph,
     headSubject: descriptor.headSubject,
     expectedVmDigest: descriptor.publicQuadsDigest,
+    expectedSwmCommitmentDigest: descriptor.publicQuadsDigest,
     expectedPublicQuadsCount: descriptor.publicQuadsCount,
     privateTripleCount: descriptor.privateTripleCount,
     ...(descriptor.privateMerkleRoot === undefined
@@ -515,9 +551,9 @@ function evidenceFromSwmDescriptor(
   };
 }
 
-function evidenceFromCatalogProjection(
-  input: Readonly<FinalizedSwmTwinCatalogProjectionEvidence>,
-): CatalogArrivalFinalizedSwmTwinEvidence {
+function evidenceFromProjection(
+  input: Readonly<FinalizedSwmTwinProjectionEvidence>,
+): CatalogArrivalFinalizedSwmTwinEvidence | RecoveredOperationTwinEvidence {
   const scope = createGraphKnowledgeAssetScope(input.kaUal, input.assertionVersion);
   const swmGraph = knowledgeAssetLayerGraphUri(
     input.contextGraphId,
@@ -531,8 +567,7 @@ function evidenceFromCatalogProjection(
     scope,
     input.subGraphName,
   );
-  return {
-    arrival: 'catalog',
+  const projection = {
     contextGraphId: input.contextGraphId,
     ...(input.subGraphName === undefined ? {} : { subGraphName: input.subGraphName }),
     kaUal: scope.ual,
@@ -555,6 +590,11 @@ function evidenceFromCatalogProjection(
     agentAddress: scope.agentAddress,
     kaNumber: BigInt(scope.kaNumber),
   };
+  if (input.arrival === 'recovered-operation') {
+    return { ...projection, arrival: 'recovered-operation', shareOperationId: input.shareOperationId,
+      expectedSwmCommitmentDigest: input.operationDigest.trim().toLowerCase() };
+  }
+  return { ...projection, arrival: 'catalog', expectedSwmCommitmentDigest: projection.expectedVmDigest };
 }
 
 interface ExactVmMetadata {
@@ -697,10 +737,21 @@ function swmCommitmentMatchesEvidence(
   return commitment !== null
     && commitment.kaUal === evidence.kaUal
     && commitment.assertionVersion === evidence.assertionVersion
-    && commitment.publicQuadsDigest === evidence.expectedVmDigest
+    && commitment.publicQuadsDigest === evidence.expectedSwmCommitmentDigest
     && commitment.publicQuadsCount === evidence.expectedPublicQuadsCount
     && commitment.privateTripleCount === evidence.privateTripleCount
     && commitment.privateMerkleRoot === evidence.privateMerkleRoot;
+}
+
+/** Match the earlier verified SELECT spelling: CONSTRUCT can emit different Unicode escapes. */
+async function readOperationLayer(store: TripleStore, graph: string, count: number): Promise<Quad[] | null> {
+  try {
+    return await readBoundedGraph(store, graph, { profile: 'bounded-single-result', expectedQuadCount: count,
+      outputGraph: '', queryOptions: { priority: 'background', source: 'agent.durableSync.finalizedSwmTwin.readGraph' } });
+  } catch (error) {
+    if (!(error instanceof ExactGraphReadError) || error.code !== 'QUAD_COUNT_MISMATCH') throw error;
+    return error.actual === 0 ? [] : null;
+  }
 }
 
 async function readExactGraph(store: TripleStore, graph: string): Promise<Quad[]> {

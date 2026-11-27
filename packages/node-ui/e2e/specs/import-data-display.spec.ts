@@ -21,7 +21,7 @@ test.describe('Import data display', () => {
     await importFilesModal.cancel();
   });
 
-  test('import modal references active context graph name', async ({ page, importFilesModal }) => {
+  test('import modal references active Context Graph name', async ({ page, importFilesModal }) => {
     await page.locator('button[title*="Import"], button[aria-label*="Import"]').first().click();
     const subtitle = page.locator('.v10-modal-subtitle');
     await expect(subtitle).toContainText(PRIMARY_CG);

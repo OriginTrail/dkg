@@ -6,6 +6,7 @@ import type { QueryOptions } from './query-options.js';
 import { shareJobsPath, shareReconciliationPath, type ShareJobsListOptions, type ShareJobsListResult } from './share-job-client-paths.js';
 import { publisherJobsPath, type PublisherJobsPageOptions, type PublisherJobsResult } from './publisher-job-client-paths.js';
 import { createEntityClient } from './entity-search/client.js';
+import { createViewSemanticsClient } from './view-semantics-client.js';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import type {
@@ -39,6 +40,9 @@ import {
 } from './finalized-publish-options.js';
 import { parseRegisterPcaAgentResult, type RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { CPU_PROFILE_PATH, cpuProfileRequestTimeoutMs, type CpuProfileResult } from './cpu-profile-wire.js';
+import { DaemonOutcomeUnknownError } from './daemon-outcome-unknown-error.js';
+import { longRequestDispatcher } from './daemon/local-agent-channel-fetch.js';
+import { READ_GRAPHS_PATH, READ_GRAPHS_REQUEST_TIMEOUT_MS, readGraphsStatusPath, type ReadGraphsAction, type ReadGraphsRequest } from './read-graphs-wire.js';
 import {
   serializeStatusQuery,
   type StatusQueryOptions,
@@ -58,7 +62,7 @@ import {
   resolveDaemonRequestDeadlines,
   type DaemonRequestDeadlines,
 } from '@origintrail-official/dkg-core/daemon-request-deadlines';
-import type { PublicQueryResult } from '@origintrail-official/dkg-core';
+import type { PublicQueryResult, ViewQuerySemantics } from '@origintrail-official/dkg-core';
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 export type { KnowledgeAssetWritableQuad } from './knowledge-asset-write-contract.js';
 /**
@@ -71,28 +75,7 @@ export type { KnowledgeAssetWritableQuad } from './knowledge-asset-write-contrac
 const VERIFY_DEFAULT_COLLECTION_TIMEOUT_MS = 30 * 60_000;
 const REQUEST_CARRIED_TIMEOUT_MARGIN_MS = 30_000;
 
-/**
- * A long Knowledge Asset mutation (`vm/publish`, `swm/share`, `wm/import-file`,
- * or a create that also shares or publishes) reached the daemon but no response
- * arrived before the client deadline. The daemon keeps working after the client
- * disconnects, so the operation may still complete, and a blind retry can 409.
- */
-export class DaemonOutcomeUnknownError extends Error {
-  readonly code = 'OUTCOME_UNKNOWN';
-  readonly method: string;
-  readonly path: string;
-  readonly timeoutMs: number;
-  constructor(method: string, path: string, timeoutMs: number, historyHint: string) {
-    super(
-      `Outcome unknown: the daemon did not answer ${method} ${path} within ${Math.round(timeoutMs / 1000)}s. ` +
-      `It keeps working after the client disconnects, so the operation may still complete. ${historyHint}`,
-    );
-    this.name = 'DaemonOutcomeUnknownError';
-    this.method = method;
-    this.path = path;
-    this.timeoutMs = timeoutMs;
-  }
-}
+export { DaemonOutcomeUnknownError };
 
 /**
  * Whether a failed request got no daemon answer: the client deadline expired,
@@ -1440,6 +1423,11 @@ export class ApiClient {
     return this.post(`/api/pca/${encodeURIComponent(accountId)}/primary-node`, { node });
   }
 
+  async marketplace<T = unknown>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body: unknown = {}): Promise<T> {
+    const route = `/api/marketplace${path}`;
+    return { GET: () => this.get<T>(route), DELETE: () => this.del<T>(route), PUT: () => this.put<T>(route, body), POST: () => this.post<T>(route, body) }[method]();
+  }
+
   // ─── Node operational wallets (Identity operational keys) ────────────
 
   /** List the node's local operational wallets (addresses only) + on-chain status. */
@@ -1689,7 +1677,7 @@ export class ApiClient {
     sparql: string,
     contextGraphId?: string,
     opts?: QueryOptions,
-  ): Promise<{ result: QueryResult }> {
+  ): Promise<{ result: QueryResult; semantics?: ViewQuerySemantics }> {
     return this.post('/api/query', {
       sparql,
       contextGraphId,
@@ -1697,7 +1685,7 @@ export class ApiClient {
       includeSharedMemory: opts?.includeSharedMemory,
       includeContextGraphPartitions: opts?.includeContextGraphPartitions,
       includeSharedMemoryMeta: opts?.includeSharedMemoryMeta,
-      view: opts?.view,
+      view: opts?.view, semantics: opts?.semantics,
       agentAddress: opts?.agentAddress,
       assertionName: opts?.assertionName,
       subGraphName: opts?.subGraphName,
@@ -2407,6 +2395,16 @@ export class ApiClient {
       { timeoutMs: cpuProfileRequestTimeoutMs(seconds) });
   }
 
+  /**
+   * Node-admin token only: the node's read graphs (`dkg store read-graphs`).
+   * `status` lists them; `check`, `rebuild` and `drop` act on them.
+   */
+  async readGraphs<T>(action: ReadGraphsAction, request: ReadGraphsRequest = {}): Promise<T> {
+    if (action === 'status') return this.get<T>(readGraphsStatusPath(request));
+    const timeoutMs = READ_GRAPHS_REQUEST_TIMEOUT_MS;
+    return this.post<T>(`${READ_GRAPHS_PATH}/${action}`, request, { timeoutMs, dispatcher: longRequestDispatcher(timeoutMs) });
+  }
+
   async shutdown(): Promise<void> {
     try {
       await this.post('/api/shutdown', {});
@@ -2419,15 +2417,13 @@ export class ApiClient {
   }
 
   private authHeaders(): Record<string, string> {
-    if (!this.token) return {};
-    return { Authorization: `Bearer ${this.token}` };
+    return this.token ? { Authorization: `Bearer ${this.token}` } : {};
   }
 
-  private async get<T>(path: string, opts: { auth?: boolean } = {}): Promise<T> {
-    return this.send<T>(path, { headers: opts.auth === false ? {} : this.authHeaders() });
-  }
+  private async get<T>(path: string, opts: { auth?: boolean } = {}): Promise<T> { return this.send<T>(path, { headers: opts.auth === false ? {} : this.authHeaders() }); }
 
   readonly entities = createEntityClient((path, body, deadline) => this.post(path, body, deadline));
+  readonly viewSemantics = createViewSemanticsClient(<T>(path: string) => this.get<T>(path));
 
   private async post<T>(path: string, body: unknown, deadline: RequestDeadline = {}): Promise<T> {
     return this.send<T>(path, {
@@ -2457,7 +2453,7 @@ export class ApiClient {
     const method = init.method ?? 'GET';
     const repeatOn = deadline.repeatOn ?? (method === 'GET' ? REPEATS_ON_ANY_AUTHORITY_ANSWER : []);
     return this.withDeadline(method, path, deadline, async (signal, remainingMs) => {
-      const res = await this.fetchOk(path, init, repeatOn, signal, remainingMs);
+      const res = await this.fetchOk(path, { ...init, ...(deadline.dispatcher ? { dispatcher: deadline.dispatcher } : {}) }, repeatOn, signal, remainingMs);
       return (await res.json()) as T;
     });
   }

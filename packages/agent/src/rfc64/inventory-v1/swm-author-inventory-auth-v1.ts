@@ -2,10 +2,9 @@ import {
   assertCanonicalDigest,
   assertSwmAuthorInventorySnapshotBindingV1,
   canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1,
-  canonicalizeSwmAuthorInventoryRowsBytesV1,
   computeControlSignatureVariantDigestHex,
   parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1,
-  parseCanonicalSwmAuthorInventoryRowsV1,
+  snapshotSwmAuthorInventoryRowsV1,
   type Digest32V1,
   type SwmAuthorInventorySnapshotV1,
 } from '@origintrail-official/dkg-core';
@@ -74,9 +73,7 @@ export function prepareVerifiedSwmAuthorInventoryCommitInputV1(
     const head = parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1(
       canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1(candidateSnapshot.head),
     );
-    const rows = parseCanonicalSwmAuthorInventoryRowsV1(
-      canonicalizeSwmAuthorInventoryRowsBytesV1(candidateSnapshot.rows),
-    );
+    const rows = snapshotSwmAuthorInventoryRowsV1(candidateSnapshot.rows);
     const snapshot = Object.freeze({ head, rows });
     assertSwmAuthorInventorySnapshotBindingV1(snapshot);
 
@@ -151,12 +148,8 @@ export function prepareVerifiedMergeSwmAuthorInventoryCommitInputV1(
     const head = parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1(
       canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1(candidateSnapshot.head),
     );
-    const rows = parseCanonicalSwmAuthorInventoryRowsV1(
-      canonicalizeSwmAuthorInventoryRowsBytesV1(candidateSnapshot.rows),
-    );
-    const mergeRows = parseCanonicalSwmAuthorInventoryRowsV1(
-      canonicalizeSwmAuthorInventoryRowsBytesV1(candidate.mergeRows),
-    );
+    const rows = snapshotSwmAuthorInventoryRowsV1(candidateSnapshot.rows);
+    const mergeRows = snapshotSwmAuthorInventoryRowsV1(candidate.mergeRows);
     if (mergeRows.length === 0) {
       throw new Error('SWM author inventory exact merge requires at least one row');
     }

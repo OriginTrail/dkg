@@ -385,10 +385,10 @@ describe('ConnectedAgentsTab rendering', () => {
       connectError: 'error',
     });
 
-    expect(markup).toContain('Connect Another Agent');
+    expect(markup).toContain('Connect another agent');
     expect(markup).toContain('Connecting...');
     expect(markup).toContain('Docs');
-    expect(markup).toContain('Release Notes');
+    expect(markup).toContain('Release notes');
     expect(markup).toContain('Connect Hermes');
     expect(markup).toContain('local Hermes profile');
     expect(markup).toContain('connected');
@@ -614,8 +614,8 @@ describe('ConnectedAgentsTab rendering', () => {
       bridgeOnline: false,
       chatReady: false,
       status: 'degraded',
-      statusLabel: 'Degraded',
-      bridgeStatusLabel: 'Degraded',
+      statusLabel: 'Partial',
+      bridgeStatusLabel: 'Partial',
     });
     const markup = renderConnectedAgentsTab({
       integrations: [degraded],
@@ -691,7 +691,7 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(markup).toContain('More actions for Hermes');
   });
 
-  it('H-AC-47b: Warning chip surfaces lastError on disconnected integration in Connect Another Agent tab', () => {
+  it('H-AC-47b: Warning chip surfaces lastError on disconnected integration in Connect another agent tab', () => {
     // After UI Disconnect with restore-failure: daemon writes
     // enabled:false + runtime.status:'disconnected' + runtime.lastError:'restore failed: …'.
     // The api.ts mapper routes that to status:'available', detail = lastError,

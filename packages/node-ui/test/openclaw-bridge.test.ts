@@ -25,6 +25,10 @@ function readPanelRightSources(): string {
   return [
     readUiFile('components/Shell/PanelRight.tsx'),
     readUiTree('components/Shell/PanelRight'),
+    // The panel's chat (send, stop, history, attachments) runs in this store.
+    readUiFile('stores/agentConversations.ts'),
+    // ...using the shared conversation model.
+    readUiTree('conversations'),
   ].join('\n');
 }
 
@@ -216,7 +220,7 @@ describe('PanelRight UI - connected agent flow', () => {
 
   it('keeps the Agents tab as the persistent OpenClaw chat surface with sub-tabs and add-agent flow', () => {
     expect(panelRight).toContain('Connect OpenClaw');
-    expect(panelRight).toContain('Connect Another Agent');
+    expect(panelRight).toContain('Connect another agent');
     expect(panelRight).toContain('Disconnect');
     expect(panelRight).toContain('Session history');
     expect(panelRight).toContain('OpenClaw');
@@ -273,27 +277,29 @@ describe('PanelRight UI - connected agent flow', () => {
 
   it('imports local-agent attachments on send instead of on selection', () => {
     const addAttachmentsBlock = panelRight.slice(
-      panelRight.indexOf('const addAttachmentsForConversation'),
-      panelRight.indexOf('const prepareAttachmentDraftsForSend'),
+      panelRight.indexOf('addAttachments(conversationKey: string'),
+      panelRight.indexOf('removeAttachment(conversationKey: string'),
     );
     const sendLocalMessageBlock = panelRight.slice(
-      panelRight.indexOf('const sendLocalMessage'),
-      panelRight.indexOf('const connectIntegration'),
+      panelRight.indexOf('async function runSend'),
+      panelRight.indexOf('async function persistHermesFailure'),
     );
 
+    expect(addAttachmentsBlock).toContain('status: \'queued\'');
     expect(addAttachmentsBlock).not.toContain('await importFile(');
     // PR3 Codex round-2: processedDrafts is now hoisted above the try block
     // (assigned, not declared with `const`, so the catch path can read it
     // to restore drafts after a failed send). Assert the assignment shape
     // without coupling to the lexical `const`.
-    expect(sendLocalMessageBlock).toContain('processedDrafts = await prepareAttachmentDraftsForSend(conversationKey, drafts);');
+    expect(sendLocalMessageBlock).toContain('processedDrafts = await uploadAttachments(conversationKey, drafts);');
     expect(sendLocalMessageBlock).toContain('if (!text && attachments.length === 0 && importContext.results.length === 0) {');
     expect(panelRight).not.toContain('selectedCompletedAttachments');
   });
 
   it('dedupes selected files per target project instead of globally per conversation', () => {
-    expect(panelRight).toContain('`${draft.contextGraphId}:${draft.file.name}:${draft.file.size}:${draft.file.lastModified}`');
     expect(panelRight).toContain('`${contextGraphId}:${file.name}:${file.size}:${file.lastModified}`');
+    expect(panelRight).toContain('draftKey(draft.contextGraphId, draft.file)');
+    expect(panelRight).toContain('draftKey(contextGraphId, file)');
   });
 
   it('only enables attachment-only sends when at least one draft is sendable', () => {
@@ -355,7 +361,7 @@ describe('PanelRight UI - connected agent flow', () => {
 
   it('merges reloaded local history with live messages', () => {
     expect(panelRight).toContain('function mergeLocalAgentMessages');
-    expect(panelRight).toContain('mergeLocalAgentMessages(prev, loaded)');
+    expect(panelRight).toContain('mergeLocalAgentMessages(c.messages, loaded)');
   });
 
   it('sends connected-agent chat through the local bridge from PanelRight', () => {
@@ -368,19 +374,12 @@ describe('PanelRight UI - connected agent flow', () => {
   });
 });
 
-describe('Agent hub shell surfaces', () => {
+describe('Agent shell surfaces', () => {
   const panelLeft = readUiFile('components/Shell/PanelLeft.tsx');
-  const agentHub = readUiFile('pages/AgentHub.tsx');
 
-  it('keeps Integrations visible while hiding the duplicate Agent Hub shell entry', () => {
-    expect(panelLeft).not.toContain('Agent Hub');
+  it('keeps Integrations visible, with no separate Agent hub entry', () => {
+    expect(panelLeft).not.toContain('Agent hub');
     expect(panelLeft).toContain('Integrations');
-  });
-
-  it('restores Agent Hub without reviving the old My Agent product path', () => {
-    expect(agentHub).toContain('Agent Hub');
-    expect(agentHub).toContain('Bring your own agent into the node');
-    expect(agentHub).not.toContain('My Agent');
   });
 });
 
@@ -1014,8 +1013,8 @@ describe('OpenClaw bridge behavioral tests', () => {
       const hermes = result.integrations.find((item) => item.id === 'hermes');
       expect(hermes).toMatchObject({
         status: 'degraded',
-        statusLabel: 'Degraded',
-        bridgeStatusLabel: 'Degraded',
+        statusLabel: 'Partial',
+        bridgeStatusLabel: 'Partial',
         chatAttachments: true,
       });
       expect(hermes?.chatReady).toBe(false);
@@ -1068,8 +1067,8 @@ describe('OpenClaw bridge behavioral tests', () => {
       const hermes = result.integrations.find((item) => item.id === 'hermes');
       expect(hermes).toMatchObject({
         status: 'degraded',
-        statusLabel: 'Degraded',
-        bridgeStatusLabel: 'Degraded',
+        statusLabel: 'Partial',
+        bridgeStatusLabel: 'Partial',
         chatReady: false,
         bridgeOnline: false,
         target: 'bridge',
@@ -1327,7 +1326,7 @@ describe('OpenClaw bridge behavioral tests', () => {
             bridgeOnline: true,
             bridgeStatusLabel: 'Connected',
             status: 'chat_ready',
-            statusLabel: 'Chat ready',
+            statusLabel: 'Ready',
             detail: 'Connected through the bridge.',
             source: 'live',
           },
@@ -1441,7 +1440,7 @@ describe('OpenClaw bridge behavioral tests', () => {
         bridgeOnline: true,
         bridgeStatusLabel: 'Connected',
         status: 'chat_ready',
-        statusLabel: 'Chat ready',
+        statusLabel: 'Ready',
         detail: 'Connected through the bridge.',
         source: 'live',
       };
@@ -1576,7 +1575,7 @@ describe('OpenClaw bridge behavioral tests', () => {
         bridgeOnline: true,
         bridgeStatusLabel: 'Bridge live',
         status: 'chat_ready',
-        statusLabel: 'Chat ready',
+        statusLabel: 'Ready',
         detail: 'Connected through the bridge.',
         source: 'live',
       });
@@ -1618,7 +1617,7 @@ describe('OpenClaw bridge behavioral tests', () => {
           bridgeOnline: true,
           bridgeStatusLabel: 'Bridge live',
           status: 'chat_ready',
-          statusLabel: 'Chat ready',
+          statusLabel: 'Ready',
           detail: 'Connected through the bridge.',
           source: 'live',
         },

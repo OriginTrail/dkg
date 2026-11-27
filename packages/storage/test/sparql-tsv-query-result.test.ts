@@ -304,3 +304,35 @@ describe('SPARQL TSV SELECT decoding', () => {
     });
   });
 });
+
+describe('SPARQL TSV SELECT decoding between chunks', () => {
+  const lines = ['?g\n<urn:a>\n', '<urn:b>\n', '<urn:c>\n'].map((chunk) => new TextEncoder().encode(chunk));
+
+  it('lets other work run between two chunks when asked to', async () => {
+    const order: string[] = [];
+    setImmediate(() => order.push('other work'));
+    const result = await decodeSparqlTsvSelectResponse(chunkedResponse(lines), { yieldBetweenChunks: true },
+      (line) => order.push(line));
+    expect(result.bindings.map((binding) => binding.g)).toEqual(['urn:a', 'urn:b', 'urn:c']);
+    expect(order).toEqual(['?g', '<urn:a>', 'other work', '<urn:b>', '<urn:c>']);
+  });
+
+  it('lets a timer that is due run between two chunks: the yield is a full turn of the event loop', async () => {
+    const order: string[] = [];
+    setTimeout(() => order.push('timer'), 0);
+    const due = Date.now() + 2;
+    while (Date.now() < due) { /* the timer is due before the decode starts */ }
+    await decodeSparqlTsvSelectResponse(chunkedResponse(lines), { yieldBetweenChunks: true }, (line) => order.push(line));
+    expect(order).toContain('timer');
+    expect(order.indexOf('timer')).toBeLessThan(order.indexOf('<urn:c>'));
+  });
+
+  it('runs straight through by default', async () => {
+    const order: string[] = [];
+    setImmediate(() => order.push('other work'));
+    await decodeSparqlTsvSelectResponse(chunkedResponse(lines), {}, (line) => order.push(line));
+    expect(order).toEqual(['?g', '<urn:a>', '<urn:b>', '<urn:c>']);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(order.at(-1)).toBe('other work');
+  });
+});

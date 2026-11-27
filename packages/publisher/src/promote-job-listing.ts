@@ -107,13 +107,13 @@ export async function listAllPromoteJobs(host: PromoteListingHost, filter: Promo
   let rowsRead = 0;
   let cursor: PromoteJobCursor | undefined;
   walk: do {
-    const keyPage: PromoteKeyPage = await host.locked(() => readPromoteJobKeys(host, filter, { cursor, pageSize: host.listKeyPageSize, source: LIST_SOURCES.keys }));
+    const keyPage: PromoteKeyPage = await host.locked('listKeys', () => readPromoteJobKeys(host, filter, { cursor, pageSize: host.listKeyPageSize, source: LIST_SOURCES.keys }));
     for (let at = 0; at < keyPage.keys.length;) {
       // With a limit the first batch is no larger than it: the usual call (a few rows of a long queue) then reads one small batch.
       const size = limit && rowsRead === 0 && readIds.size === 0 ? Math.min(limit, host.listPageSize) : host.listPageSize;
       const keys = keyPage.keys.slice(at, at + size);
       at += keys.length;
-      const batch = await host.locked(() => readPromoteJobPayloads(host, filter, keys, LIST_SOURCES.payloads));
+      const batch = await host.locked('listPayloads', () => readPromoteJobPayloads(host, filter, keys, LIST_SOURCES.payloads));
       rowsRead += batch.length;
       jobs.push(...batch);
       if (!limit) continue;
@@ -124,7 +124,7 @@ export async function listAllPromoteJobs(host: PromoteListingHost, filter: Promo
       if (!nextKey || jobs.length < limit) continue;
       const last = readyTime(jobs[limit - 1]!);
       if (last >= earliestUnread(nextKey)) continue;
-      retryAt = await host.locked(() => readPromoteRetryTimes(host, LIST_SOURCES.keys));
+      retryAt = await host.locked('listRetries', () => readPromoteRetryTimes(host, LIST_SOURCES.keys));
       if (last < earliestUnread(nextKey)) break walk;
     }
     cursor = keyPage.next;
@@ -140,13 +140,13 @@ export async function listPromoteJobsPage(
 ): Promise<PromoteJobPage> {
   const cursor = request.cursor === undefined ? undefined : decodePromoteJobCursor(request.cursor);
   const pageSize = resolvePromotePageSize(request.pageSize);
-  const page = await host.locked(() => readPromoteJobPage(host, filter, { cursor, pageSize, sources: LIST_SOURCES }));
+  const page = await host.locked('listPage', () => readPromoteJobPage(host, filter, { cursor, pageSize, sources: LIST_SOURCES }));
   return page.next ? { jobs: page.jobs, nextCursor: encodePromoteJobCursor(page.next), complete: false } : { jobs: page.jobs, complete: true };
 }
 
 /** Jobs per state as one `COUNT ... GROUP BY ?state`; a state the queue does not know is not counted. */
 export async function countPromoteJobsByState(host: PromoteListingHost): Promise<PromoteStats> {
-  return host.locked(async () => {
+  return host.locked('getStats', async () => {
     const rows = expectBindings(await host.store.query(
       `SELECT ?state (COUNT(?job) AS ?n) WHERE { GRAPH <${host.graphUri}> { ?job <${PROMOTE_STATE}> ?state } } GROUP BY ?state`,
       controlStoreOptions('share', 'publisher.asyncPromote.stats')));
@@ -167,7 +167,7 @@ export async function countPromoteJobsByState(host: PromoteListingHost): Promise
  */
 export async function listPromoteJobsForSelector(host: PromoteListingHost, selector: PromoteSelector): Promise<PromoteJob[]> {
   const branches = uniquenessLookupKeys(selector).map((key) => `{ ?job <${PROMOTE_UNIQUENESS_KEY}> ${literal(key)} ; <${PROMOTE_PAYLOAD}> ?payload . }`);
-  return host.locked(async () => {
+  return host.locked('listForSelector', async () => {
     const rows = expectBindings(await host.store.query(
       `SELECT ?payload WHERE { GRAPH <${host.graphUri}> { ${branches.join(' UNION ')} } }`,
       controlStoreOptions('share', 'publisher.asyncPromote.selectorLookup')));

@@ -1,7 +1,7 @@
 import type { SQLInputValue } from 'node:sqlite';
 
 import {
-  canonicalizeSwmAuthorInventoryRowsBytesV1,
+  snapshotSwmAuthorInventoryRowV1,
   type Digest32V1,
   type SwmAuthorInventoryRowV1,
 } from '@origintrail-official/dkg-core';
@@ -77,12 +77,10 @@ export function decodeStoredSwmAuthorInventoryRowV1(
     expiresAt: row.expires_at_u64be === null
       ? null
       : sqlBlobToDecimalU64V1(row.expires_at_u64be),
-  } as SwmAuthorInventoryRowV1;
+  };
   // This fresh record contains only scalar values copied from typed SQL columns.
-  // Keep full canonical validation (including Unicode and byte bounds), without
-  // parsing our own canonical bytes just to obtain another copy of the record.
-  canonicalizeSwmAuthorInventoryRowsBytesV1([decoded]);
-  return Object.freeze(decoded);
+  // Core owns complete wire validation, including Unicode and exact byte limits.
+  return snapshotSwmAuthorInventoryRowV1(decoded);
 }
 
 export function assertBoundedSqlBlobV1(

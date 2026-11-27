@@ -652,12 +652,83 @@ describe('applying agent profile updates to the store', () => {
     const insert = vi.fn(async (quads: Quad[]) => quads);
     const others: Quad[] = [
       { subject: SUBJECT, predicate: PEER_ID, object: literal('peer-1'), graph: 'did:dkg:context-graph:other' },
-      quad(PEER_ID, literal('peer-1'), 'did:dkg:context-graph:not-an-agent'),
+      { subject: 'did:dkg:context-graph:not-an-agent', predicate: PEER_ID, object: literal('peer-1'), graph: `${AGENT_REGISTRY_GRAPH}/_meta` },
       quad(`${DKG}agentAddress`, literal(WALLET)),
     ];
     await expect(storeAgentProfileQuads(store, others, insert)).resolves.toEqual(others);
     expect(insert).toHaveBeenCalledTimes(1);
     expect(query).not.toHaveBeenCalled();
+  });
+
+  describe('the agents graph holds agents', () => {
+    const notAnAgent = [
+      quad(DKG_ONTOLOGY.DKG_ALLOWED_AGENT, literal(WALLET), 'did:dkg:context-graph:a-graph'),
+      quad(DKG_ONTOLOGY.DKG_ALLOWED_PEER, literal('peer-1'), 'did:dkg:context-graph:a-graph'),
+      quad(DKG_ONTOLOGY.DKG_DELEGATION_AGENT, literal(WALLET), `did:dkg:agent-delegation:a-graph:${WALLET}`),
+      quad(PEER_ID, literal('peer-1'), 'urn:not-an-agent'),
+    ];
+    const fullProfile = (peerId: string): Quad[] => {
+      const keyId = `${SUBJECT}#x25519-0123`;
+      return profile(peerId, minutesAgo(1), {
+        skills: [{ skillType: 'Search', pricePerCall: 1, currency: 'TRAC', pricingModel: 'PerInvocation' }],
+        contextGraphsServed: ['a-graph'],
+        encryptionKeys: [{
+          encryptionKeyAlgorithm: 'X25519',
+          publicEncryptionKey: 'public-key',
+          encryptionKeyProof: 'proof',
+          encryptionKeyId: keyId,
+          revokedAt: minutesAgo(2),
+          revocationProof: 'revocation-proof',
+        }],
+      });
+    };
+    const storedSubjects = async (store: OxigraphStore): Promise<string[]> => {
+      const result = await store.query(`SELECT DISTINCT ?s WHERE { GRAPH <${AGENT_REGISTRY_GRAPH}> { ?s ?p ?o } } ORDER BY ?s`);
+      return result.type === 'bindings' ? result.bindings.map((row) => row['s']!) : [];
+    };
+
+    it.each([
+      ['a gossiped message', { listedPeersOnly: true }],
+      ['a page of a sync', { syncPage: true }],
+    ])('stores no row about anything else from %s', async (_label, options) => {
+      const { store } = fixture();
+      const insert = vi.fn(async (quads: Quad[]) => { await store.insert(quads); return quads; });
+
+      await expect(storeAgentProfileQuads(store, notAnAgent, insert, { nowMs: NOW, ...options })).resolves.toEqual([]);
+      expect(insert).not.toHaveBeenCalled();
+
+      const stored = await storeAgentProfileQuads(store, [...notAnAgent, ...fullProfile('peer-1')], insert, { nowMs: NOW, ...options });
+      expect(stored.filter((row) => !row.subject.startsWith('did:dkg:agent:'))).toEqual([]);
+      expect((await storedSubjects(store)).filter((subject) => !subject.startsWith('did:dkg:agent:'))).toEqual([]);
+    });
+
+    it('keeps every subject of a whole profile, its parts and its retired keys', async () => {
+      const { store } = fixture();
+      const quads = fullProfile('peer-1');
+      const whole = [...new Set(quads.map((row) => row.subject))].sort();
+      expect(whole).toEqual(expect.arrayContaining([
+        SUBJECT,
+        `${SUBJECT}#x25519-0123`,
+        `${SUBJECT}/.well-known/genid/cap1`,
+        `${SUBJECT}/.well-known/genid/offering1`,
+        `${SUBJECT}/.well-known/genid/hosting`,
+        `${SUBJECT}/.well-known/genid/registration`,
+      ]));
+
+      await storeAgentProfileQuads(store, quads, async (writes) => { await store.insert(writes); return writes; }, { nowMs: NOW, syncPage: true });
+
+      expect(await storedSubjects(store)).toEqual(whole);
+    });
+
+    it('keeps them in what gossip stores of a profile', () => {
+      const quads = fullProfile('peer-1');
+      const fromSender = gossipedAgentProfileQuads([...notAnAgent, ...quads], { fromPeerId: 'peer-1', knownAgent: false });
+      expect(fromSender).toEqual(quads);
+      const withoutSender = gossipedAgentProfileQuads([...notAnAgent, ...quads], { knownAgent: false });
+      expect(withoutSender).toEqual(quads);
+      expect(gossipedAgentProfileQuads(notAnAgent, { fromPeerId: 'peer-1', knownAgent: false })).toEqual([]);
+      expect(gossipedAgentProfileQuads(notAnAgent, { knownAgent: true })).toEqual([]);
+    });
   });
 
   it('does nothing for an empty batch', async () => {
@@ -828,10 +899,10 @@ describe('the part of a gossiped profile a node stores', () => {
     expect(gossipedAgentProfileQuads([...update, revocation], { fromPeerId: FROM, knownAgent: true })).toEqual([update[0], update[1]]);
   });
 
-  it('is nothing of a subject that is no agent, in a message about a known one', () => {
+  it('is nothing of a subject that is no agent', () => {
     const other = quad(LAST_SEEN, literal(minutesAgo(1)), 'did:dkg:context-graph:other');
     expect(gossipedAgentProfileQuads([other], { knownAgent: true })).toEqual([]);
-    expect(gossipedAgentProfileQuads([other], { knownAgent: false }), 'a new subject is stored whole, as before').toEqual([other]);
+    expect(gossipedAgentProfileQuads([other], { knownAgent: false })).toEqual([]);
   });
 
   it('takes the sender on trust when none is given', () => {
