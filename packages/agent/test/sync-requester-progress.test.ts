@@ -4,7 +4,8 @@ import { type Quad } from '@origintrail-official/dkg-storage';
 import { runDurableSync, runDurableSyncDetailed, type DurableSyncCheckpointWrite, type DurableSyncFetchRequest, type DurableSyncStoreInsertRequest } from '../src/sync/requester/durable-sync.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
-import { runSharedMemorySync, syncPublicSnapshotsForMeta } from '../src/sync/requester/shared-memory-sync.js';
+import { readPublicSnapshotWalkProgress, runSharedMemorySync, syncPublicSnapshotsForMeta } from '../src/sync/requester/shared-memory-sync.js';
+import { createRecoveryExecutionAdmission } from '../src/sync/requester/recovery-execution-guard.js';
 import { SyncPageAccumulationLimitError, type SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
@@ -31,6 +32,7 @@ function durableFetchRecorder(
   return recorder(impl);
 }
 const EXACT_UAL = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/7';
+const MISSING_EXACT_UAL = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/8';
 
 function deniedError(): Error & { syncDenied: boolean } {
   const err = new Error('access denied') as Error & { syncDenied: boolean };
@@ -193,6 +195,189 @@ describe('selected snapshot walk continuation', () => {
       totalSnapshots: 2,
       completed: true,
       missingCount: 0,
+    });
+  });
+});
+
+describe('a failing step of the snapshot walk carries the walk\'s progress out', () => {
+  const entry = (ref: string, reuse: boolean, count = 1) => ({ snapshot: { ref, digest: ref, count }, reuse });
+  const written = [{ ...quad('written'), graph: '' }];
+  const writtenDigest = workspacePublicQuadsDigest(written);
+  /** A store whose existence probe (the reuse step) fails for `failing` and finds every other snapshot present. */
+  const storeProbing = (failing: string, failure: Error, probes: string[] = []) => ({
+    getSnapshot: async () => null,
+    putSnapshot: async ({ digest }: { digest: string }) => ({ ref: digest, byteLength: 1 }),
+    lifecycle: {
+      finalizedCleanupEnabled: false as const,
+      snapshotExists: async (ref: string) => {
+        probes.push(ref);
+        if (ref === failing) throw failure;
+        return true;
+      },
+      markPublished: async () => {},
+    },
+  });
+  const walk = (
+    publicSnapshotStore: Parameters<typeof syncPublicSnapshotsForMeta>[0]['publicSnapshotStore'],
+    entries: ReturnType<typeof entry>[],
+    options: {
+      executionBoundary?: ReturnType<typeof createRecoveryExecutionAdmission>;
+      workAdmission?: typeof UNRESTRICTED_SYNC_WORK;
+      /** Collects the ref of every snapshot the walk asked the transport for. */
+      fetched?: string[];
+    } = {},
+  ) => syncPublicSnapshotsForMeta({
+    ctx,
+    remotePeerId: 'peer-throwing-step',
+    contextGraphId: 'cg-throwing-step',
+    deadline: Date.now() + 60_000,
+    workAdmission: options.workAdmission ?? UNRESTRICTED_SYNC_WORK,
+    snapshotWalk: { entries },
+    publicSnapshotStore,
+    ...(options.executionBoundary ? { executionBoundary: options.executionBoundary } : {}),
+    fetchSyncPages: async (_ctx, _peer, contextGraphId, _swm, phase, _graph, _deadline, fetchOptions) => {
+      options.fetched?.push(fetchOptions!.snapshotRef!);
+      return pageResult(contextGraphId, phase, { quads: written });
+    },
+    deleteCheckpoint: () => {},
+    setCheckpoint: () => {},
+  });
+  const rejection = async (run: Promise<unknown>): Promise<unknown> => {
+    try { await run; } catch (error) { return error; }
+    throw new Error('expected the walk to reject');
+  };
+
+  it('carries the progress out of an existence probe that throws on the second of two reuse entries', async () => {
+    const failure = Object.assign(new Error('too many open files'), { code: 'EMFILE' });
+    const error = await rejection(walk(storeProbing('second', failure), [entry('first', true), entry('second', true)]));
+    expect(error).toBe(failure);
+    expect(readPublicSnapshotWalkProgress(error)).toEqual({
+      readySnapshots: 1, totalSnapshots: 2, missingCount: 1, missingSample: ['second'],
+    });
+  });
+
+  it('reports the same progress for a store write that throws after a reused entry (the step that already did)', async () => {
+    const failure = new Error('disk full');
+    const store = { ...storeProbing('none', failure), putSnapshot: async (): Promise<never> => { throw failure; } };
+    const error = await rejection(walk(store, [entry('first', true), { snapshot: { ref: writtenDigest, digest: writtenDigest, count: 1 }, reuse: false }]));
+    expect(error).toBe(failure);
+    expect(readPublicSnapshotWalkProgress(error)).toEqual({
+      readySnapshots: 1, totalSnapshots: 2, missingCount: 1, missingSample: [writtenDigest],
+    });
+  });
+
+  it('counts the failed entry and every one after it as unresolved, and probes none of the later ones', async () => {
+    const probes: string[] = [];
+    const error = await rejection(walk(storeProbing('second', new Error('probe failed'), probes),
+      [entry('first', true), entry('second', true), entry('third', true)]));
+    expect(probes).toEqual(['first', 'second']);
+    expect(readPublicSnapshotWalkProgress(error)).toEqual({
+      readySnapshots: 1, totalSnapshots: 3, missingCount: 2, missingSample: ['second', 'third'],
+    });
+  });
+
+  /** An execution boundary that can be revoked mid-step; once revoked, `assertCurrent` throws `revoked`. */
+  const revocable = () => {
+    const revoked = new Error('recovery revoked');
+    let current = true;
+    const executionBoundary = createRecoveryExecutionAdmission({
+      signal: new AbortController().signal,
+      assertCurrent: () => { if (!current) throw revoked; },
+    });
+    return { revoked, revoke: () => { current = false; }, executionBoundary };
+  };
+
+  it('lets a revoked boundary win over a failing probe, with no progress attached', async () => {
+    const { revoked, revoke, executionBoundary } = revocable();
+    const store = storeProbing('second', new Error('probe failed'));
+    const probe = store.lifecycle.snapshotExists;
+    store.lifecycle.snapshotExists = async ref => {
+      // The boundary is revoked while the second probe is in flight.
+      if (ref === 'second') revoke();
+      return probe(ref);
+    };
+    const error = await rejection(walk(store, [entry('first', true), entry('second', true)], { executionBoundary }));
+    expect(error).toBe(revoked);
+    expect(readPublicSnapshotWalkProgress(error)).toBeUndefined();
+  });
+
+  it('reports a boundary revoked during a probe that succeeds as the revocation, with no progress attached', async () => {
+    const { revoked, revoke, executionBoundary } = revocable();
+    const store = storeProbing('none', new Error('unused'));
+    const probe = store.lifecycle.snapshotExists;
+    store.lifecycle.snapshotExists = async ref => {
+      if (ref === 'second') revoke();
+      return probe(ref);
+    };
+    const error = await rejection(walk(store, [entry('first', true), entry('second', true)], { executionBoundary }));
+    expect(error).toBe(revoked);
+    expect(readPublicSnapshotWalkProgress(error)).toBeUndefined();
+  });
+
+  it('lets a revoked boundary win over a failing store write, with no progress attached', async () => {
+    const { revoked, revoke, executionBoundary } = revocable();
+    const store = {
+      ...storeProbing('none', new Error('unused')),
+      // The boundary is revoked while the write is in flight, which then fails on its own.
+      putSnapshot: async (): Promise<never> => { revoke(); throw new Error('disk full'); },
+    };
+    const error = await rejection(walk(store, [entry('first', true), entry(writtenDigest, false)], { executionBoundary }));
+    expect(error).toBe(revoked);
+    expect(readPublicSnapshotWalkProgress(error)).toBeUndefined();
+  });
+
+  describe('reuse comes before the work-admission check', () => {
+    const spent = { ...UNRESTRICTED_SYNC_WORK, canAdmitWork: () => false };
+    /** A store whose existence probe finds nothing: the file is gone. */
+    const storeAbsent = (probes: string[] = []) => {
+      const store = storeProbing('none', new Error('unused'));
+      return {
+        ...store,
+        lifecycle: { ...store.lifecycle, snapshotExists: async (ref: string): Promise<boolean> => { probes.push(ref); return false; } },
+      };
+    };
+
+    it('counts every reusable entry as ready while this pass\'s allowance is spent, without spending any work', async () => {
+      const probes: string[] = [];
+      const fetched: string[] = [];
+      const result = await walk(storeProbing('none', new Error('unused'), probes),
+        [entry('first', true), entry('second', true)], { workAdmission: spent, fetched });
+      expect(probes).toEqual(['first', 'second']);
+      expect(fetched).toEqual([]);
+      expect(result).toMatchObject({ readySnapshots: 2, totalSnapshots: 2, missingCount: 0, completed: true });
+      expect(result.localYield).toBeUndefined();
+    });
+
+    it('yields at the first entry that needs work, after the reused entries before it', async () => {
+      const probes: string[] = [];
+      const fetched: string[] = [];
+      const result = await walk(storeProbing('none', new Error('unused'), probes),
+        [entry('first', true), entry(writtenDigest, false), entry('third', true)], { workAdmission: spent, fetched });
+      expect(probes).toEqual(['first']);
+      expect(fetched).toEqual([]);
+      expect(result).toMatchObject({
+        readySnapshots: 1, totalSnapshots: 3, missingCount: 2, missingSample: [writtenDigest, 'third'],
+        completed: false, localYield: true,
+      });
+    });
+
+    it('falls through to the normal fetch path when the reuse probe finds the file absent', async () => {
+      const probes: string[] = [];
+      const fetched: string[] = [];
+      const result = await walk(storeAbsent(probes), [entry(writtenDigest, true)], { fetched });
+      expect(probes).toEqual([writtenDigest]);
+      expect(fetched).toEqual([writtenDigest]);
+      expect(result).toMatchObject({ readySnapshots: 1, completedPhases: 1, missingCount: 0, completed: true });
+    });
+
+    it('holds an entry whose file is absent to the work-admission check, as a local yield and not a failure', async () => {
+      const fetched: string[] = [];
+      const result = await walk(storeAbsent(), [entry(writtenDigest, true)], { workAdmission: spent, fetched });
+      expect(fetched).toEqual([]);
+      expect(result).toMatchObject({
+        readySnapshots: 0, totalSnapshots: 1, missingCount: 1, missingSample: [writtenDigest],
+        completed: false, localYield: true,
+      });
     });
   });
 });
@@ -1429,6 +1614,7 @@ describe('exact durable fetch disposition', () => {
     dataRejectedMissingMeta?: number;
     fetchError?: Error;
     abortAfterMeta?: boolean;
+    exactUals?: string[];
   } = {}) {
     const controller = new AbortController();
     return runDurableSyncDetailed({
@@ -1436,7 +1622,9 @@ describe('exact durable fetch disposition', () => {
       remotePeerId: 'exact-peer',
       contextGraphIds: ['exact-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetSelectionFor: () => createUalOnlyExactAssetSelection([EXACT_UAL]),
+      exactAssetSelectionFor: () => createUalOnlyExactAssetSelection(
+        options.exactUals ?? [EXACT_UAL],
+      ),
       fetchSyncPages: async ({ phase }) => {
         if (options.fetchError) throw options.fetchError;
         const page = pageResult('exact-cg', phase, {
@@ -1487,6 +1675,7 @@ describe('exact durable fetch disposition', () => {
     });
 
     expect(detailed.exactFetchDisposition).toBe('clean-absent');
+    expect(detailed).not.toHaveProperty('exactResponderCapability');
     expect(detailed.result.complete).toBe(false);
     expect(projected.complete).toBe(false);
     expect(projected).not.toHaveProperty('exactFetchDisposition');
@@ -1546,6 +1735,52 @@ describe('exact durable fetch disposition', () => {
       data: { nextOffset: 1 },
     });
     expect(detailed.exactFetchDisposition).toBe('incomplete');
+    expect(detailed.exactResponderCapability).toBe('legacy-filter-unsupported');
+  });
+
+  it('does not infer legacy capability from a partial batched hit', async () => {
+    const assertionGraph = 'did:dkg:context-graph:exact-cg/_verifiable_memory/asset/7';
+    const detailed = await runExact({
+      exactUals: [EXACT_UAL, MISSING_EXACT_UAL],
+      rawMeta: [
+        {
+          subject: EXACT_UAL,
+          predicate: 'http://dkg.io/ontology/kaUal',
+          object: EXACT_UAL,
+          graph: 'did:dkg:context-graph:exact-cg/_meta',
+        } as Quad,
+        {
+          subject: EXACT_UAL,
+          predicate: 'http://dkg.io/ontology/assertionGraph',
+          object: assertionGraph,
+          graph: 'did:dkg:context-graph:exact-cg/_meta',
+        } as Quad,
+      ],
+      rawData: [{
+        subject: 'http://example.com/entity',
+        predicate: 'http://example.com/value',
+        object: '"present"',
+        graph: assertionGraph,
+      } as Quad],
+      meta: { nextOffset: 2 },
+      data: { nextOffset: 1 },
+    });
+
+    expect(detailed.exactFetchDisposition).toBe('incomplete');
+    expect(detailed).not.toHaveProperty('exactResponderCapability');
+  });
+
+  it('infers legacy capability when a batched request misses every requested descriptor', async () => {
+    const detailed = await runExact({
+      exactUals: [EXACT_UAL, MISSING_EXACT_UAL],
+      rawMeta: [quad('did:dkg:legacy-prefix-asset')],
+      rawData: [quad('http://example.com/legacy-prefix-data')],
+      meta: { nextOffset: 1 },
+      data: { nextOffset: 1 },
+    });
+
+    expect(detailed.exactFetchDisposition).toBe('incomplete');
+    expect(detailed.exactResponderCapability).toBe('legacy-filter-unsupported');
   });
 
   it('does not verify or store an exact phase rejected by its accumulation limit', async () => {

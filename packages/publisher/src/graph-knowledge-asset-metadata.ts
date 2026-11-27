@@ -2,6 +2,8 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   createGraphKnowledgeAssetScope,
   toAgentDid,
+  knowledgeAssetLayerGraphUri,
+  MemoryLayer,
 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
@@ -11,6 +13,7 @@ import type {
   OnChainProvenance,
 } from './metadata.js';
 
+const AUTHENTICATED_SUB_GRAPH = 'http://dkg.io/ontology/authenticatedSubGraphName';
 const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -79,13 +82,15 @@ export function readGraphKnowledgeAssetConfirmationKindV1(
   const values = metadataQuads
     .filter((quad) => quad.predicate === GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE)
     .map((quad) => rdfLiteralLexicalValue(quad.object));
-  if (values.length > 1) {
-    throw new Error(`Graph knowledge asset metadata has ${values.length} confirmation kinds`);
-  }
-  if (values.length === 1 && values[0] === undefined) {
+  if (values.some(value => value === undefined)) {
     throw new Error('Graph knowledge asset confirmation kind must be an RDF literal');
   }
-  return normalizeGraphKnowledgeAssetConfirmationKindV1(values[0]);
+  const kinds = values.map(normalizeGraphKnowledgeAssetConfirmationKindV1);
+  // Legacy union metadata may carry both compatible confirmations. Transaction
+  // provenance is stronger: choosing it retains its receipt validation rather
+  // than silently falling back to the receiptless materialization lane.
+  return kinds.includes('transaction') || kinds.length === 0
+    ? 'transaction' : 'finalized-materialization';
 }
 
 /**
@@ -220,6 +225,34 @@ export function mergeSameVersionGraphKnowledgeAssetMetadataV1(
   return merged;
 }
 
+/** Replace peer confirmation claims with facts established by this receiver. */
+export function overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(
+  metadata: readonly Quad[],
+  scope: { ual: string; metaGraph: string; receivedAt: Date; subGraphName?: string },
+  state: { status: 'tentative' } | {
+    status: 'confirmed';
+    materializedVersion: MaterializedVersion;
+    confirmation: { kind: 'finalized-materialization' } | { kind: 'transaction'; transactionHash: string };
+  },
+): Quad[] {
+  const controls = new Set([
+    GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE, GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE,
+    GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE, GRAPH_KNOWLEDGE_ASSET_TRANSACTION_HASH_PREDICATE,
+    MATERIALIZED_VERSION_PREDICATE, AUTHENTICATED_SUB_GRAPH,
+  ]);
+  const result = metadata.filter(q => !controls.has(q.predicate));
+  result.push(
+    mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE,
+      `${lit(scope.receivedAt.toISOString())}^^<${XSD}dateTime>`, scope.metaGraph),
+  );
+  if (state.status === 'confirmed') {
+    appendAuthenticatedSubGraphRoute(result, scope.ual, scope.metaGraph, scope.subGraphName);
+    appendConfirmationControls(result, scope.ual, scope.metaGraph, state.confirmation);
+    result.push(materializedVersionQuad(scope.metaGraph, scope.ual, state.materializedVersion));
+  } else result.push(mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE, lit('tentative'), scope.metaGraph));
+  return result;
+}
+
 /**
  * Constant-size VM metadata for one graph-scoped KA. RDF subjects in the KA
  * payload never become membership, token, ownership, or trust rows here.
@@ -231,44 +264,41 @@ export function generateGraphKnowledgeAssetMetadata(
   const { scope, metaGraph, quads } = generateGraphKnowledgeAssetMetadataBase(meta);
   if (state.status === 'confirmed') {
     const { confirmation } = state;
-    if (confirmation.kind === 'transaction') {
-      quads.push(
-        mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE, lit('confirmed'), metaGraph),
-        mq(
-          scope.ual,
-          GRAPH_KNOWLEDGE_ASSET_TRANSACTION_HASH_PREDICATE,
-          lit(confirmation.provenance.txHash),
-          metaGraph,
-        ),
-        mq(scope.ual, `${DKG}batchId`, intLit(confirmation.provenance.batchId), metaGraph),
-        mq(
-          scope.ual,
-          GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
-          lit('transaction'),
-          metaGraph,
-        ),
-      );
-    } else {
-      const { batchId, materializedVersion } = confirmation.provenance;
-      if (batchId < 0n) {
-        throw new Error('Finalized graph metadata batchId must be non-negative');
-      }
-      quads.push(
-        mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE, lit('confirmed'), metaGraph),
-        mq(scope.ual, `${DKG}batchId`, intLit(batchId), metaGraph),
-        mq(
-          scope.ual,
-          GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
-          lit('finalized-materialization'),
-          metaGraph,
-        ),
-        materializedVersionQuad(metaGraph, scope.ual, materializedVersion),
-      );
+    const { batchId } = confirmation.provenance;
+    if (confirmation.kind === 'finalized-materialization' && batchId < 0n) {
+      throw new Error('Finalized graph metadata batchId must be non-negative');
+    }
+    appendConfirmationControls(quads, scope.ual, metaGraph, confirmation.kind === 'transaction'
+      ? { kind: 'transaction', transactionHash: confirmation.provenance.txHash } : confirmation);
+    quads.push(mq(scope.ual, `${DKG}batchId`, intLit(batchId), metaGraph));
+    if (confirmation.kind === 'finalized-materialization') {
+      quads.push(materializedVersionQuad(metaGraph, scope.ual, confirmation.provenance.materializedVersion));
     }
   } else {
     quads.push(mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE, lit('tentative'), metaGraph));
   }
+  if (state.status === 'confirmed') appendAuthenticatedSubGraphRoute(quads, scope.ual, metaGraph, meta.subGraphName);
   return quads;
+}
+
+/** Serialize confirmation controls identically for local generation and authenticated recovery. */
+function appendConfirmationControls(
+  quads: Quad[], ual: string, metaGraph: string,
+  confirmation: { kind: 'finalized-materialization' } | { kind: 'transaction'; transactionHash: string },
+): void {
+  quads.push(
+    mq(ual, GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE, lit('confirmed'), metaGraph),
+    mq(ual, GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE, lit(confirmation.kind), metaGraph),
+  );
+  if (confirmation.kind === 'transaction') {
+    quads.push(mq(ual, GRAPH_KNOWLEDGE_ASSET_TRANSACTION_HASH_PREDICATE, lit(confirmation.transactionHash), metaGraph));
+  }
+}
+
+/** Locally authenticated routing is independent of receipt or snapshot provenance. */
+function appendAuthenticatedSubGraphRoute(quads: Quad[], ual: string, metaGraph: string, subGraphName?: string): void {
+  // The caller carries the scope established by verification or typed local generation.
+  if (subGraphName !== undefined) quads.push(mq(ual, AUTHENTICATED_SUB_GRAPH, lit(subGraphName), metaGraph));
 }
 
 function generateGraphKnowledgeAssetMetadataBase(
@@ -296,6 +326,9 @@ function generateGraphKnowledgeAssetMetadataBase(
     throw new Error('Graph-scoped KA metadata cannot describe an empty asset');
   }
   assertSafeGraphIriForSparql(meta.assertionGraph);
+  if (meta.subGraphName !== undefined && meta.assertionGraph !== knowledgeAssetLayerGraphUri(
+    meta.contextGraphId, MemoryLayer.VerifiableMemory, scope, meta.subGraphName,
+  )) throw new Error('Graph-scoped KA subgraph does not match its canonical assertion graph');
 
   const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
   const publisherPeerId = meta.publisherPeerId || 'unknown';

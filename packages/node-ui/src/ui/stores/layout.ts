@@ -1,22 +1,41 @@
+import { useSyncExternalStore } from 'react';
 import { create } from 'zustand';
 
 interface LayoutState {
   leftCollapsed: boolean;
   rightCollapsed: boolean;
+  /** The right panel fills the centre area. Never saved. */
+  rightExpanded: boolean;
   bottomCollapsed: boolean;
   bottomMaximised: boolean;
+  leftSectionMarketplaceOpen: boolean;
   leftSectionMyProjectsOpen: boolean;
+  leftSectionContextOracleOpen: boolean;
   leftSectionIntegrationsOpen: boolean;
   theme: 'dark' | 'light';
   leftWidth: number;
   rightWidth: number;
   bottomHeight: number;
+  /** The one panel open on a narrow screen. Never saved, so desktop panels keep their state. */
+  narrowPanel: 'left' | 'right' | null;
 
   toggleLeft: () => void;
   toggleRight: () => void;
+  setRightExpanded: (expanded: boolean) => void;
+  closeNarrowPanel: () => void;
+  /** Show the centre: collapse the expanded right panel and close a floating one. */
+  revealCentre: () => void;
+  /**
+   * Open the right panel: floating on a narrow screen, docked otherwise, and with
+   * `expandOnDesktop` expanded over the centre on a wide one, in one update. Already open
+   * stays open, so calling it twice changes nothing.
+   */
+  openRight: (options?: { expandOnDesktop?: boolean }) => void;
   toggleBottom: () => void;
   toggleBottomMaximised: () => void;
+  toggleLeftSectionMarketplace: () => void;
   toggleLeftSectionMyProjects: () => void;
+  toggleLeftSectionContextOracle: () => void;
   toggleLeftSectionIntegrations: () => void;
   setTheme: (t: 'dark' | 'light') => void;
   setLeftWidth: (w: number) => void;
@@ -26,11 +45,21 @@ interface LayoutState {
 
 const LAYOUT_STORAGE_KEY = 'dkg-layout';
 
+/** Below this width the side panels float over the page (02-shell-header.css). */
+const NARROW_QUERY = '(max-width: 860px)';
+
+function narrowMedia(): MediaQueryList | null {
+  return typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia(NARROW_QUERY) : null;
+}
+const isNarrowViewport = () => narrowMedia()?.matches ?? false;
+
 interface PersistedLayout {
   leftCollapsed?: boolean;
   rightCollapsed?: boolean;
   bottomCollapsed?: boolean;
+  leftSectionMarketplaceOpen?: boolean;
   leftSectionMyProjectsOpen?: boolean;
+  leftSectionContextOracleOpen?: boolean;
   leftSectionIntegrationsOpen?: boolean;
   leftWidth?: number;
   rightWidth?: number;
@@ -43,11 +72,12 @@ const DEFAULTS = {
   leftCollapsed: false,
   rightCollapsed: false,
   bottomCollapsed: true,
-  // Sidebar sections: My Context Graphs is the primary navigation surface
-  // so it stays open by default; Integrations is an escape-hatch surface
-  // (status check, no day-to-day click target) so it stays closed and
-  // doesn't run its 30s polling loop until the user opens it.
+  // Sidebar sections: Marketplace and My Context Graphs are primary
+  // navigation surfaces, while Public graphs and Integrations stay
+  // collapsed until the user needs them.
+  leftSectionMarketplaceOpen: true,
   leftSectionMyProjectsOpen: true,
+  leftSectionContextOracleOpen: false,
   leftSectionIntegrationsOpen: false,
   leftWidth: 240,
   rightWidth: 360,
@@ -115,9 +145,15 @@ function loadPersisted(): Required<PersistedLayout> {
       leftCollapsed: typeof parsed.leftCollapsed === 'boolean' ? parsed.leftCollapsed : DEFAULTS.leftCollapsed,
       rightCollapsed: typeof parsed.rightCollapsed === 'boolean' ? parsed.rightCollapsed : DEFAULTS.rightCollapsed,
       bottomCollapsed: typeof parsed.bottomCollapsed === 'boolean' ? parsed.bottomCollapsed : DEFAULTS.bottomCollapsed,
+      leftSectionMarketplaceOpen: typeof parsed.leftSectionMarketplaceOpen === 'boolean'
+        ? parsed.leftSectionMarketplaceOpen
+        : DEFAULTS.leftSectionMarketplaceOpen,
       leftSectionMyProjectsOpen: typeof parsed.leftSectionMyProjectsOpen === 'boolean'
         ? parsed.leftSectionMyProjectsOpen
         : DEFAULTS.leftSectionMyProjectsOpen,
+      leftSectionContextOracleOpen: typeof parsed.leftSectionContextOracleOpen === 'boolean'
+        ? parsed.leftSectionContextOracleOpen
+        : DEFAULTS.leftSectionContextOracleOpen,
       leftSectionIntegrationsOpen: typeof parsed.leftSectionIntegrationsOpen === 'boolean'
         ? parsed.leftSectionIntegrationsOpen
         : DEFAULTS.leftSectionIntegrationsOpen,
@@ -151,7 +187,9 @@ function snapshot(state: LayoutState): PersistedLayout {
     leftCollapsed: state.leftCollapsed,
     rightCollapsed: state.rightCollapsed,
     bottomCollapsed: state.bottomCollapsed,
+    leftSectionMarketplaceOpen: state.leftSectionMarketplaceOpen,
     leftSectionMyProjectsOpen: state.leftSectionMyProjectsOpen,
+    leftSectionContextOracleOpen: state.leftSectionContextOracleOpen,
     leftSectionIntegrationsOpen: state.leftSectionIntegrationsOpen,
     leftWidth: state.leftWidth,
     rightWidth: state.rightWidth,
@@ -164,21 +202,46 @@ const initial = loadPersisted();
 export const useLayoutStore = create<LayoutState>((set, get) => ({
   leftCollapsed: initial.leftCollapsed,
   rightCollapsed: initial.rightCollapsed,
+  rightExpanded: false,
   bottomCollapsed: initial.bottomCollapsed,
   bottomMaximised: false,
+  leftSectionMarketplaceOpen: initial.leftSectionMarketplaceOpen,
   leftSectionMyProjectsOpen: initial.leftSectionMyProjectsOpen,
+  leftSectionContextOracleOpen: initial.leftSectionContextOracleOpen,
   leftSectionIntegrationsOpen: initial.leftSectionIntegrationsOpen,
-  theme: (localStorage.getItem('dkg-theme') as 'dark' | 'light') || 'dark',
+  theme: (typeof localStorage === 'undefined' ? null : localStorage.getItem('dkg-theme') as 'dark' | 'light' | null) || 'dark',
   leftWidth: initial.leftWidth,
   rightWidth: initial.rightWidth,
   bottomHeight: initial.bottomHeight,
+  narrowPanel: null,
 
   toggleLeft: () => {
+    if (isNarrowViewport()) {
+      set((s) => ({ narrowPanel: s.narrowPanel === 'left' ? null : 'left' }));
+      return;
+    }
     set((s) => ({ leftCollapsed: !s.leftCollapsed }));
     persist(snapshot(get()));
   },
+  setRightExpanded: (expanded) => set({ rightExpanded: expanded }),
   toggleRight: () => {
-    set((s) => ({ rightCollapsed: !s.rightCollapsed }));
+    if (isNarrowViewport()) {
+      set((s) => ({ narrowPanel: s.narrowPanel === 'right' ? null : 'right' }));
+      return;
+    }
+    set((s) => ({ rightCollapsed: !s.rightCollapsed, rightExpanded: false }));
+    persist(snapshot(get()));
+  },
+  closeNarrowPanel: () => set({ narrowPanel: null }),
+  revealCentre: () => set({ rightExpanded: false, narrowPanel: null }),
+  openRight: ({ expandOnDesktop = false } = {}) => {
+    if (isNarrowViewport()) {
+      set({ narrowPanel: 'right' });
+      return;
+    }
+    const { rightCollapsed, rightExpanded } = get();
+    if (!rightCollapsed && (!expandOnDesktop || rightExpanded)) return;
+    set(expandOnDesktop ? { rightCollapsed: false, rightExpanded: true } : { rightCollapsed: false });
     persist(snapshot(get()));
   },
   toggleBottom: () => {
@@ -189,8 +252,16 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
     set((s) => ({ bottomMaximised: !s.bottomMaximised, bottomCollapsed: false }));
     persist(snapshot(get()));
   },
+  toggleLeftSectionMarketplace: () => {
+    set((s) => ({ leftSectionMarketplaceOpen: !s.leftSectionMarketplaceOpen }));
+    persist(snapshot(get()));
+  },
   toggleLeftSectionMyProjects: () => {
     set((s) => ({ leftSectionMyProjectsOpen: !s.leftSectionMyProjectsOpen }));
+    persist(snapshot(get()));
+  },
+  toggleLeftSectionContextOracle: () => {
+    set((s) => ({ leftSectionContextOracleOpen: !s.leftSectionContextOracleOpen }));
     persist(snapshot(get()));
   },
   toggleLeftSectionIntegrations: () => {
@@ -215,3 +286,20 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
     persist(snapshot(get()));
   },
 }));
+
+function subscribeNarrow(listener: () => void): () => void {
+  const media = narrowMedia();
+  media?.addEventListener('change', listener);
+  return () => media?.removeEventListener('change', listener);
+}
+
+/** Which side panels show now: narrow screens start with both closed and open one at a time. */
+export function useShellPanels(): { narrow: boolean; leftOpen: boolean; rightOpen: boolean } {
+  const narrow = useSyncExternalStore(subscribeNarrow, isNarrowViewport, () => false);
+  const leftCollapsed = useLayoutStore((s) => s.leftCollapsed);
+  const rightCollapsed = useLayoutStore((s) => s.rightCollapsed);
+  const narrowPanel = useLayoutStore((s) => s.narrowPanel);
+  return narrow
+    ? { narrow, leftOpen: narrowPanel === 'left', rightOpen: narrowPanel === 'right' }
+    : { narrow, leftOpen: !leftCollapsed, rightOpen: !rightCollapsed };
+}

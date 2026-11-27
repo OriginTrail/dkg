@@ -1,189 +1,109 @@
 import { ethers, type JsonRpcProvider } from 'ethers';
-
 import type { ReadOpts } from './rpc-failover-client.js';
+import { readTip } from './rpc-tip-read.js';
+import { RPC_LOG_SCAN_TIMEOUT_MS } from './evm-adapter-constants.js';
+import { readAdaptiveEvmLogRange } from './evm-log-range.js';
+import { withRpcRequestTimeout } from './rpc-request-transport.js';
 
-export type RawLogScanReadProvider = <T>(
-  label: string,
-  fn: (provider: JsonRpcProvider) => Promise<T>,
-  opts?: ReadOpts,
-) => Promise<T>;
-
-export interface RawLogScanFilter {
-  readonly address: string;
-  readonly topics: readonly string[];
-}
-
+export type RawLogScanReadProvider = <T>(label: string,
+  fn: (provider: JsonRpcProvider) => Promise<T>, opts?: ReadOpts) => Promise<T>;
+export interface RawLogScanFilter { readonly address: string; readonly topics: readonly string[] }
 export interface RawLogScanConfig {
   readonly readProvider: RawLogScanReadProvider;
   readonly reorgBufferBlocks: number;
   readonly label: string;
 }
+interface ScanOptions<T> { readonly isAborted?: () => boolean; readonly onLogs: (logs: readonly T[]) => void }
+interface LogWindow<T> { readonly head: number; readonly logs: readonly T[] }
+type RawLogWithIdentity = ethers.Log & { blockHash?: unknown; index?: unknown; logIndex?: unknown };
 
-export interface RawLogScanBatch {
-  readonly head: number;
-  readonly logs: readonly ethers.Log[];
-}
-
-export interface RawLogScanReadOptions {
-  /**
-   * Caller lifecycle signal, evaluated at the scan's CANCELLATION POINT between
-   * the head read and the wide `eth_getLogs`. A caller torn down while the head
-   * probe is in flight (`stop()` then `provider.destroy()`) must not still issue
-   * a `watchdogWideLogScan` against providers that are being closed.
-   */
-  readonly isAborted?: () => boolean;
-}
-
-type RawLogWithIdentity = ethers.Log & {
-  blockHash?: unknown;
-  transactionHash?: unknown;
-  index?: unknown;
-  logIndex?: unknown;
-};
-
-/**
- * Stateful, transactionally committed raw `eth_getLogs` scan mechanics.
- *
- * Callers read a batch and commit it only after their domain-specific dispatch
- * succeeds. This keeps cursor and dedupe state from advancing when a poll is
- * stopped or its domain callback fails between the RPC read and dispatch.
- *
- * DELIVERY IS AT-LEAST-ONCE, and the BATCH is the commit unit. Nothing is
- * recorded as seen until `commit()`, so a dispatch that throws on the k-th log
- * leaves logs 1..k-1 uncommitted too and the next `read()` re-delivers the WHOLE
- * batch, not just the tail. Dispatch callbacks MUST be idempotent. The rejected
- * alternative — marking each log as it is dispatched — would make the failing
- * log itself at-most-once (silently dropped), which is the worse trade for
- * rotation-style state that has to converge.
- */
+/** One owner for read, cancellation, dispatch and cursor commit. A callback failure
+ * replays the whole batch, so consumers must be idempotent. A consumer can explicitly
+ * quarantine a repeatedly failing record before returning to commit the batch. */
 export class RawLogScanner {
-  readonly #readProvider: RawLogScanReadProvider;
-  readonly #reorgBufferBlocks: number;
-  readonly #label: string;
   readonly #seenLogIds = new Map<string, number>();
   #lastScannedBlock: number | undefined;
-
-  constructor(config: RawLogScanConfig) {
+  constructor(private readonly config: RawLogScanConfig) {
     if (!Number.isSafeInteger(config.reorgBufferBlocks) || config.reorgBufferBlocks < 0) {
       throw new TypeError('reorgBufferBlocks must be a non-negative safe integer');
     }
-    if (config.label.length < 1 || config.label.length > 256) {
-      throw new TypeError('raw log scan label must be 1-256 characters');
+    if (config.label.length < 1 || config.label.length > 256) throw new TypeError('raw log scan label must be 1-256 characters');
+  }
+
+  async scan(filter: RawLogScanFilter, options: ScanOptions<ethers.Log>): Promise<void> {
+    const previous = this.#lastScannedBlock;
+    const head = await readTip(this.config.readProvider, `${this.config.label} getBlockNumber`,
+      provider => provider.getBlockNumber(), { policy: 'watchdogPointRead' });
+    if (options.isAborted?.()) return;
+    const fromBlock = previous === undefined ? this.earliestBufferedBlock(head)
+      : Math.min(this.earliestBufferedBlock(previous + 1), this.earliestBufferedBlock(head));
+    // Preserve canary's adaptive range fitting and one deadline per physical RPC.
+    const logs = await readTip(this.config.readProvider, `${this.config.label} getLogs`,
+      provider => readAdaptiveEvmLogRange({ provider, fromBlock, toBlock: head,
+        read: (from, to) => withRpcRequestTimeout(RPC_LOG_SCAN_TIMEOUT_MS,
+          `${this.config.label} getLogs [${from}, ${to}]`, () => provider.getLogs({
+            address: ethers.getAddress(filter.address), fromBlock: from, toBlock: to, topics: [[...filter.topics]],
+          })),
+      }), { policy: 'durablePagedLogScan' });
+    this.dispatch({ head, logs }, rawLogIdentity, options);
+  }
+
+  async seed(isAborted: () => boolean): Promise<void> {
+    const head = await readTip(this.config.readProvider, `${this.config.label} initial getBlockNumber`,
+      provider => provider.getBlockNumber(), { policy: 'watchdogPointRead' });
+    if (!isAborted()) this.commit(head, []);
+  }
+
+  /** Optional indexed history shares exactly the live scanner's cursor and dedupe.
+   * The first covered window establishes a baseline without replaying history. */
+  async scanStoredWindow<T extends { readonly blockNumber: number }>(
+    source: (after: number | undefined, buffer: number) => Promise<LogWindow<T> | undefined>,
+    identity: (log: T) => string, options: ScanOptions<T>,
+  ): Promise<boolean> {
+    const window = await source(this.#lastScannedBlock, this.config.reorgBufferBlocks);
+    if (window === undefined) return false;
+    if (options.isAborted?.()) return true;
+    if (this.#lastScannedBlock === undefined) this.commit(window.head, []);
+    else this.dispatch(window, identity, options);
+    return true;
+  }
+
+  private dispatch<T extends { readonly blockNumber: number }>(window: LogWindow<T>,
+    identity: (log: T) => string, options: ScanOptions<T>): void {
+    if (options.isAborted?.()) return;
+    const batch = new Map<string, T>();
+    for (const log of window.logs) {
+      const id = identity(log);
+      if (!this.#seenLogIds.has(id) && !batch.has(id)) batch.set(id, log);
     }
-    this.#readProvider = config.readProvider;
-    this.#reorgBufferBlocks = config.reorgBufferBlocks;
-    this.#label = config.label;
+    options.onLogs([...batch.values()]);
+    if (!options.isAborted?.()) this.commit(window.head, [...batch].map(([id, log]) => [id, log.blockNumber]));
   }
 
-  /**
-   * Reads one batch. Returns `undefined` when `options.isAborted` reports the
-   * caller was torn down during the head read, so the wide scan is never issued
-   * and there is no batch to dispatch or commit.
-   */
-  async read(
-    filter: RawLogScanFilter,
-    options?: RawLogScanReadOptions,
-  ): Promise<RawLogScanBatch | undefined> {
-    const previousLastScannedBlock = this.#lastScannedBlock;
-    const head = await this.readTip(
-      `${this.#label} getBlockNumber`,
-      (provider) => provider.getBlockNumber(),
-      { policy: 'watchdogPointRead' },
-    );
-    if (options?.isAborted?.()) return undefined;
-    const fromBlock = this.scanFromBlock(previousLastScannedBlock, head);
-    const logs = await this.readTip<ethers.Log[]>(
-      `${this.#label} getLogs`,
-      (provider) => provider.getLogs({
-        address: ethers.getAddress(filter.address),
-        fromBlock,
-        toBlock: head,
-        topics: [[...filter.topics]],
-      }),
-      { policy: 'watchdogWideLogScan' },
-    );
-
-    const batchSeen = new Set<string>();
-    const unseen = logs.filter((log) => {
-      const identity = rawLogIdentity(log);
-      if (this.#seenLogIds.has(identity) || batchSeen.has(identity)) return false;
-      batchSeen.add(identity);
-      return true;
-    });
-    return Object.freeze({ head, logs: Object.freeze(unseen) });
+  private commit(head: number, entries: readonly (readonly [string, number])[]): void {
+    for (const [id, block] of entries) this.#seenLogIds.set(id, block);
+    this.#lastScannedBlock = Math.max(this.#lastScannedBlock ?? head, head);
+    const floor = this.earliestBufferedBlock(head);
+    for (const [id, block] of this.#seenLogIds) if (block < floor) this.#seenLogIds.delete(id);
   }
+  private earliestBufferedBlock(head: number): number { return Math.max(0, head - this.config.reorgBufferBlocks); }
+}
 
-  async readInitialHead(): Promise<number> {
-    return this.readTip(
-      `${this.#label} initial getBlockNumber`,
-      (provider) => provider.getBlockNumber(),
-      { policy: 'watchdogPointRead' },
-    );
-  }
-
-  commit(batch: RawLogScanBatch): void {
-    for (const log of batch.logs) {
-      this.#seenLogIds.set(rawLogIdentity(log), log.blockNumber);
-    }
-    this.#lastScannedBlock = this.#lastScannedBlock == null
-      ? batch.head
-      : Math.max(this.#lastScannedBlock, batch.head);
-    this.pruneSeenLogs(batch.head);
-  }
-
-  commitInitialHead(head: number): void {
-    this.#lastScannedBlock = this.#lastScannedBlock == null
-      ? head
-      : Math.max(this.#lastScannedBlock, head);
-  }
-
-  /**
-   * Every scanner read is a background TIP probe at the ~stickiness-TTL cadence:
-   * preference-TRANSPARENT so a poll tick never re-probes/clears the preferred
-   * backend the read/write paths rely on, and so head/logs stay canonical-fresh
-   * (not a lagging sticky backend's lower tip). Owns the transport-internal
-   * `skipPreferred` opt-out ONCE so the call sites above read by INTENT (tip
-   * probe), not by the double-negative flag. Mirrors the adapter's `readTipProvider`.
-   */
-  private readTip<T>(
-    label: string,
-    fn: (provider: JsonRpcProvider) => Promise<T>,
-    opts?: ReadOpts,
-  ): Promise<T> {
-    return this.#readProvider(label, fn, { ...opts, skipPreferred: true });
-  }
-
-  private scanFromBlock(previousLastScannedBlock: number | undefined, head: number): number {
-    if (previousLastScannedBlock == null) {
-      return Math.max(0, head - this.#reorgBufferBlocks);
-    }
-    const candidateFromBlock = previousLastScannedBlock + 1 - this.#reorgBufferBlocks;
-    const recentFromBlock = head - this.#reorgBufferBlocks;
-    return Math.max(0, Math.min(candidateFromBlock, recentFromBlock));
-  }
-
-  private pruneSeenLogs(head: number): void {
-    const earliestBufferedBlock = Math.max(0, head - this.#reorgBufferBlocks);
-    for (const [identity, blockNumber] of this.#seenLogIds) {
-      if (blockNumber < earliestBufferedBlock) this.#seenLogIds.delete(identity);
-    }
-  }
+export function canonicalLogIdentity(blockHash: string, index: number): string {
+  return `${blockHash.toLowerCase()}:${index}`;
 }
 
 /** Stable identity for one chain log, with a deterministic legacy fallback. */
 export function rawLogIdentity(log: ethers.Log): string {
   const maybe = log as RawLogWithIdentity;
   const blockHash = typeof maybe.blockHash === 'string' ? maybe.blockHash : undefined;
-  const transactionHash = typeof maybe.transactionHash === 'string'
-    ? maybe.transactionHash
-    : undefined;
   const index = typeof maybe.index === 'number'
     ? maybe.index
     : typeof maybe.logIndex === 'number'
       ? maybe.logIndex
       : undefined;
-  if (blockHash && transactionHash && index != null) {
-    return `${blockHash}:${transactionHash}:${index}`;
+  if (blockHash && index != null) {
+    return canonicalLogIdentity(blockHash, index);
   }
   return [
     log.blockNumber,

@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { SyncReconcilerAttemptOutcome } from './attempt-accounting.js';
+import {
+  syncOnConnectGraphScopeCovers,
+  widenSyncOnConnectGraphScope,
+  type SyncOnConnectGraphScope,
+} from './graph-scope.js';
 
 export type SyncOnConnectErrorHandler = (
   remotePeer: string,
@@ -14,6 +19,7 @@ export type SyncOnConnectSchedulerInternalStage =
 interface OrdinaryLane {
   readonly kind: 'ordinary';
   readonly handleSyncError: SyncOnConnectErrorHandler;
+  readonly contextGraphIds: SyncOnConnectGraphScope;
 }
 
 interface SelectedLane<SelectedPlan> {
@@ -28,14 +34,17 @@ interface PeerJob<SelectedPlan> {
   currentLane: PendingLane<SelectedPlan>['kind'] | null;
   pendingSelected: SelectedLane<SelectedPlan> | null;
   pendingOrdinary: OrdinaryLane | null;
-  ordinaryStarted: boolean;
+  /** Graphs this job's ordinary passes have claimed so far. */
+  startedOrdinaryScope: SyncOnConnectGraphScope;
   runner: SyncOnConnectPeerJobRunner<SelectedPlan> | null;
   timer: ReturnType<typeof setTimeout> | null;
 }
 
 export interface SyncOnConnectPeerJobRunner<SelectedPlan> {
   /** Execute the explicit automatic-selected-then-ordinary phase plan. */
-  readonly runAutomaticSelectedThenOrdinary: () => Promise<SyncReconcilerAttemptOutcome>;
+  readonly runAutomaticSelectedThenOrdinary: (
+    contextGraphIds?: SyncOnConnectGraphScope,
+  ) => Promise<SyncReconcilerAttemptOutcome>;
   readonly runSelected: (
     recoveryPlan?: SelectedPlan,
   ) => Promise<SyncReconcilerAttemptOutcome>;
@@ -60,7 +69,9 @@ export interface SyncOnConnectPeerSchedulerCallbacks<SelectedPlan> {
 
 /**
  * One timer and one normalized pair of pending slots per remote peer.
- * Selected work always drains first; ordinary work is admitted at most once.
+ * Selected work always drains first; ordinary work is admitted at most once
+ * per graph: a pending pass widens to cover a new request, and a request the
+ * job's started passes do not cover runs after them.
  */
 export class SyncOnConnectPeerScheduler<SelectedPlan> {
   private readonly jobs = new Map<string, PeerJob<SelectedPlan>>();
@@ -95,6 +106,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
     remotePeer: string,
     handleSyncError: SyncOnConnectErrorHandler,
     delayMs: number,
+    contextGraphIds: SyncOnConnectGraphScope = null,
   ): boolean {
     if (this.closed) return false;
     const existing = this.jobs.get(remotePeer);
@@ -102,13 +114,27 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
       this.schedule(remotePeer, {
         kind: 'ordinary',
         handleSyncError,
+        contextGraphIds,
       }, delayMs);
       return true;
     }
-    if (existing.ordinaryStarted || existing.pendingOrdinary !== null) return false;
+    const pending = existing.pendingOrdinary;
+    if (pending !== null) {
+      const widened = widenSyncOnConnectGraphScope(pending.contextGraphIds, contextGraphIds);
+      if (widened === pending.contextGraphIds) return false;
+      // A whole-scope request owns the widened pass and its error reporting.
+      existing.pendingOrdinary = {
+        kind: 'ordinary',
+        handleSyncError: contextGraphIds === null ? handleSyncError : pending.handleSyncError,
+        contextGraphIds: widened,
+      };
+      return true;
+    }
+    if (syncOnConnectGraphScopeCovers(existing.startedOrdinaryScope, contextGraphIds)) return false;
     existing.pendingOrdinary = {
       kind: 'ordinary',
       handleSyncError,
+      contextGraphIds,
     };
     return true;
   }
@@ -143,7 +169,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
       currentLane: null,
       pendingSelected: lane.kind === 'selected' ? lane : null,
       pendingOrdinary: lane.kind === 'ordinary' ? lane : null,
-      ordinaryStarted: false,
+      startedOrdinaryScope: new Set(),
       runner: null,
       timer: null,
     };
@@ -198,7 +224,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
           if (lane.kind === 'selected') {
             await runner.runSelected(lane.recoveryPlan);
           } else {
-            await runner.runAutomaticSelectedThenOrdinary();
+            await runner.runAutomaticSelectedThenOrdinary(lane.contextGraphIds);
           }
         } catch (error: unknown) {
           if (this.closed) return;
@@ -259,7 +285,10 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
     if (job.pendingOrdinary !== null) {
       const ordinary = job.pendingOrdinary;
       job.pendingOrdinary = null;
-      job.ordinaryStarted = true;
+      job.startedOrdinaryScope = widenSyncOnConnectGraphScope(
+        job.startedOrdinaryScope,
+        ordinary.contextGraphIds,
+      );
       job.currentLane = 'ordinary';
       return ordinary;
     }

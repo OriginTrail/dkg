@@ -1,3 +1,5 @@
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -9,14 +11,29 @@ export interface OxigraphStandinFixture {
   cleanup(): Promise<void>;
 }
 
-/** Real HTTP child with the small CLI surface the supervisor needs. */
-export async function createOxigraphStandinFixture(): Promise<OxigraphStandinFixture> {
+/**
+ * Real HTTP child with the small CLI surface the supervisor needs. With
+ * `holdStoreLock`, it also keeps `<location>/LOCK` open for its lifetime, as
+ * RocksDB does, so the daemon finds it as a lock holder. It does not take
+ * RocksDB's advisory lock: a second stand-in on the same store fails on the
+ * port, not on the lock, so tests assert the holder is gone and the port is
+ * free rather than that a lock was acquired.
+ */
+export async function createOxigraphStandinFixture(
+  opts: { holdStoreLock?: boolean } = {},
+): Promise<OxigraphStandinFixture> {
   const directory = await mkdtemp(join(tmpdir(), 'oxi-server-real-'));
   const binaryPath = join(directory, 'oxigraph-standin.cjs');
+  const holdStoreLock = opts.holdStoreLock
+    ? `const storeDir = process.argv[process.argv.indexOf('--location') + 1];\n`
+      // Like RocksDB: create a missing store directory, then keep LOCK open.
+      + `require('node:fs').mkdirSync(storeDir, { recursive: true });\n`
+      + `require('node:fs').openSync(require('node:path').join(storeDir, 'LOCK'), 'a');\n`
+    : '';
   await writeFile(
     binaryPath,
     `#!/usr/bin/env node
-const http = require('node:http');
+${holdStoreLock}const http = require('node:http');
 const bindIdx = process.argv.indexOf('--bind');
 const [host, port] = process.argv[bindIdx + 1].split(':');
 const srv = http.createServer((req, res) => {
@@ -51,6 +68,22 @@ process.on('SIGTERM', () => {
       await rm(directory, { recursive: true, force: true }).catch(() => {});
     },
   };
+}
+
+/** Start `command args` whose parent exits at once, so init adopts it. */
+export async function spawnOrphan(command: string, args: readonly string[]): Promise<number> {
+  const launcher = spawn(process.execPath, [
+    '-e',
+    `const child = require('node:child_process').spawn(process.argv[1], process.argv.slice(2), { detached: true, stdio: 'ignore' });
+     child.unref();
+     console.log(child.pid);`,
+    command,
+    ...args,
+  ], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const launcherExited = once(launcher, 'exit');
+  const [chunk] = await once(launcher.stdout!, 'data');
+  await launcherExited;
+  return Number(String(chunk).trim());
 }
 
 /** A real port that is free at allocation time. */

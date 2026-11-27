@@ -119,6 +119,7 @@ class PriorityLaneStore implements TripleStore {
     private readonly options: {
       hangAck?: boolean;
       workspaceHeadDeleteDelayMs?: number;
+      stagingDropDelayMs?: number;
     } = {},
   ) {}
 
@@ -132,7 +133,9 @@ class PriorityLaneStore implements TripleStore {
       if (options?.priority === 'ack') {
         this.ackQueries += 1;
         if (this.options.hangAck) return new Promise<QueryResult>(() => {});
-        return { type: 'quads', quads: swmQuads };
+        // SWM loads are CONSTRUCTs; the head and ledger reads find nothing.
+        if (/^\s*CONSTRUCT/i.test(_sparql)) return { type: 'quads', quads: swmQuads };
+        return { type: 'bindings', bindings: [] };
       }
       return { type: 'bindings', bindings: [] };
     }, options?.signal);
@@ -195,6 +198,9 @@ class PriorityLaneStore implements TripleStore {
   async dropGraph(_graphUri: string, options?: QueryOptions): Promise<void> {
     return this.scheduler.run(options?.priority, options?.source ?? 'test.dropGraph', async () => {
       this.recordWrite('dropGraph', options);
+      if (options?.source === 'storage-ack.persistStaging.dropGraph' && this.options.stagingDropDelayMs) {
+        await wait(this.options.stagingDropDelayMs);
+      }
     }, options?.signal);
   }
 
@@ -307,9 +313,31 @@ describe('StorageACKHandler priority store lane', () => {
     expect(store.writeCalls.every((call) => call.priority === 'ack')).toBe(true);
 
     const signals = store.writeCalls.map((call) => call.signal);
-    expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true);
-    expect(new Set(signals).size).toBe(1);
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
+    expect(signals.slice(1)).toEqual([undefined, undefined]);
     expect(signals[0]?.aborted).toBe(false);
+  });
+
+  it('finishes staging insert and flush when a non-cooperative drop commits after deadline', async () => {
+    const store = new PriorityLaneStore(
+      new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 1 }),
+      [],
+      { stagingDropDelayMs: 75 },
+    );
+    const signer = vi.spyOn(coreWallet, 'signMessage');
+    const handler = createHandler(store, { ackHandlerDeadlineMs: 25 });
+
+    const ack = decodeStorageACK(await handler.handler(inlineStagingPublishIntent(), fakePeerId));
+    expect(isStorageACKDecline(ack)).toBe(true);
+    await vi.waitFor(() => expect(store.writeCalls.map((call) => call.source)).toEqual([
+      'storage-ack.persistStaging.dropGraph',
+      'storage-ack.persistStaging.insert',
+      'storage-ack.persistStaging.flush',
+    ]));
+    expect(store.writeCalls[0]?.signal?.aborted).toBe(true);
+    expect(store.writeCalls.slice(1).every((call) => call.signal === undefined)).toBe(true);
+    expect(signer).not.toHaveBeenCalled();
+    signer.mockRestore();
   });
 
   it('keeps graph-scoped workspace-head persistence in the ACK lane', async () => {
@@ -330,10 +358,10 @@ describe('StorageACKHandler priority store lane', () => {
       'storage-ack.persistGraphScoped.flush',
     ]);
     expect(store.writeCalls.every((call) => call.priority === 'ack')).toBe(true);
-    const abortableSignals = store.writeCalls.slice(0, 2).map((call) => call.signal);
-    expect(abortableSignals.every((signal) => signal instanceof AbortSignal)).toBe(true);
-    expect(new Set(abortableSignals).size).toBe(1);
-    expect(store.writeCalls.slice(2).every((call) => call.signal === undefined)).toBe(true);
+    // Only the first write may still be abandoned at the ACK deadline; once
+    // the operation rows are deleted, the re-insert and head commit finish.
+    expect(store.writeCalls[0]?.signal).toBeInstanceOf(AbortSignal);
+    expect(store.writeCalls.slice(1).every((call) => call.signal === undefined)).toBe(true);
   });
 
   it('finishes the workspace-head commit tail after the ACK deadline fires', async () => {

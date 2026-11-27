@@ -16,6 +16,81 @@ export type OpenClawStreamRequest = LocalAgentSseRequest;
 export type OpenClawStreamResponse = LocalAgentSseResponse;
 export type OpenClawStreamReader = LocalAgentSseReader;
 
+/**
+ * Head of every local-agent SSE response. `no-transform` keeps compressing
+ * proxies from holding small frames back, and `X-Accel-Buffering: no` turns
+ * off nginx-family proxy buffering for this response: keepalive comments only
+ * defeat proxy idle timeouts if they are flushed to the client.
+ */
+const LOCAL_AGENT_SSE_HEADERS: Readonly<Record<string, string>> = {
+  'Content-Type': 'text/event-stream; charset=utf-8',
+  'Cache-Control': 'no-cache, no-transform',
+  Connection: 'keep-alive',
+  'X-Accel-Buffering': 'no',
+};
+
+/**
+ * Writes the 200 SSE head and sends it at once. Node otherwise holds a written
+ * head until the first body byte, so a proxy saw no response at all until the
+ * agent's first text arrived.
+ */
+export function writeLocalAgentSseHead(
+  res: Pick<ServerResponse, 'writeHead'> & { flushHeaders?: () => void },
+  extraHeaders: Record<string, string> = {},
+): void {
+  res.writeHead(200, { ...LOCAL_AGENT_SSE_HEADERS, ...extraHeaders });
+  res.flushHeaders?.();
+}
+
+/** SSE comment frame: every reader skips comment lines, so it carries only liveness. */
+export const LOCAL_AGENT_SSE_KEEPALIVE_FRAME = ': keepalive\n\n';
+
+/**
+ * A tool-heavy turn can run for minutes without a transcript byte, and proxies
+ * end a response that shows no progress, commonly after 60 to 100 s. Same
+ * cadence as the Prime Agent bridge heartbeat.
+ */
+export const LOCAL_AGENT_SSE_KEEPALIVE_INTERVAL_MS = 15_000;
+
+/**
+ * Writes a keepalive comment every `intervalMs` until the returned stop
+ * function runs or the response finishes, closes or fails. `canWrite` lets a
+ * pump hold the comment while one frame is only partly forwarded.
+ */
+export function startLocalAgentSseKeepalive(
+  res: LocalAgentSseResponse,
+  options: { intervalMs?: number; canWrite?: () => boolean } = {},
+): () => void {
+  const intervalMs = options.intervalMs ?? LOCAL_AGENT_SSE_KEEPALIVE_INTERVAL_MS;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const stop = (): void => {
+    if (timer === undefined) return;
+    clearInterval(timer);
+    timer = undefined;
+    res.off('finish', stop);
+    res.off('close', stop);
+    res.off('error', stop);
+  };
+  if (!(intervalMs > 0)) return stop;
+  timer = setInterval(() => {
+    if (res.writableEnded || (res as { destroyed?: boolean }).destroyed) {
+      stop();
+      return;
+    }
+    if (options.canWrite && !options.canWrite()) return;
+    try {
+      res.write(LOCAL_AGENT_SSE_KEEPALIVE_FRAME);
+    } catch {
+      stop();
+    }
+  }, intervalMs);
+  timer.unref?.();
+  res.on('finish', stop);
+  res.on('close', stop);
+  res.on('error', stop);
+  return stop;
+}
+
 export async function writeLocalAgentSseChunk(
   res: LocalAgentSseResponse,
   chunk: Uint8Array,
@@ -141,6 +216,8 @@ export async function pipeLocalAgentSseStream(
       frame: LocalAgentSseFrame,
     ) => LocalAgentSseFrameAction | Promise<LocalAgentSseFrameAction>;
     endResponseOnTerminal?: boolean;
+    /** Keepalive comment cadence while the pump runs; 0 or unset sends none. */
+    keepaliveIntervalMs?: number;
   } = {},
 ): Promise<LocalAgentSseStreamResult> {
   let clientGone = false;
@@ -150,6 +227,12 @@ export async function pipeLocalAgentSseStream(
   let oversizedFrame = false;
   let oversizedTail: Uint8Array = new Uint8Array(0);
   const endResponseOnTerminal = options.endResponseOnTerminal !== false;
+  // Whole frames go out in one write, so a comment between writes lands on a
+  // frame boundary; only an oversized frame is forwarded in pieces.
+  const stopKeepalive = startLocalAgentSseKeepalive(res, {
+    intervalMs: options.keepaliveIntervalMs ?? 0,
+    canWrite: () => !oversizedFrame,
+  });
 
   const cancelUpstream = () => {
     if (clientGone) return;
@@ -202,13 +285,15 @@ export async function pipeLocalAgentSseStream(
     }
 
     if (buffer.length > SSE_FRAME_SCAN_LIMIT) {
-      if (!clientGone && !res.writableEnded) {
-        await writeLocalAgentSseChunk(res, buffer);
-      }
+      const partialFrame = buffer;
       oversizedTail = buffer.slice(Math.max(0, buffer.length - 3));
       buffer = new Uint8Array(0);
       scanOffset = 0;
+      // Set before the write: a keepalive must wait while it awaits drain.
       oversizedFrame = true;
+      if (!clientGone && !res.writableEnded) {
+        await writeLocalAgentSseChunk(res, partialFrame);
+      }
     }
     return false;
   };
@@ -251,6 +336,7 @@ export async function pipeLocalAgentSseStream(
       }
     }
   } finally {
+    stopKeepalive();
     reader.releaseLock();
   }
   return { terminal, clientGone };
@@ -336,12 +422,19 @@ export async function writeLocalAgentSseEvent(
   );
 }
 
+/**
+ * Byte-for-byte relay for the OpenClaw and Hermes channel bridges. Their own
+ * frames stop while the agent runs tools, so the daemon keeps the response
+ * alive itself (#3886).
+ */
 export async function pipeOpenClawStream(
   req: OpenClawStreamRequest,
   res: OpenClawStreamResponse,
   reader: OpenClawStreamReader,
 ): Promise<void> {
-  await pipeLocalAgentSseStream(req, res, reader);
+  await pipeLocalAgentSseStream(req, res, reader, {
+    keepaliveIntervalMs: LOCAL_AGENT_SSE_KEEPALIVE_INTERVAL_MS,
+  });
 }
 
 /** Compatibility binding retained while existing callers migrate names. */

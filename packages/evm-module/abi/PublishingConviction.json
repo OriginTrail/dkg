@@ -48,6 +48,17 @@
         "internalType": "uint256",
         "name": "accountId",
         "type": "uint256"
+      }
+    ],
+    "name": "EmissionAlreadyScheduled",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
       },
       {
         "internalType": "uint40",
@@ -162,6 +173,17 @@
   {
     "inputs": [
       {
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      }
+    ],
+    "name": "OnlyServiceSubscriptions",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "uint256",
         "name": "accountId",
         "type": "uint256"
@@ -200,6 +222,17 @@
       }
     ],
     "name": "PrimaryNodeUnchanged",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "treasury",
+        "type": "address"
+      }
+    ],
+    "name": "ServiceFundingPausedTreasuryWired",
     "type": "error"
   },
   {
@@ -253,6 +286,11 @@
   {
     "inputs": [],
     "name": "ZeroPrimaryNode",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroServiceValue",
     "type": "error"
   },
   {
@@ -416,13 +454,13 @@
       {
         "indexed": false,
         "internalType": "uint96",
-        "name": "drawnFromEpoch",
+        "name": "spentFromEpoch",
         "type": "uint96"
       },
       {
         "indexed": false,
         "internalType": "uint96",
-        "name": "drawnFromTopUp",
+        "name": "spentFromTopUp",
         "type": "uint96"
       }
     ],
@@ -495,6 +533,67 @@
       }
     ],
     "name": "PrimaryNodeChanged",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "value",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "cost",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "epoch",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "window",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "spentFromWindow",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "spentFromTopUp",
+        "type": "uint96"
+      }
+    ],
+    "name": "ServiceCostCovered",
     "type": "event"
   },
   {
@@ -717,6 +816,72 @@
   {
     "inputs": [
       {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint96",
+        "name": "value",
+        "type": "uint96"
+      }
+    ],
+    "name": "coverServiceCost",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint96",
+            "name": "cost",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "spentFromWindow",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "spentFromTopUp",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint40",
+            "name": "window",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "epoch",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint16",
+            "name": "discountBps",
+            "type": "uint16"
+          }
+        ],
+        "internalType": "struct PublishingConviction.ServiceSpend",
+        "name": "spend",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "address",
         "name": "publisher",
         "type": "address"
@@ -890,19 +1055,6 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "uint256[]",
-        "name": "accountIds",
-        "type": "uint256[]"
-      }
-    ],
-    "name": "migrateEmissionSchedule",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "name",
     "outputs": [
@@ -1045,6 +1197,19 @@
       }
     ],
     "name": "settle",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256[]",
+        "name": "accountIds",
+        "type": "uint256[]"
+      }
+    ],
+    "name": "settleMany",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

@@ -29,6 +29,7 @@ async function admit(
     deploymentBlockNumber?: number;
     finalized?: Readonly<{ number: number; hash: string }>;
     readBlockHash?: () => Promise<string | null>;
+    rebuildOutOfReach?: () => boolean;
   }> = {},
 ) {
   const scoped = repository.forScope(SCOPE);
@@ -39,6 +40,9 @@ async function admit(
     finalized: overrides.finalized ?? { number: 25, hash: HASH_25 },
     lifecycleSignal: new AbortController().signal,
     readBlockHash: overrides.readBlockHash ?? (async () => HASH_20),
+    ...(overrides.rebuildOutOfReach === undefined ? {} : {
+      rebuildOutOfReach: overrides.rebuildOutOfReach,
+    }),
   });
 }
 
@@ -87,6 +91,62 @@ describe('Context Graph authority index checkpoint admission and recovery', () =
       readBlockHash: async () => null,
     })).rejects.toThrow('anchor 20 is unavailable');
     expect(store.invalidations).toEqual([]);
+  });
+
+  it('rebuilds instead of retrying when the cursor is too far ahead to be head skew', async () => {
+    // The durable cursor only ever moves FORWARD — `commitOrReloadWinner` has no
+    // lowering path — so a cursor recorded on a chain view that no longer exists
+    // (a deep reorg, a restored or copied store) can never be caught up to.
+    // Retrying it forever wedged every authority read for the Context Graph and
+    // fenced exactly the catalog traffic anchoring at the operator's depth
+    // exists to admit.
+    const store = new MemoryAuthorityIndexStore();
+    store.record = { token: 7, value: checkpoint };
+
+    // 20 -> 19 is one block of ordinary pool skew: ask another endpoint.
+    await expect(admit(new ContextGraphAuthorityIndexRepository(store), {
+      finalized: { number: 19, hash: HASH_25 },
+    })).rejects.toThrow('finalized head 19 is behind durable cursor 20');
+    expect(store.invalidations).toEqual([]);
+
+    // Beyond the skew bound no endpoint will ever catch up, so rebuild.
+    await expect(admit(new ContextGraphAuthorityIndexRepository(store), {
+      finalized: { number: 20 - 51, hash: HASH_25 },
+    })).resolves.toMatchObject({ kind: 'tombstone' });
+    expect(store.invalidations).toHaveLength(1);
+  });
+
+  it('lets the owner hold an out-of-reach cursor for retry instead of rebuilding it', async () => {
+    // One anchor 51+ blocks below the cursor may be a lagging endpoint or a
+    // scan that waited behind another; on a fast chain that is seconds of lag.
+    const store = new MemoryAuthorityIndexStore();
+    store.record = { token: 7, value: checkpoint };
+    const asked: number[] = [];
+
+    await expect(admit(new ContextGraphAuthorityIndexRepository(store), {
+      finalized: { number: 20 - 51, hash: HASH_25 },
+      rebuildOutOfReach: () => {
+        asked.push(20 - 51);
+        return false;
+      },
+    })).rejects.toMatchObject({ reason: 'cursor-ahead' });
+    expect(store.invalidations).toEqual([]);
+
+    // Within the ordinary skew bound the owner is not asked at all.
+    await expect(admit(new ContextGraphAuthorityIndexRepository(store), {
+      finalized: { number: 19, hash: HASH_25 },
+      rebuildOutOfReach: () => {
+        asked.push(19);
+        return false;
+      },
+    })).rejects.toMatchObject({ reason: 'cursor-ahead' });
+    expect(asked).toEqual([20 - 51]);
+
+    await expect(admit(new ContextGraphAuthorityIndexRepository(store), {
+      finalized: { number: 20 - 51, hash: HASH_25 },
+      rebuildOutOfReach: () => true,
+    })).resolves.toMatchObject({ kind: 'tombstone' });
+    expect(store.invalidations).toHaveLength(1);
   });
 
   it('tombstones corrupt rows, deployment changes, and proven fork replacements', async () => {

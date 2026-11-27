@@ -1,0 +1,18 @@
+# Test-only certificate for a host other than localhost (signer.invalid),
+# issued with the localhost test key, for the host name checks of the local
+# TLS servers in packages/chain/test (helpers/local-tls.ts). Regenerate it
+# from this directory with:
+#   openssl req -new -x509 -config other-host.cnf -key localhost-key.pem -days 36500 -out other-host-cert.pem
+[req]
+distinguished_name = subject
+x509_extensions = server
+prompt = no
+
+[subject]
+CN = signer.invalid
+
+[server]
+subjectAltName = DNS:signer.invalid
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature
+extendedKeyUsage = serverAuth

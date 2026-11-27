@@ -1,0 +1,163 @@
+import { describe, it, expect } from "vitest";
+import { createHash } from 'node:crypto';
+import { ethers } from "ethers";
+import {
+  sealPublicGraphSnapshot,
+  decodePublicGraphSnapshot,
+  decodePublicGraphSnapshotResponse,
+  normalizePublicGraphSnapshot,
+  PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES,
+} from "../src/public-graph-snapshot.js";
+const scope = {
+  chainId: "evm:31337",
+  deploymentId: "test-hub",
+  contextGraphId: "snapshot-test",
+  onChainId: "1",
+};
+const make = () =>
+  sealPublicGraphSnapshot({
+    version: 1,
+    ...scope,
+    nameHash: ethers.id(scope.contextGraphId),
+    contextGraphStorage: `0x${"1".repeat(40)}`,
+    assetStorage: `0x${"2".repeat(40)}`,
+    blockNumber: "10",
+    blockHash: `0x${"a".repeat(64)}`,
+    finalityConfirmations: 1,
+    observedAt: 1000,
+    expiresAt: 121000,
+    accessPolicy: 0,
+    assets: [{ id: "1", root: `0x${"b".repeat(64)}`, version: "1" }],
+  });
+const reseal = (patch: object) => {
+  const { inventoryDigest: _i, snapshotDigest: _s, ...base } = make();
+  return sealPublicGraphSnapshot({ ...base, ...patch } as any);
+};
+const bytes = (s: unknown) => Buffer.from(JSON.stringify(s));
+describe("public graph snapshot contract", () => {
+  it('seals equivalent object orderings to the existing version-1 digest format', () => {
+    const { inventoryDigest, snapshotDigest, ...input } = make();
+    const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    expect(inventoryDigest).toBe(hash(input.assets));
+    expect(snapshotDigest).toBe(hash({ ...input, inventoryDigest }));
+    const reordered = Object.fromEntries(Object.entries({ ...input,
+      assets: input.assets.map(a => ({ version: a.version, root: a.root, id: a.id })),
+    }).reverse()) as typeof input;
+    expect(sealPublicGraphSnapshot(reordered)).toEqual(make());
+    expect(normalizePublicGraphSnapshot({ ...reordered, snapshotDigest, inventoryDigest }, { ...scope, now: 2000 }))
+      .toEqual(make());
+  });
+  it("accepts a scoped coherent inventory and detaches/freezes it", () => {
+    const raw = make();
+    const decoded = decodePublicGraphSnapshot(bytes(raw), {
+      ...scope,
+      now: 2000,
+    });
+    raw.assets[0]!.root = `0x${"c".repeat(64)}`;
+    expect(decoded.assets[0]!.root).not.toBe(raw.assets[0]!.root);
+    expect(Object.isFrozen(decoded.assets[0])).toBe(true);
+  });
+  it.each(["chainId", "deploymentId", "contextGraphId", "onChainId"] as const)(
+    "rejects a different %s",
+    (key) => {
+      expect(() =>
+        decodePublicGraphSnapshot(bytes(make()), {
+          ...scope,
+          [key]: "different",
+          now: 2000,
+        }),
+      ).toThrow();
+    },
+  );
+  it.each([
+    { expiresAt: 2000 },
+    { observedAt: 18000 },
+    { accessPolicy: 1 },
+    { nameHash: `0x${"c".repeat(64)}` },
+    { blockNumber: "01" },
+    { finalityConfirmations: 0 },
+    { assets: [{ id: "1", root: `0x${"b".repeat(64)}`, version: "01" }] },
+    { assets: [...make().assets, ...make().assets] },
+    { unexpected: true },
+  ])("rejects malformed or stale facts %j", (patch) => {
+    expect(() =>
+      decodePublicGraphSnapshot(bytes({ ...reseal(patch), ...patch }), {
+        ...scope,
+        now: 8000,
+      }),
+    ).toThrow("assets" in patch ? "Invalid or duplicate snapshot asset" : "unexpected" in patch ? "Invalid snapshot fields" : "Invalid, stale or mis-scoped snapshot");
+  });
+  it("accepts bounded clock skew in both directions without accepting old snapshots", () => {
+    for (const now of [-3000, 124000]) expect(decodePublicGraphSnapshot(bytes(make()), { ...scope, now }).assets).toHaveLength(1);
+    for (const now of [-5000, 126000]) expect(() => decodePublicGraphSnapshot(bytes(make()), { ...scope, now })).toThrow("stale");
+  });
+  it("rejects truncation and changed roots even with an intact inventory count", () => {
+    const s = make();
+    s.assets[0]!.root = `0x${"c".repeat(64)}`;
+    expect(() =>
+      decodePublicGraphSnapshot(bytes(s), { ...scope, now: 2000 }),
+    ).toThrow("digest");
+    expect(() =>
+      decodePublicGraphSnapshot(bytes(s).subarray(0, 50), {
+        ...scope,
+        now: 2000,
+      }),
+    ).toThrow();
+  });
+
+});
+
+describe.each([
+  ["object", normalizePublicGraphSnapshot],
+  ["response", (input: unknown, scope: Parameters<typeof normalizePublicGraphSnapshot>[1]) => {
+    const response = decodePublicGraphSnapshotResponse(bytes(input), scope);
+    if (response.kind !== "snapshot") throw new Error("Expected snapshot");
+    return response.snapshot;
+  }],
+  ["wire", (input: unknown, scope: Parameters<typeof normalizePublicGraphSnapshot>[1]) => decodePublicGraphSnapshot(bytes(input), scope)],
+] as const)("%s snapshot validation parity", (_kind, normalize) => {
+  it("canonicalizes field order and returns a detached frozen inventory", () => {
+    const raw = { ...make(), assets: make().assets.map(asset => ({ ...asset })) };
+    const reverse = Object.fromEntries(Object.entries(raw).reverse());
+    const result = normalize(reverse, {...scope,now:2000});
+    expect(result).toEqual(raw);
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(result.assets)).toBe(true);
+    expect(Object.isFrozen(result.assets[0])).toBe(true);
+    raw.assets[0]!.root = `0x${"c".repeat(64)}`;
+    expect(result.assets[0]!.root).not.toBe(raw.assets[0]!.root);
+  });
+  it.each([
+    null, {}, {extra:true}, {chainId:"other"}, {observedAt:18000},
+    {expiresAt:2000}, {snapshotDigest:"bad"}, {inventoryDigest:"bad"},
+    {assets:[...make().assets,...make().assets]}, {assets:[{id:"01",root:`0x${"b".repeat(64)}`,version:"1"}]},
+  ])("rejects invalid facts %j", patch => {
+    const input = patch === null ? null : Object.keys(patch).length === 0 ? {} : {...make(),...patch};
+    expect(() => normalize(input,{...scope,now:8000})).toThrow();
+  });
+  it("enforces the size limit on in-process results too", () => {
+    const deploymentId = "x".repeat(PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES);
+    expect(() => normalize(reseal({deploymentId}),{...scope,deploymentId,now:2000})).toThrow("size");
+  });
+});
+
+
+describe("public graph snapshot response envelope", () => {
+  it("accepts only the explicit unavailable response", () => {
+    expect(decodePublicGraphSnapshotResponse(bytes({ unavailable: true }), { ...scope, now: 2000 }))
+      .toEqual({ kind: "unavailable" });
+  });
+  it.each([
+    { unavailable: false }, { unavailable: "true" }, { unavailable: true, extra: 1 },
+    { ...make(), unavailable: true }, [{ unavailable: true }], null,
+  ])("rejects an ambiguous unavailable envelope %j", response => {
+    expect(() => decodePublicGraphSnapshotResponse(bytes(response), { ...scope, now: 2000 })).toThrow();
+  });
+  it("keeps fatal UTF-8 and byte limits for unavailable and snapshot responses", () => {
+    for (const response of [
+      Buffer.alloc(0), Buffer.alloc(PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES + 1, 32),
+      Buffer.concat([Buffer.from('{"unavailable":true,"'), Buffer.from([0xff]), Buffer.from('":0}')]),
+      bytes({ unavailable: true }).subarray(0, 10),
+    ]) expect(() => decodePublicGraphSnapshotResponse(response, { ...scope, now: 2000 })).toThrow();
+  });
+});

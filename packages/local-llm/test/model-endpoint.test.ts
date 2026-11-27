@@ -8,7 +8,7 @@ const DEFAULT_OPTIONS = {
 
 describe('local model endpoint probing', () => {
   it('probes standard and reverse-proxy-prefixed backend paths privately', async () => {
-    const fetcher = vi.fn(async (input: string | URL | Request) => {
+    const fetcher = vi.fn<typeof fetch>(async (input: string | URL | Request) => {
       const url = String(input);
       if (url.endsWith('/v1/models')) return new Response('not found', { status: 404 });
       return Response.json({ status: 'ok' });
@@ -19,13 +19,13 @@ describe('local model endpoint probing', () => {
       chatCompletionsUrl: 'http://127.0.0.1:8080/v1/chat/completions?ignored=yes',
       strategy: { kind: 'llama.cpp' },
       fetch: fetcher as typeof fetch,
-    })).resolves.toEqual({ status: 'ready', reachable: true });
+    })).resolves.toEqual({ status: 'ready' });
     await expect(probeLocalModelEndpoint({
       ...DEFAULT_OPTIONS,
       chatCompletionsUrl: 'http://localhost:9000/proxy/v1/chat/completions#ignored',
       strategy: { kind: 'llama.cpp' },
       fetch: fetcher as typeof fetch,
-    })).resolves.toEqual({ status: 'ready', reachable: true });
+    })).resolves.toEqual({ status: 'ready' });
 
     expect(fetcher.mock.calls.map(([input]) => new URL(String(input)).pathname)).toEqual([
       '/v1/models',
@@ -36,7 +36,7 @@ describe('local model endpoint probing', () => {
   });
 
   it('accepts only the configured Ollama model and its :latest alias', async () => {
-    const fetcher = vi.fn(async () => Response.json({
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({
       object: 'list',
       data: [{ id: 'qwen3:latest', object: 'model', owned_by: 'library' }],
     }));
@@ -47,12 +47,12 @@ describe('local model endpoint probing', () => {
       model: 'qwen3',
       strategy: { kind: 'ollama' },
       fetch: fetcher as typeof fetch,
-    })).resolves.toEqual({ status: 'ready', reachable: true });
+    })).resolves.toEqual({ status: 'ready' });
     expect(fetcher).toHaveBeenCalledOnce();
   });
 
   it('preserves the Ollama model-list contract under the legacy auto strategy', async () => {
-    const fetcher = vi.fn(async () => Response.json({
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({
       object: 'list',
       data: [{ id: 'local-model' }],
     }));
@@ -60,12 +60,12 @@ describe('local model endpoint probing', () => {
     await expect(probeLocalModelEndpoint({
       ...DEFAULT_OPTIONS,
       fetch: fetcher as typeof fetch,
-    })).resolves.toEqual({ status: 'ready', reachable: true });
+    })).resolves.toEqual({ status: 'ready' });
     expect(fetcher).toHaveBeenCalledOnce();
   });
 
   it('preserves loaded llama.cpp metadata under the legacy auto strategy', async () => {
-    const fetcher = vi.fn(async () => Response.json({
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({
       object: 'list',
       data: [{ id: 'local-model', meta: { n_ctx_train: 32_768 } }],
     }));
@@ -73,12 +73,12 @@ describe('local model endpoint probing', () => {
     await expect(probeLocalModelEndpoint({
       ...DEFAULT_OPTIONS,
       fetch: fetcher as typeof fetch,
-    })).resolves.toEqual({ status: 'ready', reachable: true });
+    })).resolves.toEqual({ status: 'ready' });
     expect(fetcher).toHaveBeenCalledOnce();
   });
 
   it('preserves the llama.cpp health fallback under the legacy auto strategy', async () => {
-    const fetcher = vi.fn(async (input: string | URL | Request) => {
+    const fetcher = vi.fn<typeof fetch>(async (input: string | URL | Request) => {
       const url = String(input);
       if (url.endsWith('/v1/models')) return new Response('not found', { status: 404 });
       return Response.json({ status: 'ok' });
@@ -87,13 +87,13 @@ describe('local model endpoint probing', () => {
     await expect(probeLocalModelEndpoint({
       ...DEFAULT_OPTIONS,
       fetch: fetcher as typeof fetch,
-    })).resolves.toEqual({ status: 'ready', reachable: true });
+    })).resolves.toEqual({ status: 'ready' });
     expect(fetcher.mock.calls.map(([input]) => new URL(String(input)).pathname))
       .toEqual(['/v1/models', '/health']);
   });
 
   it('rejects a non-empty model list that omits the configured model', async () => {
-    const fetcher = vi.fn(async () => Response.json({
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({
       object: 'list',
       data: [{ id: 'llama3.2', object: 'model', owned_by: 'library' }],
     }));
@@ -106,14 +106,13 @@ describe('local model endpoint probing', () => {
       fetch: fetcher as typeof fetch,
     })).resolves.toEqual({
       status: 'not-ready',
-      reachable: true,
       error: expect.stringContaining("Configured model 'qwen3:8b' is not listed"),
     });
     expect(fetcher).toHaveBeenCalledOnce();
   });
 
   it('accepts the configured llama.cpp model only after loaded metadata appears', async () => {
-    const fetcher = vi.fn(async () => Response.json({
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({
       object: 'list',
       data: [
         { id: 'other-model', meta: { n_ctx_train: 32_768 } },
@@ -125,12 +124,12 @@ describe('local model endpoint probing', () => {
       ...DEFAULT_OPTIONS,
       strategy: { kind: 'llama.cpp' },
       fetch: fetcher as typeof fetch,
-    })).resolves.toEqual({ status: 'ready', reachable: true });
+    })).resolves.toEqual({ status: 'ready' });
     expect(fetcher).toHaveBeenCalledOnce();
   });
 
   it('keeps a loading llama.cpp model not-ready when health is unavailable', async () => {
-    const fetcher = vi.fn(async (input: string | URL | Request) => {
+    const fetcher = vi.fn<typeof fetch>(async (input: string | URL | Request) => {
       const url = String(input);
       if (url.endsWith('/v1/models')) {
         return Response.json({
@@ -147,7 +146,6 @@ describe('local model endpoint probing', () => {
       fetch: fetcher as typeof fetch,
     })).resolves.toEqual({
       status: 'not-ready',
-      reachable: true,
       error: expect.stringContaining('does not report the configured model as loaded'),
     });
     expect(fetcher.mock.calls.map(([input]) => new URL(String(input)).pathname))
@@ -155,7 +153,7 @@ describe('local model endpoint probing', () => {
   });
 
   it('accepts a loading llama.cpp model only after strict health becomes ready', async () => {
-    const fetcher = vi.fn(async (input: string | URL | Request) => {
+    const fetcher = vi.fn<typeof fetch>(async (input: string | URL | Request) => {
       const url = String(input);
       if (url.endsWith('/v1/models')) {
         return Response.json({
@@ -170,13 +168,13 @@ describe('local model endpoint probing', () => {
       ...DEFAULT_OPTIONS,
       strategy: { kind: 'llama.cpp' },
       fetch: fetcher as typeof fetch,
-    })).resolves.toEqual({ status: 'ready', reachable: true });
+    })).resolves.toEqual({ status: 'ready' });
     expect(fetcher.mock.calls.map(([input]) => new URL(String(input)).pathname))
       .toEqual(['/v1/models', '/health']);
   });
 
   it('uses a strict llama.cpp health response as the legacy fallback', async () => {
-    const fetcher = vi.fn(async (input: string | URL | Request) => {
+    const fetcher = vi.fn<typeof fetch>(async (input: string | URL | Request) => {
       const url = String(input);
       if (url.endsWith('/v1/models')) return new Response('not found', { status: 404 });
       return Response.json({ status: 'ok' });
@@ -186,20 +184,33 @@ describe('local model endpoint probing', () => {
       ...DEFAULT_OPTIONS,
       strategy: { kind: 'llama.cpp' },
       fetch: fetcher as typeof fetch,
-    })).resolves.toEqual({ status: 'ready', reachable: true });
+    })).resolves.toEqual({ status: 'ready' });
   });
 
-  it.each([
-    ['a non-ok payload', () => Response.json({ status: 'loading' })],
-    ['malformed JSON', () => new Response('<html>ok</html>', {
-      status: 200,
-      headers: { 'content-type': 'text/html' },
-    })],
-  ])('rejects %s from the llama.cpp health fallback', async (_label, healthResponse) => {
-    const fetcher = vi.fn(async (input: string | URL | Request) => {
+  it('does not treat a generic string health status as llama.cpp detection', async () => {
+    const fetcher = vi.fn<typeof fetch>(async (input: string | URL | Request) => {
       const url = String(input);
       if (url.endsWith('/v1/models')) return new Response('not found', { status: 404 });
-      return healthResponse();
+      return Response.json({ status: 'loading' });
+    });
+
+    await expect(probeLocalModelEndpoint({
+      ...DEFAULT_OPTIONS,
+      strategy: { kind: 'llama.cpp' },
+      fetch: fetcher as typeof fetch,
+    })).resolves.toEqual({
+      status: 'incompatible',
+      error: expect.stringContaining('No compatible local LLM server was detected'),
+    });
+  });
+
+  it('recognizes llama.cpp documented 503 response while a model is loading', async () => {
+    const fetcher = vi.fn<typeof fetch>(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/v1/models')) return new Response('not found', { status: 404 });
+      return Response.json({
+        error: { code: 503, message: 'Loading model', type: 'unavailable_error' },
+      }, { status: 503 });
     });
 
     await expect(probeLocalModelEndpoint({
@@ -208,9 +219,59 @@ describe('local model endpoint probing', () => {
       fetch: fetcher as typeof fetch,
     })).resolves.toEqual({
       status: 'not-ready',
-      reachable: true,
-      error: expect.stringContaining('health fallback'),
+      error: expect.stringContaining('Loading model'),
     });
+  });
+
+  it('does not treat an arbitrary string health status as llama.cpp detection', async () => {
+    const fetcher = vi.fn<typeof fetch>(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/v1/models')) return new Response('not found', { status: 404 });
+      return Response.json({ status: 'healthy' });
+    });
+
+    await expect(probeLocalModelEndpoint({
+      ...DEFAULT_OPTIONS,
+      strategy: { kind: 'llama.cpp' },
+      fetch: fetcher as typeof fetch,
+    })).resolves.toEqual({
+      status: 'incompatible',
+      error: expect.stringContaining('No compatible local LLM server was detected'),
+    });
+  });
+
+  it('classifies an invalid health response as an incompatible HTTP service', async () => {
+    const fetcher = vi.fn<typeof fetch>(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/v1/models')) return new Response('not found', { status: 404 });
+      return new Response('<html>ok</html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      });
+    });
+
+    await expect(probeLocalModelEndpoint({
+      ...DEFAULT_OPTIONS,
+      strategy: { kind: 'llama.cpp' },
+      fetch: fetcher as typeof fetch,
+    })).resolves.toEqual({
+      status: 'incompatible',
+      error: expect.stringContaining('No compatible local LLM server was detected'),
+    });
+  });
+
+  it('does not detect an unrelated HTTP service that returns 404 for both probes', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => new Response('not found', { status: 404 }));
+
+    await expect(probeLocalModelEndpoint({
+      ...DEFAULT_OPTIONS,
+      fetch: fetcher as typeof fetch,
+    })).resolves.toEqual({
+      status: 'incompatible',
+      error: expect.stringContaining('No compatible local LLM server was detected'),
+    });
+    expect(fetcher.mock.calls.map(([input]) => new URL(String(input)).pathname))
+      .toEqual(['/v1/models', '/health']);
   });
 
   it('returns structured offline availability for a malformed endpoint URL', async () => {
@@ -221,14 +282,13 @@ describe('local model endpoint probing', () => {
       fetch: fetcher as typeof fetch,
     })).resolves.toEqual({
       status: 'offline',
-      reachable: false,
       error: expect.stringContaining('endpoint configuration is invalid'),
     });
     expect(fetcher).not.toHaveBeenCalled();
   });
 
   it('reports offline only when neither probe reaches the server', async () => {
-    const fetcher = vi.fn(async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => {
       throw new TypeError('fetch failed');
     });
 
@@ -237,8 +297,73 @@ describe('local model endpoint probing', () => {
       fetch: fetcher as typeof fetch,
     })).resolves.toEqual({
       status: 'offline',
-      reachable: false,
       error: expect.stringContaining('Local LLM server is offline'),
     });
+  });
+});
+
+describe('endpoint probe failure boundaries', () => {
+  it.each([0, -1, 0.5, NaN, Infinity])('rejects timeout %s before issuing requests', async timeoutMs => {
+    const fetcher = vi.fn();
+    await expect(probeLocalModelEndpoint({ ...DEFAULT_OPTIONS, timeoutMs, fetch: fetcher }))
+      .rejects.toThrow('timeout must be a positive integer');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('reports an empty model as invalid without contacting the endpoint', async () => {
+    const fetcher = vi.fn();
+    await expect(probeLocalModelEndpoint({ ...DEFAULT_OPTIONS, model: '  ', fetch: fetcher }))
+      .resolves.toEqual({ status: 'offline', error: expect.stringContaining('model must be non-empty') });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each([null, [], {}, { data: 'not-an-array' }])('rejects a malformed model list %j without health fallback', async body => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json(body));
+    await expect(probeLocalModelEndpoint({ ...DEFAULT_OPTIONS, fetch: fetcher }))
+      .resolves.toEqual({ status: 'incompatible', error: expect.stringContaining('no valid model list') });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores invalid entries while accepting a valid normalized model id', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ data: [null, [], 7, {}, { id: ' ' }, { id: 1 }, { id: ' LOCAL-MODEL:latest ' }] }));
+    await expect(probeLocalModelEndpoint({ ...DEFAULT_OPTIONS, fetch: fetcher })).resolves.toEqual({ status: 'ready' });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports invalid model-list JSON as incompatible rather than falling through to health', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => new Response('{'));
+    await expect(probeLocalModelEndpoint({ ...DEFAULT_OPTIONS, fetch: fetcher }))
+      .resolves.toEqual({ status: 'incompatible', error: expect.stringContaining('models probe returned invalid JSON') });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([null, [], 'ok'])('does not infer health from an invalid JSON body %j', async health => {
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(null, { status: 404 })).mockResolvedValueOnce(Response.json(health));
+    await expect(probeLocalModelEndpoint({ ...DEFAULT_OPTIONS, fetch: fetcher }))
+      .resolves.toEqual({ status: 'incompatible', error: expect.stringContaining('health fallback returned an invalid body') });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([401, 403, 500])('does not use health to hide HTTP %i from the models endpoint', async status => {
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(null, { status }));
+    await expect(probeLocalModelEndpoint({ ...DEFAULT_OPTIONS, fetch: fetcher }))
+      .resolves.toEqual({ status: 'incompatible', error: expect.stringContaining(`HTTP ${status}`) });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not probe llama.cpp health after an Ollama connection failure', async () => {
+    const fetcher = vi.fn().mockRejectedValue('connection refused');
+    await expect(probeLocalModelEndpoint({ ...DEFAULT_OPTIONS, strategy: { kind: 'ollama' }, fetch: fetcher }))
+      .resolves.toEqual({ status: 'offline', error: expect.stringContaining('connection refused') });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a detected loading model not-ready when its health request fails', async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json({ data: [{ id: 'local-model', meta: [] }] }))
+      .mockRejectedValueOnce(new Error('health unavailable'));
+    const result = await probeLocalModelEndpoint({ ...DEFAULT_OPTIONS, fetch: fetcher });
+    expect(result).toEqual({ status: 'not-ready', error: expect.stringContaining('health unavailable') });
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 });

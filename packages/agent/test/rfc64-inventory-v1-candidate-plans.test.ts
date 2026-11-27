@@ -211,6 +211,8 @@ function collectPlanClass(database: DatabaseSync): PlanClass {
 
 function parametersFor(sql: string): Record<string, Uint8Array | number | string | null> {
   const all: Readonly<Record<string, Uint8Array | number | string | null>> = {
+    digest: hexBytes('77'.repeat(32)),
+    json: '{}',
     session: hexBytes(NEW_SESSION_HEX),
     oldSession: hexBytes(OLD_SESSION_HEX),
     newSession: hexBytes(NEW_SESSION_HEX),
@@ -251,6 +253,11 @@ function parametersFor(sql: string): Record<string, Uint8Array | number | string
     projectionId: 'cg-shared-v1',
     repairDigest: hexBytes('aa'.repeat(32)),
     repairJson: '{}',
+    networkId: 'otp:20430',
+    contextGraphId: `0x${AUTHOR_HEX}/fixture-graph`,
+    ownerAddress: hexBytes(AUTHOR_HEX),
+    policyDigest: hexBytes('dd'.repeat(32)),
+    signedEnvelope: hexBytes('7b7d'),
     rowCount: hexBytes('0000000000000001'),
     subgraphName: null,
     transferBlobDigest: hexBytes('bb'.repeat(32)),
@@ -350,6 +357,21 @@ function expectPlanGate(plans: PlanClass): void {
       `${INVENTORY_V1_STATEMENT_IDS[statementId]} must use its exact scope/UAL key`,
     ).toBe(true);
   }
+
+  for (const statementId of ['getFinalizedPrivatePlacementFailure',
+    'upsertFinalizedPrivatePlacementFailure'] as const) {
+    expect(plans[statementId].some(detail => detail.includes('USING PRIMARY KEY')),
+      `${INVENTORY_V1_STATEMENT_IDS[statementId]} must use its exact repair digest key`).toBe(true);
+  }
+
+  expect(
+    plans.getUnregisteredAuthoritySeed.some((detail) => detail.includes('USING PRIMARY KEY')),
+    `${INVENTORY_V1_STATEMENT_IDS.getUnregisteredAuthoritySeed} must use its exact (network, graph) primary key`,
+  ).toBe(true);
+  expect(allDetails, 'seed statements must never scan the seed table')
+    .not.toEqual(expect.arrayContaining([
+      expect.stringMatching(/\bSCAN rfc64_unregistered_authority_seeds_v1\b/i),
+    ]));
 }
 
 function oldHeadWidePrimaryKeyDdl(): string {

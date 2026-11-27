@@ -9,10 +9,7 @@ import { createPrivateSwmRecoveryWindow } from '../src/sync/requester/private-sw
 import { isSyncTransportFailure } from '../src/sync/error-tags.js';
 
 function roundAdmission(budgetMs: number) {
-  return createPrivateSwmRecoveryWindow(budgetMs).admitRound(Date.now() + 60_000, {
-    sharing: 'exclusive',
-    owner: 'sync-work-admission-test',
-  });
+  return createPrivateSwmRecoveryWindow(budgetMs).admitRound(Date.now() + 60_000);
 }
 
 function request(overrides: Partial<Parameters<typeof fetchSyncPages>[0]> = {}) {
@@ -52,7 +49,7 @@ describe('page and transport admission within one operation', () => {
     const result = request({
       deadline,
       syncPageTimeoutMs: 30_000,
-      workAdmission: window.admitRound(deadline, { sharing: 'exclusive', owner: 'retry-slice' }),
+      workAdmission: window.admitRound(deadline),
       send: async (_peer, _protocol, _bytes, timeoutMs) => {
         attempts.push({ startedAt: Date.now(), timeoutMs });
         if (attempts.length <= failedAttempts) {
@@ -228,7 +225,7 @@ describe('page and transport admission within one operation', () => {
     const send = vi.fn(async () => new Uint8Array());
     const result = await request({
       deadline,
-      workAdmission: window.admitRound(deadline, { sharing: 'exclusive', owner: 'fractional-round' }),
+      workAdmission: window.admitRound(deadline),
       buildSyncRequest: async () => { elapsed = 9.5; return new Uint8Array([1]); },
       send,
     });

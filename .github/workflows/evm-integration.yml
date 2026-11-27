@@ -11,7 +11,8 @@ on:
 
 concurrency:
   group: evm-integration-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # As in ci.yml: supersede pull requests and manual runs, finish branch pushes.
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 # Minimum-needed token scope (see ci.yml header for rationale).
 permissions:
@@ -20,7 +21,7 @@ permissions:
 jobs:
   plan:
     name: Plan EVM delta
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       evm_matrix: ${{ steps.plan.outputs.evm_matrix }}
@@ -40,7 +41,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: 780f14aa60c39bdca788967121085c3c0d82d85c
+          ref: 38684f46b352019d6ba1e2ec899cf7e2a5fc8848
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
@@ -48,6 +49,7 @@ jobs:
             scripts/ci/assert-ci-results.mjs
             scripts/lib/ci-delta.mjs
             scripts/lib/ci-results.mjs
+            scripts/lib/ci-routing.mjs
           sparse-checkout-cone-mode: false
       - name: Compute fail-closed EVM plan
         id: plan
@@ -55,7 +57,6 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           MERGE_SHA: ${{ github.sha }}
           PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-          SAMPLE_KEY: ${{ github.event.pull_request.head.sha || github.sha }}
           DELTA_ENABLED: ${{ vars.CI_DELTA_ENABLED == 'true' && (github.base_ref == 'main' || github.base_ref == 'testnet-canary') }}
         run: |
           set -euo pipefail
@@ -74,6 +75,10 @@ jobs:
             BASE_SHA="$(git -C candidate rev-parse "${MERGE_SHA}^1")"
             git -C candidate diff --name-status -z \
               "${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"
+            # Lets the planner compare modified workspace manifests between the
+            # same two commits (read as git blobs, never executed). Environment,
+            # not flags, so an older pinned controller simply ignores it.
+            export CI_CANDIDATE_REPO=candidate CI_DIFF_BASE_SHA="${BASE_SHA}" CI_DIFF_HEAD_SHA="${MERGE_SHA}"
           fi
 
           PLAN_EVENT="${EVENT_NAME}"
@@ -85,7 +90,6 @@ jobs:
             --event "${PLAN_EVENT}" \
             --changes-z "${CHANGES_FILE}" \
             --labels-json "${PR_LABELS:-[]}" \
-            --sample-key "${SAMPLE_KEY}" \
             --github-output "${GITHUB_OUTPUT}" \
             --summary "${GITHUB_STEP_SUMMARY}"
 
@@ -95,8 +99,8 @@ jobs:
     name: Build EVM integration packages
     needs: plan
     if: needs.plan.outputs.evm_matrix != '[]'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -110,6 +114,9 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Set up semantic runtime build tools
+        uses: ./.github/actions/setup-semantic-runtime
 
       - name: Cache matching Hardhat compiler outputs
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -133,6 +140,9 @@ jobs:
           test "${#OUTPUTS[@]}" -gt 0
           test -d packages/evm-module/artifacts
           test -d packages/evm-module/cache
+          if test -d packages/semantic-runtime/generated; then
+            OUTPUTS+=(packages/semantic-runtime/generated)
+          fi
           tar -czf /tmp/evm-integration-build.tgz "${OUTPUTS[@]}" \
             packages/evm-module/artifacts packages/evm-module/cache
 
@@ -151,7 +161,7 @@ jobs:
     name: "Tornado EVM integration: ${{ matrix.scope }}"
     needs: [plan, build]
     if: needs.plan.outputs.evm_matrix != '[]'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     strategy:
@@ -195,14 +205,14 @@ jobs:
     name: EVM integration gate
     if: always()
     needs: [plan, build, evm-integration]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 3
     steps:
       - name: Checkout trusted CI controller
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: 780f14aa60c39bdca788967121085c3c0d82d85c
+          ref: 38684f46b352019d6ba1e2ec899cf7e2a5fc8848
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
@@ -210,6 +220,7 @@ jobs:
             scripts/ci/assert-ci-results.mjs
             scripts/lib/ci-delta.mjs
             scripts/lib/ci-results.mjs
+            scripts/lib/ci-routing.mjs
           sparse-checkout-cone-mode: false
       - name: Verify selected EVM scopes completed
         env:

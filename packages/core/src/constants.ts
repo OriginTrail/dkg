@@ -7,27 +7,31 @@ import { assertSafeIri } from './sparql-safe.js';
 export const PROTOCOL_PUBLISH = '/dkg/10.0.0/publish';
 export const PROTOCOL_QUERY = '/dkg/10.0.0/query';
 export const PROTOCOL_DISCOVER = '/dkg/10.0.0/discover';
-// Bumped /dkg/10.0.1/sync -> /dkg/10.0.2/sync: sync is taken BACK OFF
-// the Universal Messenger substrate (raw ProtocolRouter register/send,
-// no ReliableEnvelope, no idempotency, no outbox). rc.9 PR-E had routed
-// sync through the substrate "for receiver-side dedup", but the sync
-// requester mints a fresh messageId per attempt, so the dedup key never
-// repeats — the cache hit rate is structurally zero while every large,
-// never-reused page response was cached on both sides of
-// message_idempotency (the ~2.9 GB node-ui.db bloat). Sync already has
-// its own retry (withRetry), 90s auth-freshness TTL, and per-requestId
-// replay protection, so it needs none of the substrate's machinery.
-// Going raw changes the wire bytes (bare auth-envelope vs
-// ReliableEnvelope), so the protocol ID MUST bump or mixed-version peers
-// mis-decode. Hard cutover, consistent with the rc.9 migration model:
-// mixed-version peers cleanly skip each other via waitForSyncProtocol
-// (sync is a self-healing catch-up net, so the brief mixed-version
-// window during auto-update is no-data-loss).
+// Bumped /dkg/10.0.1/sync -> /dkg/10.0.2/sync: sync is taken BACK OFF the Universal Messenger
+// substrate (raw ProtocolRouter register/send, no ReliableEnvelope, no idempotency, no outbox).
+// rc.9 PR-E had routed sync through the substrate "for receiver-side dedup", but the sync requester
+// mints a fresh messageId per attempt, so the dedup key never repeats — the cache hit rate is
+// structurally zero while every large, never-reused page response was cached on both sides of
+// message_idempotency (the ~2.9 GB node-ui.db bloat). Sync already has its own retry (withRetry),
+// 90s auth-freshness TTL, and per-requestId replay protection, so it needs none of the substrate's
+// machinery. Going raw changes the wire bytes (bare auth-envelope vs ReliableEnvelope), so the
+// protocol ID MUST bump or mixed-version peers mis-decode. Hard cutover, consistent with the rc.9
+// migration model: mixed-version peers cleanly skip each other via waitForSyncProtocol (sync is a
+// self-healing catch-up net, so the brief mixed-version window during auto-update is no-data-loss).
 export const PROTOCOL_SYNC = '/dkg/10.0.2/sync';
 // Framed, long-lived transport overlay for PROTOCOL_SYNC. The logical request
 // and response bytes are unchanged; the distinct wire id lets upgraded peers
 // negotiate stream reuse while older peers cleanly fall back to one-shot sync.
 export const PROTOCOL_SYNC_POOLED = '/dkg/10.0.3/sync';
+/**
+ * Whether an advertised protocol list proves the peer serves sync (#2822).
+ * The pooled id is only ever registered as the overlay of the PROTOCOL_SYNC
+ * handler, so either id is proof. libp2p identifies once per connection and
+ * later records only the ids its streams negotiate, so a peer that connected
+ * before registering its sync handlers can list just the pooled id.
+ */
+export const advertisesSyncProtocol = (protocols: readonly string[]): boolean =>
+  protocols.includes(PROTOCOL_SYNC) || protocols.includes(PROTOCOL_SYNC_POOLED);
 // OT-RFC-59 changelog read-lane — a SEPARATE protocol id, not a field on
 // PROTOCOL_SYNC: the legacy sync response is bare N-Quads with no envelope, so a
 // structured (era, headSeq, nextSeq, records) head cannot ride the existing
@@ -66,6 +70,10 @@ export const PROTOCOL_ACCESS = '/dkg/10.0.1/private-access';
 // at the app layer so this is semantically safe (see
 // docs/messenger.md "Response caching policy").
 export const PROTOCOL_QUERY_REMOTE = '/dkg/10.0.1/query-remote';
+// OT-RFC-27 marketplace, over the messenger as remote queries are: a seller's
+// live terms (`quote`) and one paid call (`serve`), each request and response.
+export const PROTOCOL_MARKETPLACE_QUOTE = '/dkg/10.0.1/marketplace-quote';
+export const PROTOCOL_MARKETPLACE_SERVE = '/dkg/10.0.1/marketplace-serve';
 // rc.9 PR-8: bumped from /dkg/10.0.0/swm-sender-key to opt into the
 // Universal Messenger substrate (same rationale as PROTOCOL_ACCESS).
 // SWM sender-key send sites in dkg-agent.ts route through
@@ -84,56 +92,54 @@ export const PROTOCOL_SWM_SENDER_KEY = '/dkg/10.0.1/swm-sender-key';
 // or below `DKG_SWM_SUBSTRATE_MAX_MEMBERS`. See RFC-003 §6 for the
 // full transport policy.
 export const PROTOCOL_SWM_UPDATE = '/dkg/10.0.1/swm-update';
-// rc.9 PR-D (SWM reliable fan-out plan, Step 1b): NEW protocol — no
-// rc.8 predecessor. Per-recipient acknowledgement that the receiver
-// successfully applied a SWM share via the GOSSIP path. Receivers
-// emit this on every gossip-applied share to the share's author peer
-// (extracted from the gossip envelope signature); senders track ack
-// arrivals against the enumerated `expectedMembers` set in
-// `SwmAckQuorum` to compute per-share delivery quorum. Substrate-
-// delivered shares (PROTOCOL_SWM_UPDATE) ACK via the substrate
-// response itself and DO NOT emit a separate SwmShareAck to avoid
-// double counting. The watchdog runs substrate top-up over the
-// long-tail non-acked peers (`expectedMembers \ acked`) and gives
-// up at the deadline, falling back to runSyncOnConnect for offline
-// peers. See RFC-003 §4.2 + §5.2 for the full ack-quorum policy.
+// A Core relays a member's author-signed share of a public graph, the
+// envelope bytes unchanged, to the graph's owner, which needs the author's
+// signed share to keep its seal. One attempt, no outbox; a node without this
+// protocol refuses the stream. See the agent's `swm/owner-share-forward.ts`.
+export const PROTOCOL_SWM_UPDATE_RELAYED = '/dkg/10.0.1/swm-update-relayed';
+// rc.9 PR-D (SWM reliable fan-out plan, Step 1b): NEW protocol — no rc.8 predecessor. Per-recipient
+// acknowledgement that the receiver successfully applied a SWM share via the GOSSIP path. Receivers
+// emit this on every gossip-applied share to the share's author peer (extracted from the gossip
+// envelope signature); senders track ack arrivals against the enumerated `expectedMembers` set in
+// `SwmAckQuorum` to compute per-share delivery quorum. Substrate- delivered shares
+// (PROTOCOL_SWM_UPDATE) ACK via the substrate response itself and DO NOT emit a separate
+// SwmShareAck to avoid double counting. The watchdog runs substrate top-up over the long-tail
+// non-acked peers (`expectedMembers \ acked`) and gives up at the deadline, falling back to
+// runSyncOnConnect for offline peers. See RFC-003 §4.2 + §5.2 for the full ack-quorum policy.
 export const PROTOCOL_SWM_SHARE_ACK = '/dkg/10.0.1/swm-share-ack';
+// A public graph's owner tells its followers that the graph's shared memory changed (a share it
+// applied from another peer); a follower then pulls that scope from it through its ordinary sync.
+// The notice carries no data, and a node without this protocol refuses the stream. See the agent's
+// `swm/shared-memory-change-notice.ts`.
+export const PROTOCOL_SWM_CHANGE_NOTICE = '/dkg/10.0.1/swm-change-notice';
 
-// OT-RFC-38 LU-6 (cores host curated SWM substrate): NEW protocol.
-// Members fetch opaque ciphertext envelopes from a core that has
-// stored them on behalf of a CG (because the sharding-table — all-
-// cores in Phase A — assigned the CG to it). Request is a small JSON
-// envelope { contextGraphId, sinceSeqno }; response is a JSON envelope
-// carrying base64'd gossip envelopes that the requester re-feeds
-// through its local `SharedMemoryHandler.handle()` so the existing
-// Sender-Key decrypt-and-apply path runs verbatim. The wire format
-// is documented in `packages/agent/src/swm/host-catchup-wire.ts`.
+// OT-RFC-38 LU-6 (cores host curated SWM substrate): NEW protocol. Members fetch opaque ciphertext
+// envelopes from a core that has stored them on behalf of a CG (because the sharding-table — all-
+// cores in Phase A — assigned the CG to it). Request is a small JSON envelope { contextGraphId,
+// sinceSeqno }; response is a JSON envelope carrying base64'd gossip envelopes that the requester
+// re-feeds through its local `SharedMemoryHandler.handle()` so the existing Sender-Key
+// decrypt-and-apply path runs verbatim. The wire format is documented in
+// `packages/agent/src/swm/host-catchup-wire.ts`.
 //
-// This protocol closes the late-joiner gap when every CG member is
-// offline simultaneously — without it, members are the sole authority
-// for SWM and a member-quorum outage leaves new joiners with no
-// substrate to read from. With it, cores act as ciphertext-only
-// custodians whose decryption authority is bounded by the chain key
-// (which they never see).
+// This protocol closes the late-joiner gap when every CG member is offline simultaneously — without
+// it, members are the sole authority for SWM and a member-quorum outage leaves new joiners with no
+// substrate to read from. With it, cores act as ciphertext-only custodians whose decryption
+// authority is bounded by the chain key (which they never see).
 export const PROTOCOL_SWM_HOST_CATCHUP = '/dkg/10.0.1/swm-host-catchup';
 
-// rc.9 PR-10: bumped from /dkg/10.0.0/join-request to opt into the
-// Universal Messenger substrate. The in-memory JoinApprovalRetryQueue
-// (rc.9 PR #510) is replaced by the substrate's durable SQLite outbox
-// — same backoff ladder semantics, persists across daemon restart.
+// rc.9 PR-10: bumped from /dkg/10.0.0/join-request to opt into the Universal Messenger substrate.
+// The in-memory JoinApprovalRetryQueue (rc.9 PR #510) is replaced by the substrate's durable SQLite
+// outbox — same backoff ladder semantics, persists across daemon restart.
 // 10.0.2 binds decisions to the signed request generation. Keep this distinct
 // from 10.0.1 so mixed-version peers fail negotiation instead of ACK-dropping
 // generation-less approval/rejection messages and stranding the requester.
 export const PROTOCOL_JOIN_REQUEST = '/dkg/10.0.2/join-request';
 
-// rc.9 PR-11: bumped from /dkg/10.0.0/* to opt into the Universal
-// Messenger substrate. ACKCollector + VerifyCollector keep their
-// existing app-level fan-out + quorum semantics; substrate gives
-// them envelope-versioned wire + receiver-side dedup + sender
-// idempotency under the hood. Default `parallelPaths` for these two
-// is intentionally **1** (the app already fans out; parallelPaths>1
-// would 9x amplify the wire load with no SLO win — see plan PR-4
-// runtime guard + PR-11 rationale).
+// rc.9 PR-11: bumped from /dkg/10.0.0/* to opt into the Universal Messenger substrate. ACKCollector
+// + VerifyCollector keep their existing app-level fan-out + quorum semantics; substrate gives them
+// envelope-versioned wire + receiver-side dedup + sender idempotency under the hood. Default
+// `parallelPaths` for these two is intentionally **1** (the app already fans out; parallelPaths>1
+// would 9x amplify the wire load with no SLO win — see plan PR-4 runtime guard + PR-11 rationale).
 export const PROTOCOL_VERIFY_PROPOSAL = '/dkg/10.0.1/verify-proposal';
 export const PROTOCOL_VERIFY_APPROVAL = '/dkg/10.0.0/verify-approval';
 export const PROTOCOL_STORAGE_ACK = '/dkg/10.0.1/storage-ack';
@@ -236,6 +242,32 @@ export const DKG_GOSSIP_MAX_MESSAGE_BYTES = STORAGE_ACK_MAX_STAGING_BYTES;
 
 /** Allows GossipSub RPC framing around one max-sized application payload. */
 export const DKG_GOSSIP_MAX_RPC_BYTES = DKG_GOSSIP_MAX_MESSAGE_BYTES + 256 * 1024;
+
+/**
+ * gossipsub 17+ keeps at most this many bytes of one peer's subscriptions, charging
+ * each topic its length plus 1024, and silently leaves the peer out of publishes on
+ * the topics beyond it. A DKG wire topic is 106 to 375 characters (the longest with a
+ * 256-character context graph id), so gossipsub's 1 MiB default holds about 750 to
+ * 930 of them, fewer than testnet Core nodes subscribe to. 8 MiB holds about 6,000 to
+ * 7,400: at least the 5,000 subscriptions gossipsub decodes from the one RPC in which
+ * a peer announces its topics. Subscriptions a peer adds later arrive one per RPC and
+ * can go past it. The charge counts UTF-16 units, so a node can hold up to about
+ * twice the cap for each connected peer.
+ */
+export const DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER = 8 * 1024 * 1024;
+
+/**
+ * The cap on the mainnets, whose Core nodes subscribe to a few hundred topics. 2 MiB
+ * holds about 1,500 to 1,850 of them and keeps what peers can make a node hold small.
+ */
+export const DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER_MAINNET = 2 * 1024 * 1024;
+
+/** The per-peer topic cap for the selected network config: `mainnet-*` configs get the mainnet cap. */
+export function gossipMaxTopicBytesPerPeer(networkConfigName?: string): number {
+  return networkConfigName?.startsWith('mainnet-')
+    ? DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER_MAINNET
+    : DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER;
+}
 
 // ── V10 GossipSub Topics ───────────────────────────────────────────────
 
@@ -498,6 +530,33 @@ export function contextGraphLayerUriCandidates(
   const layerBase = contextGraphLayerBaseUri(contextGraphId, layer, subGraphName);
   const canonical = `${layerBase}/${canonicalKnowledgeAssetGraphIdentitySuffix(agentAddress, kaNumber)}`;
   const legacy = `${layerBase}/${agentAddress}/${kaNumber}`;
+  return canonical === legacy ? [canonical] : [canonical, legacy];
+}
+
+/**
+ * Canonical and caller-known legacy prefixes for the NAME-KEYED working-memory
+ * graph family, `…[/{sub}]/assertion/{addr}/{name}`.
+ *
+ * This is NOT a dead legacy shape. `DKGPublisher.wmGraphUri` falls back to
+ * {@link contextGraphAssertionUri} whenever `resolveKaGraphIdentity` returns
+ * null — i.e. whenever a per-author KA number cannot be resolved — so drafts
+ * still land here today. An unscoped working-memory read that only scans
+ * `…/_working_memory/{addr}/` therefore cannot see them.
+ *
+ * Mirrors {@link contextGraphLayerPrefixCandidates}: canonical (EVM-lowercased)
+ * address first, the caller's original casing second when it differs, because
+ * graphs written before address canonicalization are still addressed that way.
+ */
+export function contextGraphAssertionPrefixCandidates(
+  contextGraphId: string,
+  agentAddress: string,
+  subGraphName?: string,
+): string[] {
+  const base = subGraphName
+    ? `did:dkg:context-graph:${contextGraphId}/${subGraphName}`
+    : `did:dkg:context-graph:${contextGraphId}`;
+  const canonical = `${base}/assertion/${canonicalKnowledgeAssetAgentAddress(agentAddress)}/`;
+  const legacy = `${base}/assertion/${agentAddress}/`;
   return canonical === legacy ? [canonical] : [canonical, legacy];
 }
 

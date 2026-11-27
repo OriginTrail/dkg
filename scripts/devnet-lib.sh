@@ -32,6 +32,8 @@ api() {
 }
 code_of() { printf '%s' "$1" | head -1; }
 body_of() { printf '%s' "$1" | tail -n +2; }
+# node_up <node> -> exit 0 when the node's daemon answers /api/status with HTTP 200.
+node_up() { [ "$(code_of "$(api "$1" GET /api/status)")" = "200" ]; }
 
 # JSON: field <json> <dot.path> -> value ("" if missing; objects/arrays JSON'd) -
 field() { J="$2" node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{let j;try{j=JSON.parse(d)}catch(e){process.stdout.write("");return}let v=j;for(const k of process.env.J.split("."))v=(v==null?undefined:v[k]);process.stdout.write(v==null?"":(typeof v==="object"?JSON.stringify(v):String(v)))})' <<<"$1"; }

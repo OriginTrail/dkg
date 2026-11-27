@@ -13,7 +13,11 @@ import {
   delegatedHeldJobSettlement,
   localHeldJobSettlement,
   resolveHeldJobSettlementCapability,
+  isBulkClearableTerminalLiftJob,
+  isClearableTerminalLiftJob,
+  isHeldForChainProof,
   isTargetedClearableLiftJob,
+  needsPendingTransactionOverride,
 } from '../src/async-lift-retry-disposition.js';
 import {
   DEFAULT_CONTROL_GRAPH_URI,
@@ -140,7 +144,8 @@ describe('GH#2270 failed-job retry disposition', () => {
     // backoff/operator, blocked ↔ recovery/pending_chain_proof, skipped ↔ exhausted/no reason.
     expect([retryable, blocked, terminal].map((job) => publisher.describeConfiguredRetryState(job))).toEqual([
       { autoRetryEligible: true, waitingReason: 'backoff' },
-      { autoRetryEligible: false, waitingReason: 'pending_chain_proof' },
+      // GH#2942 - held, and WHY: the fixture's CREATE recorded no nonce, so absence can never be proven.
+      { autoRetryEligible: false, waitingReason: 'pending_chain_proof', blocker: expect.objectContaining({ code: 'nonce_missing' }) },
       { autoRetryEligible: false },
     ]);
     expect(await publisher.retryDetailed())
@@ -278,6 +283,38 @@ describe('GH#2270 failed-job retry disposition', () => {
       agentAddress: '0xAbCdEf0000000000000000000000000000001234',
     }))).toBe(false);
     expect(isTargetedClearableLiftJob(heldJob, runtimeOptions({ kind: 'agent' }))).toBe(false);
+  });
+
+  it('clears a job held for chain proof by id only with the override, like a recovery-lane one [#3573]', async () => {
+    // The by-id clear used to share only the #1837 base predicate, which refused a `retry_recovery`
+    // failure but not a held one: a plain clear removed a job whose transaction may still land, and
+    // the next re-submit minted a second job. Both lanes now read ONE clearable set.
+    const OWNER = '0xAAaAAa00000000000000000000000000000000Aa';
+    const OTHER = '0xBBbBBb00000000000000000000000000000000Bb';
+    const publisher = createPublisher();
+    const failed = await failAfterRecordedTxHash(publisher);
+    const held = { ...failed, admission: { byAgentAddress: OWNER } } as PersistedFailedJob;
+    expect([isHeldForChainProof(held), held.failure.resolution === 'retry_recovery']).toEqual([true, false]);
+    expect([needsPendingTransactionOverride(held), isClearableTerminalLiftJob(held), isBulkClearableTerminalLiftJob(held)])
+      .toEqual([true, false, false]);
+    expect(isTargetedClearableLiftJob(held)).toBe(false);
+    expect(isTargetedClearableLiftJob(held, { pendingTransactionOverride: { kind: 'agent', agentAddress: OTHER } })).toBe(false);
+    expect(isTargetedClearableLiftJob(held, { pendingTransactionOverride: { kind: 'agent', agentAddress: OWNER } })).toBe(true);
+    expect(isTargetedClearableLiftJob(held, { pendingTransactionOverride: { kind: 'nodeOperator' } })).toBe(true);
+
+    // A failure that proves its transaction had no effect, and one that never sent any, are not
+    // held: both lanes clear them without the override, and agree on every job here.
+    const reverted = await failWithRevert(publisher, kaVmPublishRequest({
+      name: 'revert-album', shareOperationId: 'revert-op', intentKey: `sha256:${'cd'.repeat(32)}`,
+    }), { recordTxHash: true });
+    const quorum = await failWithUnmetQuorum(publisher, kaVmPublishRequest({
+      name: 'quorum-album', shareOperationId: 'quorum-op', intentKey: `sha256:${'ef'.repeat(32)}`,
+    }));
+    const recovery = { ...reverted, failure: { ...reverted.failure, resolution: 'retry_recovery' } } as PersistedFailedJob;
+    for (const job of [held, reverted, quorum, recovery]) {
+      expect([job.jobId, isTargetedClearableLiftJob(job)]).toEqual([job.jobId, isBulkClearableTerminalLiftJob(job)]);
+      expect([job.jobId, needsPendingTransactionOverride(job)]).toEqual([job.jobId, job === held || job === recovery]);
+    }
   });
 
   it('names the two settlement ROLES explicitly, without inferring either from wiring [3825614002]', () => {
@@ -479,9 +516,9 @@ describe('GH#2270 failed-job retry disposition', () => {
       publisher.describeConfiguredRetryState((await publisher.getStatus(acceptedJobId))!),
     ]).toEqual([
       { autoRetryEligible: true, waitingReason: 'backoff' },
-      { autoRetryEligible: false, waitingReason: 'pending_chain_proof' },
-      { autoRetryEligible: false, waitingReason: 'operator' },
-      { autoRetryEligible: false, waitingReason: 'exhausted' },
+      { autoRetryEligible: false, waitingReason: 'pending_chain_proof', blocker: expect.objectContaining({ code: 'nonce_missing' }) },
+      { autoRetryEligible: false, waitingReason: 'operator', blocker: expect.objectContaining({ code: 'not_auto_retryable' }) },
+      { autoRetryEligible: false, waitingReason: 'exhausted', blocker: expect.objectContaining({ code: 'retry_budget_spent' }) },
       { autoRetryEligible: false },
       { autoRetryEligible: false },
     ]);
@@ -496,7 +533,11 @@ describe('GH#2270 failed-job retry disposition', () => {
 
     expect(enabled.describeConfiguredRetryState(failed)).toEqual({ autoRetryEligible: true, waitingReason: 'backoff' });
     expect(createCorruptHeadPublisher({ autoRetryEnabled: false }).describeConfiguredRetryState(failed))
-      .toEqual({ autoRetryEligible: false, waitingReason: 'operator' });
+      .toEqual({
+        autoRetryEligible: false,
+        waitingReason: 'operator',
+        blocker: expect.objectContaining({ code: 'auto_retry_disabled' }),
+      });
   });
 
   it('reports an allow-listed failure that was never SCHEDULED as operator work, not backoff', async () => {
@@ -513,7 +554,11 @@ describe('GH#2270 failed-job retry disposition', () => {
     // Re-enabled publisher, same job: allow-listed, budget intact, and still not going anywhere.
     const reEnabled = createCorruptHeadPublisher({ retryBackoffBaseMs: 100, retryBackoffMaxMs: 250, rand: () => 0.5 });
     expect(reEnabled.describeConfiguredRetryState(unscheduled))
-      .toEqual({ autoRetryEligible: false, waitingReason: 'operator' });
+      .toEqual({
+        autoRetryEligible: false,
+        waitingReason: 'operator',
+        blocker: expect.objectContaining({ code: 'retry_not_scheduled' }),
+      });
 
     // 'operator' is exactly right: the manual path DOES move it, which is what the operator is
     // being told to reach for.
@@ -536,7 +581,11 @@ describe('GH#2270 failed-job retry disposition', () => {
     expect(publisher.describeConfiguredRetryState({
       ...scheduled,
       timestamps: { ...scheduled.timestamps, nextRetryAt: undefined },
-    })).toEqual({ autoRetryEligible: false, waitingReason: 'operator' });
+    })).toEqual({
+      autoRetryEligible: false,
+      waitingReason: 'operator',
+      blocker: expect.objectContaining({ code: 'retry_not_scheduled' }),
+    });
   });
 
   // The action IS the partition: both consumers read this one function, so a divergence between
@@ -564,7 +613,7 @@ describe('GH#2270 failed-job retry disposition', () => {
       .toEqual([reaccept, blocked, skip].map((job) => describeRetryProjection(job, options)));
     expect([reaccept, blocked, skip].map((job) => describeRetryProjection(job, options))).toEqual([
       { autoRetryEligible: true, waitingReason: 'backoff' },
-      { autoRetryEligible: false, waitingReason: 'pending_chain_proof' },
+      { autoRetryEligible: false, waitingReason: 'pending_chain_proof', blocker: expect.objectContaining({ code: 'nonce_missing' }) },
       { autoRetryEligible: false },
     ]);
     expect(await publisher.retryDetailed())
@@ -583,7 +632,11 @@ describe('GH#2270 failed-job retry disposition', () => {
       describeRetryProjection(job, { autoRetryEnabled: false }),
     ]).toEqual([
       { autoRetryEligible: true, waitingReason: 'backoff' },
-      { autoRetryEligible: false, waitingReason: 'operator' },
+      {
+        autoRetryEligible: false,
+        waitingReason: 'operator',
+        blocker: expect.objectContaining({ code: 'auto_retry_disabled' }),
+      },
     ]);
   });
 

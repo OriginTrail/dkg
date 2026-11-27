@@ -44,6 +44,13 @@ function providerFor(input: {
   return { readProvider, getLogs, getBlockNumber };
 }
 
+async function scan(scanner: RawLogScanner, filter: { address: string; topics: string[] },
+  options: { isAborted?: () => boolean } = {}) {
+  let result: { logs: readonly unknown[] } | undefined;
+  await scanner.scan(filter, { ...options, onLogs: logs => { result = { logs }; } });
+  return result;
+}
+
 describe('RawLogScanner', () => {
   it('owns range construction, wide-log policy, and stable batch dedupe', async () => {
     const first = log(98, 0);
@@ -64,7 +71,7 @@ describe('RawLogScanner', () => {
       reorgBufferBlocks: 10,
     });
 
-    const firstBatch = await scanner.read({ address: ADDRESS, topics: [TOPIC_A, TOPIC_B] });
+    const firstBatch = await scan(scanner, { address: ADDRESS, topics: [TOPIC_A, TOPIC_B] });
     expect(firstBatch?.logs).toEqual([first]);
     expect(calls.map((call) => call.label)).toEqual([
       'unit scan getBlockNumber',
@@ -75,30 +82,23 @@ describe('RawLogScanner', () => {
       skipPreferred: true,
     });
     expect(calls[1]?.opts).toMatchObject({
-      policy: 'watchdogWideLogScan',
+      policy: 'durablePagedLogScan',
       skipPreferred: true,
     });
-    scanner.commit(firstBatch!);
 
-    const secondBatch = await scanner.read({ address: ADDRESS, topics: [TOPIC_A, TOPIC_B] });
+    const secondBatch = await scan(scanner, { address: ADDRESS, topics: [TOPIC_A, TOPIC_B] });
     expect(secondBatch?.logs).toEqual([second]);
   });
 
-  it('does not advance cursor or dedupe state until the caller commits a batch', async () => {
+  it('does not advance cursor or dedupe when the batch callback fails', async () => {
     const entry = log(4, 0);
     const provider = providerFor({ heads: [5, 5], logs: [[entry], [entry]] });
-    const scanner = new RawLogScanner({
-      label: 'transactional scan',
-      readProvider: provider.readProvider,
-      reorgBufferBlocks: 1,
-    });
-
-    const firstBatch = await scanner.read({ address: ADDRESS, topics: [] });
-    const secondBatch = await scanner.read({ address: ADDRESS, topics: [] });
-    expect(secondBatch?.logs).toEqual([entry]);
-    scanner.commit(firstBatch!);
-    const thirdBatch = await scanner.read({ address: ADDRESS, topics: [] });
-    expect(thirdBatch?.logs).toEqual([]);
+    const scanner = new RawLogScanner({ label: 'transactional scan', readProvider: provider.readProvider, reorgBufferBlocks: 1 });
+    await expect(scanner.scan({ address: ADDRESS, topics: [] }, {
+      onLogs: logs => { expect(logs).toEqual([entry]); throw new Error('retry batch'); },
+    })).rejects.toThrow('retry batch');
+    expect((await scan(scanner, { address: ADDRESS, topics: [] }))?.logs).toEqual([entry]);
+    expect((await scan(scanner, { address: ADDRESS, topics: [] }))?.logs).toEqual([]);
   });
 
   it('skips the wide scan and returns no batch when the caller aborts during the head read', async () => {
@@ -110,7 +110,7 @@ describe('RawLogScanner', () => {
       reorgBufferBlocks: 1,
     });
 
-    const batch = await scanner.read(
+    const batch = await scan(scanner, 
       { address: ADDRESS, topics: [] },
       { isAborted: () => true },
     );
@@ -135,11 +135,10 @@ describe('RawLogScanner', () => {
       reorgBufferBlocks: 1,
     });
 
-    const firstBatch = await scanner.read({ address: ADDRESS, topics: [] });
+    const firstBatch = await scan(scanner, { address: ADDRESS, topics: [] });
     expect(firstBatch?.logs).toEqual([boundary]);
-    scanner.commit(firstBatch!);
 
-    const rescan = await scanner.read({ address: ADDRESS, topics: [] });
+    const rescan = await scan(scanner, { address: ADDRESS, topics: [] });
     expect(provider.getLogs.mock.calls.at(-1)?.[0]).toMatchObject({
       fromBlock: boundary.blockNumber,
       toBlock: 6,
@@ -161,17 +160,15 @@ describe('RawLogScanner', () => {
       reorgBufferBlocks: 2,
     });
 
-    const firstBatch = await scanner.read({ address: ADDRESS, topics: [] });
+    const firstBatch = await scan(scanner, { address: ADDRESS, topics: [] });
     expect(firstBatch?.logs).toEqual([entry]);
-    scanner.commit(firstBatch!);
 
     // head 12 puts block 8 outside both the scan window and the buffer: nothing
     // is returned, and the commit prunes the identity.
-    const outOfRange = await scanner.read({ address: ADDRESS, topics: [] });
+    const outOfRange = await scan(scanner, { address: ADDRESS, topics: [] });
     expect(outOfRange?.logs).toEqual([]);
-    scanner.commit(outOfRange!);
 
-    const reintroduced = await scanner.read({ address: ADDRESS, topics: [] });
+    const reintroduced = await scan(scanner, { address: ADDRESS, topics: [] });
     expect(reintroduced?.logs).toEqual([entry]);
   });
 

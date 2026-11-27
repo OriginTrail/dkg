@@ -16,8 +16,8 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
+import { useAgentsStore } from '../src/ui/stores/agents.js';
 
-const fetchStatusMock = vi.fn();
 const fetchWalletsBalancesMock = vi.fn();
 const fetchMetricsMock = vi.fn();
 const fetchRetentionSettingsMock = vi.fn();
@@ -34,7 +34,7 @@ vi.mock('../src/ui/pages/identity-wallets/IdentityWalletsSection.js', () => ({
       React.createElement(
         'div',
         { className: 'card-header' },
-        React.createElement('h2', { className: 'card-title' }, 'Node Identity Wallets'),
+        React.createElement('h2', { className: 'card-title' }, 'Node identity wallets'),
       ),
       React.createElement(
         'div',
@@ -66,7 +66,6 @@ vi.mock('../src/ui/api.js', async () => {
   const actual = await vi.importActual<any>('../src/ui/api.js');
   return {
     ...actual,
-    fetchStatus: fetchStatusMock,
     fetchWalletsBalances: fetchWalletsBalancesMock,
     fetchMetrics: fetchMetricsMock,
     fetchRetentionSettings: fetchRetentionSettingsMock,
@@ -103,7 +102,8 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     document.body.innerHTML = '';
     vi.clearAllMocks();
-    fetchStatusMock.mockResolvedValue({
+    // Settings reads the shell's shared status, not its own request.
+    useAgentsStore.getState().setNodeStatus({
       name: 'Test Node', peerId: '12D3KooWTest', nodeRole: 'core',
       networkName: 'testnet', storeBackend: 'oxigraph', connectedPeers: 2,
       connections: { direct: 1, relayed: 1 }, uptimeMs: 60_000,
@@ -137,17 +137,17 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
     return container;
   }
 
-  it('renders the kept cards (incl. Publisher Conviction) + Danger Zone in the approved order', async () => {
+  it('renders the kept cards (incl. Publisher Conviction) + Danger zone in the approved order', async () => {
     const c = await render();
     expect(cardTitles(c)).toEqual([
-      'Node Identity',
-      'Node Identity Wallets',
-      'Blockchain Config',
+      'Node identity',
+      'Node identity wallets',
+      'Blockchain config',
       // PCA card inserted directly after Blockchain Config (UX §3.2).
       'Publisher Conviction',
-      'Network Telemetry',
-      'Local Data Retention',
-      'Danger Zone',
+      'Network telemetry',
+      'Local data retention',
+      'Danger zone',
     ]);
   });
 
@@ -171,7 +171,7 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
     expect(c.querySelector('.settings-grid')).toBeNull();
   });
 
-  it('Local Data Retention is its OWN card with an associated label and the honest helper copy', async () => {
+  it('Local data retention is its OWN card with an associated label and the honest helper copy', async () => {
     const c = await render();
     const select = c.querySelector<HTMLSelectElement>('#retention-select');
     expect(select).toBeTruthy();
@@ -252,7 +252,7 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
     expect(updateTelemetrySettingsMock).not.toHaveBeenCalled();
     // Confirming streams telemetry on.
     const enableBtn = Array.from(dialog!.querySelectorAll('button')).find(
-      (b) => /Enable Streaming/.test(b.textContent ?? ''),
+      (b) => /Enable streaming/.test(b.textContent ?? ''),
     )!;
     await act(async () => { enableBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     await flush();
@@ -274,7 +274,7 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
     await act(async () => { sw.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     await flush();
     const enableBtn = Array.from(document.querySelectorAll('[role="dialog"] button')).find(
-      (b) => /Enable Streaming/.test(b.textContent ?? ''),
+      (b) => /Enable streaming/.test(b.textContent ?? ''),
     ) as HTMLButtonElement;
     await act(async () => { enableBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     await flush();
@@ -283,18 +283,18 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
     expect(c.querySelector<HTMLButtonElement>('button[role="switch"]')!.getAttribute('aria-checked')).toBe('false');
   });
 
-  it('Danger Zone shutdown is a two-step confirm (no shutdown on first click)', async () => {
+  it('Danger zone shutdown is a two-step confirm (no shutdown on first click)', async () => {
     const c = await render();
     const btn = Array.from(c.querySelectorAll('button')).find(
-      (b) => (b.textContent ?? '').trim() === 'Shutdown Node',
+      (b) => (b.textContent ?? '').trim() === 'Shut down node',
     )!;
     await act(async () => { btn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     await flush();
     expect(shutdownNodeMock).not.toHaveBeenCalled();
-    expect(c.textContent ?? '').toMatch(/Confirm Shutdown/);
+    expect(c.textContent ?? '').toMatch(/Confirm shutdown/);
     // Second click confirms.
     const confirmBtn = Array.from(c.querySelectorAll('button')).find(
-      (b) => (b.textContent ?? '').trim() === 'Confirm Shutdown',
+      (b) => (b.textContent ?? '').trim() === 'Confirm shutdown',
     )!;
     await act(async () => { confirmBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     await flush();

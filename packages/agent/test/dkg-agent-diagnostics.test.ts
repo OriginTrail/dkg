@@ -19,7 +19,7 @@
 import { describe, it, expect } from 'vitest';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
-import { PROTOCOL_MESSAGE, PROTOCOL_SYNC, type ProtocolOutboxMetadata } from '@origintrail-official/dkg-core';
+import { PROTOCOL_MESSAGE, PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, type ProtocolOutboxMetadata } from '@origintrail-official/dkg-core';
 import { PeerSyncSessionTestDriver } from './_helpers/peer-sync-session-driver.js';
 
 /**
@@ -336,6 +336,18 @@ describe('DKGAgent.getPeerDiagnostics', () => {
         stale: true,
         backoff: null,
       });
+    });
+
+    it('reports a peer whose stale identify lists only the pooled sync id as sync-capable (#2822)', async () => {
+      const agentLike = makeAgentLike({
+        rawConnections: [makeStubConn(PEER_A)],
+        peerStoreEntries: new Map([
+          [PEER_A, { addresses: [], protocols: [PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC_POOLED] }],
+        ]),
+      });
+      const diag = await callDiagnostics(agentLike, PEER_A);
+      expect(diag.syncCapable).toBe(true);
+      expect(diag.syncStatus).toMatchObject({ capable: true, capability: 'supported' });
     });
 
     it('does not mark peers that lack the current sync protocol as stale', async () => {

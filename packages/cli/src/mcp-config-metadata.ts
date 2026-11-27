@@ -1,3 +1,4 @@
+import { windowsSystemRoot } from './mcp-windows-system-root.js';
 import { win32, posix } from 'node:path';
 import { detectMcpRuntime, type McpRuntime } from './mcp-runtime.js';
 import { execFileSync } from 'node:child_process';
@@ -50,13 +51,7 @@ const WINDOWS_MCP_CONFIG_SCRIPTS: Record<WindowsMcpConfigOperation, string> = {
 
 /** Resolve the OS runtime without searching the working directory or PATH. */
 export function windowsPowerShellExecutable(location: WindowsExecution): string {
-  // WSL does not forward SystemRoot by default. Non-default Windows installs
-  // can supply the inherited Windows SystemRoot explicitly to the Linux process.
-  const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT ?? 'C:\\Windows';
-  if (!/^[A-Za-z]:[\\/]/.test(systemRoot) || /[\\/]\.\.?([\\/]|$)/.test(systemRoot)) {
-    throw new Error('MCP config persistence requires an absolute Windows SystemRoot (for example C:\\Windows).');
-  }
-  const executable = win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const executable = win32.join(windowsSystemRoot(), 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   if (location === 'native') return executable;
   const mounted = execFileSync('/usr/bin/wslpath', ['-u', executable], { encoding: 'utf8', stdio: 'pipe' }).trim();
   if (!posix.isAbsolute(mounted)) throw new Error('Could not resolve an absolute WSL path for system PowerShell.');

@@ -23,6 +23,7 @@ import {
   quadsToNQuads,
   resolveGraphScopedOrLegacyMetadata,
 } from '@origintrail-official/dkg-storage';
+import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 import { computePrivateRootV10 as computePrivateRoot } from './merkle.js';
 import { resolveKnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
 
@@ -518,10 +519,7 @@ function hexToBytes(value: string): Uint8Array {
 }
 
 function stripLiteral(s: string): string {
-  if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1);
-  const match = s.match(/^"(.*)"(\^\^.*|@.*)?$/);
-  if (match) return match[1];
-  return s;
+  return rdfLiteralBody(s, { plainQuoted: true }) ?? s;
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {

@@ -4,6 +4,7 @@ import { ethers } from 'ethers';
 import {
   buildKnowledgeAssetUal,
   type ChainAdapter,
+  type KnowledgeAssetVersionSnapshotUnavailable,
 } from '@origintrail-official/dkg-chain';
 import { createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 import type {
@@ -11,6 +12,10 @@ import type {
   KnowledgeAssetVmPublishRequest,
 } from '@origintrail-official/dkg-publisher';
 import { unpackKnowledgeAssetId } from './ka-identity.js';
+import {
+  versionViewCause,
+  type NamedKaRecoveryDiagnostics,
+} from './named-ka-recovery-diagnostics.js';
 
 export interface RecoveredNamedKaPublish {
   readonly reservedKaId: bigint;
@@ -42,7 +47,9 @@ export interface RecoveredNamedKaPublish {
 function recoveryInconsistent(name: string, message: string): Error {
   return Object.assign(new Error(`Named KA recovery rejected for "${name}": ${message}`), {
     code: 'KA_VM_RECOVERY_INCONSISTENT',
-  });
+    // The reason without the asset, for the pending log (see named-ka-recovery-diagnostics.ts).
+    pendingReason: message,
+  } satisfies NamedKaRecoveryDiagnostics & { code: string });
 }
 
 /**
@@ -67,15 +74,29 @@ function equalsIgnoreCase(left: string, right: string): boolean {
  * exactly the disposition a deadline earns. It is deliberately NOT `inconsistent` — nothing about
  * the chain was found to be wrong, we simply ran out of budget.
  */
-class RecoveryDeadlineReachedError extends Error {
-  constructor() {
-    super('named-KA recovery deadline reached before the chain reads completed');
+const RECOVERY_DEADLINE_REACHED = 'named-KA recovery deadline reached before the chain reads completed';
+
+class RecoveryDeadlineReachedError extends Error implements NamedKaRecoveryDiagnostics {
+  /**
+   * The reason is the same whichever read the deadline cut short. An endpoint it
+   * found failed or still in flight varies from one tick to the next and proves
+   * little by itself, so it is in the message and not in the reason.
+   */
+  readonly pendingReason = RECOVERY_DEADLINE_REACHED;
+
+  /** `versionViewUnavailable` is the version read the deadline cut short, when it was that one. */
+  constructor(readonly versionViewUnavailable?: KnowledgeAssetVersionSnapshotUnavailable) {
+    super(RECOVERY_DEADLINE_REACHED
+      + (versionViewUnavailable?.endpoints.length ? versionViewCause(versionViewUnavailable) : ''));
     this.name = 'RecoveryDeadlineReachedError';
   }
 }
 
-export function throwIfRecoveryDeadlineReached(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) throw new RecoveryDeadlineReachedError();
+export function throwIfRecoveryDeadlineReached(
+  signal: AbortSignal | undefined,
+  versionViewUnavailable?: KnowledgeAssetVersionSnapshotUnavailable,
+): void {
+  if (signal?.aborted) throw new RecoveryDeadlineReachedError(versionViewUnavailable);
 }
 
 export async function normalizeRecoveredNamedKaPublish(input: {
@@ -98,6 +119,12 @@ export async function normalizeRecoveredNamedKaPublish(input: {
   readonly signal?: AbortSignal;
   readonly recovery: AsyncKnowledgeAssetVmPublishRecoveryEvidence;
   readonly chain: ChainAdapter;
+  /**
+   * Told when the chain adapter supplied a version view, whatever recovery then makes of it.
+   * For the pending log: an endpoint answered, so a run of deferrals blamed on the endpoints
+   * is over. It must not throw and nothing here depends on it.
+   */
+  readonly onVersionView?: () => void;
 }): Promise<RecoveredNamedKaPublish> {
   const { request, queued, recovery, chain, signal } = input;
   const inconsistent = (message: string): Error => recoveryInconsistent(request.name, message);
@@ -246,10 +273,17 @@ export async function normalizeRecoveredNamedKaPublish(input: {
   // that carry no position, so a node whose adapter can produce the view must not be blocked by
   // that read failing (or by an adapter that lacks it).
   throwIfRecoveryDeadlineReached(signal);
+  // Why the adapter answered `null`, when it says: which endpoint gave no view. It is carried
+  // on the deferral below so the log can name it; nothing here decides from it.
+  const versionRead: { unavailable?: KnowledgeAssetVersionSnapshotUnavailable } = {};
   const versionView = await chain
-    .readKnowledgeAssetVersionSnapshot?.(reservedKaId, { signal })
+    .readKnowledgeAssetVersionSnapshot?.(reservedKaId, {
+      signal,
+      onUnavailable: (report) => { versionRead.unavailable = report; },
+    })
     .catch(() => null);
-  throwIfRecoveryDeadlineReached(signal);
+  throwIfRecoveryDeadlineReached(signal, versionRead.unavailable);
+  if (versionView) input.onVersionView?.();
   // r21 (🔴 3816769865) — the position is derived HERE, above the no-view guard, because the
   // guard has to key off the DERIVED position and not merely a persisted `merkleRootCount`. A
   // create carries no count but has position 1 by construction, so gating on the field alone let a
@@ -261,10 +295,11 @@ export async function normalizeRecoveredNamedKaPublish(input: {
     ? BigInt(proof.merkleRootCount)
     : (proof.operationKind === 'create' ? 1n : undefined);
   if (!versionView && recoveredPosition !== undefined) {
-    throw inconsistent(
+    throw Object.assign(inconsistent(
       'the current KA version could not be established from a single coherent chain view; '
-      + 'recovery is deferred rather than deciding supersession from a weaker signal',
-    );
+      + 'recovery is deferred rather than deciding supersession from a weaker signal'
+      + versionViewCause(versionRead.unavailable),
+    ), { versionViewUnavailable: versionRead.unavailable } satisfies NamedKaRecoveryDiagnostics);
   }
   if (!versionView && !chain.getLatestMerkleRoot) {
     throw inconsistent('the configured chain adapter cannot resolve the current KA merkle root');

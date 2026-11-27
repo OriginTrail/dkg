@@ -2,6 +2,8 @@
 
 Web dashboard for DKG V10 nodes. Provides a browser-based UI for monitoring node health, exploring the knowledge graph, running SPARQL queries, and chatting with integrated agents.
 
+The Context Graph action bar includes **Program** for creating TypeScript Graph Computer Programs. Existing TypeScript Program assets offer **Edit TypeScript Program**. The editor supports source editing, saving a new Knowledge Asset version, explicit execution approval, JSON arguments and invocation results. See the [Graph Computer editor workflow](../graph-computer/README.md#edit-typescript-programs-in-the-node-ui) for node-agent selection, automatic source loading, permission and retry behavior.
+
 ## Features
 
 - **Dashboard** - real-time node metrics (peers, KAs published, queries served, uptime)
@@ -47,4 +49,15 @@ pnpm build
 ## Internal Dependencies
 
 - `@origintrail-official/dkg-core` - configuration types, event bus integration
+- `@origintrail-official/dkg-node-store` - the daemon's protocol persistence stores (outbox, sync checkpoints, changelog cursors, KA numbers, chain log and cursors). They used to live here; this package re-exports them unchanged (from its entry point, from `dist/db.js`, and from the former `dist/chain-event-log-store.js`, `dist/chain-cursor-stores.js` and `dist/protocol-outbox-store.js` paths, which are deprecated forwarding modules: first-party code imports node-store directly) and `DashboardDB` still opens `node-ui.db` and owns the schema and every migration
 - `@origintrail-official/dkg-graph-viz` - interactive RDF graph visualization component
+
+### Unavailable node
+
+If both initial status probes fail or time out, the dashboard shows a connection recovery screen and hides operational panels, including node health, balances, graphs and integration readiness. Fallback fixtures are never shown as live state. Check the daemon and use **Retry connection** to reload; detection remains latched for the current page. A `401` response still opens the existing API token prompt rather than declaring the node unavailable.
+
+After the dashboard has loaded, the header shows the live status: `Connecting`, `Connected` with the peer count, `No peers`, or `Unavailable` after three failed status checks in a row. One good check clears it.
+
+### Design system
+
+[DESIGN.md](DESIGN.md) holds the rules, tokens and components, and how to change them. Run `pnpm dev:ui` and open `/ui/design-system.html` to see them live. `test/design-tokens.test.ts`, `test/class-has-css.test.ts` and `test/design-docs.test.ts` enforce what can be checked.

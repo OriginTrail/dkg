@@ -111,6 +111,9 @@ function buildTestMemoryEntities(layered: any[]) {
 }
 
 const initialLayeredTriples = [
+  { subject: 'urn:entity:demo', predicate: NAME, object: 'Demo entity', layer: 'working', subGraph: 'demo' },
+  { subject: 'urn:entity:demo', predicate: 'related', object: 'urn:entity:other', layer: 'working', subGraph: 'demo' },
+  { subject: 'urn:entity:other', predicate: NAME, object: 'Other entity', layer: 'working', subGraph: 'other' },
   { subject: 'urn:entity:working', predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'working' },
   { subject: 'urn:entity:working', predicate: NAME, object: 'Working entity', layer: 'working' },
   { subject: 'urn:entity:overlap', predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'working' },
@@ -131,6 +134,7 @@ const memory = {
   loading: false,
   error: null as string | null,
   partial: false,
+  hasMore: false, canRetry: false, loadMore: vi.fn(), pageError: null, limitMessage: null,
   refresh: vi.fn(),
 };
 
@@ -166,6 +170,7 @@ const apiWrapperMock = vi.hoisted(() => ({
   // so the Subgraphs stat resolves in mock mode. Default to empty.
   fetchSubGraphs: vi.fn(async (id: string) => ({ contextGraphId: id, subGraphs: [] })),
 }));
+const fetchMemoryEntityMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../src/ui/api-wrapper.js', () => ({
   api: apiWrapperMock,
@@ -182,6 +187,7 @@ vi.mock('../src/ui/hooks/useNodeEvents.js', () => ({
 
 vi.mock('../src/ui/hooks/useMemoryEntities.js', () => ({
   useMemoryEntities: () => memory,
+  fetchMemoryEntity: fetchMemoryEntityMock,
   buildMemoryEntities: buildTestMemoryEntities,
   // ProjectView imports `canonicalEntityUri` for `dedupeTriplesBySpo`.
   // Idempotent strip of `<...>` wrappers mirrors the real impl.
@@ -203,10 +209,10 @@ vi.mock('../src/ui/hooks/useAgents.js', () => ({
 }));
 
 vi.mock('../src/ui/stores/tabs.js', () => ({
-  useTabsStore: (selector?: (state: { openTab: typeof tabsStoreMock.openTab }) => unknown) => {
+  useTabsStore: Object.assign((selector?: (state: { openTab: typeof tabsStoreMock.openTab }) => unknown) => {
     const state = { openTab: tabsStoreMock.openTab };
     return selector ? selector(state) : state;
-  },
+  }, { getState: () => ({ activeTabId: 'dashboard', openTab: (...a: unknown[]) => (tabsStoreMock.openTab as (...x: unknown[]) => unknown)(...a) }) }),
 }));
 
 vi.mock('../src/ui/components/Modals/ImportFilesModal.js', () => ({
@@ -291,7 +297,7 @@ vi.mock('../src/ui/views/project/components.js', () => ({
     React.createElement('section', { 'data-testid': 'entity-detail', 'data-entity': entity.uri, 'data-trust': entity.trustLevel, 'data-connections': String(entity.connections.length), 'data-subgraphs': [...entity.subGraphs].sort().join(',') },
       React.createElement('div', {}, entity.label),
       React.createElement('button', { 'data-testid': 'open-related-entity', onClick: () => onNavigate('urn:entity:other') }, 'Open related'),
-      React.createElement('button', { 'data-testid': 'detail-back', onClick: onClose }, 'Back to Context Graph')),
+      React.createElement('button', { 'data-testid': 'detail-back', onClick: onClose }, 'Back to context graph')),
   SubGraphDetailView: ({ slug, activeTab = 'items', onTabChange, onSelectEntity, initialLayer, initialEnabledLayers, onEnabledLayersChange }: {
     slug: string;
     activeTab?: string;
@@ -394,11 +400,11 @@ vi.mock('../src/ui/views/project/components.js', () => ({
       'data-sub-graph-fetch-failed': subGraphFetchFailed ? 'true' : 'false',
     },
       'Overview',
-      React.createElement('button', { 'data-testid': 'open-primer', onClick: onOpenPrimer }, 'What is a Context Graph?')),
+      React.createElement('button', { 'data-testid': 'open-primer', onClick: onOpenPrimer }, 'What is a context graph?')),
   PendingJoinRequestsSection: () => null,
   OverviewPrimerEntry: ({ onOpenPrimer }: { onOpenPrimer: () => void }) =>
     React.createElement('div', { 'data-testid': 'primer-footer' },
-      React.createElement('button', { 'data-testid': 'open-primer-footer', onClick: onOpenPrimer }, 'What is a Context Graph?')),
+      React.createElement('button', { 'data-testid': 'open-primer-footer', onClick: onOpenPrimer }, 'What is a context graph?')),
   curatorStatusForOverview: () => 'not-curator',
   SubGraphOverviewGrid: ({ onSelectSubGraph }: { onSelectSubGraph: (slug: string) => void }) =>
     React.createElement('button', {
@@ -406,7 +412,7 @@ vi.mock('../src/ui/views/project/components.js', () => ({
       onClick: () => onSelectSubGraph('demo'),
     }, 'Open demo subgraph'),
   SubGraphExplorerHeader: () =>
-    React.createElement('div', { 'data-testid': 'subgraph-explorer-header' }, 'Subgraph Explorer'),
+    React.createElement('div', { 'data-testid': 'subgraph-explorer-header' }, 'Subgraph explorer'),
   ContextGraphQueryView: () => null,
   LayerDetailView: ({ layer, activeTab, onTabChange, onSelectEntity, onNodeClick }: {
     layer: string;
@@ -456,8 +462,12 @@ describe('ProjectView entity detail navigation', () => {
 
   beforeEach(async () => {
     resetMemory();
+    fetchMemoryEntityMock.mockReset().mockImplementation(async (_cg: string, uri: string, layer?: string) => ({
+      partial: false, blankGraphs: [], triples: memory.allTriples.filter(t => (t.subject === uri || t.object === uri)
+        && (!layer || t.layer === ({ wm: 'working', swm: 'shared', vm: 'verified' } as Record<string, string>)[layer])),
+    }));
     apiWrapperMock.fetchContextGraphs.mockResolvedValue({
-      contextGraphs: [{ id: 'cg-test', name: 'Context Graph Test' }],
+      contextGraphs: [{ id: 'cg-test', name: 'Context graph Test' }],
     });
     apiWrapperMock.fetchCurrentAgent.mockResolvedValue({
       agentDid: 'did:dkg:agent:0xabc',
@@ -493,6 +503,70 @@ describe('ProjectView entity detail navigation', () => {
     });
     document.body.innerHTML = '';
     vi.clearAllMocks();
+  });
+
+  it('opens a resource outside the preview from nonempty asynchronous details', async () => {
+    const uri = 'urn:remote:record'; let resolve!: (value: unknown) => void;
+    fetchMemoryEntityMock.mockImplementationOnce(() => new Promise(r => { resolve = r; }));
+    expect(memory.entities.has(uri)).toBe(false);
+    await act(async () => window.dispatchEvent(new CustomEvent('v10:open-entity', {
+      detail: { contextGraphId: 'cg-test', entityUri: uri },
+    })));
+    expect(document.body.textContent).toContain('Loading resource details');
+    expect(document.querySelector('[data-testid="entity-detail"]')).toBeNull();
+    await act(async () => resolve({ partial: false, triples: [
+      { subject: uri, predicate: NAME, object: '"Remote record"', layer: 'working', subGraph: 'remote' },
+      { subject: uri, predicate: 'urn:hasPart', object: 'urn:remote:part', layer: 'working', subGraph: 'remote' },
+      { subject: 'urn:remote:origin', predicate: 'urn:references', object: uri, layer: 'working', subGraph: 'remote' },
+    ] }));
+    expect(query('entity-detail').dataset.entity).toBe(uri);
+    expect(query('entity-detail').textContent).toContain('Remote record');
+    expect(query('entity-detail').dataset.connections).toBe('1');
+    expect(query('entity-detail').dataset.subgraphs).toBe('remote');
+    expect(document.body.textContent).not.toContain('Loading resource details');
+  });
+  it('shows a successful empty detail read without reviving a resource from the stale preview', async () => {
+    fetchMemoryEntityMock.mockResolvedValueOnce({ triples: [], partial: false, blankGraphs: [] });
+    await click('open-activity-entity'); await flush();
+    expect(document.querySelector('[data-testid="entity-detail"]')).toBeNull();
+    expect(document.body.textContent).toContain('has no details in this view');
+  });
+
+  it('keeps fetched details for the current selection when an older request finishes late', async () => {
+    const pending = new Map<string, (value: unknown) => void>();
+    fetchMemoryEntityMock.mockImplementation((_cg: string, uri: string) => new Promise(resolve => pending.set(uri, resolve)));
+    const open = async (uri: string) => act(async () => window.dispatchEvent(new CustomEvent('v10:open-entity', {
+      detail: { contextGraphId: 'cg-test', entityUri: uri },
+    })));
+    await open('urn:remote:old'); await open('urn:remote:current');
+    await act(async () => pending.get('urn:remote:current')!({ partial: false, triples: [
+      { subject: 'urn:remote:current', predicate: NAME, object: '"Current fetched resource"', layer: 'shared' },
+      { subject: 'urn:remote:current', predicate: 'urn:links', object: 'urn:remote:target', layer: 'shared' },
+    ] }));
+    expect(query('entity-detail').dataset.entity).toBe('urn:remote:current');
+    expect(query('entity-detail').dataset.trust).toBe('shared');
+    expect(query('entity-detail').dataset.connections).toBe('1');
+    await act(async () => pending.get('urn:remote:old')!({ partial: false, triples: [
+      { subject: 'urn:remote:old', predicate: NAME, object: '"Obsolete fetched resource"', layer: 'working' },
+    ] }));
+    expect(query('entity-detail').dataset.entity).toBe('urn:remote:current');
+    expect(query('entity-detail').textContent).toContain('Current fetched resource');
+    expect(document.body.textContent).not.toContain('Obsolete fetched resource');
+  });
+
+  it.each([1000, 1001])('shows the incomplete detail warning only above the %i-relationship boundary', async count => {
+    const uri = 'urn:remote:bounded';
+    fetchMemoryEntityMock.mockResolvedValueOnce({ partial: count > 1000, blankGraphs: [], triples:
+      Array.from({ length: Math.min(count, 1000) }, (_, i) => ({
+        subject: uri, predicate: 'urn:links', object: `urn:part:${i}`, layer: 'working',
+      })),
+    });
+    await act(async () => window.dispatchEvent(new CustomEvent('v10:open-entity', {
+      detail: { contextGraphId: 'cg-test', entityUri: uri },
+    })));
+    await flush();
+    expect(query('entity-detail').dataset.connections).toBe('1000');
+    expect(document.body.textContent!.includes('The resource detail read reached its limit. Some relationships may be missing.')).toBe(count > 1000);
   });
 
   it('restores layer, subtab, and scroll when entity detail closes', async () => {
@@ -610,7 +684,7 @@ describe('ProjectView entity detail navigation', () => {
 
     expect(tabsStoreMock.openTab).toHaveBeenCalledWith({
       id: 'context-graph-primer',
-      label: 'What is a Context Graph?',
+      label: 'What is a context graph?',
       closable: true,
     });
     expect(pushStateSpy).not.toHaveBeenCalled();
@@ -618,7 +692,7 @@ describe('ProjectView entity detail navigation', () => {
     pushStateSpy.mockRestore();
   });
 
-  it('does not pass participants loaded for another context graph into Overview', async () => {
+  it('does not pass participants loaded for another Context Graph into Overview', async () => {
     await act(async () => {
       root.unmount();
     });
@@ -629,8 +703,8 @@ describe('ProjectView entity detail navigation', () => {
 
     apiWrapperMock.fetchContextGraphs.mockResolvedValue({
       contextGraphs: [
-        { id: 'cg-test', name: 'Context Graph Test' },
-        { id: 'cg-next', name: 'Next Context Graph' },
+        { id: 'cg-test', name: 'Context graph Test' },
+        { id: 'cg-next', name: 'Next context graph' },
       ],
     });
     apiWrapperMock.listParticipants.mockReset();
@@ -767,7 +841,7 @@ describe('ProjectView entity detail navigation', () => {
   // PARTIAL failure), so the `memoryReady` gate misclassed total
   // failure as "ready" and passed an empty entityList through.
   // ProjectView now opts into `signalErrors: true`, so a total
-  // failure surfaces `error: 'Failed to load memory data'` and
+  // failure surfaces `error: 'Couldn’t load memory data.'` and
   // the gate fires correctly. The mock here uses a non-null
   // `error` to simulate the post-fix behavior — the
   // `signalErrors` opt-in is verified at the hook unit level;
@@ -776,7 +850,7 @@ describe('ProjectView entity detail navigation', () => {
   it('does NOT pass rawMemory.entityList to SubGraphBar when all three layer queries failed (signalErrors)', async () => {
     memory.loading = false;
     memory.partial = false;
-    memory.error = 'Failed to load memory data';
+    memory.error = 'Couldn’t load memory data.';
     memory.entityList = [];
     await act(async () => {
       root.render(React.createElement(ProjectView, { contextGraphId: 'cg-test' }));
@@ -830,7 +904,7 @@ describe('ProjectView entity detail navigation', () => {
     expect(query('subgraph-detail').dataset.initialLayer).toBe('wm');
   });
 
-  it('keeps initialLayer === undefined on fresh entry from Subgraph Explorer overview (Bug H regression guard)', async () => {
+  it('keeps initialLayer === undefined on fresh entry from Subgraph explorer overview (Bug H regression guard)', async () => {
     // 1. Land on the Subgraphs tab — no activeSubGraph yet, the
     //    bar mounts layer-agnostic.
     await click('switch-subgraphs');

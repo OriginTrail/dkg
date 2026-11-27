@@ -64,7 +64,7 @@ the writer, but do not encrypt GossipSub payload bytes.
 
 ## Quick Start
 
-**Prerequisites:** Node.js 22+, npm 10+. macOS, Linux, and Windows (PowerShell 5.1+ or WSL2) all supported.
+**Prerequisites:** Node.js 22.23.5+, 24.22.3+ or 26.13.1+, npm 10+. DKG starts on Node.js 22.13+ (or 23.4+), but older releases miss the [2026-11-11 Node.js security fixes](https://nodejs.org/en/blog/vulnerability/november-2026-security-releases), and `dkg start` and `dkg doctor` warn about them. macOS, Linux, and Windows (PowerShell 5.1+ or WSL2) all supported.
 
 ### Hermes adapter
 
@@ -272,6 +272,8 @@ dkg ka import-file <name> -c <cg> --input-file <file>         # import a documen
 dkg ka write <name> -c <cg> --input-file <rdf-file>           # append RDF payload quads to WM
 dkg ka finalize <name> -c <cg>                                # seal the WM draft
 dkg ka share <name> -c <cg>                                   # share finalized WM to SWM
+dkg ka share-async <name> -c <cg>                             # enqueue async WM -> SWM share
+dkg ka share-jobs [--context-graph-id <cg>] [--state <s>]     # list async share jobs; --all or --page-size <n> to page
 dkg ka publish <name> -c <cg>                                 # sync publish from SWM to VM
 dkg ka publish-async <name> -c <cg> [--publisher-node-identity-id 0]  # enqueue VM publish
 dkg ka query <name> -c <cg>                                   # read KA WM quads
@@ -296,8 +298,8 @@ dkg subscribe <cg>                       # subscribe to a CG's gossip topics
 # Async publisher (optional, for batching)
 dkg publisher enable                     # enable the async publisher
 dkg publisher publish-async <cg> <name> [--publisher-node-identity-id 0]  # alias for dkg ka publish-async
-dkg publisher jobs                       # list publisher jobs
-dkg publisher stats                      # publisher throughput stats
+dkg publisher jobs [--status <s>]        # list publisher jobs; --all or --page-size <n> to page
+dkg publisher stats                      # job counts by status (JSON)
 # publisher wallets need native gas plus PCA registration or TRAC; node identity is optional attribution
 
 # Code & memory indexing
@@ -327,7 +329,7 @@ dkg rollback                               # roll back to previous version
 dkg doctor [--json]                        # diagnostic report: install layout, version skew, orphan clones, UI mismatch, plugin root, config sanity
 ```
 
-Run `dkg <command> --help` for per-command options.
+Run `dkg <command> --help` for per-command options. The [CLI reference](docs/references/cli.md) keeps the full list.
 
 ---
 
@@ -353,7 +355,7 @@ Use adapters for OpenClaw, ElizaOS, Hermes, or your own Node.js / TypeScript pro
 
 ## Benchmarking
 
-Benchmarking docs live in [`BENCHMARKING.md`](BENCHMARKING.md). The current
+Benchmarking docs live in [`bench/README.md`](bench/README.md). The current
 suite covers DKG publish/get and memory-layer flows:
 
 - get/read retrieval
@@ -389,6 +391,7 @@ analysis reports are under `bench/results/profiles/`, including
 |---|---|
 | [Quickstart](docs/getting-started/quickstart.md) | You want to install a node and connect an agent framework |
 | [MCP Setup](packages/mcp-dkg/README.md) | You want Cursor / Claude Code / Claude Desktop / Windsurf / VSCode + Copilot / Cline / Codex CLI to use DKG as memory |
+| [Graph Computer SDK](packages/graph-computer/README.md) | You want to upload, approve and invoke Programs from TypeScript using agent signatures |
 | [Publish & Query](docs/use-dkg/publish-and-query.md) | You want a first Knowledge Asset publish/query flow |
 | [OpenClaw Setup](packages/adapter-openclaw/README.md) | You want OpenClaw to use DKG as memory/tools |
 | [Hermes Setup](packages/adapter-hermes/README.md) | You want Hermes Agent to use DKG as memory/tools |
@@ -409,7 +412,7 @@ A fresh setup uses a daemon-managed, disk-backed [Oxigraph](https://github.com/o
 | `blazegraph` | External Blazegraph deployment, optionally provisioned by `dkg init`. |
 | `sparql-http` | Any compatible external SPARQL endpoint, with optional authorization. |
 
-See [Using an external SPARQL store](docs/use-dkg/storage-sparql-http.md) for configuration, managed-Oxigraph options, backend-switch safeguards, and limitations.
+See [Storage Backends](docs/use-dkg/storage-sparql-http.md) for configuration, managed-Oxigraph options, backend-switch safeguards, and limitations.
 
 ---
 
@@ -509,6 +512,12 @@ TOKEN=$(dkg auth show)
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9200/api/agents
 ```
 
+The dashboard asks for this token once per browser tab: paste the output of `dkg auth show`. It does not sign in automatically unless you turn that on.
+
+On a node with no reverse proxy in front of the API, you can set `"auth": { "dashboardAutoSignIn": true }` in `~/.dkg/config.json`. The dashboard then signs in without asking when it is opened on the node host itself (`http://127.0.0.1:9200/ui` or `http://localhost:9200/ui`), including through an SSH tunnel to the API port. A request under another host name, or one carrying proxy forwarding headers (`Forwarded`, any `X-Forwarded-*`, `X-Real-IP`, `X-Client-IP`, `True-Client-IP`, `CF-Connecting-IP`, `Via`), still has to enter the token.
+
+Operations that act on the whole node (node settings and logs, shutdown, agent registration, local agent integrations, bulk publisher-queue changes) require this node-level token. Agent-scoped tokens receive `403` there.
+
 The full node API surface (assertions, memory layers, context graphs, file ingestion, querying) is documented in [`packages/cli/skills/dkg-node/SKILL.md`](packages/cli/skills/dkg-node/SKILL.md) — this is the canonical reference loaded by any DKG-aware agent.
 
 ---
@@ -543,6 +552,7 @@ This is a pnpm + Turborepo monorepo.
 @origintrail-official/dkg-query              Query execution and retrieval
 @origintrail-official/dkg-agent              Identity, discovery, messaging, wallet keys
 @origintrail-official/dkg-node-ui            Web dashboard, chat memory, SPARQL explorer
+@origintrail-official/dkg-node-store         Daemon protocol persistence (outbox, sync checkpoints, cursors, KA numbers, chain log)
 @origintrail-official/dkg-graph-viz          RDF visualization
 @origintrail-official/dkg-evm-module         Solidity contracts and deployment assets
 @origintrail-official/dkg-network-sim        Multi-node simulation tooling
@@ -576,7 +586,7 @@ This is a pnpm + Turborepo monorepo.
 
 ## Development
 
-Clone the repo and use pnpm (v10+) with Node.js 22+ to work across all workspace packages:
+Clone the repo and use pnpm (v10+) with Node.js 22.23.5+ (22.13+ or 23.4+ still runs, without the 2026-11-11 security fixes) to work across all workspace packages:
 
 ```bash
 pnpm install                                     # install all workspace deps

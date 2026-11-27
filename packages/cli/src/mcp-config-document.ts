@@ -1,3 +1,4 @@
+import type { WslEnvironmentTransfer } from './mcp-wsl-environment.js';
 /** DKG owns one fixed server entry inside each client's declared container. */
 export const DKG_SERVER_KEY = 'dkg';
 export type McpClientConfigShape =
@@ -10,6 +11,8 @@ export interface DesiredRegistration {
   command: string;
   args: string[];
   env: { DKG_HOME: string };
+  /** Internal transfer policy; the writer persists only command, args and env. */
+  environmentTransfer?: WslEnvironmentTransfer;
 }
 /** Persisted client shape at the single extension-preserving merge boundary. */
 export interface PersistedRegistration {

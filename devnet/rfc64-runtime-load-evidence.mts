@@ -109,6 +109,9 @@ export function createRuntimeLoadEvidenceV1(input: Readonly<{
       return runtimeEvidence.buildExecutedRuntimeManifest(
         input.sourceCommit,
         [...loaded.values()],
+        runtimeEvidence.profile.requiredEntrypoint === undefined
+          ? undefined
+          : launchedEntrypoint(repoRoot),
       );
     },
   });
@@ -129,6 +132,19 @@ export function createRuntimeLoadEvidenceV1(input: Readonly<{
       throw new Error(`workspace runtime artifact resolves through a symbolic link: ${path}`);
     }
     return Object.freeze({ absolutePath, path });
+  }
+
+  function launchedEntrypoint(canonicalRepoRoot: string): string {
+    const launched = process.argv[1];
+    if (typeof launched !== 'string' || launched.length === 0) {
+      throw new Error('runtime process entrypoint is unavailable');
+    }
+    const absolute = realpathSync.native(resolve(launched));
+    const path = relative(canonicalRepoRoot, absolute).split(sep).join('/');
+    if (path.startsWith('../') || path === '..') {
+      throw new Error('runtime process entrypoint escaped the repository root');
+    }
+    return path;
   }
 }
 

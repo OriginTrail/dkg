@@ -18,7 +18,7 @@ describe('useSwmAttributions — SPARQL query shape', () => {
   // recent promotion. DESC + LIMIT 5000 returns the most recent
   // window — the activity feed is the load-bearing consumer.
   it('orders by ?publishedAt DESC so the newest promotions are kept inside LIMIT 5000', () => {
-    const q = buildAttributionsQuery('cg-1');
+    const q = buildAttributionsQuery();
     expect(q).toContain('ORDER BY DESC(?publishedAt)');
     expect(q).toContain('LIMIT 5000');
     // Guard against accidentally regressing to plain ASC by leaving
@@ -26,16 +26,10 @@ describe('useSwmAttributions — SPARQL query shape', () => {
     expect(q).not.toMatch(/ORDER BY \?publishedAt\s+LIMIT/);
   });
 
-  // Codex review (PR #1055) — with contextGraphId removed from the request
-  // (B2), scoping rests entirely on this STRSTARTS prefix, so it MUST end in
-  // "/" to be exact. A bare "did:dkg:context-graph:cg-1" prefix would also
-  // match a sibling CG like cg-10 / cg-1-foo and merge its _shared_memory_meta
-  // attribution rows into the legend.
-  it('scopes via an exact "<cgUri>/" STRSTARTS prefix so sibling CGs do not leak in', () => {
-    const q = buildAttributionsQuery('cg-1');
-    expect(q).toContain('STRSTARTS(STR(?g), "did:dkg:context-graph:cg-1/")');
-    // The slash-less prefix would over-match cg-10 / cg-1-foo.
-    expect(q).not.toMatch(/STRSTARTS\(STR\(\?g\), "did:dkg:context-graph:cg-1"\)/);
+  it('selects metadata without a client-side Context Graph prefix', () => {
+    const q = buildAttributionsQuery();
+    expect(q).toContain('STRENDS(STR(?g), "/_shared_memory_meta")');
+    expect(q).not.toContain('STRSTARTS');
   });
 });
 
@@ -61,14 +55,7 @@ describe('useSwmAttributions — stale-on-switch protection', () => {
     originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async (_url: any, init?: any) => {
       const body = init?.body ? JSON.parse(String(init.body)) : {};
-      // B2: the POST body no longer carries contextGraphId (it scoped the
-      // engine to CG-direct graphs and dropped per-sub-graph attribution).
-      // Recover the cgId from the SPARQL's exact STRSTARTS prefix
-      // ("did:dkg:context-graph:<cgId>/") to route the deferred promise.
-      // Capture up to the trailing `/"` (non-greedy) rather than `[^"/]+`, so
-      // canonical slash-containing ids like `<wallet>/project` route under the
-      // full key instead of being truncated at the first `/`.
-      const cgId: string = String(body.sparql).match(/context-graph:(.+?)\/"/)?.[1] ?? '';
+      const cgId: string = body.contextGraphId;
       const p = new Promise<any[]>((resolve) => {
         pending.set(cgId, { resolve });
       });
@@ -145,11 +132,7 @@ describe('useSwmAttributions — stale-on-switch protection', () => {
   });
 });
 
-// B2 (DKG-NODE-ISSUES-FOR-RC17) — the attribution fetch MUST NOT send
-// contextGraphId. The SPARQL scopes itself to the CG via STRSTARTS(?g, …)
-// and must read every sub-graph's <cg>/<sg>/_shared_memory_meta partition;
-// sending contextGraphId makes the daemon constrain GRAPH ?g to CG-direct
-// graphs only, so the legend under-counted agents (showed 1 of 5 agents live).
+// Server-owned partition discovery includes registered subgraphs and excludes child CGs.
 describe('useSwmAttributions — B2 POST body scoping', () => {
   let root: Root;
   let container: HTMLDivElement;
@@ -173,7 +156,7 @@ describe('useSwmAttributions — B2 POST body scoping', () => {
     if (originalFetch) globalThis.fetch = originalFetch;
   });
 
-  it('omits contextGraphId from the /api/query POST body so all sub-graph partitions are reached', async () => {
+  it('opts into server-scoped attribution across registered subgraphs', async () => {
     function Probe({ id }: { id: string }) {
       useSwmAttributions(id);
       return null;
@@ -187,7 +170,8 @@ describe('useSwmAttributions — B2 POST body scoping', () => {
     expect(calls.length).toBeGreaterThan(0);
     const body = JSON.parse(String((calls[0][1] as any)?.body ?? '{}'));
     expect(body.sparql).toContain('_shared_memory_meta');
-    expect(body).not.toHaveProperty('contextGraphId');
+    expect(body).toMatchObject({ contextGraphId: 'cg-1', includeContextGraphPartitions: true, includeSharedMemoryMeta: true });
+    expect(body.sparql).not.toContain('STRSTARTS');
   });
 });
 

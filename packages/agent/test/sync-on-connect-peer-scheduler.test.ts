@@ -2,11 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { SyncOnConnectPeerScheduler } from
   '../src/sync/on-connect/peer-scheduler.js';
+import type { SyncOnConnectGraphScope } from
+  '../src/sync/on-connect/graph-scope.js';
 
 const PEER = '12D3KooWSchedulerPeer';
 
 function createScheduler(callbacks: Readonly<{
-  runOrdinary: () => Promise<void>;
+  runOrdinary: (contextGraphIds?: SyncOnConnectGraphScope) => Promise<void>;
   runSelected: (plan?: string) => Promise<void>;
   cancel?: () => void;
   finish?: () => void;
@@ -18,7 +20,9 @@ function createScheduler(callbacks: Readonly<{
 }>): SyncOnConnectPeerScheduler<string> {
   return new SyncOnConnectPeerScheduler<string>({
     createJob: () => ({
-      runAutomaticSelectedThenOrdinary: async () => callbacks.runOrdinary(),
+      runAutomaticSelectedThenOrdinary: async (contextGraphIds) => (
+        callbacks.runOrdinary(contextGraphIds)
+      ),
       runSelected: async (plan) => callbacks.runSelected(plan),
       cancel: callbacks.cancel ?? (() => undefined),
       finish: callbacks.finish ?? (() => undefined),
@@ -347,6 +351,99 @@ describe('sync-on-connect per-peer scheduler', () => {
     selected.resolve();
 
     await vi.waitFor(() => expect(scheduler.size).toBe(0));
+  });
+
+  it('merges graph-scoped ordinary requests into one pending pass', async () => {
+    const scopes: SyncOnConnectGraphScope[] = [];
+    const scheduler = createScheduler({
+      runSelected: async () => undefined,
+      runOrdinary: async (contextGraphIds = null) => { scopes.push(contextGraphIds); },
+    });
+    const onError = () => undefined;
+
+    expect(scheduler.enqueueOrdinary(PEER, onError, 0, new Set(['cg-a']))).toBe(true);
+    expect(scheduler.enqueueOrdinary(PEER, onError, 0, new Set(['cg-b']))).toBe(true);
+    // Already covered by the pending pass.
+    expect(scheduler.enqueueOrdinary(PEER, onError, 0, new Set(['cg-a']))).toBe(false);
+
+    await vi.waitFor(() => expect(scheduler.size).toBe(0));
+    expect(scopes.map((scope) => (scope === null ? null : [...scope].sort()))).toEqual([
+      ['cg-a', 'cg-b'],
+    ]);
+  });
+
+  it('widens a pending graph-scoped pass to the whole scope and hands it the whole-scope error handler', async () => {
+    const scopes: SyncOnConnectGraphScope[] = [];
+    const failure = new Error('whole-scope pass failed');
+    const scopedError = vi.fn();
+    const wholeScopeError = vi.fn();
+    const scheduler = createScheduler({
+      runSelected: async () => undefined,
+      runOrdinary: async (contextGraphIds = null) => {
+        scopes.push(contextGraphIds);
+        throw failure;
+      },
+    });
+
+    expect(scheduler.enqueueOrdinary(PEER, scopedError, 0, new Set(['cg-a']))).toBe(true);
+    expect(scheduler.enqueueOrdinary(PEER, wholeScopeError, 0)).toBe(true);
+    // Neither a second whole-scope request nor a graph request adds work now.
+    expect(scheduler.enqueueOrdinary(PEER, scopedError, 0)).toBe(false);
+    expect(scheduler.enqueueOrdinary(PEER, scopedError, 0, new Set(['cg-b']))).toBe(false);
+
+    await vi.waitFor(() => expect(scheduler.size).toBe(0));
+    expect(scopes).toEqual([null]);
+    expect(wholeScopeError).toHaveBeenCalledWith(PEER, failure);
+    expect(scopedError).not.toHaveBeenCalled();
+  });
+
+  it('runs a request a started graph-scoped pass does not cover after that pass', async () => {
+    const first = deferred();
+    const scopes: SyncOnConnectGraphScope[] = [];
+    const finish = vi.fn();
+    const scheduler = createScheduler({
+      runSelected: async () => undefined,
+      runOrdinary: async (contextGraphIds = null) => {
+        scopes.push(contextGraphIds);
+        if (scopes.length === 1) await first.promise;
+      },
+      finish,
+    });
+    const onError = () => undefined;
+
+    expect(scheduler.enqueueOrdinary(PEER, onError, 0, new Set(['cg-a']))).toBe(true);
+    await vi.waitFor(() => expect(scopes).toHaveLength(1));
+    // The running pass already covers this graph.
+    expect(scheduler.enqueueOrdinary(PEER, onError, 0, new Set(['cg-a']))).toBe(false);
+    // It does not cover the peer's other graphs.
+    expect(scheduler.enqueueOrdinary(PEER, onError, 0)).toBe(true);
+    first.resolve();
+
+    await vi.waitFor(() => expect(scheduler.size).toBe(0));
+    expect(scopes).toEqual([new Set(['cg-a']), null]);
+    // Both passes belong to one peer job with one final commit.
+    expect(finish).toHaveBeenCalledOnce();
+  });
+
+  it('does not reopen ordinary work for a graph request after a whole-scope pass started', async () => {
+    const ordinary = deferred();
+    const scopes: SyncOnConnectGraphScope[] = [];
+    const scheduler = createScheduler({
+      runSelected: async () => undefined,
+      runOrdinary: async (contextGraphIds = null) => {
+        scopes.push(contextGraphIds);
+        await ordinary.promise;
+      },
+    });
+    const onError = () => undefined;
+
+    expect(scheduler.enqueueOrdinary(PEER, onError, 0)).toBe(true);
+    await vi.waitFor(() => expect(scopes).toHaveLength(1));
+    expect(scheduler.enqueueOrdinary(PEER, onError, 0, new Set(['cg-a']))).toBe(false);
+    ordinary.resolve();
+
+    await vi.waitFor(() => expect(scheduler.size).toBe(0));
+    expect(scopes).toEqual([null]);
   });
 
   it('adds owed ordinary work while selected recovery is running', async () => {

@@ -205,6 +205,7 @@ export function createFinalizedVmStoreMaterializerV1(
       },
     });
     const asset = Object.freeze({
+      merkleRootHex: request.candidate.assertionRoot.slice(2).toLowerCase(),
       contextGraphId: request.catalogLane.contextGraphId,
       ual: request.candidate.ual,
       assertionVersion: BigInt(request.candidate.assertionVersion),

@@ -1,27 +1,24 @@
 import { test, expect } from '../fixtures/base.js';
 
-// `/network` is an unframed legacy debug page mounted at the root
-// router (no AppShell, no sidebar, no Vite client). The Vite dev
+// `/network` forwards to the Network tab in Observability. The Vite dev
 // server is configured with `base: '/ui/'`, so absolute paths like
 // `/network` get rewritten by the dev server to "did you mean
 // /ui/network?". We use a path relative to the configured `baseURL`
 // (`http://localhost:<port>/ui/`) instead.
 //
-// Stat-card labels are MIXED case in the DOM ("Total Connections")
-// and only rendered uppercase via `text-transform: uppercase`.
-// `getByText` matches the underlying text content, so we assert on
-// the actual case.
+// Stat-card labels are sentence case ("Total connections"); the label
+// assertion below lowercases them first.
 
-test.describe('Network Debug Page (/ui/network)', () => {
+test.describe('Network tab in Observability (/ui/network)', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('network', { waitUntil: 'domcontentloaded' });
     await page
-      .getByRole('heading', { name: 'Network', level: 1 })
+      .getByRole('heading', { name: 'Observability', level: 1 })
       .waitFor({ state: 'visible', timeout: 15_000 });
   });
 
-  test('renders the "Network" page-title heading', async ({ page }) => {
-    const heading = page.getByRole('heading', { name: 'Network', level: 1 });
+  test('opens the Network tab in Observability', async ({ page }) => {
+    const heading = page.getByRole('heading', { name: 'Observability', level: 1 });
     await expect(heading).toBeVisible();
     await expect(heading).toHaveClass(/page-title/);
   });
@@ -54,29 +51,29 @@ test.describe('Network Debug Page (/ui/network)', () => {
     }
   });
 
-  test('Active Connections section renders the empty-state on cold devnet', async ({ page }) => {
+  test('Active connections section renders the empty-state on cold devnet', async ({ page }) => {
     const card = page
       .locator('.card')
-      .filter({ has: page.locator('.card-title', { hasText: 'Active Connections' }) });
+      .filter({ has: page.locator('.card-title', { hasText: 'Active connections' }) });
     await expect(card).toBeVisible();
     // Either the empty-state copy renders (single-node devnet) or
     // a real `.data-table` does. Both are valid.
-    const empty = card.locator('.empty-state-title', { hasText: 'No active connections' });
+    const empty = card.locator('.v10-empty-state-title', { hasText: 'No active connections' });
     const table = card.locator('table.data-table');
     await expect(empty.or(table).first()).toBeVisible();
   });
 
-  test('Discovered Agents section renders the empty-state on cold devnet', async ({ page }) => {
+  test('Discovered agents section renders the empty-state on cold devnet', async ({ page }) => {
     const card = page
       .locator('.card')
-      .filter({ has: page.locator('.card-title', { hasText: 'Discovered Agents' }) });
+      .filter({ has: page.locator('.card-title', { hasText: 'Discovered agents' }) });
     await expect(card).toBeVisible();
-    const empty = card.locator('.empty-state-title', { hasText: 'No agents discovered' });
+    const empty = card.locator('.v10-empty-state-title', { hasText: 'No agents discovered' });
     const table = card.locator('table.data-table');
     await expect(empty.or(table).first()).toBeVisible();
   });
 
-  test('Active Connections card shows either the explanatory empty state or a connections table', async ({ page }) => {
+  test('Active connections card shows either the explanatory empty state or a connections table', async ({ page }) => {
     // On a 2-node devnet node1↔node2 may or may not have dialled by the time
     // this loads, so the card resolves to one of two valid shapes: the
     // explanatory empty-state copy ("Connections will appear here…") OR a
@@ -84,26 +81,24 @@ test.describe('Network Debug Page (/ui/network)', () => {
     // still catches a card that renders NEITHER (the real regression).
     const card = page
       .locator('.card')
-      .filter({ has: page.locator('.card-title', { hasText: 'Active Connections' }) });
+      .filter({ has: page.locator('.card-title', { hasText: 'Active connections' }) });
     const desc = card.getByText(/Connections will appear here/i);
     const table = card.locator('table.data-table');
     await expect(desc.or(table).first()).toBeVisible();
   });
 
-  test('Discovered Agents card shows either the explanatory empty state or an agents table', async ({ page }) => {
+  test('Discovered agents card shows either the explanatory empty state or an agents table', async ({ page }) => {
     const card = page
       .locator('.card')
-      .filter({ has: page.locator('.card-title', { hasText: 'Discovered Agents' }) });
+      .filter({ has: page.locator('.card-title', { hasText: 'Discovered agents' }) });
     const desc = card.getByText(/Agents will be listed here/i);
     const table = card.locator('table.data-table');
     await expect(desc.or(table).first()).toBeVisible();
   });
 
-  test('the page is unframed (no AppShell sidebar / header)', async ({ page }) => {
-    // Sidebar toggle button only exists inside the framed AppShell.
-    await expect(page.locator('button[title="Toggle sidebar"]')).toHaveCount(0);
-    await expect(page.locator('.v10-panel-left')).toHaveCount(0);
-    await expect(page.locator('.v10-panel-bottom')).toHaveCount(0);
+  test('sits inside the app shell, like every other Observability tab', async ({ page }) => {
+    await expect(page.locator('button[title="Toggle sidebar"]')).toHaveCount(1);
+    await expect(page.locator('.v10-panel-left').first()).toBeVisible();
   });
 
   test('document.title is "DKG Node"', async ({ page }) => {

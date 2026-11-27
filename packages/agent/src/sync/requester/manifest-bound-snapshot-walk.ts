@@ -1,8 +1,8 @@
+import type { PublicSnapshotMetadata } from './public-snapshot-manifest.js';
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type {
-  PublicSnapshotMetadata,
   PublicSnapshotWalkPlan,
   SharedMemorySnapshotWalkContinuation,
   SnapshotWalkPreparation,

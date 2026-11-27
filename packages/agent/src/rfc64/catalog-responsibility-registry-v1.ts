@@ -1,3 +1,4 @@
+import type { Rfc64CatalogSelectionV1 } from './catalog-selection-types-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Rfc64CatalogRolloutModeV1 } from './catalog-rollout-authority-v1.js';
@@ -205,4 +206,23 @@ function assertContextGraphIdV1(contextGraphId: string): void {
   if (typeof contextGraphId !== 'string' || contextGraphId.trim().length === 0) {
     throw new TypeError('RFC-64 responsibility contextGraphId must be a non-empty string');
   }
+}
+
+/** Lightweight authority facts; replay telemetry is composed only for operators. */
+export function projectRfc64CatalogRuntimeSelectionV1(input: Readonly<{
+  nodeRole: 'core' | 'edge';
+  configuredContextGraphIds: readonly string[];
+  responsibilities: readonly Pick<Rfc64CatalogResponsibilitySelectionV1, 'contextGraphId'>[];
+  subscriptions: ReadonlyMap<string, Readonly<{ subscribed: boolean }>>;
+}>): Rfc64CatalogSelectionV1 {
+  const eligibleContextGraphs = Object.freeze([...new Set([
+    ...input.configuredContextGraphIds,
+    ...input.responsibilities.map(({ contextGraphId }) => contextGraphId),
+  ])].sort());
+  const subscriptionDriven = input.nodeRole === 'edge';
+  return Object.freeze({ subscriptionDriven, eligibleContextGraphs,
+    selectedContextGraphs: subscriptionDriven
+      ? Object.freeze(eligibleContextGraphs.filter(id => input.subscriptions.get(id)?.subscribed === true))
+      : eligibleContextGraphs,
+  });
 }

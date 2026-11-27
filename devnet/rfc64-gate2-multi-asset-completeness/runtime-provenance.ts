@@ -4,50 +4,39 @@ import { createHash } from 'node:crypto';
 
 import { canonicalize, type CanonicalValue } from '../rfc64-runtime-canonical.mts';
 import {
-  RUNTIME_BUILD_ARGS,
-  RUNTIME_CLEAN_ARGS,
-  RUNTIME_PACKAGE_CLOSURE,
+  RFC64_RELEASE_CLI_RUNTIME_EVIDENCE_PROFILE_V1,
   assertRuntimeManifestEqualV1,
   createRuntimeEvidenceV1,
   type ExecutedRuntimeManifestForProfileV1,
-  type RuntimeEvidenceProfileV1,
   type RuntimeFileEvidenceV1,
   type RuntimeManifestForProfileV1,
 } from '../rfc64-runtime-provenance.mts';
-import { validateFixedRuntimeProcessEvidenceV1 } from '../rfc64-runtime-process-evidence.mts';
+import {
+  type RuntimeProcessIdentityV1,
+  validateFixedRuntimeProcessEvidenceV1,
+} from '../rfc64-runtime-process-evidence.mts';
 
 export const GATE2_RUNTIME_MANIFEST_SCHEMA_VERSION =
-  'dkg-rfc64-gate2-runtime-manifest-v1' as const;
+  RFC64_RELEASE_CLI_RUNTIME_EVIDENCE_PROFILE_V1.manifestSchemaVersion;
 export const GATE2_RUNTIME_MANIFEST_DIGEST_DOMAIN =
-  'dkg-rfc64-gate2-runtime-manifest-v1\n' as const;
+  RFC64_RELEASE_CLI_RUNTIME_EVIDENCE_PROFILE_V1.manifestDigestDomain;
 export const GATE2_EXECUTED_RUNTIME_MANIFEST_SCHEMA_VERSION =
-  'dkg-rfc64-gate2-executed-runtime-manifest-v1' as const;
+  RFC64_RELEASE_CLI_RUNTIME_EVIDENCE_PROFILE_V1.executedManifestSchemaVersion;
 export const GATE2_EXECUTED_RUNTIME_MANIFEST_DIGEST_DOMAIN =
-  'dkg-rfc64-gate2-executed-runtime-manifest-v1\n' as const;
+  RFC64_RELEASE_CLI_RUNTIME_EVIDENCE_PROFILE_V1.executedManifestDigestDomain;
 export const GATE2_RUNTIME_PROVENANCE_SCHEMA_VERSION =
-  'dkg-rfc64-gate2-runtime-provenance-v1' as const;
+  'dkg-rfc64-gate2-runtime-provenance-v2' as const;
 export const GATE2_RUNTIME_PROVENANCE_DIGEST_DOMAIN =
-  'dkg-rfc64-gate2-runtime-provenance-v1\n' as const;
+  'dkg-rfc64-gate2-runtime-provenance-v2\n' as const;
 
-export const GATE2_RUNTIME_PACKAGE_CLOSURE = RUNTIME_PACKAGE_CLOSURE;
-export const GATE2_RUNTIME_CLEAN_ARGS = RUNTIME_CLEAN_ARGS;
-export const GATE2_RUNTIME_BUILD_ARGS = RUNTIME_BUILD_ARGS;
+export const GATE2_RUNTIME_PACKAGE_CLOSURE =
+  RFC64_RELEASE_CLI_RUNTIME_EVIDENCE_PROFILE_V1.packageClosure;
+export const GATE2_RUNTIME_CLEAN_ARGS =
+  RFC64_RELEASE_CLI_RUNTIME_EVIDENCE_PROFILE_V1.cleanArgs;
+export const GATE2_RUNTIME_BUILD_ARGS =
+  RFC64_RELEASE_CLI_RUNTIME_EVIDENCE_PROFILE_V1.buildArgs;
 
-export const GATE2_RUNTIME_EVIDENCE_PROFILE_V1 = Object.freeze({
-    buildArgs: GATE2_RUNTIME_BUILD_ARGS,
-    cleanArgs: GATE2_RUNTIME_CLEAN_ARGS,
-    executedManifestDigestDomain: GATE2_EXECUTED_RUNTIME_MANIFEST_DIGEST_DOMAIN,
-    executedManifestSchemaVersion: GATE2_EXECUTED_RUNTIME_MANIFEST_SCHEMA_VERSION,
-    mandatoryEntrypoints: Object.freeze([
-      'packages/agent/dist/index.js',
-      'packages/chain/dist/index.js',
-      'packages/core/dist/index.js',
-      'packages/storage/dist/index.js',
-    ]),
-    manifestDigestDomain: GATE2_RUNTIME_MANIFEST_DIGEST_DOMAIN,
-    manifestSchemaVersion: GATE2_RUNTIME_MANIFEST_SCHEMA_VERSION,
-    packageClosure: GATE2_RUNTIME_PACKAGE_CLOSURE,
-  } as const satisfies RuntimeEvidenceProfileV1);
+export const GATE2_RUNTIME_EVIDENCE_PROFILE_V1 = RFC64_RELEASE_CLI_RUNTIME_EVIDENCE_PROFILE_V1;
 
 export const GATE2_RUNTIME_EVIDENCE_V1 = createRuntimeEvidenceV1(
   GATE2_RUNTIME_EVIDENCE_PROFILE_V1,
@@ -73,6 +62,7 @@ export type Gate2RuntimeProcessIdV1 =
 
 export interface Gate2RuntimeProcessEvidenceV1 {
   readonly id: Gate2RuntimeProcessIdV1;
+  readonly identity: RuntimeProcessIdentityV1;
   readonly loaded: Gate2ExecutedRuntimeManifestV1;
 }
 

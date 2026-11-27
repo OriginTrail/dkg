@@ -17,7 +17,7 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -39,6 +39,8 @@ import {
   computeFlatKCMerkleLeafCountV10,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent, agentFromPrivateKey, type AgentKeyRecord } from '../../src/index.js';
+import { initializeRfc64LegacySwmBoundaryV1 } from '../../src/rfc64/legacy-swm-boundary-v1.js';
+import { resolveRfc64PersistenceRootV1 } from '../../src/rfc64/persistence-layout-v1.js';
 import { SwmHostModeStore } from '../../src/swm/host-mode-store.js';
 
 interface ClassifierInternals {
@@ -158,6 +160,18 @@ describe('GH #1124 — ingestSwmHostModeEnvelope gate behaviour (signed plaintex
     tempDirs.push(dataDir);
     const core = await DKGAgent.create({ name: 'Ingest1124Host', listenHost: '127.0.0.1', dataDir, nodeRole: 'core', rfc64CatalogActivation: { enabled: false }, swmHostMode: { enabled: true } });
     agents.push(core);
+    // Production initializes the durable legacy-SWM boundary during start()
+    // before any network ingest can reach the shared-memory handler. This
+    // fixture intentionally drives ingest without starting libp2p, so mirror
+    // that prerequisite explicitly rather than exercising the fail-closed
+    // pre-start state.
+    const persistenceRoot = resolveRfc64PersistenceRootV1(dataDir);
+    await mkdir(persistenceRoot, { mode: 0o700 });
+    await initializeRfc64LegacySwmBoundaryV1(
+      core,
+      persistenceRoot,
+      core.store,
+    );
     const store = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
     await store.init();
     const g = core as unknown as IngestInternals;
@@ -318,6 +332,15 @@ describe('GH #1124 — a confirmed-public ingest makes a NON-MEMBER host ACK-cap
     tempDirs.push(dataDir);
     const core = await DKGAgent.create({ name: 'Ack1124Host', listenHost: '127.0.0.1', dataDir, nodeRole: 'core', rfc64CatalogActivation: { enabled: false }, swmHostMode: { enabled: true } });
     agents.push(core);
+    // See the ingest fixture above: production establishes this boundary in
+    // start(), while this focused test deliberately bypasses node startup.
+    const persistenceRoot = resolveRfc64PersistenceRootV1(dataDir);
+    await mkdir(persistenceRoot, { mode: 0o700 });
+    await initializeRfc64LegacySwmBoundaryV1(
+      core,
+      persistenceRoot,
+      core.store,
+    );
     const g = core as unknown as IngestInternals;
     // Wire the host-mode store explicitly — ingestSwmHostModeEnvelope returns
     // early when `swmHostModeStore` is unset (it's lazily inited on start()).

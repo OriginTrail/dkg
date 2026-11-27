@@ -13,7 +13,7 @@ import { test, expect } from '../fixtures/base.js';
  * directory), but it still rewrites `~/.prime/agent/settings.json` on the machine
  * running the test — an edit to the operator's real Prime Agent profile, which a
  * CI spec has no business making. The click-through is covered by the manual
- * sanity checks in `agent-docs/adapters/prime-agent/IMPLEMENTATION-PLAN.md`.
+ * sanity checks in `packages/adapter-prime-agent/docs/IMPLEMENTATION-PLAN.md`.
  *
  * The session-count assertion is the interesting one: Prime Agent publishes a
  * bridge per session, so zero live sessions is a normal idle state, not a fault.
@@ -28,7 +28,7 @@ test.describe('Prime Agent connect surface (real node)', () => {
     // Same rationale as hermes-connect: on a reused devnet another agent may
     // already be connected and own the default tab, so select the "+" add-agent
     // tab explicitly.
-    const addTab = page.getByRole('tab', { name: 'Add another integrated agent' });
+    const addTab = page.getByRole('button', { name: 'Add another integrated agent' });
     await addTab.click({ timeout: 15_000 });
   });
 

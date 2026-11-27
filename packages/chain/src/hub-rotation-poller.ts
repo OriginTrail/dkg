@@ -1,10 +1,13 @@
+import type { ChainEventLogHubRotationWindow } from './chain-event-log-binding.js';
 import { Contract, ethers } from 'ethers';
 import {
-  RawLogScanner,
+  RawLogScanner, rawLogIdentity, canonicalLogIdentity,
   type RawLogScanReadProvider,
 } from './raw-log-scanner.js';
 
 export type HubRotationReadProvider = RawLogScanReadProvider;
+
+export type HubRotationLogSource = (last: number | undefined, buffer: number) => Promise<ChainEventLogHubRotationWindow | undefined>;
 
 export interface HubRotationPollerConfig {
   readProvider: HubRotationReadProvider;
@@ -13,9 +16,12 @@ export interface HubRotationPollerConfig {
   /**
    * MUST be idempotent: the scan commits per batch, so a throw anywhere in a
    * batch re-delivers that whole batch on the next poll (see `RawLogScanner`'s
-   * at-least-once contract). `applyHubRotationEventName` satisfies this.
+   * at-least-once contract). After three failures a record is quarantined with
+   * a warning to preserve progress. `applyHubRotationEventName` is idempotent.
    */
   onContractName: (name: string) => void;
+  logSource?: HubRotationLogSource;
+  onDispatchFailure?: (name: string, error: unknown) => void;
 }
 
 interface HubRotationBinding {
@@ -28,6 +34,9 @@ export class HubRotationPoller {
   private readonly intervalMs: number;
   private readonly onContractName: (name: string) => void;
   private readonly scanner: RawLogScanner;
+  private readonly failures = new Map<string, number>();
+  private readonly logSource: HubRotationLogSource | undefined;
+  private readonly onDispatchFailure: (name: string, error: unknown) => void;
   private timer: ReturnType<typeof setInterval> | null = null;
   private inFlight: Promise<void> | null = null;
   private binding: HubRotationBinding | undefined;
@@ -36,6 +45,9 @@ export class HubRotationPoller {
 
   constructor(config: HubRotationPollerConfig) {
     this.intervalMs = config.intervalMs;
+    this.logSource = config.logSource;
+    this.onDispatchFailure = config.onDispatchFailure ?? ((name, error) => console.warn(
+      `Hub rotation callback failed three times for ${name}; quarantining this log so later rotations continue`, error));
     this.onContractName = config.onContractName;
     this.scanner = new RawLogScanner({
       label: 'Hub rotation poll',
@@ -96,27 +108,45 @@ export class HubRotationPoller {
     const binding = this.binding;
     if (!this.started || !binding || binding.topics.length === 0 || generation !== this.generation) return;
 
-    const batch = await this.scanner.read(
-      { address: binding.hubAddress, topics: binding.topics },
-      { isAborted: () => !this.started || generation !== this.generation },
-    );
-    if (!batch || !this.started || generation !== this.generation) return;
-
-    this.dispatchLogs(binding.hub, batch.logs);
-    this.scanner.commit(batch);
+    if (this.logSource !== undefined && await this.pollOnceFromLog(generation)) return;
+    await this.scanner.scan({ address: binding.hubAddress, topics: binding.topics }, {
+      isAborted: () => !this.started || generation !== this.generation,
+      onLogs: logs => {
+        for (const log of logs) {
+          const name = this.contractNameFromLog(binding.hub, log);
+          if (name) this.dispatchName(rawLogIdentity(log), name);
+        }
+      },
+    });
   }
 
   private async recordInitialHead(generation: number): Promise<void> {
     if (!this.started || generation !== this.generation) return;
-    const head = await this.scanner.readInitialHead();
-    if (!this.started || generation !== this.generation) return;
-    this.scanner.commitInitialHead(head);
+    if (this.logSource !== undefined && await this.pollOnceFromLog(generation)) return;
+    await this.scanner.seed(() => !this.started || generation !== this.generation);
   }
 
-  private dispatchLogs(hub: Contract, logs: readonly ethers.Log[]): void {
-    for (const log of logs) {
-      const contractName = this.contractNameFromLog(hub, log);
-      if (contractName) this.onContractName(contractName);
+  private async pollOnceFromLog(generation: number): Promise<boolean> {
+    const source = this.logSource;
+    if (!source) return false;
+    return this.scanner.scanStoredWindow(async (after, buffer) => {
+      try {
+        const window = await source(after, buffer);
+        return window && { head: window.throughBlockNumber, logs: window.rotations };
+      } catch { return undefined; } // A cold/broken optional index falls back to live RPC.
+    }, log => canonicalLogIdentity(log.blockHash, log.logIndex), {
+      isAborted: () => !this.started || generation !== this.generation,
+      onLogs: logs => { for (const log of logs) this.dispatchName(canonicalLogIdentity(log.blockHash, log.logIndex), log.contractName); },
+    });
+  }
+
+  private dispatchName(identity: string, name: string): void {
+    try { this.onContractName(name); this.failures.delete(identity); }
+    catch (error) {
+      const attempts = (this.failures.get(identity) ?? 0) + 1;
+      if (attempts < 3) { this.failures.set(identity, attempts); throw error; }
+      this.failures.delete(identity);
+      this.onDispatchFailure(name, error);
     }
   }
 
@@ -136,8 +166,10 @@ export class HubRotationPoller {
     return [
       'ContractChanged',
       'NewContract',
+      'ContractRemoved',
       'AssetStorageChanged',
       'NewAssetStorage',
+      'AssetStorageRemoved',
     ].map((eventName) => {
       const event = hub.interface.getEvent(eventName);
       if (!event?.topicHash) {
@@ -146,4 +178,5 @@ export class HubRotationPoller {
       return event.topicHash;
     });
   }
+
 }

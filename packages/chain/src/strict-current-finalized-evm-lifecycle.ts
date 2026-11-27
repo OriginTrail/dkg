@@ -352,16 +352,27 @@ export function createStrictFinalizedAnchorProfilePolicyV1(
   blockReferenceProfile: CurrentFinalizedEvmBlockReferenceProfileV1,
   anchor: FinalizedAnchorV1,
 ): StrictFinalizedAnchorProfilePolicyV1 {
-  const usesNumberedHashSandwich =
-    blockReferenceProfile === 'trusted-block-number-hash-sandwich';
   const blockReferenceForProbe = blockReferenceProfile === 'eip1898'
     ? Object.freeze({ blockHash: anchor.blockHash, requireCanonical: true as const })
     : anchor.blockNumberQuantity;
+  /**
+   * Re-read the anchor and require the SAME height and hash, for BOTH profiles.
+   *
+   * This used to run only for the numbered hash sandwich, on the reasoning that
+   * `eip1898`'s `{ blockHash, requireCanonical: true }` is self-enforcing: an
+   * honest endpoint refuses a block that is no longer canonical. That reasoning
+   * held while the anchor was the endpoint's `finalized` tag, which cannot be
+   * orphaned. The anchor is now the operator's depth — the HEAD at the default —
+   * so an orphanable block is being attested against, `requireCanonical` is only
+   * as good as the endpoint's honesty about it, and the precommits have no
+   * un-commit path once rows are materialized and the catalog head CAS lands.
+   * The post-read comparison is profile-agnostic (number + hash, by number), so
+   * it costs one header read and closes the gap for both.
+   */
   const assertScopeStillPinned = async (
     readPostAnchor: () => Promise<FinalizedAnchorV1>,
     anchorMismatchMessage: string,
   ): Promise<void> => {
-    if (!usesNumberedHashSandwich) return;
     await assertStrictFinalizedAnchorStableV1(
       anchor,
       readPostAnchor,

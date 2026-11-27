@@ -6,13 +6,16 @@
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
-import { createServer, Server as HttpServer } from 'node:http';
+import { createServer, request, Server as HttpServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionBridge, tokenMatches } from '../extension/src/extension.js';
+import { createBridgeHost, commitBridgeRun, type PreparedBridgeRun } from './bridge-host-support.js';
 
 const TOKEN = 'test-bridge-token-value';
+// I/O barriers stay on real time while timeout scenarios advance a fake clock.
+const realSetTimeout = globalThis.setTimeout;
 let workDir: string;
 let bridge: SessionBridge;
 let sent: string[];
@@ -26,32 +29,20 @@ function visiblePrompt(text: string): string {
   return separator < 0 ? text : text.slice(separator + 1);
 }
 
-/** Minimal stand-in for the host ExtensionAPI surface the bridge uses. */
-function stubPi(onSend: (text: string, options?: { deliverAs?: 'steer' | 'followUp' }) => void) {
-  return {
-    on: () => {},
-    sendUserMessage: (content: string, options?: { deliverAs?: 'steer' | 'followUp' }) => {
-      // Mirror Prime's submission flow faithfully: the bridge keeps its tag on
-      // the prepared action and nothing strips it until message_start. `sent`
-      // therefore records the RAW submission; assertions apply visiblePrompt()
-      // wherever they mean operator-visible text, so the strip point stays in
-      // the code under test instead of hiding in this harness.
-      const result = bridge.onInput({ source: 'extension', text: content });
-      if (result.action === 'handled') return;
-      onSend(result.action === 'transform' ? result.text : content, options);
-    },
-  };
+function stubPi(onSend: Parameters<typeof createBridgeHost>[1]) {
+  return createBridgeHost(() => bridge, onSend);
 }
 
 /**
  * Deterministic barrier on an observable side effect (usually `sent` growing):
- * fixed sleeps race the loopback HTTP round-trip under CI load, a poll cannot.
+ * fixed sleeps race the loopback HTTP round-trip under CI load. Polling observes
+ * submission only; deadline scenarios must also control their timeout clock.
  */
 async function until(cond: () => boolean, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!cond()) {
     if (Date.now() > deadline) throw new Error('until(): condition not reached in time');
-    await new Promise((r) => setTimeout(r, 2));
+    await new Promise((r) => realSetTimeout(r, 2));
   }
 }
 
@@ -66,24 +57,11 @@ async function bridgeBaseUrl(b: SessionBridge): Promise<string> {
   return mine.bridgeUrl;
 }
 
-type PreparedBridgeRun = NonNullable<ReturnType<SessionBridge['onBeforeAgentStart']>>;
-
-/** Commit a bridge action using the marker Prime cached during preparation. */
 function startBridgeRun(
   ctx?: Parameters<SessionBridge['onAgentStart']>[0],
   prepared?: PreparedBridgeRun,
 ): void {
-  const prompt = sent.at(-1);
-  if (!prompt) throw new Error('startBridgeRun(): no injected prompt');
-  const ownership = prepared ?? bridge.onBeforeAgentStart({ prompt });
-  if (!ownership) throw new Error('startBridgeRun(): prompt did not receive an ownership marker');
-  bridge.onAgentStart(ctx);
-  bridge.onMessageStart({
-    message: { role: 'user', content: [{ type: 'text', text: prompt }] },
-  });
-  bridge.onMessageStart({
-    message: { role: 'custom', ...ownership.message },
-  });
+  commitBridgeRun(bridge, { prompt: sent.at(-1), context: ctx, prepared });
 }
 
 /** A locally typed prompt is a fresh run, but must not claim a bridge request. */
@@ -110,7 +88,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await bridge.stop();
+  try { await bridge.stop(); } finally { vi.useRealTimers(); }
   delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
   delete process.env.DKG_BRIDGE_TOKEN;
   rmSync(workDir, { recursive: true, force: true });
@@ -121,6 +99,21 @@ const authed = (extra: Record<string, string> = {}) => ({
   'content-type': 'application/json',
   ...extra,
 });
+
+// Native HTTP avoids advancing fetch's own pooled-connection timers along with
+// the bridge deadlines. Requests still cross the real bound HTTP listener.
+function sendWithControlledClock(payload: { text: string; correlationId: string }): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const req = request(`${base}/send`, { method: 'POST', headers: authed(), agent: false }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer) => chunks.push(chunk));
+      res.on('error', reject);
+      res.on('end', () => resolve(new Response(Buffer.concat(chunks).toString('utf8'), { status: res.statusCode })));
+    });
+    req.on('error', reject);
+    req.end(JSON.stringify(payload));
+  });
+}
 
 describe('bind + discovery', () => {
   it('binds an ephemeral loopback port and publishes a descriptor', () => {
@@ -305,7 +298,7 @@ describe('/send', () => {
       headers: authed(),
       body: JSON.stringify({ text: 'hello agent', correlationId: 'c-1' }),
     });
-    await new Promise((r) => setTimeout(r, 30));
+    await until(() => sent.length === 1);
     expect(sent.map(visiblePrompt)).toEqual(['hello agent']);
 
     startBridgeRun();
@@ -337,7 +330,7 @@ describe('/send', () => {
       headers: authed(),
       body: JSON.stringify({ text: 'one', correlationId: 'c-a' }),
     });
-    await new Promise((r) => setTimeout(r, 30));
+    await until(() => sent.length === 1);
     startBridgeRun();
     const second = await fetch(`${base}/send`, {
       method: 'POST',
@@ -368,23 +361,17 @@ describe('/send', () => {
     });
     await bridge.start();
     base = await bridgeBaseUrl(bridge);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 
-    const firstPending = fetch(`${base}/send`, {
-      method: 'POST',
-      headers: authed(),
-      body: JSON.stringify({ text: 'long turn', correlationId: 'c-timeout' }),
-    });
+    const firstPending = sendWithControlledClock({ text: 'long turn', correlationId: 'c-timeout' });
     await until(() => sent.length === 1);
     startBridgeRun();
+    await vi.advanceTimersByTimeAsync(40);
     const first = await firstPending;
     expect(first.status).toBe(504);
     expect(await first.json()).toMatchObject({ timedOut: true, correlationId: 'c-timeout' });
 
-    const whileStillRunning = await fetch(`${base}/send`, {
-      method: 'POST',
-      headers: authed(),
-      body: JSON.stringify({ text: 'must wait', correlationId: 'c-too-soon' }),
-    });
+    const whileStillRunning = await sendWithControlledClock({ text: 'must wait', correlationId: 'c-too-soon' });
     expect(whileStillRunning.status).toBe(429);
 
     // Late output from the timed-out turn is ignored, and only agent_end opens
@@ -575,39 +562,31 @@ describe('/send', () => {
     });
     await bridge.start();
     base = await bridgeBaseUrl(bridge);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let abortCount = 0;
 
-    const firstPromise = fetch(`${base}/send`, {
-      method: 'POST',
-      headers: authed(),
-      body: JSON.stringify({ text: 'hung turn', correlationId: 'c-hard-timeout' }),
-    });
+    const firstPromise = sendWithControlledClock({ text: 'hung turn', correlationId: 'c-hard-timeout' });
     await until(() => sent.length === 1);
     startBridgeRun({
       sessionManager: { getSessionId: () => 'sess-hard-timeout' },
       abort: () => { abortCount += 1; },
     });
 
+    await vi.advanceTimersByTimeAsync(30);
     const first = await firstPromise;
     expect(first.status).toBe(504);
-    const whileStillRunning = await fetch(`${base}/send`, {
-      method: 'POST',
-      headers: authed(),
-      body: JSON.stringify({ text: 'too soon', correlationId: 'c-too-soon-hard' }),
-    });
+    const whileStillRunning = await sendWithControlledClock({ text: 'too soon', correlationId: 'c-too-soon-hard' });
     expect(whileStillRunning.status).toBe(429);
 
-    await new Promise((r) => setTimeout(r, 70));
+    await vi.advanceTimersByTimeAsync(49);
+    expect(abortCount).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
     expect(abortCount).toBe(1);
     // The hard timeout aborts but keeps admission closed until Prime confirms
     // the lifecycle boundary with agent_end.
     bridge.onAgentEnd();
     expect(abortCount).toBe(1);
-    const recovered = fetch(`${base}/send`, {
-      method: 'POST',
-      headers: authed(),
-      body: JSON.stringify({ text: 'after hard timeout', correlationId: 'c-after-hard' }),
-    });
+    const recovered = sendWithControlledClock({ text: 'after hard timeout', correlationId: 'c-after-hard' });
     await until(() => sent.length === 2);
     startBridgeRun();
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'accepted' } });
@@ -623,24 +602,18 @@ describe('/send', () => {
     });
     await bridge.start();
     base = await bridgeBaseUrl(bridge);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 
-    // No abort in ctx: the hard timeout cannot stop this turn, only release it.
-    const firstPromise = fetch(`${base}/send`, {
-      method: 'POST',
-      headers: authed(),
-      body: JSON.stringify({ text: 'zombie turn', correlationId: 'c-zombie' }),
-    });
+    // No abort in ctx: the hard timeout cannot stop this turn; admission stays closed.
+    const firstPromise = sendWithControlledClock({ text: 'zombie turn', correlationId: 'c-zombie' });
     await until(() => sent.length === 1);
     startBridgeRun();
+    await vi.advanceTimersByTimeAsync(30);
     expect((await firstPromise).status).toBe(504);
 
-    await new Promise((r) => setTimeout(r, 90));
+    await vi.advanceTimersByTimeAsync(50);
 
-    const tooSoon = await fetch(`${base}/send`, {
-      method: 'POST',
-      headers: authed(),
-      body: JSON.stringify({ text: 'successor', correlationId: 'c-successor' }),
-    });
+    const tooSoon = await sendWithControlledClock({ text: 'successor', correlationId: 'c-successor' });
     expect(tooSoon.status).toBe(429);
     expect(sent.map(visiblePrompt)).toEqual(['zombie turn']);
 
@@ -652,13 +625,8 @@ describe('/send', () => {
       message: { role: 'assistant', stopReason: 'aborted' },
     });
     bridge.onAgentEnd();
-    await new Promise((r) => setTimeout(r, 0));
 
-    const successor = fetch(`${base}/send`, {
-      method: 'POST',
-      headers: authed(),
-      body: JSON.stringify({ text: 'successor', correlationId: 'c-successor' }),
-    });
+    const successor = sendWithControlledClock({ text: 'successor', correlationId: 'c-successor' });
     await until(() => sent.length === 2);
     expect(sent.map(visiblePrompt)).toEqual(['zombie turn', 'successor']);
 

@@ -43,6 +43,37 @@ describe('init chain overrides (#1307)', () => {
       { isNetworkSwitch: true },
     )).toEqual({ type: 'evm', rpcRequestBudget });
   });
+  it('preserves chain.indexTickMs across reinitialization and network switches', () => {
+    const prior = { ...defaults, indexTickMs: 12_345 };
+    expect(buildInitChainOverrides(answers, defaults, prior, sameNetwork))
+      .toEqual({ type: 'evm', indexTickMs: 12_345 });
+    const nextNetwork = {
+      ...defaults,
+      rpcUrl: 'https://next.invalid',
+      hubAddress: 'next-hub',
+      chainId: 'base:8453',
+      rpcUrls: [],
+    };
+    expect(buildInitChainOverrides(
+      { ...nextNetwork, rpcUrlsInput: '' },
+      nextNetwork,
+      prior,
+      { isNetworkSwitch: true },
+    )).toEqual({ type: 'evm', indexTickMs: 12_345 });
+  });
+  it('preserves the external signer block across reinitialization and network switches', () => {
+    const signer = { type: 'remote' as const, socketPath: '/run/signer/signer.sock', authTokenFile: '/etc/dkg/signer.token' };
+    const prior = { ...defaults, signer };
+    expect(buildInitChainOverrides(answers, defaults, prior, sameNetwork)).toEqual({ type: 'evm', signer });
+    expect(buildInitChainOverrides(answers, defaults, prior, { isNetworkSwitch: true })).toEqual({ type: 'evm', signer });
+  });
+  it('preserves an explicit bounded authority read choice across network switches', () => {
+    const prior = { ...defaults, boundedAuthorityReads: true };
+    expect(buildInitChainOverrides(answers, defaults, prior, sameNetwork))
+      .toEqual({ type: 'evm', boundedAuthorityReads: true });
+    expect(buildInitChainOverrides(answers, defaults, prior, { isNetworkSwitch: true }))
+      .toEqual({ type: 'evm', boundedAuthorityReads: true });
+  });
   it('writes full answers when no network defaults exist', () => {
     expect(buildInitChainOverrides(answers, undefined, undefined, sameNetwork)).toEqual(defaults);
   });

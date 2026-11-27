@@ -1,4 +1,5 @@
 import type { PeerSyncSession } from '../src/sync/peer-sync-session.js';
+import type { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 import { vi } from 'vitest';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -291,6 +292,7 @@ export interface SelectedProviderSelectionAgent {
   networkAdmissionCoordinator: { isAcceptedPeer: (peerId: string) => boolean };
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2: Set<string>;
+  peerCapabilityRegistry: PeerCapabilityRegistry;
   selectedSwmBootstrapAdmission: SelectedSwmBootstrapAdmission;
   rfc64SwmRecoveryCoordinatorV1: {
     admitSelectedPublic: (peerId: string, contextGraphIds: readonly string[]) => boolean;
@@ -354,6 +356,7 @@ export async function callTrySyncFromPeer(
       connectionKey: string | null;
     }>;
     resolveRfc64CatalogReceiverAuthorityV1: () => { legacySyncAllowed: boolean };
+    rfc64LegacySwmGossipAllowedForContextGraph: () => boolean;
     recordSyncReconcilerFailure: (peerId: string) => void;
   };
   agent.trySelectedSwmRetryFromPeer = LifecycleSyncMethods.prototype.trySelectedSwmRetryFromPeer;
@@ -364,6 +367,7 @@ export async function callTrySyncFromPeer(
     connectionKey: null,
   });
   agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ legacySyncAllowed: true });
+  agent.rfc64LegacySwmGossipAllowedForContextGraph = () => true;
   agent.recordSyncReconcilerFailure ??= () => {};
   const applyAccounting = agent.applySyncOnConnectAccounting;
   if (onSyncAccounting) {
@@ -400,6 +404,8 @@ export interface AdmissionProbe {
   readonly contextGraphId: string;
   readonly selected: boolean;
   readonly priority: number | undefined;
+  /** Recorded only when the admission asked for a reserved slot only. */
+  readonly reservedSlotOnly?: boolean;
   readonly event: 'start' | 'end';
 }
 
@@ -454,6 +460,11 @@ export interface SelectedSwmLifecycleHarnessOptions {
   readonly dataFailuresBeforeSuccess?: number;
   /** Mirror the production verifier's empty-batch classification. */
   readonly reportEmptyResponse?: boolean;
+  /**
+   * The peer's answer to a snapshot request for a ref this node does not hold.
+   * Without it, every snapshot must be a cache hit.
+   */
+  readonly snapshotAnswer?: (ref: string) => readonly Quad[];
   /** Override the aggregate data phase to exercise incomplete empty rounds. */
   readonly dataPage?: {
     readonly quads?: readonly Quad[];
@@ -517,7 +528,7 @@ export interface SelectedSwmLifecycleAgentFixture {
     lane: string,
     operationId: string,
     work: () => Promise<SharedMemorySyncResult>,
-    admission: { priorityOverride?: number; selectedSwmPriority?: boolean },
+    admission: { priorityOverride?: number; selectedSwmPriority?: boolean; reservedSlotOnly?: boolean },
   ) => Promise<SharedMemorySyncResult>;
   syncCheckpoints: Map<string, number>;
   workspaceOwnedEntities: Map<string, Map<string, string>>;
@@ -529,6 +540,7 @@ export interface SelectedSwmLifecycleAgentFixture {
   resolveRfc64CatalogReceiverAuthorityV1: (
     contextGraphId: string,
   ) => { legacySyncAllowed: boolean };
+  rfc64LegacySwmGossipAllowedForContextGraph: (contextGraphId: string) => boolean;
   createSwmTargetExecutorSessionV1: () => SwmTargetExecutorV1;
   syncSharedMemoryFromPeerDetailedExecution:
     typeof LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution;
@@ -567,6 +579,8 @@ ProductionSelectedSyncSharedMemoryOptions,
 > & {
   requestedScope?: TestSelectedSharedMemoryRequestedScope;
   recoveryTargets?: readonly Rfc64SwmRecoveryTargetV1[];
+  /** The peer this round asks; defaults to the harness's one provider. */
+  remotePeerId?: string;
 };
 
 type ProductionSyncSharedMemoryOptions = Parameters<
@@ -599,7 +613,7 @@ export const callSelectedSharedMemoryFromPeerDetailed = (
     ids: string[],
     syncOptions: ProductionSelectedSyncSharedMemoryOptions,
   ) => Promise<SelectedSharedMemorySyncResult>;
-  const { requestedScope, recoveryTargets, ...productionOptions } = options;
+  const { requestedScope, recoveryTargets, remotePeerId, ...productionOptions } = options;
   const targets = testRecoveryTargets(contextGraphIds, recoveryTargets);
   const exactRequestedScope: SelectedSharedMemoryRequestedScope = requestedScope?.kind
     === 'rfc64-recovery-plan'
@@ -619,7 +633,7 @@ export const callSelectedSharedMemoryFromPeerDetailed = (
         ),
       ),
     };
-  return method.call(agent, PEER, contextGraphIds, {
+  return method.call(agent, remotePeerId ?? PEER, contextGraphIds, {
     ...productionOptions,
     requestedScope: exactRequestedScope,
   });
@@ -723,7 +737,19 @@ export function createSelectedSwmLifecycleHarness(
       } = fetchOptions;
       if (phase === 'snapshot') {
         snapshotFetches.push(snapshotRef ?? 'missing-ref');
-        throw new Error('all snapshot fixtures should be cache hits');
+        if (options.snapshotAnswer === undefined || snapshotRef === undefined) {
+          throw new Error('all snapshot fixtures should be cache hits');
+        }
+        const quads = [...options.snapshotAnswer(snapshotRef)];
+        return {
+          quads,
+          bytesReceived: quads.length,
+          resumedFromOffset: 0,
+          nextOffset: quads.length,
+          checkpointKey: `${contextGraphId}:${phase}:${snapshotRef}`,
+          completed: true,
+          timedOut: false,
+        };
       }
       if (phase === 'meta') {
         metaFetches += 1;
@@ -840,6 +866,7 @@ export function createSelectedSwmLifecycleHarness(
         contextGraphId,
         selected: admission.selectedSwmPriority === true,
         priority: admission.priorityOverride,
+        ...(admission.reservedSlotOnly === undefined ? {} : { reservedSlotOnly: admission.reservedSlotOnly }),
       };
       admissions.push({ ...row, event: 'start' });
       try {
@@ -870,6 +897,7 @@ export function createSelectedSwmLifecycleHarness(
       );
     },
     resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+    rfc64LegacySwmGossipAllowedForContextGraph: () => true,
     createSwmTargetExecutorSessionV1: () => {
       createTargetExecutorSession ??=
         createSwmTargetExecutorSessionFactoryForTest(agent as never);

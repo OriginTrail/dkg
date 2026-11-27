@@ -18,6 +18,8 @@ interface VmRecoveryPeerState {
   phase: VmRecoveryProviderPhase;
 }
 
+const NO_DEFERRED_PEERS: ReadonlySet<string> = new Set();
+
 /** One recovery slice's explicit provider-affinity state machine. */
 export class VmRecoveryProviderPolicy {
   readonly #peers = new Map<string, VmRecoveryPeerState>();
@@ -37,15 +39,33 @@ export class VmRecoveryProviderPolicy {
     return kind === 'fresh' || kind === 'holder-reusable';
   }
 
-  selectNextCandidate(candidatePeerIds: readonly string[], maxPeers: number): string | undefined {
+  /**
+   * `deferredPeerIds` names candidates that cannot be attempted yet. They are
+   * passed over, and each keeps a place among the peers this slice may
+   * consider, so the peers tried meanwhile cannot crowd it out of the slice.
+   */
+  selectNextCandidate(
+    candidatePeerIds: readonly string[],
+    maxPeers: number,
+    deferredPeerIds: ReadonlySet<string> = NO_DEFERRED_PEERS,
+  ): string | undefined {
+    for (const peerId of candidatePeerIds) {
+      if (deferredPeerIds.has(peerId) && !this.#consideredPeerIds.has(peerId)
+        && this.#consideredPeerIds.size < maxPeers) {
+        this.#consideredPeerIds.add(peerId);
+      }
+    }
+    const attemptablePeerIds = candidatePeerIds.filter((peerId) => !deferredPeerIds.has(peerId));
     const ordered = [
-      ...candidatePeerIds.filter((peerId) => this.#peers.get(peerId)?.phase.kind === 'holder-reusable'),
-      ...candidatePeerIds.filter((peerId) => this.#peers.get(peerId)?.phase.kind !== 'holder-reusable'),
+      ...attemptablePeerIds.filter((peerId) => this.#peers.get(peerId)?.phase.kind === 'holder-reusable'),
+      ...attemptablePeerIds.filter((peerId) => this.#peers.get(peerId)?.phase.kind !== 'holder-reusable'),
     ];
     for (const peerId of ordered) {
       if (!this.#canAttempt(peerId)) continue;
       if (!this.#consideredPeerIds.has(peerId)) {
-        if (this.#consideredPeerIds.size >= maxPeers) return undefined;
+        // The cap excludes this peer. One that already has a place (it kept
+        // one while deferred, or was released) may still follow it.
+        if (this.#consideredPeerIds.size >= maxPeers) continue;
         this.#consideredPeerIds.add(peerId);
       }
       return peerId;
@@ -55,6 +75,12 @@ export class VmRecoveryProviderPolicy {
 
   markUnavailable(peerId: string): void {
     this.#state(peerId).phase = { kind: 'unavailable' };
+  }
+
+  /** The host must prove a current carried holder; one reuse still spends it. */
+  seedProvenHolder(peerId: string): void {
+    const state = this.#state(peerId);
+    if (state.phase.kind === 'fresh') state.phase = { kind: 'holder-reusable' };
   }
 
   beginAttempt(peerId: string): VmRecoveryProviderAttempt | undefined {
@@ -70,11 +96,7 @@ export class VmRecoveryProviderPolicy {
     return attempt;
   }
 
-  finishAttempt(
-    attempt: VmRecoveryProviderAttempt,
-    aggregateDisposition: VmRecoveryUalDisposition,
-    perUalDispositions: ReadonlyMap<string, VmRecoveryUalDisposition>,
-  ): void {
+  #activeState(attempt: VmRecoveryProviderAttempt): VmRecoveryPeerState {
     const state = this.#state(attempt.peerId);
     const activeAttempt = state.phase.kind === 'attempting-probe'
       || state.phase.kind === 'attempting-reuse'
@@ -83,11 +105,28 @@ export class VmRecoveryProviderPolicy {
     if (activeAttempt !== attempt) {
       throw new Error(`VM recovery provider attempt is not active for ${attempt.peerId}`);
     }
+    return state;
+  }
+
+  finishAttempt(
+    attempt: VmRecoveryProviderAttempt,
+    aggregateDisposition: VmRecoveryUalDisposition,
+    perUalDispositions: ReadonlyMap<string, VmRecoveryUalDisposition>,
+  ): void {
+    const state = this.#activeState(attempt);
     const earnedReuse = state.phase.kind === 'attempting-probe'
       && aggregateDisposition === 'found'
       && perUalDispositions.size > 0
       && [...perUalDispositions.values()].every((disposition) => disposition === 'found');
     state.phase = earnedReuse ? { kind: 'holder-reusable' } : { kind: 'spent' };
+  }
+
+  /**
+   * The attempt ended without a verdict on the peer's data. The peer may be
+   * attempted again in this slice, and has to earn reuse again with a probe.
+   */
+  releaseAttempt(attempt: VmRecoveryProviderAttempt): void {
+    this.#activeState(attempt).phase = { kind: 'fresh' };
   }
 
   unavailablePeerIds(): ReadonlySet<string> {

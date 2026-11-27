@@ -98,3 +98,21 @@ def test_empty_queue_does_not_write(cli_fixture):
     h.client.write_assertion.assert_not_called()
     h.client.store_turn.assert_not_called()
     assert h.saved == []
+
+
+def test_status_tolerates_object_context_graph_response(cli_fixture):
+    h = cli_fixture
+    h.client.list_context_graphs.return_value = {"contextGraphs": []}
+    result = h.runner.invoke(h.cli, ["dkg", "status"])
+    assert result.exit_code == 0 and "CONNECTED" in result.output
+    h.client.close.assert_called_once()
+
+
+def test_sync_discards_unknown_legacy_queue_records_without_network_writes(cli_fixture):
+    h = cli_fixture
+    h.cache["queued_writes"] = [{"type": "retired-event"}]
+    result = h.runner.invoke(h.cli, ["dkg", "sync"])
+    assert result.exit_code == 0
+    assert h.saved[0][0]["queued_writes"] == []
+    h.client.store_turn.assert_not_called()
+    h.client.write_assertion.assert_not_called()

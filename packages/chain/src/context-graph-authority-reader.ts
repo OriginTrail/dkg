@@ -2,7 +2,7 @@
 
 import type {
   ChainAdapter,
-  ChainReadOptions,
+  ContextGraphAuthorityReadOptions,
   ContextGraphAuthoritySnapshot,
 } from './chain-adapter.js';
 
@@ -10,7 +10,7 @@ import type {
 export interface ContextGraphAuthorityReader {
   getContextGraphAuthoritySnapshot(
     contextGraphId: bigint,
-    options?: ChainReadOptions,
+    options?: ContextGraphAuthorityReadOptions,
   ): Promise<ContextGraphAuthoritySnapshot>;
 }
 
@@ -46,7 +46,7 @@ export function bindContextGraphAuthorityReader(
     reader: Object.freeze({
       getContextGraphAuthoritySnapshot: (
         contextGraphId: bigint,
-        options?: ChainReadOptions,
+        options?: ContextGraphAuthorityReadOptions,
       ) => readSnapshot.call(adapter, contextGraphId, options),
     }),
   });

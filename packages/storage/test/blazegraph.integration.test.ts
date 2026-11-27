@@ -1,3 +1,11 @@
+import { memberGraphListingQuery } from '../src/read-graph/check.js';
+import { randomUUID } from 'node:crypto';
+import { singleAssetTransactionTests } from './_helpers/blazegraph-single-asset-integration.js';
+import { blazegraphReadGraphWriteTests } from './_helpers/blazegraph-read-graph-integration.js';
+import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../src/atomic-asset-group.js';
+import { buildBulkAssetGroupPlan } from '../src/adapters/bulk-asset-group.js';
+import { parseNQuadsTextTolerant } from '../src/nquads-text.js';
+import { quadsToNQuads } from '../src/bounded-rdf.js';
 /**
  * BlazegraphStore INTEGRATION tests — run against a REAL Blazegraph server.
  *
@@ -21,7 +29,17 @@
  * BLAZEGRAPH_TEST_URL example:
  *   http://127.0.0.1:9999/bigdata/namespace/kb/sparql
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { MemoryLayer, readGraphIri, readGraphStateGraphIri, readScope } from '@origintrail-official/dkg-core';
+import { markReadGraphsDirtyAtStart } from '../src/read-graph-partition-startup.js';
+import {
+  CURRENT_READ_GRAPH_VERSIONS,
+  parseReadGraphStateRows,
+  READ_GRAPH_STATE_PREDICATES,
+  readGraphStateCompareAndSet,
+  readGraphStateRowsQuery,
+  type ReadGraphState,
+} from '../src/read-graph/state.js';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { compileRfc64SemanticAuthorCommitV1 } from '../src/rfc64-semantic-author-commit-v1.js';
 import { normalizeRfc64AuthorCommitCasV1 } from '../src/rfc64-author-commit-cas.js';
@@ -73,6 +91,8 @@ function makeQuads(n: number): Quad[] {
 }
 
 describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', () => {
+  singleAssetTransactionTests(BLAZEGRAPH_URL!);
+  blazegraphReadGraphWriteTests(BLAZEGRAPH_URL!);
   let store: BlazegraphStore;
 
   beforeAll(async () => {
@@ -83,6 +103,176 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
 
   afterAll(async () => {
     if (store) await store.dropGraph(GRAPH).catch(() => {});
+  });
+
+  it('lists the context root and its nonempty children without admitting a neighboring context', async () => {
+    const root = `urn:bg-int:${RUN}:scope`;
+    const child = `${root}/member`;
+    const neighbor = `${root}-other/member`;
+    const list = async () => {
+      const result = await store.query(memberGraphListingQuery(store, root));
+      if (result.type !== 'bindings') throw new Error('Expected graph bindings');
+      return result.bindings.map(row => row.g).sort();
+    };
+    try {
+      await store.insert([root, child, neighbor].map(graph => ({
+        subject: 'urn:listing:subject', predicate: PRED, object: '"value"', graph,
+      })));
+      expect(await list()).toEqual([root, child]);
+      await store.dropGraph(child);
+      expect(await list()).toEqual([root]);
+    } finally {
+      for (const graph of [root, child, neighbor]) await store.dropGraph(graph);
+    }
+  });
+
+  it('lists graphs whose names need escapes, from its streamed one-graph-per-line answer', async () => {
+    const root = `urn:graph-list:${randomUUID()}`;
+    const graphs = [`${root}:café`, `${root}:smile-😀`, `${root}:a%20b`, `${root}:plain`];
+    try {
+      await store.insert(graphs.map((graph, i) => ({ subject: `${root}:s${i}`, predicate: 'urn:p', object: '"x"', graph })));
+      expect((await store.listGraphs()).filter((graph) => graph.startsWith(root)).sort()).toEqual([...graphs].sort());
+    } finally {
+      for (const graph of graphs) await store.dropGraph(graph);
+    }
+  });
+
+  it('marks read graphs dirty at start with a new generation, and recreates a damaged row dirty', async () => {
+    const contextGraphId = `bg-int-${RUN}-start`;
+    const state = readGraphStateGraphIri(contextGraphId);
+    const vm = readGraphIri({ scope: readScope(contextGraphId), layer: MemoryLayer.VerifiableMemory });
+    const swm = readGraphIri({ scope: readScope(contextGraphId), layer: MemoryLayer.SharedWorkingMemory });
+    const code = readGraphIri({ scope: readScope(contextGraphId, 'code'), layer: MemoryLayer.VerifiableMemory });
+    const row = (readGraph: string, rowState: ReadGraphState, generation: number) => ({
+      readGraph, state: rowState, generation, ...CURRENT_READ_GRAPH_VERSIONS,
+    });
+    const ours = async () => {
+      const result = await store.query(readGraphStateRowsQuery());
+      const parsed = parseReadGraphStateRows(result.type === 'bindings' ? result.bindings : []);
+      const mine = (readGraph: string) => readGraph === vm || readGraph === swm || readGraph === code;
+      return {
+        damaged: parsed.damaged.filter(mine).sort(),
+        rows: Object.fromEntries(parsed.rows.filter((each) => mine(each.readGraph)).map((each) => [each.readGraph, `${each.state}@${each.generation}`])),
+      };
+    };
+    try {
+      for (const seeded of [row(vm, 'ready', 5), row(swm, 'ready', 2), row(code, 'dirty', 9)]) {
+        await store.update(readGraphStateCompareAndSet(undefined, seeded));
+      }
+      // A second state makes the shared-memory row damaged.
+      await store.insert([{ graph: state, subject: swm, predicate: READ_GRAPH_STATE_PREDICATES.state, object: '"building"' }]);
+      expect((await ours()).damaged).toEqual([swm]);
+      expect(await markReadGraphsDirtyAtStart(store)).toBeGreaterThanOrEqual(2);
+      const after = await ours();
+      expect(after.damaged).toEqual([]);
+      expect(after.rows[vm]).toBe('dirty@6');
+      expect(after.rows[swm]).toMatch(/^dirty@/);
+      expect(after.rows[code]).toBe('dirty@9');
+      const ready = await store.query(`ASK { GRAPH <${state}> { ?readGraph <${READ_GRAPH_STATE_PREDICATES.state}> "ready" } }`);
+      expect(ready.type === 'boolean' && ready.value).toBe(false);
+    } finally {
+      await store.update(`DROP SILENT GRAPH <${state}>`);
+    }
+  });
+
+  it('replaces values and preserves exact content on replay', async () => {
+    const store = new BlazegraphStore(BLAZEGRAPH_URL!, { timeout: 10_000 });
+    const root = `urn:group-test:${randomUUID()}`, meta = `${root}:meta`;
+    const member = (id: number, value: string, version: string): AtomicAssetReplacement => ({
+      graphUri: `${root}:${id}`, metaGraphUri: meta, metadataSubject: `${root}:asset:${id}`,
+      graphQuads: [{ graph: `${root}:${id}`, subject: `${root}:entity:${id}`, predicate: 'urn:p', object: JSON.stringify(value) }],
+      metadataQuads: [{ graph: meta, subject: `${root}:asset:${id}`, predicate: 'urn:version', object: JSON.stringify(version) }],
+    });
+    const unrelated = { graph: meta, subject: `${root}:unrelated`, predicate: 'urn:p', object: '"keep"' };
+    const select = `SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g IN (<${root}:1>, <${root}:2>, <${meta}>)) } ORDER BY ?g ?s ?p ?o`;
+    try {
+      const members = [member(1, 'new-first', '2'), member(2, 'new-second', '2')];
+      const expected = { type: 'bindings', variables: ['g', 's', 'p', 'o'], bindings: [...members.flatMap(a => [...a.graphQuads, ...a.metadataQuads]), unrelated]
+        .map(q => ({ g: q.graph, s: q.subject, p: q.predicate, o: q.object })) };
+      const sorted = (result: typeof expected) => ({ ...result, bindings: [...result.bindings].sort((a, b) =>
+        JSON.stringify(a).localeCompare(JSON.stringify(b))) });
+      await store.insert([...[member(1, 'old-first', '1'), member(2, 'old-second', '1')]
+        .flatMap(a => [...a.graphQuads, ...a.metadataQuads]), unrelated]);
+      await store.replaceAssetGroup(members);
+      expect(sorted(await store.query(select) as typeof expected)).toEqual(sorted(expected));
+      await store.replaceAssetGroup(members);
+      expect(sorted(await store.query(select) as typeof expected)).toEqual(sorted(expected));
+    } finally {
+      await store.update([`${root}:1`, `${root}:2`, meta].map(g => `DROP SILENT GRAPH <${g}>`).join(';'));
+      await store.close();
+    }
+  });
+
+  it('rolls back every fallback destination after a later statement fails', async () => {
+    const root = `urn:fallback-rollback:${randomUUID()}`, meta = `${root}:meta`;
+    const member = (id: number, value: string): AtomicAssetReplacement => ({
+      graphUri: `${root}:${id}`, metaGraphUri: meta, metadataSubject: `${root}:asset:${id}`,
+      graphQuads: [{ graph: `${root}:${id}`, subject: `${root}:entity:${id}`, predicate: 'urn:p', object: value }],
+      metadataQuads: [{ graph: meta, subject: `${root}:asset:${id}`, predicate: 'urn:version', object: '"2"' }],
+    });
+    const members = [member(1, '"01"^^<http://www.w3.org/2001/XMLSchema#integer>'), member(2, '"replacement"')];
+    members[0]!.graphQuads.push({ ...members[0]!.graphQuads[0]!, object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>' });
+    expect(buildBulkAssetGroupPlan(members)).toBeNull();
+    const plan = buildAtomicAssetGroupUpdate(members);
+    const select = `SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g IN (<${root}:1>, <${root}:2>, <${meta}>)) } ORDER BY ?g ?s ?p ?o`;
+    let intercept: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await store.insert([...[member(1, '"original-one"'), member(2, '"original-two"')]
+        .flatMap(a => [...a.graphQuads, ...a.metadataQuads]),
+        { graph: meta, subject: `${root}:unrelated`, predicate: 'urn:p', object: '"keep"' }]);
+      const before = await store.query(select), transport = globalThis.fetch;
+      let injected = false;
+      intercept = vi.spyOn(globalThis, 'fetch').mockImplementation((url, init) => {
+        if (init?.body === plan.update) {
+          injected = true;
+          // CREATE on the nonempty metadata graph fails at execution time,
+          // after every generated CLEAR/DELETE/INSERT has been evaluated.
+          return transport(url, { ...init, body: `${plan.update}; CREATE GRAPH <${meta}>` });
+        }
+        return transport(url, init);
+      });
+      await expect(store.replaceAssetGroup(members)).rejects.toThrow();
+      expect(injected).toBe(true);
+      expect(await store.query(select)).toEqual(before);
+    } finally {
+      intercept?.mockRestore();
+      await store.update([`${root}:1`, `${root}:2`, meta].map(g => `DROP SILENT GRAPH <${g}>`).join(';'));
+    }
+  });
+
+  it.each([0, 1, 2, 3].flatMap(index => ['absent', 'partial'].map(mode => ({ index, mode }))))(
+    'preserves every destination when staging member $index is $mode', async ({ index, mode }) => {
+    const root = `urn:incomplete-group:${randomUUID()}`, meta = `${root}:meta`;
+    const member = (id: number, value: string): AtomicAssetReplacement => ({
+      graphUri: `${root}:${id}`, metaGraphUri: meta, metadataSubject: `${root}:asset:${id}`,
+      graphQuads: [{ graph: `${root}:${id}`, subject: `${root}:entity:${id}`, predicate: 'urn:p', object: JSON.stringify(value) }],
+      metadataQuads: [{ graph: meta, subject: `${root}:asset:${id}`, predicate: 'urn:version', object: JSON.stringify(value) }],
+    });
+    const members = [member(1, 'new'), member(2, 'new')].map(a => ({ ...a,
+      graphQuads: [...a.graphQuads, { ...a.graphQuads[0]!, predicate: 'urn:second' }],
+      metadataQuads: [...a.metadataQuads, { ...a.metadataQuads[0]!, predicate: 'urn:second' }],
+    }));
+    const plan = buildBulkAssetGroupPlan(members)!;
+    const select = `SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g IN (<${root}:1>, <${root}:2>, <${meta}>)) } ORDER BY ?g ?s ?p ?o`;
+    try {
+      await store.insert([...[member(1, 'old'), member(2, 'old')].flatMap(a => [...a.graphQuads, ...a.metadataQuads]),
+        { graph: meta, subject: `${root}:unrelated`, predicate: 'urn:p', object: '"keep"' }]);
+      const before = await store.query(select);
+      const staged = parseNQuadsTextTolerant(plan.nquads), graphs = [...new Set(staged.map(q => q.graph))];
+      expect(graphs).toHaveLength(4);
+      const omitted = staged.find(q => q.graph === graphs[index])!;
+      const uploaded = staged.filter(q => mode === 'absent' ? q.graph !== graphs[index] : q !== omitted);
+      expect(uploaded.filter(q => q.graph === graphs[index])).toHaveLength(mode === 'partial' ? 1 : 0);
+      const response = await fetch(BLAZEGRAPH_URL!, { method: 'POST', headers: { 'Content-Type': 'text/x-nquads' },
+        body: quadsToNQuads(uploaded) });
+      await response.text(); expect(response.ok).toBe(true);
+      await store.update(plan.update);
+      expect(await store.query(plan.receiptQuery)).toEqual({ type: 'boolean', value: false });
+      expect(await store.query(select)).toEqual(before);
+    } finally {
+      await store.update(plan.cleanup);
+      await store.update([`${root}:1`, `${root}:2`, meta].map(g => `DROP SILENT GRAPH <${g}>`).join(';'));
+    }
   });
 
   it('runs live requests under the configured deadline and recovers after pre-dispatch cancellation', async () => {

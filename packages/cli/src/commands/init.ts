@@ -546,12 +546,13 @@ program
     };
     await saveConfig(config);
 
-    // Generate wallets eagerly so they're available for faucet funding
+    // Generate wallets eagerly so they're available for faucet funding (none
+    // when the node signs through an external signer, chain.signer).
     let walletAddresses: string[] = [];
     try {
-      const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
-      const opWallets = await loadOpWallets(dkgDir());
-      walletAddresses = getFundableWalletAddresses(opWallets);
+      const { loadLocalOpWalletsUnlessExternal } = await import('../local-op-wallets.js');
+      const opWallets = await loadLocalOpWalletsUnlessExternal(dkgDir());
+      walletAddresses = opWallets === undefined ? [] : getFundableWalletAddresses(opWallets);
     } catch (err: any) {
       console.warn(`\nWarning: could not generate wallets (${err?.message ?? String(err)}).`);
       console.warn('Wallets will be auto-generated on first "dkg start".');

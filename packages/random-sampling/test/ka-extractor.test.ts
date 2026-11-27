@@ -26,6 +26,7 @@ import {
   hashTripleV10,
   tripleContentV10,
   keccak256,
+  keccak256Hex,
   structuredKARootV10,
   buildV10ProofMaterial,
   verifyV10ProofMaterial,
@@ -37,6 +38,8 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   knowledgeAssetLayerGraphUri,
   MemoryLayer,
+  readGraphIri,
+  readScope,
 } from '@origintrail-official/dkg-core';
 import {
   extractV10KCFromStore,
@@ -260,6 +263,30 @@ describe('extractV10KCFromStore — graph-scoped rootless KAs', () => {
       .toEqual(new V10MerkleTree(expectedLeaves).root);
   });
 
+  it('selects the chain-attested name when historical names share a numeric slot', async () => {
+    const store = new OxigraphStore();
+    await seedOntology(store, 'aaa-stale-import', CG_ID);
+    const triples = [
+      { subject: 'urn:asset:one', predicate: 'urn:p:value', object: '"one"' },
+    ];
+    const vmGraph = await seedGraphScoped(store, triples);
+    const nameHash = keccak256Hex(new TextEncoder().encode(CG_NAME));
+
+    await expect(extractV10KCFromStore(store, CG_ID, KA_ID))
+      .rejects.toBeInstanceOf(KCNotFoundError);
+    await expect(extractV10KCFromStore(
+      store, CG_ID, KA_ID, undefined,
+      async () => keccak256Hex(new TextEncoder().encode('aaa-stale-import')),
+    )).rejects.toBeInstanceOf(KCNotFoundError);
+
+    const result = await extractV10KCFromStore(
+      store, CG_ID, KA_ID, undefined, async () => nameHash,
+    );
+    expect(result.contextGraphName).toBe(CG_NAME);
+    expect(result.dataGraph).toBe(vmGraph);
+    expect(result.triples).toMatchObject(triples);
+  });
+
   it('supports a fully private KA with an empty public VM graph', async () => {
     const store = new OxigraphStore();
     const privateRoot = new Uint8Array(32).fill(0x33);
@@ -401,6 +428,33 @@ describe('extractV10KCFromStore — happy path / publisher round-trip parity', (
 
     const extractedRoot = new V10MerkleTree(result.leaves).root;
     expect(extractedRoot).toEqual(fixtureRoot);
+  });
+
+  it('extracts the same KC when read graphs hold copies of its triples', async () => {
+    const fixture: KCFixture = {
+      cgId: 9n,
+      kaId: 43n,
+      ual: 'did:dkg:hardhat:31337/0xpub/43',
+      rootEntities: ['urn:entity:alpha'],
+      publicTriples: [
+        { subject: 'urn:entity:alpha', predicate: 'urn:p:name', object: '"alpha"' },
+        { subject: 'urn:entity:alpha', predicate: 'urn:p:age', object: '"7"' },
+      ],
+    };
+    await seedKC(store, fixture);
+    const before = await extractV10KCFromStore(store, fixture.cgId, fixture.kaId);
+    // Read graphs are node-local copies of member triples. A stale one may also hold a value and a triple of its own,
+    // which a read of every graph would add to the KC; sampling must not see them.
+    const ownToReadGraphs = [
+      { subject: 'urn:entity:alpha', predicate: 'urn:p:name', object: '"alpha-old"' },
+      { subject: 'urn:entity:alpha', predicate: 'urn:p:extra', object: '"only-in-a-read-graph"' },
+    ];
+    const scopes = [readScope('cg-9'), readScope('cg-9', 'code')];
+    await store.insert(scopes.flatMap(scope => ([MemoryLayer.VerifiableMemory, MemoryLayer.SharedWorkingMemory] as const)
+      .flatMap(layer => [...fixture.publicTriples, ...ownToReadGraphs].map(triple => ({ ...triple, graph: readGraphIri({ scope, layer }) })))));
+    const after = await extractV10KCFromStore(store, fixture.cgId, fixture.kaId);
+    expect(after).toEqual(before);
+    expect(after.triples.map(triple => triple.object)).not.toContain('"alpha-old"');
   });
 
   it('handles skolemized blank-node descendants (.well-known/genid/) bound to a root entity', async () => {

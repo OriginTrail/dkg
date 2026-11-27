@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
  * pauses ONE core's store mid-publish (SIGSTOP/SIGCONT) and asserts the publish
  * still confirms via the healthy cores, the paused core logs the typed
  * CORE_TEMPORARILY_UNAVAILABLE decline, and publishing works again after
- * recovery. Depends on a running devnet; not part of the default `pnpm test`
+ * resume or supervised replacement. Depends on a running devnet; not part of the default `pnpm test`
  * fan-out.
  *
  * Run: `pnpm test:devnet:storage-ack-store-outage`.

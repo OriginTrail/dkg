@@ -1,5 +1,6 @@
 import { assertCanonicalChainId } from '@origintrail-official/dkg-core';
 
+import { resolveFinalityConfirmations } from './evm-adapter-constants.js';
 import { snapshotStrictFinalizedEndpointSessionV1 } from './strict-finalized-endpoint-session.js';
 import {
   FINALIZED_CHAIN_READ_OWNERS,
@@ -14,7 +15,10 @@ import {
 } from './strict-current-finalized-evm-types.js';
 
 const CONFIG_REQUIRED_KEYS = Object.freeze(['chainId', 'endpoints'] as const);
-const CONFIG_OPTIONAL_KEYS = Object.freeze(['blockReferenceProfile'] as const);
+const CONFIG_OPTIONAL_KEYS = Object.freeze([
+  'blockReferenceProfile',
+  'finalityConfirmations',
+] as const);
 const SNAPSHOT_CONFIG_OPTIONAL_KEYS = Object.freeze([...CONFIG_OPTIONAL_KEYS, 'owner'] as const);
 
 /**
@@ -69,6 +73,14 @@ export function snapshotStrictFinalizedSnapshotConfigV1(
   if (Object.prototype.hasOwnProperty.call(input, 'blockReferenceProfile')) {
     base.blockReferenceProfile = input.blockReferenceProfile;
   }
+  // The snapshot path REBUILDS `base` from proven data properties rather than
+  // spreading the caller's object, so every allowlisted field must be forwarded
+  // explicitly. Forgetting this one would leave the RFC-64 precommits — the only
+  // real users of the snapshot scope — silently pinned to the default depth
+  // while the one-shot read path honoured the operator's setting.
+  if (Object.prototype.hasOwnProperty.call(input, 'finalityConfirmations')) {
+    base.finalityConfirmations = input.finalityConfirmations;
+  }
 
   return Object.freeze({
     ...snapshotStrictCurrentFinalizedEvmConfigV1(
@@ -100,7 +112,23 @@ export function snapshotStrictCurrentFinalizedEvmConfigV1(
     chainId: input.chainId,
     endpoints,
     blockReferenceProfile,
+    finalityConfirmations: resolveStrictFinalityConfirmationsV1(input.finalityConfirmations),
   });
+}
+
+/**
+ * Reuse the node's ONE finality-depth validator, surfacing its rejection with
+ * this module's error type. No second rule, no second default.
+ */
+function resolveStrictFinalityConfirmationsV1(value: unknown): number {
+  try {
+    return resolveFinalityConfirmations(value);
+  } catch (cause) {
+    throw new TypeError(
+      'Strict current-finalized finalityConfirmations must be an integer >= 1',
+      { cause },
+    );
+  }
 }
 
 /**

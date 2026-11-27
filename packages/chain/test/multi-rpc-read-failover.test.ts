@@ -278,7 +278,6 @@ describe('multi-RPC read failover (real loopback providers)', () => {
         () => (a as unknown as { providers: JsonRpcProvider[] }).providers.map(
           (provider, i) => ({ provider, rpcUrl: a.getRpcUrls()[i] }),
         ),
-        async () => { throw new Error('read path must not sign'); },
         () => a.chainId,
       );
 

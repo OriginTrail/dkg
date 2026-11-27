@@ -1127,7 +1127,7 @@ describe('W1 §5.5 — `control-plane` is the trigger base case, not a catch-all
       // Empty everywhere, so `resolveAllowed()` is false and the refresh runs.
       getParticipants: async () => null,
       getAllowedPeers: async () => null,
-      getAgentGateAddresses: async () => null,
+      getAgentGate: async () => ({ kind: 'ungated' }),
       getAllowedDelegateePeers: async () => new Map(),
       getAllowedDelegateeKeys: async () => new Map(),
       getMemberRecoveryGate: async () => null,

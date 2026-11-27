@@ -1,6 +1,9 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type {
-  FinalizationRecoveryReceiveInput,
+import {
+  FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD,
+  type FinalizationRecoveryFailureCode,
+  type FinalizationRecoveryHealth,
+  type FinalizationRecoveryReceiveInput,
 } from './finalization-recovery-store.js';
 
 const DEFAULT_MAX_ENTRIES = 128;
@@ -16,8 +19,12 @@ const DEFAULT_RAW_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_TERMINAL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_TERMINAL_ENTRIES = 128;
 const DEFAULT_MAX_TERMINAL_BYTES = 16 * 1024 * 1024;
+const DEFAULT_DISPLACE_MIN_AGE_MS = 5 * 60 * 1000;
+// The local copy could not be prepared for the finalization.
+const DEFAULT_DISPLACEABLE_FAILURE_SIGNATURES: readonly FinalizationRecoveryFailureCode[] =
+  Object.freeze(['workspace-unavailable']);
 
-export interface SqliteFinalizationRecoveryStoreOptions {
+export interface FinalizationRecoveryRetentionOptions {
   maxEntries?: number;
   maxTotalBytes?: number;
   maxEnvelopeBytes?: number;
@@ -31,6 +38,12 @@ export interface SqliteFinalizationRecoveryStoreOptions {
   terminalTtlMs?: number;
   maxTerminalEntries?: number;
   maxTerminalBytes?: number;
+  /** Consecutive identical failures after which a live entry may be displaced. */
+  displaceAfterFailureStreak?: number;
+  /** Minimum age of a live entry before it may be displaced. */
+  displaceMinAgeMs?: number;
+  /** Failure signatures whose entries may be displaced; empty disables displacement. */
+  displaceableFailureSignatures?: readonly FinalizationRecoveryFailureCode[];
   now?: () => number;
 }
 
@@ -48,6 +61,9 @@ export interface FinalizationRecoveryRetentionPolicy {
   terminalTtlMs: number;
   maxTerminalEntries: number;
   maxTerminalBytes: number;
+  displaceAfterFailureStreak: number;
+  displaceMinAgeMs: number;
+  displaceableFailureSignatures: readonly FinalizationRecoveryFailureCode[];
   now: () => number;
 }
 
@@ -55,7 +71,12 @@ export interface FinalizationRecoveryCapacitySnapshot {
   liveEntries: number;
   livePayloadBytes: number;
   oldest?: number;
+  /** A node-wide live limit is reached, so no new finalization fits. */
   capacityExhausted: boolean;
+  /** Source peers at their own live quota; other sources still fit. */
+  fullSourcePeers: number;
+  /** Context Graphs at their own live quota; other graphs still fit. */
+  fullContextGraphs: number;
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {
@@ -63,7 +84,7 @@ function positiveInteger(value: number | undefined, fallback: number): number {
 }
 
 export function resolveFinalizationRecoveryRetentionPolicy(
-  options: SqliteFinalizationRecoveryStoreOptions,
+  options: FinalizationRecoveryRetentionOptions,
 ): FinalizationRecoveryRetentionPolicy {
   return {
     maxEntries: positiveInteger(options.maxEntries, DEFAULT_MAX_ENTRIES),
@@ -103,6 +124,17 @@ export function resolveFinalizationRecoveryRetentionPolicy(
       options.maxTerminalBytes,
       DEFAULT_MAX_TERMINAL_BYTES,
     ),
+    displaceAfterFailureStreak: positiveInteger(
+      options.displaceAfterFailureStreak,
+      FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD,
+    ),
+    displaceMinAgeMs: Number.isSafeInteger(options.displaceMinAgeMs)
+      && (options.displaceMinAgeMs ?? -1) >= 0
+      ? options.displaceMinAgeMs!
+      : DEFAULT_DISPLACE_MIN_AGE_MS,
+    displaceableFailureSignatures: Object.freeze([
+      ...(options.displaceableFailureSignatures ?? DEFAULT_DISPLACEABLE_FAILURE_SIGNATURES),
+    ]),
     now: options.now ?? Date.now,
   };
 }
@@ -147,7 +179,9 @@ export function pruneFinalizationRecoveryRowsWithinTransaction(
 export function hasFinalizationRecoveryDeferredCapacity(
   database: DatabaseSync,
   policy: FinalizationRecoveryRetentionPolicy,
-  input: FinalizationRecoveryReceiveInput,
+  input: Pick<FinalizationRecoveryReceiveInput, 'contextGraphId' | 'sourcePeerId'> & {
+    readonly rawMessage: { readonly byteLength: number };
+  },
 ): boolean {
   const total = database.prepare(`
     SELECT COUNT(*) AS count, COALESCE(SUM(length(raw_envelope)), 0) AS bytes
@@ -189,12 +223,15 @@ export function readFinalizationRecoveryDeferredCapacity(
   };
 }
 
-export function hasFinalizationRecoveryCapacity(
+export type FinalizationRecoveryCapacityShortfall = 'total' | 'context-graph' | 'peer';
+
+/** The first live-inbox limit `input` would exceed, if any. */
+export function finalizationRecoveryCapacityShortfall(
   database: DatabaseSync,
   policy: FinalizationRecoveryRetentionPolicy,
   input: FinalizationRecoveryReceiveInput,
   replacingKey?: string,
-): boolean {
+): FinalizationRecoveryCapacityShortfall | undefined {
   const live = database.prepare(`
     SELECT COUNT(*) AS count, COALESCE(SUM(length(raw_envelope)), 0) AS bytes
     FROM finalization_inbox_v1
@@ -204,22 +241,31 @@ export function hasFinalizationRecoveryCapacity(
   if (
     Number(live?.count ?? 0) >= policy.maxEntries
     || Number(live?.bytes ?? 0) + input.rawMessage.byteLength > policy.maxTotalBytes
-  ) return false;
+  ) return 'total';
   const graphCount = database.prepare(`
     SELECT COUNT(*) AS count FROM finalization_inbox_v1
     WHERE (state IN ('RECEIVED','VERIFIED','REORGED') OR publisher_upgrade_pending = 1)
       AND context_graph_id = ? AND (? IS NULL OR key != ?)
   `).get(input.contextGraphId, replacingKey ?? null, replacingKey ?? null);
-  if (Number(graphCount?.count ?? 0) >= policy.maxPerContextGraph) return false;
+  if (Number(graphCount?.count ?? 0) >= policy.maxPerContextGraph) return 'context-graph';
   if (input.sourcePeerId) {
     const peerCount = database.prepare(`
       SELECT COUNT(*) AS count FROM finalization_inbox_v1
       WHERE (state IN ('RECEIVED','VERIFIED','REORGED') OR publisher_upgrade_pending = 1)
         AND source_peer_id = ? AND (? IS NULL OR key != ?)
     `).get(input.sourcePeerId, replacingKey ?? null, replacingKey ?? null);
-    if (Number(peerCount?.count ?? 0) >= policy.maxPerPeer) return false;
+    if (Number(peerCount?.count ?? 0) >= policy.maxPerPeer) return 'peer';
   }
-  return true;
+  return undefined;
+}
+
+export function hasFinalizationRecoveryCapacity(
+  database: DatabaseSync,
+  policy: FinalizationRecoveryRetentionPolicy,
+  input: FinalizationRecoveryReceiveInput,
+  replacingKey?: string,
+): boolean {
+  return finalizationRecoveryCapacityShortfall(database, policy, input, replacingKey) === undefined;
 }
 
 export function readFinalizationRecoveryCapacity(
@@ -235,28 +281,49 @@ export function readFinalizationRecoveryCapacity(
   const liveEntries = Number(live?.count ?? 0);
   const livePayloadBytes = Number(live?.bytes ?? 0);
   const oldest = typeof live?.oldest === 'number' ? live.oldest : undefined;
-  const graphCapacity = database.prepare(`
-    SELECT COALESCE(MAX(count), 0) AS count FROM (
-      SELECT COUNT(*) AS count FROM finalization_inbox_v1
+  const fullGraphs = database.prepare(`
+    SELECT COUNT(*) AS count FROM (
+      SELECT context_graph_id FROM finalization_inbox_v1
       WHERE state IN ('RECEIVED','VERIFIED','REORGED') OR publisher_upgrade_pending = 1
       GROUP BY context_graph_id
+      HAVING COUNT(*) >= ?
     )
-  `).get();
-  const peerCapacity = database.prepare(`
-    SELECT COALESCE(MAX(count), 0) AS count FROM (
-      SELECT COUNT(*) AS count FROM finalization_inbox_v1
+  `).get(policy.maxPerContextGraph);
+  const fullPeers = database.prepare(`
+    SELECT COUNT(*) AS count FROM (
+      SELECT source_peer_id FROM finalization_inbox_v1
       WHERE (state IN ('RECEIVED','VERIFIED','REORGED') OR publisher_upgrade_pending = 1)
         AND source_peer_id IS NOT NULL
       GROUP BY source_peer_id
+      HAVING COUNT(*) >= ?
     )
-  `).get();
+  `).get(policy.maxPerPeer);
   return {
     liveEntries,
     livePayloadBytes,
     ...(oldest === undefined ? {} : { oldest }),
     capacityExhausted: liveEntries >= policy.maxEntries
-      || livePayloadBytes >= policy.maxTotalBytes
-      || Number(graphCapacity?.count ?? 0) >= policy.maxPerContextGraph
-      || Number(peerCapacity?.count ?? 0) >= policy.maxPerPeer,
+      || livePayloadBytes >= policy.maxTotalBytes,
+    fullSourcePeers: Number(fullPeers?.count ?? 0),
+    fullContextGraphs: Number(fullGraphs?.count ?? 0),
+  };
+}
+
+/**
+ * Readiness of the live inbox. Only a node-wide limit makes the node not
+ * ready: a source peer or Context Graph at its own quota waits in the deferred
+ * spool while every other source and graph is still admitted, so that is
+ * reported as detail instead.
+ */
+export function finalizationRecoveryCapacityHealth(
+  capacity: FinalizationRecoveryCapacitySnapshot,
+): Pick<FinalizationRecoveryHealth, 'ready' | 'degradedReason' | 'fullQuotas'> {
+  return {
+    ready: !capacity.capacityExhausted,
+    ...(capacity.capacityExhausted ? { degradedReason: 'capacity-exhausted' } : {}),
+    fullQuotas: {
+      sourcePeers: capacity.fullSourcePeers,
+      contextGraphs: capacity.fullContextGraphs,
+    },
   };
 }

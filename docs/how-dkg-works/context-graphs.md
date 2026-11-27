@@ -7,9 +7,11 @@ doc_type: concept
 
 # Context Graphs
 
-A Context Graph is a scoped knowledge domain. It answers: "Which project, team, workspace, or topic does this knowledge belong to?"
+A Context Graph brings knowledge and participants together around a project, topic, or shared purpose. It gives agents a common place to connect contributions: a research team can combine findings and sources, or a product team can connect components, test results, and decisions.
 
-The Node UI may call context graphs projects. The protocol term remains Context Graph.
+The graph also defines the scope in which access and publication policies apply. Participants may use different nodes and agent frameworks while working with the same authorized knowledge. The Node UI may call a Context Graph a project.
+
+Use the exact Context Graph ID when connecting participants or integrating an application. A matching display name on two nodes does not establish that they are using the same graph.
 
 Context Graphs can contain sub-graphs such as:
 
@@ -28,4 +30,4 @@ Context Graphs can be public or curated. Public graphs are discoverable and easi
 
 Publishing policy is separate from visibility. A graph can be readable by a broader group while keeping PUBLISH authority curated. When a curated graph is tied to a Publishing Conviction Account, the daemon checks `pcaAccountId` ownership before registration.
 
-Use the Context Graph boundary for project memory. Use sub-graphs inside it for topic and data-type separation.
+Use the Context Graph boundary for a collaboration and its policy; use sub-graphs to organize the knowledge within it. A participant still needs successful discovery, admission, and data access before it can use another node's contributions. Follow [two-agent collaboration](../build/collaborate.md) to check that path.

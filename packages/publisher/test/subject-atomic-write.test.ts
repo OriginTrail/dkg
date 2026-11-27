@@ -16,6 +16,7 @@ import {
   OxigraphStore,
   UnsupportedTripleStoreCapabilityError,
   type Quad,
+  type QueryOptions,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import { replaceSubjectAtomicallyOrFallback } from '../src/subject-atomic-write.js';
@@ -42,8 +43,14 @@ async function objectsFor(store: OxigraphStore, subject: string): Promise<string
 function countingStore(
   inner: OxigraphStore,
   mode: 'real' | 'absent' | 'refuse',
-): { store: TripleStore; counts: { replaceSubject: number; graphDeletes: number } } {
+): {
+  store: TripleStore;
+  counts: { replaceSubject: number; graphDeletes: number };
+  options: { replaceSubject: unknown[]; deletes: unknown[]; inserts: unknown[] };
+} {
   const counts = { replaceSubject: 0, graphDeletes: 0 };
+  // The options argument each store call received (undefined when none was passed).
+  const options = { replaceSubject: [] as unknown[], deletes: [] as unknown[], inserts: [] as unknown[] };
   type RealStore = {
     replaceSubject: (g: string, s: string, q: unknown, o?: unknown) => Promise<void>;
     deleteByPattern: (p: unknown, o?: unknown) => Promise<unknown>;
@@ -55,6 +62,7 @@ function countingStore(
         if (mode === 'absent') return undefined;
         return async (g: string, s: string, q: unknown, o?: unknown) => {
           counts.replaceSubject++;
+          options.replaceSubject.push(o);
           if (mode === 'refuse') {
             throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'SparqlHttpStore');
           }
@@ -64,20 +72,28 @@ function countingStore(
       if (prop === 'deleteByPattern') {
         return async (pattern: { graph?: string }, o?: unknown) => {
           if (pattern?.graph === GRAPH) counts.graphDeletes++;
+          options.deletes.push(o);
           return (target as unknown as RealStore).deleteByPattern(pattern, o);
         };
       }
       if (prop === 'deleteByPatternWithoutCount') {
         return async (pattern: { graph?: string }, o?: unknown) => {
           if (pattern?.graph === GRAPH) counts.graphDeletes++;
+          options.deletes.push(o);
           return (target as unknown as RealStore).deleteByPatternWithoutCount(pattern, o);
+        };
+      }
+      if (prop === 'insert') {
+        return async (quads: Quad[], o?: unknown) => {
+          options.inserts.push(o);
+          return target.insert(quads, o as QueryOptions | undefined);
         };
       }
       const value = Reflect.get(target, prop, target);
       return typeof value === 'function' ? value.bind(target) : value;
     },
   }) as unknown as TripleStore;
-  return { store, counts };
+  return { store, counts, options };
 }
 
 describe('#1938 replaceSubjectAtomicallyOrFallback', () => {
@@ -134,6 +150,74 @@ describe('#1938 replaceSubjectAtomicallyOrFallback', () => {
     expect(await objectsFor(inner, SUBJECT)).toEqual(['"new"']);
     // The bounded fallback never widened to the sibling row.
     expect(await objectsFor(inner, sibling)).toEqual(['"keep"']);
+  });
+
+  describe('last parameter: string | QueryOptions', () => {
+    const OPTIONS: QueryOptions = { source: 'x', priority: 'background' };
+
+    it('passes a QueryOptions object unchanged to replaceSubject (atomic path)', async () => {
+      const inner = new OxigraphStore();
+      await inner.createGraph(GRAPH);
+      const { store, options } = countingStore(inner, 'real');
+
+      await replaceSubjectAtomicallyOrFallback(store, GRAPH, SUBJECT, [quad(SUBJECT, '"new"')], OPTIONS);
+
+      expect(options.replaceSubject).toHaveLength(1);
+      expect(options.replaceSubject[0]).toBe(OPTIONS);
+      expect(options.deletes).toEqual([]);
+      expect(options.inserts).toEqual([]);
+    });
+
+    it.each(['absent', 'refuse'] as const)(
+      'passes the same QueryOptions object to the delete and the insert (%s fallback)',
+      async (mode) => {
+        const inner = new OxigraphStore();
+        await inner.createGraph(GRAPH);
+        await inner.insert([quad(SUBJECT, '"old"')]);
+        const { store, options } = countingStore(inner, mode);
+
+        await replaceSubjectAtomicallyOrFallback(store, GRAPH, SUBJECT, [quad(SUBJECT, '"new"')], OPTIONS);
+
+        expect(options.deletes).toHaveLength(1);
+        expect(options.deletes[0]).toBe(OPTIONS);
+        expect(options.inserts).toHaveLength(1);
+        expect(options.inserts[0]).toBe(OPTIONS);
+        if (mode === 'refuse') {
+          // The refused atomic attempt carried the options too.
+          expect(options.replaceSubject[0]).toBe(OPTIONS);
+        }
+        expect(await objectsFor(inner, SUBJECT)).toEqual(['"new"']);
+      },
+    );
+
+    it('turns a plain string into { source } on the atomic call, the delete and the insert', async () => {
+      const inner = new OxigraphStore();
+      await inner.createGraph(GRAPH);
+      const atomic = countingStore(inner, 'real');
+      await replaceSubjectAtomicallyOrFallback(atomic.store, GRAPH, SUBJECT, [quad(SUBJECT, '"a"')], 'test.source');
+      expect(atomic.options.replaceSubject).toEqual([{ source: 'test.source' }]);
+
+      const fallback = countingStore(inner, 'refuse');
+      await replaceSubjectAtomicallyOrFallback(fallback.store, GRAPH, SUBJECT, [quad(SUBJECT, '"b"')], 'test.source');
+      expect(fallback.options.replaceSubject).toEqual([{ source: 'test.source' }]);
+      expect(fallback.options.deletes).toEqual([{ source: 'test.source' }]);
+      expect(fallback.options.inserts).toEqual([{ source: 'test.source' }]);
+    });
+
+    it('still rejects an out-of-contract payload before any store call when given an options object', async () => {
+      const other = 'urn:test:subject-atomic-write:other';
+      const inner = new OxigraphStore();
+      await inner.createGraph(GRAPH);
+      const { store, counts, options } = countingStore(inner, 'real');
+
+      await expect(
+        replaceSubjectAtomicallyOrFallback(store, GRAPH, SUBJECT, [quad(SUBJECT, '"a"'), quad(other, '"b"')], OPTIONS),
+      ).rejects.toThrow(/must target subject/);
+
+      expect(counts.replaceSubject).toBe(0);
+      expect(counts.graphDeletes).toBe(0);
+      expect(options).toEqual({ replaceSubject: [], deletes: [], inserts: [] });
+    });
   });
 
   // #1938 — the helper enforces the atomic path's single-subject contract on BOTH paths

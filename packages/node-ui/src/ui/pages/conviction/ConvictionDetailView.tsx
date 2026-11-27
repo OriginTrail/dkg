@@ -15,19 +15,29 @@ import {
   DeviceConfirmProgress,
   formatPcaTrac,
   formatWeiToTrac,
-  formatRelativeExpiry,
+  formatExpiryShort,
 } from '../../components/Pca/index.js';
+import { RetryButton } from '../../components/ds/RetryButton.js';
 import { healthForSnapshot } from '../../pca/health.js';
 import { StatStrip } from '../../components/ContextGraphPrimitives.js';
 import { FundingSection } from './FundingSection.js';
 import { PublishingWalletsSection } from './PublishingWalletsSection.js';
 import { LifecycleSection } from './LifecycleSection.js';
 import { eqAddress } from '../../web3/address.js';
+import { ownerGuidance, type OwnerGuidance } from '../../pca/ownerGuidance.js';
 import { resolvePrimaryWalletState, type PcaOwnerAccess } from '../../pca/ownerAccess.js';
 import { usePcaOwnerAccess } from '../../pca/usePcaOwnerAccess.js';
+import { Badge, StatusGlyph } from '../../components/ds/Badge.js';
+import { BadgePercent } from 'lucide-react';
+import { Loading } from '../../components/ds/Loading.js';
+import { bpsToPercent } from '../../lib/format.js';
+import { ExternalMark } from '../../components/ds/ExternalMark.js';
+import { Breadcrumbs } from '../../components/ds/Breadcrumbs.js';
+import { PcaPrimerLink } from './PcaPrimer.js';
+import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 
 function formatExpiryTileValue(expiresAtTimestamp?: number): string {
-  return formatRelativeExpiry(expiresAtTimestamp).replace(/^Expires in /, '');
+  return formatExpiryShort(expiresAtTimestamp) ?? 'Expiry unknown';
 }
 
 /**
@@ -59,45 +69,29 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
 
   useWalletBootstrap();
 
-  if (loading && !snapshot) return <div className="lazy-spinner">Loading PCA #{accountId}…</div>;
+  if (loading && !snapshot) return <Loading block label={`Loading PCA #${accountId}…`} />;
   if (error || !snapshot) {
     return (
       <div className="v10-pca-detail">
-        <div className="card">
+        <div className="card ds-card">
           <div className="card-body v10-pca-card-error">
             <p>Couldn’t load PCA #{accountId}.</p>
-            <button type="button" className="v10-pca-card-btn" onClick={() => refresh()}>Retry</button>
+            <RetryButton onClick={() => refresh()} />
           </div>
         </div>
       </div>
     );
   }
 
-  const ownerInPool = wallets.some((w) => eqAddress(w, snapshot.owner));
-  // Owner can't be classified because this node's wallet list is loading or unreadable (#1470).
-  // `owner` is present here (past the snapshot early-returns), so this is never the no-snapshot
-  // cause — split the two so a still-LOADING read shows a neutral "confirming ownership" affordance
-  // (no false "Couldn't load", no Retry), while a FAILED read keeps the "can't confirm" + Retry.
-  // Both stay `unknown` (never a definitive read-only/external verdict — the daemon-flash fix).
-  const walletsLoading = access.ownerUnknownCause === 'wallets-loading';
-  const walletsUnreadable = access.ownerUnknownCause === 'wallets-unreadable';
-
-  // gateReason stays consumer-built for now (model gateReason deferred to a later step): the
-  // exact same branches, re-expressed on access.mode / access.wrongNetwork — identical values
-  // to the old ownerMode / walletWrongNetwork now that both come from the one model.
-  const ownerGateReason = walletsLoading
-    ? `Confirming ownership of PCA #${accountId}…`
-    : walletsUnreadable
-    ? `Couldn't load this node's wallets - can't confirm ownership of PCA #${accountId}.`
-    : access.mode === 'wallet' && access.wrongNetwork
-    ? `Wrong network - switch the connected wallet to this node's PCA network to manage PCA #${accountId}.`
-    : access.mode === 'wallet'
-    ? `Connected wallet ${snapshot.owner} owns PCA #${accountId}; device-signed owner actions are enabled.`
-    : ownerInPool
-    ? `Owner-only - PCA #${accountId} is owned by ${snapshot.owner}, not this node's primary operational wallet, so node-UI can't sign for it.`
-    : connectedWallet
-    ? `Owner-only - connected as ${connectedWallet}; switch to ${snapshot.owner} to manage PCA #${accountId}.`
-    : `Owner-only - connect ${snapshot.owner} to manage PCA #${accountId}.`;
+  // The line, the notice and the disabled-action reason, derived once (#1470 loading vs
+  // unreadable stays a neutral tip vs "can't confirm" + Retry, never a false non-owner).
+  const guidance = ownerGuidance({
+    accountId,
+    owner: snapshot.owner,
+    access,
+    connected: !!connectedWallet,
+    ownerInPool: wallets.some((w) => eqAddress(w, snapshot.owner)),
+  });
 
   return (
     <DetailBody
@@ -108,9 +102,7 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
       explorer={explorer}
       access={access}
       connectedWallet={connectedWallet}
-      ownerOnlyReason={ownerGateReason}
-      walletsLoading={walletsLoading}
-      walletsUnreadable={walletsUnreadable}
+      guidance={guidance}
       onRetryWallets={refreshWallets}
       refresh={refresh}
     />
@@ -125,9 +117,7 @@ function DetailBody({
   explorer,
   access,
   connectedWallet,
-  ownerOnlyReason,
-  walletsLoading,
-  walletsUnreadable,
+  guidance,
   onRetryWallets,
   refresh,
 }: {
@@ -138,11 +128,7 @@ function DetailBody({
   explorer: string | null;
   access: PcaOwnerAccess;
   connectedWallet?: string | null;
-  ownerOnlyReason: string;
-  /** Wallet list still loading (owner unconfirmed) → neutral affordance, no Retry. */
-  walletsLoading: boolean;
-  /** Wallet list read FAILED (owner unconfirmable) → "can't confirm" + Retry. */
-  walletsUnreadable: boolean;
+  guidance: OwnerGuidance;
   onRetryWallets: () => void;
   refresh: () => void;
 }) {
@@ -168,33 +154,29 @@ function DetailBody({
     onWalletProgress: access.mode === 'wallet' ? deviceProgress.onProgress : undefined,
   });
   const health = healthForSnapshot(snapshot);
-  const ownerTitle = access.writesEnabled ? undefined : ownerOnlyReason;
+  const ownerTitle = guidance.disabledReason;
 
-  const pct = (snapshot.discountBps / 100).toFixed(snapshot.discountBps % 100 === 0 ? 0 : 1);
-  const walletSurfaceCopy = connectedWallet
-    ? access.mode === 'wallet'
-      ? access.wrongNetwork
-        ? 'Owner wallet matches; switch network before signing owner actions.'
-        : 'Connected owner wallet will sign top-up, approve, remove, and renewal actions.'
-      : access.mode === 'daemon'
-        ? 'Connected wallet is available for wallet-owned PCAs; this account uses the node daemon for owner actions.'
-        : `Connected as ${connectedWallet}; switch to ${snapshot.owner} to manage owner actions.`
-    : access.mode === 'external'
-      ? 'Connect the PCA owner wallet to manage this account. Provider metadata is display-only.'
-      : 'Connect a wallet to view and manage wallet-owned PCAs from this tab.';
-
+  const pct = bpsToPercent(snapshot.discountBps);
   return (
     <div className="v10-pca-detail" data-testid="pca-detail">
+      <div className="ds-crumbs-bar">
+        <Breadcrumbs items={[{ label: 'Publisher Conviction', onClick: () => openTab({ id: 'conviction', label: 'Publisher Conviction', closable: true }) }, { label: `PCA #${accountId}` }]} />
+      </div>
       <div className="v10-pca-detail-band">
-        <span className="v10-pca-detail-id">PCA #{accountId}</span>
-        <span className="badge badge-info">◉ {pct}% discount</span>
+        <h1 className="ds-page-title">PCA #{accountId}</h1>
+        <Badge size="sm" icon={<BadgePercent size={12} />}>{pct}% discount</Badge>
         <span className="v10-pca-detail-committed">{formatPcaTrac(snapshot.committedTRACTrac)} TRAC committed</span>
         <span className="v10-pca-card-spacer" />
         <HealthChip state={health} />
+        <PcaPrimerLink />
       </div>
 
-      <div className="v10-modal-tip" role="status">
-        {walletSurfaceCopy}
+      {snapshot.fullySwept && (
+        <p className="v10-pca-overview-caveat">Any leftover top-up went to the staker reward pool.</p>
+      )}
+
+      <div className="v10-modal-tip ds-card-nested v10-pca-wallet-surface" role="status">
+        <p className="v10-pca-wallet-surface-copy">{guidance.walletLine}</p>
         {connectedWallet ? <WalletPill /> : <WalletConnectControl testId="pca-wallet-connect" />}
       </div>
 
@@ -206,28 +188,24 @@ function DetailBody({
         />
       )}
 
-      {!access.writesEnabled && (
-        // Pure LOADING window (#1470): a neutral "confirming ownership" tip — no false "Couldn't
-        // load", no Retry (the balances are auto-fetching); owner controls stay disabled for the
-        // brief window. FAILED/EXTERNAL/wrong-network keep the warning box (+ Retry when unreadable).
-        walletsLoading ? (
-          <div className="v10-modal-tip" role="status">{ownerOnlyReason}</div>
-        ) : (
-          <div className="v10-modal-warning" role="status">
-            ⓘ {ownerOnlyReason}{' '}
-            {walletsUnreadable ? (
-              <button type="button" className="v10-pca-card-btn" onClick={onRetryWallets}>Retry</button>
-            ) : (
-              'Wallet probe stays available.'
-            )}
+      {/* Loading: a neutral tip, no Retry (the balances are auto-fetching). Otherwise a
+          warning, with Retry when the wallets couldn't be read. */}
+      {guidance.notice?.kind === 'loading' && (
+        <div className="v10-modal-tip ds-card-nested" role="status">{guidance.notice.text}</div>
+      )}
+      {guidance.notice?.kind === 'warning' && (
+        <div className="v10-pca-retry-block">
+          <div className="v10-modal-warning ds-card-nested v10-pca-notice" role="status">
+            <StatusGlyph tone="warning" /> {guidance.notice.text}
           </div>
-        )
+          {guidance.notice.retry && <RetryButton onClick={onRetryWallets} />}
+        </div>
       )}
 
       <StatStrip
         items={[
-          { id: 'buffer', label: 'Top-up buffer', value: `${formatPcaTrac(snapshot.topUpBufferTrac)} TRAC` },
-          { id: 'per-epoch', label: 'TRAC per epoch', value: `${formatWeiToTrac(snapshot.baseEpochAllowance)} TRAC` },
+          { id: 'buffer', label: 'Top-up buffer', value: `${formatPcaTrac(snapshot.topUpBufferTrac)} TRAC`, tooltip: 'TRAC the owner added on top of the commitment. Publishes use it once the current billing period’s share of the committed TRAC runs out.' },
+          { id: 'per-epoch', label: 'Per-epoch allowance', value: `${formatWeiToTrac(snapshot.baseEpochAllowance)} TRAC`, tooltip: 'The committed TRAC is split into equal shares, one for each billing period. A billing period is an epoch long, counted from when the PCA was created. This is one period’s share.' },
           // GAP-4/5 — the precise current-epoch remaining allowance (extended snapshot,
           // best-effort). Display only — the coverage spine stays the coarse proxy (#1349
           // is a separate decision). Omitted when the extended read didn't return it.
@@ -236,10 +214,12 @@ function DetailBody({
                 id: 'remaining',
                 label: 'Remaining this epoch',
                 value: `${formatPcaTrac(snapshot.remainingAllowanceTrac)} TRAC`,
-                tooltip: snapshot.currentEpoch != null ? `Current epoch ${snapshot.currentEpoch}` : undefined,
+                tooltip: snapshot.currentEpoch != null
+                  ? `What publishes can still use now: what’s left of this billing period’s share, plus the top-up buffer. Current epoch ${snapshot.currentEpoch}.`
+                  : 'What publishes can still use now: what’s left of this billing period’s share, plus the top-up buffer.',
               }]
             : []),
-          { id: 'wallets', label: 'Publishing wallets', value: `${snapshot.agentCount} / 100` },
+          { id: 'wallets', label: 'Publishing wallets', value: `${snapshot.agentCount} / 100`, tooltip: 'Wallets approved to publish with this PCA, out of 100.' },
           { id: 'expires', label: 'Expires in', value: formatExpiryTileValue(snapshot.expiresAtTimestamp), tooltip: `Expiry epoch ${snapshot.expiresAtEpoch}` },
           // GAP-4/5 — the node this PCA directs publishing-reward weight to. '0' = none set;
           // ABSENT (read-failed) → omit, never a false value.
@@ -257,7 +237,7 @@ function DetailBody({
         <span className="v10-pca-card-owner-lbl">Owner</span>
         <WalletRow
           address={snapshot.owner}
-          trailing={explorer ? <a className="v10-pca-card-explorer" href={`${explorer}/address/${snapshot.owner}`} target="_blank" rel="noreferrer" aria-label="View owner on explorer">↗</a> : undefined}
+          trailing={explorer ? <a className="v10-pca-text-link" href={`${explorer}/address/${snapshot.owner}`} target="_blank" rel="noreferrer" aria-label="View owner on explorer"><ExternalMark /></a> : undefined}
         />
       </div>
 

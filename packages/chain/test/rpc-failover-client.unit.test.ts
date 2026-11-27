@@ -2,18 +2,18 @@
 /**
  * `RpcFailoverClient` — direct unit coverage of the pure per-endpoint transport
  * mechanism extracted from `EVMChainAdapterBase` (#1336). Constructs the module
- * DIRECTLY (PLAN §0 D1: two injected capabilities — a `getEndpoints` thunk
- * returning `{ provider, rpcUrl }[]` + a `signPopulated` callback) with
+ * DIRECTLY (PLAN §0 D1: injected capabilities — a `getEndpoints` thunk
+ * returning `{ provider, rpcUrl }[]` + a `prepareForSigning` hook) with
  * hand-made provider/contract/signer doubles
  * — no `as any` reach through protected adapter seams (the testability win the
  * issue asks for).
  *
  * This file is the PLAN §0 D9 assertion-PORT checklist. Its load-bearing focus is
- * the WRITE transport (`broadcast` / `getReceipt` / `populateAndSign`), whose
+ * the WRITE transport (`broadcast` / `getReceipt` / `prepareTransaction`), whose
  * unit coverage has no other home once the loops leave the base, plus the
  * `resolveCapMs` policy matrix:
  *
- *   - resolveCapMs → the three policies × {single,multi} cap matrix (exhaustive).
+ *   - resolveCapMs → the named policies × {single,multi} cap matrix (exhaustive).
  *   - read / readContract → the matrix APPLIED (multi caps + fails over, single
  *     uncapped) + the view BAD_DATA classifier (non-retryable, surfaces directly)
  *     + a custom-classifier override. (The detailed control-flow + observability
@@ -24,18 +24,23 @@
  *     a full URL), and a non-retryable error propagating at once.
  *   - getReceipt → the `sawNonErrorResponse` / null path, and
  *     `RPC_RECEIPT_LOOKUP_FAILED` kept DISTINCT from `RPC_ENDPOINTS_EXHAUSTED`.
- *   - populateAndSign → the #870 signer-address propagation through the
- *     `signPopulated` callback, the retryable-estimate rethrow ONLY when more
- *     providers remain, and a decoded-revert (non-retryable) propagating at once.
+ *   - prepareTransaction → the #870 signer-address propagation through the
+ *     `prepareForSigning` hook to the returned prepared transaction, the
+ *     retryable-estimate rethrow ONLY when more providers remain, and a
+ *     decoded-revert (non-retryable) propagating at once. It never signs.
  *
  * Bare-object doubles reject synchronously, so (like the sibling loop test) they
  * prove CONTROL FLOW, not the no-backoff immediacy property — that is covered
  * over REAL providers in multi-rpc-{read,write}-failover.test.ts.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { resolveCapMs, type SignPopulatedFn } from '../src/rpc-failover-client.js';
+import {
+  createRpcReadDescriptor,
+  resolveCapMs,
+} from '../src/rpc-failover-client.js';
 import {
   RPC_READ_STALL_TIMEOUT_MS,
+  RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS,
   RPC_LOG_SCAN_TIMEOUT_MS,
   RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
   RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
@@ -48,7 +53,8 @@ import {
   isRetryableRpcError,
 } from '../src/evm-adapter-rpc.js';
 import { RpcRequestGovernorQueueFullError } from '../src/rpc-request-governor.js';
-import { recorder, retryable429, NEVER_SIGN, makeClient } from './rpc-failover-test-helpers.js';
+import { ContextGraphAuthorityIndexBootstrapUnavailableError } from '../src/context-graph-authority-index-snapshot.js';
+import { recorder, retryable429, NEVER_PREPARE, makeClient } from './rpc-failover-test-helpers.js';
 
 const callExceptionErr = (msg = 'execution reverted: TooLowAllowance') => {
   const e = new Error(msg); (e as any).code = 'CALL_EXCEPTION'; return e;
@@ -74,6 +80,12 @@ const URLS = ['https://primary.example', 'https://backup.example'];
 afterEach(() => { _resetRpcFailoverStatsForTest(); });
 
 describe('RPC retry disposition', () => {
+  it('keeps core bootstrap failures retry-later even when causes mention network timeouts and 503', () => {
+    const error = new ContextGraphAuthorityIndexBootstrapUnavailableError(new Error('network timeout 503'));
+    expect(classifyRpcRetryDisposition(error)).toBe('retry-later');
+    expect(isRetryableRpcError(error)).toBe(true);
+    expect(isRpcEndpointFailoverEligible(error)).toBe(false);
+  });
   it('keeps local saturation caller-retryable but excludes it from endpoint failover', () => {
     const queueFull = new RpcRequestGovernorQueueFullError(1);
     expect(classifyRpcRetryDisposition(queueFull)).toBe('retry-later');
@@ -84,7 +96,7 @@ describe('RPC retry disposition', () => {
   });
 });
 
-// ── resolveCapMs — the named timeout-policy matrix (exhaustive 3×2) ──────────
+// ── resolveCapMs — the named timeout-policy matrix ───────────────────────────
 describe('resolveCapMs — the named timeout-policy matrix (PLAN §3.2)', () => {
   it('pointRead: multi-RPC caps at RPC_READ_STALL_TIMEOUT_MS, single-RPC is uncapped (#894)', () => {
     expect(resolveCapMs('pointRead', 2)).toBe(RPC_READ_STALL_TIMEOUT_MS);
@@ -97,6 +109,11 @@ describe('resolveCapMs — the named timeout-policy matrix (PLAN §3.2)', () => 
     expect(resolveCapMs('wideLogScan', 1)).toBeUndefined();
   });
 
+  it('durablePagedLogScan: aggregate provider attempts are uncapped', () => {
+    expect(resolveCapMs('durablePagedLogScan', 1)).toBeUndefined();
+    expect(resolveCapMs('durablePagedLogScan', 2)).toBeUndefined();
+  });
+
   it('watchdog policies cap single-RPC attempts with the matching point/log deadline', () => {
     expect(resolveCapMs('watchdogPointRead', 1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
     expect(resolveCapMs('watchdogPointRead', 2)).toBe(RPC_READ_STALL_TIMEOUT_MS);
@@ -107,6 +124,59 @@ describe('resolveCapMs — the named timeout-policy matrix (PLAN §3.2)', () => 
   it('failOpenFundingRead: caps EVERY attempt incl. single-RPC at RPC_READ_STALL_TIMEOUT_MS', () => {
     expect(resolveCapMs('failOpenFundingRead', 2)).toBe(RPC_READ_STALL_TIMEOUT_MS);
     expect(resolveCapMs('failOpenFundingRead', 1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
+  });
+
+  it('securityGatePointRead: caps multi-RPC attempts below the outer gate but leaves single-RPC to it', () => {
+    expect(resolveCapMs('securityGatePointRead', 2)).toBe(RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS);
+    expect(resolveCapMs('securityGatePointRead', 4)).toBe(RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS);
+    expect(resolveCapMs('securityGatePointRead', 1)).toBeUndefined();
+  });
+});
+
+describe('RpcReadDescriptor — explicit read attribution ownership', () => {
+  it('rejects malformed human labels before dispatching a provider read', () => {
+    const read = vi.fn(async () => 'OK');
+    const client = makeClient([{ read }], ['https://health.example']);
+    for (const label of ['', '   ', 42]) {
+      expect(() => client.read({ label, consumer: 'stable.consumer' } as never, (p: any) => p.read()))
+        .toThrow('RPC read label must be a non-empty string');
+    }
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed attribution owners before dispatching a provider read', () => {
+    const read = vi.fn(async () => 'OK');
+    const client = makeClient([{ read }], ['https://health.example']);
+    for (const consumer of ['', '   ', 42]) {
+      expect(() => client.read({ label: 'health probe', consumer } as never, (p: any) => p.read()))
+        .toThrow('RPC read consumer must be a non-empty string or null');
+    }
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('freezes the human label and consumer owner together', () => {
+    const descriptor = createRpcReadDescriptor('human read label', 'stable.consumer');
+
+    expect(descriptor).toEqual({ label: 'human read label', consumer: 'stable.consumer' });
+    expect(Object.isFrozen(descriptor)).toBe(true);
+  });
+
+  it('supports a deliberate unattributed read', () => {
+    const descriptor = createRpcReadDescriptor('health probe', null);
+    const provider = { read: recorder(async () => 'OK') };
+    const client = makeClient([provider], ['https://health.example']);
+
+    return expect(client.read(descriptor, (p: any) => p.read())).resolves.toBe('OK');
+  });
+
+  it('rejects a compatibility option that conflicts with the descriptor owner', () => {
+    const descriptor = createRpcReadDescriptor('human read label', 'stable.consumer');
+    const provider = { read: recorder(async () => 'OK') };
+    const client = makeClient([provider], ['https://health.example']);
+
+    expect(() => client.read(descriptor, (p: any) => p.read(), {
+      rpcUsageConsumer: 'different.consumer',
+    })).toThrow(/consumer conflict/);
   });
 });
 
@@ -149,6 +219,32 @@ describe('RpcFailoverClient.read / readContract — policy matrix applied + view
     await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS + 1_500);
     expect(await p).toBe('BACKUP');
     expect(slow.calls).toHaveLength(1);
+    expect(fast.calls).toHaveLength(1);
+  });
+
+  it('readContract security gate fails over before its aborting 2.5s caller deadline', async () => {
+    vi.useFakeTimers();
+    const stalled = recorder(() => new Promise<string>(() => {}));
+    const fast = recorder(async () => 'BACKUP');
+    const p0 = {}; const p1 = {};
+    const contract = {
+      connect: (provider: unknown) => ({ view: provider === p0 ? stalled : fast }),
+    } as any;
+    const client = makeClient([p0, p1], URLS);
+    const caller = new AbortController();
+    setTimeout(() => caller.abort(new Error('security gate deadline')), 2_500);
+
+    const result = client.readContract(
+      'live authority gate',
+      contract,
+      (c: any) => c.view(),
+      { policy: 'securityGatePointRead', signal: caller.signal },
+    );
+    await vi.advanceTimersByTimeAsync(RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS + 10);
+
+    await expect(result).resolves.toBe('BACKUP');
+    expect(caller.signal.aborted).toBe(false);
+    expect(stalled.calls).toHaveLength(1);
     expect(fast.calls).toHaveLength(1);
   });
 
@@ -401,7 +497,7 @@ describe('RpcFailoverClient.getReceipt — sawNonErrorResponse/null vs RPC_RECEI
     expect(thrown.code).not.toBe('RPC_ENDPOINTS_EXHAUSTED'); // the receipt poll must tell these apart
     expect(thrown.txHash).toBe('0xCAFE');
     expect(thrown.message).toContain('0xCAFE');
-    expect(thrown.message).not.toContain('https://'); // host-only, symmetric with broadcast/populateAndSign
+    expect(thrown.message).not.toContain('https://'); // host-only, symmetric with broadcast/prepareTransaction
   });
 
   it('a non-retryable receipt error propagates AT ONCE (backup untouched)', async () => {
@@ -415,8 +511,8 @@ describe('RpcFailoverClient.getReceipt — sawNonErrorResponse/null vs RPC_RECEI
   });
 });
 
-// ── populateAndSign (write transport) ────────────────────────────────────────
-describe('RpcFailoverClient.populateAndSign — #870 signer propagation + estimate failover', () => {
+// ── prepareTransaction (write transport) ─────────────────────────────────────
+describe('RpcFailoverClient.prepareTransaction — #870 signer propagation + estimate failover', () => {
   const SIGNER_ADDR = '0x' + 'cd'.repeat(20);
   // A signer double whose `.connect(provider)` returns a NEW object carrying the
   // SAME address (mirrors a Wallet reconnected to a provider, same key) + the
@@ -441,14 +537,14 @@ describe('RpcFailoverClient.populateAndSign — #870 signer propagation + estima
         },
       }),
     } as any;
-    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
-    const client = makeClient([primary, backup], URLS, signPopulated as SignPopulatedFn);
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
+    const client = makeClient([primary, backup], URLS, prepareForSigning);
 
-    await expect(client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'V10 publish'))
+    await expect(client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'V10 publish'))
       .rejects.toBe(queueFull);
     expect(primaryPopulate.calls).toHaveLength(1);
     expect(backupPopulate.calls).toEqual([]);
-    expect(signPopulated.calls).toEqual([]);
+    expect(prepareForSigning.calls).toEqual([]);
   });
 
   it('propagates local queue saturation during buffered estimation without signing or failing over', async () => {
@@ -468,10 +564,10 @@ describe('RpcFailoverClient.populateAndSign — #870 signer propagation + estima
         },
       }),
     } as any;
-    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
-    const client = makeClient([primary, backup], URLS, signPopulated as SignPopulatedFn);
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
+    const client = makeClient([primary, backup], URLS, prepareForSigning);
 
-    await expect(client.populateAndSign(
+    await expect(client.prepareTransaction(
       contract,
       'doWrite',
       [],
@@ -482,22 +578,23 @@ describe('RpcFailoverClient.populateAndSign — #870 signer propagation + estima
     expect(populateTransaction.calls).toHaveLength(1);
     expect(primaryEstimate.calls).toHaveLength(1);
     expect(backupEstimate.calls).toEqual([]);
-    expect(signPopulated.calls).toEqual([]);
+    expect(prepareForSigning.calls).toEqual([]);
   });
 
-  it('#870: the per-provider-reconnected signer (same address, bound to the active provider) is what signs', async () => {
+  it('#870: the per-provider-reconnected signer (same address, bound to the active provider) is what prepares and is returned to sign', async () => {
     const populateTransaction = recorder(async () => ({ to: '0xTO', data: '0x' }));
     const contract = { connect: () => ({ doWrite: { populateTransaction } }) } as any;
-    const signPopulated = recorder(async (_s: unknown, _pop: unknown) => ({ signedTx: '0xS', txHash: '0xH' }));
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
     const signer = makeSigner();
     const providerObj = {};
-    const client = makeClient([providerObj], ['https://only.example'], signPopulated as SignPopulatedFn);
+    const client = makeClient([providerObj], ['https://only.example'], prepareForSigning);
 
-    await expect(client.populateAndSign(contract, 'doWrite', [42n], signer, 'V10 publish'))
-      .resolves.toEqual({ signedTx: '0xS', txHash: '0xH' });
+    const prepared = await client.prepareTransaction(contract, 'doWrite', [42n], signer, 'V10 publish');
+    expect(prepared.transaction).toMatchObject({ to: '0xTO', nonce: 7 });
     expect(signer.connect.calls[0][0]).toBe(providerObj); // reconnected to providers[i]
-    const passedSigner: any = signPopulated.calls[0][0];
-    expect(passedSigner.address).toBe(SIGNER_ADDR); // signed by the right wallet (no mid-flight rotation)
+    const passedSigner: any = prepareForSigning.calls[0][0];
+    expect(prepared.signer).toBe(passedSigner); // the caller signs with the signer that prepared it
+    expect(passedSigner.address).toBe(SIGNER_ADDR); // the right wallet (no mid-flight rotation)
     expect(passedSigner.boundTo).toBe(providerObj);  // bound to the active provider
     expect(getRpcFailoverStats().servedByEndpointHost).toEqual({ 'only.example': 1 });
   });
@@ -511,60 +608,192 @@ describe('RpcFailoverClient.populateAndSign — #870 signer propagation + estima
       return 21_000n;
     });
     const contract = { connect: () => ({ doWrite: { populateTransaction, estimateGas } }) } as any;
-    const signPopulated = recorder(async (_s: unknown, pop: any) => ({ signedTx: '0xS', txHash: '0xH', g: pop.gasLimit }));
-    const client = makeClient([{}, {}], URLS, signPopulated as SignPopulatedFn);
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
+    const client = makeClient([{}, {}], URLS, prepareForSigning);
 
-    const res = await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'V10 publish', { gasLimitBufferBps: 1_000 });
-    expect(res).toMatchObject({ signedTx: '0xS', txHash: '0xH' });
+    const res = await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'V10 publish', { gasLimitBufferBps: 1_000 });
+    expect(res.transaction).toMatchObject({ to: '0xTO', nonce: 7, gasLimit: 23_100n });
     expect(estimateGas.calls).toHaveLength(2); // primary threw 429 → failed over → backup estimated
-    expect(signPopulated.calls).toHaveLength(1); // signed exactly once (on the backup)
-    const [, populated] = signPopulated.calls[0] as [unknown, any];
+    expect(prepareForSigning.calls).toHaveLength(1); // signer-side preparation exactly once (on the backup)
+    const [, populated] = prepareForSigning.calls[0] as [unknown, any];
     expect(populated.gasLimit).toBe(23_100n); // 21000 * (10000+1000) / 10000 — buffer applied
   });
 
-  it('on the LAST provider a retryable estimate error does NOT rethrow — falls back to an unbuffered sign (rethrow only if more providers)', async () => {
+  it('a least headroom alone asks for the buffered estimate and is added to it', async () => {
+    const populateTransaction = recorder(async () => ({ to: '0xTO', data: '0x' })); // no gasLimit → estimate runs
+    const estimateGas = recorder(async () => 319_732n);
+    const contract = { connect: () => ({ doWrite: { populateTransaction, estimateGas } }) } as any;
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
+    const client = makeClient([{}], ['https://only.example'], prepareForSigning);
+
+    await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'unit write', { gasLimitMinBuffer: 2_500_000n });
+
+    expect(estimateGas.calls).toHaveLength(1);
+    const [, populated] = prepareForSigning.calls[0] as [unknown, any];
+    expect(populated.gasLimit).toBe(2_819_732n);
+  });
+
+  it('prepares with the larger of the proportional and the least headroom', async () => {
+    const prepare = async (estimate: bigint) => {
+      const populateTransaction = recorder(async () => ({ to: '0xTO', data: '0x' }));
+      const contract = { connect: () => ({ doWrite: { populateTransaction, estimateGas: async () => estimate } }) } as any;
+      const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
+      const client = makeClient([{}], ['https://only.example'], prepareForSigning);
+      await client.prepareTransaction(
+        contract, 'doWrite', [], makeSigner(), 'unit write',
+        { gasLimitBufferBps: 5_000, gasLimitMinBuffer: 2_500_000n },
+      );
+      return (prepareForSigning.calls[0] as [unknown, any])[1].gasLimit;
+    };
+
+    expect(await prepare(1_000_000n)).toBe(3_500_000n); // +2.5M: half the estimate is less
+    expect(await prepare(6_000_000n)).toBe(9_000_000n); // +50%: more than 2.5M
+  });
+
+  it('leaves a gas limit the populated transaction already carries, and skips the estimate', async () => {
+    const populateTransaction = recorder(async () => ({ to: '0xTO', data: '0x', gasLimit: 777_000n }));
+    const estimateGas = recorder(async () => 319_732n);
+    const contract = { connect: () => ({ doWrite: { populateTransaction, estimateGas } }) } as any;
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
+    const client = makeClient([{}], ['https://only.example'], prepareForSigning);
+
+    await client.prepareTransaction(
+      contract, 'doWrite', [], makeSigner(), 'unit write',
+      { gasLimitBufferBps: 5_000, gasLimitMinBuffer: 2_500_000n },
+    );
+
+    expect(estimateGas.calls).toEqual([]);
+    expect((prepareForSigning.calls[0] as [unknown, any])[1].gasLimit).toBe(777_000n);
+  });
+
+  it('on the LAST provider a retryable estimate error does NOT rethrow — falls back to an unbuffered preparation (rethrow only if more providers)', async () => {
     const populateTransaction = recorder(async () => ({ to: '0xTO', data: '0x' }));
     const estimateGas = recorder(async () => { throw retryable429(); });
     const contract = { connect: () => ({ doWrite: { populateTransaction, estimateGas } }) } as any;
-    const signPopulated = recorder(async (_s: unknown, _pop: unknown) => ({ signedTx: '0xS', txHash: '0xH' }));
-    const client = makeClient([{}], ['https://only.example'], signPopulated as SignPopulatedFn); // SINGLE provider
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
+    const client = makeClient([{}], ['https://only.example'], prepareForSigning); // SINGLE provider
 
     const warns: string[] = [];
     const origWarn = console.warn;
     console.warn = ((...a: unknown[]) => { warns.push(String(a[0])); }) as typeof console.warn;
     let res: any;
     try {
-      res = await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'V10 publish', { gasLimitBufferBps: 1_000 });
+      res = await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'V10 publish', { gasLimitBufferBps: 1_000 });
     } finally {
       console.warn = origWarn;
     }
-    expect(res).toEqual({ signedTx: '0xS', txHash: '0xH' }); // STILL signed (fell back, no rethrow)
+    expect(res.transaction).toMatchObject({ to: '0xTO', nonce: 7 }); // STILL prepared (fell back, no rethrow)
     expect(estimateGas.calls).toHaveLength(1); // tried once on the only provider
-    const [, populated] = signPopulated.calls[0] as [unknown, any];
-    expect(populated.gasLimit).toBeUndefined(); // no buffer (fell back to ethers' own estimate at sign time)
+    const [, populated] = prepareForSigning.calls[0] as [unknown, any];
+    expect(populated.gasLimit).toBeUndefined(); // no buffer (falls back to ethers' own estimate in the signer-side preparation)
     expect(warns.some((w) => w.includes('buffered gas estimation failed'))).toBe(true); // left a breadcrumb
   });
 
-  it('a decoded revert (non-retryable) propagates AT ONCE — never signs, backup never prepared', async () => {
+  it('a deterministic CALL_EXCEPTION from the buffered estimate is final — no duplicate estimate/nonce population', async () => {
+    // RandomSampling surfaces the expected idle outcome as this exact shape. The buffered
+    // estimate has already executed the call and received a deterministic contract answer;
+    // signing an unbuffered request would make ethers issue the same estimate plus a nonce read.
+    const noEligible = callExceptionErr(
+      'execution reverted: NoEligibleContextGraph()',
+    );
+    const primary = {};
+    const backup = {};
+    const primaryPopulate = recorder(async () => ({ to: '0xTO', data: '0x' }));
+    const backupPopulate = recorder(async () => ({ to: '0xTO', data: '0x' }));
+    const primaryEstimate = recorder(async () => { throw noEligible; });
+    const backupEstimate = recorder(async () => 21_000n);
+    const contract = {
+      connect: (rpcSigner: unknown) => ({
+        createChallenge: {
+          populateTransaction: (rpcSigner as { boundTo?: unknown }).boundTo === primary
+            ? primaryPopulate
+            : backupPopulate,
+          estimateGas: (rpcSigner as { boundTo?: unknown }).boundTo === primary
+            ? primaryEstimate
+            : backupEstimate,
+        },
+      }),
+    } as any;
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
+    const client = makeClient([primary, backup], URLS, prepareForSigning);
+    const warns: string[] = [];
+    const origWarn = console.warn;
+    console.warn = ((...args: unknown[]) => { warns.push(String(args[0])); }) as typeof console.warn;
+    try {
+      await expect(client.prepareTransaction(
+        contract,
+        'createChallenge',
+        [],
+        makeSigner(),
+        'create random-sampling challenge',
+        { gasLimitBufferBps: 5_000 },
+      )).rejects.toBe(noEligible);
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(primaryPopulate.calls).toHaveLength(1);
+    expect(primaryEstimate.calls).toHaveLength(1);
+    expect(backupPopulate.calls).toEqual([]); // deterministic result never fails over
+    expect(backupEstimate.calls).toEqual([]);
+    expect(prepareForSigning.calls).toEqual([]); // therefore no signer estimate or nonce read
+    expect(warns).toEqual([]); // not mislabeled as a degraded unbuffered send
+  });
+
+  it.each([
+    ['plain deterministic application error', new Error('estimate policy rejected')],
+    ['UNPREDICTABLE_GAS_LIMIT compatibility error', Object.assign(
+      new Error('cannot estimate gas'),
+      { code: 'UNPREDICTABLE_GAS_LIMIT' },
+    )],
+  ])('preserves the unbuffered fallback for %s', async (_label, estimateError) => {
+    // The short-circuit is intentionally code-exact. Other non-failover errors retain the
+    // compatibility behavior: the signer-side preparation owns ethers' one unbuffered estimate+nonce attempt.
+    const populateTransaction = recorder(async () => ({ to: '0xTO', data: '0x' }));
+    const estimateGas = recorder(async () => { throw estimateError; });
+    const contract = {
+      connect: () => ({ doWrite: { populateTransaction, estimateGas } }),
+    } as any;
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
+    const client = makeClient([{}], ['https://only.example'], prepareForSigning);
+    const origWarn = console.warn;
+    console.warn = (() => undefined) as typeof console.warn;
+    try {
+      await expect(client.prepareTransaction(
+        contract,
+        'doWrite',
+        [],
+        makeSigner(),
+        'V10 publish',
+        { gasLimitBufferBps: 1_000 },
+      )).resolves.toMatchObject({ transaction: { to: '0xTO', nonce: 7 } });
+    } finally {
+      console.warn = origWarn;
+    }
+    expect(estimateGas.calls).toHaveLength(1);
+    expect(prepareForSigning.calls).toHaveLength(1);
+  });
+
+  it('a decoded revert (non-retryable) propagates AT ONCE — no signer-side preparation, backup never prepared', async () => {
     const revert = callExceptionErr('execution reverted: TooLowAllowance');
     const populateTransaction = recorder(async () => { throw revert; });
     const contract = { connect: () => ({ doWrite: { populateTransaction } }) } as any;
-    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
-    const client = makeClient([{}, {}], URLS, signPopulated as SignPopulatedFn);
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
+    const client = makeClient([{}, {}], URLS, prepareForSigning);
 
-    await expect(client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'V10 publish'))
+    await expect(client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'V10 publish'))
       .rejects.toBe(revert); // the ORIGINAL revert, propagated to the latch owner — not masked as exhaustion
     expect(populateTransaction.calls).toHaveLength(1); // only the primary attempt; no failover
-    expect(signPopulated.calls).toEqual([]); // never signed
+    expect(prepareForSigning.calls).toEqual([]); // no nonce or fee read either
   });
 
   it('all endpoints retryable-exhausted on preparation → RPC_ENDPOINTS_EXHAUSTED with a HOST-ONLY aggregate message', async () => {
     const populateTransaction = recorder(async () => { throw retryable429(); });
     const contract = { connect: () => ({ doWrite: { populateTransaction } }) } as any;
-    const client = makeClient([{}, {}], URLS, NEVER_SIGN);
+    const client = makeClient([{}, {}], URLS, NEVER_PREPARE);
 
     let thrown: any;
-    try { await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'V10 publish'); } catch (e) { thrown = e; }
+    try { await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'V10 publish'); } catch (e) { thrown = e; }
     expect(thrown.code).toBe('RPC_ENDPOINTS_EXHAUSTED');
     expect(thrown.rpcUrls).toEqual(URLS);
     expect(thrown.message).toContain('primary.example'); // host-only aggregate
@@ -586,7 +815,7 @@ describe('RpcFailoverClient — write-path per-attempt timeout (hung provider, f
 
   const hung = <T>() => recorder(() => new Promise<T>(() => {})); // never settles
   // Minimal signer double: `.connect(p)` yields a per-provider signer carrying the
-  // same address (a reconnected Wallet) — enough for populateAndSign to sign.
+  // same address (a reconnected Wallet) — enough for prepareTransaction.
   const SIGNER_ADDR = '0x' + 'ef'.repeat(20);
   const makeSigner = () => ({ address: SIGNER_ADDR, connect: () => ({ address: SIGNER_ADDR }) }) as any;
 
@@ -642,7 +871,7 @@ describe('RpcFailoverClient — write-path per-attempt timeout (hung provider, f
     expect(only.getTransactionReceipt.calls).toHaveLength(1);
   });
 
-  it('populateAndSign: a HUNG populateTransaction aborts at RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS and fails over to sign on the backup', async () => {
+  it('prepareTransaction: a HUNG populateTransaction aborts at RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS and fails over to prepare on the backup', async () => {
     vi.useFakeTimers();
     let attempt = 0;
     const populateTransaction = recorder(() => {
@@ -652,13 +881,31 @@ describe('RpcFailoverClient — write-path per-attempt timeout (hung provider, f
         : Promise.resolve({ to: '0xTO', data: '0x' });  // backup populates
     });
     const contract = { connect: () => ({ doWrite: { populateTransaction } }) } as any;
-    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
-    const client = makeClient([{}, {}], URLS, signPopulated as SignPopulatedFn);
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
+    const client = makeClient([{}, {}], URLS, prepareForSigning);
 
-    const p = client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'V10 publish');
+    const p = client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'V10 publish');
     await vi.advanceTimersByTimeAsync(RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS + 1_000);
-    await expect(p).resolves.toEqual({ signedTx: '0xS', txHash: '0xH' });
+    await expect(p).resolves.toMatchObject({ transaction: { to: '0xTO', nonce: 7 } });
     expect(populateTransaction.calls).toHaveLength(2); // primary hung → timed out → backup populated
-    expect(signPopulated.calls).toHaveLength(1); // signed exactly once, on the backup (single-sign invariant holds)
+    expect(prepareForSigning.calls).toHaveLength(1); // signer-side preparation once, on the backup
+  });
+
+  it('prepareTransaction: a HUNG signer-side preparation (nonce/fee reads) aborts at the same deadline and fails over', async () => {
+    vi.useFakeTimers();
+    const populateTransaction = recorder(async () => ({ to: '0xTO', data: '0x' }));
+    const contract = { connect: () => ({ doWrite: { populateTransaction } }) } as any;
+    let attempt = 0;
+    const prepareForSigning = recorder((_s: unknown, pop: any) => {
+      attempt += 1;
+      return attempt === 1 ? new Promise<any>(() => {}) : Promise.resolve({ ...pop, nonce: 7 });
+    });
+    const client = makeClient([{}, {}], URLS, prepareForSigning);
+
+    const p = client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'V10 publish');
+    await vi.advanceTimersByTimeAsync(RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS + 1_000);
+    await expect(p).resolves.toMatchObject({ transaction: { to: '0xTO', nonce: 7 } });
+    expect(populateTransaction.calls).toHaveLength(2);
+    expect(prepareForSigning.calls).toHaveLength(2); // the primary's stalled read was cut off, the backup prepared
   });
 });

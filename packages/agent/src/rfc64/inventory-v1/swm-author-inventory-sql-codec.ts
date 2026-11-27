@@ -1,14 +1,14 @@
 import type { SQLInputValue } from 'node:sqlite';
 
 import {
-  canonicalizeSwmAuthorInventoryRowsBytesV1,
-  parseCanonicalSwmAuthorInventoryRowsV1,
+  snapshotSwmAuthorInventoryRowV1,
   type Digest32V1,
   type SwmAuthorInventoryRowV1,
 } from '@origintrail-official/dkg-core';
 
 import type {
   EncodedSwmAuthorInventoryKeyV1,
+  PreparedMergeSwmAuthorInventoryCommitV1,
   PreparedSwmAuthorInventoryCommitV1,
 } from './swm-author-inventory-commit-plan.js';
 import {
@@ -28,7 +28,7 @@ export function swmAuthorKeyParametersV1(
 }
 
 export function swmAuthorHeadParametersV1(
-  head: PreparedSwmAuthorInventoryCommitV1,
+  head: PreparedSwmAuthorInventoryCommitV1 | PreparedMergeSwmAuthorInventoryCommitV1,
 ): SqlParametersV1 {
   const payload = head.snapshot.head.payload;
   return {
@@ -77,10 +77,10 @@ export function decodeStoredSwmAuthorInventoryRowV1(
     expiresAt: row.expires_at_u64be === null
       ? null
       : sqlBlobToDecimalU64V1(row.expires_at_u64be),
-  } as SwmAuthorInventoryRowV1;
-  return parseCanonicalSwmAuthorInventoryRowsV1(
-    canonicalizeSwmAuthorInventoryRowsBytesV1([decoded]),
-  )[0]!;
+  };
+  // This fresh record contains only scalar values copied from typed SQL columns.
+  // Core owns complete wire validation, including Unicode and exact byte limits.
+  return snapshotSwmAuthorInventoryRowV1(decoded);
 }
 
 export function assertBoundedSqlBlobV1(

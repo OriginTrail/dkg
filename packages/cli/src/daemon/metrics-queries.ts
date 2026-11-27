@@ -1,4 +1,5 @@
 import { DKG_ONTOLOGY, sparqlIri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import type { StoreCountSnapshot } from '@origintrail-official/dkg-node-ui';
 
 // Canonical SPARQL + result parsing for the daemon's metrics reads.
 //
@@ -23,14 +24,170 @@ const CONTEXT_GRAPH_RESERVED_SUFFIXES = [
 ] as const;
 const WALLET_SCOPED_CONTEXT_GRAPH_RE = /^0x[a-fA-F0-9]{40}\/.+$/;
 
+// sparql-scan-allow: R1 -- exact low-frequency store reconciliation must count the default graph
+// sparql-scan-allow: R2 -- exact low-frequency store reconciliation must count every named graph
+const TOTAL_TRIPLES_PATTERN = '{ ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } }';
+
 /**
- * Total triples across the default graph and all named graphs. Run on the 30s
- * metrics-collector cadence via `getTotalTriples` (see the metrics source in
- * `lifecycle.ts`). It is the heaviest read the collector issues and the one the
- * store-read-latency benchmark tracks.
+ * Total triples across the default graph and all named graphs. This standalone
+ * query remains the canonical benchmark probe; production metrics use the
+ * combined, low-frequency snapshot below.
  */
 export const GET_TOTAL_TRIPLES_SPARQL =
-  'SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }';
+  `SELECT (COUNT(*) AS ?c) WHERE { ${TOTAL_TRIPLES_PATTERN} }`;
+
+// RFC ka-metadata-trim (Phase 2 ⊕ / Phase 3 P3.1): the KC/KA counters are
+// predicate-based, not rdf:type-based — `generateKCMetadata` no longer
+// emits `rdf:type dkg:KnowledgeCollection` / `dkg:KnowledgeAsset` rows.
+//   - KC ≙ a subject carrying `dkg:status` (every KC row, old shape or
+//     new, has exactly one tentative/confirmed status quad).
+//   - KA ≙ read-both: a legacy `<ual>/<n>` token row carrying
+//     `dkg:partOf`, OR (collapsed shape, P3.1) a UAL subject carrying
+//     `dkg:status` + the entity pair with NO token row pointing at it
+//     (the NOT-EXISTS guard prevents double-counting old-shape rows,
+//     whose aggregate UAL node also carries `dkg:rootEntity`).
+/**
+ * One exact store-count snapshot. The subqueries intentionally preserve the
+ * established count semantics above; combining them removes four HTTP
+ * round-trips and gives the reconciler one all-or-nothing result.
+ */
+// sparql-scan-allow: R1 -- exact reconciliation runs at background priority at most once per five minutes
+// sparql-scan-allow: R2 -- exact reconciliation intentionally counts all admitted named graphs in one query
+export const GET_STORE_COUNT_SNAPSHOT_SPARQL = `SELECT ?totalTriples ?totalKCs ?totalKAs ?confirmedKCs ?tentativeKCs WHERE {
+  { SELECT (COUNT(*) AS ?totalTriples) WHERE {
+      # sparql-scan-allow: R1 -- exact background reconciliation counts the default graph at most once per five minutes
+      # sparql-scan-allow: R2 -- exact background reconciliation counts all admitted named graphs at most once per five minutes
+      ${TOTAL_TRIPLES_PATTERN}
+  } }
+  { SELECT (COUNT(DISTINCT ?kc) AS ?totalKCs) WHERE {
+      GRAPH ?g { ?kc <http://dkg.io/ontology/status> ?status }
+  } }
+  { SELECT (COUNT(DISTINCT ?ka) AS ?totalKAs) WHERE { GRAPH ?g {
+      { ?ka <http://dkg.io/ontology/partOf> ?kc }
+      UNION
+      { ?ka <http://dkg.io/ontology/status> ?status .
+        ?ka <http://dkg.io/ontology/rootEntity> ?rootEntity .
+        FILTER NOT EXISTS { ?token <http://dkg.io/ontology/partOf> ?ka } }
+  } } }
+  { SELECT (COUNT(DISTINCT ?kc) AS ?confirmedKCs) WHERE {
+      GRAPH ?g { ?kc <http://dkg.io/ontology/status> "confirmed" }
+  } }
+  { SELECT (COUNT(DISTINCT ?kc) AS ?tentativeKCs) WHERE {
+      GRAPH ?g { ?kc <http://dkg.io/ontology/status> "tentative" }
+  } }
+}`;
+
+const STORE_METRICS_HEALTH_SPARQL = 'ASK {}';
+export const STORE_COUNT_RECONCILE_INTERVAL_MS = 5 * 60_000;
+
+export interface StoreCountMetricsOptions {
+  /** Exact full-store reconciliation cadence. Defaults to five minutes. */
+  reconcileIntervalMs?: number;
+  /** Monotonic clock injection for deterministic tests. */
+  now?: () => number;
+}
+
+type MetricsCountQuery = (
+  sparql: string,
+  options: { source: string; priority: 'background' | 'health' },
+) => Promise<MetricsAgentQueryResult>;
+
+/** The normalized result contract returned by `DKGAgent.query()`. */
+interface MetricsAgentQueryResult {
+  readonly bindings: ReadonlyArray<Readonly<Record<string, string>>>;
+}
+
+interface ReconciledStoreCountSnapshot {
+  readonly value: StoreCountSnapshot;
+  readonly reconciledAt: number;
+}
+
+/**
+ * The store counts of the daemon's metrics source, read through the agent's
+ * query API with no context graph. Unscoped reads leave core-cache-marked
+ * graphs out, so after a core-cache snapshot job these count everything else.
+ */
+export function createStoreCountMetrics(
+  query: MetricsCountQuery,
+  options: StoreCountMetricsOptions = {},
+) {
+  const reconcileIntervalMs = finiteInterval(
+    options.reconcileIntervalMs,
+    STORE_COUNT_RECONCILE_INTERVAL_MS,
+    'reconcileIntervalMs',
+  );
+  const now = options.now ?? (() => performance.now());
+  let reconciled: ReconciledStoreCountSnapshot | null = null;
+
+  const reconcile = async (): Promise<StoreCountSnapshot> => {
+    try {
+      const result = await query(GET_STORE_COUNT_SNAPSHOT_SPARQL, {
+        source: 'daemon.metrics.storeCountReconcile',
+        priority: 'background',
+      });
+      const row = result.bindings[0];
+      if (!row) throw new Error('Store metrics reconciliation returned no binding');
+      const value: StoreCountSnapshot = Object.freeze({
+        totalTriples: parseRdfInt(row.totalTriples),
+        totalKCs: parseRdfInt(row.totalKCs),
+        totalKAs: parseRdfInt(row.totalKAs),
+        confirmedKCs: parseRdfInt(row.confirmedKCs),
+        tentativeKCs: parseRdfInt(row.tentativeKCs),
+      });
+      reconciled = { value, reconciledAt: now() };
+      return value;
+    } catch (error) {
+      reconciled = null;
+      throw error;
+    }
+  };
+
+  const assertHealthy = async (): Promise<void> => {
+    try {
+      const result = await query(STORE_METRICS_HEALTH_SPARQL, {
+        source: 'daemon.metrics.storeHealth',
+        priority: 'health',
+      });
+      if (result.bindings[0]?.result !== 'true') {
+        throw new Error('Store metrics health probe was denied');
+      }
+    } catch (error) {
+      reconciled = null;
+      throw error;
+    }
+  };
+
+  const read = async (): Promise<StoreCountSnapshot> => {
+    const current = reconciled;
+    if (current === null) return reconcile();
+    const refreshedAt = now();
+    if (
+      refreshedAt < current.reconciledAt
+      || refreshedAt - current.reconciledAt >= reconcileIntervalMs
+    ) {
+      // The collector persists this result for up to a day, so the collection
+      // that detects expiry must await the exact replacement rather than save
+      // the previous snapshot and strand the refreshed value in memory.
+      return reconcile();
+    }
+    // The collector owns the 30-second request cache and in-flight coalescing.
+    // Only reuse needs a probe; reconciliation itself establishes availability.
+    await assertHealthy();
+    return current.value;
+  };
+
+  return {
+    getStoreCountSnapshot: read,
+  };
+}
+
+function finiteInterval(value: number | undefined, fallback: number, label: string): number {
+  const interval = value ?? fallback;
+  if (!Number.isFinite(interval) || interval < 0) {
+    throw new RangeError(`${label} must be a finite non-negative number`);
+  }
+  return interval;
+}
 
 type MetricSubscriptionCandidate = {
   onChainId?: string;

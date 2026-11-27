@@ -1,4 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import {
+  activeDefaultStoreWorkPriority, StorePriorityScheduler, withDefaultStoreWorkPriority,
+  type StoreWorkPriority,
+} from '@origintrail-official/dkg-storage';
 
 import {
   RFC64_SWM_INVENTORY_MAX_CONFIRMED_TOMBSTONES_V1,
@@ -42,6 +46,56 @@ describe('RFC-64 SWM inventory shadow runtime', () => {
     expect(runtime.inFlightCount).toBe(0);
   });
 
+  it.each([
+    ['runExclusive', 'normal', 'background'],
+    ['runExclusive', 'background', 'normal'],
+    ['schedule', 'normal', 'background'],
+    ['schedule', 'background', 'normal'],
+  ] as const)('%s preserves %s-to-%s queued caller priority at actual store admission', async (entrypoint, blockerPriority, queuedPriority) => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    const scheduler = new StorePriorityScheduler();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const blockers = withDefaultStoreWorkPriority(blockerPriority, () => Array.from(
+      { length: RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1 },
+      (_, index) => runtime.runExclusive(`blocker-${index}`, async () => { await gate; }),
+    ));
+    const admissions: Array<{
+      before: StoreWorkPriority | undefined;
+      after: StoreWorkPriority | undefined;
+      normalInflight: number;
+      backgroundInflight: number;
+    }> = [];
+    const work = async (): Promise<void> => {
+      const before = activeDefaultStoreWorkPriority();
+      await Promise.resolve();
+      const after = activeDefaultStoreWorkPriority();
+      await scheduler.run(undefined, 'queued-catalog-read', async () => {
+        const { normalInflight, backgroundInflight } = scheduler.snapshot;
+        admissions.push({ before, after, normalInflight, backgroundInflight });
+      });
+    };
+    const queued = withDefaultStoreWorkPriority(queuedPriority, () => entrypoint === 'runExclusive'
+      ? runtime.runExclusive('queued', work)
+      : runtime.schedule('queued', work));
+    try {
+      expect(runtime.inFlightCount).toBe(RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1 + 1);
+      expect(admissions).toEqual([]);
+    } finally {
+      release();
+      await Promise.all(blockers);
+      await runtime.drain();
+      await queued;
+    }
+    expect(admissions).toEqual([{
+      before: queuedPriority,
+      after: queuedPriority,
+      normalInflight: queuedPriority === 'normal' ? 1 : 0,
+      backgroundInflight: queuedPriority === 'background' ? 1 : 0,
+    }]);
+    expect(runtime.inFlightCount).toBe(0);
+  });
+
   it('serializes one asset and lets a VM tombstone suppress a delayed SWM upsert', async () => {
     const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
     const assetKey = 'public-cg\0author\0assertion';
@@ -75,6 +129,43 @@ describe('RFC-64 SWM inventory shadow runtime', () => {
     expect(durableRows).toEqual(new Set());
     expect(runtime.isVmConfirmed(assetKey, '1', 'share-2')).toBe(false);
     expect(runtime.isVmConfirmed(assetKey, '2', 'share-1')).toBe(false);
+  });
+
+  it('returns each exclusive result and rejection without releasing the asset early', async () => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    const events: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const firstResult = { status: 'committed' } as const;
+    const first: Promise<typeof firstResult> = runtime.runExclusive('asset', async () => {
+      events.push('first-enter');
+      await gate;
+      events.push('first-exit');
+      return firstResult;
+    });
+    const failure = new Error('second failed');
+    const second = runtime.runExclusive('asset', async () => {
+      events.push('second');
+      throw failure;
+    });
+    const rejected = expect(second).rejects.toBe(failure);
+    const third: Promise<boolean> = runtime.runExclusive('asset', async () => {
+      events.push('third');
+      return false;
+    });
+    const unrelated = runtime.runExclusive('other-asset', async () => {
+      events.push('unrelated');
+      return 7;
+    });
+    await expect(unrelated).resolves.toBe(7);
+    expect(events).toEqual(['first-enter', 'unrelated']);
+    release();
+    await expect(first).resolves.toBe(firstResult);
+    await rejected;
+    await expect(third).resolves.toBe(false);
+    await runtime.drain();
+    expect(events).toEqual(['first-enter', 'unrelated', 'first-exit', 'second', 'third']);
+    expect(runtime.inFlightCount).toBe(0);
   });
 
   it('bounds retained VM tombstones while keeping the newest replay fence', () => {
@@ -171,19 +262,19 @@ describe('RFC-64 SWM inventory shadow runtime', () => {
 
   it('aborts admitted lifecycle waits so shutdown can drain promptly', async () => {
     const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    let settled: boolean | undefined;
     let markEntered!: () => void;
     const entered = new Promise<void>((resolve) => { markEntered = resolve; });
 
     expect(runtime.schedule('settling-asset', async () => {
       const signal = runtime.shutdownSignal;
       markEntered();
-      await new Promise<void>((resolve) => {
-        signal.addEventListener('abort', () => resolve(), { once: true });
-      });
+      settled = await runtime.waitForResponsibilitySettlement(8_000, signal);
     })).toBe(true);
     await entered;
 
     await runtime.closeAndDrain();
+    expect(settled).toBe(false);
     expect(runtime.inFlightCount).toBe(0);
   });
 });

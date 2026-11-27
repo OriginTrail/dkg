@@ -37,7 +37,7 @@ beforeEach(() => {
     tabs: [
       { id: 'dashboard', label: 'Dashboard', closable: false },
       { id: 'project:cg', label: 'My CG', closable: true },
-      { id: CONTEXT_GRAPH_PRIMER_TAB_ID, label: 'What is a Context Graph?', closable: true },
+      { id: CONTEXT_GRAPH_PRIMER_TAB_ID, label: 'What is a context graph?', closable: true },
     ],
     activeTabId: CONTEXT_GRAPH_PRIMER_TAB_ID,
   });

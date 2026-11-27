@@ -83,14 +83,15 @@ describe('RFC-64 finalized VM-set accumulator', () => {
     expectFailureCode(() => accumulator.append(row(10)), 'finalized-vm-set-state');
   });
 
-  it('matches a direct level-by-level tree for every boundary through 129 rows', () => {
-    for (let count = 0; count <= 129; count += 1) {
+  it.each(Array.from({ length: 130 }, (_, count) => count))(
+    'matches a direct level-by-level tree at %i rows',
+    (count) => {
       const rows = Array.from({ length: count }, (_, ordinal) => row(ordinal));
       expect(computeFinalizedVmSetEvidenceV1(SCOPE, rows).rootDigest).toBe(
         computeReferenceRoot(rows),
       );
-    }
-  }, 15_000);
+    },
+  );
 
   it('rejects duplicate, descending, and cross-lane rows instead of sorting them', () => {
     const duplicate = new FinalizedVmSetAccumulatorV1(SCOPE);

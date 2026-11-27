@@ -4,13 +4,13 @@ import {
   assertCanonicalDeterministicUalV1,
   assertSwmAuthorInventorySnapshotBindingV1,
   canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1,
-  canonicalizeSwmAuthorInventoryRowsBytesV1,
   compareSwmAuthorInventoryRowsV1,
   computeSwmAuthorInventoryScopeDigestV1,
   deriveSwmAuthorInventoryScopeFromHeadV1,
   parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1,
   type Digest32V1,
   type SwmAuthorInventorySnapshotV1,
+  type SwmAuthorInventoryRowV1,
 } from '@origintrail-official/dkg-core';
 
 import {
@@ -20,6 +20,7 @@ import {
 } from './swm-author-inventory-contracts.js';
 import type {
   EncodedSwmAuthorInventoryKeyV1,
+  PreparedMergeSwmAuthorInventoryCommitV1,
   PreparedSwmAuthorInventoryCommitV1,
 } from './swm-author-inventory-commit-plan.js';
 import {
@@ -42,6 +43,7 @@ import {
   swmAuthorRowParametersV1,
   type SqlRowV1,
 } from './swm-author-inventory-sql-codec.js';
+import { StoredSwmRowsCacheV1 } from './swm-author-inventory-stored-rows.js';
 
 type SwmInventoryErrorCodeV1 = SwmAuthorInventoryErrorCodeV1;
 
@@ -62,7 +64,12 @@ interface StoredSwmAuthorInventoryCommitV1 {
   readonly expectedHead: Uint8Array | null;
   readonly mutationKind: 'upsert' | 'remove';
   readonly mutationKaUal: string;
+  readonly replayMode: 'mutation' | 'exact-merge';
 }
+
+type PreparedReplayableSwmAuthorInventoryCommitV1 =
+  | PreparedSwmAuthorInventoryCommitV1
+  | PreparedMergeSwmAuthorInventoryCommitV1;
 
 type SwmAuthorInventoryCommitPlanV1 =
   | Readonly<{
@@ -81,11 +88,35 @@ type SwmAuthorInventoryCommitPlanV1 =
       current: StoredSwmAuthorInventoryCommitV1 | null;
     }>;
 
+/** Validate indexed identity before using a durable head as a discovery hint. */
+function decodeStoredHead(row: SqlRowV1, scopeDigest: Uint8Array, author: Uint8Array) {
+  const envelopeBytes = assertBoundedSqlBlobV1(
+    row.signed_head_envelope,
+    1,
+    4 * 1024,
+    'stored SWM author inventory head envelope',
+  );
+  const head = parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1(envelopeBytes);
+  const scope = deriveSwmAuthorInventoryScopeFromHeadV1(head.payload);
+  if (
+    computeSwmAuthorInventoryScopeDigestV1(scope) !== sqlBlobToDigest32V1(scopeDigest)
+    || head.payload.authorAddress !== sqlBlobToEvmAddressV1(author)
+    || head.objectDigest !== sqlBlobToDigest32V1(row.current_head_digest)
+    || head.payload.version !== sqlBlobToDecimalU64V1(row.inventory_version_u64be)
+    || head.payload.totalRows !== sqlBlobToDecimalU64V1(row.total_rows_u64be)
+    || head.payload.rowsDigest !== sqlBlobToDigest32V1(row.rows_digest)
+  ) {
+    throw new Error('stored head columns do not match the signed envelope');
+  }
+  return { head, scope };
+}
+
 /** Pure, shared state machine for normal apply and indeterminate-COMMIT recovery. */
 function planSwmAuthorInventoryCommitV1(
   current: StoredSwmAuthorInventoryCommitV1 | null,
-  next: PreparedSwmAuthorInventoryCommitV1,
+  next: PreparedReplayableSwmAuthorInventoryCommitV1,
   phase: 'apply' | 'resolve',
+  replayMode: StoredSwmAuthorInventoryCommitV1['replayMode'],
 ): SwmAuthorInventoryCommitPlanV1 {
   const actual = (
     current?.snapshot.head.objectDigest as Digest32V1 | undefined
@@ -100,7 +131,10 @@ function planSwmAuthorInventoryCommitV1(
         reason: 'same-head-state' as const,
       });
     }
-    if (!swmAuthorInventoryReplayEvidenceEqualV1(current, next)) {
+    if (
+      current.replayMode !== replayMode
+      || !swmAuthorInventoryReplayEvidenceEqualV1(current, next)
+    ) {
       return Object.freeze({
         state: 'conflict' as const,
         actual,
@@ -131,10 +165,63 @@ function planSwmAuthorInventoryCommitV1(
  * @internal
  */
 export class SwmAuthorInventoryPersistenceV1 {
+  private readonly verifiedRows = new StoredSwmRowsCacheV1();
+
   constructor(private readonly host: SwmAuthorInventoryPersistenceHostV1) {}
+
+  clearVerifiedRows(): void {
+    this.verifiedRows.clear();
+  }
 
   read(key: EncodedSwmAuthorInventoryKeyV1): SwmAuthorInventorySnapshotV1 | null {
     return this.readStored(key)?.snapshot ?? null;
+  }
+
+  /** Bounded local lookup only; it does not establish whole-inventory completeness. */
+  readRow(
+    key: EncodedSwmAuthorInventoryKeyV1,
+    kaUal: SwmAuthorInventoryRowV1['kaUal'],
+  ): Readonly<SwmAuthorInventoryRowV1> | null {
+    assertCanonicalDeterministicUalV1(kaUal);
+    const query = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.getSwmAuthorRow);
+    const stored = this.host.statement(() => query.get({
+      scope: key.scope, author: key.author, kaUal,
+    }) as SqlRowV1 | undefined);
+    if (stored === undefined) return null;
+    try {
+      const row = decodeStoredSwmAuthorInventoryRowV1(stored);
+      if (row.kaUal !== kaUal) throw new Error('stored row does not match its requested key');
+      return row;
+    } catch (cause) {
+      throw this.host.error('swm-inventory-database-corrupt', 'stored SWM author row is not canonical', { cause });
+    }
+  }
+
+  /** Local scheduling hint only; it does not authenticate or materialize rows. */
+  readHeadDigest(key: EncodedSwmAuthorInventoryKeyV1): Digest32V1 | null {
+    const query = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.getSwmAuthorHead);
+    const row = this.host.statement(() => query.get({
+      scope: key.scope, author: key.author,
+    }) as SqlRowV1 | undefined);
+    if (row === undefined) return null;
+    try {
+      return sqlBlobToDigest32V1(row.current_head_digest);
+    } catch (cause) {
+      throw this.host.error('swm-inventory-database-corrupt', 'stored SWM author head digest is invalid', { cause });
+    }
+  }
+
+  listScopes() {
+    const query = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.listSwmAuthorHeads);
+    const rows = this.host.statement(() => query.all() as SqlRowV1[]);
+    try {
+      return Object.freeze(rows.map(row => decodeStoredHead(row,
+        assertBoundedSqlBlobV1(row.inventory_scope_digest, 32, 32, 'inventory scope'),
+        assertBoundedSqlBlobV1(row.author_address, 20, 20, 'inventory author'),
+      ).scope));
+    } catch (cause) {
+      throw this.host.error('swm-inventory-database-corrupt', 'stored SWM author discovery head is invalid', { cause });
+    }
   }
 
   private readStored(
@@ -145,36 +232,18 @@ export class SwmAuthorInventoryPersistenceV1 {
       scope: key.scope,
       author: key.author,
     }) as SqlRowV1 | undefined);
-    if (headRow === undefined) return null;
+    if (headRow === undefined) {
+      this.verifiedRows.remember(key);
+      return null;
+    }
     const rowsQuery = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.getSwmAuthorRows);
     const storedRows = this.host.statement(() => rowsQuery.all({
       scope: key.scope,
       author: key.author,
     }) as SqlRowV1[]);
     try {
-      const envelopeBytes = assertBoundedSqlBlobV1(
-        headRow.signed_head_envelope,
-        1,
-        4 * 1024,
-        'stored SWM author inventory head envelope',
-      );
-      const head = parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1(envelopeBytes);
-      const scope = deriveSwmAuthorInventoryScopeFromHeadV1(head.payload);
-      if (
-        computeSwmAuthorInventoryScopeDigestV1(scope) !== sqlBlobToDigest32V1(key.scope)
-        || head.payload.authorAddress !== sqlBlobToEvmAddressV1(key.author)
-        || head.objectDigest !== sqlBlobToDigest32V1(headRow.current_head_digest)
-        || head.payload.version !== sqlBlobToDecimalU64V1(headRow.inventory_version_u64be)
-        || head.payload.totalRows !== sqlBlobToDecimalU64V1(headRow.total_rows_u64be)
-        || head.payload.rowsDigest !== sqlBlobToDigest32V1(headRow.rows_digest)
-      ) {
-        throw new Error('stored head columns do not match the signed envelope');
-      }
-      const rows = Object.freeze(
-        storedRows
-          .map(decodeStoredSwmAuthorInventoryRowV1)
-          .sort(compareSwmAuthorInventoryRowsV1),
-      );
+      const { head } = decodeStoredHead(headRow, key.scope, key.author);
+      const { rows, cache } = this.verifiedRows.decode(key, storedRows);
       const snapshot = Object.freeze({ head, rows });
       assertSwmAuthorInventorySnapshotBindingV1(snapshot);
       const expectedHead = headRow.expected_head_digest === null
@@ -198,7 +267,18 @@ export class SwmAuthorInventoryPersistenceV1 {
       ) {
         throw new Error('stored replay predecessor does not match the signed head');
       }
-      return Object.freeze({ snapshot, expectedHead, mutationKind, mutationKaUal });
+      const replayMode = mutationKind === 'remove'
+        && rows.some(({ kaUal }) => kaUal === mutationKaUal)
+        ? 'exact-merge' as const
+        : 'mutation' as const;
+      this.verifiedRows.remember(key, cache);
+      return Object.freeze({
+        snapshot,
+        expectedHead,
+        mutationKind,
+        mutationKaUal,
+        replayMode,
+      });
     } catch (cause) {
       if (isSwmAuthorInventoryErrorV1(cause, 'swm-inventory-database-corrupt')) throw cause;
       throw this.host.error(
@@ -210,7 +290,12 @@ export class SwmAuthorInventoryPersistenceV1 {
   }
 
   apply(next: PreparedSwmAuthorInventoryCommitV1): SwmAuthorInventoryCasResultV1 {
-    const plan = planSwmAuthorInventoryCommitV1(this.readStored(next), next, 'apply');
+    const plan = planSwmAuthorInventoryCommitV1(
+      this.readStored(next),
+      next,
+      'apply',
+      'mutation',
+    );
     if (plan.state === 'committed') {
       return Object.freeze({ status: 'existing' as const, snapshot: plan.current.snapshot });
     }
@@ -293,6 +378,7 @@ export class SwmAuthorInventoryPersistenceV1 {
       this.readStored(next),
       next,
       'resolve',
+      'mutation',
     );
     if (committed.state !== 'committed') {
       throw this.host.error(
@@ -307,7 +393,12 @@ export class SwmAuthorInventoryPersistenceV1 {
   }
 
   resolve(next: PreparedSwmAuthorInventoryCommitV1): SwmAuthorInventoryCommitResolutionV1 {
-    const plan = planSwmAuthorInventoryCommitV1(this.readStored(next), next, 'resolve');
+    const plan = planSwmAuthorInventoryCommitV1(
+      this.readStored(next),
+      next,
+      'resolve',
+      'mutation',
+    );
     if (plan.state === 'committed') return 'committed';
     if (plan.state === 'not-committed') return 'not-committed';
     if (plan.state === 'conflict') throw this.conflict(plan.actual, plan.expected);
@@ -317,27 +408,123 @@ export class SwmAuthorInventoryPersistenceV1 {
     );
   }
 
+  applyExactMerge(
+    next: PreparedMergeSwmAuthorInventoryCommitV1,
+  ): SwmAuthorInventoryCasResultV1 {
+    const plan = planSwmAuthorInventoryCommitV1(
+      this.readStored(next),
+      next,
+      'apply',
+      'exact-merge',
+    );
+    if (plan.state === 'committed') {
+      return Object.freeze({ status: 'existing' as const, snapshot: plan.current.snapshot });
+    }
+    if (plan.state === 'conflict') {
+      if (plan.reason === 'same-head-state') {
+        throw this.host.error(
+          'swm-inventory-database-corrupt',
+          'one SWM inventory head digest resolved to different exact state',
+        );
+      }
+      if (plan.reason === 'same-head-replay') {
+        throw this.host.error(
+          'swm-inventory-input',
+          'already-current SWM inventory was not produced by the exact requested merge',
+        );
+      }
+      throw this.conflict(plan.actual, plan.expected);
+    }
+    if (plan.state !== 'apply-writes') {
+      throw this.host.error(
+        'swm-inventory-database-corrupt',
+        'normal SWM inventory exact merge resolved without a write plan',
+      );
+    }
+    const current = plan.current;
+    this.assertExactMergeTransition(current?.snapshot ?? null, next);
+
+    const headParameters = swmAuthorHeadParametersV1(next);
+    if (current === null) {
+      const insert = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.insertSwmAuthorHead);
+      const result = this.host.statement(() => insert.run(headParameters));
+      if (Number(result.changes) !== 1) {
+        throw this.host.error(
+          'swm-inventory-database-corrupt',
+          'SWM author inventory exact-merge initialization did not insert one head',
+        );
+      }
+    } else {
+      const update = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.updateSwmAuthorHeadCas);
+      const result = this.host.statement(() => update.run({
+        ...headParameters,
+        expectedHead: next.expectedHead,
+      }));
+      if (Number(result.changes) !== 1) {
+        throw this.conflict(
+          current.snapshot.head.objectDigest as Digest32V1,
+          next.expectedHead === null ? null : sqlBlobToDigest32V1(next.expectedHead),
+        );
+      }
+    }
+
+    const deleteRows = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.deleteSwmAuthorRows);
+    this.host.statement(() => deleteRows.run(swmAuthorKeyParametersV1(next)));
+    const insertRow = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.upsertSwmAuthorRow);
+    for (const row of next.snapshot.rows) {
+      const result = this.host.statement(() => insertRow.run({
+        ...swmAuthorKeyParametersV1(next),
+        ...swmAuthorRowParametersV1(row),
+      }));
+      if (Number(result.changes) !== 1) {
+        throw this.host.error(
+          'swm-inventory-database-corrupt',
+          'SWM author inventory exact merge did not insert one exact row',
+        );
+      }
+    }
+
+    const committed = planSwmAuthorInventoryCommitV1(
+      this.readStored(next),
+      next,
+      'resolve',
+      'exact-merge',
+    );
+    if (committed.state !== 'committed') {
+      throw this.host.error(
+        'swm-inventory-database-corrupt',
+        'SWM author inventory exact merge did not exact-read as requested',
+      );
+    }
+    return Object.freeze({
+      status: 'applied' as const,
+      snapshot: committed.current.snapshot,
+    });
+  }
+
+  resolveExactMerge(
+    next: PreparedMergeSwmAuthorInventoryCommitV1,
+  ): SwmAuthorInventoryCommitResolutionV1 {
+    const plan = planSwmAuthorInventoryCommitV1(
+      this.readStored(next),
+      next,
+      'resolve',
+      'exact-merge',
+    );
+    if (plan.state === 'committed') return 'committed';
+    if (plan.state === 'not-committed') return 'not-committed';
+    if (plan.state === 'conflict') throw this.conflict(plan.actual, plan.expected);
+    throw this.host.error(
+      'swm-inventory-database-corrupt',
+      'indeterminate SWM inventory exact-merge resolution produced a write plan',
+    );
+  }
+
   private assertMutationTransition(
     current: SwmAuthorInventorySnapshotV1 | null,
     next: PreparedSwmAuthorInventoryCommitV1,
   ): void {
-    const nextHead = next.snapshot.head.payload;
-    if (current === null) {
-      if (nextHead.version !== '0' || nextHead.previousHeadDigest !== null) {
-        throw this.host.error(
-          'swm-inventory-input',
-          'SWM author inventory initialization requires version 0 with no predecessor',
-        );
-      }
-    } else if (
-      BigInt(nextHead.version) !== BigInt(current.head.payload.version) + 1n
-      || nextHead.previousHeadDigest !== current.head.objectDigest
-    ) {
-      throw this.host.error(
-        'swm-inventory-input',
-        'SWM author inventory successor must increment version and bind the exact predecessor',
-      );
-    }
+    this.assertSuccessor(current, next);
     let rows;
     try {
       rows = requireAppliedSwmAuthorInventoryMutationV1(
@@ -368,6 +555,43 @@ export class SwmAuthorInventoryPersistenceV1 {
     }
   }
 
+  private assertExactMergeTransition(
+    current: SwmAuthorInventorySnapshotV1 | null,
+    next: PreparedMergeSwmAuthorInventoryCommitV1,
+  ): void {
+    this.assertSuccessor(current, next);
+    const rows = mergeSwmAuthorInventoryRowsV1(current?.rows ?? [], next.mergeRows);
+    if (!swmAuthorInventoryRowsEqualV1(rows, next.snapshot.rows)) {
+      throw this.host.error(
+        'swm-inventory-input',
+        'signed SWM author inventory row set is not the exact requested merge',
+      );
+    }
+  }
+
+  private assertSuccessor(
+    current: SwmAuthorInventorySnapshotV1 | null,
+    next: PreparedReplayableSwmAuthorInventoryCommitV1,
+  ): void {
+    const nextHead = next.snapshot.head.payload;
+    if (current === null) {
+      if (nextHead.version !== '0' || nextHead.previousHeadDigest !== null) {
+        throw this.host.error(
+          'swm-inventory-input',
+          'SWM author inventory initialization requires version 0 with no predecessor',
+        );
+      }
+    } else if (
+      BigInt(nextHead.version) !== BigInt(current.head.payload.version) + 1n
+      || nextHead.previousHeadDigest !== current.head.objectDigest
+    ) {
+      throw this.host.error(
+        'swm-inventory-input',
+        'SWM author inventory successor must increment version and bind the exact predecessor',
+      );
+    }
+  }
+
   private conflict(actual: Digest32V1 | null, expected: Digest32V1 | null): Error {
     return this.host.error(
       'swm-inventory-cas-conflict',
@@ -376,14 +600,36 @@ export class SwmAuthorInventoryPersistenceV1 {
   }
 }
 
+const SWM_ROW_FIELDS = Object.keys({
+  assertionCoordinate: true,
+  assertionVersion: true,
+  kaUal: true,
+  shareOperationId: true,
+  projectionDigest: true,
+  publicTripleCount: true,
+  privateTripleCount: true,
+  sealDigest: true,
+  sharedAt: true,
+  expiresAt: true,
+} satisfies Record<keyof SwmAuthorInventoryRowV1, true>) as (keyof SwmAuthorInventoryRowV1)[];
+
+/**
+ * Rows come from validated, privately owned snapshots or their projection.
+ * Exact equality to the bound next snapshot also rejects invalid merged sets.
+ */
 function swmAuthorInventoryRowsEqualV1(
   left: SwmAuthorInventorySnapshotV1['rows'],
   right: SwmAuthorInventorySnapshotV1['rows'],
 ): boolean {
-  return sqlBlobsEqualV1(
-    canonicalizeSwmAuthorInventoryRowsBytesV1(left),
-    canonicalizeSwmAuthorInventoryRowsBytesV1(right),
-  );
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    const leftRow = left[index]!;
+    const rightRow = right[index]!;
+    for (const field of SWM_ROW_FIELDS) {
+      if (leftRow[field] !== rightRow[field]) return false;
+    }
+  }
+  return true;
 }
 
 function swmAuthorInventorySnapshotsEqualV1(
@@ -400,9 +646,46 @@ function swmAuthorInventorySnapshotsEqualV1(
 
 function swmAuthorInventoryReplayEvidenceEqualV1(
   stored: StoredSwmAuthorInventoryCommitV1,
-  requested: PreparedSwmAuthorInventoryCommitV1,
+  requested: PreparedReplayableSwmAuthorInventoryCommitV1,
 ): boolean {
   return nullableSqlBlobsEqualV1(stored.expectedHead, requested.expectedHead)
     && stored.mutationKind === requested.mutationKind
     && stored.mutationKaUal === requested.mutationKaUal;
+}
+
+/** Linear merge of two canonical, strictly ordered row sets; incoming wins by UAL. */
+function mergeSwmAuthorInventoryRowsV1(
+  current: SwmAuthorInventorySnapshotV1['rows'],
+  incoming: SwmAuthorInventorySnapshotV1['rows'],
+): readonly SwmAuthorInventorySnapshotV1['rows'][number][] {
+  const merged: SwmAuthorInventorySnapshotV1['rows'][number][] = [];
+  let currentIndex = 0;
+  let incomingIndex = 0;
+  while (currentIndex < current.length || incomingIndex < incoming.length) {
+    const currentRow = current[currentIndex];
+    const incomingRow = incoming[incomingIndex];
+    if (currentRow === undefined) {
+      merged.push(incomingRow!);
+      incomingIndex += 1;
+      continue;
+    }
+    if (incomingRow === undefined) {
+      merged.push(currentRow);
+      currentIndex += 1;
+      continue;
+    }
+    const order = compareSwmAuthorInventoryRowsV1(currentRow, incomingRow);
+    if (order < 0) {
+      merged.push(currentRow);
+      currentIndex += 1;
+    } else if (order > 0) {
+      merged.push(incomingRow);
+      incomingIndex += 1;
+    } else {
+      merged.push(incomingRow);
+      currentIndex += 1;
+      incomingIndex += 1;
+    }
+  }
+  return Object.freeze(merged);
 }

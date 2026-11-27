@@ -17,6 +17,7 @@ import {
   CgSharedProjectionError,
   assertVerifiedCgSharedProjectionForTransferV1,
   assertVerifiedCgSharedProjectionV1,
+  encodeCanonicalCgSharedPublicRootProjectionV1,
   readVerifiedCgSharedProjectionBytesV1,
   readVerifiedCgSharedProjectionMetadataV1,
   readVerifiedCgSharedProjectionV1,
@@ -148,6 +149,31 @@ describe('RFC-64 canonical cg-shared-v1 projection verification', () => {
     const wrongOrder = `${second}\n${first}\n`;
     const wrong = makeFixture(wrongOrder, sealForProjection(wrongOrder, '0', null));
     expectFailure(() => verifyProjection(wrong), 'projection-order');
+  });
+
+  it('accepts what the canonical encoder writes for a literal with a tab or another control character', () => {
+    const subject = 'https://example.org/asset';
+    const projection = new TextDecoder().decode(encodeCanonicalCgSharedPublicRootProjectionV1([
+      { subject, predicate: 'https://schema.org/text', object: '"name\\tvalue\\tunit"' },
+      { subject, predicate: 'https://schema.org/code', object: '"a\\u0001b\\u007Fc\\bd\\fe"' },
+    ]));
+    // The canonical form has no escape for these characters: they stand for themselves.
+    expect(projection).toContain('"name\tvalue\tunit"');
+    expect(projection).toContain('"a\u0001b\u007Fc\bd\fe"');
+    const fixture = makeFixture(projection, sealForProjection(projection, '0', null));
+    const snapshot = readProjection(verifyProjection(fixture), fixture);
+    expect(snapshot.publicTripleCount).toBe('2');
+    expect(snapshot.projectionBytes).toEqual(UTF8.encode(projection));
+  });
+
+  it.each([
+    ['a tab written as an escape', '"a\\tb"', 'projection-literal'],
+    ['a control character written as an escape', '"a\\u0001b"', 'projection-literal'],
+    ['a raw carriage return', '"a\rb"', 'projection-line-ending'],
+  ] as const)('still rejects %s in a literal', (_name, object, code) => {
+    const projection = `<https://example.org/asset> <https://schema.org/text> ${object} .\n`;
+    const fixture = makeFixture(projection, sealForProjection(projection, '0', null));
+    expectFailure(() => verifyProjection(fixture), code);
   });
 
   it.each([

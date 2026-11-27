@@ -21,7 +21,7 @@ test.describe('Accessibility', () => {
 
   test('log filter input has placeholder text', async ({ page, bottomPanel }) => {
     await bottomPanel.toggle();
-    await bottomPanel.switchTab('Node Log');
+    await bottomPanel.switchTab('Node log');
     const logFilter = page.locator(sel.bottom.logFilter).first();
     await expect(logFilter).toHaveAttribute('placeholder', 'Filter logs...');
   });
@@ -74,7 +74,7 @@ test.describe('Accessibility', () => {
   test('dashboard heading hierarchy is correct', async ({ page }) => {
     const h1 = page.getByRole('heading', { level: 1 });
     await expect(h1).toBeVisible();
-    const h3s = page.getByRole('heading', { level: 3 });
-    expect(await h3s.count()).toBeGreaterThan(0);
+    const h2s = page.getByRole('heading', { level: 2 });
+    expect(await h2s.count()).toBeGreaterThan(0);
   });
 });

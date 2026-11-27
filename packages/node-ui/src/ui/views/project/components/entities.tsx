@@ -1,26 +1,34 @@
-import React, { useMemo, useState, useCallback } from 'react';
+import React, { useMemo } from 'react';
 import type { ReactNode } from 'react';
-import { useFetch } from '../../../hooks.js';
 import { encodeDocTabId, resolveDocRef } from '../../../lib/doc-tab-id.js';
-import { truncateMiddle } from '../../../lib/truncate.js';
-import { listAssertions, promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublish, publishAssertionsToVm, partialPublishWarning, fetchAssertionUals, type AssertionInfo } from '../../../api.js';
 import { useMemoryEntities, type TrustLevel, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
+import { useVmReceiptSummary } from '../../../hooks/useVmReceiptSummary.js';
+import { buildVmFacts, vmSubjectsOf } from '../vm-facts.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
-import { useTabsStore } from '../../../stores/tabs.js';
+import { chooseTab as openTab } from '../../../lib/shellNavigation.js';
 import type { SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js';
-import { LAYER_CONFIG, SOURCE_CONTENT_TYPE, MARKDOWN_FORM, SOURCE_FILE, DKG_SIZE, entityAuthorUri, entityMeta, layerNoun, useLayerTriples, entityTimestamp, formatRelativeTime, type LayerContentTab } from '../helpers.js';
+import { LayerGlyph, StatusGlyph } from '../../../components/ds/Badge.js';
+import { LAYER_CONFIG, VM_TRIPLE_STAT, SOURCE_CONTENT_TYPE, MARKDOWN_FORM, SOURCE_FILE, DKG_SIZE, entityAuthorUri, entityMeta, layerNoun, useLayerTriples, entityTimestamp, formatRelativeTime, type LayerContentTab } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { LayerGraphPanel } from './graph.js';
 import { LayerWidgetStrip } from './layer-widgets.js';
+import { AssertionsList } from './assertions.js';
+import { Badge, LayerBadge } from '../../../components/ds/Badge.js';
+import { kindColorForType } from '../../../entity-kind-colors.js';
+import { humanizeTypeName } from '../../../lib/formatLabels.js';
+import { FileText } from 'lucide-react';
+import { formatDateTime, formatNumber } from '../../../lib/format.js';
+
+export { AssertionsList } from './assertions.js';
 
 // ─── Enhanced Entity list (sorted by triple count, with type pill) ──────
 
-const TRUST_BADGE_CONFIG: Record<TrustLevel, { layerKey: 'wm' | 'swm' | 'vm'; icon: string; label: string }> = {
-  working:  { layerKey: 'wm',  icon: '◇', label: 'Working'  },
-  shared:   { layerKey: 'swm', icon: '◈', label: 'Shared'   },
-  verified: { layerKey: 'vm',  icon: '◉', label: 'Verifiable' },
+const TRUST_BADGE_CONFIG: Record<TrustLevel, { layerKey: 'wm' | 'swm' | 'vm'; label: string }> = {
+  working:  { layerKey: 'wm',  label: 'Working'  },
+  shared:   { layerKey: 'swm', label: 'Shared'   },
+  verified: { layerKey: 'vm',  label: 'Verifiable' },
 };
 
 const QUERY_CATALOG_CONFIGURATION_TYPES = new Set([
@@ -33,21 +41,27 @@ export function isQueryCatalogConfigurationEntity(entity: MemoryEntity): boolean
   return entity.types.some(type => QUERY_CATALOG_CONFIGURATION_TYPES.has(type));
 }
 
+/**
+ * What an entity list covers. One memory layer (a WM/SWM/VM tab): every row
+ * carries that layer's badge. Several layers (a sub-graph): each row shows
+ * its own entity's layer, and the empty state shows `emptyIcon`.
+ */
+type EntityListScope =
+  | { layerKey: 'wm' | 'swm' | 'vm'; emptyIcon?: never }
+  | { layerKey?: undefined; emptyIcon: ReactNode };
+
 export function EntityList({
   entities,
   layerKey,
-  layerIcon,
+  emptyIcon,
   onSelectEntity,
   onOpenAgent,
   externallySorted = false,
   sortLabel,
   headerExtra,
   timestampPredicate,
-  perEntityTrustBadge = false,
-}: {
+}: EntityListScope & {
   entities: MemoryEntity[];
-  layerKey: 'wm' | 'swm' | 'vm';
-  layerIcon: string;
   onSelectEntity: (uri: string) => void;
   onOpenAgent?: (uri: string) => void;
   /** Skip the internal triple-count sort — caller already ordered `entities`. */
@@ -62,15 +76,12 @@ export function EntityList({
    *  as a relative timestamp on each entity card. Pass `binding.timelinePredicate`
    *  for sub-graphs that have one. */
   timestampPredicate?: string;
-  /** When true, render the trailing trust badge from each entity's own
-   *  `trustLevel` (cross-layer view — e.g. Subgraph Explorer detail).
-   *  When false (default), every row uses `layerKey`/`layerIcon` (the
-   *  WM/SWM/VM layer-tab convention). */
-  perEntityTrustBadge?: boolean;
 }) {
   const profile = useProjectProfileContext();
   const agents = useAgentsContext();
-  const noun = layerNoun(layerKey, entities.length).toLowerCase();
+  // A cross-layer list counts entities: only a Verifiable Memory tab says Knowledge Assets.
+  const nounFor = (count: number) => (layerKey ? layerNoun(layerKey, count) : count === 1 ? 'Entity' : 'Entities').toLowerCase();
+  const noun = nounFor(entities.length);
   const sorted = useMemo(() => {
     if (externallySorted) return entities;
     const copy = [...entities];
@@ -82,17 +93,15 @@ export function EntityList({
     return copy;
   }, [entities, externallySorted]);
 
-  const trustLabel = layerKey === 'vm' ? 'Verifiable' : layerKey === 'swm' ? 'Shared' : 'Working';
-
   if (entities.length === 0) {
     return (
       <div className="v10-entity-list empty">
         <EmptyState
           compact
-          tone={toneForLayer(layerKey)}
-          icon={layerIcon}
-          title={`No ${layerNoun(layerKey, 2).toLowerCase()} yet`}
-          description={`This view will fill when matching ${layerNoun(layerKey, 2).toLowerCase()} are available.`}
+          tone={layerKey ? toneForLayer(layerKey) : 'neutral'}
+          icon={layerKey ? <LayerGlyph layer={layerKey} /> : emptyIcon}
+          title={`No ${nounFor(2)} yet`}
+          description={`This view will fill when matching ${nounFor(2)} are available.`}
         />
       </div>
     );
@@ -121,7 +130,7 @@ export function EntityList({
           >
             <span className="v10-entity-card-icon">{icon}</span>
             <div className="v10-entity-card-main">
-              <div className="v10-entity-card-title">{e.label}</div>
+              <button type="button" className="v10-entity-card-title ds-row-open">{e.label}</button>
               <div className="v10-entity-card-meta">
                 {(author || authorUri) && (
                   <AgentChip
@@ -132,12 +141,12 @@ export function EntityList({
                   />
                 )}
                 {type && type !== 'Entity' && (
-                  <span className="v10-entity-type-pill">{icon} {type}</span>
+                  <Badge tone="kind" size="sm" kindColor={e.types.map(t => kindColorForType(t)).find(Boolean) ?? undefined} className="v10-entity-type-pill">{humanizeTypeName(type)}</Badge>
                 )}
                 {ts != null && (
                   <span
                     className="v10-entity-card-timestamp"
-                    title={new Date(ts).toLocaleString()}
+                    title={formatDateTime(ts)}
                   >
                     {formatRelativeTime(ts)}
                   </span>
@@ -145,18 +154,14 @@ export function EntityList({
                 <span className="v10-entity-card-triples">{tripleCount} triples</span>
               </div>
             </div>
-            {perEntityTrustBadge ? (() => {
-              const badge = TRUST_BADGE_CONFIG[e.trustLevel];
+            {(() => {
+              const badge = layerKey
+                ? { layerKey, label: LAYER_CONFIG[layerKey].trustLabel }
+                : TRUST_BADGE_CONFIG[e.trustLevel];
               return (
-                <span className={`v10-trust-badge ${badge.layerKey}`} title={`${badge.label} Memory`}>
-                  {badge.icon} {badge.label}
-                </span>
+                <LayerBadge layer={badge.layerKey} label={badge.label} size="sm" className={`v10-trust-badge ${badge.layerKey}`} title={layerKey ? undefined : `${badge.label} Memory`} />
               );
-            })() : (
-              <span className={`v10-trust-badge ${layerKey}`}>
-                {layerIcon} {trustLabel}
-              </span>
-            )}
+            })()}
           </div>
         );
       })}
@@ -203,7 +208,6 @@ export function LayerContent({
   showQueryCatalog?: boolean;
   onShowQueryCatalogChange?: (show: boolean) => void;
 }) {
-  const config = LAYER_CONFIG[layer];
   const itemsLabel = layerNoun(layer, 2);
   // The visibility checkbox is presentation-only. Catalog KAs remain
   // shareable/publishable through their explicit assertion-row action, but
@@ -227,21 +231,21 @@ export function LayerContent({
     <>
       <div className="v10-layer-expand-tabs">
         <button
-          className={`v10-layer-expand-tab ${activeTab === 'items' ? 'active' : ''}`}
+          className={`v10-layer-expand-tab ds-tab ${activeTab === 'items' ? 'active' : ''}`}
           onClick={handleTab('items')}
         >{itemsLabel}</button>
         {layer !== 'vm' && (
           <button
-            className={`v10-layer-expand-tab ${activeTab === 'assertions' ? 'active' : ''}`}
+            className={`v10-layer-expand-tab ds-tab ${activeTab === 'assertions' ? 'active' : ''}`}
             onClick={handleTab('assertions')}
           >Assertions</button>
         )}
         <button
-          className={`v10-layer-expand-tab ${activeTab === 'graph' ? 'active' : ''}`}
+          className={`v10-layer-expand-tab ds-tab ${activeTab === 'graph' ? 'active' : ''}`}
           onClick={handleTab('graph')}
         >Graph</button>
         <button
-          className={`v10-layer-expand-tab ${activeTab === 'docs' ? 'active' : ''}`}
+          className={`v10-layer-expand-tab ds-tab ${activeTab === 'docs' ? 'active' : ''}`}
           onClick={handleTab('docs')}
         >Documents</button>
         {layer !== 'vm' && onShowQueryCatalogChange && (
@@ -261,17 +265,17 @@ export function LayerContent({
           {layer === 'vm' && !isInitialVerifiableMemoryLoad && !isVerifiableMemoryUnavailable && (
             <VerifiableMemoryHeroBanner
               entities={entities}
-              tripleCount={tripleCount}
+              vmTriples={layerTriples}
               contextGraphId={contextGraphId}
             />
           )}
           {isInitialVerifiableMemoryLoad ? (
             <div className="v10-layer-widgets-strip empty">
               <EmptyState
+                busy
                 compact
                 tone="vm"
-                icon={LAYER_CONFIG.vm.icon}
-                title="Loading Verifiable Memory..."
+                title="Loading Verifiable Memory…"
                 description="Knowledge Assets are being read from the verified layer."
               />
             </div>
@@ -280,7 +284,7 @@ export function LayerContent({
               <EmptyState
                 compact
                 tone="vm"
-                icon={LAYER_CONFIG.vm.icon}
+                icon={<LayerGlyph layer="vm" />}
                 title="Verifiable Memory status unavailable."
                 description="This node could not read the verified layer right now."
               />
@@ -299,7 +303,6 @@ export function LayerContent({
               <EntityList
                 entities={entities}
                 layerKey={layer}
-                layerIcon={config.icon}
                 onSelectEntity={onSelectEntity}
               />
             </>
@@ -350,11 +353,31 @@ export function LayerContent({
 // Sits at the top of the VM tab's "Knowledge Assets" view. Pulls together
 // the DKG "secret sauce" into a compact visual: anchoring, consensus,
 // agent identity — the verifiability elements that justify the VM's cost.
-export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraphId }: {
+const VM_BADGE_TIP = 'Verifiable Memory: Knowledge Assets published to the DKG chain, signed by the publishing agent, and tamper-evident via content hashes.';
+
+function VmHeroFacts({ entities, vmTriples, contextGraphId }: { entities: MemoryEntity[]; vmTriples: Triple[]; contextGraphId: string }) {
+  const { summary, loading, error } = useVmReceiptSummary(contextGraphId);
+  const vmSubjects = useMemo(() => vmSubjectsOf(vmTriples), [vmTriples]);
+  const facts = useMemo(() => buildVmFacts(entities, summary, { loading, error }, vmSubjects), [entities, summary, loading, error, vmSubjects]);
+  return (
+    <dl className="v10-vm-hero-facts" aria-label="Verifiable Memory facts for this context graph">
+      {facts.map(f => (
+        <div key={f.id} className={`v10-vm-hero-fact tone-${f.tone}`} title={f.tooltip} data-fact={f.id}>
+          <dt>{f.label}</dt>
+          <dd>{f.value}{f.tone === 'warn' ? <span role="img" aria-label="needs attention" className="v10-vm-hero-fact-icon"><StatusGlyph tone="warning" /></span> : null}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+export function VerifiableMemoryHeroBanner({ entities, vmTriples, contextGraphId }: {
   entities: MemoryEntity[];
-  tripleCount: number;
+  /** Verifiable Memory's own triples (the layer view's triples). */
+  vmTriples: Triple[];
   contextGraphId: string;
 }) {
+  const tripleCount = vmTriples.length;
   const totalAssets = entities.length;
   const typeSet = new Set<string>();
   for (const e of entities) for (const t of e.types) typeSet.add(t);
@@ -362,13 +385,13 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
 
   if (totalAssets === 0) {
     return (
-      <div className="v10-vm-hero v10-vm-hero-empty">
+      <div className="v10-vm-hero ds-card v10-vm-hero-empty">
         <div className="v10-vm-hero-title">
-          <span className="v10-vm-hero-badge">◉ Verifiable Memory</span>
+          <LayerBadge layer="vm" label="Verifiable Memory" className="v10-vm-hero-badge" />
           <div className="v10-vm-hero-heading">
             <span className="v10-vm-hero-headline">Nothing published yet</span>
             <span className="v10-vm-hero-context" title={contextGraphId}>
-              Context Graph: {contextGraphId}
+              Context graph: {contextGraphId}
             </span>
           </div>
         </div>
@@ -376,7 +399,7 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
           compact
           className="v10-vm-empty-state"
           tone="vm"
-          icon={LAYER_CONFIG.vm.icon}
+          icon={<LayerGlyph layer="vm" />}
           title="No Knowledge Assets yet."
           description="Publish complete Knowledge Assets from Shared Working Memory to verify them on-chain."
         />
@@ -385,13 +408,13 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
   }
 
   return (
-    <div className="v10-vm-hero">
+    <div className="v10-vm-hero ds-card">
       <div className="v10-vm-hero-title">
-        <span className="v10-vm-hero-badge">◉ Verifiable Memory</span>
+        <LayerBadge layer="vm" label="Verifiable Memory" className="v10-vm-hero-badge" title={VM_BADGE_TIP} />
         <div className="v10-vm-hero-heading">
-          <span className="v10-vm-hero-headline">On-chain anchored · cryptographically signed</span>
+          <span className="v10-vm-hero-headline">Anchored on-chain and cryptographically signed.</span>
           <span className="v10-vm-hero-context" title={contextGraphId}>
-            Context Graph: {contextGraphId}
+            Context graph: {contextGraphId}
           </span>
         </div>
       </div>
@@ -400,282 +423,14 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
         layer="vm"
         items={[
           { id: 'assets', value: totalAssets, label: 'Knowledge Assets' },
-          { id: 'triples', value: tripleCount.toLocaleString(), label: 'Verifiable Triples' },
-          { id: 'types', value: typeCount, label: 'Entity Types' },
+          { id: 'triples', value: formatNumber(tripleCount), ...VM_TRIPLE_STAT },
+          { id: 'types', value: typeCount, label: 'Entity types' },
         ]}
       />
-      <div className="v10-vm-hero-strip">
-        <div className="v10-vm-hero-chip" title="Multi-agent endorsement">
-          <span className="v10-vm-hero-chip-dot" style={{ background: '#22c55e' }} />
-          Consensus
-        </div>
-        <div className="v10-vm-hero-chip" title="Published to the DKG blockchain anchor">
-          <span className="v10-vm-hero-chip-dot" style={{ background: '#3b82f6' }} />
-          On-chain
-        </div>
-        <div className="v10-vm-hero-chip" title="Each contribution bound to a DID">
-          <span className="v10-vm-hero-chip-dot" style={{ background: '#a855f7' }} />
-          Agent Identity
-        </div>
-        <div className="v10-vm-hero-chip" title="Tamper-evident via content hashing">
-          <span className="v10-vm-hero-chip-dot" style={{ background: '#f59e0b' }} />
-          Content Hash
-        </div>
-      </div>
+      <VmHeroFacts entities={entities} vmTriples={vmTriples} contextGraphId={contextGraphId} />
     </div>
   );
 }
-
-// Small helper: compute unique triples for a given layer slice of memory.
-
-export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = false, onComplete, scrollKey }: {
-  contextGraphId: string;
-  layer: 'wm' | 'swm';
-  includeQueryCatalog?: boolean;
-  onComplete: () => void;
-  scrollKey?: string;
-}) {
-  const { data: assertions, loading, refresh } = useFetch(
-    () => listAssertions(contextGraphId, layer, { includeQueryCatalog }),
-    [contextGraphId, layer, includeQueryCatalog],
-    0
-  );
-  // Deterministic Option-1 UAL per assertion (dkg:reservedUal), shown next to
-  // the filename. Refreshes alongside the list.
-  const { data: ualMap } = useFetch(
-    () => fetchAssertionUals(contextGraphId),
-    [contextGraphId, layer],
-    0
-  );
-  const [busy, setBusy] = useState<string | null>(null);
-  const [result, setResult] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const handlePromote = useCallback(async (assertion: AssertionInfo) => {
-    // PR #710 Fix D — busy / React keys must use `graphUri`, not
-    // `name`. A root + sub-graph pair can share a name and would
-    // otherwise both highlight as busy on a single click. `graphUri`
-    // is produced by the daemon and uniquely identifies the row.
-    setBusy(assertion.graphUri);
-    setResult(null);
-    setError(null);
-    try {
-      // No client-side CG pre-registration: atomic WM→SWM sharing is off-chain,
-      // and /vm/publish owns register-then-mint (it registers ONLY after
-      // publish preconditions pass, so a doomed publish never burns registration gas).
-      if (layer === 'wm') {
-        // The share route seals and transfers the complete KA atomically.
-        // PR #710 Fix A — sub-graph slug threads into the daemon's
-        // `(cg, name, subGraph)` lookup so a row clicked from a
-        // sub-graph partition resolves to that partition's
-        // assertion, not a same-named root one.
-        const res = await promoteAssertion(
-          contextGraphId,
-          assertion.name,
-          assertion.subGraph ? { subGraphName: assertion.subGraph } : {},
-        );
-        // Issue #864 — fan the promote response through the central
-        // describe helper so 0-count returns get an actionable hint
-        // instead of the misleading "Promoted 0 triples" toast.
-        const outcome = describePromoteResult(assertion.name, res);
-        setResult(outcome.message);
-      } else {
-        // Publish THIS assertion as one Knowledge Asset (Design B, any entity
-        // count) via the direct canonical publish API, preserving 207 partial handling.
-        const res = await knowledgeAssetPublish(contextGraphId, assertion.name, assertion.subGraph ? { subGraphName: assertion.subGraph } : {});
-        setResult(
-          res.contextGraphError
-            ? `Published ${assertion.name} on-chain — ⚠ ${partialPublishWarning(res.contextGraphError)}`
-            : `Published ${assertion.name} to Verifiable Memory`,
-        );
-      }
-      refresh();
-      onComplete();
-    } catch (err: any) {
-      const typed = describePromoteError(assertion.name, err);
-      setError(typed ? typed.message : (err?.message ?? 'Action failed'));
-    } finally {
-      setBusy(null);
-    }
-  }, [contextGraphId, layer, refresh, onComplete]);
-
-  const handlePromoteAll = useCallback(async () => {
-    setBusy('__all__');
-    setResult(null);
-    setError(null);
-    // Issue #864 (Codex review on #874) — track the in-flight
-    // assertion so mid-loop failures surface "<name>: …" instead of
-    // "selected assertion …".
-    let currentAssertion: string | null = null;
-    try {
-      // Bulk scope is intentionally independent from the display list. When
-      // query-catalog visibility is enabled, catalog assertions remain
-      // explicit row actions and are not silently admitted to this batch.
-      const bulkAssertions = await listAssertions(contextGraphId, layer);
-      if (bulkAssertions.length === 0) {
-        setResult(layer === 'wm'
-          ? 'No user Knowledge Assets are ready to share.'
-          : 'No user Knowledge Assets are ready to publish.');
-        return;
-      }
-      // No client-side CG pre-registration (see handleAction): atomic sharing is
-      // off-chain, and /vm/publish registers-then-
-      // mints only after preconditions pass.
-      if (layer === 'wm') {
-        let noopCount = 0;
-        for (const a of bulkAssertions) {
-          currentAssertion = a.name;
-          // PR #710 — see comment on the single-row handler above.
-          const res = await promoteAssertion(
-            contextGraphId,
-            a.name,
-            a.subGraph ? { subGraphName: a.subGraph } : {},
-          );
-          if (res.promotedCount === 0) noopCount += 1;
-        }
-        // Issue #864 — distinguish "some moved, some no-ops" from
-        // "literally nothing moved" so the user gets the truth.
-        const sharedCount = bulkAssertions.length - noopCount;
-        if (sharedCount > 0) {
-          const tail = noopCount > 0 ? ` (${noopCount} already shared or still committing)` : '';
-          setResult(`Shared ${sharedCount} complete Knowledge Asset${sharedCount !== 1 ? 's' : ''}${tail}`);
-        } else {
-          setResult('No Knowledge Assets were newly shared — all were already in Shared Memory or still committing.');
-        }
-      } else {
-        // Publish each shared assertion as its own Knowledge Asset (Design B) via the
-        // shared batch loop (api.ts publishAssertionsToVm) — fail-closed direct publish + 207 partial
-        // handling, uniform with the other batch-publish CTAs (carries the partial detail).
-        const r = await publishAssertionsToVm(contextGraphId, bulkAssertions);
-        if (r.published > 0) {
-          const tail = r.failures.length ? ` (${r.failures.length} could not be published)` : '';
-          const partialTail = r.partial > 0 ? ` — ⚠ ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
-          setResult(`Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}`);
-        } else {
-          throw new Error(r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed');
-        }
-      }
-      refresh();
-      onComplete();
-    } catch (err: any) {
-      const typed = describePromoteError(currentAssertion ?? 'selected assertion', err);
-      setError(typed ? typed.message : (err?.message ?? 'Action failed'));
-    } finally {
-      setBusy(null);
-    }
-  }, [contextGraphId, layer, refresh, onComplete]);
-
-  const scrollRootStyle = { flex: 1, overflow: 'auto' } as const;
-
-  if (loading) {
-    return (
-      <div className="v10-layer-empty-shell" style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
-        <EmptyState
-          compact
-          tone={toneForLayer(layer)}
-          icon={LAYER_CONFIG[layer].icon}
-          title="Loading assertions..."
-        />
-      </div>
-    );
-  }
-
-  if (!assertions?.length) {
-    return (
-      <div className="v10-layer-empty-shell" style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
-        <EmptyState
-          tone={toneForLayer(layer)}
-          icon={LAYER_CONFIG[layer].icon}
-          title={layer === 'swm'
-            ? 'No Shared Working Memory assertions listed yet.'
-            : 'No Working Memory assertions yet.'}
-          description={layer === 'swm'
-            ? 'Promoted assertion contents are available as Shared Working Memory entities. The assertion list will populate once promoted assertions are exposed by the node.'
-            : 'Create or import data to stage assertions in Working Memory.'}
-        />
-      </div>
-    );
-  }
-
-  const actionLabel = layer === 'wm' ? 'Share Complete KA → Shared' : 'Publish to VM';
-  const actionAllLabel = layer === 'wm' ? 'Share Complete KAs → Shared' : 'Publish all to Verifiable Memory';
-  const bulkVisibleAssertionCount = assertions.filter(
-    assertion => assertion.subGraph !== 'meta' || !assertion.name.startsWith('query-catalog-'),
-  ).length;
-
-  return (
-    <div style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
-      <div style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border-subtle)' }}>
-        <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{assertions.length} assertion{assertions.length !== 1 ? 's' : ''}</span>
-        {bulkVisibleAssertionCount > 0 && (
-          <button
-            className={`v10-layer-expand-footer-btn ${layer === 'wm' ? 'promote' : 'publish'}`}
-            disabled={busy !== null}
-            onClick={handlePromoteAll}
-            style={{ opacity: busy === '__all__' ? 0.5 : 1 }}
-          >
-            {busy === '__all__' ? '...' : actionAllLabel}
-          </button>
-        )}
-      </div>
-      {result && (
-        <div
-          data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
-          style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-success)' }}
-        >
-          ✓ {result}
-        </div>
-      )}
-      {error && (
-        <div
-          data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
-          style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-danger)' }}
-        >
-          ✕ {error}
-        </div>
-      )}
-      {assertions.map(a => (
-        <div key={a.graphUri} className="v10-item-row" data-testid="assertion-list-row">
-          <span className="v10-item-icon">▤</span>
-          <div className="v10-item-info">
-            <div className="v10-item-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{a.name}</div>
-            {ualMap?.[a.name] && (
-              <div
-                className="v10-item-ual"
-                style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-tertiary)', opacity: 0.7, wordBreak: 'break-all', marginTop: 1 }}
-                title={ualMap[a.name]}
-              >
-                {ualMap[a.name]}
-              </div>
-            )}
-            <div className="v10-item-meta-row">
-              {a.tripleCount != null && <span className="v10-item-count">{a.tripleCount} triples</span>}
-              {a.subGraph && (
-                <span
-                  className="v10-item-count v10-item-subgraph"
-                  title={`In sub-graph: ${a.subGraph}`}
-                >
-                  › {truncateMiddle(a.subGraph, 18)}
-                </span>
-              )}
-            </div>
-          </div>
-          <button
-            data-testid="assertion-row-action"
-            className={`v10-layer-expand-footer-btn ${layer === 'wm' ? 'promote' : 'publish'}`}
-            disabled={busy !== null}
-            onClick={ev => { ev.stopPropagation(); handlePromote(a); }}
-            style={{ opacity: busy === a.graphUri ? 0.5 : 1, flexShrink: 0 }}
-          >
-            {busy === a.graphUri ? '...' : actionLabel}
-          </button>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ─── Full Layer Detail View (WM / SWM / VM) ─────────────────
 
 export function LayerDetailView({
   layer,
@@ -716,7 +471,7 @@ export function LayerDetailView({
   return (
     <div className="v10-layer-detail">
       <div className="v10-layer-detail-header">
-        <span className="v10-layer-detail-icon" style={{ color: config.color }}>{config.icon}</span>
+        <span className={`v10-layer-detail-icon v10-layer-tone-text layer-tone-${layer}`}><LayerGlyph layer={layer} /></span>
         <div>
           <div className="v10-layer-detail-title">{config.title}</div>
           <div className="v10-layer-detail-desc">{config.desc}</div>
@@ -756,7 +511,6 @@ export function DocumentsList({
   contextGraphId?: string;
   scrollKey?: string;
 }) {
-  const openTab = useTabsStore(s => s.openTab);
 
   const docs = useMemo(() => {
     return entities.filter(e => e.properties.has(SOURCE_CONTENT_TYPE));
@@ -785,13 +539,12 @@ export function DocumentsList({
       id: encodeDocTabId(contextGraphId ?? '', ref ?? e.uri, contentType),
       label: e.label,
       closable: true,
-      icon: '📄',
     });
   };
 
   if (docs.length === 0) {
     return (
-      <div className="v10-docs-placeholder v10-layer-empty-shell" style={{ flex: 1 }} data-cg-scroll-key={scrollKey}>
+      <div className="v10-docs-placeholder v10-layer-empty-shell v10-layer-empty-fill" data-cg-scroll-key={scrollKey}>
         <EmptyState
           compact
           title="No documents in this layer yet."
@@ -811,15 +564,15 @@ export function DocumentsList({
           const size = fileEntity?.properties.get(DKG_SIZE)?.[0] ?? e.properties.get(DKG_SIZE)?.[0];
           return (
             <div key={e.uri} className="v10-item-row" onClick={() => handleOpenDoc(e)}>
-              <span className="v10-item-icon">📄</span>
+              <span className="v10-item-icon"><FileText size={14} /></span>
               <div className="v10-item-info">
-                <div className="v10-item-name">{e.label}</div>
+                <button type="button" className="v10-item-name ds-row-open">{e.label}</button>
                 <div className="v10-item-meta-row">
                   {contentType && <span className="v10-item-type">{contentType}</span>}
                   {size && <span className="v10-item-count">· {Math.round(parseInt(size) / 1024)}KB</span>}
                 </div>
               </div>
-              <button className="v10-item-promote-btn" onClick={ev => { ev.stopPropagation(); handleOpenDoc(e); }}>Open →</button>
+              <button className="v10-item-promote-btn ds-btn ds-swm ds-sm" onClick={ev => { ev.stopPropagation(); handleOpenDoc(e); }}>Open →</button>
             </div>
           );
         })}

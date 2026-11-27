@@ -115,13 +115,23 @@ export type SkillAclCheck = (
   skillUri: string,
 ) => { accept: boolean; reason?: string };
 
+/** An inbound conversation, remembered so a message replayed in it is refused. */
 interface ConversationState {
   highWaterMark: number;
   lastActivity: number;
-  sharedSecret: Uint8Array;
 }
 
 const CONVERSATION_TTL = 60 * 60 * 1000; // 1 hour
+/** The most inbound conversations remembered at once; the least recently active go first. */
+export const MAX_REMEMBERED_CONVERSATIONS = 10_000;
+
+/** Bounds on what a MessageHandler keeps per inbound conversation. */
+export interface MessageHandlerLimits {
+  /** At most this many conversations are remembered. `MAX_REMEMBERED_CONVERSATIONS` by default. */
+  maxConversations?: number;
+  /** A conversation is forgotten this long after its last message. One hour by default. */
+  conversationTtlMs?: number;
+}
 
 /**
  * Manages encrypted agent-to-agent messaging over /dkg/message/1.0.0.
@@ -137,8 +147,15 @@ export class MessageHandler {
   private readonly x25519Private: Uint8Array;
   private readonly peerId: string;
   private readonly eventBus: EventBus;
+  /**
+   * Inbound conversations by sending peer and conversation id, least recently
+   * active first. Bounded by `maxConversations` and `conversationTtlMs`.
+   */
   private readonly conversations = new Map<string, ConversationState>();
+  private readonly maxConversations: number;
+  private readonly conversationTtlMs: number;
   private readonly skillHandlers = new Map<string, SkillHandler>();
+  /** Keys registered with `registerPeerKey`. Inbound messages never add or change one. */
   private readonly peerKeys = new Map<string, Uint8Array>();
   private chatHandler: ChatHandler | null = null;
   private chatAclCheck: ChatAclCheck | null = null;
@@ -150,12 +167,15 @@ export class MessageHandler {
     x25519Private: Uint8Array,
     peerId: string,
     eventBus: EventBus,
+    limits: MessageHandlerLimits = {},
   ) {
     this.messenger = messenger;
     this.keypair = keypair;
     this.x25519Private = x25519Private;
     this.peerId = peerId;
     this.eventBus = eventBus;
+    this.maxConversations = limits.maxConversations ?? MAX_REMEMBERED_CONVERSATIONS;
+    this.conversationTtlMs = limits.conversationTtlMs ?? CONVERSATION_TTL;
 
     // PR-3 substrate migration: register via `messenger.register`
     // rather than `router.register` so inbound chats get
@@ -196,8 +216,9 @@ export class MessageHandler {
   }
 
   /**
-   * Cache a peer's Ed25519 public key for use in outgoing messages.
-   * Keys are also auto-cached from incoming messages.
+   * Use this Ed25519 public key for `peerId`, in both directions, instead of
+   * the key its peer id carries. Without one, a peer's key is read from its
+   * libp2p peer id.
    */
   registerPeerKey(peerId: string, ed25519Public: Uint8Array): void {
     this.peerKeys.set(peerId, ed25519Public);
@@ -241,12 +262,6 @@ export class MessageHandler {
 
       const recipientKey = await this.resolvePeerKey(recipientPeerId);
       const sharedSecret = this.deriveSecret(recipientKey);
-
-      this.conversations.set(conversationId, {
-        highWaterMark: 0,
-        lastActivity: Date.now(),
-        sharedSecret,
-      });
 
       const payload = new TextEncoder().encode(JSON.stringify({
         type: 'chat',
@@ -322,17 +337,12 @@ export class MessageHandler {
   async sendSkillRequest(
     recipientPeerId: string,
     request: SkillRequest,
+    options: { messageId?: string; requestOwned?: boolean } = {},
   ): Promise<SkillResponse> {
     const conversationId = bytesToHex(randomBytes(16));
 
     const recipientKey = await this.resolvePeerKey(recipientPeerId);
     const sharedSecret = this.deriveSecret(recipientKey);
-
-    this.conversations.set(conversationId, {
-      highWaterMark: 0,
-      lastActivity: Date.now(),
-      sharedSecret,
-    });
 
     const payload = new TextEncoder().encode(JSON.stringify({
       type: 'skill_request',
@@ -356,21 +366,22 @@ export class MessageHandler {
       senderPublicKey: this.keypair.publicKey,
     };
 
-    // Skill requests are synchronous request/response — we don't
-    // want the outbox to silently queue a skill call (the operator
-    // is waiting on the reply). If `sendReliable` queues instead of
-    // delivering, surface that as an explicit failure so the caller
-    // can retry deliberately rather than blocking on a background
-    // tick.
-    const sendResult = await this.messenger.sendReliable(
-      recipientPeerId,
-      PROTOCOL_MESSAGE,
-      encodeAgentMessage(msg),
-    );
+    // Effectful callers can select request-owned delivery so a failed
+    // request never executes later from the durable outbox. Existing skill
+    // callers retain the historical reliable/queued behavior.
+    const send = options.requestOwned
+      ? this.messenger.sendRequestOwned.bind(this.messenger)
+      : this.messenger.sendReliable.bind(this.messenger);
+    const sendResult = await send(recipientPeerId, PROTOCOL_MESSAGE, encodeAgentMessage(msg), {
+      messageId: options.messageId,
+      timeoutMs: request.timeoutMs,
+    });
     if (!sendResult.delivered) {
       return {
         success: false,
-        error: `Skill request queued (not delivered): ${sendResult.error}`,
+        error: options.requestOwned
+          ? `Skill request not delivered: ${sendResult.error}`
+          : `Skill request queued (not delivered): ${sendResult.error}`,
       };
     }
     const responseBytes = sendResult.response;
@@ -404,72 +415,48 @@ export class MessageHandler {
     const convId = msg.conversationId;
     const seq = typeof msg.sequence === 'number' ? msg.sequence : msg.sequence.low;
 
-    // Cache sender's public key from the message
-    const senderKey = msg.senderPublicKey?.length === 32
-      ? msg.senderPublicKey
-      : this.peerKeys.get(msg.senderPeerId);
+    // The sender is the peer the connection authenticated, and its key is the
+    // one registered for that peer or carried by its peer id. A message names
+    // its sender's key only to have it checked: it never adds or replaces a key.
+    const senderKey = await this.resolvePeerKey(fromPeerId);
+    const sharedSecret = this.deriveSecret(senderKey);
+    const reply = (response: SkillResponse) => this.encryptAndSign(sharedSecret, convId, seq + 1, response);
 
-    if (senderKey) {
-      this.peerKeys.set(msg.senderPeerId, senderKey);
+    if (msg.senderPublicKey?.length && !bytesEqual(msg.senderPublicKey, senderKey)) {
+      return reply({ success: false, error: 'Sender key does not match the connection' });
+    }
+    if (
+      msg.senderSignature?.length !== 64
+      || !await ed25519Verify(msg.senderSignature, buildSignatureInput(convId, seq, msg.encryptedPayload), senderKey)
+    ) {
+      return reply({ success: false, error: 'Invalid signature' });
     }
 
-    // Derive shared secret from sender's public key
-    const sharedSecret = senderKey
-      ? this.deriveSecret(senderKey)
-      : new Uint8Array(32); // backward compat with pre-encryption messages
-
-    let conv = this.conversations.get(convId);
-    if (!conv) {
-      conv = {
-        highWaterMark: 0,
-        lastActivity: Date.now(),
-        sharedSecret,
-      };
-      this.conversations.set(convId, conv);
-    }
-
-    if (seq <= conv.highWaterMark) {
-      return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, {
-        success: false,
-        error: 'Replay detected',
-      });
-    }
-    conv.highWaterMark = seq;
-    conv.lastActivity = Date.now();
-
-    // Verify sender's signature
-    if (senderKey && msg.senderSignature.length === 64) {
-      const sigData = buildSignatureInput(convId, seq, msg.encryptedPayload);
-      const valid = await ed25519Verify(msg.senderSignature, sigData, senderKey);
-      if (!valid) {
-        return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, {
-          success: false,
-          error: 'Invalid signature',
-        });
-      }
+    // Conversation state is kept per sending peer, and only for messages that
+    // verified, decrypted and parsed.
+    const conversationKey = `${fromPeerId}\n${convId}`;
+    const now = Date.now();
+    const known = this.conversations.get(conversationKey);
+    if (known && now - known.lastActivity <= this.conversationTtlMs && seq <= known.highWaterMark) {
+      return reply({ success: false, error: 'Replay detected' });
     }
 
     // Decrypt payload
     let plaintext: string;
     try {
-      const decrypted = decrypt(conv.sharedSecret, msg.encryptedPayload, msg.nonce);
+      const decrypted = decrypt(sharedSecret, msg.encryptedPayload, msg.nonce);
       plaintext = new TextDecoder().decode(decrypted);
     } catch {
-      return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, {
-        success: false,
-        error: 'Decryption failed',
-      });
+      return reply({ success: false, error: 'Decryption failed' });
     }
 
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(plaintext);
     } catch {
-      return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, {
-        success: false,
-        error: 'Invalid message format',
-      });
+      return reply({ success: false, error: 'Invalid message format' });
     }
+    this.rememberConversation(conversationKey, seq, now);
 
     this.eventBus.emit(DKGEvent.MESSAGE_RECEIVED, {
       conversationId: convId,
@@ -494,7 +481,7 @@ export class MessageHandler {
           verdict = { accept: false, reason: 'unauthorized: skill ACL evaluation error' };
         }
         if (!verdict.accept) {
-          return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, {
+          return reply({
             success: false,
             error: verdict.reason ?? 'unauthorized',
           });
@@ -504,7 +491,7 @@ export class MessageHandler {
       const handler = this.skillHandlers.get(skillUri);
 
       if (!handler) {
-        return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, {
+        return reply({
           success: false,
           error: `Unknown skill: ${skillUri}`,
         });
@@ -522,9 +509,9 @@ export class MessageHandler {
       try {
         const response = await handler(request, fromPeerId);
         response.executionTimeMs = Date.now() - startTime;
-        return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, response);
+        return reply(response);
       } catch (err) {
-        return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, {
+        return reply({
           success: false,
           error: err instanceof Error ? err.message : 'Skill execution failed',
           executionTimeMs: Date.now() - startTime,
@@ -579,7 +566,7 @@ export class MessageHandler {
           verdict = { accept: false, reason: 'unauthorized: ACL evaluation error' };
         }
         if (!verdict.accept) {
-          return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, {
+          return reply({
             success: false,
             error: verdict.reason ?? 'unauthorized',
           });
@@ -601,12 +588,12 @@ export class MessageHandler {
           console.error(`[Messaging] chat handler error:`, err instanceof Error ? err.message : err);
         }
       }
-      return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, {
+      return reply({
         success: true,
       });
     }
 
-    return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, {
+    return reply({
       success: false,
       error: `Unknown message type: ${parsed.type}`,
     });
@@ -642,17 +629,12 @@ export class MessageHandler {
   }
 
   /**
-   * Resolve a peer's Ed25519 public key. Checks the local cache first,
-   * then extracts the key from the libp2p PeerId (which encodes the
-   * Ed25519 public key in its identity multihash).
+   * Resolve a peer's Ed25519 public key: the one registered for it, or else
+   * the key its libp2p PeerId encodes in its identity multihash. Reading it
+   * from the PeerId is cheap, so it is not kept.
    */
   private async resolvePeerKey(peerId: string): Promise<Uint8Array> {
-    const cached = this.peerKeys.get(peerId);
-    if (cached) return cached;
-
-    const key = await ed25519KeyFromPeerId(peerId);
-    this.peerKeys.set(peerId, key);
-    return key;
+    return this.peerKeys.get(peerId) ?? ed25519KeyFromPeerId(peerId);
   }
 
   /**
@@ -664,14 +646,24 @@ export class MessageHandler {
     return deriveSharedSecret(this.x25519Private, theirX25519);
   }
 
-  cleanExpiredConversations(): number {
-    const now = Date.now();
+  /** Remember a conversation's latest sequence, as its most recently active one, within the bounds. */
+  private rememberConversation(key: string, sequence: number, now: number): void {
+    this.conversations.delete(key);
+    this.conversations.set(key, { highWaterMark: sequence, lastActivity: now });
+    this.cleanExpiredConversations(now);
+    while (this.conversations.size > this.maxConversations) {
+      this.conversations.delete(this.conversations.keys().next().value!);
+    }
+  }
+
+  /** Forget the conversations idle for longer than the TTL. Returns how many. */
+  cleanExpiredConversations(now: number = Date.now()): number {
     let cleaned = 0;
-    for (const [id, conv] of this.conversations) {
-      if (now - conv.lastActivity > CONVERSATION_TTL) {
-        this.conversations.delete(id);
-        cleaned++;
-      }
+    // Least recently active first, so the sweep stops at the first live one.
+    for (const [key, conv] of this.conversations) {
+      if (now - conv.lastActivity <= this.conversationTtlMs) break;
+      this.conversations.delete(key);
+      cleaned++;
     }
     return cleaned;
   }
@@ -679,6 +671,13 @@ export class MessageHandler {
   get activeConversations(): number {
     return this.conversations.size;
   }
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i]! ^ b[i]!;
+  return diff === 0;
 }
 
 function deriveSharedSecret(ourPrivate: Uint8Array, theirPublic: Uint8Array): Uint8Array {
@@ -708,8 +707,11 @@ function buildSignatureInput(conversationId: string, sequence: number, ciphertex
 async function ed25519KeyFromPeerId(peerIdStr: string): Promise<Uint8Array> {
   const { peerIdFromString } = await import('@libp2p/peer-id');
   const peerId = peerIdFromString(peerIdStr);
+  if (peerId.type !== 'Ed25519') throw new Error('Peer ID does not carry an Ed25519 key');
   const digest = peerId.toMultihash().digest;
-  return parseEd25519FromProtobuf(digest);
+  const key = parseEd25519FromProtobuf(digest);
+  if (key.length !== 32) throw new Error('Ed25519 public key in PeerId is not 32 bytes');
+  return key;
 }
 
 function parseEd25519FromProtobuf(proto: Uint8Array): Uint8Array {

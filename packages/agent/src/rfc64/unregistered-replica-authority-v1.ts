@@ -2,7 +2,6 @@
 
 import {
   CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
-  MAX_CONTROL_OBJECT_BYTES,
   assertSafeIri,
   canonicalizeSignedContextGraphPolicyEnvelopeBytesV1,
   contextGraphDataGraphUri,
@@ -10,11 +9,15 @@ import {
   parseCanonicalSignedContextGraphPolicyEnvelopeV1,
   type ContextGraphIdV1,
   type Digest32V1,
+  type EvmAddressV1,
   type NetworkIdV1,
+  type SignedContextGraphPolicyEnvelopeV1,
+  type SignedControlEnvelopeV1,
   type UnsignedContextGraphPolicyEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import {
   verifyControlEnvelopeIssuerSignatureV1,
+  type VerifiedControlEnvelopeIssuerSignatureV1,
 } from '@origintrail-official/dkg-chain';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import {
@@ -26,20 +29,26 @@ import {
   signAndVerifyRfc64ControlEnvelopeV1,
   type Rfc64ControlEnvelopeEip191SignerV1,
 } from './control-envelope-signer-v1.js';
+import {
+  RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1,
+  resolveRfc64WalletNamespaceOwnerV1,
+} from './unregistered-authority-seed-store-v1.js';
 
 /**
- * Public ontology carrier for an owner-signed, graph-bound unregistered
- * authority generation. The literal is canonical signed-envelope bytes encoded
- * as unpadded base64url, so it remains an RDF-safe scalar across gossip and
- * ordinary ontology sync.
+ * DEPRECATED public ontology carrier for an owner-signed, graph-bound
+ * unregistered authority generation. The literal is canonical signed-envelope
+ * bytes encoded as unpadded base64url, so it remains an RDF-safe scalar across
+ * gossip and ordinary ontology sync. The ontology system graph is being retired
+ * as a carrier; the keyed seed store (`unregistered-authority-seed-store-v1`)
+ * is the primary replica read path and this predicate stays only so older
+ * peers and pre-migration replicas can still authenticate a seed.
  */
 export const RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1 =
   'https://dkg.network/ontology#rfc64UnregisteredReplicaAuthorityV1';
 
 const MAX_AUTHORITY_EVIDENCE_ROWS_V1 = 32;
 const MAX_AUTHORITY_EVIDENCE_BASE64URL_CHARS_V1 =
-  Math.ceil(MAX_CONTROL_OBJECT_BYTES * 4 / 3) + 4;
-const EVM_ADDRESS_PREFIXED_CONTEXT_GRAPH_V1 = /^(0x[0-9a-f]{40})(?:\/|$)/iu;
+  Math.ceil(RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1 * 4 / 3) + 4;
 const BASE64URL_V1 = /^[A-Za-z0-9_-]+$/u;
 
 export interface MintRfc64UnregisteredReplicaAuthorityEvidenceInputV1
@@ -47,10 +56,22 @@ export interface MintRfc64UnregisteredReplicaAuthorityEvidenceInputV1
   readonly signer: Rfc64ControlEnvelopeEip191SignerV1;
 }
 
+/** Everything the author holds after minting one owner-signed seed. */
+export interface Rfc64MintedUnregisteredReplicaAuthoritySeedV1 {
+  /** Unpadded base64url of `canonicalEnvelopeBytes` (deprecated ontology literal). */
+  readonly evidence: string;
+  /** Exact canonical signed policy envelope bytes for the keyed seed store and the wire. */
+  readonly canonicalEnvelopeBytes: Uint8Array;
+  /** The policy object digest (RFC-64 policyDigest of this generation). */
+  readonly policyDigest: Digest32V1;
+  readonly envelope: SignedContextGraphPolicyEnvelopeV1;
+  readonly issuerSignature: VerifiedControlEnvelopeIssuerSignatureV1;
+}
+
 /** Mint the standard RFC-64 policy object used as durable replica evidence. */
-export async function mintRfc64UnregisteredReplicaAuthorityEvidenceV1(
+export async function mintRfc64UnregisteredReplicaAuthoritySeedV1(
   input: MintRfc64UnregisteredReplicaAuthorityEvidenceInputV1,
-): Promise<string> {
+): Promise<Rfc64MintedUnregisteredReplicaAuthoritySeedV1> {
   const authority = composeRfc64UnregisteredCatalogAuthorityV1(input);
   const unsigned = Object.freeze({
     issuer: input.ownerAddress,
@@ -68,27 +89,258 @@ export async function mintRfc64UnregisteredReplicaAuthorityEvidenceV1(
   const canonical = canonicalizeSignedContextGraphPolicyEnvelopeBytesV1(
     signed.envelope,
   );
-  return Buffer.from(canonical).toString('base64url');
+  return Object.freeze({
+    evidence: Buffer.from(canonical).toString('base64url'),
+    canonicalEnvelopeBytes: canonical,
+    policyDigest: objectDigest,
+    envelope: signed.envelope as SignedContextGraphPolicyEnvelopeV1,
+    issuerSignature: signed.issuerSignature,
+  });
+}
+
+/** Base64url ontology literal only; see `mintRfc64UnregisteredReplicaAuthoritySeedV1`. */
+export async function mintRfc64UnregisteredReplicaAuthorityEvidenceV1(
+  input: MintRfc64UnregisteredReplicaAuthorityEvidenceInputV1,
+): Promise<string> {
+  return (await mintRfc64UnregisteredReplicaAuthoritySeedV1(input)).evidence;
+}
+
+/** An authenticated seed: the replica authority snapshot plus its exact carrier bytes. */
+export interface Rfc64AuthenticatedUnregisteredReplicaAuthorityV1
+  extends Rfc64ReleaseNativeAuthoritySnapshotV1 {
+  readonly source: 'owner-signed-unregistered';
+  /** Lowercase envelope issuer, proven equal to the Context Graph wallet namespace. */
+  readonly ownerAddress: EvmAddressV1;
+  readonly canonicalEnvelopeBytes: Uint8Array;
+  /** The parsed canonical envelope the checks ran against. */
+  readonly envelope: SignedContextGraphPolicyEnvelopeV1;
+  /** The verifier's proof for `envelope`, so callers can bind it exactly. */
+  readonly issuerSignature: VerifiedControlEnvelopeIssuerSignatureV1;
+}
+
+/**
+ * Which acceptance check refused a seed. Transports map these onto their own
+ * wire/signature/mismatch error codes instead of re-implementing the checks.
+ */
+export type Rfc64UnregisteredReplicaAuthorityFailureCodeV1 =
+  | 'seed-bytes'
+  | 'not-wallet-namespaced'
+  | 'seed-canonical'
+  | 'issuer-signature'
+  | 'owner-mismatch'
+  | 'scope-mismatch'
+  | 'policy-shape';
+
+export class Rfc64UnregisteredReplicaAuthorityErrorV1 extends Error {
+  constructor(
+    readonly code: Rfc64UnregisteredReplicaAuthorityFailureCodeV1,
+    message: string,
+    options: ErrorOptions = {},
+  ) {
+    super(message, options);
+    this.name = 'Rfc64UnregisteredReplicaAuthorityErrorV1';
+  }
+}
+
+/**
+ * Issuer-signature verifier the predicate runs. Defaults to the pure dkg-chain
+ * EIP-191 verifier; transports inject the verifier they were configured with
+ * so the proof they bind is the one they minted.
+ */
+export type Rfc64UnregisteredReplicaAuthorityVerifyIssuerSignatureV1 = (
+  envelope: SignedControlEnvelopeV1,
+  options?: Readonly<{ readonly signal?: AbortSignal }>,
+) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>;
+
+/**
+ * Authenticate one canonical owner-signed seed against the graph it claims.
+ * This is the single acceptance predicate shared by the keyed seed store, the
+ * deprecated ontology carrier, and the peer transport: byte bound, canonical
+ * parse, issuer signature, owner equal to the wallet-namespace prefix,
+ * network/graph binding, and the exact unregistered generation-0 public policy
+ * shape. Every failure throws an `Rfc64UnregisteredReplicaAuthorityErrorV1`
+ * naming the failed check (an aborted `signal` rethrows its reason); nothing
+ * here proves finalized on-chain absence, which callers MUST establish
+ * separately before accepting the result.
+ */
+export async function authenticateRfc64UnregisteredReplicaAuthorityEnvelopeV1(
+  canonicalEnvelopeBytes: Uint8Array,
+  input: Readonly<{
+    readonly networkId: NetworkIdV1;
+    readonly contextGraphId: ContextGraphIdV1;
+    readonly signal?: AbortSignal;
+    readonly verifyIssuerSignature?: Rfc64UnregisteredReplicaAuthorityVerifyIssuerSignatureV1;
+  }>,
+): Promise<Rfc64AuthenticatedUnregisteredReplicaAuthorityV1> {
+  input.signal?.throwIfAborted();
+  if (
+    !(canonicalEnvelopeBytes instanceof Uint8Array)
+    || canonicalEnvelopeBytes.byteLength < 1
+    || canonicalEnvelopeBytes.byteLength > RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1
+  ) {
+    throw new Rfc64UnregisteredReplicaAuthorityErrorV1(
+      'seed-bytes',
+      'RFC-64 unregistered replica authority seed is outside its byte bound',
+    );
+  }
+  // Only wallet-namespaced CG IDs have an independently checkable owner before
+  // registration. A signature cannot safely self-assign ownership of an
+  // arbitrary global name.
+  const expectedOwner = resolveRfc64WalletNamespaceOwnerV1(input.contextGraphId);
+  if (expectedOwner === null) {
+    throw new Rfc64UnregisteredReplicaAuthorityErrorV1(
+      'not-wallet-namespaced',
+      'RFC-64 unregistered replica authority requires a wallet-namespaced Context Graph',
+    );
+  }
+  let envelope: SignedContextGraphPolicyEnvelopeV1;
+  try {
+    envelope = parseCanonicalSignedContextGraphPolicyEnvelopeV1(canonicalEnvelopeBytes, {
+      maxBytes: RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1,
+    });
+  } catch (cause) {
+    throw new Rfc64UnregisteredReplicaAuthorityErrorV1(
+      'seed-canonical',
+      'RFC-64 unregistered replica authority seed is not a canonical signed Context Graph policy envelope',
+      { cause },
+    );
+  }
+  const verify = input.verifyIssuerSignature ?? verifyControlEnvelopeIssuerSignatureV1;
+  let issuerSignature: VerifiedControlEnvelopeIssuerSignatureV1;
+  try {
+    issuerSignature = await verify(envelope, { signal: input.signal });
+  } catch (cause) {
+    if (input.signal?.aborted) throw cause;
+    throw new Rfc64UnregisteredReplicaAuthorityErrorV1(
+      'issuer-signature',
+      'RFC-64 unregistered replica authority issuer signature failed',
+      { cause },
+    );
+  }
+  input.signal?.throwIfAborted();
+  const owner = envelope.issuer.toLowerCase() as EvmAddressV1;
+  const policy = envelope.payload;
+  if (owner !== expectedOwner) {
+    throw new Rfc64UnregisteredReplicaAuthorityErrorV1(
+      'owner-mismatch',
+      'RFC-64 unregistered replica authority issuer is not the Context Graph wallet owner',
+    );
+  }
+  if (policy.networkId !== input.networkId || policy.contextGraphId !== input.contextGraphId) {
+    throw new Rfc64UnregisteredReplicaAuthorityErrorV1(
+      'scope-mismatch',
+      'RFC-64 unregistered replica authority is bound to a different network or Context Graph',
+    );
+  }
+  if (
+    policy.source.kind !== 'owner-signed-unregistered'
+    || policy.source.ownerAddress !== owner
+    || policy.source.ownerAuthorityEra !== '0'
+    || policy.governanceChainId !== null
+    || policy.governanceContractAddress !== null
+    || policy.ownershipTransitionDigest !== null
+    || policy.era !== '0'
+    || policy.version !== '0'
+    || policy.previousPolicyDigest !== null
+    || policy.accessPolicy !== 0
+  ) {
+    throw new Rfc64UnregisteredReplicaAuthorityErrorV1(
+      'policy-shape',
+      'RFC-64 unregistered replica authority is not a generation-0 public owner policy',
+    );
+  }
+  return Object.freeze({
+    policy,
+    policyDigest: envelope.objectDigest as Digest32V1,
+    roster: null,
+    source: 'owner-signed-unregistered' as const,
+    ownerAddress: owner,
+    canonicalEnvelopeBytes: Uint8Array.from(canonicalEnvelopeBytes),
+    envelope,
+    issuerSignature,
+  });
+}
+
+/**
+ * Keyed seed access supplied by the agent (see `Rfc64SeedStoreMethods`).
+ * `read` is a point lookup that MUST NOT scan the ontology graph; `persist`
+ * re-authenticates before writing and is expected to contain its own failures
+ * so a resolved authority is never lost to a write-through fault.
+ */
+export interface Rfc64UnregisteredReplicaAuthoritySeedAccessV1 {
+  readonly read: (input: Readonly<{
+    readonly networkId: NetworkIdV1;
+    readonly contextGraphId: ContextGraphIdV1;
+    readonly signal?: AbortSignal;
+  }>) => Promise<Uint8Array | null>;
+  readonly persist: (input: Readonly<{
+    readonly networkId: NetworkIdV1;
+    readonly contextGraphId: ContextGraphIdV1;
+    readonly canonicalEnvelopeBytes: Uint8Array;
+    readonly signal?: AbortSignal;
+  }>) => Promise<void>;
 }
 
 /**
  * Load and authenticate replica evidence. This proves only the unregistered
  * policy generation; callers MUST separately prove finalized on-chain absence
  * before accepting it.
+ *
+ * Order: (1) wallet-namespace gate, (2) keyed seed store point lookup, (3)
+ * DEPRECATED ontology system-graph scan as backward-compat fallback, (4)
+ * write-through of an ontology hit so the next read is a point lookup.
  */
 export async function loadRfc64UnregisteredReplicaAuthorityV1(input: Readonly<{
   readonly store: TripleStore;
   readonly networkId: NetworkIdV1;
   readonly contextGraphId: ContextGraphIdV1;
   readonly signal?: AbortSignal;
-}>): Promise<Rfc64ReleaseNativeAuthoritySnapshotV1 | null> {
-  const expectedOwner = input.contextGraphId
-    .match(EVM_ADDRESS_PREFIXED_CONTEXT_GRAPH_V1)?.[1]?.toLowerCase();
+  readonly seeds?: Rfc64UnregisteredReplicaAuthoritySeedAccessV1;
+}>): Promise<Rfc64AuthenticatedUnregisteredReplicaAuthorityV1 | null> {
   // Only wallet-namespaced CG IDs have an independently checkable owner before
   // registration. A signature cannot safely self-assign ownership of an
   // arbitrary global name.
-  if (expectedOwner === undefined) return null;
+  if (resolveRfc64WalletNamespaceOwnerV1(input.contextGraphId) === null) return null;
 
+  const { seeds } = input;
+  if (seeds !== undefined) {
+    const stored = await seeds.read({
+      networkId: input.networkId,
+      contextGraphId: input.contextGraphId,
+      signal: input.signal,
+    });
+    if (stored !== null) {
+      try {
+        return await authenticateRfc64UnregisteredReplicaAuthorityEnvelopeV1(stored, input);
+      } catch (cause) {
+        if (input.signal?.aborted) throw cause;
+        // A stored row that no longer authenticates is inert data, never
+        // authority. Fall through to the compat carrier rather than trust it.
+      }
+    }
+  }
+
+  // DEPRECATED: ontology system-graph carrier, backward-compat only. New code
+  // must not depend on this scan; it exists so replicas that received the
+  // seed through legacy ontology sync/gossip can still authenticate it.
+  const authority = await loadRfc64UnregisteredReplicaAuthorityFromOntologyV1(input);
+  if (authority !== null && seeds !== undefined) {
+    await seeds.persist({
+      networkId: input.networkId,
+      contextGraphId: input.contextGraphId,
+      canonicalEnvelopeBytes: authority.canonicalEnvelopeBytes,
+      signal: input.signal,
+    });
+  }
+  return authority;
+}
+
+async function loadRfc64UnregisteredReplicaAuthorityFromOntologyV1(input: Readonly<{
+  readonly store: TripleStore;
+  readonly networkId: NetworkIdV1;
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly signal?: AbortSignal;
+}>): Promise<Rfc64AuthenticatedUnregisteredReplicaAuthorityV1 | null> {
   const graph = contextGraphDataGraphUri('ontology');
   const subject = contextGraphDataGraphUri(input.contextGraphId);
   const result = await input.store.query(
@@ -104,7 +356,7 @@ export async function loadRfc64UnregisteredReplicaAuthorityV1(input: Readonly<{
     throw new Error('RFC-64 unregistered replica authority evidence exceeds its row bound');
   }
 
-  const accepted = new Map<string, Rfc64ReleaseNativeAuthoritySnapshotV1>();
+  const accepted = new Map<string, Rfc64AuthenticatedUnregisteredReplicaAuthorityV1>();
   for (const row of result.bindings) {
     if (input.signal?.aborted) throw input.signal.reason;
     const encoded = parseBase64UrlLiteralV1(row['evidence']);
@@ -116,33 +368,13 @@ export async function loadRfc64UnregisteredReplicaAuthorityV1(input: Readonly<{
       continue;
     }
     try {
-      const envelope = parseCanonicalSignedContextGraphPolicyEnvelopeV1(canonical);
-      await verifyControlEnvelopeIssuerSignatureV1(envelope, { signal: input.signal });
-      const owner = envelope.issuer.toLowerCase();
-      const policy = envelope.payload;
-      if (
-        owner !== expectedOwner
-        || policy.networkId !== input.networkId
-        || policy.contextGraphId !== input.contextGraphId
-        || policy.source.kind !== 'owner-signed-unregistered'
-        || policy.source.ownerAddress !== owner
-        || policy.source.ownerAuthorityEra !== '0'
-        || policy.governanceChainId !== null
-        || policy.governanceContractAddress !== null
-        || policy.ownershipTransitionDigest !== null
-        || policy.era !== '0'
-        || policy.version !== '0'
-        || policy.previousPolicyDigest !== null
-        || policy.accessPolicy !== 0
-      ) continue;
-      const snapshot = Object.freeze({
-        policy,
-        policyDigest: envelope.objectDigest as Digest32V1,
-        roster: null,
-        source: 'owner-signed-unregistered' as const,
-      });
-      accepted.set(envelope.objectDigest, snapshot);
-    } catch {
+      const snapshot = await authenticateRfc64UnregisteredReplicaAuthorityEnvelopeV1(
+        canonical,
+        input,
+      );
+      accepted.set(snapshot.policyDigest, snapshot);
+    } catch (cause) {
+      if (input.signal?.aborted) throw cause;
       // Unauthenticated, malformed, wrong-owner, wrong-network and replayed
       // cross-CG values are inert ontology data, never authority.
     }
@@ -170,7 +402,7 @@ function decodeCanonicalBase64UrlV1(encoded: string): Uint8Array {
   const decoded = Buffer.from(encoded, 'base64url');
   if (
     decoded.byteLength === 0
-    || decoded.byteLength > MAX_CONTROL_OBJECT_BYTES
+    || decoded.byteLength > RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1
     || decoded.toString('base64url') !== encoded
   ) {
     throw new Error('RFC-64 replica authority evidence is not canonical base64url');

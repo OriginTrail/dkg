@@ -137,13 +137,13 @@ describe('ContextGraphQueryView', () => {
   it('frames the page as a catalogue first and editor second', async () => {
     const { container, root } = await renderWithProfile(profile());
 
-    await waitForText(container, 'Query Catalogue');
+    await waitForText(container, 'Query catalogue');
 
     const buttonLabels = Array.from(container.querySelectorAll('button'))
       .map(button => button.textContent?.trim())
       .filter(Boolean);
 
-    expect(container.querySelector('h2.v10-mlv-title')?.textContent).toBe('Query Catalogue');
+    expect(container.querySelector('h2.v10-mlv-title')?.textContent).toBe('Query catalogue');
     expect(container.querySelector('#query-catalogue-saved-title')?.textContent).toBe('Choose a query');
     expect(container.querySelector('#query-catalogue-editor-title')?.textContent).toBe('Editor and results');
     expect(container.querySelector('textarea')).toBeTruthy();
@@ -151,7 +151,7 @@ describe('ContextGraphQueryView', () => {
     expect(buttonLabels.some(label => label?.startsWith('Graphs'))).toBe(true);
     expect(buttonLabels.some(label => label?.startsWith('Types'))).toBe(true);
     expect(buttonLabels).toEqual(expect.arrayContaining(['Run', 'Save', 'Reset']));
-    expect(container.textContent).toContain('Reusable SPARQL for this Context Graph');
+    expect(container.textContent).toContain('Reusable SPARQL for searching in this context graph');
     expect(container.textContent).toContain('Load a preset or saved query into the editor below.');
     expect(container.textContent).toContain('Built-in presets');
     expect(container.textContent).not.toContain('Catalogue scope');
@@ -253,7 +253,7 @@ describe('ContextGraphQueryView', () => {
     const { container, root } = await renderWithProfile(savedProfile);
 
     await waitForText(container, 'Saved queries');
-    expect(container.textContent).toContain('User-created SPARQL saved in this node profile for this Context Graph.');
+    expect(container.textContent).toContain('User-created SPARQL saved in this node profile for this context graph.');
     expect(container.textContent).not.toContain('Queries saved from the Query tab.');
     expect(container.textContent).not.toContain('Profile-saved queries');
     expect(container.textContent).toContain('Personal research');
@@ -282,7 +282,8 @@ describe('ContextGraphQueryView', () => {
     expect(textarea.value).toContain('schema.org/name');
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('schema.org/name'),
-      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory' },
+      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory', includeContextGraphPartitions: true },
+      { timeoutMs: null, maxResponseBytes: null },
     );
 
     const runButton = Array.from(container.querySelectorAll('button'))
@@ -295,7 +296,8 @@ describe('ContextGraphQueryView', () => {
     });
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('schema.org/name'),
-      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory' },
+      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory', includeContextGraphPartitions: true },
+      { timeoutMs: null, maxResponseBytes: null },
     );
 
     apiMocks.executeQuery.mockClear();
@@ -306,6 +308,7 @@ describe('ContextGraphQueryView', () => {
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('# edited'),
       { contextGraphId: 'cg-test', subGraphName: undefined, view: undefined },
+      { timeoutMs: null, maxResponseBytes: null },
     );
 
     await act(async () => { root.unmount(); });
@@ -314,7 +317,7 @@ describe('ContextGraphQueryView', () => {
   it('shows profile loading and saved-query empty catalogue states', async () => {
     const { container, root } = await renderWithProfile(profile({ loading: true }));
 
-    await waitForText(container, 'Loading saved queries...');
+    await waitForText(container, 'Loading saved queries…');
     expect(container.textContent).toContain('All triples');
     expect(container.textContent).not.toContain('No saved queries yet.');
 
@@ -381,6 +384,7 @@ describe('ContextGraphQueryView', () => {
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('"748387\\" } UNION { ?s ?p ?o"'),
       { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'verifiable-memory' },
+      { timeoutMs: null, maxResponseBytes: null },
     );
     await act(async () => {
       setFieldValue(parameterInput, 'different configuration');
@@ -433,14 +437,14 @@ describe('ContextGraphQueryView', () => {
         slug: 'ui-saved-queries',
         subGraph: '__context_graph',
         name: 'Saved queries',
-        description: 'User-created SPARQL saved in this node profile for this Context Graph.',
+        description: 'User-created SPARQL saved in this node profile for this context graph.',
         rank: 50,
         queries: [{
           slug: 'existing-query',
           subGraph: '__context_graph',
           catalogSlug: 'ui-saved-queries',
           catalogName: 'Saved queries',
-          catalogDescription: 'User-created SPARQL saved in this node profile for this Context Graph.',
+          catalogDescription: 'User-created SPARQL saved in this node profile for this context graph.',
           catalogRank: 50,
           name: 'Existing saved query',
           description: 'Already persisted.',
@@ -451,7 +455,7 @@ describe('ContextGraphQueryView', () => {
       }],
     }));
 
-    await waitForText(container, 'Query Catalogue');
+    await waitForText(container, 'Query catalogue');
 
     const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
     await act(async () => {
@@ -511,7 +515,7 @@ describe('ContextGraphQueryView', () => {
   it('keeps local saves visible while profile queries are loading', async () => {
     const { container, root } = await renderWithProfile(profile({ loading: true }));
 
-    await waitForText(container, 'Loading saved queries...');
+    await waitForText(container, 'Loading saved queries…');
 
     const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
     await act(async () => {

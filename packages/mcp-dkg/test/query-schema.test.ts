@@ -42,6 +42,26 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     expect(lastCall.agentAddress).toBe('peer-test');
   });
 
+  it('passes the scoped metadata opt-ins through the public tool schema', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',
+      projectId: 'parent', includeContextGraphPartitions: true, includeSharedMemoryMeta: true,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(client.queryCalls.at(-1)).toMatchObject({ contextGraphId: 'parent',
+      includeContextGraphPartitions: true, includeSharedMemoryMeta: true });
+  });
+
+  it('passes semantics through the public tool schema, and refuses other values', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }', projectId: 'parent', view: 'verifiable-memory', semantics: 'merged',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(client.queryCalls.at(-1)).toMatchObject({ contextGraphId: 'parent', view: 'verifiable-memory', semantics: 'merged' });
+    await expect(server.call('dkg_query', { sparql: 'SELECT ?s WHERE { ?s ?p ?o }', projectId: 'parent', semantics: 'joined' }))
+      .rejects.toThrow();
+  });
+
   it('renders CONSTRUCT quads instead of dropping graph-shaped results', async () => {
     client = new FakeClient({
       query: async () => ({
@@ -335,9 +355,9 @@ describe('dkg_list_context_graphs — rename + UX-note pair', () => {
     expect(server.tools.has('dkg_list_projects')).toBe(false);
   });
 
-  it("description includes the canonical-naming reconciliation note: \"called 'projects' in the DKG node UI\"", () => {
+  it("description includes the canonical-naming reconciliation note: \"shown as 'Context Graphs' in the DKG node UI\"", () => {
     const tool = server.get('dkg_list_context_graphs');
-    expect(tool.config.description).toContain("called 'projects' in the DKG node UI");
+    expect(tool.config.description).toContain("shown as 'Context Graphs' in the DKG node UI");
   });
 
   it('happy path: invokes client.listProjects and renders rows', async () => {

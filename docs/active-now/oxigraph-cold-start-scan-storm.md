@@ -28,6 +28,13 @@ operation scan after a restart and again on each sweep. The emergency switches
 worked because they reduced aggregate admission and removed three retry
 producers; they did not remove the underlying overlap or materialization shape.
 
+Later change: chain reconcile no longer scans workspace operations at all, and
+finalization no longer reads shared memory by root entity. A KA with no local
+graph-scoped state answers `no-swm` and is fetched from peers; a finalization
+message that is not graph-scoped is ignored. The handler memo, the scan
+single-flight of item 1, the finalization slice paging of item 2 and the two
+`scan_singleflight` metrics below went with those reads.
+
 ## Implemented boundaries
 
 1. Equivalent finalization and chain-reconcile scans are keyed single-flights.
@@ -292,3 +299,19 @@ audit to this table before declaring the rollout accepted.
    four-slot budget with ACK/health reserves. Raise it only from measured
    headroom. Remove `DKG_SYNC_GLOBAL_MAX_INFLIGHT=1` last and increase one step
    per soak; do not jump directly to the former concurrency.
+
+`DKG_SYNC_GLOBAL_MAX_INFLIGHT=1` is a soak-only override, not a setting for
+normal operation. Leave the sync limits at their defaults (10 jobs at once,
+20 waiting) on production nodes. With one slot and
+`DKG_SYNC_GLOBAL_QUEUE_LIMIT=0`, one long Verified Memory transfer holds the
+only slot, and every other sync job is refused for as long as it runs (#3251).
+From 10.0.25, shared-memory pulls keep one reserved slot and a short queue of
+their own, so they still run beside such a transfer.
+
+Metadata refreshes, which bring a graph's definition and a private graph's
+member list, also keep one reserved slot (#3280), with no queue of their own.
+A refresh that finds that slot busy as well is refused at once, as before.
+A node set to one slot therefore runs up to three sync jobs at once: one
+transfer, one shared-memory pull and one metadata refresh.
+`DKG_SYNC_SHARED_MEMORY_RESERVED_INFLIGHT=0` and
+`DKG_SYNC_CONTROL_PLANE_RESERVED_INFLIGHT=0` turn the reserves off.

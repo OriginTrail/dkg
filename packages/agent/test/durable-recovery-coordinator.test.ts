@@ -1,3 +1,4 @@
+import { accountDurableRecoveryAction, type MutableDurableRecoveryPeerHealth } from '../src/sync/durable-recovery-peer-health.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   DurableRecoveryCoordinator,
@@ -186,4 +187,25 @@ describe('durable recovery peer ranking', () => {
       candidate('new', { manifestDigest: MANIFEST_B, offset: 100, updatedAtMs: 10 }),
     ])).toBe(MANIFEST_B);
   });
+});
+
+
+it('preserves partial penalties, retry neutrality, terminal decay and peer ranking', () => {
+  const health = (): MutableDurableRecoveryPeerHealth => ({ attempts: 8, successfulSlices: 0, recentTimeouts: 4, recentTransportResets: 4 });
+  const row = health();
+  {
+    accountDurableRecoveryAction(row, 'partial-progress', { timedOutPhases: 2, failedPeers: 1 }, 100);
+    expect(row).toMatchObject({ successfulSlices: 1, recentTimeouts: 5, recentTransportResets: 5 });
+    accountDurableRecoveryAction(row, 'unchanged', { timedOutPhases: 2, failedPeers: 1 }, 200);
+    expect(row).toMatchObject({ successfulSlices: 1, recentTimeouts: 5, recentTransportResets: 5, lastSuccessfulTransportAtMs: 100 });
+    accountDurableRecoveryAction(row, 'failure', { timedOutPhases: 1, failedPeers: 1 }, 300);
+    accountDurableRecoveryAction(row, 'success', { timedOutPhases: 1, failedPeers: 1 }, 400);
+    accountDurableRecoveryAction(row, 'terminal', { timedOutPhases: 1, failedPeers: 1 }, 500);
+  }
+  expect(row).toEqual({ attempts: 8, successfulSlices: 3, recentTimeouts: 4, recentTransportResets: 4, lastSuccessfulTransportAtMs: 500 });
+  const candidates = [
+    { peer: 'older', peerId: 'older', discoveryRank: 0, health: { ...row, lastSuccessfulTransportAtMs: 400 } },
+    { peer: 'recovered', peerId: 'recovered', discoveryRank: 1, health: row },
+  ];
+  expect(rankDurableRecoveryPeers(candidates).map(row => row.peerId)).toEqual(['recovered', 'older']);
 });

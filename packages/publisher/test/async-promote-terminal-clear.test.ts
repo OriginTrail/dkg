@@ -65,6 +65,28 @@ describe('#1837 promote queue clearTerminalJob', () => {
     return result.type === 'bindings' ? result.bindings[0]?.['payload'] : undefined;
   }
 
+  it('protects a replay-safe post-commit row until its recovery budget is spent', async () => {
+    const queue = createQueue({ maxRetries: 2, backoff: () => 100 });
+    const jobId = await queue.enqueue(makeRequest());
+    const failCommitted = async () => {
+      const job = (await queue.claimNext('worker-1'))!;
+      await queue.recordCommitMarker(jobId, job.lease!.claimToken, 'promoteStarted');
+      await queue.fail(jobId, job.lease!.claimToken, {
+        message: 'A promote post-commit step failed after Shared Memory was committed',
+        classification: 'fatal', retryable: false, recordedAt: now,
+        diagnosticCode: 'PROMOTE_POST_COMMIT_FAILURE',
+      });
+    };
+    await failCommitted();
+    const before = await rawPayloadOf(jobId);
+    expect(await queue.clearTerminalJob(jobId)).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    expect(await rawPayloadOf(jobId)).toBe(before);
+    expect(await queue.recoverPostCommitFailures()).toMatchObject([{ jobId, action: 'requeued' }]);
+    now += 100;
+    await failCommitted();
+    expect(await queue.clearTerminalJob(jobId)).toEqual({ outcome: 'cleared' });
+  });
+
   it('clears an exact succeeded job (cleared); no other job changes', async () => {
     const queue = createQueue();
     const target = await enqueueSucceeded(queue, { assertionName: 'a' });

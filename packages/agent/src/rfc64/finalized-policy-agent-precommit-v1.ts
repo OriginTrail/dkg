@@ -23,6 +23,7 @@ import {
   resolveAndVerifyRfc64FinalizedPolicyInSnapshotV1,
 } from './finalized-policy-verifier-v1.js';
 import type {
+  Rfc64PublicCatalogNativeAdmissionPlanV1,
   Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1,
   Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1,
 } from './public-catalog-native-receiver-v1.js';
@@ -31,6 +32,13 @@ export interface Rfc64FinalizedPolicyAgentPrecommitResolutionOptionsV1 {
   readonly acceptedPolicySnapshotForCatalogScope:
     (scope: Readonly<AuthorCatalogScopeV1>) => AcceptedRfc64CatalogAccessSnapshotV1;
   readonly rpcEndpoints: readonly string[] | null;
+  /**
+   * `chain.finalityConfirmations` — the node's SINGLE definition of finality,
+   * forwarded verbatim to the strict snapshot scope. Omitted means the shared
+   * default of 1 (anchor at head); an operator who wants a deeper precommit
+   * anchor deepens the one chain-wide setting.
+   */
+  readonly finalityConfirmations?: number;
   readonly getOnChainContextGraphId:
     (contextGraphId: ContextGraphIdV1, signal: AbortSignal) => Promise<string | null>;
   readonly getEvmChainId: () => Promise<bigint>;
@@ -51,10 +59,11 @@ export interface ResolvedRfc64FinalizedPolicyAgentPrecommitV1 {
  * Resolve and snapshot the shared agent/chain boundary used by both finalized
  * policy-only and VM-materializing precommits. Returning null means the
  * accepted policy is not chain-finalized and therefore needs no EVM barrier.
+ * It reads no row, so each precommit's `admit` runs it before activation too.
  */
 export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
   options: Rfc64FinalizedPolicyAgentPrecommitResolutionOptionsV1,
-  plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
+  plan: Readonly<Rfc64PublicCatalogNativeAdmissionPlanV1>,
   signal: AbortSignal,
   assertAcceptedPolicyBeforeChainResolution?: (
     acceptedPolicy: Readonly<AcceptedRfc64CatalogAccessSnapshotV1>,
@@ -155,6 +164,18 @@ export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
 }
 
 /**
+ * The strict snapshot config validates its own key set, so an operator who never
+ * set a depth must produce NO key rather than an explicit `undefined`.
+ */
+export function strictFinalityConfirmationsOptionV1(
+  finalityConfirmations: number | undefined,
+): Readonly<{ finalityConfirmations?: number }> {
+  return finalityConfirmations === undefined
+    ? Object.freeze({})
+    : Object.freeze({ finalityConfirmations });
+}
+
+/**
  * Guard a finalized-chain SWM catalog before its applied-head CAS without
  * treating catalog rows as a second VM inventory. The chain remains the VM
  * catalog; this barrier verifies the accepted policy, cleartext CG name,
@@ -163,7 +184,10 @@ export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
 export function createRfc64FinalizedPolicyAgentPrecommitV1(
   options: Rfc64FinalizedPolicyAgentPrecommitOptionsV1,
 ): Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1 {
-  return Object.freeze(async (plan, signal): Promise<void> => {
+  return Object.freeze(Object.assign(async (
+    plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
+    signal: AbortSignal,
+  ): Promise<void> => {
     const resolved = await resolveRfc64FinalizedPolicyAgentPrecommitV1(
       options,
       plan,
@@ -176,6 +200,7 @@ export function createRfc64FinalizedPolicyAgentPrecommitV1(
     const snapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
       chainId: resolved.chainId,
       endpoints: resolved.rpcEndpoints,
+      ...strictFinalityConfirmationsOptionV1(options.finalityConfirmations),
       // One process-wide per-chain gate protects concurrent policy and VM
       // reads even though each precommit owns its own snapshot scope.
       owner: 'rfc64',
@@ -205,7 +230,16 @@ export function createRfc64FinalizedPolicyAgentPrecommitV1(
       plan,
       resolved.acceptedPolicy,
     );
-  });
+  }, {
+    // Everything before the snapshot read: the accepted policy and its
+    // binding, the trusted RPC endpoints, the chain id and the on-chain id.
+    admit: async (
+      plan: Readonly<Rfc64PublicCatalogNativeAdmissionPlanV1>,
+      signal: AbortSignal,
+    ): Promise<void> => {
+      await resolveRfc64FinalizedPolicyAgentPrecommitV1(options, plan, signal);
+    },
+  }));
 }
 
 function assertPlanPolicyAndRosterCurrentV1(

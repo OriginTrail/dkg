@@ -14,21 +14,30 @@ function providerKey(detail: Eip6963ProviderDetail): string {
 
 /**
  * Shared wallet connect surface. It starts EIP-6963 discovery only while a
- * browser-wallet UI is mounted, keeps provider metadata display-only, and uses conditional
- * hardware copy per inv-14.
+ * browser-wallet UI is mounted, keeps provider metadata display-only, and lets
+ * each feature own its explanatory guidance.
  */
+export interface WalletConnectControlProps {
+  className?: string;
+  testId?: string;
+  description?: React.ReactNode;
+  purpose?: 'transaction' | 'message';
+}
+
 export function WalletConnectControl({
   className = '',
   testId = 'wallet-connect',
-}: {
-  className?: string;
-  testId?: string;
-}) {
+  purpose = 'transaction',
+  description = (
+    <>Hardware wallet recommended. Verify every transaction on the signing device before confirming.</>
+  ),
+}: WalletConnectControlProps) {
   const discovered = useWalletStore((s) => s.discovered);
   const unsupported = useWalletStore((s) => s.unsupported);
   const address = useWalletStore((s) => s.address);
   const initWallet = useWalletStore((s) => s.initWallet);
   const connect = useWalletStore((s) => s.connect);
+  const disconnect = useWalletStore((s) => s.disconnect);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -45,7 +54,7 @@ export function WalletConnectControl({
   if (address) {
     return (
       <div className={['v10-wallet-connect', className].filter(Boolean).join(' ')}>
-        <WalletPill />
+        {purpose === 'message' ? <div className="program-wallet-address"><code>{address}</code> <button type="button" onClick={disconnect}>Disconnect</button></div> : <WalletPill />}
         <p className="v10-wallet-note">
           One active wallet in v1. Disconnect to switch accounts or providers.
         </p>
@@ -79,7 +88,7 @@ export function WalletConnectControl({
     <div className={['v10-wallet-connect', className].filter(Boolean).join(' ')}>
       <button
         type="button"
-        className="v10-wallet-connect-btn"
+        className="v10-wallet-connect-btn ds-btn"
         data-testid={testId}
         onClick={onMainClick}
         aria-expanded={pickerOpen}
@@ -89,15 +98,13 @@ export function WalletConnectControl({
         {discovered.length !== 1 && <ChevronDown size={14} aria-hidden="true" />}
       </button>
       <p className="v10-wallet-note">
-        Hardware wallet recommended. If your provider uses a device, verify the amount and contract on
-        the device. Hot publishing wallets can publish without prompts; their spend is bounded by the
-        per-epoch allowance, not the committed TRAC.
+        {description}
       </p>
       <p className="v10-wallet-note">
         Provider names are self-reported and display-only.
       </p>
       {pickerOpen && (
-        <div className="v10-wallet-picker" role="menu" aria-label="Wallet providers">
+        <div className="v10-wallet-picker ds-card-nested" role="menu" aria-label="Wallet providers">
           {discovered.length > 0 ? (
             discovered.map((detail) => {
               const key = providerKey(detail);
@@ -105,7 +112,7 @@ export function WalletConnectControl({
                 <button
                   key={key}
                   type="button"
-                  className="v10-wallet-provider"
+                  className="v10-wallet-provider ds-card-nested"
                   role="menuitem"
                   onClick={() => void connectDetail(detail)}
                   disabled={busyKey != null}
@@ -114,7 +121,7 @@ export function WalletConnectControl({
                     <img src={detail.info.icon} alt="" aria-hidden="true" className="v10-wallet-provider-icon" />
                   )}
                   <span>{providerName(detail)}</span>
-                  {busyKey === key && <Loader2 size={13} aria-hidden="true" />}
+                  {busyKey === key && <Loader2 size={14} aria-hidden="true" />}
                 </button>
               );
             })

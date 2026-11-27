@@ -246,6 +246,27 @@ describe('RFC-64 finalized authority snapshot batch runtime', () => {
     expect(idle).toBe(true);
   });
 
+  it('lets a single-owner read cancel its physical read, but never a shared batch', async () => {
+    const readSnapshots = vi.fn(async (
+      targetIds: readonly ContextGraphAuthorityIndexId[],
+      _signal?: AbortSignal,
+    ) => new Map(targetIds.map((targetId) => [targetId, snapshot(targetId)])));
+    const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({ readSnapshots });
+    const owner = new AbortController();
+    const sharedReader = new AbortController();
+
+    await runtime.read(ID_9, owner.signal);
+    // A shared batch serves every lane that reads it, so one lane's signal
+    // only detaches that lane (see the cancelled-caller case above).
+    await runtime.createBatch([ID_9, ID_10]).read(ID_9, sharedReader.signal);
+
+    expect(readSnapshots.mock.calls).toEqual([
+      [[ID_9], owner.signal],
+      [[ID_9, ID_10]],
+    ]);
+    await runtime.whenIdle();
+  });
+
   it('returns immutable evidence owned by the closed batch lifecycle', async () => {
     const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
       readSnapshots: async (targetIds) => new Map(

@@ -40,9 +40,25 @@ export function canonicalizeJson(
   value: CanonicalJsonValue,
   options: CanonicalJsonOptions = {},
 ): string {
+  return writeCanonicalJson(value, options, true).finish();
+}
+
+/** Apply the serializer's complete validation and exact byte limit without retaining output. */
+export function assertCanonicalJsonValue(
+  value: CanonicalJsonValue,
+  options: CanonicalJsonOptions = {},
+): void {
+  writeCanonicalJson(value, options, false);
+}
+
+function writeCanonicalJson(
+  value: CanonicalJsonValue,
+  options: CanonicalJsonOptions,
+  retainOutput: boolean,
+): BoundedJsonWriter {
   const { maxBytes, maxDepth } = resolveLimits(options);
   const ancestors = new Set<object>();
-  const writer = new BoundedJsonWriter(maxBytes);
+  const writer = new BoundedJsonWriter(maxBytes, retainOutput);
 
   const encode = (input: unknown, depth: number): void => {
     if (depth > maxDepth) {
@@ -125,7 +141,7 @@ export function canonicalizeJson(
   };
 
   encode(value, 0);
-  return writer.finish();
+  return writer;
 }
 
 export function canonicalizeJsonBytes(
@@ -210,14 +226,14 @@ class BoundedJsonWriter {
   private pending = '';
   private byteLength = 0;
 
-  constructor(private readonly maxBytes: number) {}
+  constructor(private readonly maxBytes: number, private readonly retainOutput: boolean) {}
 
   appendAscii(value: string): void {
     this.appendMeasured(value, value.length);
   }
 
-  appendUtf8(value: string): void {
-    this.appendMeasured(value, UTF8.encode(value).byteLength);
+  appendValidatedUtf8(value: string, start: number, end: number, byteLength: number): void {
+    this.appendMeasured(this.retainOutput ? value.slice(start, end) : '', byteLength);
   }
 
   finish(): string {
@@ -233,6 +249,7 @@ class BoundedJsonWriter {
       throw new CanonicalJsonError(`Canonical JSON exceeds ${this.maxBytes} bytes`);
     }
     this.byteLength += bytes;
+    if (!this.retainOutput) return;
     this.pending += value;
     if (this.pending.length >= 8192) {
       this.chunks.push(this.pending);
@@ -249,12 +266,15 @@ function writeCanonicalJsonString(
 ): void {
   writer.appendAscii('"');
   let rawStart = 0;
+  let rawBytes = 0;
   let index = 0;
 
   const flushRaw = (end: number): void => {
-    // Keep TextEncoder allocations bounded even when the source string is enormous.
-    if (end > rawStart) writer.appendUtf8(value.slice(rawStart, end));
+    // The validation scan already knows each scalar's UTF-8 width. Do not
+    // allocate and discard an encoded buffer merely to measure this segment.
+    if (end > rawStart) writer.appendValidatedUtf8(value, rawStart, end, rawBytes);
     rawStart = end;
+    rawBytes = 0;
   };
 
   while (index < value.length) {
@@ -282,10 +302,12 @@ function writeCanonicalJsonString(
       if (!isLowSurrogate(next)) {
         throw new CanonicalJsonError(`${label} contains an unpaired high surrogate`);
       }
+      rawBytes += 4;
       index += 2;
     } else if (isLowSurrogate(unit)) {
       throw new CanonicalJsonError(`${label} contains an unpaired low surrogate`);
     } else {
+      rawBytes += unit < 0x80 ? 1 : unit < 0x800 ? 2 : 3;
       index += 1;
     }
 

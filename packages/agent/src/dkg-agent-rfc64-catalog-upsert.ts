@@ -1,49 +1,57 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { CatalogRepairConditionErrorV1 } from './rfc64/catalog-repair-diagnostics-v1.js';
 /** Catalog-owned, serialized exact-set mutations for confirmed public SWM assets. */
 
 import {
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
-  assertSignedAuthorCatalogHeadEnvelopeV1,
-  assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
-  canonicalizeCanonicalGraphScopedAuthorSealV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeAuthorCatalogScopeDigestV1,
-  computeControlSignatureVariantDigestHex,
-  decodeOpaqueKaBundleV1,
-  parseCanonicalGraphScopedAuthorSealV1,
+  createOperationContext,
   type AssertionCoordinateV1,
   type AuthorCatalogScopeV1,
   type CatalogSealDeploymentProfileV1,
-  type Digest32V1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
-import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
-import {
-  loadBoundedAuthorCatalogHistoryV1,
-  type BoundedAuthorCatalogHistoryV1,
-  type Rfc64CatalogAuthorSignerV1,
-  type Rfc64CatalogSuccessorAssetInputV1,
-  type Rfc64StagedAuthorCatalogHeadRefV1,
+import type {
+  Rfc64CatalogAuthorSignerV1,
+  Rfc64CatalogSuccessorAssetInputV1,
 } from './dkg-agent-rfc64-catalog.js';
+import {
+  rfc64CatalogMutationMemoryV1,
+  type Rfc64CatalogMutationStateV1,
+  type Rfc64CatalogMutationV1,
+} from './internal/catalog-mutation-memory.js';
+import type { Rfc64VerifiedCatalogRowsV1 } from './internal/verified-catalog-rows.js';
+import { yieldMainThread } from './main-thread-time-slice.js';
+import { planNextRfc64CatalogExactSetV1 } from './internal/catalog-exact-set-plan.js';
+export { planNextRfc64CatalogExactSetV1 } from './internal/catalog-exact-set-plan.js';
+import { validateRfc64CatalogTargetAssetsV1 } from './rfc64/public-catalog-successor-producer-v1.js';
+import {
+  assertCatalogTargetRevisionsV1, withCatalogTransitionVmAuthorizationV1,
+} from './internal/catalog-asset-revision.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
 import {
-  compareRfc64PublicCatalogSuccessorAssetsByKaIdV1,
+  compareRfc64PublicCatalogSuccessorAssetsByKaIdV1, sameRfc64SuccessorAssetV1,
   snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1,
+  snapshotRfc64PublicCatalogSuccessorAssetV1,
 } from './rfc64/public-catalog-successor-asset-v1.js';
 import { snapshotRfc64PublicCatalogAnnouncementPeersV1 } from './rfc64/catalog-peers-v1.js';
 import { computeRfc64AppliedInventoryDigestV1 } from './rfc64/public-catalog-inventory-completeness-v1.js';
-import type { Rfc64PublicCatalogIssuerAuthorizationV1 } from './rfc64/public-catalog-successor-producer-v1.js';
+import type { AnnounceRfc64PublicCatalogHeadResultV1 } from './rfc64/public-catalog-service-v1.js';
 import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
 import {
   throwIfRfc64AbortedV1 as throwIfAbortedV1,
 } from './rfc64/abort-v1.js';
+import {
+  AuthorCatalogFullErrorV1,
+  assertAuthorCatalogTakesNewRowsV1,
+} from './internal/author-catalog-capacity.js';
 import type { Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 } from
   './rfc64/swm-author-inventory-producer-v1.js';
-
 export interface UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1 {
   readonly scope: AuthorCatalogScopeV1;
   readonly author: Rfc64CatalogAuthorSignerV1;
@@ -53,6 +61,22 @@ export interface UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1 {
   readonly catalogIssuerDelegationEffectiveAt: TimestampMsV1;
   readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
 }
+
+/**
+ * GH#3081 — what one catalog mutation reports while it runs: how long each phase took and whether
+ * it resolved or rejected. The delivery of its head is not among them: the mutation hands the head
+ * off and returns, and the fan-out reports itself. Observation only; an observer never changes the
+ * mutation, and `measure` passes the work's result or rejection through unchanged.
+ */
+export interface Rfc64CatalogMutationObserverV1 {
+  now(): number;
+  measure<T>(phase: 'state' | 'successor' | 'cas', work: () => Promise<T>, startedAt?: number): Promise<T>;
+}
+
+const UNOBSERVED_CATALOG_MUTATION_V1: Rfc64CatalogMutationObserverV1 = Object.freeze({
+  now: () => 0,
+  measure: <T>(_phase: unknown, work: () => Promise<T>) => work(),
+});
 
 export interface ReconcileRfc64PublicRootCatalogExactSetParamsV1 {
   readonly scope: AuthorCatalogScopeV1;
@@ -86,6 +110,7 @@ export type Rfc64CatalogProjectionTargetPolicyV1 =
 
 interface Rfc64CatalogProjectionMutationOptionsV1 {
   readonly targetPolicy: Rfc64CatalogProjectionTargetPolicyV1;
+  readonly source: 'confirmed' | 'inventory';
   readonly commitAppliedHead?: (
     commit: () => AppliedCatalogHeadSnapshotV1,
   ) => Promise<Rfc64SourceAwareAppliedHeadCommitResultV1>;
@@ -109,14 +134,6 @@ interface ReconcileRfc64SwmInventoryCatalogResultV1
   readonly sourceCurrent: boolean;
 }
 
-interface Rfc64CatalogMutationStateV1 {
-  readonly current: AppliedCatalogHeadSnapshotV1 | null;
-  readonly previousHead: Rfc64StagedAuthorCatalogHeadRefV1;
-  readonly catalogIssuerAuthorization: Rfc64PublicCatalogIssuerAuthorizationV1;
-  readonly assets: Rfc64CatalogSuccessorAssetInputV1[];
-  readonly expectedCurrentCatalogHeadDigest: Digest32V1 | null;
-}
-
 export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
   /** Package-internal positive proof used by crash-safe confirmed-row retirement. */
   async rfc64CatalogCoversConfirmedSwmRowV1(
@@ -130,11 +147,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
   ): Promise<boolean> {
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
-    const state = await this.readRfc64CatalogMutationStateV1(
-      persistence,
-      computeAuthorCatalogScopeDigestV1(params.scope),
-      params.scope.authorAddress,
-    );
+    const state = await this.readRfc64CatalogMutationStateV1(persistence, params.scope);
     const asset = state?.assets.find((candidate) => (
       candidate.seal.kaUal === params.expectedRow.kaUal
     ));
@@ -144,15 +157,16 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     ) return false;
     const catalogVersion = BigInt(asset.seal.assertionVersion);
     const expectedVersion = BigInt(params.expectedRow.assertionVersion);
-    if (catalogVersion > expectedVersion) {
-      // A newer assertion on the same stable KA and coordinate is durable
-      // completion for an obsolete confirmation repair. Never reconstruct or
-      // roll it back to the older workspace/seal generation.
-      return true;
-    }
-    return catalogVersion === expectedVersion
-      && computeCanonicalGraphScopedAuthorSealDigestV1(asset.seal)
-        === params.expectedRow.sealDigest;
+    // A newer assertion on the same stable KA and coordinate is durable
+    // completion for an obsolete confirmation repair. Never reconstruct or
+    // roll it back to the older workspace/seal generation.
+    const covered = catalogVersion > expectedVersion || (
+      catalogVersion === expectedVersion
+      && computeCanonicalGraphScopedAuthorSealDigestV1(asset.seal) === params.expectedRow.sealDigest
+    );
+    // The answer retires a durable repair marker: it does not rest on memory alone.
+    if (covered) await this.confirmRfc64CatalogDurableV1(persistence, params.scope, state!, asset);
+    return covered;
   }
 
   /**
@@ -164,11 +178,25 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     this: DKGAgent,
     params: UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1,
   ): Promise<AppliedCatalogHeadSnapshotV1> {
+    return this.upsertObservedRfc64PublicRootCatalogAssetV1(params, UNOBSERVED_CATALOG_MUTATION_V1);
+  }
+
+  /**
+   * The same mutation, reporting its phases to `observer` (GH#3081; the finalized-private
+   * placement repair is the observed caller). The input stays data-only.
+   */
+  protected async upsertObservedRfc64PublicRootCatalogAssetV1(
+    this: DKGAgent,
+    params: UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1,
+    observer: Rfc64CatalogMutationObserverV1,
+  ): Promise<AppliedCatalogHeadSnapshotV1> {
+    // The VM proof and both successor commits must bind the same caller-independent bytes.
+    const asset = snapshotRfc64PublicCatalogSuccessorAssetV1(params.asset);
     const authority = this.assertRfc64CatalogAuthoringModeV1(params.scope.contextGraphId);
     if (params.scope.subGraphName !== null) {
       throw new Error('RFC-64 confirmed public asset upsert requires the root catalog lane');
     }
-    if (params.scope.authorAddress !== params.asset.seal.authorAddress) {
+    if (params.scope.authorAddress !== asset.seal.authorAddress) {
       throw new Error('RFC-64 confirmed public asset author differs from the catalog scope');
     }
     const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(params.peers);
@@ -181,34 +209,35 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       throw new Error('RFC-64 catalog upsert requires the public catalog service');
     }
     service.acceptedPolicySnapshotForCatalogScope(params.scope);
-    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(params.scope);
+    const stateStartedAt = observer.now();
 
-    return this.rfc64CatalogMutationCoordinatorV1.run(params.scope, async () => {
-      let state = await this.readRfc64CatalogMutationStateV1(
-        persistence,
-        catalogScopeDigest,
-        params.scope.authorAddress,
-      );
-      state ??= await this.createRfc64CatalogGenesisStateV1(params);
-      const assets = state.assets;
+    return this.runRfc64CatalogMutationV1(params.scope, async (mutation) => {
+      // The state phase includes the wait for the mutation lock, so it starts before `run`.
+      const state = await observer.measure('state', async () => (
+        await this.readRfc64CatalogMutationStateV1(persistence, params.scope)
+      ) ?? this.createRfc64CatalogGenesisStateV1(params), stateStartedAt);
+      const assets = [...state.assets];
       const existingIndex = assets.findIndex(
-        (asset) => asset.seal.reservedKaId === params.asset.seal.reservedKaId,
+        (currentAsset) => currentAsset.seal.reservedKaId === asset.seal.reservedKaId,
       );
+      // GH#3134 — a new asset needs a free row; a row the catalog holds is replaced in place.
+      if (existingIndex < 0) assertAuthorCatalogTakesNewRowsV1(assets, 1);
       if (
         existingIndex >= 0
-        && sameRfc64SuccessorAssetV1(assets[existingIndex]!, params.asset)
+        && sameRfc64SuccessorAssetV1(assets[existingIndex]!, asset)
       ) {
         if (state.current === null) {
           throw new Error('RFC-64 staged genesis unexpectedly contains an ordinary asset');
         }
+        await this.confirmRfc64CatalogDurableV1(persistence, params.scope, state, assets[existingIndex]!);
         return state.current;
       }
       if (existingIndex >= 0) {
         const existing = assets[existingIndex]!;
         const existingVersion = BigInt(existing.seal.assertionVersion);
-        const requestedVersion = BigInt(params.asset.seal.assertionVersion);
+        const requestedVersion = BigInt(asset.seal.assertionVersion);
         if (
-          existing.assertionCoordinate === params.asset.assertionCoordinate
+          existing.assertionCoordinate === asset.assertionCoordinate
           && requestedVersion < existingVersion
         ) {
           // A delayed VM-confirmation repair for vN must not roll a catalog
@@ -218,28 +247,27 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
           if (state.current === null) {
             throw new Error('RFC-64 staged genesis unexpectedly contains an ordinary asset');
           }
+          await this.confirmRfc64CatalogDurableV1(persistence, params.scope, state, existing);
           return state.current;
         }
-        if (
-          existing.assertionCoordinate !== params.asset.assertionCoordinate
-          || requestedVersion <= existingVersion
-        ) {
-          throw new Error(
-            `RFC-64 catalog upsert for KA ${params.asset.seal.reservedKaId} is not a newer assertion version on the same coordinate`,
+        if (existing.assertionCoordinate !== asset.assertionCoordinate) {
+          throw new CatalogRepairConditionErrorV1('version_conflict',
+            `RFC-64 catalog upsert for KA ${asset.seal.reservedKaId} is not a newer assertion version on the same coordinate`,
           );
         }
+        if (requestedVersion > existingVersion + 1n) {
+          throw new CatalogRepairConditionErrorV1('version_conflict',
+            'RFC-64 confirmed upsert cannot skip assertion versions');
+        }
       }
-      if (existingIndex >= 0) assets[existingIndex] = params.asset;
-      else assets.push(params.asset);
-      const committed = await this.applyRfc64CatalogSuccessorV1(
-        persistence,
-        state,
-        params,
-        assets,
-        peers,
-        authority.reconciliationLane === 'shadow-stage',
-      );
-      return committed.applied;
+      if (existingIndex >= 0) assets[existingIndex] = asset;
+      else assets.push(asset);
+      assets.sort(compareRfc64PublicCatalogSuccessorAssetsByKaIdV1);
+      const result = await this.applyRfc64CatalogTargetV1(persistence, state, params, assets, peers, {
+        source: 'confirmed', stageOnly: authority.reconciliationLane === 'shadow-stage', observer, mutation,
+      });
+      if (result.appliedHead === null) throw new Error('RFC-64 upsert did not produce an applied head');
+      return result.appliedHead;
     });
   }
 
@@ -254,6 +282,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
   ): Promise<ReconcileRfc64PublicRootCatalogExactSetResultV1> {
     const result = await this.reconcileRfc64PublicRootCatalogProjectionCoreV1(params, {
       targetPolicy: 'exact-replacement',
+      source: 'confirmed',
     });
     return Object.freeze({
       status: result.status,
@@ -270,6 +299,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
   ): Promise<ReconcileRfc64SwmInventoryCatalogResultV1> {
     return this.reconcileRfc64PublicRootCatalogProjectionCoreV1(params, {
       targetPolicy: params.targetPolicy,
+      source: 'inventory',
       commitAppliedHead: params.commitAppliedHeadIfInventoryCurrent,
     });
   }
@@ -303,18 +333,13 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       throw new Error('RFC-64 exact-set reconciliation requires the public catalog service');
     }
     service.acceptedPolicySnapshotForCatalogScope(params.scope);
-    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(params.scope);
 
-    return this.rfc64CatalogMutationCoordinatorV1.run(params.scope, async () => {
+    return this.runRfc64CatalogMutationV1(params.scope, async (mutation) => {
       throwIfAbortedV1(params.signal);
       // The coordinator tail follows this physical read. Caller cancellation
       // remains prompt through the coordinator's outer race, but persistence
       // cannot close until a non-cooperative read actually settles.
-      let state = await this.readRfc64CatalogMutationStateV1(
-        persistence,
-        catalogScopeDigest,
-        params.scope.authorAddress,
-      );
+      let state = await this.readRfc64CatalogMutationStateV1(persistence, params.scope);
       throwIfAbortedV1(params.signal);
       if (state === null && requestedAssets.length === 0) {
         return Object.freeze({
@@ -326,14 +351,19 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         });
       }
       state ??= await this.createRfc64CatalogGenesisStateV1(params);
+      // Reading the applied set, planning against it and producing its
+      // successor each walk every row; timers and I/O run in between.
+      await yieldMainThread();
       throwIfAbortedV1(params.signal);
       const targetAssets = planRfc64CatalogProjectionTargetV1(
         state.assets,
         requestedAssets,
         options.targetPolicy,
       );
-      assertReplacementHistoryIsContiguousV1(state.assets, targetAssets);
       if (sameRfc64SuccessorAssetSetsV1(state.assets, targetAssets)) {
+        // Nothing to sign: the catalog that answer rests on, every row's bundle included, is read
+        // back from the durable store.
+        if (state.current !== null) await this.confirmRfc64CatalogDurableV1(persistence, params.scope, state);
         return Object.freeze({
           status: state.current === null ? 'empty' as const : 'existing' as const,
           appliedHead: state.current,
@@ -343,53 +373,64 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         });
       }
 
-      let successorsApplied = 0;
-      const hardLimit = MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 * 2;
-      while (!sameRfc64SuccessorAssetSetsV1(state.assets, targetAssets)) {
-        throwIfAbortedV1(params.signal);
-        if (successorsApplied >= hardLimit) {
-          throw new Error('RFC-64 exact-set reconciliation exceeded its bounded successor limit');
-        }
-        const nextAssets = planNextRfc64CatalogExactSetV1(state.assets, targetAssets);
-        const committed = await this.applyRfc64CatalogSuccessorV1(
-          persistence,
-          state,
-          params,
-          nextAssets,
-          peers,
-          authority.reconciliationLane === 'shadow-stage',
-          params.signal,
-          options.commitAppliedHead,
-        );
-        successorsApplied += 1;
-        state = Object.freeze({
-          current: committed.applied,
-          previousHead: Object.freeze({
-            objectDigest: committed.successor.headObjectDigest,
-            signatureVariantDigest: committed.successor.signatureVariantDigest,
-          }),
-          catalogIssuerAuthorization: state.catalogIssuerAuthorization,
-          assets: nextAssets,
-          expectedCurrentCatalogHeadDigest: committed.applied.currentCatalogHeadDigest,
-        });
-        if (!committed.sourceCurrent) {
-          return Object.freeze({
-            status: 'advanced' as const,
-            appliedHead: state.current,
-            successorsApplied,
-            targetAssetCount: targetAssets.length,
-            sourceCurrent: false,
-          });
-        }
-      }
-      return Object.freeze({
-        status: 'advanced' as const,
-        appliedHead: state.current,
-        successorsApplied,
-        targetAssetCount: targetAssets.length,
-        sourceCurrent: true,
+      return this.applyRfc64CatalogTargetV1(persistence, state, params, targetAssets, peers, {
+        source: options.source, stageOnly: authority.reconciliationLane === 'shadow-stage', mutation,
+        signal: params.signal, commitAppliedHead: options.commitAppliedHead,
       });
     }, params.signal);
+  }
+
+  /** One lock-held, bounded transition executor for confirmed upserts and inventory projection. */
+  private async applyRfc64CatalogTargetV1(
+    this: DKGAgent,
+    persistence: Rfc64PersistenceV1,
+    state: Rfc64CatalogMutationStateV1,
+    params: Readonly<{ scope: AuthorCatalogScopeV1; author: Rfc64CatalogAuthorSignerV1;
+      deployment: CatalogSealDeploymentProfileV1 }>,
+    targetAssets: readonly Rfc64CatalogSuccessorAssetInputV1[],
+    peers: readonly string[],
+    options: Readonly<Pick<Rfc64CatalogProjectionMutationOptionsV1, 'source' | 'commitAppliedHead'> & {
+      stageOnly: boolean; mutation: Rfc64CatalogMutationV1;
+      signal?: AbortSignal; observer?: Rfc64CatalogMutationObserverV1;
+    }>,
+  ): Promise<ReconcileRfc64SwmInventoryCatalogResultV1> {
+    await validateRfc64CatalogTargetAssetsV1(targetAssets, params.scope, params.deployment, options.signal,
+      this.rfc64VerifiedCatalogRowsV1(params.scope));
+    await assertCatalogTargetRevisionsV1(this.store, params.scope, state.assets, targetAssets,
+      options.source, options.signal);
+    let successorsApplied = 0;
+    const hardLimit = MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 * 2;
+    while (!sameRfc64SuccessorAssetSetsV1(state.assets, targetAssets)) {
+      throwIfAbortedV1(options.signal);
+      if (successorsApplied >= hardLimit) {
+        throw new Error('RFC-64 exact-set reconciliation exceeded its bounded successor limit');
+      }
+      const transition = planNextRfc64CatalogExactSetV1(state.assets, targetAssets);
+      const committed = await withCatalogTransitionVmAuthorizationV1(
+        this.store, params.scope, transition, options.source,
+        () => this.applyRfc64CatalogSuccessorV1(persistence, state, params, transition.nextAssets, peers, options.stageOnly,
+          { signal: options.signal, commitAppliedHead: options.commitAppliedHead,
+            mutation: options.mutation, observer: options.observer }), options.signal,
+      );
+      successorsApplied += 1;
+      state = committed.next;
+      if (!committed.sourceCurrent) {
+        return Object.freeze({
+          status: 'advanced' as const,
+          appliedHead: state.current,
+          successorsApplied,
+          targetAssetCount: targetAssets.length,
+          sourceCurrent: false,
+        });
+      }
+    }
+    return Object.freeze({
+      status: 'advanced' as const,
+      appliedHead: state.current,
+      successorsApplied,
+      targetAssetCount: targetAssets.length,
+      sourceCurrent: true,
+    });
   }
 
   private assertRfc64CatalogAuthoringModeV1(
@@ -406,51 +447,90 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     return authority;
   }
 
-  private async readRfc64CatalogMutationStateV1(
+  /**
+   * The verified state of the scope's applied head: from memory while the durable applied head
+   * and the scope's accepted policy are the ones it was read under, else from the durable store.
+   */
+  private readRfc64CatalogMutationStateV1(
     this: DKGAgent,
     persistence: Rfc64PersistenceV1,
-    catalogScopeDigest: Digest32V1,
-    authorAddress: AuthorCatalogScopeV1['authorAddress'],
+    scope: AuthorCatalogScopeV1,
   ): Promise<Rfc64CatalogMutationStateV1 | null> {
-    const current = persistence.inventory.readAppliedCatalogHeadV1(
-      catalogScopeDigest,
-      authorAddress,
+    let authority: string | undefined;
+    try {
+      authority = this.rfc64PublicCatalogServiceV1?.acceptedPolicyDigestForCatalogScope(scope);
+    } catch { /* No accepted policy for this exact scope: nothing is served from memory. */ }
+    return rfc64CatalogMutationMemoryV1(this).read(
+      persistence,
+      computeAuthorCatalogScopeDigestV1(scope),
+      scope.authorAddress,
+      authority,
     );
-    if (current === null) return null;
+  }
 
-    const storedHead = await persistence.controlObjects.getVerifiedObjectByDigest({
-      objectDigest: current.currentCatalogHeadDigest,
-      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-    });
-    if (storedHead === null) throw new Error('RFC-64 applied author head is not durably staged');
-    assertSignedAuthorCatalogHeadEnvelopeV1(storedHead.envelope);
-    const previousHead = Object.freeze({
-      objectDigest: storedHead.envelope.objectDigest as Digest32V1,
-      signatureVariantDigest: computeControlSignatureVariantDigestHex(
-        storedHead.envelope.objectDigest,
-        storedHead.envelope.signature,
-      ) as Digest32V1,
-    });
-    const history = await loadBoundedAuthorCatalogHistoryV1(persistence, previousHead);
-    const assets = await loadRfc64CatalogSuccessorAssetsV1(persistence, history);
-    const storedDelegation = await persistence.controlObjects.getVerifiedObjectByDigest({
-      objectDigest: history.previousHead.payload.catalogIssuerDelegationDigest,
-      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-    });
-    if (storedDelegation === null) {
-      throw new Error('RFC-64 applied author head delegation is not durably staged');
-    }
-    assertSignedAuthorCatalogIssuerDelegationEnvelopeV1(storedDelegation.envelope);
-    return Object.freeze({
-      current,
-      previousHead,
-      catalogIssuerAuthorization: Object.freeze({
-        catalogIssuerDelegation: storedDelegation.envelope,
-        parentAuthorAgentEvidence: null,
-      }),
-      assets,
-      expectedCurrentCatalogHeadDigest: current.currentCatalogHeadDigest,
-    });
+  /**
+   * One serialized mutation of `scope`. A mutation that fails leaves nothing remembered about the
+   * scope, unless it failed after its own applied-head CAS: that state is the committed one. A
+   * refusal for a full catalog is not such a failure.
+   */
+  private runRfc64CatalogMutationV1<T>(
+    this: DKGAgent,
+    scope: AuthorCatalogScopeV1,
+    mutate: (mutation: Rfc64CatalogMutationV1) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    return this.rfc64CatalogMutationCoordinatorV1.run(scope, async () => {
+      const mutation = rfc64CatalogMutationMemoryV1(this).mutation(
+        computeAuthorCatalogScopeDigestV1(scope),
+        scope.authorAddress,
+      );
+      try {
+        return await mutate(mutation);
+      } catch (cause) {
+        // GH#3134 — a full catalog refuses a new row from the row count of the state it has
+        // just read, before a successor is asked for: what is remembered is still the applied
+        // head's, and forgetting it would make the next placement read the whole catalog again.
+        if (!(cause instanceof AuthorCatalogFullErrorV1)) mutation.failed();
+        throw cause;
+      }
+    }, signal);
+  }
+
+  /**
+   * Before `state` ends work without a successor: its head's directory root and bucket, and the
+   * bundle of the row the decision is about (every row's when no `asset` is named), are in the
+   * durable store.
+   */
+  private confirmRfc64CatalogDurableV1(
+    this: DKGAgent,
+    persistence: Rfc64PersistenceV1,
+    scope: AuthorCatalogScopeV1,
+    state: Rfc64CatalogMutationStateV1,
+    asset?: Rfc64CatalogSuccessorAssetInputV1,
+  ): Promise<void> {
+    return rfc64CatalogMutationMemoryV1(this).confirmDurable(
+      persistence,
+      computeAuthorCatalogScopeDigestV1(scope),
+      scope.authorAddress,
+      state,
+      asset,
+    );
+  }
+
+  /** The durable stores are closing: nothing read from them stays in memory. */
+  protected clearRfc64CatalogMutationMemoryV1(this: DKGAgent): void {
+    rfc64CatalogMutationMemoryV1(this).clear();
+  }
+
+  /** The rows of `scope` this process has verified, for the successor producer. */
+  protected rfc64VerifiedCatalogRowsV1(
+    this: DKGAgent,
+    scope: AuthorCatalogScopeV1,
+  ): Rfc64VerifiedCatalogRowsV1 | undefined {
+    return rfc64CatalogMutationMemoryV1(this).verifiedRows(
+      computeAuthorCatalogScopeDigestV1(scope),
+      scope.authorAddress,
+    );
   }
 
   private async createRfc64CatalogGenesisStateV1(
@@ -497,25 +577,42 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     assets: readonly Rfc64CatalogSuccessorAssetInputV1[],
     peers: readonly string[],
     stageOnly: boolean,
-    signal?: AbortSignal,
-    commitAppliedHead?: (
-      commit: () => AppliedCatalogHeadSnapshotV1,
-    ) => Promise<Rfc64SourceAwareAppliedHeadCommitResultV1>,
+    options: Readonly<{
+      signal?: AbortSignal;
+      commitAppliedHead?: (
+        commit: () => AppliedCatalogHeadSnapshotV1,
+      ) => Promise<Rfc64SourceAwareAppliedHeadCommitResultV1>;
+      observer?: Rfc64CatalogMutationObserverV1;
+      /** The serialized mutation this successor belongs to, when it runs inside one. */
+      mutation?: Rfc64CatalogMutationV1;
+    }> = {},
   ) {
-    throwIfAbortedV1(signal);
-    const successor = await this.publishAuthorCatalogExactSetSuccessorV1({
-      previousHead: state.previousHead,
-      author: params.author,
-      catalogIssuerAuthorization: state.catalogIssuerAuthorization,
-      assets,
-      deployment: params.deployment,
-      issuedAt: Date.now().toString() as TimestampMsV1,
-      peers: [],
-    });
-    throwIfAbortedV1(signal);
-    const appliedInventoryDigest = computeRfc64AppliedInventoryDigestV1({
-      catalogScopeDigest: successor.catalogScopeDigest,
-      rows: successor.assets,
+    const { signal, commitAppliedHead, mutation } = options;
+    const observer = options.observer ?? UNOBSERVED_CATALOG_MUTATION_V1;
+    // From here to the applied-head CAS a failure may come from the catalog itself.
+    mutation?.producing();
+    // The plan before this call and the successor below are whole-set work.
+    const { successor, appliedInventoryDigest } = await observer.measure('successor', async () => {
+      await yieldMainThread();
+      throwIfAbortedV1(signal);
+      const produced = await this.publishAuthorCatalogExactSetSuccessorV1({
+        previousHead: state.previousHead,
+        author: params.author,
+        catalogIssuerAuthorization: state.catalogIssuerAuthorization,
+        assets,
+        deployment: params.deployment,
+        issuedAt: Date.now().toString() as TimestampMsV1,
+        peers: [],
+        signal,
+      });
+      throwIfAbortedV1(signal);
+      return {
+        successor: produced,
+        appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({
+          catalogScopeDigest: produced.catalogScopeDigest,
+          rows: produced.assets,
+        }),
+      };
     });
     const commit = (): AppliedCatalogHeadSnapshotV1 => (
       persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
@@ -529,44 +626,53 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         stageOnly,
       }).snapshot
     );
-    const committed = commitAppliedHead === undefined
+    const committed = await observer.measure('cas', async () => (commitAppliedHead === undefined
       ? Object.freeze({ appliedHead: commit(), sourceCurrent: true })
-      : await commitAppliedHead(commit);
+      : commitAppliedHead(commit)));
+    const next = mutation === undefined
+      ? rfc64CatalogMutationMemoryV1(this).advance(state, committed.appliedHead, successor, assets)
+      : mutation.committed(state, committed.appliedHead, successor, assets);
     if (!signal?.aborted) {
-      await this.announceRfc64PublicCatalogHeadV1({
-        announcement: successor.announcement,
-        peers,
-        signal,
-      });
+      // The head is durable. Hand it to the catalog service's delivery owner and return: the
+      // fan-out runs outside this serialized mutation, so the next change never waits for a peer
+      // (GH#3081). The fan-out reports itself; the mutation has nothing to observe about it.
+      this.deliverRfc64CatalogHeadV1({ announcement: successor.announcement, peers });
+    } else {
+      // The caller gave up after the commit, so nothing is handed off. The head is durable all
+      // the same and reaches peers with the catalog's next head or through replay: say so.
+      this.reportRfc64CatalogHeadNotHandedOffV1(successor.announcement);
     }
     return Object.freeze({
       applied: committed.appliedHead,
       successor,
       sourceCurrent: committed.sourceCurrent,
+      next,
     });
   }
 
-}
-
-function assertReplacementHistoryIsContiguousV1(
-  current: readonly Rfc64CatalogSuccessorAssetInputV1[],
-  target: readonly Rfc64CatalogSuccessorAssetInputV1[],
-): void {
-  const currentByKaId = new Map(current.map((asset) => [asset.seal.reservedKaId, asset]));
-  for (const targetAsset of target) {
-    const currentAsset = currentByKaId.get(targetAsset.seal.reservedKaId);
-    if (currentAsset === undefined || sameRfc64SuccessorAssetV1(currentAsset, targetAsset)) continue;
-    const currentVersion = BigInt(currentAsset.seal.assertionVersion);
-    const targetVersion = BigInt(targetAsset.seal.assertionVersion);
-    if (
-      currentAsset.assertionCoordinate !== targetAsset.assertionCoordinate
-      || targetVersion <= currentVersion
-    ) {
-      throw new Error(
-        `RFC-64 exact-set replacement for KA ${targetAsset.seal.reservedKaId} is not a newer assertion version on the same coordinate`,
-      );
-    }
+  /**
+   * Author-side announce delivery is best-effort, but a silently failed
+   * fan-out leaves every replica waiting on connect-time replay churn. Surface
+   * the per-peer outcome so a slow convergence can be traced to its cause.
+   */
+  warnRfc64CatalogAnnounceFailuresV1(
+    this: DKGAgent,
+    delivery: AnnounceRfc64PublicCatalogHeadResultV1,
+  ): void {
+    const failed = delivery.failedPeers;
+    if (failed.length === 0) return;
+    const total = failed.length + delivery.announcedPeers.length;
+    this.log.warn(
+      createOperationContext('system'),
+      `RFC-64 catalog head announce failed for ${failed.length}/${total} peer(s)`
+        + ` head=${delivery.announcement.catalogHeadObjectDigest}`
+        + ` cg=${delivery.announcement.contextGraphId}`
+        + ` version=${delivery.announcement.catalogVersion}`
+        + ` peers=${failed.map(({ peerId }) => peerId.slice(-8)).join(',')}`
+        + ` error=${failed[0]!.error.slice(0, 160)}`,
+    );
   }
+
 }
 
 /** Build the explicit projection target before entering the mutation engine. */
@@ -576,88 +682,15 @@ export function planRfc64CatalogProjectionTargetV1(
   policy: Rfc64CatalogProjectionTargetPolicyV1,
 ): readonly Rfc64CatalogSuccessorAssetInputV1[] {
   if (policy === 'exact-replacement') return requested;
+  const retained = current.filter((existing) => !requested.some(
+    (candidate) => candidate.seal.reservedKaId === existing.seal.reservedKaId,
+  ));
+  // GH#3134 — requested rows the catalog does not hold are new; the others replace their rows.
+  assertAuthorCatalogTakesNewRowsV1(current, retained.length + requested.length - current.length);
   return snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1(
-    [
-      ...current.filter((existing) => !requested.some(
-        (candidate) => candidate.seal.reservedKaId === existing.seal.reservedKaId,
-      )),
-      ...requested,
-    ],
+    [...retained, ...requested],
     'RFC-64 monotonic-union target assets',
   );
-}
-
-export function planNextRfc64CatalogExactSetV1(
-  current: readonly Rfc64CatalogSuccessorAssetInputV1[],
-  target: readonly Rfc64CatalogSuccessorAssetInputV1[],
-): Rfc64CatalogSuccessorAssetInputV1[] {
-  let currentIndex = 0;
-  let targetIndex = 0;
-  while (currentIndex < current.length || targetIndex < target.length) {
-    const currentAsset = current[currentIndex];
-    const targetAsset = target[targetIndex];
-    if (currentAsset === undefined) {
-      return insertOrFreeRfc64CatalogCapacityV1(current, target, targetAsset!);
-    }
-    if (targetAsset === undefined) {
-      return current.filter((_, index) => index !== currentIndex);
-    }
-    const comparison = compareRfc64CatalogAssetsByKaIdV1(currentAsset, targetAsset);
-    if (comparison < 0) return current.filter((_, index) => index !== currentIndex);
-    if (comparison > 0) {
-      return insertOrFreeRfc64CatalogCapacityV1(current, target, targetAsset);
-    }
-    if (!sameRfc64SuccessorAssetV1(currentAsset, targetAsset)) {
-      if (
-        BigInt(targetAsset.seal.assertionVersion)
-          > BigInt(currentAsset.seal.assertionVersion) + 1n
-      ) {
-        // A durable inventory can advance more than once while catalog
-        // projection is unavailable. Remove the stale row first, then insert
-        // the independently verified latest row on the following successor.
-        return current.filter((_, index) => index !== currentIndex);
-      }
-      const next = [...current];
-      next[currentIndex] = targetAsset;
-      return next;
-    }
-    currentIndex += 1;
-    targetIndex += 1;
-  }
-  throw new Error('RFC-64 exact-set planner was called for an already-converged target');
-}
-
-function insertOrFreeRfc64CatalogCapacityV1(
-  current: readonly Rfc64CatalogSuccessorAssetInputV1[],
-  target: readonly Rfc64CatalogSuccessorAssetInputV1[],
-  asset: Rfc64CatalogSuccessorAssetInputV1,
-): Rfc64CatalogSuccessorAssetInputV1[] {
-  if (current.length < MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1) {
-    return insertRfc64CatalogAssetV1(current, asset);
-  }
-  const targetKaIds = new Set(target.map((targetAsset) => targetAsset.seal.reservedKaId));
-  for (let index = current.length - 1; index >= 0; index -= 1) {
-    if (!targetKaIds.has(current[index]!.seal.reservedKaId)) {
-      return current.filter((_currentAsset, currentIndex) => currentIndex !== index);
-    }
-  }
-  throw new Error('RFC-64 exact-set planner cannot free capacity for a target-only asset');
-}
-
-function insertRfc64CatalogAssetV1(
-  current: readonly Rfc64CatalogSuccessorAssetInputV1[],
-  asset: Rfc64CatalogSuccessorAssetInputV1,
-): Rfc64CatalogSuccessorAssetInputV1[] {
-  const next = [...current, asset];
-  next.sort((left, right) => compareRfc64CatalogAssetsByKaIdV1(left, right));
-  return next;
-}
-
-function compareRfc64CatalogAssetsByKaIdV1(
-  left: Rfc64CatalogSuccessorAssetInputV1,
-  right: Rfc64CatalogSuccessorAssetInputV1,
-): -1 | 0 | 1 {
-  return compareRfc64PublicCatalogSuccessorAssetsByKaIdV1(left, right);
 }
 
 function sameRfc64SuccessorAssetSetsV1(
@@ -666,45 +699,4 @@ function sameRfc64SuccessorAssetSetsV1(
 ): boolean {
   return left.length === right.length
     && left.every((asset, index) => sameRfc64SuccessorAssetV1(asset, right[index]!));
-}
-
-async function loadRfc64CatalogSuccessorAssetsV1(
-  persistence: Rfc64PersistenceV1,
-  history: BoundedAuthorCatalogHistoryV1,
-): Promise<Rfc64CatalogSuccessorAssetInputV1[]> {
-  const assets: Rfc64CatalogSuccessorAssetInputV1[] = [];
-  for (const row of history.previousBucket?.payload.rows ?? []) {
-    const bundleBytes = await persistence.kaBundles.readKaBundleByDigest(row.transfer.blobDigest);
-    if (bundleBytes === null) {
-      throw new Error(`RFC-64 applied catalog bundle ${row.transfer.blobDigest} is unavailable`);
-    }
-    const decoded = decodeOpaqueKaBundleV1(bundleBytes);
-    if (
-      decoded.blobDigest !== row.transfer.blobDigest
-      || decoded.projectionDigest !== row.projectionDigest
-    ) {
-      throw new Error('RFC-64 applied catalog bundle differs from its signed predecessor row');
-    }
-    assets.push(Object.freeze({
-      assertionCoordinate: row.assertionCoordinate,
-      projectionBytes: new Uint8Array(decoded.projectionBytes),
-      seal: parseCanonicalGraphScopedAuthorSealV1(decoded.sealBytes),
-    }));
-  }
-  return assets;
-}
-
-function sameRfc64SuccessorAssetV1(
-  left: Rfc64CatalogSuccessorAssetInputV1,
-  right: Rfc64CatalogSuccessorAssetInputV1,
-): boolean {
-  return left.assertionCoordinate === right.assertionCoordinate
-    && canonicalizeCanonicalGraphScopedAuthorSealV1(left.seal)
-      === canonicalizeCanonicalGraphScopedAuthorSealV1(right.seal)
-    && equalBytes(left.projectionBytes, right.projectionBytes);
-}
-
-function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
-  return left.byteLength === right.byteLength
-    && left.every((byte, index) => byte === right[index]);
 }

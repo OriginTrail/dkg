@@ -1,0 +1,50 @@
+/* Marketplace tokens. Scoped to the section's roots (.mktx for the component
+   gallery, .mkt-frame for each surface). Every value is one of the app's
+   own tokens from 00-theme.css, so the section follows the light and dark
+   themes like the rest of the app. The names below say what each job is in
+   the marketplace; they never hold a colour of their own.
+
+   Text (--text-primary, --text-secondary, --text-tertiary) and borders
+   (--border-subtle, --border-strong) are the app's tokens, used directly. */
+
+.mktx, .mkt-frame {
+  /* surfaces: sunken (inputs, snippets), card, nested, raised */
+  --surface-0:var(--bg-panel);
+  --surface-1:var(--bg-surface);
+  --surface-2:var(--bg-elevated);
+  --surface-3:var(--bg-hover);
+
+  /* actions and selection: neutral, as the app's primary button and
+     filter chips. Purple stays for Verifiable Memory, blue for roles. */
+  --interactive-fill:var(--accent-primary);
+  --interactive-on:var(--text-on-primary);
+  --interactive-line:var(--border-prominent);
+  --interactive-text:var(--text-primary);
+
+  /* states: landed or live, held or waiting, refused or missed (signals) */
+  --state-verified:var(--text-success);
+  --state-pending:var(--text-warning);
+  --state-blocked:var(--text-danger);
+
+  /* provenance: the ⛓ / ☁ glyph carries the meaning */
+  --prov-pinned:var(--text-secondary);
+
+  /* budget bars and sparklines */
+  --gauge-track:var(--bg-active);
+  --gauge-fill:var(--text-secondary);
+  --gauge-spark:var(--text-tertiary);
+  --gauge-mid:var(--accent-amber);        /* nearing the soft ceiling */
+  --gauge-over:var(--accent-red);         /* at the soft ceiling */
+
+  /* type: the app's own faces and size scale (00-theme.css) */
+  --font-ui:var(--font-sans);
+  --fs-xs:var(--fs-label); --fs-sm:var(--fs-control);
+  --fs-md:var(--fs-body); --fs-lg:var(--fs-title);
+  --fs-xl:var(--fs-heading); --fs-2xl:var(--fs-display);
+  --lh-tight:1.25; --lh-normal:1.55;
+  --fw-regular:400; --fw-semibold:600;
+
+  /* spacing: 4px base scale only */
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px;
+  --sp-5:20px; --sp-6:24px; --sp-10:40px;
+}

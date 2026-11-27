@@ -1,3 +1,6 @@
+import type { Quad } from '../triple-store.js';
+import { quadToNQuad } from '../bounded-rdf.js';
+
 /**
  * Blazegraph N-Quads wire encoder.
  *
@@ -77,4 +80,19 @@ function escapeUtf16CodeUnits(s: string): string {
     out += `\\u${s.charCodeAt(i).toString(16).toUpperCase().padStart(4, '0')}`;
   }
   return out;
+}
+
+/**
+ * N-Quads serializer for Blazegraph's bulk-insert wire format: a standard
+ * N-Quads line ({@link quadToNQuad}) made ASCII-safe
+ * ({@link toBlazegraphAsciiSafeNQuads}). This is the single serialization
+ * entry point for the adapter's write path, so the Blazegraph wire-format
+ * invariant lives at the serialization boundary rather than as a separate
+ * post-processing pass a caller must remember to apply. The ASCII-safe pass
+ * operates on the assembled line by design: it normalizes `\U` escapes and
+ * relies on backslash parity across the whole line, both of which are
+ * line-level properties of the rendered N-Quads, not of an individual term.
+ */
+export function quadToBlazegraphNQuad(q: Quad): string {
+  return toBlazegraphAsciiSafeNQuads(quadToNQuad(q));
 }

@@ -678,6 +678,19 @@ def test_publish_200_clean_success_not_marked_partial(provider):
     assert out["status"] == "confirmed"
 
 
+def test_publish_outcome_unknown_reaches_the_agent_as_non_error(provider, client_module):
+    # A long mutation that timed out after reaching the daemon may still land;
+    # the handler must pass that through, not wrap it into a tool error.
+    provider._client.publish_response = client_module._outcome_unknown(
+        "/api/knowledge-assets/ka/vm/publish", 300)
+    out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka",
+    }))
+    assert out["outcomeUnknown"] is True
+    assert "error" not in out and "partial" not in out
+    assert "dkg_knowledge_asset_history" in out["warning"]
+
+
 def test_publish_empty_context_graph_error_is_not_partial(provider):
     provider._client.publish_response = {
         "ual": "did:dkg:1/0xabc/5", "status": "confirmed", "contextGraphError": "",

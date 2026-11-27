@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 
 const publisher = await import('@origintrail-official/dkg-publisher');
 assert.equal(typeof publisher.DKGPublisher, 'function');
+assert.equal(typeof publisher.parseConfirmedGraphKnowledgeAssetMetadataEnvelope, 'function');
 
 const legacyWorkspaceResolution = await import(
   '@origintrail-official/dkg-publisher/dist/workspace-resolution.js'

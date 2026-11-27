@@ -1,5 +1,6 @@
 import {
   decodePublishRequest, SYSTEM_CONTEXT_GRAPHS, isAgentRegistryContextGraph, DKG_ONTOLOGY,
+  CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE, type OntologyBindingSlotClass,
   Logger, createOperationContext,
   isSafeIri, assertSafeIri, validateSubGraphName, validateContextGraphId,
   contextGraphSubGraphUri,
@@ -19,6 +20,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
 import {
+  acceptIncomingPublicQuads,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
   generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad,
   generateGraphKnowledgeAssetMetadata,
@@ -27,10 +29,12 @@ import {
   shouldApplyMaterialization,
   withMaterializationLock,
   writeMaterializedVersion,
-  validatePublishRequest, parseSimpleNQuads, generateSubGraphRegistration,
+  validatePublishRequest, parseSimpleNQuads, ensureSubGraphRegistration, assertWritableQuadTerms, assertNoReceivedProtocolMetadata,
   type KAMetadata,
 } from '@origintrail-official/dkg-publisher';
+import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 import { ethers } from 'ethers';
+import { gossipedAgentProfileQuads, storeAgentProfileQuads } from './agent-profile-updates.js';
 import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
 import type {
   ContextGraphDiscoveryMetadata,
@@ -39,6 +43,10 @@ import type {
 } from './dkg-agent-types.js';
 import { normalizeContextGraphSubscriptionTransition } from './context-graph-subscription-policy.js';
 import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
+import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
+
+/** One registration announces one binding; more in a message are dropped unread. */
+const MAX_ONTOLOGY_GOSSIP_BINDING_CLASSIFICATIONS = 4;
 
 export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;
 
@@ -161,6 +169,12 @@ export interface GossipPublishHandlerCallbacks {
   getCgMeta?: (id: string) => Promise<ContextGraphMetaRecord>;
   /** Resolve the topic Context Graph to its authoritative on-chain id. */
   getContextGraphOnChainId?: (id: string) => Promise<string | null>;
+  /**
+   * Classify the on-chain slot named by an ontology id binding (see
+   * `DKGAgent#classifyOntologyBindingSlot`). A binding to a slot proven
+   * curated is not stored from ontology gossip.
+   */
+  classifyOnChainSlot?: (onChainId: string) => Promise<OntologyBindingSlotClass>;
   markCgMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
   persistContextGraphSubscription?: (id: string) => void;
   onPhase?: GossipPhaseCallback;
@@ -269,7 +283,8 @@ export class GossipPublishHandler {
       }
 
       const nquadsStr = new TextDecoder().decode(request.nquads);
-      const quads = parseSimpleNQuads(nquadsStr);
+      const quads = assertWritableQuadTerms(parseSimpleNQuads(nquadsStr), request.kas?.map((ka) => ka.rootEntity));
+      assertNoReceivedProtocolMetadata(quads);
       const graphPublish = resolveGraphScopedPublishRequest(request);
 
       if (quads.length === 0 && !request.ual) {
@@ -321,7 +336,9 @@ export class GossipPublishHandler {
               `(wire=${graphPublish.publicTripleCount}, parsed=${quads.length})`,
           );
         }
-        normalized = quads.map((quad) => ({ ...quad, graph: dataGraph }));
+        // Compared with this node's own head below and written to VM: take
+        // the payload in the form the store returns it in.
+        normalized = acceptIncomingPublicQuads(quads).map((quad) => ({ ...quad, graph: dataGraph }));
       } else {
         const filteredQuads = quads.filter(q => {
           const g = q.graph;
@@ -387,6 +404,7 @@ export class GossipPublishHandler {
         }
 
         normalized = await this.filterInvalidOntologyPolicyBindings(normalized, ctx);
+        normalized = await this.filterCuratedOnChainBindings(normalized, ctx);
       } else {
         const allowedPeers = await this.getContextGraphAllowedPeers(request.contextGraphId);
 
@@ -466,7 +484,10 @@ export class GossipPublishHandler {
             this.log.warn(ctx, `Gossip structural validation rejected publish ${request.ual}: ${validation.errors.join('; ')}`);
             return;
           }
-          this.log.info(ctx, `Gossip replay detected for ${request.ual}, skipping data insert but running verification`);
+          // In the agents registry a known subject is an update of its profile, not a replay.
+          if (!isAgentRegistryContextGraph(request.contextGraphId)) {
+            this.log.info(ctx, `Gossip replay detected for ${request.ual}, skipping data insert but running verification`);
+          }
           isReplay = true;
         }
       }
@@ -476,25 +497,14 @@ export class GossipPublishHandler {
       // Auto-register sub-graph in _meta AFTER validation passes.
       // This prevents polluting metadata when invalid messages are rejected.
       if (subGraphName) {
-        const sgUri = contextGraphSubGraphUri(request.contextGraphId, subGraphName);
-        const metaGraph = `did:dkg:context-graph:${assertSafeIri(request.contextGraphId)}/_meta`;
-        const alreadyRegistered = await this.store.query(
-          `ASK { GRAPH <${metaGraph}> {
-            <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> ;
-              <http://schema.org/name> ${JSON.stringify(subGraphName)} ;
-              <http://dkg.io/ontology/createdBy> ?createdBy .
-          } }`,
-          { source: 'agent.gossipPublish.subGraphRegistration' },
-        );
-        if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
-          const regQuads = generateSubGraphRegistration({
-            contextGraphId: request.contextGraphId,
-            subGraphName,
-            createdBy: request.publisherAddress || 'gossip-discovery',
-            timestamp: new Date(),
-          });
-          await this.store.insert(regQuads);
-          this.callbacks.markCgMetaDirtyFromQuads?.(regQuads);
+        const registration = await ensureSubGraphRegistration(this.store, {
+          contextGraphId: request.contextGraphId,
+          subGraphName,
+          createdBy: request.publisherAddress || 'gossip-discovery',
+          timestamp: new Date(),
+        }, { source: 'agent.gossipPublish.subGraphRegistration' });
+        if (registration.registered) {
+          this.callbacks.markCgMetaDirtyFromQuads?.(registration.quads);
           this.log.info(ctx, `Auto-registered sub-graph "${subGraphName}" in context graph "${request.contextGraphId}" from gossip`);
         }
       }
@@ -694,7 +704,15 @@ export class GossipPublishHandler {
       }
 
       phase?.('store', 'start');
-      if (normalized.length > 0 && !isReplay) {
+      if (isAgentRegistryContextGraph(request.contextGraphId)) {
+        const stored = await storeAgentProfileQuads(
+          this.store,
+          gossipedAgentProfileQuads(normalized, { fromPeerId, knownAgent: isReplay }),
+          async (quads) => { await this.store.insert(quads); return quads; },
+          { listedPeersOnly: true },
+        );
+        if (stored.length > 0) this.callbacks.markCgMetaDirtyFromQuads?.(stored);
+      } else if (normalized.length > 0 && !isReplay) {
         await this.store.insert(normalized);
         this.callbacks.markCgMetaDirtyFromQuads?.(normalized);
       }
@@ -898,6 +916,38 @@ export class GossipPublishHandler {
     }
   }
 
+  /**
+   * Drop on-chain id bindings whose slot the chain proves curated: ontology
+   * carries public graphs, and a curated graph's binding stays in its own
+   * `_meta`. A binding whose slot isn't proven either way is stored, as
+   * before: a registration announcement usually outruns this node's view of
+   * a new slot, and a node without chain reads can't classify at all. The
+   * metadata relocation removes such a binding later if its slot proves
+   * curated. Each distinct slot costs a chain read, so a message gets only a
+   * few.
+   */
+  private async filterCuratedOnChainBindings(quads: Quad[], ctx: OperationContext): Promise<Quad[]> {
+    const classify = this.callbacks.classifyOnChainSlot;
+    if (!classify) return quads;
+    const bindingPredicate = CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE;
+    const onChainIds = [...new Set(quads
+      .filter((q) => q.predicate === bindingPredicate)
+      .map((q) => stripLiteral(q.object).trim()))];
+    if (onChainIds.length === 0) return quads;
+    const kept = new Set<string>();
+    for (const onChainId of onChainIds.slice(0, MAX_ONTOLOGY_GOSSIP_BINDING_CLASSIFICATIONS)) {
+      if (!isCanonicalAuthoritativeContextGraphId(onChainId)) continue;
+      if (await classify(onChainId).catch(() => 'unknown') !== 'curated') kept.add(onChainId);
+    }
+    const dropped = onChainIds.length - kept.size;
+    if (dropped > 0) {
+      this.log.info(ctx, `Skipped ${dropped} ontology gossip binding(s) of a curated or unreadable slot`);
+    }
+    return quads.filter((q) => (
+      q.predicate !== bindingPredicate || kept.has(stripLiteral(q.object).trim())
+    ));
+  }
+
   private async filterInvalidOntologyPolicyBindings(quads: Quad[], ctx: OperationContext): Promise<Quad[]> {
     // Detect binding subjects from rdf:type AND from revocation/approval predicates.
     // Revocation quads may not include the type triple, so we must also check
@@ -1006,8 +1056,5 @@ export class GossipPublishHandler {
 }
 
 function stripLiteral(s: string): string {
-  if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1);
-  const match = s.match(/^"(.*)"(\^\^.*|@.*)?$/);
-  if (match) return match[1];
-  return s;
+  return rdfLiteralBody(s, { plainQuoted: true }) ?? s;
 }

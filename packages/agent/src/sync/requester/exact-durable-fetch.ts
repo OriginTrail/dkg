@@ -7,6 +7,8 @@ import {
   exactAssetCommitmentsForSelection,
   exactAssetUalsForSelection,
   type ExactAssetSelection,
+  type UalOnlyExactAssetSelection,
+  type ChallengePinnedExactAssetSelection,
 } from '../exact-assets.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
@@ -15,39 +17,73 @@ const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
 
 export type ExactDurableFetchDisposition = 'found' | 'clean-absent' | 'incomplete';
 
+/**
+ * Capability evidence derived from a completed exact request. The only
+ * negative capability is deliberately exposed: a responder that returned a
+ * bounded, clean prefix without the requested descriptor cannot satisfy a
+ * future exact request on the same connection.
+ */
+export type ExactAssetResponderCapability = 'legacy-filter-unsupported';
+
 export type ExactAssetFetchSessionPolicy =
   | Readonly<{
       kind: 'durable-materialization';
+      selection: UalOnlyExactAssetSelection;
       forceFreshSession: false;
       allowDurableCheckpoints: true;
       requesterScope?: never;
     }>
   | Readonly<{
+      kind: 'vm-update-refresh';
+      selection: UalOnlyExactAssetSelection;
+      forceFreshSession: true;
+      allowDurableCheckpoints: true;
+      requesterScope?: never;
+    }>
+  | Readonly<{
       kind: 'ephemeral-challenge';
+      selection: ChallengePinnedExactAssetSelection;
       forceFreshSession: true;
       allowDurableCheckpoints: false;
       requesterScope: `challenge-exact:${string}`;
     }>;
 
 /** Keep exact retrieval semantics next to filtering and completion policy. */
+export function exactAssetFetchSessionPolicy(selection: UalOnlyExactAssetSelection, purpose: 'vm-update-refresh'): Extract<ExactAssetFetchSessionPolicy, { kind: 'vm-update-refresh' }>;
+export function exactAssetFetchSessionPolicy(selection: UalOnlyExactAssetSelection): Extract<ExactAssetFetchSessionPolicy, { kind: 'durable-materialization' }>;
+export function exactAssetFetchSessionPolicy(selection: ChallengePinnedExactAssetSelection): Extract<ExactAssetFetchSessionPolicy, { kind: 'ephemeral-challenge' }>;
+export function exactAssetFetchSessionPolicy(selection: ExactAssetSelection): ExactAssetFetchSessionPolicy;
 export function exactAssetFetchSessionPolicy(
   selection: ExactAssetSelection,
+  purpose?: 'vm-update-refresh',
 ): ExactAssetFetchSessionPolicy {
+  if (purpose === 'vm-update-refresh') {
+    return { kind: 'vm-update-refresh', selection: requireUalOnlyExactAssetSelection(selection), forceFreshSession: true, allowDurableCheckpoints: true };
+  }
+
   if (selection.kind === 'ual-only') {
     return {
       kind: 'durable-materialization',
+      selection,
       forceFreshSession: false,
       allowDurableCheckpoints: true,
     };
   }
   return {
     kind: 'ephemeral-challenge',
+    selection,
     forceFreshSession: true,
     allowDurableCheckpoints: false,
     requesterScope: `challenge-exact:${selection.commitments
       .map((commitment) => `${commitment.merkleRootHex}:${commitment.merkleLeafCount}`)
       .join('.')}`,
   };
+}
+
+/** Refresh is a durable UAL selection, never a challenge or a full graph. */
+export function requireUalOnlyExactAssetSelection(selection: ExactAssetSelection): UalOnlyExactAssetSelection {
+  if (selection.kind !== 'ual-only') throw new Error('VM update refresh requires a UAL-only exact selection');
+  return selection;
 }
 
 function descriptorMatchesCommitment(
@@ -78,6 +114,7 @@ export function filterExactAssetDurablePayload(
   dataQuads: Quad[];
   metaQuads: Quad[];
   descriptorCoverageComplete: boolean;
+  returnedDescriptorCount: number;
   missingDescriptorUals: string[];
   mismatchedDescriptorUals: string[];
 } {
@@ -120,6 +157,7 @@ export function filterExactAssetDurablePayload(
     dataQuads: dataQuads.filter((quad) => exactGraphs.has(quad.graph)),
     descriptorCoverageComplete:
       missingDescriptorUals.length === 0 && mismatchedDescriptorUals.length === 0,
+    returnedDescriptorCount: returnedDescriptors.size,
     missingDescriptorUals,
     mismatchedDescriptorUals,
   };
@@ -134,31 +172,72 @@ export function classifyExactDurableFetch(params: {
   rejectedKcs: number;
   dataRejectedMissingMeta: number;
 }): ExactDurableFetchDisposition {
-  const cleanPhase = (phase: SyncPageResult) => (
-    phase.completed
-    && !phase.timedOut
-    && phase.nextOffset >= phase.resumedFromOffset
-  );
   if (
     params.requestedAssetCount === 0
     || !params.metaFetched
-    || !cleanPhase(params.metaResult)
-    || !cleanPhase(params.dataResult)
+    || !isCleanExactPhase(params.metaResult)
+    || !isCleanExactPhase(params.dataResult)
     || params.rejectedKcs !== 0
     || params.dataRejectedMissingMeta !== 0
   ) return 'incomplete';
 
-  const freshEmptyPhase = (phase: SyncPageResult) => (
-    phase.responderSessionStartedFresh === true
-    && phase.resumedFromOffset === 0
-    && phase.nextOffset === 0
-    && phase.quads.length === 0
-  );
-  if (freshEmptyPhase(params.metaResult) && freshEmptyPhase(params.dataResult)) {
+  if (isFreshEmptyExactPhase(params.metaResult) && isFreshEmptyExactPhase(params.dataResult)) {
     return 'clean-absent';
   }
 
   return params.descriptorCoverageComplete ? 'found' : 'incomplete';
+}
+
+/**
+ * Detect the rolling-upgrade case where an older responder ignored an exact
+ * filter and returned a clean bounded prefix that omitted every requested
+ * descriptor. A partial batched hit is not negative capability evidence: a
+ * capable responder may legitimately hold only some requested assets. Fresh
+ * empty exact responses remain ordinary clean absence; incomplete, rejected,
+ * or challenge-pinned responses do not produce capability evidence.
+ */
+export function classifyExactAssetResponderCapability(params: {
+  requestedAssetCount: number;
+  metaResult: SyncPageResult;
+  dataResult: SyncPageResult;
+  metaFetched: boolean;
+  descriptorCoverageComplete: boolean;
+  returnedDescriptorCount: number;
+  rejectedKcs: number;
+  dataRejectedMissingMeta: number;
+}): ExactAssetResponderCapability | undefined {
+  if (
+    params.requestedAssetCount === 0
+    || params.returnedDescriptorCount > 0
+    || !params.metaFetched
+    || !isCleanExactPhase(params.metaResult)
+    || !isCleanExactPhase(params.dataResult)
+    || params.rejectedKcs !== 0
+    || params.dataRejectedMissingMeta !== 0
+    || params.descriptorCoverageComplete
+    || (isFreshEmptyExactPhase(params.metaResult) && isFreshEmptyExactPhase(params.dataResult))
+  ) return undefined;
+  return 'legacy-filter-unsupported';
+}
+
+function isCleanExactPhase(phase: SyncPageResult): boolean {
+  return phase.completed
+    && !phase.timedOut
+    && phase.nextOffset >= phase.resumedFromOffset;
+}
+
+function isFreshEmptyExactPhase(phase: SyncPageResult): boolean {
+  return phase.responderSessionStartedFresh === true
+    && phase.resumedFromOffset === 0
+    && phase.nextOffset === 0
+    && phase.quads.length === 0;
+}
+
+export function mergeExactAssetResponderCapability(
+  current: ExactAssetResponderCapability | undefined,
+  next: ExactAssetResponderCapability | undefined,
+): ExactAssetResponderCapability | undefined {
+  return current ?? next;
 }
 
 export function mergeExactDurableFetchDisposition(

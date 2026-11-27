@@ -42,6 +42,11 @@ export const RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 = Object.freeze({
   // Changed revisions continue to refresh on every five-minute index poll.
   safetyRevalidationIntervalCount:
     RFC64_CATALOG_AUTHORITY_FRESHNESS_INTERVAL_COUNT_V1 - 1,
+  // A failed refresh leaves its graph without usable authority until the
+  // graph is refreshed again. Other passes come from lifecycle nudges, which
+  // on a busy Edge can wait behind sync work, or from the interval above, so
+  // a failed graph retries itself. A commit resets its retry count.
+  failureRetryDelaysMs: Object.freeze([1_000, 5_000, 30_000]),
   // A provider-pool exhaustion is shared infrastructure state, not a reason
   // for every registered graph to immediately repeat the same cold scan.
   rpcCircuitBaseBackoffMs: 60_000,

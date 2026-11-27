@@ -72,6 +72,39 @@ export function rpcHost(url: string): string {
   }
 }
 
+/**
+ * A URL inside error text, in any case: the request URL ethers embeds in the
+ * message of an HTTP-level error, or a link in a provider's own words. It ends
+ * at whitespace, a quote or an angle bracket, so a URL quoted in JSON
+ * (`"requestUrl": "https://…"`) or in HTML is matched without its closing
+ * delimiter. Prose punctuation after the URL (`)` `,` `.` `:` `;` `!` `?`) is not
+ * part of it, so "(https://h/KEY)" and "https://h:8545: boom" keep their
+ * punctuation and their host; a key can still never survive, because the greedy
+ * prefix swallows everything up to the final non-punctuation character. `]` is
+ * deliberately not excluded (IPv6 hosts). The scheme is at most 32 characters:
+ * the scan restarts at every letter, so an unbounded scheme made it quadratic
+ * over a long `[a-z0-9+.-]` run (hex calldata), URL or no URL. A longer run
+ * before a URL keeps its leading characters, never the URL's key. Global: use
+ * it only with `replace`.
+ */
+export const RPC_TEXT_URL_PATTERN = /[a-z][a-z0-9+.-]{0,31}:\/\/[^\s"'<>]*[^\s"'<>),.:;!?]/gi;
+
+/**
+ * `text` with every URL in it reduced to its host ({@link rpcHost}). A
+ * configured RPC URL can carry an API key in its path or query, and ethers
+ * embeds the full request URL in the message of an HTTP-level error, so
+ * provider text passes through this before an error message or a log line
+ * quotes it. Idempotent, and total: a non-string is coerced, because this runs
+ * on failure paths that must not throw.
+ *
+ * The `://` guard skips the scan for the common URL-free message.
+ */
+export function hostOnlyRpcText(text: string): string {
+  const value = typeof text === 'string' ? text : String(text ?? '');
+  if (!value.includes('://')) return value;
+  return value.replace(RPC_TEXT_URL_PATTERN, (url) => rpcHost(url));
+}
+
 // --- Process-wide counters (host-only) --------------------------------------
 
 interface MutableStats {
@@ -227,6 +260,24 @@ export function noteRpcFailover(
     } else {
       entry.suppressed += 1;
     }
+  } catch {
+    // Observability must never break the failover path.
+  }
+}
+
+/**
+ * #3591 — a refusal for funds that does not count, because an earlier attempt at the same signed
+ * transaction may have been accepted. The sender then waits for chain proof, and if the wallet really
+ * was short no proof can arrive by itself, so this is worth one line that names the transaction.
+ */
+export function noteRefusalAfterPossibleAcceptance(label: string, txHash: string | undefined): void {
+  try {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[chain] ${label}: an endpoint refused tx ${txHash ?? '(unknown)'} for funds, but an earlier attempt may have been `
+      + 'accepted, so its outcome stays unknown. A publication waiting on it stays held until chain proof settles it; '
+      + 'if the wallet really was short, an operator may have to clear that job by id.',
+    );
   } catch {
     // Observability must never break the failover path.
   }

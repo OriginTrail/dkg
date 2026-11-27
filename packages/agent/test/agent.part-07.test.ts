@@ -1,4 +1,5 @@
 import type { RandomSamplingRuntime } from '../src/random-sampling-runtime.js';
+import { resolveChainFinalityConfirmationsV1 } from '../src/chain-finality-confirmations-v1.js';
 import { describe, it, expect, beforeAll, afterAll, vi, DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy, OxigraphStore, getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, contextGraphMetaUri, sparqlString, DKGQueryEngine, sha256, EVMChainAdapter, MockChainAdapter, createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS, mintTokens, ethers, tmpdir, mkdtemp, readFile, readdir, rm, join, fileURLToPath, _wrapAgentPublisherForSeal, CapturingContextGraphChainAdapter, AsyncSignerAddressContextGraphChainAdapter, SignerListContextGraphChainAdapter, PcaCuratedRegistrationChainAdapter, NonRegisteringACKChainAdapter, FlakyRegistrationACKChainAdapter, TransientIdentityFailureChainAdapter, BrandNewCoreTransientChainAdapter, PermanentProfileFailureChainAdapter, RetryPathPermanentFailureChainAdapter, ContextAuthorizedPublisherChainAdapter, buildSnapshotFactQuads, ReferenceEvaluator, loadYaml, CCL_FACT_NS, OperationalKeyOnlyPublishChainAdapter, ExternalOperationalKeyPublishChainAdapter, AddressOnlyExternalOperationalKeyPublishChainAdapter, AsyncAddressSignMessageAsPublishChainAdapter, GenericSignMessageExternalOperationalKeyPublishChainAdapter, MultiSignerGenericSignMessagePublishChainAdapter, SingleAddressMismatchedGenericSignMessagePublishChainAdapter, SingleSignerAdapterPublishChainAdapter, ReservingAuthorityContextGraphChainAdapter, type Quad, type ChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type OnChainPublishResult, type V10PublishDirectParams } from './agent.shared';
 
 
@@ -262,6 +263,43 @@ describe('DKGAgent ACK signer gating', () => {
       expect((agent as any).chain).toBeInstanceOf(EVMChainAdapter);
       expect((agent as any).chain.finalityConfirmations).toBe(3);
       expect((agent as any).chain.maxFeePerGasWei).toBe(100n);
+      // The RFC-64 precommits must anchor at the SAME depth the adapter's own
+      // authority reads use, and they must read it FROM the adapter.
+      expect((agent as any).chain.getFinalityConfirmations()).toBe(3);
+      expect(resolveChainFinalityConfirmationsV1((agent as any).chain, (agent as any).config.chainConfig)).toBe(3);
+    });
+
+    it('takes the precommit finality depth from a pre-built adapter, not chainConfig', async () => {
+      // `dkg-agent-types.ts` documents `chainAdapter` as "If provided,
+      // chainConfig is ignored". Reading `chainConfig.finalityConfirmations`
+      // for the RFC-64 precommits therefore pinned them to the default while
+      // the adapter's own authority reads honoured the operator — two anchors
+      // in one process, and nothing anywhere reported the divergence.
+      const operational = ethers.Wallet.createRandom();
+      const built = await DKGAgent.create({
+        name: 'PreBuiltAdapterDepthSource',
+        listenHost: '127.0.0.1',
+        listenPort: 0,
+        chainConfig: {
+          rpcUrl: 'http://127.0.0.1:0',
+          hubAddress: ethers.ZeroAddress,
+          operationalKeys: [operational.privateKey],
+          finalityConfirmations: 7,
+        },
+        nodeRole: 'edge',
+      });
+      const prebuilt = (built as any).chain as EVMChainAdapter;
+
+      const agent = await DKGAgent.create({
+        name: 'PreBuiltAdapterDepthConsumer',
+        listenHost: '127.0.0.1',
+        listenPort: 0,
+        chainAdapter: prebuilt,
+        nodeRole: 'edge',
+      });
+
+      expect((agent as any).config.chainConfig?.finalityConfirmations).toBeUndefined();
+      expect(resolveChainFinalityConfirmationsV1((agent as any).chain, (agent as any).config.chainConfig)).toBe(7);
     });
 
 

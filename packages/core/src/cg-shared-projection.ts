@@ -1,4 +1,5 @@
 import {
+  isAbsoluteRfc3987IriV1,
   parseRdfLiteralLexicalTerm,
 } from '@origintrail-official/dkg-rdf-utils';
 
@@ -25,7 +26,6 @@ import {
   hashTripleV10,
   tripleContentV10,
 } from './crypto/canonicalize.js';
-import { isAbsoluteRfc3987IriV1 } from './absolute-rfc3987-iri.js';
 import {
   assertCanonicalDigest,
   parseCanonicalDecimalU64,
@@ -380,7 +380,6 @@ const VERIFIED_CG_SHARED_PROJECTIONS_V1 = new WeakMap<
   VerifiedCgSharedProjectionStateV1
 >();
 
-/** Verify canonical bytes, private commitment, counts, and structured V10 root. */
 export function verifyCgSharedProjectionV1(
   transferredBundle: VerifiedTransferredCatalogBundleV1,
   signedHead: SignedAuthorCatalogHeadEnvelopeV1,
@@ -439,19 +438,13 @@ export function verifyCgSharedProjectionV1(
       cause,
     );
   }
-  if (projectionBytes.byteLength > verificationLimits.maxProjectionBytes) {
-    fail(
-      'projection-resource-refused',
-      'projection exceeds the local in-memory byte limit',
-    );
-  }
 
   const projectionDigest = metadata.projectionDigest;
   if (projectionDigest !== metadata.transfer.projectionDigest) {
     fail('projection-digest', 'catalog and transfer projection digests differ');
   }
 
-  const semantic = verifyCanonicalProjectionBytes(
+  const semantic = verifyCanonicalCgSharedProjectionBytesV1(
     projectionBytes,
     sealBinding.seal,
     projectionDigest,
@@ -587,7 +580,8 @@ export function readVerifiedCgSharedProjectionBytesV1(
   );
 }
 
-function verifyCanonicalProjectionBytes(
+/** Canonical semantics and local limits shared by preflight and transferred bundles. */
+export function verifyCanonicalCgSharedProjectionBytesV1(
   projectionBytes: Uint8Array,
   seal: Readonly<CanonicalGraphScopedAuthorSealV1>,
   projectionDigest: Digest32V1,
@@ -597,6 +591,9 @@ function verifyCanonicalProjectionBytes(
   readonly privateDataHash: Digest32V1;
   readonly assertionMerkleRoot: Digest32V1;
 } {
+  limits = normalizeVerificationLimits(limits);
+  assertProjectionWithinLocalLimits(String(projectionBytes.byteLength) as ByteLengthV1,
+    seal.publicTripleCount, limits);
   if (projectionBytes.byteLength === 0) {
     fail('projection-empty', 'cg-shared-v1 projection must not be empty');
   }
@@ -898,11 +895,10 @@ function assertCanonicalObjectTerm(object: string, lineNumber: number): void {
 }
 
 function assertCanonicalLiteralBody(body: string, lineNumber: number): void {
+  // Only the escapes are checked. The canonical form escapes `\`, `"`, LF and
+  // CR; a tab or another control character stands for itself. A raw line
+  // break never reaches a line: every entry point refuses CR and splits on LF.
   for (let index = 0; index < body.length; index += 1) {
-    const code = body.charCodeAt(index);
-    if (code <= 0x1f || code === 0x7f) {
-      fail('projection-literal', `projection line ${lineNumber} literal contains a raw control`);
-    }
     if (body[index] !== '\\') continue;
     const escaped = body[index + 1];
     if (escaped !== '\\' && escaped !== '"' && escaped !== 'n' && escaped !== 'r') {

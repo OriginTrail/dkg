@@ -28,6 +28,7 @@ function memoryFor(triples: LayeredTriple[]): MemoryData {
     partial: false,
     layerStatus: { wm: 'ok', swm: 'ok', vm: 'ok' },
     refresh: () => {},
+    hasMore: false, canRetry: false, loadMore: () => {}, pageError: null, limitMessage: null,
   } as unknown as MemoryData;
 }
 
@@ -229,6 +230,7 @@ describe('useCanonicalTriples — canonical project-wide triple total (GH #819)'
       partial: false,
       layerStatus: { wm: 'ok', swm: 'ok', vm: 'ok' },
       refresh: () => {},
+    hasMore: false, canRetry: false, loadMore: () => {}, pageError: null, limitMessage: null,
     } as unknown as MemoryData;
     render(memory);
     const { total, spo } = readProbe(container);

@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { describe, expect, it } from 'vitest';
 import type { ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
@@ -51,7 +52,7 @@ const VALID_OBJECT_EVENT_DOC = {
 };
 
 function createResponse() {
-  const response = {
+  const response = Object.assign(new EventEmitter(), {
     statusCode: 0,
     headers: undefined as Record<string, string> | undefined,
     body: '',
@@ -66,7 +67,7 @@ function createResponse() {
       this.writableEnded = true;
       return this;
     },
-  };
+  });
   return response;
 }
 
@@ -451,6 +452,9 @@ describe('EPCIS events query route — per-request CG + sub-graph', () => {
   function captureSparql(): { agent: RequestContext['agent']; calls: Array<{ sparql: string; opts: unknown }> } {
     const calls: Array<{ sparql: string; opts: unknown }> = [];
     const agent = {
+      resolveContextGraphReadAuthority: async () => ({
+        outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'forbidden',
+      }),
       query: async (sparql: string, opts: unknown) => {
         calls.push({ sparql, opts });
         return { bindings: [] };
@@ -575,5 +579,32 @@ describe('EPCIS events query route — per-request CG + sub-graph', () => {
 
     expect(ctx.res.statusCode).toBe(400);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('EPCIS capture status', () => {
+  it('answers a failed capture with a short reason, also when the stored one is long', async () => {
+    const stored = `send failed at https://rpc.example/v2/SECRET-API-KEY: ${'refused; '.repeat(80)}`;
+    const url = new URL('http://127.0.0.1/api/epcis/capture/capture-1');
+    const ctx = createContext({
+      req: createGetRequest(url.pathname),
+      url,
+      path: url.pathname,
+      publisherControl: {
+        getStatus: async () => ({
+          status: 'failed',
+          timestamps: { acceptedAt: 1_000 },
+          failure: { code: 'rpc_unavailable', message: stored },
+        }),
+      } as unknown as RequestContext['publisherControl'],
+    });
+
+    await handleEpcisRoutes(ctx);
+
+    expect(ctx.res.statusCode).toBe(200);
+    const body = responseBody(ctx);
+    expect(body).toMatchObject({ captureID: 'capture-1', state: 'failed', finalizedAt: null });
+    expect(String(body['error'])).toMatch(/^send failed at rpc\.example: refused; .*…$/);
+    expect(String(body['error']).length).toBeLessThanOrEqual(512);
   });
 });

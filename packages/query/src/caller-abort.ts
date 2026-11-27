@@ -13,7 +13,11 @@ export function raceAgainstCallerAbort<T>(
   signal: AbortSignal | undefined,
 ): Promise<T> {
   if (!signal) return work;
-  if (signal.aborted) return Promise.reject(callerAbortReason(signal));
+  if (signal.aborted) {
+    // The work goes on, and nobody awaits it: its failure must not go unhandled.
+    void work.catch(() => undefined);
+    return Promise.reject(callerAbortReason(signal));
+  }
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(callerAbortReason(signal));
     signal.addEventListener('abort', onAbort, { once: true });

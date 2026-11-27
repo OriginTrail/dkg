@@ -1,3 +1,5 @@
+import { ProverHealth, type TickFailureKind } from './prover-health.js';
+import { ChallengeTickError } from './prover-challenge-error.js';
 /**
  * Generic prover-loop driver: takes a prover-shaped object and runs
  * `tick()` on a timer with single-flight semantics. Lives in
@@ -11,7 +13,10 @@
  * makes both files easy to read and test.
  */
 
-import type { ProverLogger, TickOutcome } from './prover.js';
+import {
+  type ProverLogger,
+  type TickOutcome,
+} from './prover.js';
 
 export interface TickableProver {
   tick(): Promise<TickOutcome>;
@@ -39,6 +44,22 @@ export interface ProverLoopStatus {
   lastSubmittedTxHash: string | null;
   /** Wall-clock ISO-8601 timestamp of the most recent `submitted` outcome. */
   lastSubmittedAt: string | null;
+  /**
+   * Distinct challenges (proof periods) this process first saw in the trailing
+   * 24 hours. Repeated ticks on one period count once. Process-local: a period
+   * first seen as already solved (for example, proved before a restart) counts
+   * here without a matching proof below. A tick that throws after receiving a challenge still counts that period.
+   */
+  challengesReceived24h?: number;
+  /**
+   * Of the periods counted in `challengesReceived24h`, how many this process
+   * submitted a proof for. Never exceeds `challengesReceived24h`.
+   */
+  proofsSubmitted24h?: number;
+  /** Kind of the most recent failed tick, or null if none has failed. */
+  lastFailureClassification?: TickFailureKind | null;
+  /** Wall-clock ISO-8601 timestamp of the most recent failed tick. */
+  lastFailureAt?: string | null;
 }
 
 export interface ProverLoopOptions {
@@ -76,21 +97,30 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
   let submittedCount = 0;
   let lastSubmittedTxHash: string | null = null;
   let lastSubmittedAt: string | null = null;
+  const health = new ProverHealth();
+
+  /** The one place a settled tick, returned or thrown, updates the snapshot. */
+  const recordOutcome = (outcome: TickOutcome, at: number): void => {
+    lastOutcome = outcome;
+    health.observe(outcome, at);
+    if (outcome.kind === 'submitted') {
+      submittedCount += 1;
+      lastSubmittedTxHash = outcome.txHash;
+      lastSubmittedAt = new Date(at).toISOString();
+    }
+
+  };
 
   const runOnce = (): Promise<void> => {
     if (inflight || stopping) return Promise.resolve();
     inflight = true;
     totalTicks += 1;
-    lastTickAt = new Date().toISOString();
+    const tickStartedAt = Date.now();
+    lastTickAt = new Date(tickStartedAt).toISOString();
     const run = (async (): Promise<void> => {
       try {
         const outcome = await opts.prover.tick();
-        lastOutcome = outcome;
-        if (outcome.kind === 'submitted') {
-          submittedCount += 1;
-          lastSubmittedTxHash = outcome.txHash;
-          lastSubmittedAt = lastTickAt;
-        }
+        recordOutcome(outcome, Date.now());
         try {
           opts.onTick?.(outcome);
         } catch (err) {
@@ -99,8 +129,11 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
           });
         }
       } catch (err) {
-        const error = err instanceof Error ? err : new Error(String(err));
-        lastOutcome = { kind: 'error', error };
+        const cause = err instanceof ChallengeTickError ? err.cause : err;
+        const error = cause instanceof Error ? cause : new Error(String(cause));
+        const outcome: TickOutcome = { kind: 'error', error,
+          ...(err instanceof ChallengeTickError ? { period: err.period } : {}) };
+        recordOutcome(outcome, Date.now());
         // The orchestrator already maps known errors to TickOutcome
         // variants. An exception here means an unmapped path
         // (typically a transient adapter / RPC issue). Log and keep
@@ -109,7 +142,7 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
           err: error.message,
         });
         try {
-          opts.onTick?.(lastOutcome);
+          opts.onTick?.(outcome);
         } catch (hookErr) {
           opts.log?.warn('rs.loop.onTick-threw', {
             err: hookErr instanceof Error ? hookErr.message : String(hookErr),
@@ -173,6 +206,7 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
         submittedCount,
         lastSubmittedTxHash,
         lastSubmittedAt,
+        ...health.snapshot(Date.now()),
       };
     },
   };

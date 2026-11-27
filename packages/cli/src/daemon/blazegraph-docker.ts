@@ -348,6 +348,63 @@ interface ContainerInspectInfo extends BlazegraphContainerPolicyStatus {
   exists: boolean;
   running: boolean;
   hostPort?: number;
+  /**
+   * Where the container publishes a port beyond this host's loopback interface:
+   * `address:port` for each such binding, configured or live, and `the host's
+   * network` when it shares it. Empty when it publishes on loopback only.
+   */
+  publicBindings: string[];
+}
+
+/** Whether a Docker port binding's `HostIp` is a loopback address. An empty one means every interface. */
+function isLoopbackHostIp(hostIp: string): boolean {
+  return hostIp === '::1' || (net.isIPv4(hostIp) && hostIp.startsWith('127.'));
+}
+
+/**
+ * The container's port bindings beyond loopback: its configured ones
+ * (`HostConfig.PortBindings`, also set while it is stopped) and its live ones
+ * (`NetworkSettings.Ports`), and host networking, which publishes every port
+ * the container listens on.
+ */
+function publicBindingsOf(info: Record<string, unknown>): string[] {
+  const found = new Set<string>();
+  const hostConfig = isRecord(info.HostConfig) ? info.HostConfig : undefined;
+  if (hostConfig?.NetworkMode === 'host') found.add("the host's network");
+  const networkSettings = isRecord(info.NetworkSettings) ? info.NetworkSettings : undefined;
+  for (const bindings of [hostConfig?.PortBindings, networkSettings?.Ports]) {
+    if (!isRecord(bindings)) continue;
+    for (const list of Object.values(bindings)) {
+      if (!Array.isArray(list)) continue;
+      for (const binding of list) {
+        if (!isRecord(binding)) continue;
+        const hostIp = typeof binding.HostIp === 'string' ? binding.HostIp : '';
+        if (isLoopbackHostIp(hostIp)) continue;
+        const address = hostIp === '' ? '0.0.0.0' : hostIp.includes(':') ? `[${hostIp}]` : hostIp;
+        found.add(`${address}:${typeof binding.HostPort === 'string' ? binding.HostPort : '?'}`);
+      }
+    }
+  }
+  return [...found];
+}
+
+/**
+ * Refuse to use a container that publishes Blazegraph beyond this host's
+ * loopback interface. DKG creates the container on 127.0.0.1 only; one created
+ * otherwise (before 7 Aug 2026, or by hand) must be recreated, not reused.
+ */
+function refusePublicContainer(info: ContainerInspectInfo, spec: BlazegraphContainerSpec): void {
+  if (info.publicBindings.length === 0) return;
+  const recreate = info.durableStorage
+    ? `Its journal is in the named volume "${spec.volumeName}", so it can be recreated on loopback with the same `
+      + `data: run "docker rm -f ${spec.containerName}" and this setup again.`
+    : `Back up its Blazegraph journal first: it is not confirmed to be in the named volume "${spec.volumeName}", `
+      + 'so removing the container may discard it.';
+  throw new Error(
+    `Container "${spec.containerName}" publishes Blazegraph's SPARQL endpoint, which takes reads and updates `
+    + `without authentication, beyond this host's loopback interface (${info.publicBindings.join(', ')}). `
+    + `DKG reuses it only when it publishes on 127.0.0.1. ${recreate}`,
+  );
 }
 
 async function inspectContainer(
@@ -364,6 +421,7 @@ async function inspectContainer(
       running: false,
       durableStorage: false,
       boundedLogs: false,
+      publicBindings: [],
     };
   }
   try {
@@ -375,6 +433,7 @@ async function inspectContainer(
         running: false,
         durableStorage: false,
         boundedLogs: false,
+        publicBindings: [],
       };
     }
     const running = info.State?.Running === true;
@@ -392,6 +451,7 @@ async function inspectContainer(
       exists: true,
       running,
       hostPort,
+      publicBindings: isRecord(info) ? publicBindingsOf(info) : [],
       ...spec.inspectPolicy(info),
     };
   } catch {
@@ -400,6 +460,7 @@ async function inspectContainer(
       running: false,
       durableStorage: false,
       boundedLogs: false,
+      publicBindings: [],
     };
   }
 }
@@ -475,6 +536,7 @@ async function finaliseReusedContainer(opts: {
   log: (msg: string) => void;
   announceReuse: boolean;
 }): Promise<ProvisionBlazegraphDockerResult> {
+  refusePublicContainer(opts.inspectInfo, opts.spec);
   const port = opts.inspectInfo.hostPort ?? opts.fallbackPort;
   const url = `http://127.0.0.1:${port}`;
   if (opts.announceReuse) {
@@ -553,6 +615,8 @@ export async function provisionBlazegraphDocker(
 
   // 3. Stopped-but-exists path — start it back up before re-creating.
   if (inspectInfo.exists && !inspectInfo.running) {
+    // Starting it would publish it again: refuse before that.
+    refusePublicContainer(inspectInfo, containerSpec);
     log(`  Container "${containerName}" exists but is stopped; starting it.`);
     const startResult = await docker.run(['start', containerName]);
     if (startResult.exitCode !== 0) {

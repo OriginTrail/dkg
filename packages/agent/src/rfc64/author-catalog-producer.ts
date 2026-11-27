@@ -47,6 +47,7 @@ import {
   type TimestampMsV1,
   type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
+import { yieldMainThread } from '../main-thread-time-slice.js';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
 import {
@@ -217,12 +218,8 @@ export async function produceSparseAuthorCatalogSuccessorV1(
 async function produceSparseAuthorCatalogSuccessorUncheckedV1(
   input: ProduceSparseAuthorCatalogSuccessorInputV1,
 ): Promise<ProducedAuthorCatalogPublicationV1> {
-  const previousHeadInput = input.previousHead;
-  const previousPathInput = input.previousDirectoryPath;
-  const previousBucketInput = input.previousBucket;
-  const selectedBucketId = input.selectedBucketId;
-  const nextRowsInput = input.nextRows;
-  const issuedAt = input.issuedAt;
+  const { previousHead: previousHeadInput, previousDirectoryPath: previousPathInput,
+    previousBucket: previousBucketInput, selectedBucketId, nextRows: nextRowsInput, issuedAt } = input;
   const signer = snapshotSigner(input.signer);
 
   const previousHead = snapshotHead(previousHeadInput);
@@ -256,10 +253,16 @@ async function produceSparseAuthorCatalogSuccessorUncheckedV1(
     signer.issuer,
   );
 
+  if (!Array.isArray(nextRowsInput) || Object.getPrototypeOf(nextRowsInput) !== Array.prototype) {
+    fail('catalog-production-input', 'nextRows must be an ordinary dense Array');
+  }
+  const rows = snapshotRows(nextRowsInput);
+  // Split predecessor verification from replacement encoding before the next CPU-heavy phase.
+  await yieldMainThread();
   const preparedBucket = prepareReplacementBucket(
     scope,
     selectedBucketId,
-    nextRowsInput,
+    rows,
     signer.issuer,
   );
   const nextDescriptor = preparedBucket.descriptor;
@@ -370,13 +373,9 @@ type PreparedReplacementBucketV1 =
 function prepareReplacementBucket(
   scope: AuthorCatalogScopeV1,
   selectedBucketId: DecimalU64V1,
-  rowsInput: readonly AuthorCatalogRowV1[],
+  rows: readonly AuthorCatalogRowV1[],
   issuer: EvmAddressV1,
 ): PreparedReplacementBucketV1 {
-  if (!Array.isArray(rowsInput) || Object.getPrototypeOf(rowsInput) !== Array.prototype) {
-    fail('catalog-production-input', 'nextRows must be an ordinary dense Array');
-  }
-  const rows = snapshotRows(rowsInput);
   if (rows.length === 0) {
     return Object.freeze({
       bucket: null,

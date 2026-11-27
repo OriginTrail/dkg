@@ -19,6 +19,7 @@ import {
   type LiftJobPayloadDecodeResult,
   type StructurallyValidLiftJobPayload,
 } from '../../src/lift-job-payload-codec.js';
+import { requireActiveLiftJobClaim, type CommittedLiftJob } from '../../src/lift-job-committed.js';
 
 declare const publisher: TripleStoreAsyncLiftPublisher;
 declare const accepted: LiftJobAccepted;
@@ -56,6 +57,26 @@ void narrowedClaim;
 publisher.openClaimSession(accepted);
 // @ts-expect-error A legacy claimed record without a required token/lease is not active authority.
 publisher.openClaimSession(legacyClaimedWithoutFence);
+
+// A committed write returns the canonical lifecycle variant of its candidate. Persistence rebuilds
+// the record, so a refinement the caller held is re-established by a check, never advertised.
+declare const committedClaim: CommittedLiftJob<ActiveLiftJobClaim>;
+const canonicalClaim: LiftJobClaimed = committedClaim;
+void canonicalClaim;
+// @ts-expect-error A committed claim does not vouch for a live fence until it is re-checked.
+const unprovenFence: ActiveLiftJobClaim = committedClaim;
+void unprovenFence;
+const recheckedFence: ActiveLiftJobClaim = requireActiveLiftJobClaim(committedClaim);
+void recheckedFence;
+declare const committedAccepted: CommittedLiftJob<LiftJobAccepted>;
+const stillAccepted: LiftJobAccepted = committedAccepted;
+void stillAccepted;
+// @ts-expect-error A commit in one lifecycle state is not a record in another.
+const acceptedAsClaimed: LiftJobClaimed = committedAccepted;
+void acceptedAsClaimed;
+declare const committedInAnyState: CommittedLiftJob;
+const anyLifecycleState: LiftJob = committedInAnyState;
+void anyLifecycleState;
 
 // Freeze the changed part of the pre-session contract independently of the current interface.
 // In particular, old structural implementations returned the broad persisted LiftJob shape;

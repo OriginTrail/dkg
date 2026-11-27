@@ -68,6 +68,22 @@ export const FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 = deriveFinalizedVmScanMaxRows(
   CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
 );
 
+/**
+ * GH#3134 — the graph has more assets on chain than one pinned-snapshot scan reads
+ * ({@link FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1}), so this node cannot check an author catalog of
+ * the graph against the chain. Its code stays `resource-limit`; its class is what tells it apart
+ * from the other resource limits of a snapshot.
+ */
+export class FinalizedVmChainInventoryLimitErrorV1 extends CurrentFinalizedEvmCallErrorV1 {
+  constructor(contextGraphId: DecimalU256V1, rowCount: bigint) {
+    super(
+      'resource-limit',
+      `Finalized VM inventory has ${rowCount} rows, above the v1 pinned-scan limit`
+        + ` ${FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1}, for on-chain context graph ${contextGraphId}`,
+    );
+  }
+}
+
 export interface FinalizedVmChainSessionScannerConfigV1 {
   readonly networkId: NetworkIdV1;
   readonly chainId: ChainIdV1;
@@ -196,10 +212,7 @@ async function scanPinnedInventory(
     encodedCount,
   );
   if (rowCount > BigInt(FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1)) {
-    throw new CurrentFinalizedEvmCallErrorV1(
-      'resource-limit',
-      `Finalized VM inventory has ${rowCount} rows, above the v1 pinned-scan limit ${FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1}`,
-    );
+    throw new FinalizedVmChainInventoryLimitErrorV1(contextGraphId, rowCount);
   }
 
   const rowCountNumber = Number(rowCount);

@@ -1,3 +1,4 @@
+import { LiftPayloadValidationError } from './lift-validation-error.js';
 import { ethers } from 'ethers';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { GRAPH_KA_CONTENT_SCOPE_VERSION, type OperationContext } from '@origintrail-official/dkg-core';
@@ -122,11 +123,11 @@ export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): 
   const { metadata } = normalizeLiftPublishInput(input, 'Lift publish mapping');
   const authorityProofRef = normalizeAuthorityProofRef(input.validation.authorityProofRef);
   if (authorityProofRef.length === 0) {
-    throw new Error('Lift publish mapping requires a non-empty authorityProofRef');
+    throw new LiftPayloadValidationError('Lift publish mapping requires a non-empty authorityProofRef');
   }
 
   if (metadata.transitionType !== input.validation.transitionType) {
-    throw new Error(
+    throw new LiftPayloadValidationError(
       `Lift publish mapping requires validation.transitionType to match request metadata transitionType. Request: ${metadata.transitionType}, validation: ${input.validation.transitionType}`,
     );
   }
@@ -134,7 +135,7 @@ export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): 
   const requestPriorVersion = normalizePriorVersion(input.request.priorVersion);
   const validationPriorVersion = input.validation.priorVersion;
   if (requestPriorVersion !== validationPriorVersion) {
-    throw new Error(
+    throw new LiftPayloadValidationError(
       `Lift publish mapping requires validation.priorVersion to match request.priorVersion. Request: ${requestPriorVersion ?? '<none>'}, validation: ${validationPriorVersion ?? '<none>'}`,
     );
   }
@@ -145,13 +146,13 @@ export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): 
   const accessPolicy = input.resolved.accessPolicy ?? (privateQuads.length > 0 ? 'ownerOnly' : 'public');
 
   if (accessPolicy !== 'public' && !publisherPeerId) {
-    throw new Error(`Lift publish mapping requires publisherPeerId when accessPolicy is ${accessPolicy}`);
+    throw new LiftPayloadValidationError(`Lift publish mapping requires publisherPeerId when accessPolicy is ${accessPolicy}`);
   }
   if (accessPolicy === 'allowList' && allowedPeers.length === 0) {
-    throw new Error('Lift publish mapping requires non-empty allowedPeers for allowList access');
+    throw new LiftPayloadValidationError('Lift publish mapping requires non-empty allowedPeers for allowList access');
   }
   if (accessPolicy !== 'allowList' && allowedPeers.length > 0) {
-    throw new Error('Lift publish mapping only allows allowedPeers when accessPolicy is allowList');
+    throw new LiftPayloadValidationError('Lift publish mapping only allows allowedPeers when accessPolicy is allowList');
   }
 
   // GH #1121 — derive the inline-encryption path. Public CGs MUST stay
@@ -176,11 +177,11 @@ export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): 
     input.request.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION
     && entityProofs === true
   ) {
-    throw new Error('Graph-scoped async publish does not support entityProofs');
+    throw new LiftPayloadValidationError('Graph-scoped async publish does not support entityProofs');
   }
   const publishEpochs = input.request.publishEpochs;
   if (publishEpochs !== undefined && (!Number.isSafeInteger(publishEpochs) || publishEpochs < 1 || publishEpochs > MAX_PUBLISH_EPOCHS)) {
-    throw new Error(`Lift publish mapping requires request.publishEpochs to be a positive uint32 integer; got ${String(publishEpochs)}`);
+    throw new LiftPayloadValidationError(`Lift publish mapping requires request.publishEpochs to be a positive uint32 integer; got ${String(publishEpochs)}`);
   }
   const publisherNodeIdentityIdOverride = input.request.publisherNodeIdentityIdOverride !== undefined
     ? BigInt(input.request.publisherNodeIdentityIdOverride)
@@ -265,10 +266,10 @@ function decodeSealField(
     bytes = ethers.getBytes(hex);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Lift seal ${fieldName} contains invalid hex: ${message}`);
+    throw new LiftPayloadValidationError(`Lift seal ${fieldName} contains invalid hex: ${message}`);
   }
   if (bytes.length !== expectedBytes) {
-    throw new Error(
+    throw new LiftPayloadValidationError(
       `Lift seal ${fieldName} must be exactly ${expectedBytes} bytes; got ${bytes.length} (hex: ${hex})`,
     );
   }

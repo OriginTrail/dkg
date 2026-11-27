@@ -25,9 +25,24 @@
  *   graph-set-index-store.ts — "only graphs containing at least one quad are
  *   listed").
  *
- * This is standard SPARQL 1.1 — correct on any endpoint, index-optimized on
- * oxigraph (the sparql-http adapter's DKG backend). The Blazegraph adapter
- * deliberately keeps the legacy scan form (mainnet cores; out of scope here).
+ * The bounded EXISTS subquery avoids a full-graph probe on Blazegraph while
+ * retaining non-empty semantics on Oxigraph. Callers can compose the pattern
+ * into a catalog UNION without duplicating backend enumeration policy.
  */
+export function nonEmptyNamedGraphEnumerationPattern(variable = 'g'): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable)) throw new TypeError('Invalid graph variable');
+  const graph = `?${variable}`;
+  const probe = ['s', 'p', 'o'].map(name => `?${name === variable ? '_' : ''}${name}`).join(' ');
+  return `GRAPH ${graph} {} FILTER EXISTS { SELECT ${graph} WHERE { GRAPH ${graph} { ${probe} } } LIMIT 1 }`;
+}
 export const NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY =
-  'SELECT ?g WHERE { GRAPH ?g {} FILTER EXISTS { GRAPH ?g { ?s ?p ?o } } }';
+  `SELECT ?g WHERE { ${nonEmptyNamedGraphEnumerationPattern()} }`;
+
+/**
+ * SPARQL that enumerates every registered named graph, emptied ones included:
+ * bare `GRAPH ?g {}`, the pattern above without its non-empty filter. A graph
+ * emptied by DELETE stays registered on Oxigraph until it is dropped, and
+ * Oxigraph answers this from its graph index. Blazegraph keeps no empty
+ * graphs, so there it lists the graphs that hold a quad.
+ */
+export const REGISTERED_NAMED_GRAPH_ENUMERATION_QUERY = 'SELECT ?g WHERE { GRAPH ?g {} }';

@@ -6,10 +6,13 @@
  * target after the wait, and apply only the still-current one — is a focused,
  * testable unit rather than a closure buried in the 3.5k-line lifecycle file.
  *
- * The mode differences (which check, which installer, log wording) live here;
- * the cross-cutting rollout state machine (single-flight, hold-off, shutdown
- * abort, isUpdating) is owned by the {@link UpdateHoldoffGate}. Lifecycle wires
- * these into setInterval and provides the gate + a restart callback.
+ * The mode differences (which check, which installer, log wording) live here.
+ * Each check result is mapped onto the gate's mode-neutral
+ * {@link UpdateCheckOutcome}; the cross-cutting rollout state machine
+ * (hold-off, persisted deadline, shutdown abort, isUpdating) is
+ * owned by the {@link UpdateHoldoffGate}; each runCheck binds its mode's rollout
+ * step to the gate once. `auto-update-polling.ts` builds the
+ * daemon's gate, these runChecks and their timers.
  */
 import {
   checkForNpmVersionUpdate,
@@ -19,56 +22,88 @@ import {
   getCurrentCliVersion,
   checkForNewCommitWithStatus,
   performUpdateWithStatus,
+  type CommitCheckStatus,
+  type NpmVersionStatus,
 } from './auto-update.js';
-import type { UpdateHoldoffGate } from './auto-update-jitter.js';
+import type { UpdateCheckOutcome, UpdateHoldoffGate } from './auto-update-holdoff-gate.js';
 import type { LastUpdateCheck } from './state.js';
 import type { ResolvedAutoUpdateConfig } from '../config.js';
 
+/** An npm version check as a gate outcome. `no-target` is definitive: the
+ *  channel has nothing to install until a release is published to it. */
+export function npmCheckOutcome(status: NpmVersionStatus): UpdateCheckOutcome {
+  switch (status.status) {
+    case 'available': return { status: 'available', target: status.version };
+    case 'up-to-date':
+    case 'no-target': return { status: 'none' };
+    case 'error': return { status: 'failed' };
+  }
+}
+
 /**
- * Re-resolve the CURRENT npm channel target after the hold-off, mapping to the
- * version to apply or null when there is nothing to apply now (withdrawn /
- * rolled back / caught up). Private to the runner — a one-line adapter over the
- * already-public `checkForNpmVersionUpdate`, not part of the daemon's API.
+ * The mode-neutral tail of the "update available" log line, so the git and npm
+ * paths word the three hold-off cases identically.
+ */
+export function describeUpdateHold(holdMs: number, resumed: boolean): string {
+  const secs = Math.round(holdMs / 1000);
+  if (!resumed) return `holding ${secs}s before applying (rollout jitter — spreads fleet restarts).`;
+  if (holdMs <= 0) return 'rollout hold-off deadline carried over from before a restart has passed — applying now.';
+  return `resuming the rollout hold-off carried over from before a restart — ${secs}s left before applying.`;
+}
+
+/** A git ref check as a gate outcome. */
+export function gitCheckOutcome(status: CommitCheckStatus): UpdateCheckOutcome {
+  if (status.status === 'up-to-date') return { status: 'none' };
+  if (status.status === 'available' && status.commit) return { status: 'available', target: status.commit };
+  return { status: 'failed' };
+}
+
+/**
+ * Re-check the npm channel target after the hold-off. Private to the runner — an
+ * adapter over the already-public `checkForNpmVersionUpdate`, not part of the
+ * daemon's API.
  */
 export async function resolveCurrentNpmTarget(
   log: (msg: string) => void,
   allowPrerelease: boolean,
   channel?: string,
-): Promise<string | null> {
-  const status = await checkForNpmVersionUpdate(log, allowPrerelease, channel);
-  return status.status === 'available' ? status.version : null;
+): Promise<UpdateCheckOutcome> {
+  return npmCheckOutcome(await checkForNpmVersionUpdate(log, allowPrerelease, channel));
 }
 
-/** Git counterpart to {@link resolveCurrentNpmTarget}: the current ref tip, or
- *  null when it no longer points ahead of the running commit. Runner-private. */
+/** Git counterpart to {@link resolveCurrentNpmTarget}: re-check the ref tip. Runner-private. */
 export async function resolveCurrentGitTarget(
   au: ResolvedAutoUpdateConfig,
   log: (msg: string) => void,
-): Promise<string | null> {
-  const status = await checkForNewCommitWithStatus(au, log);
-  return status.status === 'available' && status.commit ? status.commit : null;
+): Promise<UpdateCheckOutcome> {
+  return gitCheckOutcome(await checkForNewCommitWithStatus(au, log));
 }
 
-export interface NpmUpdateRunCheckDeps {
-  /** null = version-check-only (auto-apply disabled): detect + record, never apply. */
-  gate: UpdateHoldoffGate | null;
-  log: (msg: string) => void;
-  lastUpdateCheck: LastUpdateCheck;
-  allowPrerelease: boolean;
-  channel?: string;
+/** What npm mode needs to install an available version. */
+export interface NpmAutoApply {
+  gate: UpdateHoldoffGate;
   nodeRole: 'edge' | 'core';
   /** Trigger the supervised restart after a successful install. */
   onRestart: () => Promise<void>;
 }
 
+export interface NpmUpdateRunCheckDeps {
+  log: (msg: string) => void;
+  lastUpdateCheck: LastUpdateCheck;
+  allowPrerelease: boolean;
+  channel?: string;
+  /** null = version-check-only (auto-apply disabled): detect + record, never apply. */
+  autoApply: NpmAutoApply | null;
+}
+
 /**
  * Build the npm-mode polling `runCheck`. Always refreshes `lastUpdateCheck` (so
- * `/api/status` is current even when auto-apply is off); when a gate is present
- * and an update is available, routes the apply through it — including the
- * post-hold-off revalidation that skips a version withdrawn during the wait.
+ * `/api/status` is current even when auto-apply is off); with auto-apply, hands
+ * the check's outcome to the gate — including the post-hold-off re-check that
+ * skips a version withdrawn during the wait.
  */
 export function createNpmUpdateRunCheck(deps: NpmUpdateRunCheckDeps): () => Promise<void> {
-  return async () => {
+  const check = async (): Promise<UpdateCheckOutcome> => {
     const npmStatus = await checkForNpmVersionUpdate(deps.log, deps.allowPrerelease, deps.channel);
     const derived = deriveUpdateCheckState(npmStatus);
     if (derived) {
@@ -83,35 +118,38 @@ export function createNpmUpdateRunCheck(deps: NpmUpdateRunCheckDeps): () => Prom
           `Auto-update (npm): WARNING — channel "${npmStatus.channel}" has no acceptable target (tag missing or rejected by allowPrerelease); node will not update until it is published.`,
         );
     }
-    if (npmStatus.status !== 'available') return;
-    if (!deps.gate) return; // version check only — no auto-apply when polling disabled
-    const detectedVersion = npmStatus.version;
-
-    await deps.gate.run<string>({
-      onHold: (holdMs) =>
-        deps.log(
-          `Auto-update (npm): version ${detectedVersion} available; ` +
-            `holding ${Math.round(holdMs / 1000)}s before applying (rollout jitter — spreads fleet restarts).`,
-        ),
-      shutdownMessage:
-        'Auto-update (npm): hold-off aborted — daemon shutting down; deferring to next boot.',
-      supersededMessage:
-        'Auto-update (npm): target superseded during hold-off (version withdrawn or node caught up); skipping — next poll re-evaluates.',
-      // Re-resolve the channel target AFTER the hold-off so a version withdrawn /
-      // rolled back during the wait is not installed; a newer one is applied.
-      revalidate: () => resolveCurrentNpmTarget(deps.log, deps.allowPrerelease, deps.channel),
-      apply: async (version) => {
-        // OT-RFC-41 Bundle B1b: Edge → npm install -g, Core → slot install.
-        const status = deps.nodeRole === 'edge'
-          ? await performNpmUpdateEdge(version, getCurrentCliVersion(), deps.log)
-          : await performNpmUpdate(version, deps.log);
-        if (status === 'updated') {
-          deps.log('Auto-update: update activated; exiting for supervised restart.');
-          await deps.onRestart();
-        }
-      },
-    });
+    return npmCheckOutcome(npmStatus);
   };
+
+  const { autoApply } = deps;
+  if (!autoApply) {
+    // Version check only — no auto-apply when polling disabled.
+    return async () => { await check(); };
+  }
+  return autoApply.gate.bindRollout<string>({
+    check,
+    onHold: (version, holdMs, resumed) =>
+      deps.log(`Auto-update (npm): version ${version} available; ${describeUpdateHold(holdMs, resumed)}`),
+    shutdownMessage:
+      'Auto-update (npm): hold-off aborted — daemon shutting down; deferring to next boot.',
+    supersededMessage:
+      'Auto-update (npm): target superseded during hold-off (version withdrawn or node caught up); skipping — next poll re-evaluates.',
+    recheckFailedMessage:
+      'Auto-update (npm): re-check after the hold-off failed; not applying — the rollout deadline is kept and the next poll retries.',
+    // Re-resolve the channel target AFTER the hold-off so a version withdrawn /
+    // rolled back during the wait is not installed; a newer one is applied.
+    revalidate: () => resolveCurrentNpmTarget(deps.log, deps.allowPrerelease, deps.channel),
+    apply: async (version) => {
+      // OT-RFC-41 Bundle B1b: Edge → npm install -g, Core → slot install.
+      const status = autoApply.nodeRole === 'edge'
+        ? await performNpmUpdateEdge(version, getCurrentCliVersion(), deps.log)
+        : await performNpmUpdate(version, deps.log);
+      if (status === 'updated') {
+        deps.log('Auto-update: update activated; exiting for supervised restart.');
+        await autoApply.onRestart();
+      }
+    },
+  });
 }
 
 export interface GitUpdateRunCheckDeps {
@@ -124,16 +162,16 @@ export interface GitUpdateRunCheckDeps {
 
 /**
  * Build the git-mode polling `runCheck`. Detects the remote ref tip, refreshes
- * `lastUpdateCheck`, and on an available commit routes the apply through the
- * gate — re-resolving the ref AFTER the hold-off so the CURRENT tip is applied,
- * not the commit captured before the (possibly long) wait.
+ * `lastUpdateCheck`, and hands the outcome to the gate — which re-resolves the
+ * ref AFTER the hold-off so the CURRENT tip is applied, not the commit captured
+ * before the (possibly long) wait.
  */
 export function createGitUpdateRunCheck(deps: GitUpdateRunCheckDeps): () => Promise<void> {
-  return async () => {
+  const check = async (): Promise<UpdateCheckOutcome> => {
     const gitStatus = await checkForNewCommitWithStatus(deps.au, deps.log);
     if (gitStatus.status === 'error') {
       deps.log('Auto-update (git): update check failed.');
-      return;
+      return { status: 'failed' };
     }
 
     deps.lastUpdateCheck.checkedAt = Date.now();
@@ -141,36 +179,36 @@ export function createGitUpdateRunCheck(deps: GitUpdateRunCheckDeps): () => Prom
     deps.lastUpdateCheck.channelTargetMissing = false;
     deps.lastUpdateCheck.latestVersion = '';
     deps.lastUpdateCheck.latestCommit = gitStatus.commit ?? '';
-
-    if (gitStatus.status !== 'available' || !gitStatus.commit) return;
-    const detectedCommit = gitStatus.commit;
-
-    await deps.gate.run<string>({
-      onHold: (holdMs) =>
-        deps.log(
-          `Auto-update (git): new commit ${detectedCommit.slice(0, 8)} available; ` +
-            `holding ${Math.round(holdMs / 1000)}s before applying (rollout jitter — spreads fleet restarts).`,
-        ),
-      shutdownMessage:
-        'Auto-update (git): hold-off aborted — daemon shutting down; deferring to next boot.',
-      supersededMessage:
-        'Auto-update (git): target superseded during hold-off (ref moved or node caught up); skipping — next poll re-evaluates.',
-      revalidate: () => resolveCurrentGitTarget(deps.au, deps.log),
-      apply: async (commit) => {
-        const updateStatus = await performUpdateWithStatus(deps.au, deps.log, {
-          expectedCommit: commit,
-        });
-        if (updateStatus === 'updated') {
-          deps.log('Auto-update (git): update activated; exiting for supervised restart.');
-          await deps.onRestart();
-          return;
-        }
-        if (updateStatus === 'up-to-date') {
-          deps.log('Auto-update (git): update skipped — node caught up before apply.');
-          return;
-        }
-        deps.log('Auto-update (git): update failed.');
-      },
-    });
+    return gitCheckOutcome(gitStatus);
   };
+
+  return deps.gate.bindRollout<string>({
+    check,
+    onHold: (commit, holdMs, resumed) =>
+      deps.log(
+        `Auto-update (git): new commit ${commit.slice(0, 8)} available; ${describeUpdateHold(holdMs, resumed)}`,
+      ),
+    shutdownMessage:
+      'Auto-update (git): hold-off aborted — daemon shutting down; deferring to next boot.',
+    supersededMessage:
+      'Auto-update (git): target superseded during hold-off (ref moved or node caught up); skipping — next poll re-evaluates.',
+    recheckFailedMessage:
+      'Auto-update (git): re-check after the hold-off failed; not applying — the rollout deadline is kept and the next poll retries.',
+    revalidate: () => resolveCurrentGitTarget(deps.au, deps.log),
+    apply: async (commit) => {
+      const updateStatus = await performUpdateWithStatus(deps.au, deps.log, {
+        expectedCommit: commit,
+      });
+      if (updateStatus === 'updated') {
+        deps.log('Auto-update (git): update activated; exiting for supervised restart.');
+        await deps.onRestart();
+        return;
+      }
+      if (updateStatus === 'up-to-date') {
+        deps.log('Auto-update (git): update skipped — node caught up before apply.');
+        return;
+      }
+      deps.log('Auto-update (git): update failed.');
+    },
+  });
 }

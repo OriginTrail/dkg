@@ -1,7 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 
 /** Attach immediately after spawn. Services supply readiness; this utility owns lifetime. */
-export function ownProcess(child, { label = 'Owned child', graceMs = 1200, killTimeoutMs = 2000 } = {}) {
+export function ownProcess(child, { label = 'Owned child', graceMs = 1200, killTimeoutMs = 2000, kill = signal => child.kill(signal) } = {}) {
   let stdout = '';
   let stderr = '';
   let spawnError;
@@ -33,27 +33,34 @@ export function ownProcess(child, { label = 'Owned child', graceMs = 1200, killT
     stop() {
       stopping ??= (async () => {
         if (result) return;
-        child.kill('SIGTERM');
+        kill('SIGTERM');
         try { await deadline(closed, graceMs); }
         catch {
-          child.kill('SIGKILL');
+          kill('SIGKILL');
           // Never delete a service's files or claim teardown before close.
           await deadline(closed, killTimeoutMs);
         }
       })();
       return stopping;
     },
-    async ready(probe, { timeoutMs = 45_000, intervalMs = 100 } = {}) {
+    async ready(probe, { timeoutMs = 45_000, intervalMs = 100, signal } = {}) {
       const controller = new AbortController();
+      const probeSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
+      let onAbort;
       try {
+        signal?.throwIfAborted();
         const value = await deadline(Promise.race([
           closed.then(() => { throw failure(); }),
+          ...(signal ? [new Promise((_, reject) => {
+            onAbort = () => reject(signal.reason);
+            signal.addEventListener('abort', onAbort, { once: true });
+          })] : []),
           (async () => {
             while (true) {
-              controller.signal.throwIfAborted();
-              const value = await probe({ signal: controller.signal, stdout: () => stdout });
+              probeSignal.throwIfAborted();
+              const value = await probe({ signal: probeSignal, stdout: () => stdout });
               if (value !== undefined) return value;
-              await delay(intervalMs, undefined, { signal: controller.signal });
+              await delay(intervalMs, undefined, { signal: probeSignal });
             }
           })(),
         ]), timeoutMs);
@@ -63,7 +70,10 @@ export function ownProcess(child, { label = 'Owned child', graceMs = 1200, killT
         controller.abort();
         await owner.stop();
         throw diagnosticError(error);
-      } finally { controller.abort(); }
+      } finally {
+        controller.abort();
+        if (onAbort) signal.removeEventListener('abort', onAbort);
+      }
     },
     async waitForExit(timeoutMs = 300_000) {
       try {

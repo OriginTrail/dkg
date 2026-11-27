@@ -176,6 +176,11 @@ program
         await client.knowledgeAssetShare(targetContextGraph, indexAssertionName);
         process.stdout.write(`\n  Publishing "${indexAssertionName}" to VM...`);
         const published = await client.publishFromFinalizedAssertion(targetContextGraph, indexAssertionName);
+        if (published.catalogObligationPending) {
+          console.error(JSON.stringify(published, null, 2));
+          process.exitCode = 1;
+          return;
+        }
         console.log(`\n\n  Published ${result.quads.length} quads as knowledge asset "${indexAssertionName}" in context graph "${targetContextGraph}".`);
         console.log(`  Status: ${published.status}`);
         console.log(`  KA ID:  ${published.kaId}`);

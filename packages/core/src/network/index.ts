@@ -5,6 +5,7 @@ export type {
   Address,
   DialOpts,
   PeerConnectOpts,
+  PeerRecoveryStageOpts,
   ProtocolHandler,
 } from './network.js';
 export { PeerConnectionUnresolvedError } from './network.js';

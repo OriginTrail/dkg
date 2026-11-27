@@ -564,3 +564,53 @@ describe('discovery — Bug 2: round-trip through ka-builder + bindingsToKa with
     expect(`${ctx[prefix]}${local}`).toBe('https://source.example/StreamingSource');
   });
 });
+
+describe('discovery binding and literal boundaries', () => {
+  it('unwraps RDF result objects and ignores missing or non-string terms', () => {
+    const ka = bindingsToKa([
+      { ual: { value: 'did:dkg:1/wrapped' }, p: { value: 'https://schema.org/name' }, o: { value: '"wrapped"' } },
+      { p: null, o: 'ignored' }, { p: 12, o: 'ignored' }, { p: {}, o: 'ignored' },
+      { p: 'https://schema.org/description' },
+      { p: 'https://schema.org/description', o: { value: 12 } },
+      { p: 'https://schema.org/description', o: null },
+      { p: 'https://schema.org/description', o: '' },
+    ]);
+    expect(ka).toEqual({ '@context': { 'dkg-streams': 'https://ontology.dkg.io/streams#', schema: 'https://schema.org/' },
+      '@id': 'did:dkg:1/wrapped', '@type': 'dkg-streams:KafkaStream', 'schema:name': 'wrapped', 'schema:description': '' });
+  });
+
+  it('retains three values for one predicate in their original order', () => {
+    const rows = ['alpha', 'beta', 'gamma'].map(value => ({ p: 'https://schema.org/keywords', o: `"${value}"` }));
+    expect(bindingsToKa(rows)!['schema:keywords']).toEqual(['alpha', 'beta', 'gamma']);
+  });
+
+  it('allocates unique prefixes for three namespaces sharing the same stem', () => {
+    const ka = bindingsToKa(['https://vendor.example/a#', 'https://vendor.other/b#', 'https://vendor.third/c#']
+      .map((namespace, index) => ({ p: `${namespace}field`, o: `"${index}"` })));
+    expect(ka!['@context']).toMatchObject({ vendor: 'https://vendor.example/a#', vendor2: 'https://vendor.other/b#', vendor3: 'https://vendor.third/c#' });
+    expect(ka).toMatchObject({ 'vendor:field': '0', 'vendor2:field': '1', 'vendor3:field': '2' });
+  });
+
+  it.each([
+    ['"1"^^<http://www.w3.org/2001/XMLSchema#boolean>', true],
+    ['"0"^^<http://www.w3.org/2001/XMLSchema#boolean>', false],
+    ['"false"^^<http://www.w3.org/2001/XMLSchema#boolean>', false],
+    ['"not-a-boolean"^^<http://www.w3.org/2001/XMLSchema#boolean>', 'not-a-boolean'],
+    ['"INF"^^<http://www.w3.org/2001/XMLSchema#double>', 'INF'],
+    ['"NaN"^^<http://www.w3.org/2001/XMLSchema#double>', 'NaN'],
+    ['"1.00"^^<http://www.w3.org/2001/XMLSchema#decimal>', '1.00'],
+    ['"-17"^^<http://www.w3.org/2001/XMLSchema#integer>', -17],
+    ['"9007199254740991"^^<http://www.w3.org/2001/XMLSchema#integer>', Number.MAX_SAFE_INTEGER],
+    ['"unknown"^^<https://vendor.example/type>', 'unknown'],
+    ['"unterminated', '"unterminated'],
+    ['"a\\tb\\rc\\\\d\\\'e"', 'a\tb\rc\\d\'e'],
+  ])('preserves the scalar meaning of %s', (raw, expected) => {
+    expect(bindingsToKa([{ p: 'https://schema.org/value', o: raw }])!['schema:value']).toBe(expected);
+  });
+});
+
+it('uses a stable fallback prefix for an internationalized namespace stem', () => {
+  const ka = bindingsToKa([{ p: 'https://例子.example/field', o: '"value"' }]);
+  expect(ka!['@context']).toMatchObject({ ns: 'https://例子.example/' });
+  expect(ka!['ns:field']).toBe('value');
+});

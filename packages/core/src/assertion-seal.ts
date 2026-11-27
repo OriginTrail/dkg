@@ -132,10 +132,11 @@ function hexBinaryLexical(hex: string): string {
  * Caller supplies the resolved `assertionUri` (subject), the `_meta`
  * graph URI for the context graph (typically
  * `contextGraphMetaUri(contextGraphId)`), and the seal payload.
- * Every quad is pinned to the `metaGraph`. NOTE: the seal does NOT ride
- * SWM live gossip (that path force-rewrites quads onto the KA's data graph
- * and never carried seal fields); its peer-to-peer transport is the durable
- * `_meta` sync lane. See GH#1778.
+ * Every quad is pinned to the `metaGraph`. NOTE: these `_meta` rows do not
+ * ride SWM live gossip (that path force-rewrites quads onto the KA's data
+ * graph). A share carries the seal as canonical author-seal bytes instead,
+ * and a receiver that verifies them writes these rows itself (GH#3294); the
+ * durable `_meta` sync lane also carries them (GH#1778).
  */
 interface AssertionSealBuildBaseArgs {
   assertionUri: string;
@@ -630,6 +631,16 @@ export function parseGraphScopedAssertionSealCandidate(
   rows: ReadonlyArray<{ subject: string; predicate: string; object: string }>,
   subject: string,
 ): GraphScopedAssertionSealCandidate | undefined {
+  const seal = parseGraphScopedAssertionSealStructure(rows, subject);
+  const coordinate = parseContextGraphAssertionUri(subject);
+  return seal && coordinate && coordinate.agentAddress.toLowerCase() === seal.authorAddress.toLowerCase()
+    ? { seal, coordinate } : undefined;
+}
+
+/** Validate seal structure and signing identity, without granting its physical lifecycle owner author authority. */
+export function parseGraphScopedAssertionSealStructure(
+  rows: ReadonlyArray<{ subject: string; predicate: string; object: string }>, subject: string,
+): AssertionSeal | undefined {
   try {
     const { fields } = collectSealFieldObjects(rows, subject);
     // Fail closed on ambiguity BEFORE the last-writer-wins full parse: any
@@ -650,15 +661,13 @@ export function parseGraphScopedAssertionSealCandidate(
       || !seal.kaUal) {
       return undefined;
     }
-    const coordinate = parseContextGraphAssertionUri(subject);
-    if (!coordinate) return undefined;
-    // Identity alignment: subject-coordinate author == seal author == kaUal author.
+    // Signing author and KA identity must agree independently of storage placement.
     const sealAuthor = seal.authorAddress.toLowerCase();
     const ualAuthor = parseDeterministicKnowledgeAssetUal(seal.kaUal).agentAddress.toLowerCase();
-    if (coordinate.agentAddress.toLowerCase() !== sealAuthor || ualAuthor !== sealAuthor) {
+    if (ualAuthor !== sealAuthor) {
       return undefined;
     }
-    return { seal, coordinate };
+    return seal;
   } catch {
     return undefined;
   }

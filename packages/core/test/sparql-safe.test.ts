@@ -7,6 +7,7 @@ import {
   escapeSparqlLiteral,
   sparqlString,
   sparqlInt,
+  UnsafeSparqlValueError,
 } from '../src/index.js';
 
 describe('assertSafeIri', () => {
@@ -19,6 +20,11 @@ describe('assertSafeIri', () => {
 
   it('rejects empty string', () => {
     expect(() => assertSafeIri('')).toThrow('Unsafe or empty IRI');
+  });
+
+  it('throws its dedicated error type, so callers can tell bad input from a bug', () => {
+    expect(() => assertSafeIri('urn:a b')).toThrow(UnsafeSparqlValueError);
+    expect(() => assertSafeRdfTerm('" } DROP ALL #')).toThrow(UnsafeSparqlValueError);
   });
 
   it('rejects angle brackets', () => {

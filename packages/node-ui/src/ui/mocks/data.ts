@@ -4,7 +4,6 @@ export const MOCK_STATUS = {
   name: 'my-dkg-node',
   networkName: 'DKG Mainnet',
   connectedPeers: 12,
-  synced: true,
   version: '10.0.0-rc',
 };
 

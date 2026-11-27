@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { QuorumUnmetError } from '../src/ack-errors.js';
 import {
@@ -7,6 +7,7 @@ import {
   computePublishACKDigest,
   PROTOCOL_STORAGE_ACK,
   PROTOCOL_STORAGE_ACK_V2,
+  PROTOCOL_STORAGE_UPDATE_ACK,
 } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10, computeFlatKCMerkleLeafCountV10, computePrivateRootV10 } from '../src/merkle.js';
 import { ethers } from 'ethers';
@@ -63,11 +64,14 @@ describe('ACKCollector', () => {
   ];
 
   it('collects 3 valid ACKs from core peers', async () => {
+    const diagnosticEvents: unknown[] = [];
     const gossipCalls: Uint8Array[] = [];
+    const releases = new Map<string, () => void>();
 
     const deps: ACKCollectorDeps = {
       gossipPublish: async (_topic, data) => { gossipCalls.push(data); },
       sendP2P: async (peerId, _protocol, _data) => {
+        await new Promise<void>(resolve => { releases.set(peerId, resolve); });
         const idx = parseInt(peerId.replace('peer-', ''), 10);
         const wallet = coreWallets[idx];
         const { r, vs } = await signACK(wallet, testCGId, merkleRoot, 1, 100n);
@@ -79,12 +83,13 @@ describe('ACKCollector', () => {
           nodeIdentityId: idx + 1,
         });
       },
-      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2', 'peer-3'],
+      getConnectedCorePeers: async () => ['peer-0', 'peer-1', 'peer-2', 'peer-3'],
       log: () => {},
     };
 
     const collector = new ACKCollector(deps);
-    const result = await collector.collect({
+    const collection = collector.collect({
+      onDiagnostic: event => { diagnosticEvents.push(event); },
       merkleRoot,
       contextGraphId: testCGId,
       contextGraphIdStr: testCGIdStr,
@@ -99,7 +104,26 @@ describe('ACKCollector', () => {
       ackMode: { kind: 'public' },
     });
 
-    expect(result.acks).toHaveLength(3);
+    // All four real transport calls are pending before three are released.
+    // The fourth must still be outstanding when quorum publishes its summary.
+    await vi.waitFor(() => expect(releases.size).toBe(4));
+    for (const peer of ['peer-0', 'peer-1', 'peer-2']) releases.get(peer)!();
+    const result = await collection;
+    let settledSummary: string;
+    try {
+      expect(result.acks).toHaveLength(3);
+      expect(diagnosticEvents).toEqual([expect.objectContaining({
+        completedPeerAttempts: 3, perRoundPeakPeerRequests: 4,
+        candidates: { total: 4, ack: 3, declined: 0, invalid: 0, unsupported: 0, transport: 0, pending: 1 },
+      })]);
+      expect((diagnosticEvents[0] as { peerAttemptMs: number }).peerAttemptMs).toBeGreaterThan(0);
+      settledSummary = JSON.stringify(diagnosticEvents);
+    } finally {
+      releases.get('peer-3')!();
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    expect(JSON.stringify(diagnosticEvents)).toBe(settledSummary);
+    expect(JSON.stringify(diagnosticEvents)).not.toContain('peer-');
     expect(gossipCalls).toHaveLength(0);
     expect(result.merkleRoot).toBe(merkleRoot);
     expect(result.contextGraphId).toBe(testCGId);
@@ -111,6 +135,81 @@ describe('ACKCollector', () => {
       expect(ack.signatureVS.length).toBe(32);
       expect(ack.nodeIdentityId).toBeGreaterThan(0n);
     }
+  });
+
+  it('surfaces async publish and update candidate-provider failures as typed quorum errors', async () => {
+    const candidateFailure = new Error('admission preflight unavailable');
+    const deps: ACKCollectorDeps = {
+      gossipPublish: async () => {},
+      sendP2P: async () => {
+        throw new Error('sendP2P should not be called');
+      },
+      getConnectedCorePeers: async () => {
+        throw candidateFailure;
+      },
+      log: () => {},
+    };
+
+    const collector = new ACKCollector(deps);
+    let caught: QuorumUnmetError | undefined;
+    try {
+      await collector.collect({
+        merkleRoot,
+        contextGraphId: testCGId,
+        contextGraphIdStr: testCGIdStr,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: 100n,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: ['urn:a'],
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
+        merkleLeafCount,
+        ackMode: { kind: 'public' },
+      });
+    } catch (err) {
+      caught = err as QuorumUnmetError;
+    }
+
+    expect(caught).toBeInstanceOf(QuorumUnmetError);
+    expect(caught).toMatchObject({
+      collected: 0,
+      required: 3,
+      dialled: 0,
+      cause: candidateFailure,
+    });
+    expect(caught!.message).toContain('ACK candidate discovery failed');
+    expect(caught!.message).toContain(PROTOCOL_STORAGE_ACK);
+
+    let updateCaught: QuorumUnmetError | undefined;
+    try {
+      await collector.collectUpdate({
+        kaId: 1n,
+        contextGraphId: testCGId,
+        preUpdateMerkleRootCount: 1n,
+        newMerkleRoot: merkleRoot,
+        newByteSize: 100n,
+        newTokenAmount: 1n,
+        mintAmount: 0n,
+        burnTokenIds: [],
+        newMerkleLeafCount: merkleLeafCount,
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
+        publisherPeerId: 'publisher-0',
+      });
+    } catch (err) {
+      updateCaught = err as QuorumUnmetError;
+    }
+
+    expect(updateCaught).toBeInstanceOf(QuorumUnmetError);
+    expect(updateCaught).toMatchObject({
+      collected: 0,
+      required: 3,
+      dialled: 0,
+      cause: candidateFailure,
+    });
+    expect(updateCaught!.message).toContain('ACK candidate discovery failed');
+    expect(updateCaught!.message).toContain(PROTOCOL_STORAGE_UPDATE_ACK);
   });
 
   it('does not put lifecycle assetUal on the PublishIntent wire', async () => {

@@ -1,7 +1,7 @@
 /**
  * Unit tests for the supervisor-liveness watchdog — NO service mocks.
  *
- * `startLivenessWatcher`'s `probe` / `onUnresponsive` / `onFailure` /
+ * `startLivenessWatcher`'s `probe` / `onUnresponsive` / `onObservation` /
  * `isShuttingDown` parameters are the module's OWN documented
  * dependency-injection seams (the source: "Injectable probe — tests pass a
  * stub"; "Exported so tests can verify the truth table"), not service
@@ -34,6 +34,7 @@ import {
   DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS,
   resolveLivenessShutdownGraceMs,
 } from '../src/daemon/supervisor-liveness.js';
+import type { LivenessProbeResult } from '../src/daemon/liveness-probe.js';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 
 // Plain DI recorder (no vitest mock API): captures every call's args and
@@ -48,6 +49,11 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   return Object.assign(fn, { calls });
 }
 const noop = (): void => undefined;
+
+function probeResult(alive: boolean): LivenessProbeResult {
+  return { outcome: alive ? 'http_response' : 'deadline', elapsedMs: 10,
+    connected: true, headersReceived: alive, ...(alive ? { statusCode: 404 } : {}) };
+}
 
 describe('isLivenessProbeEnabled', () => {
   it.each([
@@ -109,14 +115,16 @@ describe('startLivenessWatcher', () => {
   }
 
   it('fires onUnresponsive after N consecutive failures', async () => {
-    const probe = recorder(async () => false);
+    const probe = recorder(async () => probeResult(false));
     const onUnresponsive = recorder(noop);
     const onFailure = recorder((_c: number) => undefined);
     const watcher = startLivenessWatcher({
       port: 1234,
       probe,
       onUnresponsive,
-      onFailure,
+      onObservation: (observation) => {
+        if (observation.consecutiveFailures > 0) onFailure(observation.consecutiveFailures);
+      },
       intervalMs: 1000,
       timeoutMs: 100,
       consecutiveFailuresToKill: 3,
@@ -135,7 +143,7 @@ describe('startLivenessWatcher', () => {
 
   it('resets the failure counter on a successful probe', async () => {
     let alive = false;
-    const probe = recorder(async () => alive);
+    const probe = recorder(async () => probeResult(alive));
     const onUnresponsive = recorder(noop);
     const watcher = startLivenessWatcher({
       port: 1234,
@@ -157,11 +165,8 @@ describe('startLivenessWatcher', () => {
     watcher.stop();
   });
 
-  it('resets failure counter AFTER firing onUnresponsive (so respawn boot has full quorum)', async () => {
-    // If the counter weren't reset post-fire, a slow-respawning worker would
-    // trip the threshold again before its listener bound, causing a
-    // pathological kill-respawn loop. Lock that invariant.
-    const probe = recorder(async () => false);
+  it('makes only one restart decision for its worker generation', async () => {
+    const probe = recorder(async () => probeResult(false));
     const onUnresponsive = recorder(noop);
     const watcher = startLivenessWatcher({
       port: 1234,
@@ -174,15 +179,14 @@ describe('startLivenessWatcher', () => {
     await advanceTicks(2, 1000);
     expect(onUnresponsive.calls).toHaveLength(1);
 
-    // Three MORE failed ticks should yield only ONE more onUnresponsive
-    // (after threshold of 2), not three or four.
+    // A replacement child receives a new watcher with its own full quorum.
     await advanceTicks(2, 1000);
-    expect(onUnresponsive.calls).toHaveLength(2);
+    expect(onUnresponsive.calls).toHaveLength(1);
     watcher.stop();
   });
 
   it('stop() halts further probing', async () => {
-    const probe = recorder(async () => false);
+    const probe = recorder(async () => probeResult(false));
     const onUnresponsive = recorder(noop);
     const watcher = startLivenessWatcher({
       port: 1234,
@@ -204,10 +208,10 @@ describe('startLivenessWatcher', () => {
     // If two ticks land on top of a single in-flight probe, we should
     // drop the second tick rather than queue another probe — otherwise a
     // slow worker (e.g. CPU-bound) generates a probe storm.
-    let resolveSlowProbe: (alive: boolean) => void;
+    let resolveSlowProbe: (result: LivenessProbeResult) => void;
     const probe = recorder(
       () =>
-        new Promise<boolean>((resolve) => {
+        new Promise<LivenessProbeResult>((resolve) => {
           resolveSlowProbe = resolve;
         }),
     );
@@ -223,14 +227,14 @@ describe('startLivenessWatcher', () => {
     await advanceTicks(3, 1000);
     expect(probe.calls).toHaveLength(1);
 
-    resolveSlowProbe!(true);
+    resolveSlowProbe!(probeResult(true));
     await advanceTicks(1, 1000);
     expect(probe.calls).toHaveLength(2);
     watcher.stop();
   });
 
   it('passes the configured host through to the probe', async () => {
-    const probe = recorder(async () => true);
+    const probe = recorder(async () => probeResult(true));
     const watcher = startLivenessWatcher({
       port: 1234,
       host: '::1',
@@ -241,15 +245,15 @@ describe('startLivenessWatcher', () => {
     });
 
     await advanceTicks(1, 1000);
-    expect(probe.calls[0]).toEqual([1234, '::1', 250]);
+    expect(probe.calls[0]).toEqual([1234, '::1', 250, expect.any(AbortSignal)]);
     watcher.stop();
   });
 
   it('ignores a probe result that resolves after stop()', async () => {
-    let resolveProbe: (alive: boolean) => void;
+    let resolveProbe: (result: LivenessProbeResult) => void;
     const probe = recorder(
       () =>
-        new Promise<boolean>((resolve) => {
+        new Promise<LivenessProbeResult>((resolve) => {
           resolveProbe = resolve;
         }),
     );
@@ -259,14 +263,16 @@ describe('startLivenessWatcher', () => {
       port: 1234,
       probe,
       onUnresponsive,
-      onFailure,
+      onObservation: (observation) => {
+        if (observation.consecutiveFailures > 0) onFailure(observation.consecutiveFailures);
+      },
       intervalMs: 1000,
       consecutiveFailuresToKill: 1,
     });
 
     await advanceTicks(1, 1000);
     watcher.stop();
-    resolveProbe!(false);
+    resolveProbe!(probeResult(false));
     await Promise.resolve();
     await Promise.resolve();
 
@@ -275,14 +281,16 @@ describe('startLivenessWatcher', () => {
   });
 
   it('healthy probes never trigger onFailure / onUnresponsive', async () => {
-    const probe = recorder(async () => true);
+    const probe = recorder(async () => probeResult(true));
     const onUnresponsive = recorder(noop);
     const onFailure = recorder((_c: number) => undefined);
     const watcher = startLivenessWatcher({
       port: 1234,
       probe,
       onUnresponsive,
-      onFailure,
+      onObservation: (observation) => {
+        if (observation.consecutiveFailures > 0) onFailure(observation.consecutiveFailures);
+      },
       intervalMs: 1000,
       consecutiveFailuresToKill: 2,
     });
@@ -304,7 +312,7 @@ describe('startLivenessWatcher', () => {
     // it enters a bounded grace window during which failures are
     // suppressed. The "still armed after the window" case is covered in
     // the dedicated `re-arms SIGKILL after shutdownGraceMs elapses` test.
-    const probe = recorder(async () => false);
+    const probe = recorder(async () => probeResult(false));
     const onUnresponsive = recorder(noop);
     const onFailure = recorder((_c: number) => undefined);
     const isShuttingDown = recorder(() => true);
@@ -312,7 +320,9 @@ describe('startLivenessWatcher', () => {
       port: 1234,
       probe,
       onUnresponsive,
-      onFailure,
+      onObservation: (observation) => {
+        if (observation.consecutiveFailures > 0) onFailure(observation.consecutiveFailures);
+      },
       isShuttingDown,
       intervalMs: 1000,
       consecutiveFailuresToKill: 1,
@@ -331,7 +341,7 @@ describe('startLivenessWatcher', () => {
     // Mirror image of the previous test: api.port present + probe failing
     // means the worker is genuinely a zombie (event loop wedged after a
     // partial shutdown attempt), and the watcher must still trip.
-    const probe = recorder(async () => false);
+    const probe = recorder(async () => probeResult(false));
     const onUnresponsive = recorder(noop);
     const isShuttingDown = recorder(() => false);
     const watcher = startLivenessWatcher({
@@ -353,7 +363,7 @@ describe('startLivenessWatcher', () => {
     // api.port), we MUST NOT silently disarm — that would let a real zombie
     // hide behind a flaky FS. Treat detector errors as "not shutting down"
     // and keep counting failures.
-    const probe = recorder(async () => false);
+    const probe = recorder(async () => probeResult(false));
     const onUnresponsive = recorder(noop);
     const isShuttingDown = recorder(async () => { throw new Error('FS busy'); });
     const watcher = startLivenessWatcher({
@@ -374,7 +384,7 @@ describe('startLivenessWatcher', () => {
     // Performance: the supervisor probes every 30s in production. We only
     // need to consult `isShuttingDown` when the probe FAILS — checking on
     // every healthy tick wastes a syscall in the steady state.
-    const probe = recorder(async () => true);
+    const probe = recorder(async () => probeResult(true));
     const isShuttingDown = recorder(() => false);
     const watcher = startLivenessWatcher({
       port: 1234,
@@ -396,7 +406,7 @@ describe('startLivenessWatcher', () => {
     // or respawn the worker. The fix: keep probing during shutdown, but
     // resume counting failures after a bounded grace window so wedged
     // teardowns still get force-killed.
-    const probe = recorder(async () => false);
+    const probe = recorder(async () => probeResult(false));
     const onUnresponsive = recorder(noop);
     const isShuttingDown = recorder(() => true);
     const watcher = startLivenessWatcher({
@@ -422,7 +432,7 @@ describe('startLivenessWatcher', () => {
   });
 
   it('resets stale failure count when entering shutdown grace', async () => {
-    const probe = recorder(async () => false);
+    const probe = recorder(async () => probeResult(false));
     const onUnresponsive = recorder(noop);
     const onFailure = recorder((_c: number) => undefined);
     let shuttingDown = false;
@@ -430,7 +440,9 @@ describe('startLivenessWatcher', () => {
       port: 1234,
       probe,
       onUnresponsive,
-      onFailure,
+      onObservation: (observation) => {
+        if (observation.consecutiveFailures > 0) onFailure(observation.consecutiveFailures);
+      },
       isShuttingDown: () => shuttingDown,
       intervalMs: 1000,
       consecutiveFailuresToKill: 3,
@@ -454,7 +466,7 @@ describe('startLivenessWatcher', () => {
     // Operators who explicitly want the rc.11-and-earlier "never SIGKILL
     // during graceful shutdown" semantic can opt back in with a negative
     // grace value.
-    const probe = recorder(async () => false);
+    const probe = recorder(async () => probeResult(false));
     const onUnresponsive = recorder(noop);
     const isShuttingDown = recorder(() => true);
     const watcher = startLivenessWatcher({

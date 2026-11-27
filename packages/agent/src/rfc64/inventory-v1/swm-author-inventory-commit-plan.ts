@@ -11,7 +11,10 @@ import {
   type SwmAuthorInventoryErrorFactoryV1,
   type SwmAuthorInventoryMutationV1,
 } from './swm-author-inventory-contracts.js';
-import type { VerifiedSwmAuthorInventoryCommitInputV1 } from './swm-author-inventory-auth-v1.js';
+import type {
+  VerifiedMergeSwmAuthorInventoryCommitInputV1,
+  VerifiedSwmAuthorInventoryCommitInputV1,
+} from './swm-author-inventory-auth-v1.js';
 import {
   digest32ToSqlBlobV1,
   evmAddressToSqlBlobV1,
@@ -28,6 +31,22 @@ export interface PreparedSwmAuthorInventoryCommitV1
   readonly snapshot: SwmAuthorInventorySnapshotV1;
   readonly mutation: SwmAuthorInventoryMutationV1;
   readonly mutationKind: SwmAuthorInventoryMutationV1['kind'];
+  readonly mutationKaUal: string;
+  readonly expectedHead: Uint8Array | null;
+  readonly signedHeadEnvelope: Uint8Array;
+}
+
+/**
+ * Prepared exact-merge plan. The compatibility replay marker deliberately uses
+ * `remove` plus a UAL present in the resulting snapshot. Such metadata cannot
+ * describe a valid ordinary remove transition, while satisfying v1 schemas
+ * whose CHECK constraint only admits `upsert` and `remove`.
+ */
+export interface PreparedMergeSwmAuthorInventoryCommitV1
+  extends EncodedSwmAuthorInventoryKeyV1 {
+  readonly snapshot: SwmAuthorInventorySnapshotV1;
+  readonly mergeRows: SwmAuthorInventorySnapshotV1['rows'];
+  readonly mutationKind: 'remove';
   readonly mutationKaUal: string;
   readonly expectedHead: Uint8Array | null;
   readonly signedHeadEnvelope: Uint8Array;
@@ -79,6 +98,45 @@ export function prepareSwmAuthorInventoryCommitV1(
     throw error(
       'swm-inventory-input',
       'verified SWM author inventory CAS input cannot be encoded for persistence',
+      { cause },
+    );
+  }
+}
+
+export function prepareMergeSwmAuthorInventoryCommitV1(
+  input: VerifiedMergeSwmAuthorInventoryCommitInputV1,
+  error: SwmAuthorInventoryErrorFactoryV1,
+): PreparedMergeSwmAuthorInventoryCommitV1 {
+  try {
+    const { snapshot, mergeRows } = input;
+    const { head } = snapshot;
+    const scope = deriveSwmAuthorInventoryScopeFromHeadV1(head.payload);
+    const key = encodeSwmAuthorInventoryKeyV1(
+      computeSwmAuthorInventoryScopeDigestV1(scope),
+      head.payload.authorAddress,
+      error,
+    );
+    let expectedHead: Uint8Array | null = null;
+    if (input.expectedCurrentHeadDigest !== null) {
+      expectedHead = digest32ToSqlBlobV1(input.expectedCurrentHeadDigest);
+    }
+    const markerRow = snapshot.rows[0];
+    if (markerRow === undefined || mergeRows.length === 0) {
+      throw new Error('exact merge and resulting inventory must both be non-empty');
+    }
+    return Object.freeze({
+      ...key,
+      snapshot,
+      mergeRows,
+      mutationKind: 'remove' as const,
+      mutationKaUal: markerRow.kaUal,
+      expectedHead,
+      signedHeadEnvelope: canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1(head),
+    });
+  } catch (cause) {
+    throw error(
+      'swm-inventory-input',
+      'verified SWM author inventory exact merge cannot be encoded for persistence',
       { cause },
     );
   }

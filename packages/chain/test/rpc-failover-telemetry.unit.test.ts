@@ -31,7 +31,6 @@ const retryable429 = () => { const e = new Error('429 too many requests'); (e as
 function mkClient(providers: any[]): RpcFailoverClient {
   return new RpcFailoverClient(
     () => providers.map((p, i) => ({ provider: p, rpcUrl: URLS[i] })),
-    async () => ({ signedTx: '0xsigned', txHash: '0xhash' }),
     () => CHAIN,
   );
 }

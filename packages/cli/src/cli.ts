@@ -21,20 +21,46 @@ import { registerCclCommand } from './commands/ccl.js';
 import { registerIndexCommand } from './commands/index-command.js';
 import { registerSourceWorkerCommand } from './commands/source-worker.js';
 import { registerPcaCommand } from './commands/pca.js';
+import { registerMarketplaceCommand } from './commands/marketplace.js';
 import { registerPublisherCommand } from './commands/publisher.js';
 import { registerEpcisCommand } from './commands/epcis.js';
 import { registerNodeOpsCommands } from './commands/node-ops.js';
+import { registerEntitiesCommand } from './commands/entities.js';
 import { registerQueryCatalogCommand } from './commands/query-catalog.js';
 import { registerMaintenanceCommands } from './commands/maintenance.js';
 import { registerRandomSamplingCommand } from './commands/random-sampling.js';
 import { registerOkfCommand } from './commands/okf.js';
 import { registerLlmCommand } from './commands/llm.js';
+import { registerDebugCommand } from './commands/debug.js';
+import { registerViewSemanticsCommand } from './commands/view-semantics.js';
+import { registerReadGraphsCommand } from './commands/read-graphs.js';
 
 const program = new Command();
 program
   .name('dkg')
   .description('DKG V10 node CLI')
   .version(getCliVersion());
+
+/* c8 ignore start -- exercised by the Gate 2 runtime harness, not CLI tests. */
+const gate2AdapterCommand = process.argv[2] === 'rfc64-gate2-adapter';
+if (gate2AdapterCommand) {
+  // Testnet evidence must enter through the same built CLI module as a
+  // release daemon. The adapter remains a harness-only protocol behind this
+  // explicit command and is never registered in the public command tree.
+  const role = process.argv[3];
+  if (role !== 'author' && role !== 'receiver') {
+    throw new Error('rfc64-gate2-adapter requires an author or receiver role');
+  }
+  process.argv.splice(2, 2, role);
+  await import(new URL(
+    '../../../devnet/rfc64-gate2-multi-asset-completeness/adapter-process.ts',
+    import.meta.url,
+  ).href);
+  // The adapter owns the process after import; avoid handing its protocol
+  // arguments to Commander when the normal entrypoint continues below.
+  process.argv.splice(2);
+}
+/* c8 ignore stop */
 
 registerInitCommand(program);
 registerAgentCommand(program);
@@ -54,14 +80,19 @@ registerCclCommand(program);
 registerIndexCommand(program);
 registerSourceWorkerCommand(program);
 registerPcaCommand(program);
+registerMarketplaceCommand(program);
 registerPublisherCommand(program);
 registerEpcisCommand(program);
 registerNodeOpsCommands(program);
 registerQueryCatalogCommand(program);
+registerEntitiesCommand(program);
 registerMaintenanceCommands(program);
 registerRandomSamplingCommand(program);
 registerOkfCommand(program);
 registerLlmCommand(program);
+registerDebugCommand(program);
+registerViewSemanticsCommand(program);
+registerReadGraphsCommand(program);
 
 // ─── dkg integration ─────────────────────────────────────────────────
 

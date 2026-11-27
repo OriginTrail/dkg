@@ -8,7 +8,8 @@
 // looked inside the monolithic `handleRequest`.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { DKGAgent, OpWalletsConfig } from '@origintrail-official/dkg-agent';
+import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import type { OperationalWalletAddresses } from '../evm-signing.js';
 import type { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import {
   authenticatedAgentAddress,
@@ -34,8 +35,11 @@ import type { VectorStore, EmbeddingProvider } from '../../vector-store.js';
 import type { CatchupTracker } from '../types.js';
 import type { RoutePlugin } from '../plugin-api.js';
 import type { AdmissionStatsView } from '../http-utils.js';
+import type { EventLoopDelayView } from '../event-loop-delay-monitor.js';
 import type { DaemonLocalLlmService } from '../local-llm-service.js';
 import type { DaemonRouteRpcTransport } from '../rpc-runtime.js';
+import type { ConfiguredSemanticRuntimeService } from '../../semantic-runtime.js';
+import type { Buyer, Gateway, Seller } from '@origintrail-official/dkg-marketplace';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -127,7 +131,8 @@ export interface RequestContext {
   rfc64PublicCatalog: ResolvedRfc64PublicCatalogActivationConfig;
   startedAt: number;
   dashDb: DashboardDB;
-  opWallets: OpWalletsConfig;
+  /** Wallet addresses only; with an external signer, the payer accounts it serves. */
+  opWallets: OperationalWalletAddresses;
   network: Awaited<ReturnType<typeof loadNetworkConfig>>;
   tracker: OperationTracker;
   memoryManager: ChatMemoryManager;
@@ -141,6 +146,7 @@ export interface RequestContext {
   assertionImportLocks: Map<string, Promise<void>>;
   vectorStore: VectorStore;
   embeddingProvider: EmbeddingProvider | null;
+  entitySearch?: import('../../entity-search/service.js').EntitySearchService;
   validTokens: Set<string>;
   // API socket identity — trusted server-side state for manifestSelfClient
   // SSRF defence.
@@ -153,10 +159,22 @@ export interface RequestContext {
   // shedding load. Deliberately the read-only `AdmissionStatsView`, not the
   // concrete limiter — plugin-facing routes must not reach tryAcquire()/release().
   admission: AdmissionStatsView;
+  /** Daemon-owned event-loop delay gauge (read-only); `/api/status` reports it. */
+  eventLoopDelay?: EventLoopDelayView;
   /** Daemon-owned, read-only local LLM session used by the Node UI. */
   localLlm?: DaemonLocalLlmService;
   /** Daemon-owned admission + accounting shared by every direct route provider. */
   routeRpcTransport?: DaemonRouteRpcTransport;
+  /** Opt-in WASM semantic runtime owned by the daemon lifecycle. */
+  semanticRuntimeHost?: ConfiguredSemanticRuntimeService | null;
+  /** Lifecycle-owned lazy start; management routes authenticate before calling. */
+  ensureSemanticRuntime?: () => Promise<ConfiguredSemanticRuntimeService | null>;
+  /** The marketplace buyer (OT-RFC-27), whose job the daemon runs; absent while the marketplace is off. */
+  marketplace?: Buyer;
+  /** The buyer's OpenAI-compatible gateway and its access keys; absent while the marketplace is off. */
+  marketplaceGateway?: Gateway;
+  /** The marketplace seller, whose job the daemon runs; absent while selling is off. */
+  marketplaceSeller?: Seller;
   // Derived per-request. The correlated authentication decision is carried unchanged; identity
   // and capabilities are pure projections from it rather than separately mutable context fields.
   url: URL;

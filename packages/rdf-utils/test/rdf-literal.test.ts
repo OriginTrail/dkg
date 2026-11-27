@@ -8,6 +8,7 @@ import {
   formatCanonicalRdfLiteralTerm,
   isRdfTerm,
   normalizeRdfObject,
+  parseSparqlTsvLiteralTerm,
   parseRdfLiteralLexicalTerm,
   parseRdfLiteralTerm,
   type RdfLiteralTerm,
@@ -131,6 +132,19 @@ describe('RDF literal term codec', () => {
       .toEqual({ kind: 'language', value: 'a\tb', language: 'en' });
     expect(parseRdfLiteralTerm('"a\tb"^^<urn:test:datatype>'))
       .toEqual({ kind: 'typed', value: 'a\tb', datatype: 'urn:test:datatype' });
+  });
+
+  it('canonicalizes raw wire controls for plain, language, and typed literals', () => {
+    const value = 'a\u0001b\u007F';
+    for (const [input, expected] of [
+      [`"${value}"`, '"a\\u0001b\\u007F"'],
+      [`"${value}"@en`, '"a\\u0001b\\u007F"@en'],
+      [`"${value}"^^<urn:test:type>`, '"a\\u0001b\\u007F"^^<urn:test:type>'],
+    ]) {
+      expect(formatCanonicalRdfLiteralTerm(parseSparqlTsvLiteralTerm(input)!)).toBe(expected);
+    }
+    const ordinary = '"already canonical"';
+    expect(parseSparqlTsvLiteralTerm(ordinary)).toEqual({ kind: 'plain', value: 'already canonical' });
   });
 
   it('rejects non-literal and malformed literal terms', () => {
