@@ -613,17 +613,17 @@ test('the trusted controller runs from a checkout of exactly its policy files', 
 
 test('a push proves its contracts with the Solidity shards, and coverage runs only where the controller requires it', () => {
   const { jobs } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
-  const runs = (job, eventName) => Function('github', 'needs', `return (${jobs[job].if});`)(
-    { event_name: eventName }, { changes: { outputs: { contracts: 'true' } } });
-  for (const eventName of ['pull_request', 'merge_group']) assert.equal(runs('solidity-coverage', eventName), false, eventName);
+  assert.equal(jobs.solidity.if,
+    "(github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && needs.changes.outputs.contracts == 'true'");
+  assert.equal(jobs['solidity-coverage'].if,
+    "github.event_name != 'pull_request' && github.event_name != 'merge_group' && github.event_name != 'push'");
   // Every non-candidate plan is full, so these events always select contracts.
-  for (const eventName of ['push', 'workflow_dispatch', 'schedule']) {
-    const solidity = runs('solidity', eventName);
-    const coverage = runs('solidity-coverage', eventName);
-    assert.deepEqual([solidity, coverage], [eventName === 'push', eventName !== 'push'], eventName);
+  for (const [eventName, successfulJob] of [
+    ['push', 'solidity'], ['workflow_dispatch', 'solidity-coverage'], ['schedule', 'solidity-coverage'],
+  ]) {
     const needs = gateNeeds(succeeded(
       'build', LANE_JOBS, 'abi-freshness', 'tornado-static-analysis', 'evm-node-test-artifacts', 'evm-devnet-test-artifacts',
-      solidity ? ['solidity'] : [], coverage ? ['solidity-coverage'] : [],
+      successfulJob,
     ));
     const errors = validatePrimaryResults({ eventName, plan: planCi({ eventName }), needs });
     assert.deepEqual(errors.filter((error) => /solidity/.test(error)), [], eventName);
