@@ -19,6 +19,25 @@ async function execute(command, args, { cwd, log, signal, timeout = 20 * 60_000 
   fs.closeSync(fd);
   await ownProcess(child, { label: `${command}; see ${path.basename(log)}` }).waitForExit(timeout);
 }
+// Each Docker cleanup command (removing a container or network, copying a
+// layout's data out) gets this long. `docker rm -f` of a used npm-install
+// container can take minutes on a host short on memory. A cleanup that fails or
+// runs past the limit still leaves the attempt INCOMPLETE.
+export const CLEANUP_TIMEOUT_ENV = 'DKG_PACKAGE_CERTIFICATION_CLEANUP_TIMEOUT_MS';
+export const DEFAULT_CLEANUP_TIMEOUT_MS = 180_000;
+const MAX_TIMER_MS = 2 ** 31 - 1; // A longer Node timer fires at once.
+export function cleanupTimeoutMs(env = process.env) {
+  const value = env[CLEANUP_TIMEOUT_ENV];
+  if (value === undefined || value === '') return DEFAULT_CLEANUP_TIMEOUT_MS;
+  assert.ok(/^[1-9]\d{0,9}$/.test(value) && Number(value) <= MAX_TIMER_MS,
+    `${CLEANUP_TIMEOUT_ENV} must be a whole number of milliseconds from 1 to ${MAX_TIMER_MS}, got ${JSON.stringify(value)}`);
+  return Number(value);
+}
+/** Runs Docker cleanup commands, logging to `log`, each within the cleanup limit read from `env`. */
+export function dockerCleanup(log, env = process.env) {
+  const timeout = cleanupTimeoutMs(env);
+  return args => execute('docker', args, { log, timeout });
+}
 async function startChain(rootDir, output, signal) {
   signal.throwIfAborted();
   const contextFile = path.join(output, 'chain-context.json');
@@ -44,6 +63,8 @@ async function startChain(rootDir, output, signal) {
 }
 
 export async function certifyInstall({ rootDir, bundle, output, expected, image = 'node:22.23.4-bookworm-slim', negativeControl }) {
+  // Read before anything runs, so a malformed limit fails at once, not at cleanup.
+  const cleanupDocker = dockerCleanup(path.join(output, 'controller.log'));
   const manifest = verifyBundle(bundle, expected);
   assert.equal(requireCleanSource(rootDir), expected.commit, 'controller checkout is not intended candidate');
   assert.ok(!negativeControl || negativeControl === 'missing-ui', 'unknown negative control');
@@ -65,7 +86,6 @@ export async function certifyInstall({ rootDir, bundle, output, expected, image 
   let chain, registry;
   const containers = new Set();
   const networks = new Set();
-  const cleanupDocker = args => execute('docker', args, { log: path.join(output, 'controller.log'), timeout: 30_000 });
   return recordAttempt({ output, receipt, work: async signal => {
     const docker = (args, log = 'controller.log') => execute('docker', args, { log: path.join(output, log), signal });
     const started = Date.now();

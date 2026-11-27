@@ -25,6 +25,7 @@ export interface AuthConfig {
   tokens?: string[];
   /** Explicit local administration role; signatures alone confer no role. */
   operatorAgentAddresses?: string[];
+  /** Embed the operator token in the dashboard for a browser on the node host (default false). */ dashboardAutoSignIn?: boolean;
 }
 
 /** HTTP identity established by the CLI daemon's authentication boundary. */

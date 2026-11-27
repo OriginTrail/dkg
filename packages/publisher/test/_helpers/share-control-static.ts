@@ -79,7 +79,7 @@ const STORE_METHOD_OPTIONS: Readonly<Record<string, number>> = {
 /** Free helper -> index of its options argument. `createGraph` and `flush` are exempt: the queue passes no options and neither reaches a scheduler. */
 const STORE_HELPER_OPTIONS: Readonly<Record<string, number>> = {
   deleteByPatternWithoutCount: 2, tryReplaceSubjectAtomically: 4, tryReplaceSubjectAndInsertAtomically: 5,
-  replaceSubjectAtomicallyOrFallback: 4, readPromoteOwnershipCandidates: 3,
+  replaceSubjectAtomicallyOrFallback: 4, readPromoteOwnershipCandidates: 3, tryUpdateWithTouchedGraphs: 3,
 };
 
 /**

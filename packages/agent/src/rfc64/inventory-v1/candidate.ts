@@ -645,6 +645,11 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
   readonly #traversals = new WeakMap<object, TraversalRecordV1>();
   readonly #verifiedRows = new WeakMap<object, VerifiedCandidateCatalogRowRecordV1>();
   readonly #pins = new Map<string, number>();
+  readonly #swmAuthorInventory = new SwmAuthorInventoryPersistenceV1({
+    prepare: sql => this.prepare(sql),
+    statement: operation => this.statement(operation),
+    error: swmAuthorInventoryErrorV1,
+  });
   #startupPurgeDone = false;
   #committedOverruns = 0;
   #available = true;
@@ -853,7 +858,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
 
   listSwmAuthorInventoryScopesV1(): ReturnType<Rfc64SwmAuthorInventoryOperationsV1['listSwmAuthorInventoryScopesV1']> {
     this.assertOpen();
-    return this.readTransaction(() => this.swmAuthorInventoryPersistenceV1().listScopes());
+    return this.readTransaction(() => this.#swmAuthorInventory.listScopes());
   }
 
   readSwmAuthorInventoryHeadDigestV1(
@@ -861,7 +866,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     authorAddress: EvmAddressV1,
   ): Digest32V1 | null {
     this.assertOpen();
-    const persistence = this.swmAuthorInventoryPersistenceV1();
+    const persistence = this.#swmAuthorInventory;
     const key = encodeSwmAuthorInventoryKeyV1(
       inventoryScopeDigest, authorAddress, swmAuthorInventoryErrorV1,
     );
@@ -874,7 +879,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     kaUal: SwmAuthorInventoryRowV1['kaUal'],
   ): Readonly<SwmAuthorInventoryRowV1> | null {
     this.assertOpen();
-    const persistence = this.swmAuthorInventoryPersistenceV1();
+    const persistence = this.#swmAuthorInventory;
     const key = encodeSwmAuthorInventoryKeyV1(
       inventoryScopeDigest, authorAddress, swmAuthorInventoryErrorV1,
     );
@@ -886,7 +891,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     authorAddress: EvmAddressV1,
   ): SwmAuthorInventorySnapshotV1 | null {
     this.assertOpen();
-    const persistence = this.swmAuthorInventoryPersistenceV1();
+    const persistence = this.#swmAuthorInventory;
     const key = encodeSwmAuthorInventoryKeyV1(
       inventoryScopeDigest,
       authorAddress,
@@ -897,7 +902,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
 
   deleteSwmAuthorInventoryV1(input: DeleteSwmAuthorInventoryInputV1): void {
     this.assertOpen();
-    const persistence = this.swmAuthorInventoryPersistenceV1();
+    const persistence = this.#swmAuthorInventory;
     const key = encodeSwmAuthorInventoryKeyV1(
       input.inventoryScopeDigest,
       input.authorAddress,
@@ -938,7 +943,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     input: CompareAndSwapSwmAuthorInventoryInputV1,
   ): SwmAuthorInventoryCasResultV1 {
     this.assertOpen();
-    const persistence = this.swmAuthorInventoryPersistenceV1();
+    const persistence = this.#swmAuthorInventory;
     const verified = prepareVerifiedSwmAuthorInventoryCommitInputV1(
       input,
       swmAuthorInventoryErrorV1,
@@ -970,7 +975,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     input: CompareAndSwapMergeSwmAuthorInventoryInputV1,
   ): SwmAuthorInventoryCasResultV1 {
     this.assertOpen();
-    const persistence = this.swmAuthorInventoryPersistenceV1();
+    const persistence = this.#swmAuthorInventory;
     const verified = prepareVerifiedMergeSwmAuthorInventoryCommitInputV1(
       input,
       swmAuthorInventoryErrorV1,
@@ -1587,6 +1592,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#swmAuthorInventory.clearVerifiedRows();
     this.#available = false;
     this.invalidateTraversals();
     this.#sessionRecords.clear();
@@ -2109,14 +2115,6 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     );
   }
 
-  private swmAuthorInventoryPersistenceV1(): SwmAuthorInventoryPersistenceV1 {
-    return new SwmAuthorInventoryPersistenceV1({
-      prepare: (sql) => this.prepare(sql),
-      statement: <T>(operation: () => T): T => this.statement(operation),
-      error: swmAuthorInventoryErrorV1,
-    });
-  }
-
   private captureDeleteTarget(row: SqlRowV1): DeleteTargetV1 {
     const key: EncodedLoadKeyV1 = {
       session: assertSqlKeyBlob(row.session_id, 32, 'selected session_id'),
@@ -2469,6 +2467,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
         { cause: this.#unavailableCause }), this.#closed ? undefined : this.#unavailableCause);
     }
     this.invalidateTraversals();
+    this.#swmAuthorInventory.clearVerifiedRows();
     // A new low-level handle: nothing listed through the old one is reused.
     this.#appliedCatalogHeadsSnapshot = null;
     const previous = this.database;

@@ -1,3 +1,4 @@
+import { memberGraphListingQuery } from '../src/read-graph/check.js';
 import { randomUUID } from 'node:crypto';
 import { singleAssetTransactionTests } from './_helpers/blazegraph-single-asset-integration.js';
 import { blazegraphReadGraphWriteTests } from './_helpers/blazegraph-read-graph-integration.js';
@@ -102,6 +103,27 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
 
   afterAll(async () => {
     if (store) await store.dropGraph(GRAPH).catch(() => {});
+  });
+
+  it('lists the context root and its nonempty children without admitting a neighboring context', async () => {
+    const root = `urn:bg-int:${RUN}:scope`;
+    const child = `${root}/member`;
+    const neighbor = `${root}-other/member`;
+    const list = async () => {
+      const result = await store.query(memberGraphListingQuery(store, root));
+      if (result.type !== 'bindings') throw new Error('Expected graph bindings');
+      return result.bindings.map(row => row.g).sort();
+    };
+    try {
+      await store.insert([root, child, neighbor].map(graph => ({
+        subject: 'urn:listing:subject', predicate: PRED, object: '"value"', graph,
+      })));
+      expect(await list()).toEqual([root, child]);
+      await store.dropGraph(child);
+      expect(await list()).toEqual([root]);
+    } finally {
+      for (const graph of [root, child, neighbor]) await store.dropGraph(graph);
+    }
   });
 
   it('lists graphs whose names need escapes, from its streamed one-graph-per-line answer', async () => {

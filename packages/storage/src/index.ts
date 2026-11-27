@@ -48,6 +48,7 @@ export {
   isStoreWorkPriority,
   registerTripleStoreAdapter,
   findTripleStoreCapability,
+  supportsAtomicSparqlModify,
   asBoundedQueryResponseCapability,
   deleteByPatternWithoutCount,
   createTripleStore,
@@ -145,6 +146,7 @@ export {
   logStoreControlPathGeometry,
   resolveStoreControlConfig,
   selectStoreScheduler,
+  storeControlQueueInUse,
   type StoreControlConfig,
   type StoreControlPath,
   type StoreControlPathSettings,
@@ -572,3 +574,5 @@ export {
   type ReadGraphCheckScheduleOptions,
 } from './read-graph/check-schedule.js';
 export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';
+
+export { ShareStoreHold, withoutShareStoreHold } from './share-store-timing.js';

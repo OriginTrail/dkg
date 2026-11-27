@@ -26,7 +26,10 @@ import type { ContextGraphAuthorityProjectionServedEvidence } from
   '../src/context-graph-authority-index-projection.js';
 import { createEvmContextGraphAuthorityIndexRevisionReaderV1 } from
   '../src/evm-context-graph-authority-index-reader.js';
+import type { ContextGraphAuthorityIndexDeploymentLookup as ContractDeploymentLookupV1 } from
+  '../src/context-graph-authority-index.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
+import { withRpcRequestContext } from '../src/rpc-request-transport.js';
 import { RpcUsageTracker } from '../src/rpc-usage.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
 import { MemoryAuthorityIndexStore } from './helpers/context-graph-authority-index.js';
@@ -229,10 +232,13 @@ function makeReader(options: {
    * only thing the projection cache reads as an availability outage.
    */
   exhaustsOnFailover?: boolean;
+  /** What the adapter's deploy-block lookup answers. */
+  deployment?: () => ContractDeploymentLookupV1;
 } = {}) {
   const { provider, calls, authorityLogs, usage } = makeProvider(options.latestBlockNumber);
+  const indexStore = new MemoryAuthorityIndexStore();
   const index = new ContextGraphAuthorityIndex(
-    new MemoryAuthorityIndexStore(),
+    indexStore,
     undefined,
     { tickMs: TICK_MS, now: options.now ?? (() => NOW_MS) },
   );
@@ -267,12 +273,13 @@ function makeReader(options: {
         }
       }
     },
-    // The NUMBER the reader declares, which is what the adapter wires in
-    // (`resolveContractDeployBlockNumber`), not the adapter's own
-    // `{ fromBlock, head, scanProviders }` search result. Handing the object
+    // The lookup the reader declares, which is what the adapter wires in
+    // (`resolveContractDeployBlockLookup`), not the adapter's own
+    // `{ fromBlock, head, scanProviders }` search result. Handing that object
     // over made every anchor unresolvable and sent all of these through the
     // live scan they exist to prove is skipped.
-    resolveContractDeployBlockNumber: async () => DEPLOY_BLOCK,
+    resolveContractDeployBlock: async () => options.deployment?.()
+      ?? { blockNumber: DEPLOY_BLOCK, pinned: true },
     pageSize: () => 2_000,
     finalityConfirmations: () => options.finalityConfirmations ?? 1,
     ...(options.sourceProvider === undefined && options.source === undefined
@@ -283,7 +290,7 @@ function makeReader(options: {
         }),
   });
   reader.snapshots.open();
-  return { reader, index, provider, calls, authorityLogs, attempts, usage };
+  return { reader, index, indexStore, provider, calls, authorityLogs, attempts, usage };
 }
 
 /** The same `ContextGraphCreated`, as the LIVE scan would deliver it. */
@@ -621,6 +628,118 @@ describe('Context Graph authority index over the one log', () => {
       .map((entry) => entry.consumer);
     expect(headerConsumers).toContain('authorityIndex.head');
     expect(headerConsumers).toContain('authorityIndex.stabilize');
+  });
+
+  it('keeps the stored deployment block when the lookup falls back to genesis', async () => {
+    let lookup: ContractDeploymentLookupV1 = { blockNumber: DEPLOY_BLOCK, pinned: true };
+    const { reader, indexStore, calls } = makeReader({ deployment: () => lookup });
+    await reader.snapshots.refresh();
+    const reduced = indexStore.record;
+    const scannedLogs = calls.getLogs;
+    // No endpoint pinned the block this time. The checkpoint reduced from the
+    // pinned block is not a different deployment, and rebuilding it from
+    // block 0 is a walk of the whole chain history.
+    lookup = { blockNumber: 0, pinned: false };
+
+    await reader.snapshots.refresh();
+
+    expect(indexStore.invalidations).toEqual([]);
+    expect((indexStore.record!.value as { cursor: { deploymentBlockNumber: number } }).cursor)
+      .toMatchObject({ deploymentBlockNumber: DEPLOY_BLOCK });
+    expect(indexStore.record).toBe(reduced);
+    expect(calls.getLogs).toBe(scannedLogs);
+  });
+
+  it('rebuilds from genesis when the stored deployment block is above a reset chain', async () => {
+    let head = LIVE_HEAD;
+    let lookup: ContractDeploymentLookupV1 = { blockNumber: DEPLOY_BLOCK, pinned: true };
+    const { reader, indexStore } = makeReader({
+      deployment: () => lookup,
+      latestBlockNumber: () => head,
+    });
+    await reader.snapshots.refresh();
+    // The chain was reset at the same address and is now below the block the
+    // stored checkpoint was reduced from; no endpoint can pin the new one.
+    head = DEPLOY_BLOCK - 5;
+    lookup = { blockNumber: 0, pinned: false };
+
+    await reader.snapshots.refresh();
+
+    expect(indexStore.invalidations).toHaveLength(1);
+    expect((indexStore.record!.value as { cursor: Record<string, number> }).cursor)
+      .toMatchObject({ deploymentBlockNumber: 0, throughBlockNumber: DEPLOY_BLOCK - 5 });
+  });
+
+  it('rebuilds rejected history live when the log cannot reach below the stored deployment block', async () => {
+    let lookup: ContractDeploymentLookupV1 = { blockNumber: DEPLOY_BLOCK, pinned: true };
+    let enableLog = false;
+    // The log of a chain reset at the same address: it covers the history from
+    // the stored deployment block only, and its block hashes are the new chain's.
+    const source = logSource(seededStore(), {
+      readBlockHash: async (blockNumber) => `0x${(blockNumber + 0xabcdef).toString(16).padStart(64, '0')}`,
+    });
+    const { reader, indexStore, authorityLogs, attempts } = makeReader({
+      deployment: () => lookup,
+      latestBlockNumber: () => 100,
+      sourceProvider: () => (enableLog ? source : undefined),
+    });
+    await reader.snapshots.refresh();
+    lookup = { blockNumber: 0, pinned: false };
+    enableLog = true;
+    // A graph the reset chain created below the old deployment block.
+    authorityLogs.push(liveCreationLog(5, 9n, ABSENT_NAME_HASH));
+
+    await reader.snapshots.refresh();
+
+    // One endpoint, no failed attempt: the log handed the rebuild to the live scan.
+    expect(attempts).toEqual([]);
+    expect(indexStore.invalidations).toHaveLength(1);
+    const rebuilt = indexStore.record!.value as {
+      cursor: { deploymentBlockNumber: number };
+      states: ReadonlyArray<{ contextGraphId: string }>;
+    };
+    expect(rebuilt.cursor.deploymentBlockNumber).toBe(0);
+    expect(rebuilt.states.map((state) => state.contextGraphId)).toContain('9');
+  });
+
+  it.each([
+    { held: 'background', other: 'foreground' },
+    { held: 'foreground', other: 'background' },
+  ] as const)('answers a $other read while a $held walk on the same provider is held', async ({ held, other }) => {
+    const { reader, provider, authorityLogs } = makeReader();
+    authorityLogs.push(liveCreationLog(20, 7n, NAME_HASH));
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const getLogs = provider.getLogs.bind(provider);
+    let pages = 0;
+    // Hold the walk's first page read; every later page read passes.
+    provider.getLogs = async (filter) => {
+      pages += 1;
+      if (pages === 1) {
+        entered.resolve();
+        await release.promise;
+      }
+      return getLogs(filter);
+    };
+    const walk = withRpcRequestContext({ requestClass: held }, () => reader.snapshots.refresh());
+    await entered.promise;
+
+    // The reader takes the class from the caller's RPC context, for the scan
+    // wait and for the scan itself, so this read neither waits for that walk
+    // nor queues behind it.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      withRpcRequestContext(
+        { requestClass: other },
+        () => reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH),
+      ),
+      new Promise<'held'>((resolve) => { timer = setTimeout(() => resolve('held'), 2_000); }),
+    ]);
+    clearTimeout(timer);
+    release.resolve();
+    await walk;
+
+    expect(outcome).toBe(7n);
   });
 
   it('rechecks a cached tip before exhausting an endpoint whose cursor just advanced', async () => {

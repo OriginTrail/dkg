@@ -1440,16 +1440,18 @@ describe('durable synchronous share ownership', () => {
     await store.close();
   });
 
-  it('reclaims a bound completed share after success bookkeeping fails with swmInserted=true', async()=>{
+  it.each(['legacy', 'atomic'] as const)('reclaims a completed bound share after a failed %s success write', async mode => {
     const {store,agent,finalized}=await setup();let now=Date.now();
     const queue=new TripleStoreAsyncPromoteQueue(store,{now:()=>now,leaseMs:100,backoff:()=>0});
     const bound=await agent.assertion.prepareDurableShare(CG,NAME,{agentAddress:AUTHOR});
     const job=await queue.enqueueAndClaim({contextGraphId:CG,assertionName:NAME,entities:'all',...bound},'old');
-    vi.spyOn(queue,'succeed').mockRejectedValue(new Error('success bookkeeping unavailable'));
+    if (mode === 'legacy') Object.defineProperty(queue, 'succeedWithShareEvidence', { value: undefined });
+    const completion = mode === 'legacy' ? 'succeed' : 'succeedWithShareEvidence';
+    vi.spyOn(queue, completion).mockRejectedValue(new Error('success bookkeeping unavailable'));
     const outcome=await runPromoteJob({job,queue,workerId:'old',now:()=>now,heartbeatIntervalMs:25,bookkeepingRetryBudgetMs:0,
       log:()=>undefined,runPromote:()=>agent.assertion.promote(CG,NAME,bound)});
     expect(outcome.outcome).toBe('partial_promote_ambiguity');
-    expect(await queue.getStatus(job.jobId)).toMatchObject({state:'running',commitMarker:{promoteStarted:true,swmInserted:true}});
+    expect(await queue.getStatus(job.jobId)).toMatchObject({state:'running',commitMarker:{promoteStarted:true,swmInserted:mode === 'legacy'}});
     const content=await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${finalized.sharedGraphUri}> { ?s ?p ?o } }`);
     now+=101;
     const reopened=new TripleStoreAsyncPromoteQueue(store,{now:()=>now,leaseMs:100,backoff:()=>0});
@@ -1458,7 +1460,9 @@ describe('durable synchronous share ownership', () => {
     try {
       await worker.start();
       await vi.waitFor(async()=>expect((await reopened.getStatus(job.jobId))?.state).toBe('succeeded'));
-      expect(await reopened.getStatus(job.jobId)).toMatchObject({attempt:{count:2},request:{recoveryBinding:bound.recoveryBinding}});
+      expect(await reopened.getStatus(job.jobId)).toMatchObject({ attempt: { count: 2 },
+        request: { recoveryBinding: bound.recoveryBinding }, commitMarker: { swmInserted: true },
+        result: { shareEvidence: { shareOperationId: bound.recoveryBinding.intent.operationId } } });
       expect(await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${finalized.sharedGraphUri}> { ?s ?p ?o } }`)).toEqual(content);
       await expect(reopened.succeed(job.jobId,job.lease!.claimToken,{promotedCount:1,succeededAt:now})).rejects.toThrow();
     } finally {await worker.stop();await store.close();}

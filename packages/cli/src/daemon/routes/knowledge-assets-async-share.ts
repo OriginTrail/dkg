@@ -70,6 +70,7 @@ export async function handleKaShareAsyncEnqueue(ctx: RequestContext, name: strin
   const { req, res, agent, authentication } = ctx;
   const writePreflightCallerAgentAddress = authenticatedAgentAddress(authentication);
   const writePreflightContextGraphOpts = {
+    asyncAdmission: true,
     callerAgentAddress: writePreflightCallerAgentAddress,
     allowLocalExactFallback: !writePreflightCallerAgentAddress,
   };

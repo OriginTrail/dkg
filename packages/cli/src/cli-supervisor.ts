@@ -35,33 +35,93 @@ interface WorkerExit {
   signal: NodeJS.Signals | null;
 }
 
+/** Crashes in a row after which a supervisor starts no new worker. */
+const MAX_CRASH_RESTARTS = 5;
 /**
- * The line a supervisor writes when its worker ended: how it ended, and what
- * the supervisor does next. Read before the crash count takes this exit in.
+ * A worker that ran this long was healthy: once it crashes, the crashes before
+ * it no longer count. So only crashes close together make a supervisor give
+ * up, not a few spread over a node's whole life. Longer than a slow start plus
+ * the liveness watchdog's kill (5 failed probes 30 s apart, about 2.5 min), so
+ * a worker the watchdog keeps killing still counts.
  */
-function describeWorkerExit(
-  { pid, code, signal }: WorkerExit,
+const HEALTHY_WORKER_UPTIME_MS = 10 * 60_000;
+const REQUESTED_RESTART_DELAY_MS = 250;
+const CRASH_RESTART_DELAY_MS = 1_000;
+
+/**
+ * What a supervisor does once its worker has ended. One decision drives the
+ * loop and is what the supervisor logs, so the two cannot disagree.
+ */
+type WorkerExitDecision =
+  | { readonly reason: 'asked-to-stop' | 'clean-stop'; readonly next: 'stop'; readonly exitCode: number }
+  | { readonly reason: 'gave-up'; readonly next: 'stop'; readonly exitCode: number; readonly crashes: number }
+  | { readonly reason: 'restart-requested'; readonly next: 'restart'; readonly crashes: 0; readonly delayMs: number }
+  | {
+    readonly reason: 'crashed';
+    readonly next: 'restart';
+    readonly crashes: number;
+    readonly delayMs: number;
+    /** Crashes before this one that no longer count, because this worker ran {@link HEALTHY_WORKER_UPTIME_MS}. */
+    readonly forgiven: number;
+  };
+
+/**
+ * Decide what follows a worker's exit, given the crashes counted before it.
+ * A crash after a healthy run counts as the first again. Giving up ends the
+ * supervisor with a non-zero code, the worker's own when it has one, so a
+ * service manager sees a failure.
+ */
+function decideWorkerExit(
+  { code, uptimeMs }: { code: number | null; uptimeMs: number },
   crashes: number,
-  maxCrashRestarts: number,
   options: { stopping?: boolean } = {},
-): string {
-  const { forced, originalExitCode } = decodeForcedExitCode(code);
+): WorkerExitDecision {
+  const { originalExitCode } = decodeForcedExitCode(code);
+  if (options.stopping) return { reason: 'asked-to-stop', next: 'stop', exitCode: originalExitCode ?? 0 };
+  if (originalExitCode === DAEMON_EXIT_CODE_RESTART) {
+    return { reason: 'restart-requested', next: 'restart', crashes: 0, delayMs: REQUESTED_RESTART_DELAY_MS };
+  }
+  if (originalExitCode === 0) return { reason: 'clean-stop', next: 'stop', exitCode: 0 };
+  const forgiven = uptimeMs >= HEALTHY_WORKER_UPTIME_MS ? crashes : 0;
+  const counted = crashes - forgiven + 1;
+  if (counted >= MAX_CRASH_RESTARTS) {
+    return { reason: 'gave-up', next: 'stop', exitCode: originalExitCode || 1, crashes: counted };
+  }
+  return { reason: 'crashed', next: 'restart', crashes: counted, delayMs: CRASH_RESTART_DELAY_MS, forgiven };
+}
+
+function describeNext(decision: WorkerExitDecision): string {
+  switch (decision.reason) {
+    case 'asked-to-stop':
+      return 'the supervisor was asked to stop';
+    case 'clean-stop':
+      return 'clean stop, the supervisor stops too';
+    case 'restart-requested':
+      return 'restart requested, starting a new worker';
+    case 'gave-up':
+      return `giving up after ${decision.crashes} crashes with no worker running ${HEALTHY_WORKER_UPTIME_MS / 60_000} min between them: `
+        + 'no new worker will start, and the node stays down until it is started again; '
+        + `the supervisor exits with code ${decision.exitCode}`;
+    case 'crashed':
+      return `crash ${decision.crashes} of ${MAX_CRASH_RESTARTS}${describeForgiven(decision.forgiven)}, starting a new worker`;
+  }
+}
+
+function describeForgiven(forgiven: number): string {
+  if (forgiven === 0) return '';
+  const minutes = HEALTHY_WORKER_UPTIME_MS / 60_000;
+  return forgiven === 1
+    ? ` (it ran ${minutes} min or more, so the crash before it no longer counts)`
+    : ` (it ran ${minutes} min or more, so the ${forgiven} crashes before it no longer count)`;
+}
+
+/** The line a supervisor writes when its worker ended: how it ended, and what the supervisor does next. */
+function describeWorkerExit({ pid, code, signal }: WorkerExit, decision: WorkerExitDecision): string {
+  const { forced } = decodeForcedExitCode(code);
   const how = signal
     ? `signal ${signal}`
     : `exit code ${code}${forced ? ' (forced: its shutdown did not finish)' : ''}`;
-  let next: string;
-  if (options.stopping) {
-    next = 'the supervisor was asked to stop';
-  } else if (originalExitCode === DAEMON_EXIT_CODE_RESTART) {
-    next = 'restart requested, starting a new worker';
-  } else if (originalExitCode === 0) {
-    next = 'clean stop, the supervisor stops too';
-  } else if (crashes + 1 >= maxCrashRestarts) {
-    next = `giving up after ${maxCrashRestarts} crashes: no new worker will start, and the node stays down until it is started again`;
-  } else {
-    next = `crash ${crashes + 1} of ${maxCrashRestarts}, starting a new worker`;
-  }
-  return `[supervisor] worker ${pid ?? 'unknown'} ended with ${how}; ${next}`;
+  return `[supervisor] worker ${pid ?? 'unknown'} ended with ${how}; ${describeNext(decision)}`;
 }
 
 /**
@@ -182,72 +242,17 @@ async function maybeStartSupervisorLivenessWatcher(
   };
 }
 
-async function runDaemonSupervisor(): Promise<void> {
-  process.env.DKG_HOME = selectedDkgHomeForEnv(process.env);
-  const childEnv = withSelectedDkgHome(process.env);
-  const livenessConfig = resolveSupervisorLivenessConfig(childEnv);
-  const maxCrashRestarts = 5;
-  let crashRestartCount = 0;
-
-  while (true) {
-    await removeApiPort().catch((err: any) => {
-      supervisorWarn(
-        `[supervisor] could not clear stale api.port before spawn: ${err?.message ?? String(err)}`,
-      );
-    });
-    const daemonCommand = resolveDaemonNodeCommand('daemon-worker');
-    const child = spawn(
-      daemonCommand.executable,
-      daemonCommand.args,
-      {
-        stdio: ['ignore', 'ignore', 'ignore'],
-        env: childEnv,
-      },
-    );
-
-    // Positive-liveness watchdog. Catches the generic zombie shape (HTTP
-    // listener dead but process still alive) that the exit-watcher can't
-    // see. SIGKILL forces the child's exit, the existing respawn logic
-    // takes it from there. Gated by DKG_SUPERVISOR_LIVENESS_PROBE so
-    // tests + headless-worker scenarios can opt out. See
-    // packages/cli/src/daemon/supervisor-liveness.ts for the full rationale.
-    const stopWatcher = await maybeStartSupervisorLivenessWatcher(child, livenessConfig);
-
-    const { code: rawExitCode, signal } = await new Promise<Omit<WorkerExit, 'pid'>>((resolve) => {
-      child.once('exit', (code, exitSignal) => resolve({ code, signal: exitSignal }));
-    });
-    stopWatcher();
-    const { forced, originalExitCode } = decodeForcedExitCode(rawExitCode);
-    if (forced) {
-      console.warn(
-        `[supervisor] previous worker forced-exited (code ${rawExitCode}; original intent ${originalExitCode}). ` +
-          `Shutdown cleanup deadlocked — see worker logs for [shutdown-timeout].`,
-      );
-    }
-    await reportWorkerExit(describeWorkerExit({ pid: child.pid, code: rawExitCode, signal }, crashRestartCount, maxCrashRestarts));
-
-    if (originalExitCode === DAEMON_EXIT_CODE_RESTART) {
-      crashRestartCount = 0;
-      await sleep(250);
-      continue;
-    }
-
-    if (originalExitCode === 0) return;
-
-    crashRestartCount += 1;
-    if (crashRestartCount >= maxCrashRestarts) return;
-    await sleep(1000);
-  }
-}
-
-interface ForegroundWorkerIterationDependencies {
+interface WorkerIterationDependencies {
   clearApiPort(): Promise<void>;
   spawnWorker(childEnv: NodeJS.ProcessEnv): ReturnType<typeof spawn>;
   startWorkerLiveness: typeof maybeStartSupervisorLivenessWatcher;
   warn(message: string): void;
+  /** Milliseconds on a monotonic clock: how long the worker ran. */
+  now(): number;
 }
 
-const foregroundWorkerIterationDependencies: ForegroundWorkerIterationDependencies = {
+const foregroundWorkerIterationDependencies: WorkerIterationDependencies = {
+  now: () => performance.now(),
   clearApiPort: removeApiPort,
   spawnWorker: (childEnv) => {
     const daemonCommand = resolveDaemonNodeCommand('daemon-foreground-worker');
@@ -261,34 +266,60 @@ const foregroundWorkerIterationDependencies: ForegroundWorkerIterationDependenci
   warn: supervisorWarn,
 };
 
-interface ForegroundWorkerIterationResult {
+/** A detached supervisor's worker runs with every stream ignored: `daemon.log` is its only record. */
+function spawnDetachedWorker(childEnv: NodeJS.ProcessEnv): ReturnType<typeof spawn> {
+  const daemonCommand = resolveDaemonNodeCommand('daemon-worker');
+  return spawn(
+    daemonCommand.executable,
+    daemonCommand.args,
+    { stdio: ['ignore', 'ignore', 'ignore'], env: childEnv },
+  );
+}
+
+interface WorkerIterationResult {
   pid: number | undefined;
   rawExitCode: number | null;
   signal: NodeJS.Signals | null;
   forced: boolean;
   originalExitCode: number | null;
+  /** How long the worker ran, from its spawn to its exit. */
+  uptimeMs: number;
 }
 
-async function runForegroundWorkerIteration(input: {
+/**
+ * One worker's run, from clearing a stale `api.port` to the worker's exit,
+ * with the liveness watchdog around it. Both supervisors run their workers
+ * through this; each keeps its own signal handling and how it ends.
+ */
+async function runWorkerIteration(input: {
   childEnv: NodeJS.ProcessEnv;
   livenessConfig?: SupervisorLivenessConfig;
   onChild?: (child: ReturnType<typeof spawn> | null) => void;
-  dependencies?: Partial<ForegroundWorkerIterationDependencies>;
-}): Promise<ForegroundWorkerIterationResult> {
+  /** What the warning about a stale `api.port` that cannot be cleared calls this spawn. */
+  spawnName?: string;
+  dependencies?: Partial<WorkerIterationDependencies>;
+}): Promise<WorkerIterationResult> {
   const dependencies = {
     ...foregroundWorkerIterationDependencies,
     ...input.dependencies,
   };
   await dependencies.clearApiPort().catch((err: any) => {
     dependencies.warn(
-      `[supervisor] could not clear stale api.port before foreground spawn: `
+      `[supervisor] could not clear stale api.port before ${input.spawnName ?? 'foreground spawn'}: `
       + `${err?.message ?? String(err)}`,
     );
   });
   const child = dependencies.spawnWorker(input.childEnv);
+  const startedAt = dependencies.now();
   input.onChild?.(child);
   let stopWatcher: (() => void) | undefined;
   try {
+    // Positive-liveness watchdog. Catches the generic zombie shape (HTTP
+    // listener dead but process still alive) that the exit-watcher can't
+    // see. SIGKILL forces the child's exit, the existing respawn logic
+    // takes it from there. Gated by DKG_SUPERVISOR_LIVENESS_PROBE so
+    // tests + headless-worker scenarios can opt out. See
+    // packages/cli/src/daemon/supervisor-liveness.ts for the full rationale.
     stopWatcher = await dependencies.startWorkerLiveness(
       child,
       input.livenessConfig ?? resolveSupervisorLivenessConfig(input.childEnv),
@@ -297,18 +328,64 @@ async function runForegroundWorkerIteration(input: {
       child.once('exit', (code, exitSignal) => resolve({ code, signal: exitSignal }));
       child.once('error', () => resolve({ code: 1, signal: null }));
     });
-    return { pid: child.pid, rawExitCode, signal, ...decodeForcedExitCode(rawExitCode) };
+    return {
+      pid: child.pid,
+      rawExitCode,
+      signal,
+      ...decodeForcedExitCode(rawExitCode),
+      uptimeMs: dependencies.now() - startedAt,
+    };
   } finally {
     stopWatcher?.();
     input.onChild?.(null);
   }
 }
 
+/** Log how a worker ended and what the supervisor does next, as `decision` says. */
+async function reportWorkerEnded(ended: WorkerIterationResult, decision: WorkerExitDecision): Promise<void> {
+  if (ended.forced) {
+    console.warn(
+      `[supervisor] previous worker forced-exited (code ${ended.rawExitCode}; original intent ${ended.originalExitCode}). ` +
+        `Shutdown cleanup deadlocked — see worker logs for [shutdown-timeout].`,
+    );
+  }
+  await reportWorkerExit(describeWorkerExit({ pid: ended.pid, code: ended.rawExitCode, signal: ended.signal }, decision));
+}
+
+interface SupervisorDependencies extends WorkerIterationDependencies {
+  sleep(ms: number): Promise<void>;
+}
+
+/** Resolves with the code the supervisor's process ends with: non-zero once it gave up. */
+async function runDaemonSupervisor(dependencies: Partial<SupervisorDependencies> = {}): Promise<number> {
+  const { sleep: wait = sleep, ...iterationDependencies } = dependencies;
+  process.env.DKG_HOME = selectedDkgHomeForEnv(process.env);
+  const childEnv = withSelectedDkgHome(process.env);
+  const livenessConfig = resolveSupervisorLivenessConfig(childEnv);
+  let crashRestartCount = 0;
+
+  while (true) {
+    const ended = await runWorkerIteration({
+      childEnv,
+      livenessConfig,
+      spawnName: 'spawn',
+      dependencies: { spawnWorker: spawnDetachedWorker, ...iterationDependencies },
+    });
+    const decision = decideWorkerExit({ code: ended.rawExitCode, uptimeMs: ended.uptimeMs }, crashRestartCount);
+    await reportWorkerEnded(ended, decision);
+
+    if (decision.next === 'stop') return decision.exitCode;
+    crashRestartCount = decision.crashes;
+    await wait(decision.delayMs);
+  }
+}
+
 async function runForegroundSupervisor(
   childEnv: NodeJS.ProcessEnv = process.env,
+  dependencies: Partial<SupervisorDependencies> = {},
 ): Promise<void> {
+  const { sleep: wait = sleep, ...iterationDependencies } = dependencies;
   const livenessConfig = resolveSupervisorLivenessConfig(childEnv);
-  const maxCrashRestarts = 5;
   let crashRestartCount = 0;
   let currentChild: ReturnType<typeof spawn> | null = null;
 
@@ -324,39 +401,22 @@ async function runForegroundSupervisor(
     while (true) {
       if (signalled) process.exit(0);
 
-      const decision = await runForegroundWorkerIteration({
+      const ended = await runWorkerIteration({
         childEnv,
         livenessConfig,
         onChild: (child) => { currentChild = child; },
+        dependencies: iterationDependencies,
       });
-      const { pid, rawExitCode, signal, forced, originalExitCode } = decision;
-      if (forced) {
-        console.warn(
-          `[supervisor] previous worker forced-exited (code ${rawExitCode}; original intent ${originalExitCode}). ` +
-            `Shutdown cleanup deadlocked — see worker logs for [shutdown-timeout].`,
-        );
-      }
-      await reportWorkerExit(describeWorkerExit(
-        { pid, code: rawExitCode, signal },
+      const decision = decideWorkerExit(
+        { code: ended.rawExitCode, uptimeMs: ended.uptimeMs },
         crashRestartCount,
-        maxCrashRestarts,
         { stopping: signalled },
-      ));
+      );
+      await reportWorkerEnded(ended, decision);
 
-      if (signalled) process.exit(originalExitCode ?? 0);
-
-      if (originalExitCode === DAEMON_EXIT_CODE_RESTART) {
-        crashRestartCount = 0;
-        await sleep(250);
-        if (signalled) process.exit(0);
-        continue;
-      }
-
-      if (originalExitCode === 0) process.exit(0);
-
-      crashRestartCount += 1;
-      if (crashRestartCount >= maxCrashRestarts) process.exit(originalExitCode ?? 1);
-      await sleep(1000);
+      if (decision.next === 'stop') process.exit(decision.exitCode);
+      crashRestartCount = decision.crashes;
+      await wait(decision.delayMs);
       if (signalled) process.exit(0);
     }
   } finally {
@@ -368,9 +428,12 @@ async function runForegroundSupervisor(
 export {
   appendSupervisorLog,
   supervisorWarn,
+  HEALTHY_WORKER_UPTIME_MS,
+  MAX_CRASH_RESTARTS,
+  decideWorkerExit,
   describeWorkerExit,
   maybeStartSupervisorLivenessWatcher,
-  runForegroundWorkerIteration,
+  runWorkerIteration,
   runDaemonSupervisor,
   runForegroundSupervisor,
 };

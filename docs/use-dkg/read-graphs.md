@@ -38,7 +38,7 @@ Read graphs are off by default. This page switches the verifiable memory of one 
   - a `sparql-http` endpoint whose `consistencyProfile` is `atomic-update` or stronger.
 
   On any other store the daemon refuses to start with read graphs on (`READ_GRAPHS_UNSUPPORTED`).
-- **One node per store backend.** Read graphs assume that the node is its store's only writer, as the node's graph catalog does. Two nodes that share one store backend are not supported with read graphs in 10.1.2.
+- **One node per store backend.** Read graphs assume that the node is its store's only writer, as the node's graph catalog does. Two nodes that share one store backend are not supported with read graphs in 10.1.1.
 - **The rollback target must recognize read graphs.** The rollback target is the release `dkg rollback` would activate: the other slot on a Core, or the version in `previous-version` on an Edge. A release that does not recognize read graphs would treat them as ordinary graphs, so `dkg start` refuses read graphs while the target is such a release:
 
   ```text

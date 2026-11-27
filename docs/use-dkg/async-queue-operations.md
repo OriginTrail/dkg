@@ -40,7 +40,7 @@ Store control path: on (added slots share=1 publisher=2; default for oxigraph-se
 
 ## Write preflight sharing
 
-Before a write, the node checks that the target context graph exists and that the caller may write to it. When many writes from one caller to one graph arrive at once, they share one check.
+Before a write, the node checks that the target context graph exists and that the caller may write to it. When many writes from one caller to one graph arrive at once, they share one check. With a `preflight` slot in `DKG_STORE_CONTROL_RESERVED_SLOTS`, async shares and publishes on a Blazegraph or managed Oxigraph node share their own check, apart from other writes.
 
 It is on by default. To turn it off, set `DKG_WRITE_PREFLIGHT_COALESCING=0` in the daemon's environment and restart. The startup log then shows `Write preflight coalescing: off`.
 
@@ -63,6 +63,25 @@ dkg ka share-job <job-id>
 dkg ka recover-share-job <job-id>
 ```
 
+### When a failed share is obsolete
+
+A client may have completed an asset another way while the node still holds its original failed share job. For example, after losing a response, a client might publish a replacement and verify its transaction and content root. Recovering the original job would ask the node to run the old share again.
+
+Use operator retirement only when you have established that the original share is no longer wanted. Match the exact job and its bound content to the client's records. If a replacement was published, verify the replacement receipt first. A timeout or a missing success marker leaves the original attempt's effects uncertain. Retirement records the operator's decision and preserves the failed job for audit. It does not undo an earlier write to shared working memory.
+
+Use the node operator credential for both requests. Keep the daemon as the sole writer to the queue store and confirm that any earlier store request for this job has finished. A client timeout can leave a write running on the backend. Wait for it to settle before retiring the job.
+
+1. Read `GET /api/knowledge-assets/swm/share-jobs/{jobId}/retire`. For an eligible job, compare the returned graph, asset name, agent, seal digest and operation ID against your records. Save `jobSha256`, which identifies the exact failed record you inspected.
+2. Send `POST` to the same URL using the digest from your preview and the explicit acknowledgment below.
+
+   ```json
+   { "expectedJobSha256": "<jobSha256 from the preview>", "acceptUnknownEffects": true }
+   ```
+
+3. Look for `outcome: "retired"` with the same digest. If the response is lost, read the same URL again. An `observed` receipt means the node can read the decision. Submit the same approved digest again to confirm it is durable. The repeat performs the persistence check without moving the job a second time. On a conflict, inspect the latest record before taking further action.
+
+The operator can read the retirement receipt after a restart. It preserves the original failed payload in a dedicated archive graph. Back up that graph with the two queue graphs. Its name is the share control graph name followed by `:retirements`, which defaults to `urn:dkg:promote-queue:control-plane:retirements`. An ordinary client clearing the old job now gets `already_absent`. Retirement makes no share or publication request. It applies to eligible failed share jobs on stores supporting the atomic move. Publish jobs have their own recovery procedure.
+
 ## Clean up finished jobs
 
 The queues keep every finished job until someone clears it. On a busy node the queue data keeps growing, and reads over it get slower. Cleanup removes these jobs 7 days after they finished:
@@ -70,7 +89,7 @@ The queues keep every finished job until someone clears it. On a busy node the q
 - **Share queue:** succeeded jobs, and cancelled or rejected jobs that provably never started the share.
 - **Publish queue:** finalized jobs, oldest first for each Knowledge Asset. An older failed job of the same asset holds the newer ones back until you clear it.
 
-Every other failed job stays until you clear it, for inspection or recovery.
+Other failed jobs remain available for inspection. A failed share with a durable recovery binding can still own the work. Ordinary cleanup leaves that job in place.
 
 Cleanup ships for evaluation. Leave it off on production nodes until a later release says it is ready; to try it, run `report` mode, which removes nothing, on a node whose store is backed up.
 
@@ -97,7 +116,7 @@ Removed jobs cannot be restored.
 
 1. Run `report` for at least two weeks.
 2. Check `wouldDelete` on the `async_promote_retention_pass` and `async_lift_retention_pass` log lines against what you expect to lose.
-3. Just before you switch, back up both queue graphs: `urn:dkg:promote-queue:control-plane` and `urn:dkg:publisher:control-plane`.
+3. Just before you switch, back up the share and publisher control graphs (`urn:dkg:promote-queue:control-plane` and `urn:dkg:publisher:control-plane`). Include the share retirement archive if you have used operator retirement.
 4. Set `mode` to `delete` and restart.
 
 ### After a job is removed

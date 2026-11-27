@@ -148,7 +148,7 @@ export async function handleSemanticRuntimeConfigurationRoutes(ctx: RequestConte
       : operationIri(method === 'GET' ? ctx.url.searchParams.get('operationIri') : raw?.operationIri ?? body.operationIri);
     await assertManager(ctx, kind, graph);
     const runtime = ctx.semanticRuntimeHost ?? await ctx.ensureSemanticRuntime?.();
-    if (!runtime || !ctx.config.semanticRuntime) throw new SemanticProgramError('SEMANTIC_RUNTIME_DISABLED', 'Semantic runtime is explicitly disabled or unavailable', 409);
+    if (!runtime || !ctx.config.semanticRuntime) throw new SemanticProgramError('SEMANTIC_RUNTIME_DISABLED', 'Programs are off on this node: set semanticRuntime.enabled to true in its config to use them', 409);
     const configuration = runtime.configuration;
     if (method === 'GET') {
       const entry = operation ? configuration.inspect(kind, graph, operation) : configuration.list(kind, graph);

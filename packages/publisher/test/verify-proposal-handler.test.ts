@@ -1,13 +1,16 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { VerifyProposalHandler, type VerifyProposalHandlerDeps } from '../src/verify-proposal-handler.js';
 import {
   encodeVerifyProposal,
   decodeVerifyApproval,
+  computeACKDigest,
+  computeVerifyApprovalDigest,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 
 const wallet = ethers.Wallet.createRandom();
 const merkleRoot = new Uint8Array(32).fill(0xab);
+const domain = { chainId: 84532n, contractAddress: '0x00000000000000000000000000000000000000a1' };
 
 function makeDeps(overrides?: Partial<VerifyProposalHandlerDeps>): VerifyProposalHandlerDeps {
   return {
@@ -16,6 +19,7 @@ function makeDeps(overrides?: Partial<VerifyProposalHandlerDeps>): VerifyProposa
     agentAddress: wallet.address,
     getBatchMerkleRoot: async () => merkleRoot,
     getContextGraphIdOnChain: async () => 42n,
+    getSigningDomain: async () => domain,
     ...overrides,
   };
 }
@@ -86,5 +90,44 @@ describe('VerifyProposalHandler', () => {
     const garbage = new Uint8Array([0xff, 0x00, 0x01]);
 
     await expect(handler.handler(garbage, peerId)).rejects.toThrow('invalid_proposal');
+  });
+
+  it.each([
+    ['empty', ''],
+    ['with a space', 'test cg'],
+    ['with angle brackets', 'test-cg>'],
+    ['with braces', 'test-cg{x}'],
+    ['with a dot-dot segment', 'test/../cg'],
+    ['longer than 256 characters', 'c'.repeat(257)],
+  ])('refuses a proposal whose context graph id is %s, before any lookup', async (_name, contextGraphId) => {
+    const getBatchMerkleRoot = vi.fn(async () => merkleRoot);
+    const getContextGraphIdOnChain = vi.fn(async () => 42n);
+    const handler = new VerifyProposalHandler(makeDeps({ getBatchMerkleRoot, getContextGraphIdOnChain }));
+
+    await expect(handler.handler(makeProposalBytes({ contextGraphId }), peerId))
+      .rejects.toThrow('invalid_proposal: invalid context graph id');
+    expect(getBatchMerkleRoot).not.toHaveBeenCalled();
+    expect(getContextGraphIdOnChain).not.toHaveBeenCalled();
+  });
+
+  it('signs the approval digest bound to the chain, the deployment, the context graph and the batch', async () => {
+    const handler = new VerifyProposalHandler(makeDeps());
+    const approval = decodeVerifyApproval(await handler.handler(makeProposalBytes({ batchId: 7 }), peerId));
+    const signature = ethers.Signature.from({
+      r: ethers.hexlify(approval.agentSignatureR),
+      yParityAndS: ethers.hexlify(approval.agentSignatureVS),
+    });
+    const signerOver = (digest: Uint8Array) => ethers.verifyMessage(digest, signature);
+
+    expect(signerOver(computeVerifyApprovalDigest(domain.chainId, domain.contractAddress, 42n, 7n, merkleRoot)))
+      .toBe(wallet.address);
+    // Not a signature over the unbound two-field digest, nor over another batch, chain or deployment.
+    expect(signerOver(computeACKDigest(42n, merkleRoot))).not.toBe(wallet.address);
+    expect(signerOver(computeVerifyApprovalDigest(domain.chainId, domain.contractAddress, 42n, 8n, merkleRoot)))
+      .not.toBe(wallet.address);
+    expect(signerOver(computeVerifyApprovalDigest(1n, domain.contractAddress, 42n, 7n, merkleRoot)))
+      .not.toBe(wallet.address);
+    expect(signerOver(computeVerifyApprovalDigest(domain.chainId, '0x00000000000000000000000000000000000000a2', 42n, 7n, merkleRoot)))
+      .not.toBe(wallet.address);
   });
 });
