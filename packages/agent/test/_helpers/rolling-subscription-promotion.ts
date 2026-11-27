@@ -1,3 +1,6 @@
+import type { SubscriptionRecoverySchedulingPorts } from '../../src/context-graph-subscription-recover-row.js';
+import { unavailableContextGraphReadAuthorityDecision, contextGraphReadAuthorityDependencyOf } from '../../src/context-graph-read-authority.js';
+import { SubscriptionRecoveryCoordinator } from '../../src/subscription-recovery-owner.js';
 // SPDX-License-Identifier: Apache-2.0
 import { createTestSubscriptionActivations } from './subscription-activation-owner.js';
 // Shared by the Hardhat fence suite and the hermetic request-lane suite.
@@ -42,6 +45,23 @@ export function createRollingPromotionFixture(
     owns: () => true, request: vi.fn(() => true), whenIdle: async () => undefined,
   };
   const host = {
+    get row(): SubscriptionRecoverySchedulingPorts {
+      return {
+        recovery: host.recovery, isCurrent: () => host.started,
+        dormancy: id => host.contextGraphSubscriptionDormancyById.get(id),
+        revision: id => host.contextGraphSubscriptionPersistRevisions.get(id) ?? 0,
+        subscription: id => host.subscribedContextGraphs.get(id), load,
+        clear: (id, revoked) => revoked ? host.recordContextGraphSubscriptionClear([], [id]) : host.recordContextGraphSubscriptionClear([id]),
+        resolveAuthority: (saved, signal) => host.resolveAuthority({ contextGraphId: saved.id,
+          onChainId: saved.onChainId, onChainHash: saved.onChainHash }, signal).catch(error =>
+          unavailableContextGraphReadAuthorityDecision('legacy-local', 'unexpected-authority-error', contextGraphReadAuthorityDependencyOf(error))),
+        retire: (id, reason) => { host.transitionDormancy(id, reason); host.touchStatus(); },
+        capped: () => {},
+        activate: (saved, binding, current) => host.activate(saved, binding,
+          subscription => current() && host.subscribedContextGraphs.get(saved.id) === subscription),
+      };
+    },
+    recovery: new SubscriptionRecoveryCoordinator(),
     savedRows,
     store: { load, loadAll: async () => [...savedRows.values()] },
     getStatus: (): ReturnType<RollingSubscriptionPromotionPorts['getStatus']> => host.contextGraphSubscriptionRehydrationStatus,
@@ -68,8 +88,12 @@ export function createRollingPromotionFixture(
     log: { warn: vi.fn<RollingSubscriptionPromotionPorts['log']['warn']>(), info: vi.fn<RollingSubscriptionPromotionPorts['log']['info']>(), debug: vi.fn<RollingSubscriptionPromotionPorts['log']['debug']>() },
     touchStatus: vi.fn(),
     activated: vi.fn<(id: string) => void>(),
+    commitLiveIntent: (id: string, subscription: ContextGraphSub) => {
+      host.subscribedContextGraphs.set(id, subscription);
+      activations.replaceLiveIntent(id, subscription);
+    },
     transitionDormancy: (id: string, reason: ContextGraphDormancyReason | undefined) => activations.transition({ id, kind: 'dormancy', reason }),
-    recordContextGraphSubscriptionClear: vi.fn<RollingSubscriptionPromotionPorts['recordContextGraphSubscriptionClear']>((removed, revoked = []) => activations.transitionBatch([
+    recordContextGraphSubscriptionClear: vi.fn<(removed: readonly string[], revoked?: readonly string[]) => void>((removed, revoked = []) => activations.transitionBatch([
       ...removed.map(id => ({ id, kind: 'cleared' as const })), ...revoked.map(id => ({ id, kind: 'deactivated' as const })),
     ])),
     persistContextGraphSubscriptionStrict: vi.fn<PersistedContextGraphSubscriptionActivationPorts['persistBinding']>(async () => undefined),

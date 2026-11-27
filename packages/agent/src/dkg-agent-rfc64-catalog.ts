@@ -54,6 +54,7 @@ import { resolveChainRpcEndpointsV1 } from './chain-rpc-endpoints-v1.js';
 import type { DKGAgent } from './dkg-agent.js';
 import { answerRfc64CatalogHeadReplayRequestV1, rfc64CatalogReplayPeerFailureV1 } from './internal/catalog-head-replay-peers.js';
 import { yieldMainThread } from './main-thread-time-slice.js';
+import { peekPersistedSubscriptionNameBindingRetry } from './context-graph-subscription-name-binding-retry.js';
 import { isApprovedPrivateReplicaDelegationActive, resolveApprovedPrivateReplicaAuthority, } from './approved-private-replica.js';
 import { Rfc64CatalogReplayConnectionRuntimeV1, type Rfc64CatalogReplayConnectionReservationV1, } from './rfc64/catalog-replay-connection-runtime-v1.js';
 import { createRfc64CatalogReplayConnectionRuntimeV1 } from './rfc64/catalog-replay-connection-adapter-v1.js';
@@ -3334,6 +3335,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       // or changes generation; unchanged refreshes need no transport reconciliation.
       if (previousAuthorityProgress?.state !== 'accepted' || authorityGenerationChanged) {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
+        peekPersistedSubscriptionNameBindingRetry(this)?.wake(); // The chain authority source answers again.
         this.scheduleRfc64AuthorityAcceptedPeerCatchupV1(contextGraphId);
         this.requestRfc64OwedShareInventoryDrainV1(); // Shares admitted behind the fence owe their rows now.
       }

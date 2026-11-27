@@ -15,7 +15,7 @@
     "--outputFile=<report>"
   ],
   "exitCode": 0,
-  "rawReportSha256": "b761d73873ca4aad6638eae34c899cf1a8df86e73fea7fd56a6d88a31a6bb705",
+  "rawReportSha256": "d13ae2aa09406b5178efc630fe6eccbeab89575da467ab149838e9b139cbd5a3",
   "assertions": [
     {
       "ancestorTitles": [
@@ -24,7 +24,7 @@
       "fullName": "follow-up pull of a peer's own agent profile a Core pulls the agents graph again when its connect-time pull lacked the peer's own profile",
       "status": "passed",
       "title": "a Core pulls the agents graph again when its connect-time pull lacked the peer's own profile",
-      "duration": 2667.147083,
+      "duration": 2774.029958000001,
       "failureMessages": [],
       "meta": {}
     }
