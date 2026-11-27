@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { FinalizationRecoveryEntry, FinalizationRecoveryStore } from './finalization-recovery-store.js';
 
-/** Diagnose an evidence violation only from the current durable generation. */
+/** Map the durable mutation outcome to the recovery API and its diagnostic. */
 export async function transitionFinalizationRecoveryEntry(
   store: FinalizationRecoveryStore | undefined, entry: FinalizationRecoveryEntry,
   state: 'SETTLED' | 'SUPERSEDED' | 'REJECTED' | 'UNSUPPORTED',
@@ -9,15 +9,11 @@ export async function transitionFinalizationRecoveryEntry(
 ): Promise<boolean> {
     if (!store) return false;
     try {
-      const changed = await store.transition(entry.key, entry.generation, state, reason);
-      if (!changed && state === 'SETTLED') {
-        const current = await store.get(entry.key);
-        if (current?.generation === entry.generation
-          && (current.state === 'RECEIVED' || current.state === 'REORGED')) {
-          log.warn(`Finalization recovery inbox refused to settle ${entry.ual}: verified evidence missing`);
-        }
+      const outcome = await store.transition(entry.key, entry.generation, state, reason);
+      if (outcome.status === 'missing-evidence') {
+        log.warn(`Finalization recovery inbox refused to settle ${entry.ual}: verified evidence missing`);
       }
-      return changed;
+      return outcome.status === 'changed';
     } catch (error) {
       log.warn(
         `Finalization recovery transition to ${state} failed for ${entry.ual}: `

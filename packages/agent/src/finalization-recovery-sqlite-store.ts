@@ -10,6 +10,7 @@ import {
   type FinalizationRecoveryReceiveResult,
   type FinalizationRecoverySettledPublisherUpgradeResult,
   type FinalizationRecoveryState,
+  type FinalizationRecoveryTransitionResult,
   type FinalizationRecoveryStore,
   type FinalizationRecoveryVerifyResult,
   planFinalizationRecoveryVerifiedEvidenceTransition,
@@ -688,37 +689,35 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     generation: number,
     state: 'SETTLED' | 'SUPERSEDED' | 'REJECTED' | 'UNSUPPORTED',
     lastError?: string,
-  ): Promise<boolean> {
-    if (this.#closed || this.#closing) return Promise.resolve(false);
-    return this.mutate(() => {
-      if (this.#closed) return false;
-      let changed = false;
-      this.transaction(() => {
-        if (state === 'SETTLED') {
-          const row = this.database.prepare('SELECT * FROM finalization_inbox_v1 WHERE key = ?').get(key);
-          if (!row) return;
-          const current = finalizationRecoveryRowToEntry(row);
-          if (current.generation !== generation || current.state !== 'VERIFIED') return;
-        }
-        const now = this.#policy.now();
-        const result = this.database.prepare(`
-          UPDATE finalization_inbox_v1
-          SET state = ?,
-              publisher_upgrade_pending = 0,
-              attempt_count = CASE WHEN ? = 'SETTLED' THEN 0 ELSE attempt_count END,
-              failure_signature = NULL,
-              failure_streak = 0,
-              last_error = ?,
-              next_attempt_at = NULL,
-              updated_at = ?
-          WHERE key = ? AND generation = ?
-            AND state IN ('RECEIVED','VERIFIED','REORGED')
-        `).run(state, state, lastError ?? null, now, key, generation);
-        changed = result.changes > 0;
-        pruneFinalizationRecoveryRowsWithinTransaction(this.database, this.#policy, now);
-      });
-      return changed;
-    });
+  ): Promise<FinalizationRecoveryTransitionResult> {
+    if (this.#closed || this.#closing) return Promise.resolve({ status: 'closed' });
+    return this.mutate(() => this.transaction<FinalizationRecoveryTransitionResult>(() => {
+      if (this.#closed) return { status: 'closed' };
+      if (state === 'SETTLED') {
+        const row = this.database.prepare('SELECT * FROM finalization_inbox_v1 WHERE key = ?').get(key);
+        if (!row) return { status: 'stale' };
+        const current = finalizationRecoveryRowToEntry(row);
+        if (current.generation !== generation) return { status: 'stale' };
+        if (current.state === 'RECEIVED' || current.state === 'REORGED') return { status: 'missing-evidence' };
+        if (current.state !== 'VERIFIED') return { status: 'stale' };
+      }
+      const now = this.#policy.now();
+      const result = this.database.prepare(`
+        UPDATE finalization_inbox_v1
+        SET state = ?,
+            publisher_upgrade_pending = 0,
+            attempt_count = CASE WHEN ? = 'SETTLED' THEN 0 ELSE attempt_count END,
+            failure_signature = NULL,
+            failure_streak = 0,
+            last_error = ?,
+            next_attempt_at = NULL,
+            updated_at = ?
+        WHERE key = ? AND generation = ?
+          AND state IN ('RECEIVED','VERIFIED','REORGED')
+      `).run(state, state, lastError ?? null, now, key, generation);
+      pruneFinalizationRecoveryRowsWithinTransaction(this.database, this.#policy, now);
+      return { status: result.changes > 0 ? 'changed' : 'stale' };
+    }));
   }
 
   recordAttempt(

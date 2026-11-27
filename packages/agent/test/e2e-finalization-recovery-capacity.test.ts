@@ -108,7 +108,7 @@ async function createCapacityRecoveryReceiver(
       },
       async releaseCapacity() {
         if (fillerKey === undefined) throw new Error(`${name} inbox was not filled`);
-        await expect(store.transition(fillerKey, 0, 'SUPERSEDED')).resolves.toBe(true);
+        await expect(store.transition(fillerKey, 0, 'SUPERSEDED')).resolves.toEqual({ status: 'changed' });
       },
       async close() {
         try {

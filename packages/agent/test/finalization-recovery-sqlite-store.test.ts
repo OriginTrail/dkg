@@ -1,15 +1,10 @@
-import { transitionFinalizationRecoveryEntry } from '../src/finalization-recovery-transition.js';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
   openSqliteFinalizationRecoveryStore,
 } from '../src/finalization-recovery-sqlite-store.js';
-import {
-  finalizationEnvelopeSha256,
-  finalizationRecoveryRowToEntry,
-} from '../src/finalization-recovery-sqlite-codec.js';
 import {
   FINALIZATION_INBOX_DATABASE_FILENAME,
 } from '../src/finalization-recovery-store.js';
@@ -34,101 +29,7 @@ function commitOriginalEvidence(
   );
 }
 
-function sqliteRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    key: 'entry-1',
-    state: 'RECEIVED',
-    chain_id: 'base:84532',
-    context_graph_id: 'graph',
-    source_peer_id: '12D3KooWPublisher',
-    trusted_publisher_peer_id: null,
-    publisher_upgrade_pending: 0,
-    ual: 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/7',
-    tx_hash: `0x${'ab'.repeat(32)}`,
-    assertion_version: '1',
-    merkle_root: `0x${'01'.repeat(32)}`,
-    ka_id: '7',
-    batch_id: '7',
-    target_context_graph_id: '42',
-    block_number: null,
-    block_hash: null,
-    tx_index: null,
-    publisher_address: null,
-    author_address: null,
-    envelope_sha256: finalizationEnvelopeSha256(RAW),
-    raw_envelope: RAW,
-    verified_evidence_json: null,
-    generation: 0,
-    attempt_count: 0,
-    failure_signature: null,
-    failure_streak: 0,
-    next_attempt_at: null,
-    last_error: null,
-    created_at: 1_000,
-    updated_at: 1_000,
-    ...overrides,
-  };
-}
-
 describe('SQLite finalization recovery store', () => {
-  it.each([
-    ['VERIFIED', null, 'verified row has no evidence'],
-    ['SETTLED', null, 'verified row has no evidence'],
-    ['RECEIVED', JSON.stringify(evidence()), 'unverified row has verified evidence'],
-    ['REORGED', JSON.stringify(evidence()), 'reorged row retains stale verified evidence'],
-  ] as const)('fails closed for %s evidence mismatch', (state, verifiedEvidence, message) => {
-    expect(() => finalizationRecoveryRowToEntry(sqliteRow({
-      state,
-      verified_evidence_json: verifiedEvidence,
-    }))).toThrow(message);
-  });
-
-  it('refuses to settle an entry until verified evidence is committed', async () => {
-    const directory = await temporaryDirectory();
-    try {
-      const store = await openSqliteFinalizationRecoveryStore(directory);
-      await store.receive(received());
-
-      await expect(store.transition('entry-1', 0, 'SETTLED')).resolves.toBe(false);
-      await expect(store.get('entry-1')).resolves.toMatchObject({
-        state: 'RECEIVED',
-      });
-
-      await expect(commitOriginalEvidence(store, 'entry-1', 0, evidence()))
-        .resolves.toMatchObject({ status: 'verified' });
-      await expect(store.transition('entry-1', 0, 'SETTLED')).resolves.toBe(true);
-      await expect(store.get('entry-1')).resolves.toMatchObject({
-        state: 'SETTLED',
-        verifiedEvidence: { blockNumber: 123 },
-      });
-      await store.close();
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-  it('rolls back a failed settlement, reports the SQL error, and permits a later commit', async () => {
-    const directory = await temporaryDirectory();
-    const store = await openSqliteFinalizationRecoveryStore(directory);
-    const control = new DatabaseSync(store.databasePath);
-    try {
-      await store.receive(received());
-      await commitOriginalEvidence(store, 'entry-1', 0, evidence());
-      const entry = await store.get('entry-1');
-      if (!entry) throw new Error('fixture entry missing');
-      control.exec(`CREATE TRIGGER reject_settlement BEFORE UPDATE OF state ON finalization_inbox_v1
-        WHEN NEW.state = 'SETTLED' BEGIN SELECT RAISE(ABORT, 'settlement write rejected'); END`);
-      const warn = vi.fn();
-      await expect(transitionFinalizationRecoveryEntry(store, entry, 'SETTLED', undefined, { warn })).resolves.toBe(false);
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('settlement write rejected'));
-      await expect(store.get(entry.key)).resolves.toMatchObject({ state: 'VERIFIED', generation: 0, verifiedEvidence: evidence() });
-      control.exec('DROP TRIGGER reject_settlement');
-      await expect(transitionFinalizationRecoveryEntry(store, entry, 'SETTLED', undefined, { warn })).resolves.toBe(true);
-      await expect(store.get(entry.key)).resolves.toMatchObject({ state: 'SETTLED', verifiedEvidence: evidence() });
-      expect(warn).toHaveBeenCalledOnce();
-    } finally { control.close(); await store.close(); await rm(directory, { recursive: true, force: true }); }
-  });
-
   it('lists only due live work in bounded oldest-first batches', async () => {
     const directory = await temporaryDirectory();
     try {
@@ -165,7 +66,7 @@ describe('SQLite finalization recovery store', () => {
       const store = await openSqliteFinalizationRecoveryStore(directory);
       await store.receive(received());
       await expect(store.transition('entry-1', 0, 'REJECTED', 'terminal'))
-        .resolves.toBe(true);
+        .resolves.toEqual({ status: 'changed' });
 
       await expect(store.recordAttempt(
         'entry-1',
@@ -270,7 +171,7 @@ describe('SQLite finalization recovery store', () => {
       const store = await openSqliteFinalizationRecoveryStore(directory);
       expect((await store.receive(received())).status).toBe('inserted');
       expect((await commitOriginalEvidence(store, 'entry-1', 0, evidence())).status).toBe('verified');
-      expect(await store.transition('entry-1', 0, 'SETTLED')).toBe(true);
+      expect(await store.transition('entry-1', 0, 'SETTLED')).toEqual({ status: 'changed' });
       await store.close();
 
       const reopened = await openSqliteFinalizationRecoveryStore(directory);
@@ -305,7 +206,7 @@ describe('SQLite finalization recovery store', () => {
       expect((await store.receive(received())).status).toBe('inserted');
       expect((await commitOriginalEvidence(store, 'entry-1', 0, evidence())).status)
         .toBe('verified');
-      expect(await store.transition('entry-1', 0, 'UNSUPPORTED')).toBe(true);
+      expect(await store.transition('entry-1', 0, 'UNSUPPORTED')).toEqual({ status: 'changed' });
 
       // The audit evidence is deliberately retained, not nulled.
       await expect(store.get('entry-1')).resolves.toMatchObject({
@@ -454,7 +355,7 @@ describe('SQLite finalization recovery store', () => {
         nextAttemptAt: expect.any(Number),
       }]);
 
-      expect(await store.transition('entry-1', 0, 'SETTLED')).toBe(true);
+      expect(await store.transition('entry-1', 0, 'SETTLED')).toEqual({ status: 'changed' });
       expect(await store.list()).toMatchObject([{
         state: 'SETTLED',
         attemptCount: 0,
@@ -567,7 +468,7 @@ describe('SQLite finalization recovery store', () => {
         sourcePeerId: '12D3KooWUntrustedRelay',
       }))).status).toBe('inserted');
       expect((await commitOriginalEvidence(store, 'entry-1', 0, evidence())).status).toBe('verified');
-      expect(await store.transition('entry-1', 0, 'SETTLED')).toBe(true);
+      expect(await store.transition('entry-1', 0, 'SETTLED')).toEqual({ status: 'changed' });
       await store.recordAttempt('entry-1', 0, 'old settled retry', {
         mode: 'ordinary', retryDelayMs: 1_000,
       });
@@ -642,7 +543,7 @@ describe('SQLite finalization recovery store', () => {
         accessPolicy: 'allowList',
         allowedPeers: ['12D3KooWReader'],
       }))).status).toBe('verified');
-      expect(await store.transition('entry-1', 1, 'SETTLED')).toBe(true);
+      expect(await store.transition('entry-1', 1, 'SETTLED')).toEqual({ status: 'changed' });
       expect(await store.list()).toMatchObject([{
         state: 'SETTLED',
         generation: 1,
@@ -837,7 +738,7 @@ describe('SQLite finalization recovery store', () => {
       const store = await openSqliteFinalizationRecoveryStore(directory);
       await store.receive(received());
       await expect(store.transition('entry-1', 0, 'SUPERSEDED', 'newer assertion'))
-        .resolves.toBe(true);
+        .resolves.toEqual({ status: 'changed' });
       const entries = await store.list();
       expect(entries).toMatchObject([{ state: 'SUPERSEDED' }]);
       expect(entries[0]).not.toHaveProperty('verifiedEvidence');

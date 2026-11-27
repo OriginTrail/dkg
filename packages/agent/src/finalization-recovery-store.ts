@@ -341,6 +341,9 @@ export interface FinalizationRecoveryHealth {
   oldestDeferredAgeMs?: number;
 }
 
+export type FinalizationRecoveryTransitionResult =
+  | { status: 'changed' } | { status: 'stale' } | { status: 'closed' } | { status: 'missing-evidence' };
+
 export interface FinalizationRecoveryStore {
   readonly closed: boolean;
   /** Reloads one entry after waiting on an in-process serialization boundary. */
@@ -401,7 +404,7 @@ export interface FinalizationRecoveryStore {
       'SETTLED' | 'SUPERSEDED' | 'REJECTED' | 'UNSUPPORTED'
     >,
     lastError?: string,
-  ): Promise<boolean>;
+  ): Promise<FinalizationRecoveryTransitionResult>;
   recordAttempt(
     key: string,
     generation: number,
