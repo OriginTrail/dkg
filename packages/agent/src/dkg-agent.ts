@@ -3283,19 +3283,22 @@ export class DKGAgent extends DKGAgentBase {
     options: DKGAgentACKTransportOptions = {},
   ): ACKTransportFactory {
     const timeoutMs = options.sendTimeoutMs ?? this.config.storageAckTiming.sendTimeoutMs;
-    return () => ({
+    return () => this.buildACKTransport({ ...options, sendTimeoutMs: timeoutMs });
+  }
+
+  private buildACKTransport(
+    options: DKGAgentACKTransportOptions & { expectedHead?: LocalStorageAckHeadExpectation } = {},
+  ): ReturnType<ACKTransportFactory> {
+    return {
       publisherPeerId: this.peerId,
-      gossipPublish: async (topic: string, data: Uint8Array) => {
-        await this.gossip.publish(topic, data);
-      },
-      sendP2P: this.createACKSendP2P(timeoutMs),
+      gossipPublish: async (topic: string, data: Uint8Array) => { await this.gossip.publish(topic, data); },
+      sendP2P: this.createACKSendP2P(options.sendTimeoutMs, options.expectedHead),
       getConnectedCorePeers: (protocol: string, requiredACKs: number) => this.getACKCandidatePeersAfterAdmission(
-        protocol,
-        this.ackOperationContext(protocol), requiredACKs,
+        protocol, this.ackOperationContext(protocol), requiredACKs,
       ),
       log: options.log,
-      onPeerOutcomes: (reports) => this.ackCandidateDiscovery.recordRoundOutcomes(reports),
-    });
+      onPeerOutcomes: reports => this.ackCandidateDiscovery.recordRoundOutcomes(reports),
+    };
   }
 
   private ackOperationContext(protocol?: string): OperationContext {
@@ -3369,14 +3372,7 @@ export class DKGAgent extends DKGAgentBase {
     this.offerOwnerTieV1(contextGraphId);
 
     const collector = new ACKCollector({
-      gossipPublish: async (topic: string, data: Uint8Array) => {
-        await this.gossip.publish(topic, data);
-      },
-      sendP2P: this.createACKSendP2P(undefined, expectedHead),
-      getConnectedCorePeers: (protocol: string, requiredACKs: number) => this.getACKCandidatePeersAfterAdmission(
-        protocol,
-        this.ackOperationContext(protocol), requiredACKs,
-      ),
+      ...this.buildACKTransport({ expectedHead, log: msg => this.log.info(createOperationContext('publish'), msg) }),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint, options) => {
             try {
@@ -3400,8 +3396,6 @@ export class DKGAgent extends DKGAgentBase {
             }
           }
         : undefined,
-      log: (msg: string) => this.log.info(createOperationContext('publish'), msg),
-      onPeerOutcomes: (reports) => this.ackCandidateDiscovery.recordRoundOutcomes(reports),
     });
 
     const chain = this.chain;
@@ -3515,14 +3509,7 @@ export class DKGAgent extends DKGAgentBase {
     if (typeof this.chain.getKnowledgeAssetsLifecycleAddress !== 'function') return undefined;
 
     const collector = new ACKCollector({
-      gossipPublish: async (topic: string, data: Uint8Array) => {
-        await this.gossip.publish(topic, data);
-      },
-      sendP2P: this.createACKSendP2P(undefined, expectedHead),
-      getConnectedCorePeers: (protocol: string, requiredACKs: number) => this.getACKCandidatePeersAfterAdmission(
-        protocol,
-        this.ackOperationContext(protocol), requiredACKs,
-      ),
+      ...this.buildACKTransport({ expectedHead, log: msg => this.log.info(createOperationContext('update'), msg) }),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint, options) => {
             try {
@@ -3541,8 +3528,6 @@ export class DKGAgent extends DKGAgentBase {
             }
           }
         : undefined,
-      log: (msg: string) => this.log.info(createOperationContext('update'), msg),
-      onPeerOutcomes: (reports) => this.ackCandidateDiscovery.recordRoundOutcomes(reports),
     });
 
     const chain = this.chain;

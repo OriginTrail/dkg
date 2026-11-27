@@ -14,8 +14,10 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter, buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
-import { createGraphKnowledgeAssetScope, createOperationContext, type KnowledgeAssetConfirmedEvent } from '@origintrail-official/dkg-core';
+import { DKGEvent, createGraphKnowledgeAssetScope, createOperationContext, type KnowledgeAssetConfirmedEvent } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
+import { wrapPublisherForTest, mockSealCtx } from '../../publisher/test/_helpers/seal.js';
+import { mockChainStubACKProvider } from '../../publisher/test/_helpers/acks.js';
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
 import { knowledgeAssetSharedMemoryGraph, knowledgeAssetVerifiedMemoryGraph, stageKnowledgeAssetInSharedMemory } from './_helpers/staged-knowledge-asset.js';
@@ -207,6 +209,73 @@ describe('VM reconcile after this node\'s own publish', () => {
       triples: [triple], shareOperationId: 'durability-share' });
     return { ...f, store, scope, triple, stage };
   }
+
+  it('recovers a confirmed publish after its local VM write fails and its live nudge is suppressed', async () => {
+    const wallet = new ethers.Wallet('0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d');
+    const chain = new MockChainAdapter('mock:31337', wallet.address, { initialContextGraphId: 1217n });
+    chain.seedIdentity(wallet.address, 1n);
+    chain.minimumRequiredSignatures = 1;
+    chain.signMessage = async message => {
+      const sig = ethers.Signature.from(await wallet.signMessage(message));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    };
+    const selected = 'own-failed-vm-write';
+    await chain.createOnChainContextGraph({ nameHash: ethers.keccak256(ethers.toUtf8Bytes(selected)), accessPolicy: 0, publishPolicy: 1 });
+    const head = { block: 100 };
+    Object.assign(chain, { getBlockNumber: async () => head.block });
+    const saveCursor = vi.fn(async () => undefined);
+    agent = await DKGAgent.create({ name: 'OwnFailedVmWrite', listenHost: '127.0.0.1', chainAdapter: chain,
+      syncContextGraphs: [selected], rfc64CatalogActivation: { enabled: false }, syncReconcilerEnabled: true,
+      selectedVmReconcileCursorStore: { loadSelectedVmReconcileCursor: async () => null, saveSelectedVmReconcileCursor: saveCursor },
+    });
+    const internal = agent as any;
+    internal.config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: [{ policyEnvelope: { payload: { accessPolicy: 0, contextGraphId: selected } }, targets: [] }],
+    };
+    await agent.start(); // Installs the production KC_CONFIRMED listener.
+    clearTimeout(internal.vmReconcileStartupTimer); clearInterval(internal.vmReconcileTimer);
+    internal.vmReconcileStartupTimer = null; internal.vmReconcileTimer = null;
+    internal.subscribedContextGraphs.set(selected, { subscribed: true, onChainId: '1217' });
+    const execute = vi.spyOn(agent, 'executeVmReconcileForCg');
+    const events: KnowledgeAssetConfirmedEvent[] = [];
+    internal.eventBus.on(DKGEvent.KC_CONFIRMED, (event: KnowledgeAssetConfirmedEvent) => events.push(event));
+    const store = internal.store;
+    const insert = store.insert.bind(store);
+    let failed = false;
+    const insertFailure = vi.spyOn(store, 'insert').mockImplementation(async (quads: any, options: any) => {
+      if (!failed && quads.some((quad: any) => quad.graph.includes('/_verifiable_memory/'))) {
+        failed = true;
+        expect(events).toHaveLength(1); // Failure is after receipt confirmation.
+        throw new Error('injected post-confirmation VM write failure');
+      }
+      return insert(quads, options);
+    });
+    const publisher = wrapPublisherForTest(internal.publisher, { author: wallet,
+      ctx: mockSealCtx({ chainId: await chain.getEvmChainId(), kav10Address: await chain.getKnowledgeAssetsLifecycleAddress() }),
+      v10ACKProvider: mockChainStubACKProvider(),
+    });
+    const triple = { subject: 'urn:own-failed:asset', predicate: 'http://schema.org/name', object: '"recover me"' };
+    await expect(publisher.publish({ contextGraphId: selected, onChainContextGraphId: 1217n,
+      quads: [{ ...triple, graph: '' }] })).rejects.toThrow('injected post-confirmation VM write failure');
+    insertFailure.mockRestore();
+    expect(failed).toBe(true); expect(events).toHaveLength(1);
+    const kaId = events[0]!.kaId!;
+    const scope = createGraphKnowledgeAssetScope(buildKnowledgeAssetUal(chain.chainId, wallet.address, kaId & ((1n << 96n) - 1n)), '1');
+    const vmGraph = knowledgeAssetVerifiedMemoryGraph(selected, scope);
+    const hasCopy = () => store.query(`ASK { GRAPH <${vmGraph}> { <${triple.subject}> <${triple.predicate}> ${triple.object} } }`);
+    await expect(hasCopy()).resolves.toMatchObject({ type: 'boolean', value: false });
+    await internal.handleKARegisteredNudge('1217', kaId, createOperationContext('system'));
+    await internal.vmReconcileScheduling.waitForIdle();
+    expect(execute).not.toHaveBeenCalled();
+    // The shared assertion is available to the periodic materializer, as from a successful share.
+    await stageKnowledgeAssetInSharedMemory({ store, contextGraphId: selected, scope, triples: [triple], shareOperationId: 'failed-own-publish-share' });
+    await agent.runVmReconcileSweep();
+    await expect(hasCopy()).resolves.toMatchObject({ type: 'boolean', value: true });
+    expect(execute).toHaveBeenCalled();
+    head.block = 106;
+    await agent.runVmReconcileSweep();
+    await expect(execute.mock.results.at(-1)!.value).resolves.toMatchObject({ watermarkAfter: 1 });
+  });
 
   it.each([false, true])('flushes real metadata repairs behind a held watermark (flush failure=%s)', async failFlush => {
     const f = await realCopyFixture(`MetadataRepair${failFlush}`);
