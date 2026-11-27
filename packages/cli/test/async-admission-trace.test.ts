@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { ServerResponse } from 'node:http';
-import { beforeEach, describe, expect, it } from 'vitest';
-import { asyncAdmissionUsage } from '@origintrail-official/dkg-core';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { Logger, asyncAdmissionUsage, currentAsyncAdmissionDiagnosticContext } from '@origintrail-official/dkg-core';
 import {
   admissionStep,
   beginAsyncAdmissionTrace,
@@ -247,4 +248,44 @@ describe('async admission trace', () => {
     noteAdmissionResponse(res, 500, '{}'); // after the close: no trace is left to note
     expect(outcomes()).toEqual(['share_async/enqueue/200/-:1']);
   });
+});
+
+it('joins each opt-in share timing to its own enqueue and bounds the gateway field', async () => {
+  const raw = 'ab'.repeat(16);
+  const messages: string[] = [];
+  const sink = vi.spyOn(Logger.prototype, 'info').mockImplementation((_context, message) => { messages.push(message); });
+  const { clock, advance } = manualClock();
+  const start = (id: unknown, path = SHARE) => {
+    const res = fakeResponse();
+    Object.assign(res, { req: { headers: { 'x-scan-admission-id': id } } });
+    beginAsyncAdmissionTrace('POST', path, res, clock);
+    return res;
+  };
+  try {
+    vi.stubEnv('DKG_ASYNC_PROMOTE_ADMISSION_TRACE', '1');
+    const first = start(raw);
+    const abandoned = start([raw, raw]);
+    const publish = start(raw, PUBLISH);
+    advance(2);
+    await admissionStep(first, 'write_preflight', async () => { advance(5); });
+    const requestId = await admissionStep(first, 'enqueue', async () => currentAsyncAdmissionDiagnosticContext()?.requestId);
+    advance(3);
+    abandoned.close();
+    noteAdmissionResponse(first, 202, '{}');
+    advance(5);
+    first.close();
+    publish.close();
+    vi.stubEnv('DKG_ASYNC_PROMOTE_ADMISSION_TRACE', '0');
+    start(raw).close();
+    expect(messages).toHaveLength(2);
+    const [closed, answered] = messages.map(message => JSON.parse(message));
+    expect(closed).toEqual({ event: 'async_share_http_timing', requestId: expect.any(String), phase: 'request', status: 0, elapsedMs: 10 });
+    expect(closed.requestId).not.toBe(requestId);
+    expect(answered).toEqual({ event: 'async_share_http_timing', requestId, exchangeHash: createHash('sha256').update(raw).digest('hex'),
+      phase: 'enqueue', status: 202, elapsedMs: 10, enqueueStartedAfterMs: 7, writePreflightStartedAfterMs: 2, writePreflightSettledAfterMs: 7 });
+    expect(messages.join('')).not.toContain(raw);
+  } finally {
+    sink.mockRestore();
+    vi.unstubAllEnvs();
+  }
 });

@@ -61,9 +61,12 @@ export interface GraphSetIndexStoreOptions {
    */
   revalidateMs?: number;
   /**
-   * How a warm catalog revalidates once it is due: `background` (the default)
-   * answers callers from it while one background flight refreshes it;
-   * `blocking` makes the caller that finds it due wait, as before.
+   * How a warm catalog revalidates once it is due: `blocking` (the default)
+   * makes the caller that finds it due wait for the refresh; `background`
+   * answers callers from it while one background flight refreshes it. A
+   * warm answer can miss graphs written outside this index since the last
+   * refresh, and a node reading its own just-synced metadata must see it,
+   * so `background` is opt-in.
    */
   revalidate?: GraphSetRevalidation;
   /**
@@ -164,7 +167,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     this.graphEnumerationVisibility = composeGraphEnumerationVisibility(inner, graph => !isStorageHiddenGraph(graph));
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
-    this.revalidate = options.revalidate ?? 'background';
+    this.revalidate = options.revalidate ?? 'blocking';
     this.revalidateFailureBackoffMs = positiveFiniteMs(
       options.revalidateFailureBackoffMs,
       Math.max(MIN_GRAPH_SET_REVALIDATE_FAILURE_BACKOFF_MS, this.revalidateMs),

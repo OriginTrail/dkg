@@ -53,7 +53,7 @@ describe('unscoped query admission', () => {
     const readable = 'did:dkg:context-graph:readable';
     const inner = new OxigraphStore();
     await inner.insert([{ graph: readable, subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
-    const store = new GraphSetIndexStore(inner, { revalidateMs: 100, now: () => now });
+    const store = new GraphSetIndexStore(inner, { revalidateMs: 100, revalidate: 'background', now: () => now });
     const canRead = vi.fn(async (id: string) => id === 'readable');
     const deps = { store, knownContextGraphIds: [], canReadContextGraph: canRead } satisfies UnscopedQueryAdmissionDependencies;
     try {
@@ -82,7 +82,7 @@ describe('unscoped query admission', () => {
     }
     const inner = new HeldListing();
     await inner.insert([{ graph: readable, subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
-    const store = new GraphSetIndexStore(inner, { revalidateMs: 100, now: () => now });
+    const store = new GraphSetIndexStore(inner, { revalidateMs: 100, revalidate: 'background', now: () => now });
     const canRead = vi.fn(async (id: string) => id === 'readable');
     const deps = { store, knownContextGraphIds: [], canReadContextGraph: canRead } satisfies UnscopedQueryAdmissionDependencies;
     try {

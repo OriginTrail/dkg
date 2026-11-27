@@ -34,6 +34,7 @@ import {
 } from '../openclaw.js';
 import { persistDurableChatTurn } from '../chat-turn-persistence.js';
 import { durableChatTurnResponseBody } from './durable-chat-turn-response.js';
+import { startLocalAgentSseKeepalive, writeLocalAgentSseHead } from '../local-agent-sse.js';
 import {
   isUndiciResponseTimeoutError,
   localAgentChannelFetchInit,
@@ -420,12 +421,10 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
 
         const contentType = (transportRes.headers.get('content-type') ?? '').toLowerCase();
         if (contentType.includes('text/event-stream') && transportRes.body) {
-          res.writeHead(200, {
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache',
-            Connection: 'keep-alive',
-            ...corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)),
-          });
+          writeLocalAgentSseHead(res, corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)));
+          // The channel pump keeps itself alive. The OpenAI relay drops Hermes's
+          // comment frames and persists before `final`, so it needs its own (#3886).
+          const stopKeepalive = target.protocol === 'hermes-openai' ? startLocalAgentSseKeepalive(res) : undefined;
           try {
             if (target.protocol === 'hermes-openai') {
               const streamed = await pipeHermesOpenAiStream(
@@ -472,6 +471,8 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
                 : { type: 'error', error: err.message };
               res.write(`data: ${JSON.stringify(event)}\n\n`);
             }
+          } finally {
+            stopKeepalive?.();
           }
           if (!res.writableEnded) res.end();
           return;
@@ -488,12 +489,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             return jsonResponse(res, 500, buildHermesUiPersistenceErrorBody(err));
           }
         }
-        res.writeHead(200, {
-          'Content-Type': 'text/event-stream; charset=utf-8',
-          'Cache-Control': 'no-cache',
-          Connection: 'keep-alive',
-          ...corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)),
-        });
+        writeLocalAgentSseHead(res, corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)));
         res.write(`data: ${JSON.stringify({
           type: 'final',
           text: reply.text ?? '',

@@ -594,7 +594,7 @@ export interface GraphSetIndexConfig {
   enabled?: boolean;
   /** Revalidate the named-graph index after this many milliseconds. 0 means every read. */
   revalidateMs?: number;
-  /** `background` (the default) answers from a warm index while it revalidates; `blocking` makes the caller that finds it due wait. */
+  /** `blocking` (the default) makes the caller that finds the index due wait for it; `background` answers from a warm index while it revalidates. */
   revalidate?: 'background' | 'blocking';
 }
 
@@ -880,7 +880,7 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
    * a verified agent-key signature or a Bearer token. A legacy token is
    * auto-generated on first start and stored in `<DKG_HOME>/auth.token`.
    */
-  auth?: { enabled?: boolean; tokens?: string[]; operatorAgentAddresses?: string[] };
+  auth?: { enabled?: boolean; tokens?: string[]; operatorAgentAddresses?: string[]; dashboardAutoSignIn?: boolean };
   /**
    * Opt-in telemetry streaming to a central network dashboard.
    * `enabled` is the master gate: when false, NOTHING is forwarded off the
