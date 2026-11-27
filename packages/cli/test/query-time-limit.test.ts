@@ -3,7 +3,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OxigraphWorkerStore, QueryWorkStoppedError, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, OxigraphWorkerStore, SharedMemoryLiteralBlobStore, QueryWorkStoppedError, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { DKGAgent } from '@origintrail-official/dkg-agent';
+import { WorkerAdmission, runStoppableRead } from '../../storage/src/adapters/oxigraph-worker-admission.js';
 import {
   DEFAULT_API_QUERY_TIME_LIMIT_MS,
   MAX_API_QUERY_TIME_LIMIT_MS,
@@ -118,6 +120,66 @@ describe('the node time limit for /api/query', () => {
 });
 
 describe('/api/query answers for its time limit', () => {
+  it('bounds the local-first registration-status read before reaching the query engine', async () => {
+    vi.useFakeTimers();
+    const registrationRead = vi.fn((_sparql: string, options?: QueryOptions) => new Promise((_resolve, reject) => {
+      options?.signal?.addEventListener('abort', () => reject(options.signal!.reason), { once: true });
+    }));
+    const queryEngine = { query: vi.fn() };
+    const internal = {
+      log: { info: vi.fn() }, store: { query: registrationRead }, queryEngine,
+      localContextGraphProvenance: { hasLocalCreate: () => true }, subscribedContextGraphs: new Map(),
+      contextGraphMetaProjection: { markDirty: vi.fn() },
+      resolveContextGraphReadAuthority: async () => ({ outcome: 'denied', grantScope: 'none',
+        source: 'legacy-local', reason: 'no-read-authority', metadataBootstrap: 'eligible' }),
+      isLocalFirstUnregisteredContextGraph: DKGAgent.prototype.isLocalFirstUnregisteredContextGraph,
+      readLocalContextGraphRegistrationStatus: DKGAgent.prototype.readLocalContextGraphRegistrationStatus,
+    } as unknown as DKGAgent;
+    const res = new ResponseStub();
+    try {
+      const route = handleQueryRoutes(routeContext('/api/query', new RequestStub({
+        sparql: 'SELECT ?s WHERE { ?s ?p ?o }', contextGraphId: 'local-draft', view: 'working-memory', timeoutMs: 1_000,
+      }), res, { query: (sparql: string, options: QueryOptions) => DKGAgent.prototype.query.call(internal, sparql, options) }));
+      await vi.waitFor(() => expect(registrationRead).toHaveBeenCalledOnce());
+      expect(registrationRead.mock.calls[0]![1]?.workDeadline).toBeTypeOf('number');
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(res.statusCode).toBe(504); // Assert before awaiting: a dropped signal must fail promptly.
+      await route;
+      expect(JSON.parse(res.body)).toMatchObject({ code: 'QUERY_TIME_LIMIT_EXCEEDED', stopped: false });
+      expect(registrationRead.mock.calls[0]![1]?.signal?.aborted).toBe(true);
+      expect(queryEngine.query).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not certify a rewritten query while its running sibling awaits termination', async () => {
+    const inner = new OxigraphStore();
+    const store = new SharedMemoryLiteralBlobStore(inner, { blobDir: '/unused-stopped-query', thresholdBytes: 8 });
+    let completeTermination!: () => void;
+    const termination = new Promise<boolean>(resolve => { completeTermination = () => resolve(true); });
+    const replaceWorker = vi.fn(() => termination);
+    const host = { admission: new WorkerAdmission(), operationTimeoutMs: 0, persist: async () => {}, replaceWorker };
+    const physical = vi.spyOn(inner, 'query').mockImplementation((_sparql, options) => runStoppableRead(host,
+      (_timeout, signal) => new Promise((_resolve, reject) => {
+        signal!.addEventListener('abort', () => reject(signal!.reason), { once: true });
+      }), options!));
+    const res = new ResponseStub();
+    try {
+      await handleQueryRoutes(routeContext('/api/query', new RequestStub({
+        sparql: `SELECT ?s WHERE { ?s <urn:p> "${'x'.repeat(100)}" }`, timeoutMs: 1_000,
+      }), res, { query: (sparql: string, options: QueryOptions) => store.query(sparql, options) }));
+      expect(physical).toHaveBeenCalledTimes(2);
+      expect(replaceWorker).toHaveBeenCalledOnce();
+      expect(physical.mock.calls.every(call => call[1]?.signal?.aborted)).toBe(true);
+      expect(res.statusCode).toBe(504);
+      expect(JSON.parse(res.body)).toMatchObject({ code: 'QUERY_TIME_LIMIT_EXCEEDED', stopped: false });
+    } finally {
+      completeTermination();
+      await Promise.allSettled(physical.mock.results.map(result => result.value));
+      physical.mockRestore();
+      await inner.close();
+    }
+  });
+
   it('hands the store the deadline and a signal that aborts at the limit', async () => {
     const query = vi.fn(async () => ({ bindings: [] }));
     const startedAt = performance.now();

@@ -225,6 +225,23 @@ describe('oxigraph-worker: an in-memory store is never replaced', () => {
 });
 
 describe('WorkerAdmission', () => {
+  it.each(['ordinary', 'exclusive'] as const)('releases a late %s ticket when admission races cancellation', async kind => {
+    const admission = new WorkerAdmission();
+    const noTimeout = () => new Error('unexpected timeout');
+    const first = await admission.own(undefined, 0, noTimeout);
+    const controller = new AbortController(), reason = new Error('cancel during handoff');
+    const waiting = kind === 'ordinary'
+      ? admission.enter(controller.signal, 0, noTimeout) : admission.own(controller.signal, 0, noTimeout);
+    const rejection = expect(waiting).rejects.toBe(reason);
+    first.done(); // Resolves the ticket promise; cancellation wins before its observer runs.
+    controller.abort(reason);
+    const next = admission.own(undefined, 0, noTimeout);
+    await rejection;
+    (await next).done();
+    const ordinary = admission.tryEnter();
+    expect(ordinary).not.toBeNull();
+    ordinary?.done();
+  });
   const noTimeout = () => new Error('unexpected timeout');
 
   it('admits operations at once while no stoppable read waits or runs', () => {

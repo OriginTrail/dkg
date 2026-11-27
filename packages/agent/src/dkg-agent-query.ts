@@ -510,9 +510,9 @@ export class QueryMethods extends DKGAgentBase {
         view: opts.view,
         callerAgentAddress: callerAgentAddressStr,
         targetsSharedMemory,
-        signal: opts.signal,
+        signal: opts.signal, workDeadline: opts.workDeadline,
         resolveAuthority: (id, options) => this.resolveContextGraphReadAuthority(id, options),
-        isLocalFirstUnregistered: (id) => this.isLocalFirstUnregisteredContextGraph(id),
+        isLocalFirstUnregistered: (id, readOptions) => this.isLocalFirstUnregisteredContextGraph(id, readOptions),
         readCurrentBinding: (id) => this.subscribedContextGraphs.get(id),
       }), opts);
       if (scopedReadAuthority.outcome === 'unavailable') {

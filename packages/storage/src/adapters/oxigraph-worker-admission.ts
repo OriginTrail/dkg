@@ -48,30 +48,18 @@ export class WorkerAdmission {
 
   #wait(kind: Waiter['kind'], signal: AbortSignal | undefined, timeoutMs: number, timeoutError: () => Error): Promise<WorkerAdmissionTicket> {
     if (signal?.aborted) return Promise.reject(asAbortError(signal.reason));
-    return new Promise<WorkerAdmissionTicket>((resolve, reject) => {
-      let state: 'queued' | 'settled' = 'queued';
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const settle = () => {
-        state = 'settled';
-        if (timer) clearTimeout(timer);
-        signal?.removeEventListener('abort', onAbort);
-      };
-      const admit = (ticket: WorkerAdmissionTicket) => { settle(); resolve(ticket); };
-      const waiter: Waiter = { kind, admit };
-      const giveUp = (error: Error) => {
-        if (state === 'settled') return;
-        this.#waiters.splice(this.#waiters.indexOf(waiter), 1);
-        settle();
-        reject(error);
-        this.#pump();
-      };
-      const onAbort = () => giveUp(asAbortError(signal?.reason));
-      signal?.addEventListener('abort', onAbort, { once: true });
-      if (timeoutMs > 0) {
-        timer = setTimeout(() => giveUp(timeoutError()), timeoutMs);
-        if (typeof timer.unref === 'function') timer.unref();
-      }
+    let waiter!: Waiter;
+    const admission = new Promise<WorkerAdmissionTicket>(resolve => {
+      waiter = { kind, admit: resolve };
       this.#waiters.push(waiter);
+    });
+    const waiting = raceStoreWorkAgainstAbort(admission, signal, {
+      timeout: { timeoutMs, timeoutError }, onLateResult: ticket => ticket.done(),
+    });
+    this.#pump();
+    return waiting.finally(() => {
+      const index = this.#waiters.indexOf(waiter);
+      if (index >= 0) this.#waiters.splice(index, 1);
       this.#pump();
     });
   }
