@@ -244,6 +244,7 @@ export type {
   ContextGraphListOnChainFacts,
   ListContextGraphsRow,
 } from './context-graph-list-authority-enrichment.js';
+export type { ContextGraphListFilter } from './context-graph-list-filter.js';
 export {
   describeContextGraphOnChainIdResolution,
   parseContextGraphOnChainIdReference,

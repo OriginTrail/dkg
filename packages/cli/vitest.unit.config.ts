@@ -492,9 +492,12 @@ export default defineConfig({
           'test/daemon-prime-agent.test.ts',
           'test/daemon-prime-agent-persistence.test.ts',
           'test/daemon-sse-final-frame.test.ts',
+          // Proxy keepalives on the Hermes and OpenClaw chat streams (#3886).
+          'test/local-agent-sse-keepalive.test.ts',
           'test/chain-discovery-scan-mode.test.ts',
           'test/chain-discovery-scan-storage.test.ts',
           'test/context-graph-list-cli.test.ts',
+          'test/context-graph-list-filter-route.test.ts',
           'test/historical-context-graph-discovery.test.ts',
           'test/context-graph-subscriptions-route.test.ts',
           'test/context-graph-authority-route.test.ts',
