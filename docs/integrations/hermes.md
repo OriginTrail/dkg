@@ -32,6 +32,24 @@ Confirm node health, adapter verification, and a chat reply from the connected p
 
 If chat is unavailable, check the selected profile and bridge/gateway health with `dkg hermes doctor`. See the [adapter reference](https://github.com/OriginTrail/dkg/blob/main/packages/adapter-hermes/README.md) for runtime prerequisites, profiles, transport modes, and configuration.
 
+## Long-running turns
+
+The daemon gives each Hermes chat forward an absolute response deadline. The default is 900000 ms (15 minutes). Keepalives, token deltas and tool progress do not extend it, so a turn that is still working when the deadline passes ends with a structured `HERMES_GATEWAY_RESPONSE_TIMEOUT` or `HERMES_BRIDGE_RESPONSE_TIMEOUT`; the turn is not replayed automatically.
+
+To allow longer turns, set `localAgentIntegrations.hermes.responseTimeoutMs` in `~/.dkg/config.json` and restart the daemon:
+
+```json
+{
+  "localAgentIntegrations": {
+    "hermes": {
+      "responseTimeoutMs": 3600000
+    }
+  }
+}
+```
+
+The value is milliseconds: a positive integer up to 86400000 (24 hours). Invalid values stop the daemon from starting. The same deadline covers `POST /api/hermes-channel/send` and `POST /api/hermes-channel/stream`.
+
 ## Disconnect
 
 ```bash

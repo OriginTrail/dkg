@@ -26,6 +26,12 @@ import {
   resolveHermesApiServerKey,
 } from '../src/daemon/hermes.js';
 import {
+  assertHermesChannelResponseTimeoutConfig,
+  MAX_HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
+  resolveHermesChannelResponseTimeoutMs,
+} from '../src/daemon/hermes-response-timeout.js';
+import { localAgentChannelDispatcherTimeoutMs } from '../src/daemon/local-agent-channel-fetch.js';
+import {
   connectLocalAgentIntegrationFromUi,
   getLocalAgentIntegration,
   mergeLocalAgentIntegrationConfig,
@@ -1589,6 +1595,37 @@ describe('Hermes local-agent registry lifecycle', () => {
   });
 });
 
+describe('Hermes channel response deadline config', () => {
+  it('preserves the 15-minute default', () => {
+    expect(resolveHermesChannelResponseTimeoutMs(undefined)).toBe(900_000);
+    expect(HERMES_CHANNEL_RESPONSE_TIMEOUT_MS).toBe(900_000);
+  });
+
+  it('accepts a positive bounded override', () => {
+    expect(resolveHermesChannelResponseTimeoutMs(120_000)).toBe(120_000);
+    expect(resolveHermesChannelResponseTimeoutMs(MAX_HERMES_CHANNEL_RESPONSE_TIMEOUT_MS))
+      .toBe(MAX_HERMES_CHANNEL_RESPONSE_TIMEOUT_MS);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, MAX_HERMES_CHANNEL_RESPONSE_TIMEOUT_MS + 1, '90000', null])(
+    'rejects invalid value %j',
+    (value) => {
+      expect(() => resolveHermesChannelResponseTimeoutMs(value))
+        .toThrow('localAgentIntegrations.hermes.responseTimeoutMs must be a positive integer');
+    },
+  );
+
+  it('rejects an invalid persisted config before a forward can start', () => {
+    expect(() => assertHermesChannelResponseTimeoutConfig({
+      localAgentIntegrations: { hermes: { responseTimeoutMs: 0 } },
+    })).toThrow('localAgentIntegrations.hermes.responseTimeoutMs must be a positive integer');
+  });
+
+  it('keeps the dispatcher timers later than the explicit deadline', () => {
+    expect(localAgentChannelDispatcherTimeoutMs(120_000)).toBe(180_000);
+  });
+});
+
 describe('Hermes daemon routes', () => {
   it('fails closed for chat send when Hermes local-agent chat is not enabled', async () => {
     const { ctx, res } = makeHermesRouteContext({
@@ -1642,6 +1679,134 @@ describe('Hermes daemon routes', () => {
       correlationId: 'corr-timeout',
       timeoutMs: HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
     });
+  });
+
+  it('applies the configured deadline to Hermes chat send without replaying the turn', async () => {
+    const urls: string[] = [];
+    let sendSignal: AbortSignal | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const requestUrl = String(url);
+      urls.push(requestUrl);
+      if (requestUrl.endsWith('/health')) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (requestUrl.endsWith('/send')) {
+        sendSignal = init?.signal ?? undefined;
+        return await new Promise<Response>((_resolve, reject) => {
+          const rejectTimeout = () => {
+            const err = new Error('The operation was aborted due to timeout');
+            (err as any).name = 'TimeoutError';
+            reject(err);
+          };
+          if (!init?.signal) return rejectTimeout();
+          if (init.signal.aborted) return rejectTimeout();
+          init.signal.addEventListener('abort', rejectTimeout, { once: true });
+        });
+      }
+      return new Response('unexpected target', { status: 418 });
+    }));
+    const { ctx, res } = makeHermesRouteContext({
+      text: 'long task',
+      correlationId: 'corr-configured-timeout',
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange: vi.fn(async () => {}),
+    }, {
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          responseTimeoutMs: 50,
+          transport: {
+            kind: 'hermes-channel',
+            bridgeUrl: 'http://127.0.0.1:9444',
+            gatewayUrl: 'https://hermes.example.com',
+          },
+        },
+      },
+    }, '/api/hermes-channel/send');
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(504);
+    expect(JSON.parse(res.body)).toMatchObject({
+      code: 'HERMES_BRIDGE_RESPONSE_TIMEOUT',
+      source: 'hermes-channel',
+      target: 'bridge',
+      correlationId: 'corr-configured-timeout',
+      timeoutMs: 50,
+    });
+    expect(sendSignal).toBeInstanceOf(AbortSignal);
+    expect(sendSignal?.aborted).toBe(true);
+    expect(urls).toEqual([
+      'http://127.0.0.1:9444/health',
+      'http://127.0.0.1:9444/send',
+    ]);
+  });
+
+  it('does not let healthy keepalives extend the configured Hermes stream deadline', async () => {
+    const bridge = createServer((req, res) => {
+      req.resume();
+      if (req.url === '/health') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      if (req.url === '/stream') {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write(': keepalive\n\n');
+        const keepalive = setInterval(() => {
+          if (!res.writableEnded) res.write(': keepalive\n\n');
+        }, 20);
+        res.on('close', () => clearInterval(keepalive));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => bridge.listen(0, '127.0.0.1', resolve));
+    const bridgeUrl = `http://127.0.0.1:${(bridge.address() as AddressInfo).port}`;
+    vi.stubGlobal('fetch', undiciFetch);
+    try {
+      const { ctx, res } = makeHermesRouteContext({
+        text: 'long stream',
+        correlationId: 'corr-keepalive-deadline',
+      }, {
+        hasChatTurn: vi.fn(async () => false),
+        storeChatExchange: vi.fn(async () => {}),
+      }, {
+        localAgentIntegrations: {
+          hermes: {
+            enabled: true,
+            responseTimeoutMs: 500,
+            transport: { kind: 'hermes-channel', bridgeUrl },
+          },
+        },
+      }, '/api/hermes-channel/stream');
+
+      await handleHermesRoutes(ctx);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.writableEnded).toBe(true);
+      // The keepalives reached the downstream stream, but did not extend the deadline.
+      expect(res.body).toContain(': keepalive');
+      const frames = res.body
+        .split('\n\n')
+        .filter((frame: string) => frame.startsWith('data: '))
+        .map((frame: string) => JSON.parse(frame.slice('data: '.length)));
+      expect(frames).toEqual([
+        expect.objectContaining({
+          type: 'error',
+          code: 'HERMES_BRIDGE_RESPONSE_TIMEOUT',
+          source: 'hermes-channel',
+          target: 'bridge',
+          correlationId: 'corr-keepalive-deadline',
+          timeoutMs: 500,
+        }),
+      ]);
+    } finally {
+      bridge.closeAllConnections();
+      await new Promise((resolve) => bridge.close(resolve));
+    }
   });
 
   it('keeps Hermes health reads from mutating stale runtime state', async () => {

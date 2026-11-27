@@ -12,7 +12,6 @@ import {
 } from '../local-agents.js';
 import type { OpenClawAttachmentRef } from '../openclaw.js';
 import {
-  HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
   buildStableHermesTurnId,
   buildHermesChannelHeaders,
   ensureHermesBridgeAvailable,
@@ -39,6 +38,7 @@ import {
   isUndiciResponseTimeoutError,
   localAgentChannelFetchInit,
 } from '../local-agent-channel-fetch.js';
+import { resolveHermesChannelResponseTimeoutMs } from '../hermes-response-timeout.js';
 
 type HermesPersistRouteResult = {
   statusCode: number;
@@ -62,6 +62,7 @@ function formatTimeoutMs(timeoutMs: number): string {
 function buildHermesChannelTimeoutBody(
   correlationId: string,
   target: { name?: string } | undefined,
+  timeoutMs: number,
   details?: string,
 ): Record<string, unknown> {
   const targetName = target?.name === 'gateway' ? 'gateway' : 'bridge';
@@ -73,9 +74,9 @@ function buildHermesChannelTimeoutBody(
       : 'HERMES_BRIDGE_RESPONSE_TIMEOUT',
     source: 'hermes-channel',
     target: targetName,
-    details: details || `${targetLabel} did not produce an agent response within ${formatTimeoutMs(HERMES_CHANNEL_RESPONSE_TIMEOUT_MS)}`,
+    details: details || `${targetLabel} did not produce an agent response within ${formatTimeoutMs(timeoutMs)}`,
     correlationId,
-    timeoutMs: HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
+    timeoutMs,
   };
 }
 
@@ -223,6 +224,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
 
     const targets = getHermesChannelTargets(config);
     const apiServerKey = resolveHermesApiServerKey(config);
+    const responseTimeoutMs = resolveHermesChannelResponseTimeoutMs(config.localAgentIntegrations?.hermes?.responseTimeoutMs);
     let lastFailure: { status?: number; details?: string; offline?: boolean } | null = null;
 
     for (const target of targets) {
@@ -242,7 +244,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             'Content-Type': 'application/json',
           }, target.inboundUrl, apiServerKey),
           body: JSON.stringify(forwardBody),
-          ...localAgentChannelFetchInit(HERMES_CHANNEL_RESPONSE_TIMEOUT_MS),
+          ...localAgentChannelFetchInit(responseTimeoutMs),
         });
         if (!forwardRes.ok) {
           const details = await forwardRes.text().catch(() => '');
@@ -253,12 +255,13 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             return jsonResponse(res, 504, buildHermesStructuredChannelTimeoutBody(
               payload.correlationId,
               details,
-            ) ?? buildHermesChannelTimeoutBody(payload.correlationId, target));
+            ) ?? buildHermesChannelTimeoutBody(payload.correlationId, target, responseTimeoutMs));
           }
           if (forwardRes.status === 504) {
             return jsonResponse(res, 504, buildHermesChannelTimeoutBody(
               payload.correlationId,
               target,
+              responseTimeoutMs,
               details || `${target.name} response timeout`,
             ));
           }
@@ -308,7 +311,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         return jsonResponse(res, 200, reply);
       } catch (err: any) {
         if (isHermesBridgeTimeoutError(err)) {
-          return jsonResponse(res, 504, buildHermesChannelTimeoutBody(payload.correlationId, target));
+          return jsonResponse(res, 504, buildHermesChannelTimeoutBody(payload.correlationId, target, responseTimeoutMs));
         }
         lastFailure = { details: err.message, offline: true };
       }
@@ -355,6 +358,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
 
     const targets = getHermesChannelTargets(config);
     const apiServerKey = resolveHermesApiServerKey(config);
+    const responseTimeoutMs = resolveHermesChannelResponseTimeoutMs(config.localAgentIntegrations?.hermes?.responseTimeoutMs);
     let lastFailure: { status?: number; details?: string; offline?: boolean } | null = null;
 
     for (const target of targets) {
@@ -376,7 +380,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             Accept: 'text/event-stream',
           }, streamUrl, apiServerKey),
           body: JSON.stringify(forwardBody),
-          ...localAgentChannelFetchInit(HERMES_CHANNEL_RESPONSE_TIMEOUT_MS),
+          ...localAgentChannelFetchInit(responseTimeoutMs),
         });
 
         if (!transportRes.ok) {
@@ -388,12 +392,13 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             return jsonResponse(res, 504, buildHermesStructuredChannelTimeoutBody(
               payload.correlationId,
               details,
-            ) ?? buildHermesChannelTimeoutBody(payload.correlationId, target));
+            ) ?? buildHermesChannelTimeoutBody(payload.correlationId, target, responseTimeoutMs));
           }
           if (transportRes.status === 504) {
             return jsonResponse(res, 504, buildHermesChannelTimeoutBody(
               payload.correlationId,
               target,
+              responseTimeoutMs,
               details || `${target.name} response timeout`,
             ));
           }
@@ -467,7 +472,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
           } catch (err: any) {
             if (!res.writableEnded) {
               const event = isHermesBridgeTimeoutError(err)
-                ? { type: 'error', ...buildHermesChannelTimeoutBody(payload.correlationId, target) }
+                ? { type: 'error', ...buildHermesChannelTimeoutBody(payload.correlationId, target, responseTimeoutMs) }
                 : { type: 'error', error: err.message };
               res.write(`data: ${JSON.stringify(event)}\n\n`);
             }
@@ -503,7 +508,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         return;
       } catch (err: any) {
         if (isHermesBridgeTimeoutError(err)) {
-          return jsonResponse(res, 504, buildHermesChannelTimeoutBody(payload.correlationId, target));
+          return jsonResponse(res, 504, buildHermesChannelTimeoutBody(payload.correlationId, target, responseTimeoutMs));
         }
         lastFailure = { details: err.message, offline: true };
       }
