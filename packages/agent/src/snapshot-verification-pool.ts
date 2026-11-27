@@ -20,7 +20,7 @@ export function snapshotVerificationWidth(resources = {
 /** Each lane owns one verifier; no unbounded worker-message queue or parsed-asset backlog. */
 export async function withSnapshotVerificationPool<T>(options: {
   contextGraphId: string; signal: AbortSignal;
-  run: (lane: { index: number; verify: ReturnType<typeof createAssetPayloadVerifier> }) => Promise<T>;
+  run: (lane: { index: number; signal: AbortSignal; verify: ReturnType<typeof createAssetPayloadVerifier> }) => Promise<T>;
   /** Only lowers the resource-derived ceiling. */
   maxWorkers?: number;
 }): Promise<T[]> {
@@ -44,7 +44,7 @@ export async function withSnapshotVerificationPool<T>(options: {
         processDurableBatchInWorker: (data, meta, _ctx, accept, mode) => worker.processDurableBatch(data, meta, accept, mode),
       });
       try {
-        return await options.run({ index, verify: async (payload: DecodedAssetPayload) => {
+        return await options.run({ index, signal, verify: async (payload: DecodedAssetPayload) => {
           signal.throwIfAborted();
           const result = await verify(payload, signal);
           signal.throwIfAborted();

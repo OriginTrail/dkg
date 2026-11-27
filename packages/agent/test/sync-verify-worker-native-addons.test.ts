@@ -1,7 +1,6 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { expect, it, vi } from 'vitest';
 import { SyncVerifyWorker } from '../src/sync-verify-worker.js';
@@ -29,11 +28,13 @@ process.dlopen = function (module, filename, ...rest) {
   threads.execArgv = ['--require', preload];
   const addons = () => existsSync(log) ? readFileSync(log, 'utf8') : '';
   try {
-    // Without the thread's environment the same module graph loads the addon, so the check below can't pass vacuously.
-    const control = new Worker(fileURLToPath(new URL('../dist/sync-verify-worker-impl.js', import.meta.url)));
-    const answered = new Promise(resolve => control.once('message', resolve));
-    control.postMessage({ id: 1, method: 'parseAndFilter', args: ['', 'urn:g', 'test'] });
-    await answered;
+    // The verifier now imports a transport-free surface. Use the public core
+    // barrel as an independent positive control for addon instrumentation.
+    const control = new Worker(`
+      const { parentPort, workerData } = require('node:worker_threads');
+      import(workerData).then(() => parentPort.postMessage('loaded'));
+    `, { eval: true, workerData: import.meta.resolve('@origintrail-official/dkg-core') });
+    await new Promise(resolve => control.once('message', resolve));
     await control.terminate();
     expect(addons()).toContain('bufferutil');
     rmSync(log);

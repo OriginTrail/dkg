@@ -41,7 +41,9 @@ function fixture() {
   }));
   const evidence = { mode: 'rpc-only', snapshot: { chainId, assetStorage, contextGraphId: 'urn:cg', assets },
     authenticate: (asset: unknown) => ({ asset }) } as unknown as PublicSnapshotEvidence;
-  return { directory: '/checkpoint', entries, evidence, signal: new AbortController().signal, assertCurrent() {} };
+  let next = 0;
+  const source = { next: async () => entries[next++], consumed: () => {} };
+  return { directory: '/checkpoint', entries, source, evidence, signal: new AbortController().signal, assertCurrent() {} };
 }
 
 // Keep the real pool and native gzip: all fixture I/O/verifier promises resolve

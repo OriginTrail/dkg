@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { GRAPH_KA_CONTENT_SCOPE_VERSION, MemoryLayer, createGraphKnowledgeAssetScope,
-  knowledgeAssetLayerGraphUri, assertSafeIri, validateSubGraphName } from '@origintrail-official/dkg-core';
+import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer, validateSubGraphName
+} from '@origintrail-official/dkg-core/verification';
+import { assertSafeIri } from '@origintrail-official/dkg-core/sparql-safe';
 import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 const DKG = 'http://dkg.io/ontology/';
 

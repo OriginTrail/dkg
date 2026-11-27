@@ -156,3 +156,11 @@ export function startDaemonLogController(opts: {
     },
   };
 }
+
+/** Preserve a startup failure in the log before cleanup detaches its writer. */
+export function startupFailureCleanup(log: (message: string) => void, cleanup: () => Promise<void>) {
+  return async (error: unknown): Promise<void> => {
+    log(`[startup] Failed: ${error instanceof Error ? error.message : String(error)}`);
+    await cleanup();
+  };
+}

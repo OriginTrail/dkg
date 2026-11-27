@@ -11,11 +11,17 @@ export interface SnapshotCheckpointBudget {
   readonly maxEncodedBytes: number; readonly maxPlainBytes: number; readonly minFreeBytes: number;
 }
 
+export interface SnapshotCheckpointStaging {
+  reserve(bytes: number, signal: AbortSignal): Promise<void>;
+  publish(entry: SnapshotCheckpointEntry): void;
+}
+
 /** New protocol only: PERSISTED is local checkpoint persistence, never materialization or coverage. */
 export async function receiveSnapshotCheckpointChunk(
   session: Pick<BulkGraphSession, 'next' | 'send' | 'signal'>,
   request: BulkGraphRequest,
-  options: { directory: string; startIndex: number; budget: SnapshotCheckpointBudget; assertCurrent(): void },
+  options: { directory: string; startIndex: number; budget: SnapshotCheckpointBudget; assertCurrent(): void;
+    staging?: SnapshotCheckpointStaging },
 ): Promise<SnapshotCheckpointEntry[]> {
   const entries: SnapshotCheckpointEntry[] = [];
   await receiveBulkChunk(session, request, {
@@ -25,6 +31,8 @@ export async function receiveSnapshotCheckpointChunk(
       if (header.encodedBytes > budget.maxEncodedBytes - budget.encodedBytes
         || header.plainBytes > budget.maxPlainBytes - budget.plainBytes)
         throw new RangeError('Checkpoint job allowance exceeded');
+      await options.staging?.reserve(header.encodedBytes, session.signal);
+      session.signal.throwIfAborted(); options.assertCurrent();
       const disk = await statfs(options.directory);
       if (disk.bavail * disk.bsize < budget.minFreeBytes + header.encodedBytes + header.plainBytes)
         throw new Error('Checkpoint disk reserve unavailable');
@@ -42,6 +50,7 @@ export async function receiveSnapshotCheckpointChunk(
       session.signal.throwIfAborted(); options.assertCurrent();
       entries.push({ index, ual: request.assetUals[assetIndex]!, encodedBytes: bytes,
         plainBytes: header.plainBytes, bodySha256: header.digest, metadataSha256: checkpointSha256(metadata) });
+      options.staging?.publish(entries[entries.length - 1]!);
       await session.send({ kind: K.CREDIT, index: assetIndex, sequence: bytes, payload: new Uint8Array() });
       await session.send({ kind: K.PERSISTED, index: assetIndex, sequence: bytes, payload: new Uint8Array() });
     },

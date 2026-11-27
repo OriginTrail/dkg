@@ -83,6 +83,8 @@ it.each(['encoded', 'expanded'] as const)('preparation carries %s accounting bet
     peerBatches: async function* () { yield ['core']; }, dataDir: '/fixture', signal: new AbortController().signal,
     deadline: Date.now() + 30_000, assertCurrent() {} })).rejects.toThrow('allowance');
   expect(sessions).toHaveLength(2); expect(sessions[0]!.send).toHaveBeenCalledTimes(2);
-  expect(sessions[1]!.send).not.toHaveBeenCalled(); expect(verifySnapshotCheckpoint).not.toHaveBeenCalled();
+  expect(sessions[1]!.send).not.toHaveBeenCalled();
+  expect(verifySnapshotCheckpoint).toHaveBeenCalledOnce();
+  expect(vi.mocked(verifySnapshotCheckpoint).mock.calls[0]![0].signal.aborted).toBe(true);
   expect(vi.mocked(open).mock.calls.filter(([path]) => String(path).endsWith('.body'))).toHaveLength(1);
 });

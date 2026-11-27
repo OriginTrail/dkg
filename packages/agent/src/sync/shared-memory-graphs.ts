@@ -2,7 +2,7 @@ import {
   contextGraphWorkspaceGraphUri,
   contextGraphWorkspaceMetaGraphUri,
   validateSubGraphName,
-} from '@origintrail-official/dkg-core';
+} from '@origintrail-official/dkg-core/verification';
 
 export function isSharedMemoryBucketDescendantDataGraph(graph: string, bucketGraph: string): boolean {
   if (!graph.startsWith(`${bucketGraph}/`)) return false;

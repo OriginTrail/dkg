@@ -1,11 +1,27 @@
 import { expect, it } from 'vitest';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { checkpointAgentFixture } from '../../agent/test/helpers/public-checkpoint-agent-fixture.js';
 import { checkDaemonCheckpointEligibility } from '../src/daemon/public-checkpoint-config.js';
 import { openDaemonCheckpointAgent } from '../src/daemon/public-checkpoint-agent.js';
 import { PublicCheckpointStartup } from '../src/daemon/public-checkpoint-startup.js';
 import { openSnapshotNativeStore } from '../../agent/src/snapshot-native-store.js';
+
+it('refuses preparation when the reachable Core has not enabled checkpoint serving', async () => {
+  const f = await checkpointAgentFixture({ servingEnabled: false });
+  const runtime = { java: process.env.DKG_PUBLIC_CHECKPOINT_JAVA!, jar: process.env.DKG_PUBLIC_CHECKPOINT_JAR!,
+    jarSha256: process.env.DKG_PUBLIC_CHECKPOINT_JAR_SHA256! };
+  await mkdir(f.config.dataDir);
+  try {
+    await expect(openDaemonCheckpointAgent(f.config, { version: 1, runtime, source: f.sync },
+      'fresh', AbortSignal.timeout(30_000))).rejects.toThrow('No compatible public checkpoint core; use incremental recovery');
+    const checkpoints = join(f.config.dataDir, 'public-checkpoint-preparation/public-snapshot-checkpoints');
+    const attempts = await readdir(checkpoints);
+    expect(attempts).toHaveLength(1);
+    expect(await readdir(join(checkpoints, attempts[0]!))).toEqual([]);
+    expect(await readdir(f.config.dataDir)).not.toContain('public-checkpoint-edge');
+  } finally { await f.core.stop(); }
+}, 30_000);
 
 it('normal daemon composition prepares once, owns native startup, and reopens the same journal', async () => {
   const f = await checkpointAgentFixture();
