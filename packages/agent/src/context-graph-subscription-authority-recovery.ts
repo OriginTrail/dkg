@@ -126,6 +126,19 @@ export interface DeferredContextGraphSubscriptionAuthorityRecoveryPorts {
   warn(id: string, error: unknown): void;
 }
 
+/** Paced schedulers hold one row lease through activation and compensation. */
+async function recoverScheduledSubscriptionRow(
+  id: string, ports: SubscriptionRecoveryRowPorts, signal: AbortSignal,
+  options: Parameters<typeof recoverPersistedSubscriptionRow>[3],
+): ReturnType<typeof recoverPersistedSubscriptionRow> {
+  const owner = ports.recovery.claim(id, 0, signal);
+  if (!owner) return { kind: 'again' };
+  try {
+    await owner.ready;
+    return await recoverPersistedSubscriptionRow(id, ports, owner, options);
+  } finally { owner.release(); }
+}
+
 /** Executes one fenced pass over only the authority-unavailable durable rows. */
 export async function recoverDeferredContextGraphSubscriptionAuthorities(
   signal: AbortSignal,
@@ -134,7 +147,7 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
   const status = ports.getStatus();
   if (!status?.rehydrationEnabled || !ports.row.isCurrent()) return;
   const candidateIds = [...ports.dormancyById]
-    .filter(([id, reason]) => reason === 'authorityUnavailable' && ports.row.recovery?.has(id) !== true)
+    .filter(([id, reason]) => reason === 'authorityUnavailable' && !ports.row.recovery.has(id))
     .map(([id]) => id)
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   const snapshotRows = async (): Promise<ReadonlyMap<string, ContextGraphSubscriptionRecord>> => (
@@ -202,7 +215,7 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
     },
   };
   for (const { contextGraphId, revision, candidate } of candidates) {
-    const outcome = await recoverPersistedSubscriptionRow(contextGraphId, rowPorts, signal, { snapshot: { row: candidate, revision } });
+    const outcome = await recoverScheduledSubscriptionRow(contextGraphId, rowPorts, signal, { snapshot: { row: candidate, revision } });
     if (outcome.kind === 'activation-failed') ports.warn(contextGraphId, outcome.error);
     if (!ports.row.isCurrent()) return;
   }
@@ -260,7 +273,7 @@ export async function activateRollingSubscriptionPromotion(
 
 /** Rolling promotion owns candidate ordering and generation fences. */
 export interface RollingSubscriptionPromotionPorts {
-  readonly recovery?: SubscriptionRecoveryCoordinator;
+  readonly recovery: SubscriptionRecoveryCoordinator;
   readonly store?: Pick<ContextGraphSubscriptionStore, 'load' | 'loadAll'>;
   getStatus(): Pick<ContextGraphSubscriptionRehydrationInternalStatus, 'rehydrationEnabled' | 'activationCap'> | null;
   isCurrent(signal: AbortSignal): boolean;
@@ -317,7 +330,7 @@ export async function promoteDormantContextGraphSubscriptions(
       // A subscription that lost its readiness can take the slot during the pause.
       if (ports.contextGraphSubscriptionRehydrationSlotIds.size >= status.activationCap) break;
 
-      const outcome = await recoverPersistedSubscriptionRow(contextGraphId, {
+      const outcome = await recoverScheduledSubscriptionRow(contextGraphId, {
         recovery: ports.recovery,
         isCurrent: () => ports.isCurrent(signal) && ports.contextGraphSubscriptionRehydrationPendingIds.has(contextGraphId),
         dormancy: id => ports.contextGraphSubscriptionDormancyById.get(id),

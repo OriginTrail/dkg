@@ -1,6 +1,6 @@
 import { SubscriptionRecoveryCoordinator } from '../src/subscription-recovery-owner.js';
 import { PersistedSubscriptionNameBindingRetry } from '../src/context-graph-subscription-name-binding-retry.js';
-import { recoverPersistedSubscriptionRow, type SubscriptionRecoveryRowPorts } from '../src/context-graph-subscription-recover-row.js';
+import type { SubscriptionRecoveryRowPorts } from '../src/context-graph-subscription-recover-row.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ContextGraphSubscriptionActivations, isCommittedSubscription } from '../src/context-graph-subscription-activation-state.js';
 import { StorageAckDemandActivations } from '../src/storage-ack-demand-activation.js';
@@ -106,6 +106,7 @@ describe('demand and rolling activation share commit ownership', () => {
       await f.owner.activate(record, f.ports, { onChainId, isCurrent, prepare });
     });
     const demand = new StorageAckDemandActivations({
+      recovery: new SubscriptionRecoveryCoordinator(),
       signal: controller.signal, isCurrent: () => true,
       dormancy: id => f.dormancy.get(id), revision: () => 0, subscription: id => f.live.get(id),
       load: async () => ({ ...target }), resolveAuthority: async () => ({ outcome: 'allowed', grantScope: 'public',
@@ -142,8 +143,9 @@ describe('demand and rolling activation share commit ownership', () => {
     const reading = new Promise<void>(resolve => { answer = resolve; });
     const preparing = new Promise<void>(resolve => { beginPreparation = resolve; });
     const held = new Promise<void>(resolve => { release = resolve; });
-    const controller = new AbortController();
+    const controller = new AbortController(), recovery = new SubscriptionRecoveryCoordinator();
     const rolling = promoteDormantContextGraphSubscriptions({
+      recovery,
       store: { load: async () => ({ ...target }), loadAll: async () => [target] },
       getStatus: f.status, isCurrent: () => !controller.signal.aborted,
       contextGraphSubscriptionRollingChecks: new RollingSubscriptionChecks({ minPauseMs: 0, pausePerCheckTime: 0 }),
@@ -157,6 +159,7 @@ describe('demand and rolling activation share commit ownership', () => {
     }, controller.signal);
     await readStarted;
     const demand = new StorageAckDemandActivations({
+      recovery,
       signal: controller.signal, isCurrent: () => !controller.signal.aborted,
       dormancy: id => f.dormancy.get(id), revision: () => 0, subscription: id => f.live.get(id),
       load: async () => ({ ...target }), resolveAuthority: async () => authority,
@@ -168,8 +171,8 @@ describe('demand and rolling activation share commit ownership', () => {
       track: () => {}, log: { info: () => {}, warn: () => {}, debug: () => {} },
     });
     demand.request(target.id, '1');
+    answer(); await rolling; // The successor waits for the superseded read to retire.
     await preparing;
-    answer(); await rolling;
     expect(isCommittedSubscription(f.live, f.dormancy, target.id)).toBe(false);
     expect(f.status().activated).toBe(0);
     if (retired) controller.abort();
@@ -232,7 +235,7 @@ describe('one recovery owner across scheduling policies', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(resolveAuthority).toHaveBeenCalledOnce();
     // The periodic owner consults the same key, including during retry backoff.
-    await expect(recoverPersistedSubscriptionRow(target.id, ports, controller.signal)).resolves.toEqual({ kind: 'again' });
+    expect(recovery.claim(target.id, 0, controller.signal)).toBeUndefined();
     expect(resolveAuthority).toHaveBeenCalledOnce();
     const demand = new StorageAckDemandActivations(scheduled);
     expect(demand.request(target.id, '1')).toBe(true);

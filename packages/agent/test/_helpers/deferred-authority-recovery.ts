@@ -1,4 +1,4 @@
-import type { SubscriptionRecoveryCoordinator } from '../../src/subscription-recovery-owner.js';
+import { SubscriptionRecoveryCoordinator } from '../../src/subscription-recovery-owner.js';
 // SPDX-License-Identifier: Apache-2.0
 import { recoverDeferredContextGraphSubscriptionAuthorities as recover,
   type DeferredContextGraphSubscriptionAuthorityRecoveryCursor } from '../../src/context-graph-subscription-authority-recovery.js';
@@ -44,7 +44,7 @@ export function recoverDeferredContextGraphSubscriptionAuthorities(signal: Abort
     store: ports.store, dormancyById: ports.dormancyById, coldCursor: ports.coldCursor,
     getStatus: ports.getStatus, warn: ports.warn,
     row: {
-      recovery: ports.recovery,
+      recovery: ports.recovery ?? new SubscriptionRecoveryCoordinator(),
       isCurrent: ports.isCurrent, dormancy: id => ports.dormancyById.get(id),
       revision: id => ports.persistRevisions.get(id) ?? 0,
       subscription: id => ports.subscriptions.get(id),

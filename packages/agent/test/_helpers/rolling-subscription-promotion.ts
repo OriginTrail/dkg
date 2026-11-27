@@ -1,3 +1,4 @@
+import { SubscriptionRecoveryCoordinator } from '../../src/subscription-recovery-owner.js';
 // SPDX-License-Identifier: Apache-2.0
 import { createTestSubscriptionActivations } from './subscription-activation-owner.js';
 // Shared by the Hardhat fence suite and the hermetic request-lane suite.
@@ -42,6 +43,7 @@ export function createRollingPromotionFixture(
     owns: () => true, request: vi.fn(() => true), whenIdle: async () => undefined,
   };
   const host = {
+    recovery: new SubscriptionRecoveryCoordinator(),
     savedRows,
     store: { load, loadAll: async () => [...savedRows.values()] },
     getStatus: (): ReturnType<RollingSubscriptionPromotionPorts['getStatus']> => host.contextGraphSubscriptionRehydrationStatus,

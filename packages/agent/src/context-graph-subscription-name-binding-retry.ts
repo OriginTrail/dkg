@@ -150,7 +150,7 @@ export class PersistedSubscriptionNameBindingRetry {
     const outcome = await recoverPersistedSubscriptionRow(row.id, {
       ...this.ports, isCurrent: lease.isCurrent,
       resolveAuthority: saved => checkSubscriptionAuthority(lease, signal => this.ports.resolveAuthority(saved, signal)),
-    }, this.ports.signal, { owner: lease.owner });
+    }, lease.owner);
     held.lastCheckAt = this.#now();
     if (outcome.kind === 'done') return undefined;
     if (outcome.kind === 'activated') {
