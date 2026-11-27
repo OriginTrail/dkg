@@ -127,22 +127,21 @@ export class PersistedSubscriptionNameBindingRetry {
     }
     return taken;
   }
-  holds(id: string): boolean { return this.#executor.rows.has(id) && this.#executor.current(); }
-  get size(): number { return this.#executor.rows.size; }
+  holds(id: string): boolean { return this.#executor.has(id) && this.#executor.current(); }
+  get size(): number { return this.#executor.size; }
   get signal(): AbortSignal { return this.ports.signal; }
   whenIdle(): Promise<void> { return this.#executor.whenIdle(); }
 
   wake(): void {
     const now = this.#now();
-    for (const row of this.#executor.rows.values()) {
-      if (row.checking || row.dueAt <= now || !row.value.wakeable) continue;
+    this.#executor.reschedule(row => {
+      if (row.checking || row.dueAt <= now || !row.value.wakeable) return undefined;
       row.value.wakeable = false; row.value.wokenCheck = true;
-      row.dueAt = Math.min(row.dueAt, row.value.lastCheckAt + this.#firstPauseMs);
-    }
-    this.#executor.pump();
+      return { dueAt: Math.min(row.dueAt, row.value.lastCheckAt + this.#firstPauseMs) };
+    });
   }
 
-  async #attempt(row: SubscriptionRetryRow<HeldRow>, lease: SubscriptionRetryLease): Promise<number | undefined> {
+  async #attempt(row: Readonly<SubscriptionRetryRow<HeldRow>>, lease: SubscriptionRetryLease): Promise<number | undefined> {
     const held = row.value;
     held.checks += 1;
     const outcome = await recoverUnavailableSubscriptionRow(row.id, {
