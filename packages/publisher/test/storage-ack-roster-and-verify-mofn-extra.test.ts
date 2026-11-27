@@ -171,7 +171,8 @@ describe('P-8: VerifyCollector rejects single-voter promotion (requiredSignature
         proposalId: new Uint8Array(16), // echoes proposer; collector only uses approval signature/addresses
         agentSignatureR: ethers.getBytes(sig.r),
         agentSignatureVS: ethers.getBytes(sig.yParityAndS),
-        approvalTimestamp: new Date().toISOString(),
+        // An approval counts only for the approver address it names, which every approver sends.
+        approverAddress: w.address,
       });
     };
 

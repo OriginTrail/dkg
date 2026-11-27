@@ -327,6 +327,7 @@ import {
   isUndiciResponseTimeoutError,
   localAgentChannelFetchInit,
 } from '../local-agent-channel-fetch.js';
+import { writeLocalAgentSseHead } from '../local-agent-sse.js';
 
 import type { RequestContext } from './context.js';
 
@@ -933,12 +934,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
           transportRes.headers.get("content-type") ?? ""
         ).toLowerCase();
         if (contentType.includes("text/event-stream") && transportRes.body) {
-          res.writeHead(200, {
-            "Content-Type": "text/event-stream; charset=utf-8",
-            "Cache-Control": "no-cache",
-            Connection: "keep-alive",
-            ...corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)),
-          });
+          writeLocalAgentSseHead(res, corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)));
 
           try {
             await pipeOpenClawStream(
@@ -959,12 +955,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
         }
 
         const reply = await transportRes.json();
-        res.writeHead(200, {
-          "Content-Type": "text/event-stream; charset=utf-8",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-          ...corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)),
-        });
+        writeLocalAgentSseHead(res, corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)));
         res.write(
           `data: ${JSON.stringify({ type: "final", text: reply.text ?? "", correlationId: reply.correlationId ?? corrId })}\n\n`,
         );

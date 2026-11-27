@@ -629,3 +629,5 @@ export {
 
 export { decodeWorkspaceOperationTimestamp, earliestWorkspaceOperationTimestamp, isResolverWorkspaceOperationTimestamp } from './workspace-operation-timestamp.js';
 export { GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES, GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES, projectGraphKnowledgeAssetReplayControls } from './graph-knowledge-asset-controls.js';
+
+export { isPromoteRetirementApproval, type PromoteJobRetirer, type PromoteRetirementApproval, type PromoteRetirementResult } from './promote-job-retirement.js';

@@ -48,6 +48,7 @@ export {
   isStoreWorkPriority,
   registerTripleStoreAdapter,
   findTripleStoreCapability,
+  supportsAtomicSparqlModify,
   asBoundedQueryResponseCapability,
   deleteByPatternWithoutCount,
   createTripleStore,
