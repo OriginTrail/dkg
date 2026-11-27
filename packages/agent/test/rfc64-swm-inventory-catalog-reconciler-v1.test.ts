@@ -6,6 +6,7 @@ import {
   computeKaProjectionDigestV1,
   computeSwmAuthorInventoryHeadObjectDigestV1,
   computeSwmAuthorInventoryRowsDigestV1,
+  snapshotSwmAuthorInventoryRowsV1,
   type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
   type ContextGraphIdV1,
@@ -204,6 +205,56 @@ describe('RFC-64 R1.1 signed SWM inventory to catalog target', () => {
       resolveAsset,
     })).rejects.toMatchObject({ code: 'swm-catalog-reconcile-signature' });
     expect(resolveAsset).not.toHaveBeenCalled();
+  });
+
+  // Persistence hands the reconciler codec-owned row sets, which it reuses by identity instead of re-encoding.
+  describe('with a codec-owned row set, as persistence supplies it', () => {
+    const owned = (snapshot: SwmAuthorInventorySnapshotV1) =>
+      Object.freeze({ head: snapshot.head, rows: snapshotSwmAuthorInventoryRowsV1(snapshot.rows) });
+
+    it('reuses the owned rows and still binds every asset to its row', async () => {
+      const seal = await authorSeal();
+      const snapshot = owned(await signedSnapshot([inventoryRow(seal, PROJECTION)], AUTHOR_WALLET));
+      const resolveAsset = vi.fn(async (resolvedRow: Readonly<SwmAuthorInventoryRowV1>) => ({
+        assertionCoordinate: resolvedRow.assertionCoordinate, projectionBytes: PROJECTION, seal,
+      }));
+      const target = await prepareRfc64SwmInventoryCatalogTargetV1({ snapshot, resolveAsset });
+      expect(resolveAsset.mock.calls[0]![0]).toBe(snapshot.rows[0]);
+      expect(target.assets).toHaveLength(1);
+    });
+
+    it('rejects owned rows paired with another head', async () => {
+      const seal = await authorSeal();
+      const signed = await signedSnapshot([inventoryRow(seal, PROJECTION)], AUTHOR_WALLET);
+      const other = owned(await signedSnapshot([inventoryRow(await authorSeal(8n), PROJECTION)], AUTHOR_WALLET));
+      const resolveAsset = vi.fn();
+      await expect(prepareRfc64SwmInventoryCatalogTargetV1({
+        snapshot: Object.freeze({ head: signed.head, rows: other.rows }), resolveAsset,
+      })).rejects.toMatchObject({ code: 'swm-catalog-reconcile-input' });
+      expect(resolveAsset).not.toHaveBeenCalled();
+    });
+
+    it('rejects owned rows under a head signed by another key', async () => {
+      const seal = await authorSeal();
+      const snapshot = owned(await signedSnapshot([inventoryRow(seal, PROJECTION)], OTHER_WALLET));
+      const resolveAsset = vi.fn();
+      await expect(prepareRfc64SwmInventoryCatalogTargetV1({ snapshot, resolveAsset }))
+        .rejects.toMatchObject({ code: 'swm-catalog-reconcile-signature' });
+      expect(resolveAsset).not.toHaveBeenCalled();
+    });
+
+    it('rejects an owned row whose resolver substitutes different projection bytes', async () => {
+      const seal = await authorSeal();
+      const snapshot = owned(await signedSnapshot([inventoryRow(seal, PROJECTION)], AUTHOR_WALLET));
+      await expect(prepareRfc64SwmInventoryCatalogTargetV1({
+        snapshot,
+        resolveAsset: async (resolvedRow: Readonly<SwmAuthorInventoryRowV1>) => ({
+          assertionCoordinate: resolvedRow.assertionCoordinate,
+          projectionBytes: new TextEncoder().encode('<https://example.org/r1> <https://schema.org/name> "substituted" .\n'),
+          seal,
+        }),
+      })).rejects.toMatchObject({ code: 'swm-catalog-reconcile-binding' });
+    });
   });
 });
 

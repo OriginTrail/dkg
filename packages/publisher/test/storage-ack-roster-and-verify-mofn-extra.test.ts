@@ -32,7 +32,7 @@ import {
   encodePublishIntent,
   encodeVerifyApproval,
   computePublishACKDigest,
-  computeACKDigest,
+  computeVerifyApprovalDigest,
   decodeStorageACK,
 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -61,9 +61,10 @@ describe('P-8: VerifyCollector rejects single-voter promotion (requiredSignature
     ethers.keccak256(ethers.toUtf8Bytes('p8-verify-root')),
   );
   const proposerWallet = ethers.Wallet.createRandom();
+  const DOMAIN = { chainId: 84532n, contractAddress: '0x00000000000000000000000000000000000000a1' };
 
   function makeProposerSig() {
-    const digest = computeACKDigest(CG_ON_CHAIN, merkleRoot);
+    const digest = computeVerifyApprovalDigest(DOMAIN.chainId, DOMAIN.contractAddress, CG_ON_CHAIN, BATCH_ID, merkleRoot);
     return proposerWallet
       .signMessage(digest)
       .then((hex) => {
@@ -88,6 +89,7 @@ describe('P-8: VerifyCollector rejects single-voter promotion (requiredSignature
       collector.collect({
         contextGraphId: CG,
         contextGraphIdOnChain: CG_ON_CHAIN,
+        signingDomain: DOMAIN,
         verifiableMemoryId: VERIFIED_ID,
         batchId: BATCH_ID,
         merkleRoot,
@@ -114,6 +116,7 @@ describe('P-8: VerifyCollector rejects single-voter promotion (requiredSignature
       collector.collect({
         contextGraphId: CG,
         contextGraphIdOnChain: CG_ON_CHAIN,
+        signingDomain: DOMAIN,
         verifiableMemoryId: VERIFIED_ID,
         batchId: BATCH_ID,
         merkleRoot,
@@ -144,6 +147,7 @@ describe('P-8: VerifyCollector rejects single-voter promotion (requiredSignature
       collector.collect({
         contextGraphId: CG,
         contextGraphIdOnChain: CG_ON_CHAIN,
+        signingDomain: DOMAIN,
         verifiableMemoryId: VERIFIED_ID,
         batchId: BATCH_ID,
         merkleRoot,
@@ -160,14 +164,15 @@ describe('P-8: VerifyCollector rejects single-voter promotion (requiredSignature
     // address is distinct from the proposer's → should count as 1 remote
     // approval (meets requiredSignatures = 2 with proposer as the 2nd).
     const remoteWallet = ethers.Wallet.createRandom();
-    const approvalDigest = computeACKDigest(CG_ON_CHAIN, merkleRoot);
+    const approvalDigest = computeVerifyApprovalDigest(DOMAIN.chainId, DOMAIN.contractAddress, CG_ON_CHAIN, BATCH_ID, merkleRoot);
     const approvalBytesFor = async (w: ethers.Wallet) => {
       const sig = ethers.Signature.from(await w.signMessage(approvalDigest));
       return encodeVerifyApproval({
         proposalId: new Uint8Array(16), // echoes proposer; collector only uses approval signature/addresses
         agentSignatureR: ethers.getBytes(sig.r),
         agentSignatureVS: ethers.getBytes(sig.yParityAndS),
-        approvalTimestamp: new Date().toISOString(),
+        // An approval counts only for the approver address it names, which every approver sends.
+        approverAddress: w.address,
       });
     };
 
@@ -181,6 +186,7 @@ describe('P-8: VerifyCollector rejects single-voter promotion (requiredSignature
     const result = await collector.collect({
       contextGraphId: CG,
       contextGraphIdOnChain: CG_ON_CHAIN,
+      signingDomain: DOMAIN,
       verifiableMemoryId: VERIFIED_ID,
       batchId: BATCH_ID,
       merkleRoot,

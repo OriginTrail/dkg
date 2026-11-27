@@ -107,7 +107,8 @@ describe('sync authorization cancellation at the real owner', () => {
     const controller = new AbortController();
     const isPrivateContextGraph = vi.fn(async () => { controller.abort('privacy read retired'); return false; });
     await expect(ContextGraphResolveMethods.prototype.authorizeSyncRequest.call(
-      { isPrivateContextGraph } as never, {} as never, 'peer', { signal: controller.signal },
+      { keepsContextGraphLocally: () => false, isPrivateContextGraph } as never,
+      { contextGraphId: 'public-cg' } as never, 'peer', { signal: controller.signal },
     )).rejects.toMatchObject({ name: 'AbortError', message: 'privacy read retired' });
   });
 
@@ -121,7 +122,7 @@ describe('sync authorization cancellation at the real owner', () => {
     );
     const signature = ethers.Signature.from(await wallet.signMessage(digest));
     const getMemberRecoveryGate = vi.fn(async () => [wallet.address]);
-    const agent = { peerId: 'local-peer', seenPrivateSyncRequestIds: new Map(),
+    const agent = { peerId: 'local-peer', seenPrivateSyncRequestIds: new Map(), keepsContextGraphLocally: () => true,
       isPrivateContextGraph: async () => true, computeSyncDigest: ContextGraphResolveMethods.prototype.computeSyncDigest,
       chain: { verifySyncIdentity: vi.fn(async () => { if (cancelled) controller.abort('identity read retired'); return true; }) },
       getPrivateContextGraphParticipants: async () => [], getContextGraphAllowedPeers: async () => [],

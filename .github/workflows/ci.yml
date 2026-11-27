@@ -1772,11 +1772,9 @@ jobs:
   # crytic-compile to read directly, and pass `ignore-compile: true`
   # to skip the action's own install/build.
   #
-  # Aderyn ships as the @cyfrin/aderyn npm devDep. Its package lazily
-  # installs the platform-specific binary when `pnpm exec aderyn` runs;
-  # keep it out of repo-wide `pnpm.onlyBuiltDependencies` so ordinary
-  # test/build jobs do not depend on a scanner binary release download.
-  # solhint is also a npm devDep and is pulled by the standard install.
+  # Aderyn is built from its pinned upstream source in this lane. Its
+  # availability is independent of ordinary frozen workspace installs.
+  # solhint remains an npm devDependency.
   # ------------------------------------------------------------------
   tornado-static-analysis:
     name: "Tornado: static analysis (informational)"
@@ -1857,18 +1855,22 @@ jobs:
           category: slither
 
       # ------- Aderyn -------
-      - name: Verify Aderyn bootstrap
-        working-directory: packages/evm-module
+      - name: Install pinned Aderyn from upstream source
+        env:
+          ADERYN_REVISION: a288420403cb1ae5f38ce606c3a6d4e605b9c81d # aderyn-v0.6.8
+          ADERYN_TOOLCHAIN: nightly-2025-09-20
         run: |
-          for attempt in 1 2 3; do
-            if pnpm exec aderyn --version; then
-              exit 0
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              exit 1
-            fi
-            sleep $((attempt * 10))
-          done
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/aderyn-source"
+          git init "$source_dir"
+          git -C "$source_dir" fetch --depth=1 https://github.com/Cyfrin/aderyn.git "$ADERYN_REVISION"
+          git -C "$source_dir" -c advice.detachedHead=false checkout --detach FETCH_HEAD
+          test "$(git -C "$source_dir" rev-parse HEAD)" = "$ADERYN_REVISION"
+          rustup toolchain install "$ADERYN_TOOLCHAIN" --profile minimal
+          cargo "+$ADERYN_TOOLCHAIN" install --locked \
+            --path "$source_dir/aderyn" \
+            --root "$RUNNER_TEMP/aderyn" --bin aderyn aderyn
+          "$RUNNER_TEMP/aderyn/bin/aderyn" --version
 
       - name: Run Aderyn (SARIF)
         # Aderyn auto-detects Hardhat from hardhat.config.ts and uses
@@ -1876,7 +1878,7 @@ jobs:
         # path is relative to working-directory.
         continue-on-error: true
         working-directory: packages/evm-module
-        run: pnpm exec aderyn . --output aderyn.sarif
+        run: '"$RUNNER_TEMP/aderyn/bin/aderyn" . --output aderyn.sarif'
 
       - name: Validate Aderyn SARIF
         if: always()

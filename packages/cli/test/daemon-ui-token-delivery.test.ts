@@ -85,7 +85,15 @@ describe('nodeUiTokenForRequest', () => {
       headers: { ...(host === undefined ? {} : { host }), ...extra },
     } as unknown as IncomingMessage;
   }
-  const opts = { authEnabled: true, validTokens: VALID_TOKENS, resolveAgentByToken };
+  // The trusted-local rules below apply once the operator turns on auto sign-in.
+  const opts = { authEnabled: true, autoSignIn: true, validTokens: VALID_TOKENS, resolveAgentByToken };
+
+  it.each([
+    ['127.0.0.1', 'localhost:9200'],
+    ['::1', '[::1]:9200'],
+  ])('withholds the token from %s with Host %s unless auto sign-in is on (the default)', (remoteAddress, host) => {
+    expect(nodeUiTokenForRequest(fakeReq(remoteAddress, host), { ...opts, autoSignIn: false })).toBeUndefined();
+  });
 
   it.each([
     ['127.0.0.1', 'localhost:9200'],
@@ -149,7 +157,7 @@ describe('dashboard shell behind the token decision (real HTTP)', () => {
     // Mirrors the daemon: decide the token per request, then serve the shell.
     server = createServer((req, res) => {
       const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
-      const token = nodeUiTokenForRequest(req, { authEnabled: true, validTokens: VALID_TOKENS, resolveAgentByToken });
+      const token = nodeUiTokenForRequest(req, { authEnabled: true, autoSignIn: true, validTokens: VALID_TOKENS, resolveAgentByToken });
       void handleNodeUIRequest(req, res, url, { dataDir: staticDir } as never, staticDir, undefined, undefined, token);
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));

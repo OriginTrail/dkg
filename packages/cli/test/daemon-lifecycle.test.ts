@@ -84,6 +84,18 @@ async function writeWorkspaceTsconfig(tsconfigPath: string): Promise<void> {
 }
 
 async function runSupervisor(tempHome: string, tsconfigPath: string): Promise<void> {
+  const { code, output } = await runSupervisorProcess(tempHome, tsconfigPath);
+  if (code !== 0) {
+    throw new Error(`daemon-supervisor exited with ${code}\n${output}`);
+  }
+  expect(code).toBe(0);
+}
+
+/** Run the real `daemon-supervisor` command; resolves with its exit code and what it printed. */
+async function runSupervisorProcess(
+  tempHome: string,
+  tsconfigPath: string,
+): Promise<{ code: number | null; output: string }> {
   const env = {
     ...process.env,
     HOME: tempHome,
@@ -110,14 +122,10 @@ async function runSupervisor(tempHome: string, tsconfigPath: string): Promise<vo
     child.once('exit', code => resolveExit(code));
   });
 
-  if (code !== 0) {
-    throw new Error(
-      `daemon-supervisor exited with ${code}\n` +
-      Buffer.concat(stdout).toString('utf8') +
-      Buffer.concat(stderr).toString('utf8'),
-    );
-  }
-  expect(code).toBe(0);
+  return {
+    code,
+    output: Buffer.concat(stdout).toString('utf8') + Buffer.concat(stderr).toString('utf8'),
+  };
 }
 
 describe('daemon lifecycle control-plane files', () => {
@@ -174,4 +182,36 @@ describe('daemon lifecycle control-plane files', () => {
     expect(existsSync(join(defaultHome, 'api.port'))).toBe(false);
     expect(existsSync(join(defaultHome, 'daemon.pid'))).toBe(false);
   });
+
+  it('ends with the worker\'s exit code once it gives up after five quick crashes', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'dkg-supervisor-gives-up-'));
+    const selectedHome = join(tempRoot, '.dkg-dev');
+    const tsconfigPath = join(tempRoot, 'tsx-tsconfig.json');
+    const fakeWorker = join(selectedHome, 'releases', 'a', 'packages', 'cli', 'dist', 'cli.js');
+
+    await mkdir(dirname(fakeWorker), { recursive: true });
+    await writeWorkspaceTsconfig(tsconfigPath);
+    await writeFile(
+      join(selectedHome, 'config.json'),
+      JSON.stringify({ name: 'supervisor-gives-up', apiPort: 25002, listenPort: 0, nodeRole: 'core' }),
+    );
+    await symlink('a', join(selectedHome, 'releases', 'current'));
+    await writeFile(
+      fakeWorker,
+      [
+        "const fs = require('node:fs');",
+        "const path = require('node:path');",
+        "fs.appendFileSync(path.join(process.env.DKG_HOME, 'starts'), 'x');",
+        'process.exit(3);',
+        '',
+      ].join('\n'),
+    );
+
+    const { code, output } = await runSupervisorProcess(tempRoot, tsconfigPath);
+
+    expect(code, output).toBe(3);
+    expect(readFileSync(join(selectedHome, 'starts'), 'utf8')).toBe('xxxxx');
+    expect(readFileSync(join(selectedHome, 'daemon.log'), 'utf8'))
+      .toContain('giving up after 5 crashes with no worker running 10 min between them');
+  }, 60_000);
 });

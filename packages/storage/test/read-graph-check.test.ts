@@ -50,7 +50,7 @@ describe('read-graph checks under concurrent writes', () => {
     const under = `FILTER(?g = <${root}> || STRSTARTS(STR(?g), "${root}/"))`;
     expect(memberGraphListingQuery(new PlanningOxigraphStore(), root)).toBe(`SELECT ?g WHERE { ${nonEmptyNamedGraphEnumerationPattern('g')} ${under} }`);
     const blazegraph = new BlazegraphStore('http://fixture.invalid/sparql');
-    expect(memberGraphListingQuery(blazegraph, root)).toBe(`SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } ${under} }`);
+    expect(memberGraphListingQuery(blazegraph, root)).toBe(`SELECT ?g WITH { SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } } } AS %names WHERE { INCLUDE %names . ${under} }`);
     // Through a decorator, as below the read-graph layer.
     expect(memberGraphListingQuery({ innerStore: blazegraph } as unknown as OxigraphStore, root)).toBe(memberGraphListingQuery(blazegraph, root));
   });

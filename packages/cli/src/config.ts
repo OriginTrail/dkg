@@ -880,7 +880,7 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
    * a verified agent-key signature or a Bearer token. A legacy token is
    * auto-generated on first start and stored in `<DKG_HOME>/auth.token`.
    */
-  auth?: { enabled?: boolean; tokens?: string[]; operatorAgentAddresses?: string[] };
+  auth?: { enabled?: boolean; tokens?: string[]; operatorAgentAddresses?: string[]; dashboardAutoSignIn?: boolean };
   /**
    * Opt-in telemetry streaming to a central network dashboard.
    * `enabled` is the master gate: when false, NOTHING is forwarded off the

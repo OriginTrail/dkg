@@ -10,6 +10,7 @@ import {
   invokeStoredSemanticProgram,
   loadStoredSemanticProgram,
   startConfiguredSemanticRuntime,
+  startDaemonSemanticRuntime,
   validateSemanticRuntimeConfig,
 } from '../src/semantic-runtime.js';
 import { createDkgQueryAdapter } from '../src/semantic-runtime-query-adapter.js';
@@ -233,6 +234,32 @@ describe('semantic runtime daemon configuration', () => {
       startConfiguredSemanticRuntime({ enabled: false }, { log: vi.fn(), start }),
     ).resolves.toBeNull();
     expect(start).not.toHaveBeenCalled();
+  });
+
+  it('is never started by the daemon on a node that has not enabled it', async () => {
+    // The daemon starts the runtime the same way at boot and when a management
+    // route needs it, so a route can no longer switch Programs on.
+    const start = vi.fn();
+    const dataDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'semantic-runtime-daemon-'));
+    try {
+      await expect(startDaemonSemanticRuntime({}, { log: vi.fn(), start, dataDirectory })).resolves.toBeNull();
+      await expect(startDaemonSemanticRuntime({ enabled: false }, { log: vi.fn(), start, dataDirectory })).resolves.toBeNull();
+      expect(start).not.toHaveBeenCalled();
+      expect(fs.readdirSync(dataDirectory)).toEqual([]);
+    } finally {
+      fs.rmSync(dataDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it('is started by the daemon once the operator enables it', async () => {
+    const host = { stop: vi.fn() } as any;
+    const start = vi.fn().mockResolvedValue(host);
+    const service = await startDaemonSemanticRuntime(
+      { enabled: true },
+      { log: vi.fn(), start, openStore: () => new SemanticRuntimeStore(':memory:') },
+    );
+    expect(service?.host).toBe(host);
+    expect(start).toHaveBeenCalledTimes(1);
   });
 
   it('forwards only validated opt-in configuration and reports Phase 0 limits', async () => {

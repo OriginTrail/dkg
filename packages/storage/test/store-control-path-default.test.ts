@@ -20,6 +20,7 @@ import {
   resolveStoreControlConfig,
   selectStoreScheduler,
   setStoreControlPathForTesting,
+  storeControlQueueInUse,
 } from '../src/store-control-path.js';
 
 // The process-wide resolution reads the host's CPUs; the startup lines below are checked for chosen counts.
@@ -372,5 +373,21 @@ describe('off restores today exactly (AC2), whichever setting turned it off', ()
     }
     expect(getStoreControlPath()).toEqual({});
     expect(controlIds()).toEqual([]);
+  });
+});
+
+describe('storeControlQueueInUse', () => {
+  it('is true only where the configured backend runs tagged calls on the queue\'s scheduler', () => {
+    vi.stubEnv(STORE_CONTROL_RESERVED_SLOTS_ENV, undefined);
+    configureStoreControlPath({ backend: 'oxigraph-worker', configured: 'share:1,publisher:2,preflight:1' });
+    expect(getStoreControlPath().preflight).toBeDefined();
+    expect(storeControlQueueInUse('preflight')).toBe(false);
+    setStoreControlPathForTesting(undefined);
+    configureStoreControlPath({ backend: 'blazegraph', configured: 'share:1,publisher:2,preflight:1' });
+    expect(storeControlQueueInUse('preflight')).toBe(true);
+    expect(storeControlQueueInUse('share')).toBe(true);
+    setStoreControlPathForTesting(undefined);
+    configureStoreControlPath({ backend: 'blazegraph' });
+    expect(storeControlQueueInUse('preflight')).toBe(false);
   });
 });
