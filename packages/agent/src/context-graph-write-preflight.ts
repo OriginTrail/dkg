@@ -9,7 +9,7 @@ import { classifyWritePreflightFailure, type WritePreflightFailure, type WritePr
 /** Read-only dependencies of this point probe; the agent mixin remains its adapter. */
 export interface WritePreflightHost {
   readonly store: Pick<TripleStore, 'query'>;
-  contextGraphExists(contextGraphId: string): Promise<boolean>;
+  contextGraphExists(contextGraphId: string, options?: { controlQueue?: 'preflight' }): Promise<boolean>;
   contextGraphHasLocalContent(contextGraphId: string): Promise<boolean>;
   curatorDidMatchesChecksumAgent(curator: string, checksumAddress: string): boolean;
   callerIsAllowlistedAgentParticipant(
@@ -21,6 +21,8 @@ export interface WritePreflightHost {
 
 /** What a probe call may carry besides the context graph id. */
 export interface WritePreflightProbeOptions {
+  /** Only the exact declaration and existence queries may use the admission reserve. */
+  controlQueue?: 'preflight';
   callerAgentAddress?: string | null;
   /** Daemon writability checks may omit content discovery when fresh facts suffice.
    * Full probes remain the default; omitted content is unknown, not false. */
@@ -53,6 +55,7 @@ const DECLARATION_ROW_PREDICATES: Readonly<Partial<Record<string, string>>> = {
 };
 
 interface WritePreflightSubscriptions {
+  readonly locallyCreated?: boolean;
   readonly store?: Pick<ContextGraphSubscriptionStore, 'load'>;
   readonly current: (contextGraphId: string) => Pick<ContextGraphSub, 'subscribed' | 'synced'> | undefined;
 }
@@ -120,7 +123,7 @@ export async function probeContextGraphWritePreflight(
           BIND("gate" AS ?kind)
         }
       }
-    `, { source: 'agent.writePreflight.declaration' });
+    `, { source: 'agent.writePreflight.declaration', controlQueue: opts?.controlQueue });
 
     // Track B (write-preflight resilience): these four reads were previously
     // combined with `Promise.all`, so a single failing store read (slow-store
@@ -138,7 +141,7 @@ export async function probeContextGraphWritePreflight(
     const deferContent = opts?.contentCheck === 'when-needed-for-write';
     const [existsRead, hasLocalContentRead, persistedSubscriptionRead, declarationRead] =
       await Promise.allSettled([
-        host.contextGraphExists(contextGraphId),
+        host.contextGraphExists(contextGraphId, { controlQueue: opts?.controlQueue }),
         deferContent ? Promise.resolve(undefined) : host.contextGraphHasLocalContent(contextGraphId),
         persistedSubscriptionPromise,
         declarationPromise,
@@ -266,6 +269,7 @@ export async function probeContextGraphWritePreflight(
       // The optional `storeUnavailable`/`storeErrorMessage` pair is kept
       // for the 503-diagnostics path (unchanged wire behaviour).
       storeAvailable: !storeUnavailable,
+      locallyCreated: subscriptions.locallyCreated === true,
       ...(exists !== undefined ? { exists } : {}),
       ...(hasLocalContent !== undefined ? { hasLocalContent } : {}),
       ...(inMemorySubscription

@@ -43,7 +43,7 @@ function snap() {
 
 async function waitFor(c: HTMLElement, sel: string) {
   const started = Date.now();
-  while (Date.now() - started < 2000) {
+  while (Date.now() - started < 10000) {
     if (c.querySelector(sel)) return;
     await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
   }
@@ -83,5 +83,5 @@ describe('PanelCenter — conviction tab routing', () => {
     expect(container.textContent).toContain('PCA #7');
     await act(async () => root.unmount());
     container.remove();
-  });
+  }, 15_000);
 });

@@ -14,6 +14,7 @@ import {
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
 import { captureUnscopedQueryConsistency } from '../../agent/src/unscoped-query-consistency.js';
+import { SemanticsUnsupportedError, VIEW_NOT_READY_RETRY_AFTER_SECONDS, ViewNotReadyError } from '../../query/src/view-dataset-plan.js';
 import {
   configureApiQueryPriority,
   createApiQueryRequestLifecycle,
@@ -822,4 +823,85 @@ it('the shared query responder renders the public result-size contract as 413', 
   expect(respondToQueryFailure(res as unknown as ServerResponse, error)).toBe(true);
   expect(res.statusCode).toBe(413);
   expect(JSON.parse(res.body)).toEqual({ code: error.code, error: error.message, limitBytes: 100, actualBytes: 101 });
+});
+
+describe('/api/query view semantics', () => {
+  const routeTracker = () => ({
+    start: vi.fn(), startPhase: vi.fn(), completePhase: vi.fn(), complete: vi.fn(), fail: vi.fn(), cancel: vi.fn(),
+  });
+  const scoped = { sparql: 'SELECT ?s WHERE { ?s ?p ?o }', contextGraphId: 'cg-semantics', view: 'verifiable-memory' };
+
+  it('refuses an unknown semantics before the agent runs', async () => {
+    for (const semantics of ['merge', 1, null]) {
+      const res = new ResponseStub();
+      const agent = { query: vi.fn() };
+      await handleQueryRoutes(queryRouteContext(new RequestStub({ ...scoped, semantics }), res, agent, routeTracker()));
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body).error).toBe(`Invalid semantics ${JSON.stringify(semantics)}. Supported: merged, per-asset`);
+      expect(agent.query).not.toHaveBeenCalled();
+    }
+  });
+
+  it('passes semantics to the agent and reports how the query matched', async () => {
+    const res = new ResponseStub();
+    const agent = { query: vi.fn(async (_sparql: string, options: Record<string, unknown>) => ({ bindings: [], semantics: options.semantics })) };
+    await handleQueryRoutes(queryRouteContext(new RequestStub({ ...scoped, semantics: 'merged' }), res, agent, routeTracker()));
+    expect(agent.query).toHaveBeenCalledWith(scoped.sparql, expect.objectContaining({ view: 'verifiable-memory', semantics: 'merged' }));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({ result: { type: 'bindings', bindings: [] }, semantics: 'merged' });
+  });
+
+  it('reports the semantics the engine answered with over the request\'s fallback', async () => {
+    const res = new ResponseStub();
+    // A node whose default for the context graph is merged answers a request that did not ask.
+    const agent = { query: vi.fn(async () => ({ bindings: [], semantics: 'merged' })) };
+    await handleQueryRoutes(queryRouteContext(new RequestStub(scoped), res, agent, routeTracker()));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).semantics).toBe('merged');
+  });
+
+  it('reports a scoped answer without its own semantics as asked, or per asset, and none for an unscoped query', async () => {
+    for (const [body, expected] of [
+      [{ ...scoped, semantics: 'merged' }, 'merged'],
+      [scoped, 'per-asset'],
+      [{ sparql: scoped.sparql }, undefined],
+    ] as const) {
+      const res = new ResponseStub();
+      const agent = { query: vi.fn(async () => ({ bindings: [] })) };
+      await handleQueryRoutes(queryRouteContext(new RequestStub(body), res, agent, routeTracker()));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body).semantics).toBe(expected);
+    }
+  });
+
+  it('answers a view that is not ready with a retryable 503 and Retry-After', async () => {
+    const error = new ViewNotReadyError();
+    const res = new ResponseStub();
+    const tracker = routeTracker();
+    await handleQueryRoutes(queryRouteContext(new RequestStub({ ...scoped, semantics: 'merged' }), res,
+      { query: vi.fn(async () => { throw error; }) }, tracker));
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe(String(VIEW_NOT_READY_RETRY_AFTER_SECONDS));
+    expect(JSON.parse(res.body)).toEqual({ error: error.message, code: 'VIEW_NOT_READY', retryable: true, hint: error.hint });
+    expect(tracker.fail).toHaveBeenCalledWith(expect.anything(), error);
+  });
+
+  it('answers merged where it does not apply with 400 SEMANTICS_UNSUPPORTED', async () => {
+    const error = new SemanticsUnsupportedError('minTrust above SelfAttested');
+    const res = new ResponseStub();
+    await handleQueryRoutes(queryRouteContext(new RequestStub({ ...scoped, semantics: 'merged', minTrust: 'Endorsed' }), res,
+      { query: vi.fn(async () => { throw error; }) }, routeTracker()));
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toEqual({ error: 'semantics "merged" does not apply to minTrust above SelfAttested',
+      code: 'SEMANTICS_UNSUPPORTED', hint: error.hint });
+  });
+
+  it('answers a not-ready shape without a usable interval with Retry-After 1', () => {
+    const res = new ResponseStub();
+    expect(respondToQueryFailure(res as unknown as ServerResponse,
+      { code: 'VIEW_NOT_READY', message: 'not ready', retryAfterSeconds: -5 })).toBe(true);
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe('1');
+    expect(JSON.parse(res.body)).toEqual({ error: 'not ready', code: 'VIEW_NOT_READY', retryable: true });
+  });
 });

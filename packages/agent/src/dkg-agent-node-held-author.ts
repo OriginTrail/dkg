@@ -9,7 +9,9 @@ import { createOperationContext } from '@origintrail-official/dkg-core';
 import type { AgentKeyRecord } from './agent-keystore.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { EncryptionKeyEnrollments } from './encryption-key-enrollment.js';
 import { isNodeHeldAgent, localAgentRecord, nodeHeldAuthorEnabled, nodeHeldDefaultAgent } from './node-held-author.js';
+import { installReadGraphWorkingMemoryIdentity } from './read-graph-view-source.js';
 // dkg-agent.ts takes the config check from here too, on one import line: it is at its file-size budget.
 export { assertNodeHeldAuthorConfig } from './node-held-author.js';
 
@@ -35,6 +37,8 @@ export class NodeHeldAuthorMethods extends DKGAgentBase {
     const previous = this.defaultAgentAddress;
     // Taken before anything is awaited, so a concurrent registration finds the default agent taken.
     this.defaultAgentAddress = record.agentAddress;
+    // A started node's read graphs follow the new owner of its peer ID's drafts; start installs the rule otherwise.
+    if (this.started) await installReadGraphWorkingMemoryIdentity(this.store, { defaultAgentAddress: record.agentAddress, peerId: this.peerId });
     const ctx = createOperationContext('system');
     this.log.info(
       ctx,
@@ -59,5 +63,15 @@ export class NodeHeldAuthorMethods extends DKGAgentBase {
           'peers learn its encryption keys from the next profile publish',
       );
     }
+  }
+
+  /**
+   * Whether an explicit node operator prepared an unexpired encryption enrollment for this agent here.
+   * Its recipient signs the activation before this node holds an agent record for it. It sits here, not
+   * with the other enrollment methods in dkg-agent-registry.ts, because that file is at its size budget.
+   */
+  async hasPendingEncryptionKeyEnrollment(this: DKGAgent, agentAddress: string): Promise<boolean> {
+    if (!this.config.dataDir) return false;
+    return new EncryptionKeyEnrollments(`${this.config.dataDir}/encryption-enrollments.json`, this.peerId).hasPending(agentAddress);
   }
 }

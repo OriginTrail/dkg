@@ -34,6 +34,15 @@ export class ContextGraphOnChainIdUnresolvedError extends Error {
   }
 }
 
+/**
+ * The finalized authority index holds no current on-chain id for the graph's
+ * name. This cause, unlike the parent's others, is the chain's own answer, and
+ * it repeats until the name is registered, so the scheduling runtime spaces the
+ * periodic sweep's retries (see `internal/vm-reconcile-absent-target-backoff.ts`).
+ * Callers and routes see the parent: same code, name and message.
+ */
+export class ContextGraphNameAbsentError extends ContextGraphOnChainIdUnresolvedError {}
+
 export class VmReconcileUnavailableError extends Error {
   readonly code = 'VmReconcileUnavailable';
 

@@ -13,7 +13,8 @@
  *
  * The adapter then calls `server.registerTool(...)` for every tool it
  * contributes. Failure to load any single adapter is logged to stderr and
- * does not abort startup — adapters are opt-in and optional.
+ * does not abort startup — adapters are opt-in and optional. Program-pinned
+ * entries are required and fail session startup if verification or loading fails.
  *
  * Compared to the legacy mcp-server loader (removed in the V10 keeper
  * consolidation 2026-05-04; see `pre-v10-tool-drop` tag for its original
@@ -25,12 +26,16 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { DkgClient } from './client.js';
 import type { DkgConfig } from './config.js';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFile, writeFile, unlink } from 'node:fs/promises';
+import { dirname, extname, isAbsolute, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 export type AdapterRegisterFn = (
   server: McpServer,
   client: DkgClient,
   config: DkgConfig,
-) => void;
+) => void | Promise<void>;
 
 /** Short-name → package-id map for first-party adapters. */
 const ADAPTER_MAP: Record<string, string> = {};
@@ -68,24 +73,50 @@ export async function loadAdapters(
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
+  const pins: Array<{ path: string; sha256: string }> | undefined = process.env.DKG_ADAPTER_HASHES
+    ? JSON.parse(process.env.DKG_ADAPTER_HASHES) : undefined;
+  if (pins && (!Array.isArray(pins) || pins.length !== names.length
+    || new Set(pins.map(pin => pin.path)).size !== names.length
+    || pins.some(pin => !names.includes(pin.path) || !isAbsolute(pin.path) || !/^[a-f0-9]{64}$/.test(pin.sha256)))) {
+    throw new Error('INVALID_PINNED_ADAPTER_CONFIGURATION');
+  }
   for (const name of names) {
     const pkg = ADAPTER_MAP[name] ?? name;
+    let snapshot: string | undefined;
     try {
       const retired = RETIRED_ALIASES[name];
       if (retired) throw new Error(retired);
-      const mod = (await import(pkg)) as { registerTools?: AdapterRegisterFn };
+      const pin = pins?.find(pin => pin.path === name);
+      if (pin) {
+        const bytes = await readFile(name);
+        if (createHash('sha256').update(bytes).digest('hex') !== pin.sha256) {
+          throw new Error('PINNED_ADAPTER_CONTENT_CHANGED');
+        }
+        // Import exactly the verified bytes. A sibling keeps relative imports
+        // and package type resolution intact, even if the original is replaced
+        // between reading and importing. Dependencies are not part of this pin.
+        const file = join(dirname(name), `.dkg-pinned-${randomUUID()}${extname(name) || '.mjs'}`);
+        await writeFile(file, bytes, { flag: 'wx', mode: 0o600 });
+        snapshot = file;
+      }
+      const mod = (await import(snapshot ? pathToFileURL(snapshot).href : pkg)) as { registerTools?: AdapterRegisterFn };
       if (typeof mod.registerTools === 'function') {
-        mod.registerTools(server, client, config);
+        await mod.registerTools(server, client, config);
         process.stderr.write(`[dkg-mcp] adapter loaded: ${name}\n`);
       } else {
+        if (pin) throw new Error('PINNED_ADAPTER_REGISTER_TOOLS_MISSING');
         process.stderr.write(
           `[dkg-mcp] adapter ${name}: no registerTools export, skipped\n`,
         );
       }
     } catch (e) {
+      // A Program-approved adapter is required, unlike an optional CLI adapter.
+      if (pins) throw e;
       process.stderr.write(
         `[dkg-mcp] adapter ${name} failed to load: ${formatError(e)}\n`,
       );
+    } finally {
+      if (snapshot) await unlink(snapshot);
     }
   }
 }

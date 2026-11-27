@@ -289,7 +289,7 @@ describe('ChatMemoryManager', () => {
     expect(secondQuads.length).toBe(11);
   });
 
-  it('creates agent-context context graph when not in list', async () => {
+  it('creates agent-context Context Graph when not in list', async () => {
     mockListContextGraphs.returns.push([]);
     mockQuery.returns.push({ bindings: [] });
     const m = new ChatMemoryManager(
@@ -1061,7 +1061,7 @@ describe('ChatMemoryManager WM write discipline', () => {
     }
   });
 
-  it('agent-context context graph is created with private: true when missing from the list', async () => {
+  it('agent-context Context Graph is created with private: true when missing from the list', async () => {
     mockListContextGraphs.returns.push([]);
     mockQuery.returns.push({ bindings: [] });
     const manager = createManager();
@@ -1073,7 +1073,7 @@ describe('ChatMemoryManager WM write discipline', () => {
     expect(createOpts.private).toBe(true);
   });
 
-  it('context graph creation opts always include private: true even on subsequent initializations', async () => {
+  it('Context Graph creation opts always include private: true even on subsequent initializations', async () => {
     mockListContextGraphs.defaultReturn = [];
     const listReturns = mockListContextGraphs.returns;
     listReturns.push([], []);

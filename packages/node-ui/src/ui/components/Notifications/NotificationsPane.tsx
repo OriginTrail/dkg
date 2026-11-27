@@ -15,6 +15,9 @@ import React from 'react';
 import type { UseNotificationsFeed } from '../../hooks/useNotificationsFeed.js';
 import type { PcaAlert } from '../../hooks/usePcaAlerts.js';
 import { JoinRequestRow, ActivityDigestRow, ConfirmationRow, PcaCostCoveredRow } from './rows.js';
+import { Count } from '../ds/Badge.js';
+import { Loading } from '../ds/Loading.js';
+import { RefreshCw } from 'lucide-react';
 
 export interface NotificationsPaneProps {
   feed: UseNotificationsFeed;
@@ -60,13 +63,13 @@ export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], on
   const isEmpty = !hasJoin && !hasActivity && !hasPca;
 
   return (
-    <div className="v10-notif-pane" role="region" aria-label="Notifications" id={id} ref={paneRef} tabIndex={-1}>
+    <div className="v10-notif-pane ds-card-nested" role="region" aria-label="Notifications" id={id} ref={paneRef} tabIndex={-1}>
       <div className="v10-notif-pane-titlebar">
         <div className="v10-notif-pane-title">Notifications</div>
         {hasInformationalUnread && (
           <button
             type="button"
-            className="v10-notif-pane-markread"
+            className="v10-notif-pane-markread ds-btn ds-ghost ds-sm"
             onClick={markAllInformationalSeen}
             title="Mark informational notifications as read"
           >
@@ -82,7 +85,7 @@ export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], on
           <section className="v10-notif-section v10-notif-section-pca" aria-label="Publisher Conviction">
             <div className="v10-notif-section-head">
               <span className="v10-notif-section-label">Publisher Conviction</span>
-              <span className="v10-notif-section-count">{pcaAlerts.length}</span>
+              <Count value={pcaAlerts.length} tone="attention" className="v10-notif-section-count" />
             </div>
             <div className="v10-notif-section-rows">
               {pcaAlerts.map((al) => (
@@ -110,11 +113,11 @@ export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], on
         {status === 'identity-pending' ? (
           <div className="v10-notif-pane-state" role="status">Verifying access…</div>
         ) : status === 'loading' && isEmpty ? (
-          <div className="v10-notif-pane-state" role="status">Loading notifications…</div>
+          <Loading label="Loading notifications…" />
         ) : status === 'error' && isEmpty ? (
           <div className="v10-notif-pane-error" role="status" aria-live="polite">
             Couldn’t load notifications.{' '}
-            <button type="button" className="v10-notif-retry" onClick={feed.retry}>Retry</button>
+            <button type="button" className="v10-notif-retry" onClick={feed.retry}><RefreshCw size={12} />Retry</button>
           </div>
         ) : isEmpty ? (
           <div className="v10-notif-pane-empty" role="status">
@@ -130,7 +133,7 @@ export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], on
             {refreshError && (
               <div className="v10-notif-pane-error v10-notif-pane-error-inline" role="status" aria-live="polite">
                 Couldn’t refresh notifications.{' '}
-                <button type="button" className="v10-notif-retry" onClick={feed.retry}>Retry</button>
+                <button type="button" className="v10-notif-retry" onClick={feed.retry}><RefreshCw size={12} />Retry</button>
               </div>
             )}
 
@@ -138,7 +141,7 @@ export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], on
               <section className="v10-notif-section v10-notif-section-action" aria-label="Needs your action">
                 <div className="v10-notif-section-head">
                   <span className="v10-notif-section-label">Needs your action</span>
-                  <span className="v10-notif-section-count">{joinRequests.length}</span>
+                  <Count value={joinRequests.length} tone="attention" className="v10-notif-section-count" />
                 </div>
                 <div className="v10-notif-section-rows">
                   {joinRequests.map((req) => (

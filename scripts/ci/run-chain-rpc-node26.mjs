@@ -33,8 +33,7 @@ function spawnVitest(reportPath, env) {
   const require = createRequire(path.join(chain, 'package.json'));
   const vitest = path.join(path.dirname(require.resolve('vitest/package.json')), 'vitest.mjs');
   return spawnSync(process.execPath, [
-    vitest, 'run', '--config', 'vitest.unit.config.ts',
-    'test/rpc-http1-dispatcher.unit.test.ts',
+    vitest, 'run', '--config', 'vitest.node26.config.ts',
     '--reporter=default', '--reporter=json', `--outputFile.json=${reportPath}`,
   ], { cwd: chain, env, stdio: 'inherit', timeout: 120_000 });
 }

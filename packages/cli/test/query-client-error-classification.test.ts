@@ -1,7 +1,7 @@
 import type { ServerResponse } from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
 import { SparqlHttpResponseError } from '@origintrail-official/dkg-storage';
-import { QueryResultTooLargeError } from '@origintrail-official/dkg-agent';
+import { QueryResultTooLargeError, asQueryResultTooLargeError, isQueryResultTooLargeError } from '@origintrail-official/dkg-agent';
 import {
   respondToQueryFailure,
   isClientQueryFailure,
@@ -27,6 +27,24 @@ describe('respondToQueryFailure — bounded result policy', () => {
   it('does not classify a lookalike message without a structural code', () => {
     expect(respondToQueryFailure({} as ServerResponse, new Error('Triple-store response exceeds byte limit')))
       .toBe(false);
+  });
+
+  it('answers a node-side limit as a retryable 503, never as the 413 result-size answer', () => {
+    // It also carries the byte fields of a caller-size error: the code decides.
+    const error = Object.assign(new Error('Graph catalog exceeds the node-side limit'), {
+      code: 'STORE_INTERNAL_LIMIT', limitName: 'STORE_GRAPH_CATALOG_MAX_BYTES',
+      limitBytes: 1024, actualBytes: 2048, maxBytes: 1024, queryPhase: 'result',
+    });
+    expect(isQueryResultTooLargeError(error)).toBe(false);
+    expect(asQueryResultTooLargeError(error)).toBeUndefined();
+    expect(isClientQueryFailure(error)).toBe(false);
+    const res = { writeHead: vi.fn(), end: vi.fn(), setHeader: vi.fn() };
+    expect(respondToQueryFailure(res as unknown as ServerResponse, error)).toBe(true);
+    expect(res.writeHead).toHaveBeenCalledWith(503, expect.objectContaining({ 'Retry-After': '1' }));
+    expect(JSON.parse(res.end.mock.calls[0]![0] as string)).toMatchObject({
+      code: 'STORE_INTERNAL_LIMIT', retryable: true,
+      limitName: 'STORE_GRAPH_CATALOG_MAX_BYTES', limitBytes: 1024, actualBytes: 2048,
+    });
   });
 });
 

@@ -75,6 +75,6 @@ export class MemoryLayerPage {
   }
 
   async hasRefreshButton() {
-    return this.root.locator('button').filter({ hasText: '↻' }).isVisible().catch(() => false);
+    return this.root.getByRole('button', { name: /refresh/i }).first().isVisible().catch(() => false);
   }
 }

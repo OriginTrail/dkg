@@ -25,7 +25,7 @@ import { test, expect } from '../../fixtures/base.js';
 import { PRIMARY_CG } from '../../helpers/real-node.js';
 
 test.describe('KNOWN BUG: views stick on "Loading…" with no error state when a fetch fails', () => {
-  test('ProjectView shows an error/retry state (not a perpetual "Loading context graph...")', async ({
+  test('ProjectView shows an error/retry state (not a perpetual "Loading Context Graph...")', async ({
     page,
     shell,
     leftPanel,

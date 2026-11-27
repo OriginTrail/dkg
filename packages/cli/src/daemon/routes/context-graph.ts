@@ -1,6 +1,7 @@
 import { handlePublicSnapshotJob } from './public-snapshot-job.js';
 import { handlePublicCheckpointJob } from './public-checkpoint-job.js';
 import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
+import { parseContextGraphListQuery } from './context-graph-list-query.js';
 // daemon/routes/context-graph.ts
 //
 // Route handlers for context-graph (+ contextGraph, sub-graph) CRUD, participants, join flow, manifest publish/install.
@@ -1155,6 +1156,46 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // GET /api/context-graph/{id}/authority — targeted owner/operator diagnostics.
+  // Monitoring needs the current policy before and after each write. Do not
+  // enumerate unrelated graphs or turn a metadata lookup failure into public
+  // access. The native getters retain their write-invalidated authority view.
+  const authorityMatch = path.match(/^\/api\/context-graph\/([^/]+)\/authority$/);
+  if (req.method === "GET" && authorityMatch) {
+    const nodeAdmin = isNodeAdminCaller();
+    const caller = actor.authenticatedAgentAddress;
+    if (!nodeAdmin && !caller) {
+      return jsonResponse(res, 403, { error: 'Requires the graph owner or a node-level admin token' });
+    }
+    let contextGraphId: string;
+    try {
+      contextGraphId = decodeURIComponent(authorityMatch[1]);
+    } catch {
+      return jsonResponse(res, 400, { code: 'INVALID_CONTEXT_GRAPH_ID' });
+    }
+    try {
+      const signal = AbortSignal.timeout(10_000);
+      // An agent may inspect only a graph it curates. Check ownership before
+      // disclosing existence, policy, registration or membership. No inference
+      // from the graph's name or allowlist can grant this diagnostic access.
+      const ownerCurator = nodeAdmin ? undefined : await agent.getContextGraphCurator(contextGraphId, { signal });
+      if (!nodeAdmin && ownerCurator?.toLowerCase() !== 'did:dkg:agent:' + caller!.toLowerCase()) {
+        return jsonResponse(res, 403, { error: 'Requires the graph owner or a node-level admin token' });
+      }
+      if (!await agent.contextGraphExists(contextGraphId, { signal })) {
+        return jsonResponse(res, 404, { code: 'CONTEXT_GRAPH_NOT_FOUND' });
+      }
+      const accessPolicy = await agent.getExplicitAccessPolicy(contextGraphId, { signal });
+      const curator = ownerCurator ?? await agent.getContextGraphCurator(contextGraphId, { signal });
+      const onChainId = await agent.getContextGraphOnChainId(contextGraphId, { signal });
+      const allowedAgents = await agent.getContextGraphAllowedAgents(contextGraphId);
+      signal.throwIfAborted();
+      return jsonResponse(res, 200, { contextGraphId, accessPolicy, curator, onChainId, allowedAgents });
+    } catch {
+      return jsonResponse(res, 503, { code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE' });
     }
   }
 
@@ -2379,10 +2420,16 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     }
   }
 
-  // GET /api/context-graph/list
+  // GET /api/context-graph/list — `named`, `system` and `onChain` are opt-in
+  // filters (#3919); without them the answer is the one it always was.
   if (req.method === "GET" && path === "/api/context-graph/list") {
+    const listQuery = parseContextGraphListQuery(url.searchParams);
+    if (!listQuery.ok) {
+      return jsonResponse(res, 400, { error: listQuery.error, code: listQuery.code });
+    }
     const contextGraphs = await agent.listContextGraphs({
       callerAgentAddress: requestAgentAddress ?? null,
+      ...(listQuery.filter ? { filter: listQuery.filter } : {}),
     });
     return jsonResponse(res, 200, {
       contextGraphs,

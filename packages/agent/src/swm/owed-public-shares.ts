@@ -34,7 +34,9 @@
  * is settled, when the owner refuses the share, when every Core it was sent to
  * refuses it, when its graph is no longer public, after
  * {@link OWED_PUBLIC_SHARE_RESIGN_FAILURES_MAX} failed signings, or after
- * {@link OWED_PUBLIC_SHARE_TTL_MS}. At most {@link OWED_PUBLIC_SHARES_MAX}
+ * {@link OWED_PUBLIC_SHARE_TTL_MS}. Only a definite "public" lets a record be
+ * sent: a pass that cannot read whether its graph is public skips the record,
+ * which then keeps its place and does not count. At most {@link OWED_PUBLIC_SHARES_MAX}
  * records, of at most {@link OWED_PUBLIC_SHARES_MAX_BYTES} together, are kept;
  * the oldest makes room. Shares dropped unsent are warned of once a pass.
  *
@@ -138,7 +140,11 @@ interface OwedRecord<S> extends OwedPublicShare<S> {
 
 /** What the store uses of the agent. */
 export interface OwedPublicSharePorts<S> {
-  /** Whether the graph is public now; never asked more than once a pass per graph. */
+  /**
+   * Whether the graph is public now; never asked more than once a pass per
+   * graph. A rejection, or an answer that is neither true nor false, is not
+   * known: the graph's records are then kept, unsent, for a later pass.
+   */
   isPublic(contextGraphId: string): Promise<boolean>;
   /** Connected Cores, none of `exclude`, that may hold the graph's share of this scope now, bounded. */
   holderPeers(contextGraphId: string, subGraphName: string | null, exclude: ReadonlySet<string>): Promise<readonly string[]>;
@@ -203,10 +209,33 @@ class DroppedShares {
   }
 }
 
+/** Whether a graph is public, as one pass read it: `unreadable` when that is not known either way. */
+type GraphAccess =
+  | { readonly kind: 'public' }
+  | { readonly kind: 'private' }
+  | { readonly kind: 'unreadable'; readonly reason: string };
+
+const PUBLIC_GRAPH: GraphAccess = { kind: 'public' };
+const PRIVATE_GRAPH: GraphAccess = { kind: 'private' };
+
+/** Read whether a graph is public; never rejects. */
+async function readGraphAccess(isPublic: () => Promise<boolean>): Promise<GraphAccess> {
+  try {
+    const answer: unknown = await isPublic();
+    if (answer === true) return PUBLIC_GRAPH;
+    if (answer === false) return PRIVATE_GRAPH;
+    return { kind: 'unreadable', reason: `the answer was ${String(answer)}` };
+  } catch (error) {
+    return { kind: 'unreadable', reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 /** What one pass asks once per graph. */
 interface PassLookups {
-  readonly publicGraphs: Map<string, Promise<boolean>>;
+  readonly publicGraphs: Map<string, Promise<GraphAccess>>;
   readonly owners: Map<string, Promise<readonly string[]>>;
+  /** Graphs this pass has logged as unreadable, so that each is logged once a pass. */
+  readonly unreadableLogged: Set<string>;
 }
 
 function lookUpOnce<T>(cache: Map<string, Promise<T>>, key: string, run: () => Promise<T>, fallback: T): Promise<T> {
@@ -343,7 +372,7 @@ export class OwedPublicShares<S> {
     const warn = (message: string) => this.#ports.logWarn(message);
     expired.flush(warn, `given up after ${OWED_PUBLIC_SHARE_TTL_MS / 60_000} min`);
     this.#droppedForRoom.flush(warn, 'dropped to make room for newer owed shares');
-    const lookups: PassLookups = { publicGraphs: new Map(), owners: new Map() };
+    const lookups: PassLookups = { publicGraphs: new Map(), owners: new Map(), unreadableLogged: new Set() };
     // A share that reached nobody goes first. Within each kind the share tried
     // longest ago goes first; the sort keeps equals oldest first. A share tried
     // in this pass goes behind every share of its kind this pass did not get
@@ -359,13 +388,28 @@ export class OwedPublicShares<S> {
     }
   }
 
-  /** Whether the share was sent, or tried to be: false when it had nobody to go to. */
+  /** Whether the share was sent, or tried to be: false when it had nobody to go to, or its graph was not known public. */
   async #retry(share: OwedRecord<S>, lookups: PassLookups, generation: number): Promise<boolean> {
-    const isPublic = await lookUpOnce(lookups.publicGraphs, share.contextGraphId, () => this.#ports.isPublic(share.contextGraphId), false);
+    const access = await lookUpOnce(
+      lookups.publicGraphs,
+      share.contextGraphId,
+      () => readGraphAccess(() => this.#ports.isPublic(share.contextGraphId)),
+      { kind: 'unreadable', reason: 'the read failed' },
+    );
     if (!this.#open(generation)) return false;
-    if (!isPublic) {
+    if (access.kind === 'private') {
       this.#shares.delete(share.shareOperationId);
-      this.#ports.logInfo(`${describeShare(share)} not sent again: the graph is not public now, or its access policy cannot be read`);
+      this.#ports.logInfo(`${describeShare(share)} not sent again: the graph is not public now`);
+      return false;
+    }
+    if (access.kind !== 'public') {
+      // Not known either way, as during a transient store error: nothing goes out without a definite
+      // "public", and the record stays, in its place, for a later pass until it expires.
+      if (!lookups.unreadableLogged.has(share.contextGraphId)) {
+        lookups.unreadableLogged.add(share.contextGraphId);
+        this.#ports.logInfo(`SWM shares into "${share.contextGraphId}" kept for a later pass, not sent now: `
+          + `whether the graph is public cannot be read: ${access.reason}`);
+      }
       return false;
     }
     const refused = this.#refusedLately(share);

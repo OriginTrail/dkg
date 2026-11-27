@@ -1,4 +1,5 @@
-import { ASSERTION_NAMED_GRAPH_PREFIX, contextGraphDataUri, validateSubGraphName } from '@origintrail-official/dkg-core';
+import { ASSERTION_NAMED_GRAPH_PREFIX, READ_GRAPH_SEGMENT, contextGraphDataUri, validateSubGraphName } from '@origintrail-official/dkg-core';
+import { isReadGraphPartitionGraph } from '@origintrail-official/dkg-storage';
 import type { ContentPartition } from './content-partition-policy.js';
 
 function isDraft(tail: string): boolean {
@@ -26,7 +27,7 @@ export function describeScopedContentGraph(graph: string, contextGraphId: string
   }
   const base = { subGraphName };
   if (partition === '_shared_memory_meta') return { ...base, kind: 'shared-metadata' };
-  if (isExcludedContentGraphTail(tail)) return undefined;
+  if (isExcludedContentGraph(graph, root)) return undefined;
   if (!partition) return { ...base, kind: 'content' };
   if (partition === '_shared_memory') return { ...base, kind: 'shared-root' };
   if (partition.startsWith('_shared_memory/')) return { ...base, kind: 'shared' };
@@ -98,6 +99,32 @@ function isStagingGraphTail(tail: string): boolean {
 }
 
 
-export function isExcludedContentGraphTail(tail: string): boolean {
+function isExcludedContentGraphTail(tail: string): boolean {
   return isMetadataGraphTail(tail) || isPrivateGraphTail(tail) || isRulesGraphTail(tail) || isStagingGraphTail(tail);
+}
+
+/** A graph under a context graph's root that is never content. Read graphs and their state are node-local derived data. */
+export function isExcludedContentGraph(graph: string, rootGraph: string): boolean {
+  return isExcludedContentGraphTail(graph.slice(rootGraph.length + 1)) || isReadGraphPartitionGraph(graph);
+}
+
+/** The query options that a route turns into graph names: a context graph, a sub-graph, an agent or an assertion. */
+const GRAPH_NAMING_QUERY_OPTIONS = ['contextGraphId', 'subGraphName', 'graphSuffix', 'agentAddress', 'agentAddressAliases',
+  'assertionName', 'verifiedGraph'] as const;
+
+/**
+ * The first query option that names a read-graph partition: one that holds the
+ * reserved segment as a path segment, so a graph built from it could fall in a
+ * partition. Read graphs and their state are node-local derived data that no
+ * caller query reads.
+ */
+export function queryOptionNamingReadGraphPartition(options: object | undefined): string | undefined {
+  if (options === undefined) return undefined;
+  const record = options as Readonly<Record<string, unknown>>;
+  for (const name of GRAPH_NAMING_QUERY_OPTIONS) {
+    const value = record[name];
+    const values = Array.isArray(value) ? value : [value];
+    if (values.some(entry => typeof entry === 'string' && entry.split('/').includes(READ_GRAPH_SEGMENT))) return name;
+  }
+  return undefined;
 }

@@ -13,28 +13,33 @@
  * in a dedicated lightweight "layer counts" endpoint later if the tree
  * grows past ~10 projects.
  */
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo } from 'react';
 import type { ContextGraph } from '../stores/projects.js';
 import { refreshContextGraphInventory, useContextGraphInventory } from '../hooks/useContextGraphInventory.js';
-import { useTabsStore } from '../stores/tabs.js';
+import { chooseTab as openTab } from '../lib/shellNavigation.js';
 import { useMemoryEntities, type MemoryEntity, type TrustLevel } from '../hooks/useMemoryEntities.js';
 import { useMemoryCounts } from './project/helpers.js';
 import { relativeTime } from '../hooks/useProjectActivity.js';
 import { useHiddenContextGraphIds } from '../hooks/useHiddenContextGraphIds.js';
 import { MemoryReadStatus } from '../components/MemoryReadStatus.js';
+import { ContextGraphMark } from '../context-graph-colors.js';
+import { LayerGlyph } from '../components/ds/Badge.js';
+import { Loading } from '../components/ds/Loading.js';
+import { RefreshCw } from 'lucide-react';
+import { formatNumber } from '../lib/format.js';
+import { PageHeader } from '../components/ds/PageHeader.js';
 
 const LAYERS: Array<{
   key: 'working' | 'shared' | 'verified';
   title: string;
   short: string;
-  icon: string;
-  color: string;
+  icon: React.ReactNode;
   desc: string;
   tabPrefix: 'wm' | 'swm' | 'vm';
 }> = [
-  { key: 'working',  title: 'Working Memory',        short: 'WM',  icon: '◇', color: '#64748b', desc: 'Private agent drafts', tabPrefix: 'wm' },
-  { key: 'shared',   title: 'Shared Working Memory', short: 'SWM', icon: '◈', color: '#f59e0b', desc: 'Team proposals',       tabPrefix: 'swm' },
-  { key: 'verified', title: 'Verifiable Memory',     short: 'VM',  icon: '◉', color: '#22c55e', desc: 'On-chain knowledge',   tabPrefix: 'vm' },
+  { key: 'working',  title: 'Working Memory',        short: 'WM',  icon: <LayerGlyph layer="wm" />, desc: 'Private agent drafts', tabPrefix: 'wm' },
+  { key: 'shared',   title: 'Shared Working Memory', short: 'SWM', icon: <LayerGlyph layer="swm" />, desc: 'Team proposals',       tabPrefix: 'swm' },
+  { key: 'verified', title: 'Verifiable Memory',     short: 'VM',  icon: <LayerGlyph layer="vm" />, desc: 'On-chain knowledge',   tabPrefix: 'vm' },
 ];
 
 const TS_PREDS = [
@@ -55,23 +60,20 @@ export function MemoryStackView() {
   );
 
   return (
-    <div className="v10-memstack">
-      <div className="v10-memstack-head">
-        <h1 className="v10-memstack-title">Memory Stack</h1>
-        <p className="v10-memstack-sub">
+    <div className="ds-page v10-memstack">
+      <PageHeader title="Memory stack" description={<>
           Every layer across every context graph, at a glance.
           {(!inventoryLoading && !inventoryError || contextGraphs.length > 0) && <> {visible.length} visible context graph{visible.length === 1 ? '' : 's'} · hidden context graphs are skipped.</>}
-        </p>
-      </div>
+      </>} />
 
       {inventoryError && <div className="v10-stale-banner" role="alert">
         <span>{listError ? 'Context graphs unavailable. ' : ''}{identity.error ? 'Agent identity unavailable. ' : ''}
           {contextGraphs.length > 0 ? 'Showing the last available context graphs.' : 'Context graph inventory is unknown.'}</span>
-        <button type="button" className="v10-retry-btn" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry context graphs</button>
+        <button type="button" className="v10-retry-btn ds-btn ds-sm" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}><RefreshCw size={12} />Retry context graphs</button>
       </div>}
-      {inventoryLoading && contextGraphs.length === 0 && <div role="status">Loading context graphs…</div>}
+      {inventoryLoading && contextGraphs.length === 0 && <Loading label="Loading context graphs…" />}
       {visible.length === 0 ? (!inventoryError && !inventoryLoading && (
-        <div className="v10-memstack-empty">
+        <div className="v10-memstack-empty ds-card-nested">
           No visible context graphs. Create one from the sidebar or un-hide dismissed ones.
         </div>
       )) : (
@@ -79,7 +81,7 @@ export function MemoryStackView() {
           <div className="v10-memstack-colheads">
             <div className="v10-memstack-colhead project" />
             {LAYERS.map(L => (
-              <div key={L.key} className="v10-memstack-colhead" style={{ color: L.color }}>
+              <div key={L.key} className={`v10-memstack-colhead v10-layer-tone-text layer-tone-${L.tabPrefix}`}>
                 <span className="v10-memstack-colhead-icon">{L.icon}</span>
                 <span className="v10-memstack-colhead-title">{L.title}</span>
                 <span className="v10-memstack-colhead-desc">{L.desc}</span>
@@ -97,7 +99,6 @@ export function MemoryStackView() {
 
 function MemoryStackRow({ cg }: { cg: ContextGraph }) {
   const memory = useMemoryEntities(cg.id);
-  const { openTab } = useTabsStore();
   // GH #819 round 3 (Codex sweep 1 🔴 #2) — per-layer buckets use
   // the OR-rule admission (drop if subject OR resource-object moved
   // past t.layer; matches the per-layer Triples tab the layer-card
@@ -147,7 +148,7 @@ function MemoryStackRow({ cg }: { cg: ContextGraph }) {
     <div className="v10-memstack-row">
       <div className="v10-memstack-project">
         <button type="button" className="v10-memstack-project-btn" onClick={openProject}>
-          <span className="v10-memstack-project-dot" />
+          <ContextGraphMark id={cg.id} name={cg.name} />
           <span className="v10-memstack-project-name">{cg.name || cg.id}</span>
         </button>
         {cg.description && (
@@ -169,7 +170,6 @@ function MemoryStackRow({ cg }: { cg: ContextGraph }) {
           <LayerCell
             key={L.key}
             cgId={cg.id}
-            color={L.color}
             layerTitle={L.title}
             tabPrefix={L.tabPrefix}
             entityCount={bucket.entities.length}
@@ -192,7 +192,6 @@ function MemoryStackRow({ cg }: { cg: ContextGraph }) {
 
 function LayerCell({
   cgId: _cgId,
-  color,
   layerTitle,
   tabPrefix,
   entityCount,
@@ -202,7 +201,6 @@ function LayerCell({
   onOpenLayer,
 }: {
   cgId: string;
-  color: string;
   layerTitle: string;
   tabPrefix: 'wm' | 'swm' | 'vm';
   entityCount: number;
@@ -214,8 +212,7 @@ function LayerCell({
   const isEmpty = entityCount === 0;
   return (
     <div
-      className={`v10-memstack-cell${isEmpty ? ' empty' : ''}`}
-      style={{ '--cell-color': color } as React.CSSProperties}
+      className={`v10-memstack-cell ds-card-nested layer-tone-${tabPrefix}${isEmpty ? ' empty' : ''}`}
     >
       <div className="v10-memstack-cell-stats">
         <span className="v10-memstack-cell-n">{entityCount}</span>
@@ -223,7 +220,7 @@ function LayerCell({
           {partial ? 'loaded ' : ''}entit{entityCount === 1 ? 'y' : 'ies'}
         </span>
         <span className="v10-memstack-cell-sep">·</span>
-        <span className="v10-memstack-cell-t">{tripleCount.toLocaleString()}</span>
+        <span className="v10-memstack-cell-t">{formatNumber(tripleCount)}</span>
         <span className="v10-memstack-cell-t-lbl">{partial ? 'loaded triples' : 'triples'}</span>
       </div>
       {recent.length > 0 ? (

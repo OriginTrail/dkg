@@ -460,7 +460,7 @@ export async function runApproveBatch(
           dispatch({
             type: 'ROW_SET',
             address: addr,
-            row: { address: addr, status: 'conflict', message: `Approved on PCA #${plan.prevAccountId}, but it’s expired/swept (not covering) — ask its owner to deregister you; this node can’t free it.` },
+            row: { address: addr, status: 'conflict', message: `Approved on PCA #${plan.prevAccountId}, but it’s expired (not covering) — ask its owner to deregister you; this node can’t free it.` },
           });
           continue;
         }
