@@ -18,7 +18,7 @@ export interface SubscriptionRecoveryRowPorts {
   revision(id: string): number;
   subscription(id: string): ContextGraphSub | undefined;
   load(id: string): Promise<ContextGraphSubscriptionRecord | null>;
-  resolveAuthority(row: ContextGraphSubscriptionRecord, signal: AbortSignal): Promise<ContextGraphReadAuthorityDecision | undefined>;
+  resolveAuthority(row: ContextGraphSubscriptionRecord, signal: AbortSignal): Promise<ContextGraphReadAuthorityDecision>;
   clear(id: string): void;
   retire(id: string, reason: ContextGraphDormancyReason): void;
   capped(id: string): void;
@@ -44,7 +44,6 @@ export async function recoverUnavailableSubscriptionRow(
   if (!hasIntent(row)) { ports.clear(id); return { kind: 'done' }; }
   const authority = await ports.resolveAuthority(row, signal);
   if (!current()) return { kind: 'done' };
-  if (authority === undefined) return { kind: 'retry', why: 'authority check did not answer before its deadline' };
   const fresh = await ports.load(id);
   if (!current()) return { kind: 'done' };
   if (!hasIntent(fresh)) { ports.clear(id); return { kind: 'done' }; }

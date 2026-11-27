@@ -265,11 +265,19 @@ export class ContextGraphSubscriptionActivations {
     if (reserved) {
       if (this.recoveryReservations.has(row.id)) throw changed();
       const status = this.startupAccounting ?? this.ports.getStatus();
-      const installing = [...this.pending.values()].filter(attempt =>
-        attempt.phase.kind === 'installing' && attempt.phase.subscription.coreHosted !== true
-        && !this.recoveryReservations.has(attempt.intent.id)).length;
-      if (status && status.activationCap > 0
-        && Math.max(0, status.activated - status.hostedActivated) + installing + this.recoveryReservations.size >= status.activationCap) {
+      // Capacity is the union of committed rows and in-flight ownership. A
+      // just-committed attempt may still hold its lease until its promise retires.
+      const occupied = new Set(this.recoveryReservations);
+      for (const id of this.ports.contextGraphSubscriptionRehydrationAccountedIds) {
+        if (!this.ports.contextGraphSubscriptionDormancyById.has(id)) occupied.add(id);
+      }
+      for (const attempt of this.pending.values()) {
+        if (attempt.phase.kind === 'installing') occupied.add(attempt.intent.id);
+      }
+      for (const id of occupied) {
+        if (this.ports.subscribedContextGraphs.get(id)?.coreHosted === true) occupied.delete(id);
+      }
+      if (status && status.activationCap > 0 && occupied.size >= status.activationCap) {
         throw new SubscriptionActivationCapacityError();
       }
       this.recoveryReservations.add(row.id);

@@ -8,7 +8,7 @@ import type { ContextGraphDormancyReason } from '../src/context-graph-subscripti
 const row = (id: string, coreHosted = false): ContextGraphSubscriptionRecord => ({
   id, subscribed: true, synced: true, syncScoped: true, coreHosted,
 });
-function fixture(rows: ContextGraphSubscriptionRecord[]) {
+function fixture(rows: ContextGraphSubscriptionRecord[], cap = 1, publish: (id: string) => void = () => {}) {
   const live = new Map<string, ContextGraphSub>();
   const dormancy = new Map<string, ContextGraphDormancyReason>();
   let status: ContextGraphSubscriptionRehydrationInternalStatus | null = null;
@@ -17,10 +17,10 @@ function fixture(rows: ContextGraphSubscriptionRecord[]) {
     contextGraphSubscriptionRehydrationPendingIds: new Set(), contextGraphSubscriptionRehydrationSlotIds: new Set(),
     contextGraphSubscriptionRehydrationAccountedIds: new Set(),
     getStatus: () => status, setStatus: next => { status = next; },
-    slotReleased: () => {}, clearPersistRevision: () => {}, publish: () => {},
+    slotReleased: () => {}, clearPersistRevision: () => {}, publish,
   });
   owner.reset(rows);
-  owner.beginRehydration(rows, { rehydrationEnabled: true, systemExcluded: 0, activationCap: 1 });
+  owner.beginRehydration(rows, { rehydrationEnabled: true, systemExcluded: 0, activationCap: cap });
   owner.completeRehydration();
   const ports: PersistedContextGraphSubscriptionActivationPorts = {
     install: vi.fn(record => {
@@ -38,6 +38,19 @@ function fixture(rows: ContextGraphSubscriptionRecord[]) {
 }
 
 describe('authority recovery activation capacity', () => {
+  it('counts a committed activation once while its outer reservation is retiring', async () => {
+    const a = row('a'), b = row('b'), c = row('c');
+    let second: Promise<ContextGraphSub> | undefined;
+    const f = fixture([a, b, c], 2, id => {
+      if (id === 'a') second = f.owner.activate(b, f.ports, { respectActivationCap: true });
+    });
+    await f.owner.activate(a, f.ports, { respectActivationCap: true });
+    await expect(second).resolves.toMatchObject({ subscribed: true });
+    expect(f.status().activated).toBe(2);
+    await expect(f.owner.activate(c, f.ports, { respectActivationCap: true }))
+      .rejects.toBeInstanceOf(SubscriptionActivationCapacityError);
+  });
+
   it.each([true, false])('accounts for installing recovery/rolling work while hosted recovery stays exempt (reserved=%s)', async reserved => {
     const a = row('a'), b = row('b'), hosted = row('hosted', true);
     const f = fixture([a, b, hosted]);
