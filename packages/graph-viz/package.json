@@ -46,7 +46,7 @@
   },
   "dependencies": {
     "force-graph": "^1.51.0",
-    "n3": "^1.22.3",
+    "n3": "^2.13.12",
     "oxigraph": "^0.5.4"
   },
   "optionalDependencies": {
