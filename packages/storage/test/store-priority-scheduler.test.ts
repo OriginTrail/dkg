@@ -49,7 +49,7 @@ describe('StorePriorityScheduler', () => {
     expect(STORE_WORK_PRIORITIES).toEqual(['ack', 'health', 'normal', 'background']);
   });
 
-  it('dispatches contending lanes in the stable canonical order', async () => {
+  it('preserves health priority before the owed single-slot normal turn', async () => {
     const scheduler = new StorePriorityScheduler({
       maxConcurrent: 1,
       ackReservedSlots: 0,

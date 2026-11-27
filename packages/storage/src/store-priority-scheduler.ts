@@ -1,3 +1,4 @@
+import { StoreDispatchPolicy, normalizeNonAckLanePolicy, type NonAckLanePolicy } from './store-dispatch-policy.js';
 import { traceShareStoreCall } from './share-store-timing.js';
 import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';
 import { performance } from 'node:perf_hooks';
@@ -196,19 +197,6 @@ interface QueueEntry<T> {
   waitTimer?: ReturnType<typeof setTimeout>;
 }
 
-interface NonAckLanePolicy {
-  /** Shared normal/background capacity after the ACK and health reservations. */
-  totalLimit: number;
-  /** Capacity protected from background work. */
-  normalFloor: number;
-  /** Normal ceiling while queued background work owns its floor. */
-  normalLimitWhileBackgroundQueued: number;
-  /** Background progress guarantee while background work is queued. */
-  backgroundFloor: number;
-  /** Background ceiling that protects the normal floor. */
-  backgroundLimit: number;
-}
-
 interface LegacyStorePrioritySchedulerArguments {
   argumentCount: number;
   ackReservedSlots?: number;
@@ -228,7 +216,6 @@ const MIN_ACK_SAFE_MAX_CONCURRENT = DEFAULT_ACK_RESERVED_SLOTS + 1;
 const DEFAULT_HEALTH_RESERVED_SLOTS = 1;
 const DEFAULT_NORMAL_RESERVED_SLOTS = 1;
 const DEFAULT_BACKGROUND_RESERVED_SLOTS = 1;
-const MAX_CONTENDED_NORMAL_DISPATCHES = 8;
 export const DEFAULT_STORE_QUEUE_LIMIT = 64;
 export const DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS = 10_000;
 
@@ -324,31 +311,6 @@ function normalizeStorePrioritySchedulerOptions(
   };
 }
 
-function normalizeNonAckLanePolicy(
-  totalLimit: number,
-  requestedNormalFloor: number,
-  requestedBackgroundFloor: number,
-): NonAckLanePolicy {
-  const normalFloor = Math.min(
-    Math.max(0, requestedNormalFloor),
-    Math.max(0, totalLimit - 1),
-  );
-  const backgroundLimit = Math.max(1, totalLimit - normalFloor);
-  const backgroundFloor = Math.min(
-    Math.max(0, requestedBackgroundFloor),
-    backgroundLimit,
-    Math.max(0, totalLimit - 1),
-  );
-  const normalLimitWhileBackgroundQueued = totalLimit - backgroundFloor;
-  return {
-    totalLimit,
-    normalFloor,
-    normalLimitWhileBackgroundQueued,
-    backgroundFloor,
-    backgroundLimit,
-  };
-}
-
 export function storeWorkPriorityRank(priority: StoreWorkPriority): number {
   return STORE_WORK_PRIORITIES.indexOf(priority);
 }
@@ -375,7 +337,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
   private readonly nonAckLanePolicy: NonAckLanePolicy;
   private readonly shareSingleOrdinarySlot: boolean;
   private readonly controlId?: string;
-  private contendedNormalDispatches = 0;
+  private readonly dispatchPolicy = new StoreDispatchPolicy();
   private readonly activeAdmissions = new Map<QueueEntry<unknown>, number>();
   // Wait and rejection figures for the periodic line. The lanes come from `queues`:
   // STORE_WORK_PRIORITIES can still be uninitialised when the singleton below is built.
@@ -624,22 +586,22 @@ export class StorePriorityScheduler extends ObservableScheduler {
   }
 
   private nextRunnable(): QueueEntry<unknown> | undefined {
-    if (this.queues.background.length === 0) this.contendedNormalDispatches = 0;
-    for (const priority of STORE_WORK_PRIORITIES) {
-      const queue = this.queues[priority];
-      if (queue.length === 0) continue;
-      if (priority === 'normal' && this.shareSingleOrdinarySlot
-        && this.contendedNormalDispatches >= MAX_CONTENDED_NORMAL_DISPATCHES
-        && this.queues.background.length > 0 && this.canStart('background')) {
-        return this.queues.background.shift();
+    const candidates = this.dispatchPolicy.candidates({
+      maxConcurrent: this.maxConcurrent, lanePolicy: this.nonAckLanePolicy,
+      ackReservedSlots: this.ackReservedSlots, ackQueued: this.queues.ack.length,
+      shareSingleOrdinarySlot: this.shareSingleOrdinarySlot,
+      normalInflight: this.normalInflight, backgroundInflight: this.backgroundInflight,
+      normalQueued: this.queues.normal.length, backgroundQueued: this.queues.background.length,
+    });
+    for (const priority of candidates) {
+      if (this.queues[priority].length > 0 && this.hasCapacityFor(priority)) {
+        return this.queues[priority].shift();
       }
-      if (!this.canStart(priority)) continue;
-      return queue.shift();
     }
     return undefined;
   }
 
-  private canStart(priority: StoreWorkPriority): boolean {
+  private hasCapacityFor(priority: StoreWorkPriority): boolean {
     const totalInflight = this.ackInflight + this.healthInflight + this.normalInflight + this.backgroundInflight;
     if (totalInflight >= this.maxConcurrent) return false;
     if (priority === 'ack') return true;
@@ -656,14 +618,11 @@ export class StorePriorityScheduler extends ObservableScheduler {
       return false;
     }
     if (priority === 'background' || this.queues.background.length === 0) return true;
-    return this.backgroundInflight >= lanePolicy.backgroundFloor &&
-      this.normalInflight < lanePolicy.normalLimitWhileBackgroundQueued;
+    return this.normalInflight < lanePolicy.normalLimitWhileBackgroundQueued;
   }
 
   private start(entry: QueueEntry<unknown>): void {
-    if (entry.priority === 'background') this.contendedNormalDispatches = 0;
-    else if (entry.priority === 'normal' && this.shareSingleOrdinarySlot
-      && this.queues.background.length > 0) this.contendedNormalDispatches += 1;
+    this.dispatchPolicy.started(entry.priority, this.shareSingleOrdinarySlot && this.queues.background.length > 0, this.queues.ack.length > 0);
     this.cleanupQueuedEntry(entry);
     this.increment(entry.priority);
     const startedAt = this.now();
