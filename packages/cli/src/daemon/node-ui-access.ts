@@ -41,32 +41,28 @@ function forwardedByProxy(headers: IncomingMessage['headers']): boolean {
 
 /**
  * The token to embed in the dashboard shell for this request, if any. The
- * shell itself is public so every caller can load it and authenticate, but the
- * node-operator token is injected only for a trusted local request: a loopback
- * client socket AND a `Host` that names the loopback interface AND no proxy
- * forwarding headers. A non-loopback client, a loopback client presenting any
- * other `Host`, or a request forwarded by a proxy is untrusted and is served
- * the same shell without a token.
+ * shell itself is public so every caller can load it and authenticate; by
+ * default it carries no token, and the dashboard asks for one.
+ *
+ * Only an operator who turns on `auth.dashboardAutoSignIn` gets the
+ * node-operator token injected, and then only for a trusted local request: a
+ * loopback client socket AND a `Host` that names the loopback interface AND no
+ * proxy forwarding headers. It is off by default; leave it off on a node with
+ * a reverse proxy in front of the API.
  */
 export function nodeUiTokenForRequest(
   req: Pick<IncomingMessage, 'socket' | 'headers'>,
   opts: {
     authEnabled: boolean;
+    /** `auth.dashboardAutoSignIn`: embed the token for a trusted local request. */
+    autoSignIn: boolean;
     validTokens: Iterable<string>;
     resolveAgentByToken: (token: string) => string | undefined;
   },
 ): string | undefined {
-  if (!opts.authEnabled) return undefined;
+  if (!opts.authEnabled || !opts.autoSignIn) return undefined;
   if (!isLoopbackClientIp(req.socket?.remoteAddress ?? '')) return undefined;
   if (!hostIsLocal(req.headers.host)) return undefined;
   if (forwardedByProxy(req.headers)) return undefined;
-  // TODO: two opt-in settings do not exist yet. An allowlist of extra Host
-  // names would let an operator on the node host use another name for it and
-  // still be signed in automatically. A trusted-proxy setting would cover a
-  // same-host reverse proxy that forwards a loopback Host and adds none of those
-  // headers (e.g. nginx's default `proxy_set_header Host $proxy_host` without
-  // X-Forwarded-For), which cannot be told apart from a direct local caller;
-  // operators who front the dashboard that way need authentication in front of
-  // the proxy until then.
   return nodeOperatorToken(opts.validTokens, opts.resolveAgentByToken);
 }

@@ -15,7 +15,7 @@ import {
   type SwmSnapshotCoverage,
   type SyncPeerResolution,
 } from '@origintrail-official/dkg-agent';
-import { advertisesSyncProtocol, createOperationContext } from '@origintrail-official/dkg-core';
+import { advertisesSyncProtocol, createOperationContext, workerThreadEnv } from '@origintrail-official/dkg-core';
 
 const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
 const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
@@ -728,7 +728,7 @@ class WorkerCatchupRunner implements CatchupRunner {
     const jsWorkerUrl = new URL('./catchup-runner-worker-impl.js', import.meta.url);
     const tsWorkerUrl = new URL('./catchup-runner-worker-impl.ts', import.meta.url);
     const workerUrl = existsSync(fileURLToPath(jsWorkerUrl)) ? jsWorkerUrl : tsWorkerUrl;
-    this.worker = new Worker(fileURLToPath(workerUrl));
+    this.worker = new Worker(fileURLToPath(workerUrl), { env: workerThreadEnv() });
     this.worker.on('message', (message: WorkerMessage) => {
       if (message.type === 'run-result') {
         const pending = this.pendingRuns.get(message.runId);

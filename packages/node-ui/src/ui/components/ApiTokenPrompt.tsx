@@ -76,13 +76,12 @@ export function ApiTokenPrompt({
     <form className="v10-token-prompt" aria-label="Node API token" onSubmit={onSubmit}>
       <span className="v10-token-prompt-text">
         <strong>API token required</strong>
-        {state === 'rejected' ? ' — the node did not accept that token.' : ' —'} The node
-        passes its token to the dashboard only when it is opened on the node host. Paste
-        the token from <code>auth.token</code> on the node host to use this dashboard
-        at <strong>{window.location.host}</strong> (kept for this tab only).
+        {state === 'rejected' ? ' — the node did not accept that token.' : ' —'} Paste
+        the node's token, which <code>dkg auth show</code> prints on the node host, to use
+        this dashboard at <strong>{window.location.host}</strong> (kept for this tab only).
       </span>
       <input
-        className="v10-token-prompt-input"
+        className="v10-token-prompt-input ds-input ds-sm"
         type="password"
         autoComplete="off"
         spellCheck={false}

@@ -85,7 +85,8 @@ describe('named KA VM lifecycle batching', () => {
     const update = vi.spyOn(raw, 'update'); const insert = vi.spyOn(raw, 'insert'); const remove = vi.spyOn(raw, 'deleteByPatternWithoutCount');
     await fast(raw)(value);
     expect(update).toHaveBeenCalledTimes(1);
-    expect(update.mock.calls[0]![1]).toEqual({ touchedGraphs: [contextGraphMetaUri(input.contextGraphId)], source: 'agent.publish.namedKaVmLifecycle' });
+    const meta = contextGraphMetaUri(input.contextGraphId);
+    expect(update.mock.calls[0]![1]).toEqual({ touchedGraphs: [meta], writtenGraphs: [meta], source: 'agent.publish.namedKaVmLifecycle' });
     expect(insert).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled();
     const preserved = packed ? [] : old.slice(10);
     expect(await all(raw)).toEqual([...rows(value), ...unrelated, ...preserved].map(quadToNQuad).sort());

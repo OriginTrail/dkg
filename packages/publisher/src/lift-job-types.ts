@@ -215,10 +215,10 @@ export interface LiftJobRecoveryResetToAccepted {
    * signing anything, and be held on a transaction the dispatcher itself established does not
    * exist, with no second proof possible because nothing new was ever sent.
    *
-   * Written ONLY by the proof-first dispatcher's release paths: a proven absence, and a proven
-   * revert of a transaction some earlier attempt sent. Never by the interrupted-recovery reset,
-   * the retry sweep, or a manual reaccept — none of those has asked the chain anything, and a hash
-   * they carry forward is still genuinely unaccounted for.
+   * Written by the proof-first dispatcher's release paths (a proven absence, and a proven revert of
+   * a transaction some earlier attempt sent) and by a reaccept of an attempt's own refused
+   * transaction, whose refusal is the proof (#3591). A reset that has asked the chain nothing only
+   * ever keeps an existing mark: a hash it carries forward unmarked is still unaccounted for.
    *
    * A NEW post-sign failure records fresh `broadcast` metadata, which is unconditional evidence:
    * this flag only ever speaks about the INHERITED hash it sits beside.

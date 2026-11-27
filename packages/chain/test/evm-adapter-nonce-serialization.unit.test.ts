@@ -21,6 +21,7 @@ import {
   isChainWriteAheadHookError,
 } from '../src/write-ahead-hook-error.js';
 import { connectable } from './connectable.js';
+import { makeClient, retryable429 } from './rpc-failover-test-helpers.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -616,5 +617,141 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
     // accepted. It may overlap receipt polling, which is intentionally outside
     // the nonce-critical lane.
     expect(events.indexOf('rs-start:submitProof')).toBeGreaterThan(events.indexOf('accepted:pub'));
+  });
+});
+
+describe('rebroadcastReceiptBatch — in the lane of the wallet that signed the batch', () => {
+  // A receipt batch recorded at nonce 7 but never broadcast left its wallet's pending nonce at 7, so a write in that
+  // wallet's lane reads 7 too. These endpoints take a transaction only at its wallet's pending nonce, as a node does,
+  // and answer the pending-nonce read from the same count.
+  const signedAt = (pk: string, nonce: number, data: string) => new ethers.Wallet(pk).signTransaction({
+    type: 2, chainId: 31337, nonce, to: V10_KA_ADDRESS, data, gasLimit: 100_000n, maxFeePerGas: 2n, maxPriorityFeePerGas: 1n,
+  });
+
+  function onChain(config: Partial<EVMAdapterConfig> = {}) {
+    const a = new EVMChainAdapter(minimalConfig(config));
+    (a as any).initialized = true;
+    const pending = new Map<string, number>();
+    const pendingOf = (address: string) => pending.get(address) ?? 7;
+    const sent: string[] = [];
+    (a as any).broadcastSignedTransactionWithFailover = recorder(async (signedTx: string) => {
+      const tx = ethers.Transaction.from(signedTx);
+      if (tx.nonce !== pendingOf(tx.from!)) throw new Error(`nonce too low: ${tx.nonce}, pending ${pendingOf(tx.from!)}`);
+      pending.set(tx.from!, tx.nonce + 1);
+      sent.push(signedTx);
+    });
+    (a as any).waitForReceiptWithFailover = recorder(async (txHash: string) => fakeReceipt(txHash));
+    // The guard asks where the wallet's writes read their nonce; a read through the read provider fails the test.
+    const nonceReads: string[] = [];
+    (a as any).rpcFailover.pendingNonce = async (address: string) => {
+      nonceReads.push(address);
+      return pendingOf(address);
+    };
+    (a as any).readTipProvider = async () => { throw new Error('the guard read the read provider'); };
+    const broadcasts: unknown[][] = (a as any).broadcastSignedTransactionWithFailover.calls;
+    return { a, sent, pending, pendingOf, nonceReads, broadcasts };
+  }
+
+  /** Hold a wallet's lane, as a write that has read its nonce and not yet sent does. */
+  function holdLane(a: EVMChainAdapter, pk: string) {
+    const release = deferred();
+    const held = (a as any).signerTxSerializer.run(new ethers.Wallet(pk).address, () => release.promise, 'test hold');
+    return { release: () => release.resolve(), held };
+  }
+
+  it('waits while a write in the same lane signs at the nonce it read, then leaves that nonce to it', async () => {
+    const { a, sent, pendingOf, broadcasts } = onChain();
+    const wallet = new ethers.Wallet(DEPLOYER_PK);
+    const batch = await signedAt(DEPLOYER_PK, 7, '0xba');
+    const read = deferred();
+    const signing = deferred();
+    const publish = (a as any).dispatchSerializedV10Write(wallet, 'publish', undefined, async () => {
+      const nonce = pendingOf(wallet.address);
+      read.resolve();
+      await signing.promise;
+      const signedTx = await signedAt(DEPLOYER_PK, nonce, '0x9b');
+      return { signedTx, txHash: ethers.Transaction.from(signedTx).hash!, nonce };
+    }, neverNull);
+    await read.promise;
+    const recovery = a.rebroadcastReceiptBatch(batch);
+    await tick(10);
+    // Nothing is sent while the publish signs at nonce 7.
+    expect(sent).toEqual([]);
+    signing.resolve();
+    await Promise.all([publish, recovery]);
+    // The publish took nonce 7, so the batch is not sent at all: it could only be refused, or replace the publish.
+    expect(broadcasts).toHaveLength(1);
+    expect(sent).toHaveLength(1);
+    expect(sent).not.toContain(batch);
+  });
+
+  it("sends nothing once its wallet's pending nonce is past the batch's", async () => {
+    const { a, pending, nonceReads, broadcasts } = onChain();
+    // Another transaction holds nonce 7, pending, or the batch itself is out already.
+    const address = new ethers.Wallet(DEPLOYER_PK).address;
+    pending.set(address, 8);
+    await a.rebroadcastReceiptBatch(await signedAt(DEPLOYER_PK, 7, '0xba'));
+    expect(broadcasts).toEqual([]);
+    expect(nonceReads).toEqual([address]);
+  });
+
+  it("reads the pending nonce where its wallet's writes read theirs, so a lagging primary frees no taken nonce", async () => {
+    // Two RPCs. A publish took nonce 7 on the backup once the primary failed it, so writes now read their nonce there.
+    // The primary never saw that publish and still reports 7; the backup reports 8.
+    const a = new EVMChainAdapter(minimalConfig());
+    (a as any).initialized = true;
+    const address = new ethers.Wallet(DEPLOYER_PK).address;
+    const primary = { getTransactionCount: recorder(async () => 7) };
+    const backup = { getTransactionCount: recorder(async () => 8) };
+    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example'],
+      async (_signer: unknown, populated: any) => ({ ...populated, nonce: 7 }), { enabled: true });
+    const signer = { address, connect: (p: unknown) => ({ address, boundTo: p }) } as any;
+    const knowledgeAssets = { connect: (s: any) => ({ publish: { populateTransaction: () => (s.boundTo === primary
+      ? Promise.reject(retryable429()) : Promise.resolve({ to: V10_KA_ADDRESS, data: '0x' })) } }) } as any;
+    await client.prepareTransaction(knowledgeAssets, 'publish', [], signer, 'publish');
+    (a as any).rpcFailover = client;
+    const send = recorder(async () => undefined);
+    (a as any).broadcastSignedTransactionWithFailover = send;
+    await a.rebroadcastReceiptBatch(await signedAt(DEPLOYER_PK, 7, '0xba'));
+    expect(send.calls).toEqual([]);
+    expect(backup.getTransactionCount.calls).toEqual([[address, 'pending']]);
+    expect(primary.getTransactionCount.calls).toEqual([]);
+  });
+
+  it("sends a batch at its wallet's pending nonce once: sent again, it finds that nonce taken", async () => {
+    const { a, sent, broadcasts } = onChain();
+    const batch = await signedAt(DEPLOYER_PK, 7, '0xba');
+    await a.rebroadcastReceiptBatch(batch);
+    await a.rebroadcastReceiptBatch(batch);
+    expect(sent).toEqual([batch]);
+    expect(broadcasts).toHaveLength(1);
+  });
+
+  it('waits in the lane of the wallet that signed it, and in no other', async () => {
+    const { a, sent } = onChain({ additionalKeys: [OTHER_PK] });
+    const primary = holdLane(a, DEPLOYER_PK);
+    const other = holdLane(a, OTHER_PK);
+    const batch = await signedAt(OTHER_PK, 7, '0xba');
+    const recovery = a.rebroadcastReceiptBatch(batch);
+    await tick(10);
+    expect(sent).toEqual([]);
+    // Its own wallet's lane frees, and it is sent while the primary wallet's lane is still held.
+    other.release();
+    await tick(10);
+    expect(sent).toEqual([batch]);
+    primary.release();
+    await Promise.all([recovery, primary.held, other.held]);
+  });
+
+  it("is sent at once when none of the node's wallets signed it: there is no lane to share", async () => {
+    const { a, sent } = onChain();
+    const primary = holdLane(a, DEPLOYER_PK);
+    const batch = await signedAt(OTHER_PK, 7, '0xba');
+    const recovery = a.rebroadcastReceiptBatch(batch).then(() => 'sent', (err: Error) => err.message);
+    await tick(10);
+    expect(sent).toEqual([batch]);
+    primary.release();
+    expect(await recovery).toBe('sent');
+    await primary.held;
   });
 });

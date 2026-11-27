@@ -52,7 +52,8 @@ import {
   type WorkspacePublicSnapshotStore,
   type StorageAckCopyCleanupWriter,
 } from '@origintrail-official/dkg-publisher';
-import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { createPublisherStore } from './publisher-store.js';
 import {
   loadNetworkConfig,
   loadResolvedNetworkConfig,
@@ -82,6 +83,7 @@ import {
   verifyCanonicalUpdateFacts,
   type PublisherChainAdapters,
 } from './publisher-chain-proof.js';
+import { createPublisherWalletBalanceReader } from './publisher-wallet-balances.js';
 
 export type { ACKTransportFactory } from '@origintrail-official/dkg-publisher';
 
@@ -664,9 +666,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       });
     }
 
-    const publishers = new Map<string, DKGPublisher>(
-      wallets.map((wallet) => [wallet.address, wallet.publisher]),
-    );
+    const publishers = new Map<string, DKGPublisher>(wallets.map((wallet) => [wallet.address, wallet.publisher]));
     // Recovery factories use the adapters owned by these wallet runtimes.
     const chainAdapters = chainAdaptersForWallets(wallets);
     const hasChainRecovery = [...chainAdapters.values()].some(hasChainPublishLookup);
@@ -696,6 +696,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       ...args.retryTuning,
       publicSnapshotStore: args.publicSnapshotStore,
       journalWrites: args.journalWrites ?? false,
+      walletBalanceReader: createPublisherWalletBalanceReader(chainAdapters),
       knowledgeAssetVmPublishHandler: scopedKnowledgeAssetVmPublishHandler,
       publishExecutor: async ({ walletId, publishOptions }: AsyncLiftPublishExecutionInput) => {
         const publisher = publishers.get(walletId);
@@ -831,10 +832,10 @@ function createV10ACKProviderForPublisher(
   const chain = (publisher as unknown as {
     chain?: {
       isV10Ready?: () => boolean;
-      verifyACKIdentity?: (recoveredAddress: string, claimedIdentityId: bigint) => Promise<boolean>;
+      verifyACKIdentity?: (recoveredAddress: string, claimedIdentityId: bigint, options?: { signal?: AbortSignal }) => Promise<boolean>;
       verifyACKIdentityDetailed?: (
         recoveredAddress: string,
-        claimedIdentityId: bigint,
+        claimedIdentityId: bigint, options?: { signal?: AbortSignal },
       ) => Promise<{ valid: boolean; reason?: 'key-not-registered' | 'not-in-sharding-table' | 'rpc-error' }>;
       getMinimumRequiredSignatures?: () => Promise<number>;
       getEvmChainId?: () => Promise<bigint>;
@@ -855,12 +856,12 @@ function createV10ACKProviderForPublisher(
     gossipPublish: transport.gossipPublish,
     sendP2P: transport.sendP2P,
     getConnectedCorePeers: transport.getConnectedCorePeers,
-    verifyIdentity: async (recoveredAddress: string, claimedIdentityId: bigint) => chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId),
+    verifyIdentity: async (recoveredAddress: string, claimedIdentityId: bigint, options) => chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId, options),
     // Prefer the structured verifier when the chain adapter exposes it
     // so the rejection log can report the specific failing gate.
     ...(typeof chain.verifyACKIdentityDetailed === 'function' ? {
-      verifyIdentityDetailed: async (recoveredAddress: string, claimedIdentityId: bigint) =>
-        chain.verifyACKIdentityDetailed!(recoveredAddress, claimedIdentityId),
+      verifyIdentityDetailed: async (recoveredAddress: string, claimedIdentityId: bigint, options) =>
+        chain.verifyACKIdentityDetailed!(recoveredAddress, claimedIdentityId, options),
     } : {}),
     log: transport.log,
   });
@@ -1277,43 +1278,6 @@ function mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
   };
 }
 
-
-async function createPublisherStore(dataDir: string, config: DkgConfig, readOnly = false): Promise<TripleStore> {
-  if (config.store) {
-    const storeConfig = config.store as any;
-    return await createTripleStore({
-      ...storeConfig,
-      // Only the embedded Oxigraph adapters write a store file back; an external store is a server the inspector only queries.
-      ...(readOnly && isLocalOxigraphStoreConfig(storeConfig) ? { options: { ...storeConfig.options, readOnly } } : {}),
-      // OT-RFC-59 §5.3: the daemon-down CLI publisher is a SECOND writer against
-      // the same store. It MUST NOT maintain the change log — a second in-memory
-      // seq allocator would fork the log (commit order ≠ seq order across
-      // processes). Only the single-writer daemon owns the changelog; force it
-      // off here regardless of config.store.changelog.
-      changelog: false,
-      largeLiteralStorage: config.largeLiteralStorage ?? (
-        isLocalOxigraphStoreConfig(storeConfig)
-          ? defaultLargeLiteralStorage(dataDir, config)
-          : undefined
-      ),
-    });
-  }
-
-  return await createTripleStore({
-    backend: 'oxigraph-worker',
-    options: { path: join(dataDir, 'store.nq'), readOnly },
-    largeLiteralStorage: defaultLargeLiteralStorage(dataDir, config),
-  });
-}
-
-function defaultLargeLiteralStorage(dataDir: string, config: DkgConfig) {
-  return {
-    enabled: config.largeLiteralStorage?.enabled ?? true,
-    thresholdBytes: config.largeLiteralStorage?.thresholdBytes,
-    directory: config.largeLiteralStorage?.directory ?? join(dataDir, 'literal-blobs'),
-  };
-}
-
 export function createPublicSnapshotStore(
   dataDir: string,
   config?: Pick<DkgConfig, 'sharedMemoryPublicSnapshotStorage'>,
@@ -1333,12 +1297,6 @@ export function createPublicSnapshotStore(
     { gc: snapshotConfig?.gc, log: options.log,
       isSnapshotReferenced: options.store ? snapshotReferenceCheck(options.store) : undefined },
   );
-}
-
-function isLocalOxigraphStoreConfig(storeConfig: { backend?: unknown }): boolean {
-  return storeConfig.backend === 'oxigraph'
-    || storeConfig.backend === 'oxigraph-worker'
-    || storeConfig.backend === 'oxigraph-persistent';
 }
 
 async function loadOrCreateAgentWallet(dataDir: string): Promise<DKGAgentWallet> {

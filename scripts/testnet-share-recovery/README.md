@@ -1,6 +1,6 @@
 # #2963 live recovery comparison
 
-These scripts preserve one-shot request denominators and read-only evidence for the six-publisher, Blazegraph comparison described in `agent-docs/plans/2026-10-16-2963-durable-share-recovery.md`. They do not claim wallet ownership, copy credentials, fund wallets, start daemons, retry HTTP mutations or perform manual repair. Use the DKG testnet skill's native environment setup, exclusive wallet claim and reconciliation workflow first.
+These scripts preserve one-shot request denominators and read-only evidence for the six-publisher, Blazegraph comparison described in the [live recovery report](../../run-reports/2026-10-16-2963-share-recovery.md). They do not claim wallet ownership, copy credentials, fund wallets, start daemons, retry HTTP mutations or perform manual repair. Use the DKG testnet skill's native environment setup, exclusive wallet claim and reconciliation workflow first.
 
 The campaign uses a fixed public author address and graph suffix in the scripts. These are public test identities, not portable defaults. A different wallet pool requires an explicitly recorded protocol revision before either comparison arm. Run from the repository root; evidence lives under `.tmp/2963/evidence/<arm>`. `DKG_HOME` must name the owned isolated home. Build the selected revision first and disable auto-update in that home.
 

@@ -173,7 +173,7 @@ function applyRegistrationEdit(
   if (result.warning) {
     process.stderr.write(`[mcp-config] WARNING: ${target.shape.format.toUpperCase()} config at ${target.displayPath} ${result.warning}\n`);
   }
-  target.write(result.content, source);
+  target.write(result.content, source, { preserveTimestamps: edit.kind === 'remove' });
 }
 
 /** Inspect only: stale/null entries still count as an owned registration. */

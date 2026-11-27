@@ -3,6 +3,7 @@ import { Worker } from 'node:worker_threads';
 import { existsSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, sep } from 'node:path';
+import { workerThreadEnv } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 export interface SyncVerifyLogEntry {
@@ -207,7 +208,7 @@ export class SyncVerifyWorker {
       );
     }
 
-    this.worker = new Worker(workerPath);
+    this.worker = new Worker(workerPath, { env: workerThreadEnv() });
     this.worker.on('message', (message: { id: number; result?: unknown; error?: string }) => {
       const pending = this.pending.get(message.id);
       if (!pending) return;

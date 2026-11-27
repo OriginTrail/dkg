@@ -243,11 +243,10 @@ describe('GH#2270 admission and cleanup for held jobs', () => {
 
   it('lets a failure that proves its transaction had no effect supersede and clear', async () => {
     // The exception that keeps the hold honest. `tx_reverted` (the receipt says it published
-    // nothing) and `insufficient_funds` (refused before it entered the mempool) carry a txHash
-    // but nothing to account for — so they stay skippable, supersedable and clearable, and a
-    // client can re-submit the KA (the wallet-top-up case) instead of waiting for proof that
-    // will never come.
-    for (const message of ['execution reverted', 'insufficient funds for gas']) {
+    // nothing) carries a txHash but nothing to account for — so it stays skippable, supersedable
+    // and clearable, and a client can re-submit the KA instead of waiting for proof that will
+    // never come. `insufficient_funds` is not held either; it re-runs as the same job (below).
+    for (const message of ['execution reverted']) {
       h.freshStore();
       const publisher = createPublisher();
       const request = kaVmPublishRequest();
@@ -272,6 +271,29 @@ describe('GH#2270 admission and cleanup for held jobs', () => {
       const resubmitted = await publisher.enqueueKnowledgeAssetVmPublish(request);
       expect([message, resubmitted === jobId]).toEqual([message, false]);
     }
+  });
+
+  it('re-runs a job refused for funds as the same job, its refused transaction accounted (#3591)', async () => {
+    const publisher = createPublisher();
+    const request = kaVmPublishRequest();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId: 'wallet-1' } });
+    const refused = expectFailed(await publisher.recordPublishFailure(jobId, {
+      error: new Error('insufficient funds for gas'),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:dkg:test:error:refused',
+    }));
+
+    expect([hasBroadcastEvidence(refused), isHeldForChainProof(refused)]).toEqual([true, false]);
+    expect(refused.failure).toMatchObject({ code: 'insufficient_funds', retryable: true });
+    // A re-submit binds the same job; the reaccept carries the refused hash, accounted for.
+    expect(await publisher.enqueueKnowledgeAssetVmPublish(request)).toBe(jobId);
+    expect(await publisher.getStatus(jobId)).toMatchObject({
+      status: 'accepted',
+      recovery: { txHashChecked: TX_HASH, txHashAccounted: true },
+    });
   });
 
   it('bulk-clears a failure proven to have had no effect, even with a transaction hash', async () => {

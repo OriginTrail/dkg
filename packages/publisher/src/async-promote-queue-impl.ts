@@ -1,9 +1,11 @@
+import { retireFailedPromote, type PromoteRetirementApproval } from './promote-job-retirement.js';
+import type { PromoteLockOperation } from './promote-lock-timing.js';
 import { bindUnstartedPromoteJob } from './bind-promote-recovery.js';
 import type { PromoteRecoveryBinding } from './promote-recovery-binding.js';
 import { reconcileRetainedShareUnlocked, validateShareReconciliationInput, type ShareReconciliationInput } from './share-reconciliation.js';
-import { readShareCompletionEvidence } from './share-completion-evidence.js';
+import { readShareCompletionEvidence, type ShareCompletionEvidence } from './share-completion-evidence.js';
 import { promoteSuccessTransition } from './async-promote-success.js';
-import { persistPromoteJobWithEvidence, type PromotePersistenceResult } from './promote-admission-persistence.js';
+import { persistPromoteJobWithEvidence, type PromoteJobWriteDurability, type PromotePersistenceResult } from './promote-admission-persistence.js';
 import { PromoteAdmissionCoordinator, PromoteAdmissionError, type PromoteAdmissionAttempt } from './promote-admission.js';
 import { recordUnstartedPromoteAttempt, isRetiredBoundRejection } from './promote-no-effect-rejection.js';
 import { FIND_ACTIVE_CONFLICT_SOURCE, createPromoteOwnershipReader, hasUnfinishedBoundObligation, readPromoteOwnershipCandidates, promoteOwnershipLookup, storedPromoteLaneScope, type PromoteConflictLookup } from './async-promote-ownership.js';
@@ -16,7 +18,8 @@ import { DEFAULT_PROMOTE_RETRY_TUNING } from './promote-retry-policy.js';
 import { countLeaseRecovery, isAutomaticallyRecoverablePostCommitFailure, missingStorageLaneForAuthorOnlyJob, promoteFailureTransition, requiresManualInspection } from './async-promote-recovery-policy.js';
 /** RDF queue: immutable bound replay or conservative legacy recovery; one owner per assertion. */
 
-import { controlStoreOptions, deleteByPatternWithoutCount, withoutDefaultStoreWorkPriority, type TripleStore } from '@origintrail-official/dkg-storage';
+import { controlStoreOptions, deleteByPatternWithoutCount, withoutDefaultStoreWorkPriority, withoutShareStoreHold, type TripleStore } from '@origintrail-official/dkg-storage';
+import { withoutAsyncAdmissionDiagnosticContext } from '@origintrail-official/dkg-core';
 import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
 import { isSafeJobId } from './job-id.js';
 import {
@@ -70,6 +73,19 @@ import {
 type ActivationConflict = { kind: 'pending'; error: PromoteAdmissionError }
   | { kind: 'durable'; job: PromoteJob; error: PromoteJobConflictError };
 
+/**
+ * Whether a commit marker write waits for disk. Lease recovery reads an unbound job's markers to decide
+ * whether its promote may have started, so they must be on disk before the worker goes on. A bound job
+ * is reclaimed and its admitted operation replayed whatever its markers say (`reconcileExpiredRunning`),
+ * and its success write waits for a flush: `succeedWithShareEvidence` sets `swmInserted` in that write and
+ * requires `promoteStarted` in the stored job, and `succeed` requires `swmInserted`. Its markers reach
+ * disk with that write, so a durable share waits for two whole-snapshot writes of an embedded store: at
+ * admission and at success.
+ */
+function commitMarkerDurability(job: PromoteJob): PromoteJobWriteDurability {
+  return isBoundPromoteJob(job) ? 'next-flush' : 'flush';
+}
+
 export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteTerminalJobClearer {
   // A managed-store recovery can legitimately reject every heartbeat and
   // bookkeeping write for several minutes. Keep the lease longer than the
@@ -115,15 +131,15 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     this.claimTokenGenerator = config.claimTokenGenerator ?? (() => crypto.randomUUID());
     this.backoff = config.backoff ?? createDefaultPromoteBackoff(config.rand);
     this.listing = { store, graphUri: this.graphUri, now: this.now, ...promoteListingTuning(config), observe: job => this.admissions.observe(job),
-      locked: run => this.withMutationLock(async () => { await this.ensureGraph(); return run(); }) };
+      locked: (operation, run) => this.withMutationLock(operation, async () => { await this.ensureGraph(); return run(); }) };
   }
 
   // Public surface — RFC §3.1–3.4
 
-  async enqueue(request: PromoteRequest): Promise<string> {
+  async enqueue(request: PromoteRequest, options?: { signal?: AbortSignal }): Promise<string> {
     this.validateRequest(request);
     const requestSnapshot = this.snapshotRequest(request);
-    return this.admissions.run(requestSnapshot, admission => this.withMutationLock(async () => {
+    return this.admissions.run(requestSnapshot, admission => this.withMutationLock('enqueue', async () => {
       admission.enter('graph');
       await this.ensureGraph();
       admission.enter('conflict');
@@ -148,14 +164,14 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         : { phase: 'persist', admissionOutcome: 'not_admitted' }, persistence.cause);
       this.notifyWorkAvailable();
       return jobId;
-    }), this.admissionTimeoutMs);
+    }), this.admissionTimeoutMs, undefined, options?.signal);
   }
 
   async enqueueAndClaim(request: BoundPromoteRequest, workerId: string): Promise<BoundPromoteJob> {
     this.validateRequest(request);
     if (!workerId) throw new Error('workerId is required');
     const requestSnapshot = this.snapshotRequest(request);
-    return this.withMutationLock(async () => {
+    return this.withMutationLock('enqueueAndClaim', async () => {
       await this.ensureGraph();
       await this.assertNoActiveConflict(this.conflictLookupForRequest(requestSnapshot));
       const now = this.now(), jobId = this.idGenerator();
@@ -175,7 +191,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   }
 
   async bindRecovery(jobId: string, claimToken: string, binding: PromoteRecoveryBinding): Promise<BoundPromoteJob> {
-    return this.withMutationLock(async () => {
+    return this.withMutationLock('bindRecovery', async () => {
       await this.ensureGraph();
       const job = await this.requireJob(jobId);
       this.assertLeaseHeld(job, claimToken);
@@ -187,7 +203,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   }
 
   async getStatus(jobId: string): Promise<PromoteJob | null> {
-    return this.withMutationLock(async () => {
+    return this.withMutationLock('getStatus', async () => {
       await this.ensureGraph();
       return this.readJob(jobId);
     });
@@ -208,7 +224,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
 
   async reconcileShare(input: ShareReconciliationInput) {
     const expected = validateShareReconciliationInput(input);
-    return this.withMutationLock(() => reconcileRetainedShareUnlocked(this.store, expected, this.graphUri));
+    return this.withMutationLock('reconcileShare', () => reconcileRetainedShareUnlocked(this.store, expected, this.graphUri));
   }
 
   private async listUnlocked(
@@ -235,8 +251,19 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     return filter.limit && filter.limit > 0 ? sorted.slice(0, Math.floor(filter.limit)) : sorted;
   }
 
+  async retireFailedJob(jobId: string, approval?: PromoteRetirementApproval) {
+    return this.withMutationLock('retirement', async () => {
+      if (this.admissions.hasPendingJob(jobId)) return { outcome: 'ineligible' as const };
+      try {
+        return await retireFailedPromote(this.store, this.graphUri, jobId, this.now, approval);
+      } finally {
+        if (approval) this.admissions.invalidate(jobId);
+      }
+    });
+  }
+
   async cancel(jobId: string): Promise<void> {
-    await this.withMutationLock(async () => {
+    await this.withMutationLock('cancel', async () => {
       await this.ensureGraph();
       const job = await this.requireJob(jobId);
       if (hasUnfinishedBoundObligation(job)) throw new PromoteJobCancellationConflictError(jobId, 'an unfinished durable share obligation must retain its recovery owner');
@@ -258,7 +285,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   }
 
   async recover(jobId: string): Promise<void> {
-    await this.withMutationLock(async () => {
+    await this.withMutationLock('recover', async () => {
       await this.ensureGraph();
       const job = await this.requireJob(jobId);
       if (job.state !== 'failed') {
@@ -304,7 +331,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     if (!workerId || typeof workerId !== 'string') {
       throw new Error('workerId is required');
     }
-    return this.withMutationLock(async () => {
+    return this.withMutationLock('claimNext', async () => {
       await this.ensureGraph();
       if (this.paused) return null;
 
@@ -355,7 +382,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   }
 
   async heartbeat(jobId: string, claimToken: string): Promise<void> {
-    await this.withMutationLock(async () => {
+    await this.withMutationLock('heartbeat', async () => {
       await this.ensureGraph();
       const job = await this.requireJob(jobId);
       this.assertLeaseHeld(job, claimToken);
@@ -374,7 +401,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   }
 
   async recordCommitMarker(jobId: string, claimToken: string, step: PromoteCommitMarkerStep): Promise<void> {
-    await this.withMutationLock(async () => {
+    await this.withMutationLock('recordCommitMarker', async () => {
       await this.ensureGraph();
       const job = await this.requireJob(jobId);
       this.assertLeaseHeld(job, claimToken);
@@ -387,13 +414,13 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         [step]: true,
       };
       const updated: PromoteJob = { ...job, updatedAt: this.now(), commitMarker: marker };
-      await this.writeJob(updated);
+      await this.writeJob(updated, commitMarkerDurability(updated));
     });
   }
 
   async succeed(jobId: string, claimToken: string, result: PromoteResult): Promise<void> {
     const snapshot = { ...result, ...(result.shareEvidence ? { shareEvidence: readShareCompletionEvidence(result.shareEvidence) } : {}) };
-    await this.withMutationLock(async () => {
+    await this.withMutationLock('succeed', async () => {
       await this.ensureGraph();
       const job = await this.requireJob(jobId);
       this.assertLeaseHeld(job, claimToken);
@@ -402,8 +429,24 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     });
   }
 
+  async succeedWithShareEvidence(jobId: string, claimToken: string, result: PromoteResult & { shareEvidence: ShareCompletionEvidence }): Promise<void> {
+    const snapshot = { ...result, shareEvidence: readShareCompletionEvidence(result.shareEvidence) };
+    await this.withMutationLock('succeed', async () => {
+      await this.ensureGraph();
+      const job = await this.requireJob(jobId);
+      this.assertLeaseHeld(job, claimToken);
+      if (!isBoundPromoteJob(job) || !job.commitMarker?.promoteStarted) {
+        throw new Error('Atomic share completion requires a started, bound promote job');
+      }
+      // The transition checks the proof against the durable operation and seal.
+      // The bound writer commits marker, receipt and lease release in one replacement.
+      const marked = { ...job, commitMarker: { ...job.commitMarker, swmInserted: true } };
+      await this.writeJob(promoteSuccessTransition(marked, snapshot, this.now()));
+    });
+  }
+
   async fail(jobId: string, claimToken: string, error: PromoteAttemptError): Promise<PromoteFailureTransition> {
-    return this.withMutationLock(async () => {
+    return this.withMutationLock('fail', async () => {
       await this.ensureGraph();
       const job = await this.requireJob(jobId);
       this.assertLeaseHeld(job, claimToken);
@@ -418,7 +461,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   // ===========================================================================
 
   async recoverOnStartup(): Promise<PromoteRecoverySummary> {
-    return this.withMutationLock(async () => {
+    return this.withMutationLock('recoverOnStartup', async () => {
       await this.ensureGraph();
       return this.reconcileExpiredRunning(this.now());
     });
@@ -546,9 +589,9 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   private notifyWorkAvailable(): void {
     this.nextIdleClaimAt = 0;
     try {
-      // Issued with no lane scope: the worker tick this starts synchronously (often from inside the mutex) inherits
-      // no ambient lane from the caller, so its data-plane work stays on the shared scheduler's default lane.
-      withoutDefaultStoreWorkPriority(() => this.workScheduler?.onWorkAvailable());
+      // Detached worker wakes inherit neither caller priority nor HTTP diagnostic context.
+      withoutShareStoreHold(() =>
+        withoutDefaultStoreWorkPriority(() => withoutAsyncAdmissionDiagnosticContext(() => this.workScheduler?.onWorkAvailable())));
     } catch {
       // Queue persistence has already committed. A best-effort in-process
       // wake must never change the enqueue/recover result; periodic polling
@@ -630,15 +673,15 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     return job;
   }
 
-  private async writeJob(job: PromoteJob): Promise<void> {
-    const result = await this.writeJobWithEvidence(job);
+  private async writeJob(job: PromoteJob, durability: PromoteJobWriteDurability = 'flush'): Promise<void> {
+    const result = await this.writeJobWithEvidence(job, durability);
     if (!result.ok) throw result.cause;
   }
 
-  private async writeJobWithEvidence(job: PromoteJob): Promise<PromotePersistenceResult> {
+  private async writeJobWithEvidence(job: PromoteJob, durability: PromoteJobWriteDurability = 'flush'): Promise<PromotePersistenceResult> {
     this.nextIdleClaimAt = 0;
     this.admissions.invalidate(job.jobId);
-    const result = await persistPromoteJobWithEvidence(this.store, this.graphUri, job);
+    const result = await persistPromoteJobWithEvidence(this.store, this.graphUri, job, durability);
     if (result.ok) this.admissions.observe(job);
     return result;
   }
@@ -666,7 +709,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     // IRI (defense-in-depth; the SWM route already pre-validates via decodePromoteJobId,
     // but a direct agent.assertion.clearPromoteAsync caller must be bounded too).
     if (!isSafeJobId(jobId)) return { outcome: 'rejected', reason: 'malformed' };
-    return this.withMutationLock(async () => {
+    return this.withMutationLock('clearTerminalJob', async () => {
       await this.ensureGraph();
       const rows = expectBindings(
         await this.store.query(
@@ -815,7 +858,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
 
 
   /** Per-control-graph FIFO mutex (promote-control-lock.ts): every store call made inside carries the share control options. */
-  private withMutationLock<T>(fn: () => Promise<T>): Promise<T> {
-    return withPromoteControlLock(this.graphUri, fn);
+  private withMutationLock<T>(operation: PromoteLockOperation, fn: () => Promise<T>): Promise<T> {
+    return withPromoteControlLock(this.graphUri, fn, operation);
   }
 }

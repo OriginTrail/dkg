@@ -20,7 +20,7 @@ it.each<DurableRecoveryRoundDecision>([
   const result = createIncompleteDurableSyncResult();
   const physical = vi.spyOn(graph, 'runAdmittedGraphOwnedDurableGraph').mockResolvedValue({ result, decision });
   const input = request();
-  expect(await runGraphOwnedDurableRecovery(input)).toEqual({ result, decision });
+  expect(await runGraphOwnedDurableRecovery(input)).toEqual({ result, decision, admission: 'work-started' });
   expect(physical).toHaveBeenCalledOnce();
   expect(physical.mock.calls[0]![0]).toMatchObject({ contextGraphId: input.contextGraphId, recovery: input.recovery });
 });
@@ -31,7 +31,7 @@ it.each([
   const input = request();
   vi.mocked(input.host.admission.run).mockRejectedValue(refusal);
   const outcome = await runGraphOwnedDurableRecovery(input);
-  expect(outcome).toMatchObject({ decision: { strategy: 'not-started' }, result: { deferredBackpressure: 1 } });
+  expect(outcome).toMatchObject({ decision: { strategy: 'not-started' }, admission: 'local-admission-deferred', result: { deferredBackpressure: 1 } });
   expect(input.host.log.info).toHaveBeenCalledTimes(lines);
 });
 it.each(['cancelled', 'deferred'] as const)('reports not-started explicitly for %s admission', async state => {
@@ -42,6 +42,7 @@ it.each(['cancelled', 'deferred'] as const)('reports not-started explicitly for 
   else vi.mocked(input.host.admission.run).mockRejectedValue(new SyncBackpressureBusyError('busy'));
   const outcome = await runGraphOwnedDurableRecovery({ ...input, options: { signal: controller.signal } });
   expect(outcome.decision).toEqual({ strategy: 'not-started' });
+  expect(outcome.admission).toBe(state === 'deferred' ? 'local-admission-deferred' : 'not-started');
   expect(outcome.result.complete).toBe(false);
   expect(outcome.result.deferredBackpressure).toBe(state === 'deferred' ? 1 : 0);
   expect(physical).not.toHaveBeenCalled();

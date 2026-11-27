@@ -1,3 +1,4 @@
+import type { PromoteLockOperation } from './promote-lock-timing.js';
 import { controlStoreOptions, type TripleStore } from '@origintrail-official/dkg-storage';
 import type { PromoteJob, PromoteListFilter } from './async-promote-queue-types.js';
 import {
@@ -37,7 +38,7 @@ export interface PromoteListingHost {
   /** A complete listing of more rows than this logs a warning. */
   readonly listWarnRows: number;
   /** One hold of the queue's mutex, with the control graph created. */
-  locked<T>(run: () => Promise<T>): Promise<T>;
+  locked<T>(operation: PromoteLockOperation, run: () => Promise<T>): Promise<T>;
   /** Show the admission coordinator a job the read returned; call it inside the hold that read it, never after. */
   observe(job: PromoteJob): void;
 }

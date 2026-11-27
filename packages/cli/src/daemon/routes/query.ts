@@ -60,7 +60,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, classifySparqlOperation } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, VIEW_QUERY_SEMANTICS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, classifySparqlOperation } from '@origintrail-official/dkg-core';
 import {
   findReservedSubjectPrefix,
   isSkolemizedUri,
@@ -580,6 +580,10 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         error: `Invalid view "${view}". Supported: ${GET_VIEWS.join(", ")}`,
       });
     }
+    const semantics = parsed.semantics;
+    if (semantics !== undefined && !(VIEW_QUERY_SEMANTICS as readonly unknown[]).includes(semantics)) {
+      return jsonResponse(res, 400, { error: `Invalid semantics ${JSON.stringify(semantics)}. Supported: ${VIEW_QUERY_SEMANTICS.join(", ")}` });
+    }
     // PR #239 Codex iter-7: gate minTrust normalization/validation behind
     // view === 'verifiable-memory'. Upstream `resolveViewGraphs()` already
     // ignores `minTrust` outside VM, so the HTTP layer must match that —
@@ -680,6 +684,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
           includeContextGraphPartitions,
           includeSharedMemoryMeta,
           view,
+          semantics,
           agentAddress,
           verifiedGraph,
           assertionName,
@@ -717,6 +722,8 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       tracker.complete(ctx, { tripleCount: resultCount });
       return jsonResponse(res, 200, {
         result: publicResult,
+        // A scoped answer says how it matched: merged when the engine marks it, otherwise as asked, or per asset.
+        semantics: result.semantics ?? (contextGraphId ? semantics ?? 'per-asset' : undefined),
         phases: { execute: execDur, serverTotal: Date.now() - serverT0 },
       });
     } catch (err: any) {

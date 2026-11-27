@@ -1,5 +1,6 @@
 export * from './types.js';
 export { gzipBounded, gunzipBounded, BoundedGzipLimitError, BoundedGzipCapacityError, type BoundedGzipOptions } from './bounded-gzip.js';
+export { workerThreadEnv } from './worker-thread-env.js';
 export * from './constants.js';
 export * from './storage-ack-protocols.js';
 export * from './context-graph-storage-uri.js';
@@ -14,6 +15,7 @@ export * from './context-graph-join-policy.js';
 export * from './catalog.js';
 export { parseDotenvValue } from './dotenv.js';
 export * from './memory-model.js';
+export * from './read-graph-names.js';
 export * from './ka-content-scope.js';
 export * from './rfc64-shared-projection-address-v1.js';
 export * from './graph-knowledge-asset-metadata.js';
@@ -135,6 +137,7 @@ export {
   getTracer, withSpan, linkedSpan, currentTraceIds, activeSpanContext,
   getMetrics, rebuildMetrics, type WithSpanOpts, type DkgMetrics,
 } from './telemetry-api.js';
+export { recordViewSemanticsDelta } from './view-semantics-delta-metric.js';
 export * from './crypto/index.js';
 export * from './proto/index.js';
 export {
@@ -406,6 +409,8 @@ export {
 export {
   formatIriPrefix,
   formatSparqlTerm,
+  isSparqlTermValidationError,
+  SPARQL_TERM_VALIDATION_ERROR_CODE,
   SparqlTermValidationError,
   unwrapIri,
   type SparqlTermContext,
@@ -466,10 +471,12 @@ export {
   readDaemonPid,
   isProcessAlive,
   readDkgApiPort,
+  readDkgApiPortSync,
   loadAuthTokenSync,
   loadAuthToken,
   toEip55Checksum,
 } from './dkg-home.js';
+export * from './node-key-store.js';
 export {
   type Quad as ExtractionQuad,
   type ExtractionInput,
@@ -536,8 +543,8 @@ export {
 } from './node-timer.js';
 export * from './query-catalog-parameters.js';
 export * from './query-catalog.js';
-
 export { checkFdLimit, type FdLimitLogLevel } from './fd-limit.js';
+export { canonicalizeJson, type CanonicalJsonValue } from './canonical-json.js';
 
 export * from './bulk-graph-wire.js';
 export * from './bulk-graph-transport.js';
@@ -545,3 +552,8 @@ export * from './bulk-graph-transport.js';
 export { ProtocolReadLimitError } from './bounded-stream-read.js';
 
 export * from './async-admission-usage.js';
+export * from './async-admission-diagnostic-context.js';
+
+// Exact store readback form; unlike the hash canonicalizer, rejects precision loss.
+export { canonicalizeAuthorSealStoreXsdDateTimeValue as canonicalizeExactStoreDateTime } from './xsd-date-time.js';
+export { canonicalContextGraphAgentDid, contextGraphBelongsToAgent, type ContextGraphMembership } from './context-graph-membership.js';

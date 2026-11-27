@@ -6,10 +6,10 @@ import {
   type DurableRecoveryRetry,
 } from '../src/sync/durable-recovery-turns.js';
 import { DurableRecoveryRunner, type DurableRecoveryRunnerDependencies } from '../src/sync/durable-recovery-runner.js';
-import { exactRecoveryActionOutcome } from '../src/sync/durable-recovery-action.js';
+import { exactRecoveryActionOutcome, type ExactRecoveryActionOutcome } from '../src/sync/durable-recovery-action.js';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { createIncompleteDurableSyncResult } from '../src/sync/durable-progress.js';
-import type { DurableRecoveryRoundOutcome } from '../src/sync/durable-recovery-round.js';
+import type { DurableRecoveryRoundOutcome, DurableRecoverySlice } from '../src/sync/durable-recovery-round.js';
 
 /** Timers that fire only when the test moves the clock, earliest first. */
 function manualClock() {
@@ -352,7 +352,13 @@ describe('durable recovery turns', () => {
 });
 
 const PEERS = ['peer-aaaaaaaa', 'peer-bbbbbbbb'];
+/** A round that ran in a slot, as its owner receives it. */
+const inSlot = (round: DurableRecoveryRoundOutcome): DurableRecoverySlice => ({ ...round, admission: 'work-started' });
 const ASSET = { ual: 'did:dkg:test/1/2', assertionVersion: '1' };
+/** What the runner has recorded about one peer of one graph. */
+const peerHealth = (runner: DurableRecoveryRunner, graph: string, peerId: string) => (
+  runner as unknown as { healthByGraphPeer: Map<string, { attempts: number; successfulSlices: number }> }
+).healthByGraphPeer.get(`${graph}\0${peerId}`);
 
 /** What one slice of a graph does once it has the slot. */
 type Step = 'progress' | 'meta' | 'missing' | 'done';
@@ -391,12 +397,12 @@ function oneSlotNode(steps: Record<string, Step[]>, options: { selected?: readon
     isPrivateContextGraph: async () => false,
     orderPeerIds: (peerIds) => [...peerIds],
     isSyncCapable: async () => true,
-    executeSlice: async (peerId, recovery): Promise<DurableRecoveryRoundOutcome> => {
+    executeSlice: async (peerId, recovery): Promise<DurableRecoverySlice> => {
       attempts.push({ graph, peerId });
       if (!selected.has(graph)) {
         if (holder !== undefined) {
           refused.push(graph);
-          return { result: deferredResult(), decision: { strategy: 'not-started' } };
+          return { result: deferredResult(), decision: { strategy: 'not-started' }, admission: 'local-admission-deferred' };
         }
         holder = graph;
       }
@@ -408,25 +414,25 @@ function oneSlotNode(steps: Record<string, Step[]>, options: { selected?: readon
         ? { checkpointKey: `meta:${graph}`, quads: [], bytesReceived: 0, nextOffset: 1, rawNextOffset: 1 }
         : undefined;
       if (step === 'done') {
-        return { result: { ...createIncompleteDurableSyncResult(), complete: true }, decision: { strategy: 'legacy' } };
+        return inSlot({ result: { ...createIncompleteDurableSyncResult(), complete: true }, decision: { strategy: 'legacy' } });
       }
       if (step === 'missing') {
         // Other work takes the slot before the owner's exact request.
         holder = 'other';
-        return { result: createIncompleteDurableSyncResult(), decision: { strategy: 'exact-missing', batches: [[ASSET]] } };
+        return inSlot({ result: createIncompleteDurableSyncResult(), decision: { strategy: 'exact-missing', batches: [[ASSET]] } });
       }
-      if (step === 'meta') return { result: { ...createIncompleteDurableSyncResult(), checkpointAdvances: 1 }, decision: { strategy: 'full', continuation: 'full-graph' } };
+      if (step === 'meta') return inSlot({ result: { ...createIncompleteDurableSyncResult(), checkpointAdvances: 1 }, decision: { strategy: 'full', continuation: 'full-graph' } });
       const key = getSyncCheckpointKey(peerId, graph, false, 'data');
       store.set(key, (store.get(key)?.offset ?? 0) + 1);
-      return { result: createIncompleteDurableSyncResult(), decision: { strategy: 'full', continuation: 'full-graph' } };
+      return inSlot({ result: createIncompleteDurableSyncResult(), decision: { strategy: 'full', continuation: 'full-graph' } });
     },
     executeExactSlice: async () => {
       attempts.push({ graph, peerId: 'exact' });
       if (holder !== undefined) {
         refused.push(graph);
-        return exactRecoveryActionOutcome(deferredResult(), false);
+        return exactRecoveryActionOutcome(deferredResult(), false, 'local-admission-deferred');
       }
-      return exactRecoveryActionOutcome({ ...createIncompleteDurableSyncResult(), complete: true });
+      return exactRecoveryActionOutcome({ ...createIncompleteDurableSyncResult(), complete: true }, true, 'work-started');
     },
     logDebug: () => {},
     logInfo: () => {},
@@ -449,15 +455,36 @@ function oneSlotNode(steps: Record<string, Step[]>, options: { selected?: readon
     expect(pending[0]!.graph).toBe(graph);
     pending.shift()!.release();
   };
-  const health = (graph: string, peerId: string) => (
-    runner as unknown as { healthByGraphPeer: Map<string, { attempts: number; successfulSlices: number }> }
-  ).healthByGraphPeer.get(`${graph}\0${peerId}`);
+  const health = (graph: string, peerId: string) => peerHealth(runner, graph, peerId);
   return {
     run, release, health, advance, turns, attempts, asked, refused, ran, pending, warnings,
     takeSlot: () => { holder = 'other'; },
     freeSlot: () => { holder = undefined; },
     unsubscribe: (graph: string) => { outOfScope.add(graph); },
   };
+}
+
+/** One owner: its first slice leaves a missing asset to it, its exact request comes back as `exact`, and any later slice completes the graph. */
+async function ownerWithExactRequest(exact: ExactRecoveryActionOutcome) {
+  const runner = new DurableRecoveryRunner({ turns: new DurableRecoveryTurns(manualClock().clock) });
+  const slices: Array<{ peerId: string; ownerFetchesMissingAssets?: boolean }> = [];
+  const warnings: string[] = [];
+  let exactRequests = 0;
+  const execution = await runner.run({ contextGraphId: 'g', dependencies: {
+    checkpointStore: new MemorySyncCheckpointStore(), isRunning: () => true, resolvePreferredPeerId: async () => undefined,
+    connectRequestedPeer: async () => {}, primeConnections: async () => {}, liveConnectionPeerIds: () => PEERS,
+    admitPeer: async () => true, isPrivateContextGraph: async () => false, orderPeerIds: (peerIds) => [...peerIds],
+    isSyncCapable: async () => true,
+    executeSlice: async (peerId, { holdings }) => {
+      slices.push({ peerId, ownerFetchesMissingAssets: holdings.ownerFetchesMissingAssets });
+      return inSlot(slices.length === 1
+        ? { result: createIncompleteDurableSyncResult(), decision: { strategy: 'exact-missing', batches: [[ASSET]] } }
+        : { result: { ...createIncompleteDurableSyncResult(), complete: true }, decision: { strategy: 'legacy' } });
+    },
+    executeExactSlice: async () => { exactRequests += 1; return exact; },
+    logDebug: () => {}, logInfo: () => {}, logWarn: (message) => { warnings.push(message); },
+  } });
+  return { execution, slices, warnings, exactRequests, health: peerHealth(runner, 'g', PEERS[0]!) };
 }
 
 describe('durable recovery under local backpressure', () => {
@@ -600,6 +627,51 @@ describe('durable recovery under local backpressure', () => {
     expect(node.ran).toEqual(['a', 'a', 'b', 'a']);
   });
 
+  it('reads a deferral from the slice\'s admission, not from its diagnostics', async () => {
+    const runner = new DurableRecoveryRunner({ turns: new DurableRecoveryTurns(manualClock().clock) });
+    const slices: DurableRecoverySlice[] = [
+      // Admitted work whose diagnostics carry a deferral of something else: an ordinary slice without progress.
+      { result: { ...createIncompleteDurableSyncResult(), deferredBackpressure: 1 }, decision: { strategy: 'full', continuation: 'full-graph' }, admission: 'work-started' },
+      // Refused by admission with no deferral counted: the round still ends deferred, and says so.
+      { result: createIncompleteDurableSyncResult(), decision: { strategy: 'not-started' }, admission: 'local-admission-deferred' },
+    ];
+    const peers: string[] = [];
+    const execution = await runner.run({ contextGraphId: 'g', dependencies: {
+      checkpointStore: new MemorySyncCheckpointStore(), isRunning: () => true, resolvePreferredPeerId: async () => undefined,
+      connectRequestedPeer: async () => {}, primeConnections: async () => {}, liveConnectionPeerIds: () => PEERS,
+      admitPeer: async () => true, isPrivateContextGraph: async () => false, orderPeerIds: (peerIds) => [...peerIds],
+      isSyncCapable: async () => true,
+      executeSlice: async (peerId) => { peers.push(peerId); return slices.shift()!; },
+      logDebug: () => {}, logInfo: () => {}, logWarn: () => {},
+    } });
+
+    expect(peers).toEqual(PEERS);
+    expect(execution.outcome).toBe('deferred');
+    expect(execution.result.deferredBackpressure).toBe(1);
+    expect(execution.peerResults.find(({ peerId }) => peerId === PEERS[1])?.result.deferredBackpressure).toBe(1);
+  });
+
+  it('treats a slice that leaves missing assets as an ordinary one when the owner has no exact request', async () => {
+    const runner = new DurableRecoveryRunner({ turns: new DurableRecoveryTurns(manualClock().clock) });
+    const peers: string[] = [];
+    const execution = await runner.run({ contextGraphId: 'g', dependencies: {
+      checkpointStore: new MemorySyncCheckpointStore(), isRunning: () => true, resolvePreferredPeerId: async () => undefined,
+      connectRequestedPeer: async () => {}, primeConnections: async () => {}, liveConnectionPeerIds: () => PEERS,
+      admitPeer: async () => true, isPrivateContextGraph: async () => false, orderPeerIds: (peerIds) => [...peerIds],
+      isSyncCapable: async () => true,
+      executeSlice: async (peerId) => {
+        peers.push(peerId);
+        if (peers.length > 4) throw new Error('the round did not end');
+        return inSlot({ result: createIncompleteDurableSyncResult(), decision: { strategy: 'exact-missing', batches: [[ASSET]] } });
+      },
+      logDebug: () => {}, logInfo: () => {}, logWarn: () => {},
+    } });
+
+    // Nothing to fetch the assets with: each peer's slice made no progress, and the round ends.
+    expect(peers).toEqual(PEERS);
+    expect(execution.outcome).toBe('no-progress');
+  });
+
   it('ends the round when an exact request finds no free slot, without falling back or charging the peer', async () => {
     const node = oneSlotNode({ g: ['missing'] });
     const round = node.run('g');
@@ -610,5 +682,38 @@ describe('durable recovery under local backpressure', () => {
     expect(node.attempts).toEqual([{ graph: 'g', peerId: PEERS[0] }, { graph: 'g', peerId: 'exact' }]);
     expect(node.warnings).toEqual([]);
     expect(node.health('g', PEERS[0])).toMatchObject({ attempts: 1 });
+  });
+
+  it('ends the round when admission refuses an exact request, even with no deferral in its diagnostics', async () => {
+    const { execution, slices, warnings, exactRequests, health } = await ownerWithExactRequest(
+      exactRecoveryActionOutcome(createIncompleteDurableSyncResult(), false, 'local-admission-deferred'),
+    );
+
+    expect(execution.outcome).toBe('deferred');
+    expect(execution.peerResults).toEqual([
+      expect.objectContaining({ peerId: PEERS[0], result: expect.objectContaining({ deferredBackpressure: 1 }) }),
+    ]);
+    expect(exactRequests).toBe(1);
+    // No fallback: no further slice, and no report of assets left unstored.
+    expect(slices).toEqual([{ peerId: PEERS[0], ownerFetchesMissingAssets: true }]);
+    expect(warnings).toEqual([]);
+    // The peer's one slice counts, and the refused request does not.
+    expect(health).toMatchObject({ attempts: 1, successfulSlices: 1 });
+  });
+
+  it('falls back to full-graph rounds when an admitted exact request is incomplete, even with a deferral in its diagnostics', async () => {
+    const { execution, slices, warnings, exactRequests, health } = await ownerWithExactRequest(
+      exactRecoveryActionOutcome({ ...createIncompleteDurableSyncResult(), deferredBackpressure: 1 }, false, 'work-started'),
+    );
+
+    expect(execution.outcome).toBe('terminal');
+    expect(exactRequests).toBe(1);
+    expect(slices).toEqual([
+      { peerId: PEERS[0], ownerFetchesMissingAssets: true },
+      { peerId: PEERS[0], ownerFetchesMissingAssets: false },
+    ]);
+    expect(warnings).toEqual([expect.stringContaining('did not store 1 missing asset(s)')]);
+    // The two slices and the request are attempts on the peer, and the request is not a successful one.
+    expect(health).toMatchObject({ attempts: 3, successfulSlices: 2 });
   });
 });

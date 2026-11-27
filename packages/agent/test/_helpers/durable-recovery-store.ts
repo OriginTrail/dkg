@@ -99,7 +99,7 @@ export function createRequesterHarness(serving: RecoveryPeers, options: Requeste
         executeExactSlice: async (peerId: string, assetUals: readonly string[]) => {
           const selection = createUalOnlyExactAssetSelection(assetUals);
           const { result } = await round(checkpointStore, peerId, { exactAssetSelectionFor: () => selection });
-          return exactRecoveryActionOutcome(result);
+          return exactRecoveryActionOutcome(result, true, 'work-started');
         },
       }),
       logDebug: () => {},

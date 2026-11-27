@@ -26,6 +26,7 @@ import type {
   LiftJobHex,
 } from '../src/index.js';
 import { resetFailedLiftJobToAccepted, type PersistedFailedJob } from '../src/async-lift-publisher-utils.js';
+import { createLiftJobFailureMetadata } from '../src/lift-job.js';
 import { chainProofLookupFingerprint } from '../src/async-lift-publisher-impl.js';
 import { hasBroadcastEvidence, isHeldForChainProof } from '../src/async-lift-retry-disposition.js';
 import {
@@ -993,6 +994,30 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       expect(released?.recovery?.txHashAccounted).toBe(true);
     });
 
+    it('still ends the hold on a proven revert of the newest hash, beside an older open one (#3591)', async () => {
+      // A record with an older open hash is held whatever its code says. Chain proof tracks the
+      // newest hash and its rebuilt record drops the older one, so that hold can still end.
+      const publisher = dispatcher({ status: 'reverted' });
+      const failed = await failAfterRecordedTxHash(publisher);
+      const carried = {
+        ...failed,
+        recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: `0x${'dd'.repeat(32)}`, walletIdChecked: 'wallet-older' },
+      } as unknown as LiftJob;
+      await h.store.deleteByPattern({ subject: jobSubject(failed.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(carried, DEFAULT_CONTROL_GRAPH_URI));
+      expect(isHeldForChainProof(expectFailed(await publisher.getStatus(failed.jobId)))).toBe(true);
+
+      expect(await publisher.recover()).toBe(1);
+
+      // Its own transaction is still the open question here: no proof has settled it yet.
+      expect(chainProofLookups[0]).toMatchObject({ txHash: TX_HASH });
+      const reverted = expectFailed(await publisher.getStatus(failed.jobId));
+      expect(reverted.failure.code).toBe('tx_reverted');
+      expect(reverted.broadcast?.txHash).toBe(TX_HASH);
+      expect(reverted.recovery).toBeUndefined();
+      expect(isHeldForChainProof(reverted)).toBe(false);
+    });
+
     it('does NOT mark a hash accounted on any reset that did not ask the chain', async () => {
       // The interrupted-recovery reset and the manual reaccept carry the same hash forward, and
       // neither has established anything about it. If either marked it accounted, a genuinely
@@ -1002,6 +1027,105 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       const manual = resetFailedLiftJobToAccepted(failed, 9_000);
 
       expect(manual.recovery?.txHashAccounted).toBeUndefined();
+    });
+  });
+
+  describe.each([
+    ['refused before signing', false],
+    ['refused on its own signed transaction', true],
+  ] as const)('an older open hash beside an attempt %s (#3591)', (_attempt, signed) => {
+    // The refusal settles the attempt's own transaction, so the question left is the older one. The
+    // older hash is TX_HASH, which is what the canned proofs above name.
+    const REFUSED_TX_HASH = `0x${'ee'.repeat(32)}` as LiftJobHex;
+
+    async function refusedBesideOpenHash(
+      publisher: ReturnType<typeof createPublisher>,
+      operationKind: 'create' | 'update' = 'create',
+    ): Promise<PersistedFailedJob> {
+      const failed = await failAfterRecordedTxHash(publisher, operationKind === 'update' ? updateRequestForDispatch() : undefined);
+      const carried = {
+        ...failed,
+        broadcast: { ...failed.broadcast, txHash: REFUSED_TX_HASH, walletId: 'wallet-refused', nonce: 9 },
+        recovery: {
+          action: 'reset_to_accepted',
+          recoveredFromStatus: 'broadcast',
+          txHashChecked: TX_HASH,
+          walletIdChecked: 'wallet-older',
+          nonceChecked: 5,
+          operationKind,
+        },
+        failure: createLiftJobFailureMetadata({
+          failedFromState: 'broadcast',
+          code: 'insufficient_funds',
+          message: 'insufficient funds for gas * price + value',
+          errorPayloadRef: `urn:dkg:test:error:${failed.jobId}`,
+        }),
+      } as unknown as LiftJob;
+      if (!signed) delete (carried as unknown as Record<string, unknown>).broadcast;
+      await h.store.deleteByPattern({ subject: jobSubject(failed.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(carried, DEFAULT_CONTROL_GRAPH_URI));
+      return expectFailed(await publisher.getStatus(failed.jobId));
+    }
+
+    it('asks about the older hash under its own signer and nonce, and finalizes the job when it succeeded', async () => {
+      const publisher = dispatcher(RECOVERED);
+      const held = await refusedBesideOpenHash(publisher);
+      expect(isHeldForChainProof(held)).toBe(true);
+
+      expect(await publisher.recover()).toBe(1);
+
+      expect(chainProofLookups).toHaveLength(1);
+      expect(chainProofLookups[0]).toMatchObject({ txHash: TX_HASH, walletId: 'wallet-older', nonce: 5 });
+      const finalized = await publisher.getStatus(held.jobId);
+      expect(finalized?.status).toBe('finalized');
+      // The finalized record names the transaction that was proven, not the one that was refused.
+      expect(finalized?.broadcast).toMatchObject({ txHash: TX_HASH, walletId: 'wallet-older' });
+      expect(sends).toBe(0);
+    });
+
+    it.each([
+      ['proven absent', { status: 'not-found' }],
+      ['proven reverted', { status: 'reverted' }],
+    ] as const)('releases the job for a re-run once the older hash is %s, and accounts for that hash', async (_name, verdict) => {
+      const publisher = dispatcher(verdict);
+      const held = await refusedBesideOpenHash(publisher);
+
+      expect(await publisher.recover()).toBe(1);
+
+      expect(chainProofLookups[0]).toMatchObject({ txHash: TX_HASH, walletId: 'wallet-older', nonce: 5 });
+      expect(await publisher.getStatus(held.jobId)).toMatchObject({
+        status: 'accepted',
+        recovery: { txHashChecked: TX_HASH, txHashAccounted: true, walletIdChecked: 'wallet-older', nonceChecked: 5 },
+      });
+      expect(sends).toBe(0);
+    });
+
+    it('keeps an UPDATE held when the older hash reverted: re-queuing it could replay a stale root', async () => {
+      const publisher = dispatcher({ status: 'reverted' });
+      const held = await refusedBesideOpenHash(publisher, 'update');
+
+      expect(await publisher.recover()).toBe(0);
+
+      expect(chainProofLookups[0]).toMatchObject({ txHash: TX_HASH });
+      const still = expectFailed(await publisher.getStatus(held.jobId));
+      expect(still.failure.code).toBe('insufficient_funds');
+      expect(isHeldForChainProof(still)).toBe(true);
+      expect(sends).toBe(0);
+    });
+
+    it('keeps holding, with the older hash open, while the chain has settled nothing', async () => {
+      const publisher = dispatcher({ status: 'inconclusive' });
+      const held = await refusedBesideOpenHash(publisher);
+
+      expect(await publisher.recover()).toBe(0);
+
+      expect(chainProofLookups[0]).toMatchObject({ txHash: TX_HASH });
+      const still = expectFailed(await publisher.getStatus(held.jobId));
+      expect(still.failure.code).toBe('insufficient_funds');
+      expect(still.recovery).toMatchObject({ txHashChecked: TX_HASH });
+      expect(still.recovery?.txHashAccounted).toBeUndefined();
+      expect(isHeldForChainProof(still)).toBe(true);
+      expect(sends).toBe(0);
     });
   });
 

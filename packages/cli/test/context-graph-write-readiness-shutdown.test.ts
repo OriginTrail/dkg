@@ -175,6 +175,7 @@ describe('a write that waits for its graph does not outlive shutdown or its requ
         steps.push(`drainCatchupJobs: ${drained}`);
       },
       closeEntitySearch: noop,
+      stopSemanticRuntime: noop,
       closeLocalLlm: noop,
       flushTelemetry: noop,
       stopPublisherRuntime: noop,

@@ -29,11 +29,12 @@ import {
   shouldApplyMaterialization,
   withMaterializationLock,
   writeMaterializedVersion,
-  validatePublishRequest, parseSimpleNQuads, ensureSubGraphRegistration,
+  validatePublishRequest, parseSimpleNQuads, ensureSubGraphRegistration, assertWritableQuadTerms, assertNoReceivedProtocolMetadata,
   type KAMetadata,
 } from '@origintrail-official/dkg-publisher';
 import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 import { ethers } from 'ethers';
+import { gossipedAgentProfileQuads, storeAgentProfileQuads } from './agent-profile-updates.js';
 import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
 import type {
   ContextGraphDiscoveryMetadata,
@@ -282,7 +283,8 @@ export class GossipPublishHandler {
       }
 
       const nquadsStr = new TextDecoder().decode(request.nquads);
-      const quads = parseSimpleNQuads(nquadsStr);
+      const quads = assertWritableQuadTerms(parseSimpleNQuads(nquadsStr), request.kas?.map((ka) => ka.rootEntity));
+      assertNoReceivedProtocolMetadata(quads);
       const graphPublish = resolveGraphScopedPublishRequest(request);
 
       if (quads.length === 0 && !request.ual) {
@@ -482,7 +484,10 @@ export class GossipPublishHandler {
             this.log.warn(ctx, `Gossip structural validation rejected publish ${request.ual}: ${validation.errors.join('; ')}`);
             return;
           }
-          this.log.info(ctx, `Gossip replay detected for ${request.ual}, skipping data insert but running verification`);
+          // In the agents registry a known subject is an update of its profile, not a replay.
+          if (!isAgentRegistryContextGraph(request.contextGraphId)) {
+            this.log.info(ctx, `Gossip replay detected for ${request.ual}, skipping data insert but running verification`);
+          }
           isReplay = true;
         }
       }
@@ -699,7 +704,15 @@ export class GossipPublishHandler {
       }
 
       phase?.('store', 'start');
-      if (normalized.length > 0 && !isReplay) {
+      if (isAgentRegistryContextGraph(request.contextGraphId)) {
+        const stored = await storeAgentProfileQuads(
+          this.store,
+          gossipedAgentProfileQuads(normalized, { fromPeerId, knownAgent: isReplay }),
+          async (quads) => { await this.store.insert(quads); return quads; },
+          { listedPeersOnly: true },
+        );
+        if (stored.length > 0) this.callbacks.markCgMetaDirtyFromQuads?.(stored);
+      } else if (normalized.length > 0 && !isReplay) {
         await this.store.insert(normalized);
         this.callbacks.markCgMetaDirtyFromQuads?.(normalized);
       }

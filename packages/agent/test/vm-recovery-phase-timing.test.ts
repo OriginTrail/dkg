@@ -49,7 +49,7 @@ function usageSnapshot(
 ): ReturnType<VmRecoveryTimingSources['usage']> {
   return {
     schemaVersion: 1,
-    consumerVocabularyVersion: 3,
+    consumerVocabularyVersion: 4,
     processEpoch: 'test',
     capturedAtUtc: '2026-10-01T00:00:00.000Z',
     capturedAtMonotonicMs: 0,

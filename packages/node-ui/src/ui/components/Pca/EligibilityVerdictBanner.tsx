@@ -1,5 +1,8 @@
 import React from 'react';
 import type { ReactNode } from 'react';
+import { Badge, StatusGlyph } from '../ds/Badge.js';
+import { CircleHelp } from 'lucide-react';
+import { formatBps } from '../../lib/format.js';
 
 /**
  * The publish-eligibility verdict (UX §5.5, expanded by invariant #6). FOUR
@@ -24,15 +27,22 @@ export type PcaVerdict = 'eligible' | 'fallthrough' | 'fallthrough-no-funds' | '
 
 function pctLabel(bps?: number): string | null {
   if (typeof bps !== 'number' || !Number.isFinite(bps) || bps <= 0) return null;
-  const p = bps / 100;
-  return `${p.toFixed(p % 1 === 0 ? 0 : 1)}%`;
+  return formatBps(bps);
 }
 
-const VERDICT_META: Record<PcaVerdict, { glyph: string; toneClass: string }> = {
-  eligible: { glyph: '◉', toneClass: 'v10-pca-verdict-green' },
-  fallthrough: { glyph: '⚠', toneClass: 'v10-pca-verdict-amber' },
-  'fallthrough-no-funds': { glyph: '⚠', toneClass: 'v10-pca-verdict-danger' },
-  unknown: { glyph: '◌', toneClass: 'v10-pca-verdict-neutral' },
+/** Compact chip is a Badge; its label carries any glyph, so the badge adds none. */
+const CHIP_TONE: Record<PcaVerdict, 'success' | 'warning' | 'danger' | 'neutral'> = {
+  eligible: 'success',
+  fallthrough: 'warning',
+  'fallthrough-no-funds': 'danger',
+  unknown: 'neutral',
+};
+
+const VERDICT_META: Record<PcaVerdict, { glyph: ReactNode; toneClass: string }> = {
+  eligible: { glyph: <StatusGlyph tone="success" />, toneClass: 'v10-pca-verdict-green' },
+  fallthrough: { glyph: <StatusGlyph tone="warning" />, toneClass: 'v10-pca-verdict-amber' },
+  'fallthrough-no-funds': { glyph: <StatusGlyph tone="danger" />, toneClass: 'v10-pca-verdict-danger' },
+  unknown: { glyph: <CircleHelp size={14} />, toneClass: 'v10-pca-verdict-neutral' },
 };
 
 /**
@@ -97,12 +107,14 @@ export function EligibilityVerdictBanner({
       verdict === 'eligible'
         ? `Funded by ${pcaLabel}${trackedNote}${disc ? ` (${disc} discount)` : ''}`
         : verdict === 'fallthrough'
-          ? '⚠ No PCA discount'
+          ? 'No PCA discount'
           : verdict === 'fallthrough-no-funds'
-            ? '⚠ Publish will fail'
+            ? 'Publish will fail'
             : 'PCA status unknown';
     return (
-      <span
+      <Badge
+        tone={CHIP_TONE[verdict]}
+        icon={verdict === 'fallthrough' || verdict === 'fallthrough-no-funds' ? undefined : null}
         className={['v10-pca-verdict-chip', meta.toneClass, className].filter(Boolean).join(' ')}
         data-testid="pca-eligibility-chip"
         data-verdict={verdict}
@@ -110,7 +122,7 @@ export function EligibilityVerdictBanner({
         <span className="v10-pca-verdict-chip-label" role={role} aria-live={ariaLive}>
           {chipLabel}
         </span>
-      </span>
+      </Badge>
     );
   }
 
@@ -129,11 +141,10 @@ export function EligibilityVerdictBanner({
         {/* P2-interim — the chip can't see the sized per-publish fee (deferred to
             #1351), so don't assert the direct-cost publish WILL succeed; say it
             ATTEMPTS and fails if the wallet's TRAC is below the fee. */}
-        No PCA discount on this publish — it will attempt to pay the direct cost from the signing
-        wallet’s TRAC
+        This publish won’t get a PCA discount
         {/* F9 — name the forfeited discount when it's in context (§5.5 / #5a). */}
-        {disc ? `, forfeiting ${pcaLabel}’s ${disc} discount` : ''}
-        {ownerPublish ? escrowCaveat : ''}; the publish fails if that TRAC is below the fee.{reasonText}
+        {disc ? ` (you’d lose ${pcaLabel}’s ${disc} discount)` : ''}. The signing wallet will pay the full cost in TRAC
+        {ownerPublish ? `,${escrowCaveat}` : ''}. If it doesn’t have enough TRAC, the publish fails.{reasonText}
       </>
     );
   } else if (verdict === 'fallthrough-no-funds') {
@@ -141,7 +152,7 @@ export function EligibilityVerdictBanner({
       <>
         {/* Q2 — source-agnostic: DANGER now fires on no TRAC (R3) OR no gas (Q2);
             the specific cause is carried in reasonText. */}
-        This publish will FAIL — no signing wallet can cover it
+        This publish will fail: no signing wallet can cover it.
         {disc ? `, forfeiting ${pcaLabel}’s ${disc} discount` : ''}
         {ownerPublish ? escrowCaveat : ''}.{reasonText}
       </>
@@ -152,7 +163,7 @@ export function EligibilityVerdictBanner({
 
   return (
     <div
-      className={['v10-pca-verdict-banner', meta.toneClass, className].filter(Boolean).join(' ')}
+      className={['v10-pca-verdict-banner ds-card-nested', meta.toneClass, className].filter(Boolean).join(' ')}
       data-testid="pca-eligibility-verdict"
       data-verdict={verdict}
       role={role}

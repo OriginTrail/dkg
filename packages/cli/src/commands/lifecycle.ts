@@ -1,3 +1,4 @@
+import { DEFAULT_STARTUP_TIMEOUT_MS, waitForDaemonReady, describeDaemonStartupFailure } from '../daemon/startup-wait.js';
 import { Command } from 'commander';
 import { readFileSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -20,7 +21,7 @@ import {
 import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath, exitOnStoreConfigErrors,
-  readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
+  readPid, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
   releasesDir, activeSlot, swapSlot,
@@ -30,6 +31,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { resolveRetentionConfigOrExit } from '../retention-config.js';
+import { resolveQueryConfigOrExit } from '../update/read-graph-rollback-target.js';
 import { ApiClient, type DaemonStatusResponse } from '../api-client.js';
 import {
   STORE_QUADS_REFRESH_AFTER_MS,
@@ -72,7 +74,6 @@ import {
   formatPublisherJobValue,
   stripQuotes,
   formatQuadObject,
-  sleep,
   stopDaemonIfRunning,
 } from '../cli-helpers.js';
 import type { ActionOpts, CatchupStatusCommandOptions } from '../cli-helpers.js';
@@ -270,12 +271,13 @@ program
   .command('daemon-supervisor', { hidden: true })
   .description('Internal: supervise daemon worker restarts')
   .action(async () => {
-    await runDaemonSupervisor();
+    process.exitCode = await runDaemonSupervisor();
   });
 
 program
   .command('start')
   .description('Start the DKG daemon')
+  .option('--timeout <ms>', 'Maximum wait for detached daemon API readiness', value => parsePositiveIntegerOption(value, '--timeout'), DEFAULT_STARTUP_TIMEOUT_MS)
   .option('-f, --foreground', 'Run in the foreground (don\'t daemonize)')
   .option(
     '--relay-preferred <multiaddr>',
@@ -293,10 +295,13 @@ program
       process.exit(1);
     }
 
+    if (Number(opts.timeout) > 2_147_483_647) throw new Error('--timeout must not exceed 2147483647 milliseconds');
     const bootConfig = await loadConfig();
     exitOnStoreConfigErrors(bootConfig, (message) => console.error(message));
     // OT-RFC-73 P10b: a bad queue-retention value is refused here, naming the key, before a detached daemon could hide it.
     resolveRetentionConfigOrExit(bootConfig.queueRetention, (message) => console.error(message));
+    // OT-RFC-74: so is a bad `query` value, and read graphs that the rollback target would not recognize.
+    await resolveQueryConfigOrExit(bootConfig, (message) => console.error(message));
 
     const pid = await readPid();
     if (pid && isProcessRunning(pid)) {
@@ -366,22 +371,12 @@ program
     );
     child.unref();
 
-    // Wait for daemon to write its PID file and API port
-    let startedPid: number | null = null;
-    for (let i = 0; i < 30; i++) {
-      await sleep(500);
-      const newPid = await readPid();
-      if (newPid && isProcessRunning(newPid)) {
-        startedPid = newPid;
-        const rawPort = await readApiPort().catch(() => null);
-        if (Number.isFinite(rawPort) && rawPort! > 0) break;
-      }
-    }
-    if (startedPid && isProcessRunning(startedPid)) {
-      const config = await loadConfig();
-      const rawPort = await readApiPort().catch(() => null);
-      const port = (Number.isFinite(rawPort) && rawPort! > 0) ? rawPort : (config.apiPort ?? 9200);
-      const host = config.apiHost && config.apiHost !== '0.0.0.0' ? config.apiHost : '127.0.0.1';
+    const ready = await waitForDaemonReady(child, probeHostForApiHost(bootConfig.apiHost), Number(opts.timeout));
+    if (ready.status === 'ready') {
+      const config = bootConfig;
+      const startedPid = ready.pid;
+      const port = ready.port;
+      const host = probeHostForApiHost(config.apiHost);
       const hostDisplay = host.includes(':') ? `[${host}]` : host;
       const isTTY = process.stdout.isTTY;
       const cyan = (s: string) => isTTY ? `\x1b[4m\x1b[36m${s}\x1b[0m` : s;
@@ -395,7 +390,7 @@ program
       console.log('');
       return;
     }
-    console.error('Daemon did not start within 15s. Check logs:', logPath());
+    console.error(`${describeDaemonStartupFailure(ready)} Check logs: ${logPath()}`);
     process.exit(1);
   });
 

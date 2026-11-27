@@ -401,13 +401,17 @@ it.each(['connected', 'registry-only'] as const)('commits a verified asset throu
   } } });
   Object.assign(chain, { getIdentityId: signing.chain.getIdentityId,
     signMessage: signing.chain.signMessage, verifyACKIdentity: signing.chain.verifyACKIdentity,
-    readPublicGraphSnapshot: async () => sealPublicGraphSnapshot({
-      version: 1, chainId: chain.chainId, deploymentId, ...scope,
-      nameHash: ethers.id(scope.contextGraphId), contextGraphStorage: `0x${'2'.repeat(40)}`,
-      assetStorage: `0x${'3'.repeat(40)}`, blockNumber: '1', blockHash: `0x${'4'.repeat(64)}`,
-      finalityConfirmations: 1, observedAt: Date.now(), expiresAt: Date.now() + 120000,
-      accessPolicy: 0, assets: [{ id: kaId.toString(), root: ethers.hexlify(root), version: '1' }],
-    }),
+    readPublicGraphSnapshot: async () => {
+      // One clock reading: two can be a millisecond apart, which is over the longest window a snapshot may declare.
+      const now = Date.now();
+      return sealPublicGraphSnapshot({
+        version: 1, chainId: chain.chainId, deploymentId, ...scope,
+        nameHash: ethers.id(scope.contextGraphId), contextGraphStorage: `0x${'2'.repeat(40)}`,
+        assetStorage: `0x${'3'.repeat(40)}`, blockNumber: '1', blockHash: `0x${'4'.repeat(64)}`,
+        finalityConfirmations: 1, observedAt: now, expiresAt: now + 120000,
+        accessPolicy: 0, assets: [{ id: kaId.toString(), root: ethers.hexlify(root), version: '1' }],
+      });
+    },
   });
   const agents: DKGAgent[] = [];
   try {

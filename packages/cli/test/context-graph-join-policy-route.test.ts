@@ -194,6 +194,7 @@ describe('GET/PUT /api/context-graph/{id}/join-policy', () => {
       maxApprovalsPerHour: 4,
     }));
     expect(probeContextGraphWritePreflight).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, {
+      contentCheck: 'when-needed-for-write',
       callerAgentAddress: OWNER_ADDRESS,
     });
     expect(setContextGraphJoinPolicy).toHaveBeenCalledWith(
@@ -237,6 +238,7 @@ describe('GET/PUT /api/context-graph/{id}/join-policy', () => {
 
     expect(result.status).toBe(200);
     expect(probeContextGraphWritePreflight).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, {
+      contentCheck: 'when-needed-for-write',
       callerAgentAddress: OWNER_ADDRESS,
     });
     expect(listContextGraphs).not.toHaveBeenCalled();

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import type { ServerResponse } from 'node:http';
 import { contextGraphDataUri, contextGraphMetaUri, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import type { DashboardDB } from '@origintrail-official/dkg-node-ui';
-import { registerJoinMetadataEmptyVmSettlement } from '../src/context-graph-empty-vm-readiness.js';
+import { registerJoinMetadataEmptyVmSettlement, settlePrivateEmptyVmAtSubscribe } from '../src/context-graph-empty-vm-readiness.js';
+import { privateEmptyVmRepeatTimers } from '../src/context-graph-empty-vm-repeat.js';
 import { resolveRequiredWriteContextGraphId } from '../src/daemon/http-utils.js';
 
 // A member is approved into a registered private graph that holds nothing yet,
@@ -89,8 +90,8 @@ describe('first write of an approved member into an empty registered private gra
       _agent: unknown, bindings: { readMetadataRevision(): string },
     ) => ({ proven: true as const, metadataRevision: bindings.readMetadataRevision(), onChainId }));
 
-    /** The post-approval sync stores the curator's metadata, then confirms it. */
-    const receiveCuratorMetadata = async () => {
+    /** The curator's metadata reaches the store. */
+    const storeCuratorMetadata = async () => {
       const subject = contextGraphDataUri(contextGraphId);
       const graph = contextGraphMetaUri(contextGraphId);
       const delegation = `did:dkg:agent-delegation:${contextGraphId}:${member.agentAddress.toLowerCase()}`;
@@ -106,6 +107,10 @@ describe('first write of an approved member into an empty registered private gra
         { subject: delegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT, object: `"${Date.now() - 1_000}"`, graph },
         { subject: delegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: `"${MEMBER_PEER_ID}"`, graph },
       ]);
+    };
+    /** The post-approval sync stores the curator's metadata, then confirms it. */
+    const receiveCuratorMetadata = async () => {
+      await storeCuratorMetadata();
       await internals.refreshMetaSyncedFlags([contextGraphId]);
     };
 
@@ -120,7 +125,12 @@ describe('first write of an approved member into an empty registered private gra
     };
 
     return {
-      contextGraphId, member: member.agentAddress.toLowerCase(), log, write, receiveCuratorMetadata,
+      contextGraphId, member: member.agentAddress.toLowerCase(), log, write, receiveCuratorMetadata, storeCuratorMetadata,
+      agent: node, dashboard, onChainId,
+      candidateAuthority: {
+        outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'eligible',
+      } as const,
+      hasConfirmedMeta: () => node.hasConfirmedMetaState(contextGraphId),
       subscription: () => node.getSubscribedContextGraphs().get(contextGraphId),
       readiness: () => readiness,
     };
@@ -154,5 +164,85 @@ describe('first write of an approved member into an empty registered private gra
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(node.subscription()).toMatchObject({ subscribed: true, synced: false, metaSynced: true });
     expect(await node.write()).toBe('CONTEXT_GRAPH_NOT_WRITABLE');
+  });
+
+  describe('when the metadata comes after every one-shot attempt', () => {
+    const realTimers = { set: privateEmptyVmRepeatTimers.set, clear: privateEmptyVmRepeatTimers.clear };
+    let armed: Array<{ callback: () => void; delayMs: number }>;
+
+    beforeEach(() => {
+      armed = [];
+      privateEmptyVmRepeatTimers.set = (callback, delayMs) => {
+        const handle = { callback, delayMs };
+        armed.push(handle);
+        return handle;
+      };
+      privateEmptyVmRepeatTimers.clear = (handle) => {
+        armed = armed.filter((entry) => entry !== handle);
+      };
+    });
+    afterEach(() => {
+      privateEmptyVmRepeatTimers.set = realTimers.set;
+      privateEmptyVmRepeatTimers.clear = realTimers.clear;
+      vi.restoreAllMocks();
+    });
+
+    /** The chain read holds once the metadata is there; until then the attempt says so. */
+    function holdsOnceMetadataIsConfirmed(onChainMetadata: () => Promise<boolean>, onChainId: bigint) {
+      proofLeaf.attempt.mockImplementation(async (
+        _agent: unknown, bindings: { readMetadataRevision(): string },
+      ) => (await onChainMetadata()
+        ? { proven: true as const, metadataRevision: bindings.readMetadataRevision(), onChainId }
+        : { proven: false as const, stage: 'metadata-not-yet-confirmed' }));
+    }
+
+    it('is synced by the repeat, without a second subscribe, and can then write', async () => {
+      const node = await approvedMemberNode();
+      holdsOnceMetadataIsConfirmed(() => node.hasConfirmedMeta(), node.onChainId);
+
+      // The member's subscribe finds no metadata yet, and ends unproven.
+      expect(await settlePrivateEmptyVmAtSubscribe(
+        node.agent, node.dashboard, node.contextGraphId, node.candidateAuthority, node.member,
+      )).toBe(false);
+      expect(armed.map((repeat) => repeat.delayMs)).toEqual([15_000]);
+      expect(await node.write()).toBe('CONTEXT_GRAPH_NOT_FOUND');
+
+      // The first repeat is still too early.
+      armed.shift()!.callback();
+      await vi.waitFor(() => expect(armed.map((repeat) => repeat.delayMs)).toEqual([30_000]));
+      expect(node.subscription()).toMatchObject({ synced: false });
+
+      // The metadata reaches the store without anything announcing it.
+      await node.storeCuratorMetadata();
+      armed.shift()!.callback();
+
+      await vi.waitFor(() => expect(node.subscription()).toMatchObject({ synced: true }), { timeout: 5_000 });
+      expect(node.subscription()).toMatchObject({
+        subscribed: true, metaSynced: true, pendingMeta: false, sharedMemorySynced: false,
+      });
+      expect(node.readiness()).toMatchObject({ durableVerified: true, sharedMemoryVerified: false });
+      expect(await node.write()).toBe('accepted');
+      expect(armed).toEqual([]);
+    });
+
+    it('stays refused while the proof does not hold, and stops at the bound', async () => {
+      const node = await approvedMemberNode();
+      proofLeaf.attempt.mockImplementation(async () => ({ proven: false as const, stage: 'finalized-zero-proof-false' }));
+
+      await settlePrivateEmptyVmAtSubscribe(
+        node.agent, node.dashboard, node.contextGraphId, node.candidateAuthority, node.member,
+      );
+      const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+      for (let repeat = 0; repeat < 9; repeat += 1) {
+        await vi.waitFor(() => expect(armed).toHaveLength(1));
+        armed.shift()!.callback();
+      }
+
+      await vi.waitFor(() => expect(info.mock.calls.some(([line]) => String(line).includes('still not proven after 9'))).toBe(true));
+      expect(armed).toEqual([]);
+      expect(proofLeaf.attempt).toHaveBeenCalledTimes(10);
+      expect(node.subscription()).toMatchObject({ subscribed: true, synced: false });
+      expect(await node.write()).not.toBe('accepted');
+    });
   });
 });

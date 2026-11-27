@@ -45,7 +45,7 @@ import { generateKeyPair, privateKeyFromRaw } from '@libp2p/crypto/keys';
 import { peerIdFromString, peerIdFromPrivateKey } from '@libp2p/peer-id';
 import { ed25519GetPublicKey } from './crypto/ed25519.js';
 import type { ConnectionTransport, DKGNodeConfig } from './types.js';
-import { DKG_GOSSIP_MAX_RPC_BYTES, dhtProtocolForNetwork } from './constants.js';
+import { DKG_GOSSIP_MAX_RPC_BYTES, dhtProtocolForNetwork, gossipMaxTopicBytesPerPeer } from './constants.js';
 import { POOLED_MESSAGE_PROTOCOL } from './message-stream-pool.js';
 import { RelayMetricsAdapter, RELAY_V2_STOP_CODEC } from './libp2p-metrics-adapter.js';
 import { readRelayReservations, readConnectionStreams } from './relay-internal-shapes.js';
@@ -834,9 +834,14 @@ export class DKGNode {
         floodPublish: true,
         maxInboundDataLength: DKG_GOSSIP_MAX_RPC_BYTES,
         maxOutboundBufferSize: DKG_GOSSIP_MAX_RPC_BYTES,
-        D: 4,
-        Dlo: 2,
-        Dhi: 8,
+        // Testnet Core peers subscribe to more topics than gossipsub's 1 MiB default keeps per peer.
+        maxTopicBytesPerPeer: gossipMaxTopicBytesPerPeer(this.config.networkIdentity?.networkConfigName),
+        D: 4, Dlo: 2, Dhi: 8,
+        // Keep mesh topics out of the peer store: each GRAFT would tag the peer with its topic for good,
+        // records would grow to thousands of tags that libp2p decodes and re-encodes on every peer-store
+        // access, and a reconnect's GRAFTs would block the event loop for seconds. Relays and warm cores
+        // keep their own keep-alive tags.
+        tagMeshPeers: false,
         // NOTE — RFC 07 §5.4 ships the constant `dkgGossipMsgId` for
         // cross-backend dedup, but it is intentionally NOT wired in
         // here yet. Codex review feedback on PR #501 (round 2) flagged

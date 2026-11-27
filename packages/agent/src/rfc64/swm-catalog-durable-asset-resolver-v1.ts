@@ -34,6 +34,7 @@ import {
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
+import { matchesCatalogConfirmedEnvelopeV1 } from '../internal/catalog-asset-revision.js';
 
 import type { Rfc64PublicCatalogSuccessorAssetInputV1 } from
   './public-catalog-successor-asset-v1.js';
@@ -246,24 +247,8 @@ async function resolveFinalizedVmProjectionQuadsV1(
     ual: identity.kaUal,
   }));
   throwIfAbortedV1(params.signal);
-  const expectedPrivateMerkleRoot = seal.privateMerkleRoot === null
-    ? undefined
-    : ethers.getBytes(seal.privateMerkleRoot);
-  const expectedMerkleRoot = ethers.getBytes(seal.assertionMerkleRoot);
-  if (
-    stored.state !== 'confirmed'
-    || stored.envelope.assertionVersion !== identity.assertionVersion
-    || stored.envelope.batchId !== BigInt(seal.reservedKaId)
-    || stored.envelope.publicTripleCount !== Number(seal.publicTripleCount)
-    || stored.envelope.privateTripleCount !== Number(seal.privateTripleCount)
-    || !equalOptionalBytesV1(
-      stored.envelope.privateMerkleRoot,
-      expectedPrivateMerkleRoot,
-    )
-    || !equalBytesV1(stored.envelope.merkleRoot, expectedMerkleRoot)
-    || stored.envelope.assertionGraph !== vmGraph
-    || stored.envelope.subGraphName !== undefined
-  ) {
+  if (stored.state !== 'confirmed'
+    || !matchesCatalogConfirmedEnvelopeV1(params.contextGraphId, seal, stored.envelope)) {
     throw new CatalogRepairIntegrityErrorV1(`durable finalized VM projection differs for ${identity.kaUal}`);
   }
   const quads = await observeCatalogRepairStageV1('vm_projection', async () => {
@@ -413,18 +398,4 @@ function assertProjectionMatchesSealV1(
   if (actualRoot !== seal.assertionMerkleRoot) {
     throw new CatalogRepairIntegrityErrorV1(`durable finalized VM projection differs for ${kaUal}`);
   }
-}
-
-function equalBytesV1(left: Uint8Array, right: Uint8Array): boolean {
-  return left.length === right.length
-    && left.every((byte, index) => byte === right[index]);
-}
-
-function equalOptionalBytesV1(
-  left: Uint8Array | undefined,
-  right: Uint8Array | undefined,
-): boolean {
-  return left === undefined || right === undefined
-    ? left === right
-    : equalBytesV1(left, right);
 }

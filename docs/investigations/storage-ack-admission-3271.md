@@ -2,7 +2,8 @@
 
 The node retains its existing FIFO collector limit (one by default). This change
 adds phase measurements and cancels queued admission when the node lifetime
-closes. It does not change quorum, candidate selection, signatures, retry budgets,
+closes. Settled publish/update rounds also cancel their obsolete outbound sends
+and retry sleeps, and ignore late responses before starting more identity reads. It does not change quorum, candidate selection, signatures, retry budgets,
 deadlines, wallet/nonce behavior, or the default concurrency setting.
 
 ## Operator diagnosis
@@ -84,3 +85,38 @@ that retirement before store teardown. A non-cooperative preflight/collector can
 therefore delay retirement or trigger the existing shutdown quarantine; this is
 not a promise of immediate physical cancellation. Tests cover this ownership,
 reopen fencing, throwing observers and synchronous observer reentrancy.
+
+
+## Settled-round retirement
+
+Previously, reaching quorum returned three valid ACKs immediately but left other
+sends running until their own timeout or response. A late response could still
+launch identity verification after the caller had its final result. The round's
+120-second timer also remained armed after success. In retained2026-10-30 live
+canary runs,54–62 of66 rounds ended with candidates still pending (including six
+warmups). Pending includes transport and validation; it does not count remote
+store operations.
+
+Each round now owns a cancellation signal and clears its deadline at settlement.
+It forwards cancellation through the existing request-owned Messenger transport
+and self-ACK path. Success, impossible quorum, timeout and caller cancellation
+stop obsolete sends/backoffs. Late replies and already-started verification
+results cannot add ACKs, trigger further verification or change the settled
+round. Three valid unique identities are still required; concurrency, candidate
+selection, deadlines and retry budgets retain their existing values.
+
+The same signal reaches identity verification through its existing chain-read
+options. Native cancellable reads stop; custom verifiers that ignore it retain
+their own physical lifetime. Cancellation does not prove that an older remote
+handler stopped its store work. The receiver and local self-ACK
+transport keep their existing physical-completion/drain ownership. A custom
+transport that ignores the optional signal may continue running, but its late
+reply is fenced. The real-P2P regression deliberately keeps one remote handler
+blocked after quorum while checking that all caller-side sends retire and no
+durable outbox retry is created.
+
+This removes avoidable publisher work. It does not by itself explain a remote
+handler deadline or eliminate FIFO waiting during an active slow round. Matched
+live baseline/PR measurements are required before claiming publication latency
+or throughput improvements. Query/store QoS and responder-phase attribution
+remain separate evidence requirements.

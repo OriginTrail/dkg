@@ -1,4 +1,4 @@
-import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
+import { Logger, createOperationContext, currentAsyncAdmissionDiagnosticContext } from '@origintrail-official/dkg-core';
 import { isStoreOperationTimeoutError, isStoreSchedulerBusyError, type TripleStore } from '@origintrail-official/dkg-storage';
 import { hasUnfinishedBoundObligation, storedPromoteLaneScope } from './async-promote-ownership.js';
 import { PromoteJobConflictError, type PromoteJob, type PromoteRequest } from './async-promote-queue-types.js';
@@ -7,7 +7,7 @@ import { ACTIVE_PROMOTE_STATES, promoteLaneConflictScope, promoteLaneScopesConfl
 export type PromoteAdmissionPhase = 'lock' | 'graph' | 'conflict' | 'persist';
 export type PromoteAdmissionOutcome = 'not_admitted' | 'indeterminate';
 export interface PromoteAdmissionEvent {
-  event: 'phase_settled' | 'deadline';
+  event: 'phase_settled' | 'deadline' | 'caller_aborted';
   phase: PromoteAdmissionPhase;
   elapsedMs: number;
   outcome: 'completed' | PromoteAdmissionOutcome;
@@ -44,10 +44,14 @@ export class PromoteAdmissionError extends Error {
 }
 
 const logger = new Logger('AsyncPromoteAdmission');
-function trace(event: PromoteAdmissionEvent): void {
-  if (process.env.DKG_ASYNC_PROMOTE_ADMISSION_TRACE === '1') {
-    logger.info(createOperationContext('publish', 'admission'), `async_promote_admission ${JSON.stringify(event)}`);
-  }
+function admissionTrace(): (event: PromoteAdmissionEvent) => void {
+  if (process.env.DKG_ASYNC_PROMOTE_ADMISSION_TRACE !== '1') return () => {};
+  // A close listener can run outside the original request's async context.
+  const context = currentAsyncAdmissionDiagnosticContext();
+  const requestId = context?.route === 'share_async' ? context.requestId : undefined;
+  return event => {
+    logger.info(createOperationContext('publish', 'admission'), `async_promote_admission ${JSON.stringify({ ...event, requestId })}`);
+  };
 }
 
 type PrePersistencePhase = Exclude<PromoteAdmissionPhase, 'persist'>;
@@ -61,7 +65,7 @@ export class PromoteAdmissionAttempt {
   private expired = false;
   private phaseStarted = performance.now();
   private readonly deadlineAt: number;
-  constructor(timeoutMs: number, private readonly emit: (event: PromoteAdmissionEvent) => void) {
+  constructor(timeoutMs: number, private readonly emit: (event: PromoteAdmissionEvent) => void, private readonly signal?: AbortSignal) {
     this.deadlineAt = performance.now() + timeoutMs;
   }
   enter(phase: PrePersistencePhase): void { this.transition({ phase }); }
@@ -71,7 +75,7 @@ export class PromoteAdmissionAttempt {
   }
   private transition(state: AdmissionState): void {
     if (this.state.phase === 'persist') throw new Error('Cannot leave or restart persistence');
-    if (this.expired || performance.now() >= this.deadlineAt) throw this.expire();
+    if (this.expired || this.signal?.aborted || performance.now() >= this.deadlineAt) throw this.expire();
     this.report('completed');
     this.state = state;
     this.phaseStarted = performance.now();
@@ -147,7 +151,8 @@ export class PromoteAdmissionCoordinator {
   }
 
   async run(request: PromoteRequest, work: (attempt: PromoteAdmissionAttempt) => Promise<string>,
-    timeoutMs: number, emit = trace): Promise<string> {
+    timeoutMs: number, emit = admissionTrace(), signal?: AbortSignal): Promise<string> {
+    if (signal?.aborted) throw new PromoteAdmissionError({ phase: 'lock', admissionOutcome: 'not_admitted' });
     const key = uniquenessKey(request);
     const existing = this.pending.get(key);
     if (existing) {
@@ -162,9 +167,16 @@ export class PromoteAdmissionCoordinator {
       if (promoteLaneScopesConflict(owner.scope, scope)) throw new PromoteJobConflictError(id, request, true);
     }
     if (this.pending.size >= MAX_PENDING) throw new PromoteAdmissionError({ phase: 'lock', admissionOutcome: 'not_admitted' });
-    const attempt = new PromoteAdmissionAttempt(timeoutMs, emit);
+    const attempt = new PromoteAdmissionAttempt(timeoutMs, emit, signal);
     let timer: ReturnType<typeof setTimeout>;
+    let onAbort: (() => void) | undefined;
     const deadline = new Promise<never>((_resolve, reject) => {
+      onAbort = () => {
+        const error = attempt.expire();
+        attempt.report(error.admissionOutcome, 'caller_aborted');
+        reject(error);
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
       timer = setTimeout(() => {
         const error = attempt.expire();
         attempt.report(error.admissionOutcome, 'deadline');
@@ -177,7 +189,10 @@ export class PromoteAdmissionCoordinator {
       if (attempt.phase === 'persist' || isStoreSchedulerBusyError(cause) || isStoreOperationTimeoutError(cause)) throw attempt.error(cause);
       throw cause;
     });
-    const result = Promise.race([operation, deadline]).finally(() => clearTimeout(timer));
+    const result = Promise.race([operation, deadline]).finally(() => {
+      clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener('abort', onAbort);
+    });
     const flight = { attempt, result, scope };
     this.pending.set(key, flight);
     void operation.then(() => {

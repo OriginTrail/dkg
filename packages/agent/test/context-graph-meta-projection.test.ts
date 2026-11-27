@@ -81,10 +81,7 @@ describe('ContextGraphMetaProjection', () => {
     expect(meta.creator).toBe('did:dkg:agent:0x0000000000000000000000000000000000000003');
     expect(meta.curator).toBe('did:dkg:agent:0x0000000000000000000000000000000000000004');
     expect(meta.onChainId).toBe('202');
-    expect(meta.creators).toEqual([
-      'did:dkg:agent:0x0000000000000000000000000000000000000003',
-      'did:dkg:agent:0x0000000000000000000000000000000000000002',
-    ]);
+    expect(meta.creators).toEqual(['did:dkg:agent:0x0000000000000000000000000000000000000003']);
     expect(meta.curators).toEqual([
       'did:dkg:agent:0x0000000000000000000000000000000000000004',
       'did:dkg:agent:0x0000000000000000000000000000000000000001',
@@ -156,7 +153,7 @@ describe('ContextGraphMetaProjection', () => {
     expect(meta.revokedAgents[0]?.toLowerCase()).toBe(address.toLowerCase());
   });
 
-  it('loads AGENTS graph policy rows and invalidates allowlist mutations', async () => {
+  it('takes a private policy from the AGENTS graph and invalidates allowlist mutations', async () => {
     const store = new OxigraphStore();
     const projection = new ContextGraphMetaProjection(store);
     const id = '0x0000000000000000000000000000000000000abc/projection-agents-private';
@@ -177,9 +174,9 @@ describe('ContextGraphMetaProjection', () => {
 
     const first = await projection.get(id);
     expect(first.accessPolicy).toBe('private');
-    expect(first.curator).toBe('did:dkg:agent:0x0000000000000000000000000000000000000111');
+    expect(first.curator).toBeUndefined();
     expect(first.allowedAgents).toEqual(['0x0000000000000000000000000000000000000111']);
-    expect(first.revokedAgents).toEqual(['0x0000000000000000000000000000000000000333']);
+    expect(first.revokedAgents).toEqual([]);
 
     const addedAgent: Quad = {
       subject: uri,
@@ -196,6 +193,162 @@ describe('ContextGraphMetaProjection', () => {
       '0x0000000000000000000000000000000000000111',
       '0x0000000000000000000000000000000000000222',
     ]));
+  });
+
+  describe('a context graph access list comes from its own metadata', () => {
+    const id = '0x0000000000000000000000000000000000000abc/projection-access-list';
+    const uri = contextGraphDataGraphUri(id);
+    const metaGraph = contextGraphMetaGraphUri(id);
+    const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const member = '0x0000000000000000000000000000000000000111';
+    const wallet = '0x0000000000000000000000000000000000000222';
+    const row = (predicate: string, value: string, graph: string): Quad => (
+      { subject: uri, predicate, object: `"${value}"`, graph }
+    );
+    const accessRows = (graph: string): Quad[] => [
+      row(DKG_ONTOLOGY.DKG_ALLOWED_AGENT, wallet, graph),
+      row(DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT, wallet, graph),
+      row(DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID, '7', graph),
+      row(DKG_ONTOLOGY.DKG_ALLOWED_PEER, 'peer-shared', graph),
+      row(DKG_ONTOLOGY.DKG_REVOKED_AGENT, member, graph),
+    ];
+    const ownRows = (): Quad[] => [
+      row(DKG_ONTOLOGY.DKG_ALLOWED_AGENT, member, metaGraph),
+      row(DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT, member, metaGraph),
+      row(DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID, '5', metaGraph),
+      row(DKG_ONTOLOGY.DKG_ALLOWED_PEER, 'peer-own', metaGraph),
+    ];
+
+    it.each([
+      ['AGENTS', agentsGraph],
+      ['ONTOLOGY', ontologyGraph],
+    ])('takes none of it from the %s graph', async (_name, graph) => {
+      const store = new OxigraphStore();
+      await store.insert([...ownRows(), ...accessRows(graph)]);
+
+      const meta = await new ContextGraphMetaProjection(store).get(id);
+
+      expect(meta.allowedAgents).toEqual([member]);
+      expect(meta.participantAgents).toEqual([member]);
+      expect(meta.participantIdentityIds).toEqual(['5']);
+      expect(meta.allowedPeers).toEqual(['peer-own']);
+      expect(meta.revokedAgents).toEqual([]);
+    });
+
+    it.each([
+      ['AGENTS', agentsGraph],
+      ['ONTOLOGY', ontologyGraph],
+    ])('reports no gate from the %s graph alone', async (_name, graph) => {
+      const store = new OxigraphStore();
+      await store.insert(accessRows(graph));
+
+      const meta = await new ContextGraphMetaProjection(store).get(id);
+
+      expect(meta).toMatchObject({ hasAgentGate: false, hasPeerGate: false, hasLegacyParticipantGate: false });
+      expect(meta.accessPolicy).toBeUndefined();
+    });
+
+    it('takes no one who speaks for the graph from the AGENTS graph', async () => {
+      const store = new OxigraphStore();
+      await store.insert([
+        { subject: uri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: `did:dkg:agent:${wallet}`, graph: agentsGraph },
+        { subject: uri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${wallet}`, graph: agentsGraph },
+        row(`${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, '101', agentsGraph),
+      ]);
+
+      const meta = await new ContextGraphMetaProjection(store).get(id);
+
+      expect(meta).toMatchObject({ creators: [], curators: [] });
+      expect(meta.creator).toBeUndefined();
+      expect(meta.curator).toBeUndefined();
+      expect(meta.onChainId).toBeUndefined();
+    });
+
+    it('still takes a public graph\'s definition from the ONTOLOGY graph', async () => {
+      const store = new OxigraphStore();
+      await store.insert([
+        { subject: uri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: ontologyGraph },
+        row(DKG_ONTOLOGY.SCHEMA_NAME, 'Public graph', ontologyGraph),
+        row(DKG_ONTOLOGY.DKG_ACCESS_POLICY, 'public', ontologyGraph),
+        row(`${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, '101', ontologyGraph),
+        { subject: uri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: `did:dkg:agent:${wallet}`, graph: ontologyGraph },
+        { subject: uri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${member}`, graph: ontologyGraph },
+      ]);
+
+      expect(await new ContextGraphMetaProjection(store).get(id)).toMatchObject({
+        declared: true,
+        name: 'Public graph',
+        accessPolicy: 'public',
+        onChainId: '101',
+        creator: `did:dkg:agent:${wallet}`,
+        curator: `did:dkg:agent:${member}`,
+      });
+    });
+
+    it('takes existence, a description and a private policy from the AGENTS graph, and no public one', async () => {
+      const store = new OxigraphStore();
+      await store.insert([
+        { subject: uri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: agentsGraph },
+        row(DKG_ONTOLOGY.SCHEMA_NAME, 'Declared', agentsGraph),
+        row(DKG_ONTOLOGY.SCHEMA_DESCRIPTION, 'A description', agentsGraph),
+        row(DKG_ONTOLOGY.DKG_CREATED_AT, '2026-10-31T00:00:00Z', agentsGraph),
+        row(DKG_ONTOLOGY.DKG_ACCESS_POLICY, ' PUBLIC ', agentsGraph),
+      ]);
+
+      const projection = new ContextGraphMetaProjection(store);
+      const declaredMeta = await projection.get(id);
+      expect(declaredMeta).toMatchObject({
+        declared: true,
+        name: 'Declared',
+        description: 'A description',
+        createdAt: '2026-10-31T00:00:00Z',
+      });
+      expect(declaredMeta.accessPolicy).toBeUndefined();
+
+      const privateRow = row(DKG_ONTOLOGY.DKG_ACCESS_POLICY, 'private', agentsGraph);
+      await store.insert([privateRow]);
+      projection.markDirtyFromQuads([privateRow]);
+      expect((await projection.get(id)).accessPolicy).toBe('private');
+    });
+
+    it('takes a restricted access class from the AGENTS graph', async () => {
+      const store = new OxigraphStore();
+      await store.insert([{
+        subject: uri,
+        predicate: DKG_ONTOLOGY.DCT_ACCESS_RIGHTS,
+        object: DKG_ONTOLOGY.ACCESS_RIGHT_RESTRICTED,
+        graph: agentsGraph,
+      }]);
+
+      expect((await new ContextGraphMetaProjection(store).get(id)).accessPolicy).toBe('private');
+    });
+
+    it('keeps the record of the agents system graph itself', async () => {
+      const store = new OxigraphStore();
+      await store.insert([
+        { subject: agentsGraph, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: agentsGraph },
+        { subject: agentsGraph, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Agent Registry"', graph: agentsGraph },
+      ]);
+
+      expect(await new ContextGraphMetaProjection(store).get(SYSTEM_CONTEXT_GRAPHS.AGENTS))
+        .toMatchObject({ declared: true, isSystem: true, name: 'Agent Registry' });
+    });
+
+    it('keeps the disclosure floor of the catalog graph', async () => {
+      const store = new OxigraphStore();
+      const catalogGraph = contextGraphCatalogUri(id);
+      await store.insert([
+        { subject: uri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH, graph: catalogGraph },
+        row(DKG_ONTOLOGY.DKG_ALLOWED_AGENT, wallet, catalogGraph),
+        row(DKG_ONTOLOGY.SCHEMA_NAME, 'Catalog name', catalogGraph),
+      ]);
+
+      const meta = await new ContextGraphMetaProjection(store).get(id);
+
+      expect(meta).toMatchObject({ declared: true, accessPolicy: 'private', allowedAgents: [] });
+      expect(meta.name).toBeUndefined();
+    });
   });
 
   it('does not dirty policy entries for unrelated tentative KC metadata', async () => {
@@ -419,7 +572,7 @@ describe('ContextGraphMetaProjection', () => {
     const started = new Promise<void>((resolve) => { refreshStarted = resolve; });
     let releaseRefresh!: () => void;
     const blocked = new Promise<void>((resolve) => { releaseRefresh = resolve; });
-    const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const store = {
       async query(sparql: string) {
         if (blockNextQuery) {
@@ -427,7 +580,7 @@ describe('ContextGraphMetaProjection', () => {
           refreshStarted();
           await blocked;
         }
-        if (sparql.includes(`<${agentsGraph}>`)) {
+        if (sparql.includes(`<${ontologyGraph}>`)) {
           return {
             type: 'bindings',
             bindings: [{ p: DKG_ONTOLOGY.DKG_ACCESS_POLICY, o: `"${policy}"` }],
@@ -601,20 +754,20 @@ describe('ContextGraphMetaProjection', () => {
     expect(participants).toEqual([active, 'identity:legacy']);
   });
 
-  it('routes AGENTS-only wallet curators through projected creator peer metadata', async () => {
+  it('routes wallet curators through the creator peer an ONTOLOGY definition names', async () => {
     const store = new OxigraphStore();
     const projection = new ContextGraphMetaProjection(store);
-    const id = 'projection-agents-curator-route';
+    const id = 'projection-ontology-curator-route';
     const uri = contextGraphDataGraphUri(id);
-    const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const curatorAddress = '0x0000000000000000000000000000000000000abc';
-    const creatorPeerId = '12D3KooWAgentsCreatorPeer111111111111111111111111';
+    const creatorPeerId = '12D3KooWOntologyCreatorPeer1111111111111111111111';
 
     await store.insert([
-      { subject: uri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: agentsGraph },
-      { subject: uri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"private"', graph: agentsGraph },
-      { subject: uri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${curatorAddress}`, graph: agentsGraph },
-      { subject: uri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: `did:dkg:agent:${creatorPeerId}`, graph: agentsGraph },
+      { subject: uri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: ontologyGraph },
+      { subject: uri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"public"', graph: ontologyGraph },
+      { subject: uri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${curatorAddress}`, graph: ontologyGraph },
+      { subject: uri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: `did:dkg:agent:${creatorPeerId}`, graph: ontologyGraph },
     ]);
 
     const agentLike = {
@@ -783,9 +936,6 @@ describe('getOwnMetaFacts', () => {
   });
 
   it('ignores creators contributed by AGENTS or the peer-fetchable _catalog', async () => {
-    // The reason this reader exists: `get()` merges these in and discards which
-    // graph supplied each fact, so a third-party assertion becomes
-    // indistinguishable from the graph's own declaration.
     const store = new OxigraphStore();
     const projection = new ContextGraphMetaProjection(store);
     const id = 'own-definition-third-party';
@@ -799,9 +949,9 @@ describe('getOwnMetaFacts', () => {
     ]);
 
     expect((await projection.getOwnMetaFacts(id)).creators).toEqual([]);
-    // …while the merged projection does surface the AGENTS claim, which is the
-    // precise difference the authority decision turns on.
-    expect((await projection.get(id)).creators).toContain('did:dkg:agent:12D3KooWAgentsClaim');
+    // …and the merged projection takes neither: its filtered sources say nothing
+    // about who speaks for the graph.
+    expect((await projection.get(id)).creators).toEqual([]);
   });
 
   it('ignores an injected ONTOLOGY creator even when it is the ONLY one visible', async () => {

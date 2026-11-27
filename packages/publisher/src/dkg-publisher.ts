@@ -24,7 +24,7 @@ import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import { fallbackAuthorResolver, type FallbackAuthor } from './fallback-author.js';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { GraphManager, deleteByPatternWithoutCount, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
@@ -36,7 +36,8 @@ import {
   resolvePublicationPricing,
 } from './publication-pricing.js';
 import { measureCanonicalPublicationPayload } from './publication-payload-measurement.js';
-import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
+import { skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
+import { rejectUserAuthoredProtocolMetadata } from './protocol-metadata.js';
 import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
 import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
@@ -60,7 +61,7 @@ import {
   trustedCatalogTripleKeySet,
 } from './catalog-trust.js';
 import { partitionCatalogQuads, catalogCommittedLeaves, computeCatalogRoot, contextGraphCatalogUri, contextGraphOnChainIdBindingQuery, isAgentRegistryContextGraph } from '@origintrail-official/dkg-core';
-import { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
+import { RESERVED_SUBJECT_PREFIXES, isReservedSubject } from './reserved-subjects.js';
 import { skolemize } from './skolemize.js';
 import {
   computeTripleHashV10 as computeTripleHash,
@@ -867,43 +868,6 @@ function sameBigIntLiteral(left: string | bigint | undefined, right: string | bi
   }
 }
 
-// Round 14 Bug 41: case-insensitive check against `RESERVED_SUBJECT_PREFIXES`.
-// Per RFC 8141 §3.1, the URN scheme (`urn:`) and NID (`dkg`) are
-// case-insensitive for equivalence purposes — `URN:dkg:file:abc`,
-// `urn:DKG:file:abc`, and `urn:dkg:file:abc` are all the same resource.
-// The NSS portion is case-sensitive by default but our reserved
-// prefixes (`urn:dkg:file:`, `urn:dkg:extraction:`) are entirely
-// within the scheme+NID range, so lowercase-then-startsWith on the
-// full subject string is the correct comparison: it accepts all
-// case variants of the scheme/NID without over-matching into
-// NSS-level content.
-//
-// Earlier rounds used a byte-level `subject.startsWith(prefix)` check
-// at both the Bucket A write-boundary guard (Round 9 Bug 25) AND the
-// Round 4 promote-time filter (Round 12 Bug 35 SSOT). Both were
-// case-sensitive, so a malicious or accidentally-mixed-case subject
-// like `URN:dkg:file:keccak256:<hex>` bypassed both defenses. Codex
-// Bug 41 flagged this. The fix replaces both byte-level comparisons
-// with the shared case-insensitive helper from `reserved-subjects.ts`,
-// preserving the SSOT property established in Round 12.
-function rejectReservedSubjectPrefixes(quads: Quad[]): void {
-  for (const q of quads) {
-    if (isReservedSubject(q.subject)) {
-      // Find the specific prefix that matched (for the error message)
-      // — re-scan with the lowercased subject since the constants are
-      // lowercase. Byte-level comparison here is fine because by this
-      // point we've already confirmed a match exists.
-      throw new ReservedNamespaceError(q.subject, findReservedSubjectPrefix(q.subject)!);
-    }
-  }
-}
-
-function rejectUserAuthoredProtocolMetadata(quads: Quad[]): void {
-  rejectReservedSubjectPrefixes(quads);
-  assertNoUserAuthoredKnowledgeAssetSkolemTerms(quads);
-  assertNoUserAuthoredTrustLevelQuads(quads);
-}
-
 function normalizeAssertionInputGraph(
   contextGraphId: string,
   subGraphName: string | undefined,
@@ -1239,36 +1203,12 @@ export class DKGPublisher implements Publisher {
             <${cgData}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy
           }
         } UNION {
-          GRAPH <${ontologyGraph}> {
-            <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?gate
-          }
-        } UNION {
-          GRAPH <${agentsGraph}> {
-            <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?gate
-          }
-        } UNION {
           GRAPH <${cgMeta}> {
             <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?gate
           }
         } UNION {
-          GRAPH <${ontologyGraph}> {
-            <${cgData}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?gate
-          }
-        } UNION {
-          GRAPH <${agentsGraph}> {
-            <${cgData}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?gate
-          }
-        } UNION {
           GRAPH <${cgMeta}> {
             <${cgData}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?gate
-          }
-        } UNION {
-          GRAPH <${ontologyGraph}> {
-            <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> ?gate
-          }
-        } UNION {
-          GRAPH <${agentsGraph}> {
-            <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> ?gate
           }
         } UNION {
           GRAPH <${cgMeta}> {
@@ -3527,46 +3467,19 @@ export class DKGPublisher implements Publisher {
     // graph (intentional local-only publish). NOT used on the
     // chain-failure path — that re-throws and never reaches a store
     // write.
-    const finalizeIntentionalLocalPublish = async (reasonLog: string) => {
+    // Initial graph-scoped publication is a VM writer too. Share the update/recovery/
+    // catalog lock, acquired only for local mutation, never across chain work.
+    const withPublishMaterializationLock = <T>(write: () => Promise<T>): Promise<T> => graphPublish
+      ? withMaterializationLock(options.targetMetaGraphUri ?? this.graphManager.metaGraphUri(contextGraphId),
+        graphPublish.scope.ual, write)
+      : write();
+    const finalizeIntentionalLocalPublish = (reasonLog: string) => withPublishMaterializationLock(async () => {
       for (const km of kaMetadata) {
         km.kcUal = ual;
       }
-      // RC11 / PR3: write the KC + KA metadata + tentative status quad
-      // alongside the public quads so downstream consumers
-      // (`access-handler`, `assertion-history`, the `verifiable-memory`
-      // view) can still locate this publish by its tentative UAL.
-      // Pre-PR2 this was the responsibility of the chain-failure
-      // catch block via `generateTentativeMetadata`. PR2 deleted that
-      // unconditional catch (failed *chain* publishes now write
-      // nothing locally), but the two intentional-local branches
-      // (`no on-chain CG id`, `chain not V10-ready`) both need the metadata
-      // to keep the local data-graph queryable. Replicating the
-      // tentative-metadata generation here scopes the metadata write
-      // exclusively to those intentional-skip branches and keeps the
-      // chain-failure path inert.
-      // RC11 / PR2 (review fix): preserve the exact provenance + meta-graph
-      // routing the pre-PR2 catch block did. Two strictly-additive
-      // requirements relative to the minimal call above:
-      //
-      //   1. `authorAddress` — feeds the KC row's `prov:wasAttributedTo`
-      //      so downstream consumers (`access-handler`,
-      //      `assertion-history`, the verifiable-memory view) can still
-      //      attribute the publish locally before any chain confirmation.
-      //      The on-chain `KnowledgeBatch.authorAddress` is canonical only
-      //      once the publish confirms; until then this is a self-claim.
-      //      `publisherSigner` may be undefined (no-chain / no-key path) —
-      //      skip the field in that case. (The former `dkg:Publication`
-      //      mirror keyed on `publishOperationId` was dropped — RFC
-      //      ka-metadata-trim Phase 1, zero readers.)
-      //
-      //   2. `targetMetaGraphUri` remap — every generated meta quad sits
-      //      in the default `did:dkg:context-graph:<id>/_meta` graph. If
-      //      the caller supplied a `targetMetaGraphUri` (e.g. for SWM /
-      //      private-channel meta isolation) the pre-PR2 path remapped
-      //      them; without this, intentional-local publishes targeting a
-      //      non-default meta graph would silently drop their `_meta`
-      //      triples into the wrong graph and become invisible to the
-      //      caller's own meta-graph queries.
+      // Intentional-local publishes persist tentative metadata and private slices.
+      // Chain failures never enter this branch. Preserve author attribution and
+      // caller-selected metadata routing so local reads retain the same identity.
       const commonMeta = {
         ual,
         contextGraphId,
@@ -3636,7 +3549,7 @@ export class DKGPublisher implements Publisher {
       // B3: only now that the local publish has persisted do we refresh the
       // public catalog entry (CLEAR/REPLACE — see persistCatalogEntry).
       await persistCatalogEntry();
-    };
+    });
 
     // GH #1013 — record WHY a local-only publish skipped chain so the async
     // lift can tell an honest local finalization (no chain) from a publish
@@ -4087,13 +4000,6 @@ export class DKGPublisher implements Publisher {
             q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
           );
         }
-        if (graphPublish) {
-          await replaceLocallyTrustedKnowledgeAssetControls(
-            this.store,
-            graphPublish.scope.ual,
-            confirmedQuads,
-          );
-        }
         // RC11 / PR2: write the published public quads into the root
         // data graph ONLY after the chain has confirmed (KCCreated
         // returned via `createKnowledgeAssets`). Pre-PR2 this insert
@@ -4117,32 +4023,42 @@ export class DKGPublisher implements Publisher {
             )
           : contextGraphLayerUri(contextGraphId, MemoryLayer.VerifiableMemory, vmAuthor, vmNumber, options.subGraphName);
         const vmQuads = normalizedQuads.map((q) => ({ ...q, graph: vmGraph }));
-        this.log.info(ctx, `Storing ${vmQuads.length} triples in ${vmGraph} (post-confirmation)`);
-        if (graphPublish) {
-          await this.replaceExactKnowledgeAssetGraph(
-            vmGraph,
-            vmQuads,
-            'Graph-scoped confirmed publish',
-          );
-        } else {
-          await this.store.insert(vmQuads);
-        }
-        await this.store.insert(confirmedQuads);
-        // GH #1078 — supersede/persist private slices only now that the chain
-        // has confirmed (before returning 'confirmed', so no read sees the KA
-        // confirmed without its private data).
-        await persistFinalizedPrivateSlices();
-        if (!graphPublish) {
-          await stampTrustLevel(
-            this.store,
-            vmGraph,
-            collectTrustSubjectsForRoots(
+        const persistConfirmedVm = async () => {
+          if (graphPublish) {
+            await replaceLocallyTrustedKnowledgeAssetControls(
+              this.store,
+              graphPublish.scope.ual,
+              confirmedQuads,
+            );
+          }
+          this.log.info(ctx, `Storing ${vmQuads.length} triples in ${vmGraph} (post-confirmation)`);
+          if (graphPublish) {
+            await this.replaceExactKnowledgeAssetGraph(
+              vmGraph,
               vmQuads,
-              manifestEntries.map((entry) => entry.rootEntity),
-            ),
-            TrustLevel.SelfAttested,
-          );
-        }
+              'Graph-scoped confirmed publish',
+            );
+          } else {
+            await this.store.insert(vmQuads);
+          }
+          await this.store.insert(confirmedQuads);
+          // GH #1078 — supersede/persist private slices only now that the chain
+          // has confirmed (before returning 'confirmed', so no read sees the KA
+          // confirmed without its private data).
+          await persistFinalizedPrivateSlices();
+          if (!graphPublish) {
+            await stampTrustLevel(
+              this.store,
+              vmGraph,
+              collectTrustSubjectsForRoots(
+                vmQuads,
+                manifestEntries.map((entry) => entry.rootEntity),
+              ),
+              TrustLevel.SelfAttested,
+            );
+          }
+        };
+        await withPublishMaterializationLock(persistConfirmedVm);
 
         // RFC ka-metadata-trim Phase 1: the off-chain AuthorshipProof block
         // (`dkg:authoredBy` bnode + signature quads, spec §9.0.6) is no

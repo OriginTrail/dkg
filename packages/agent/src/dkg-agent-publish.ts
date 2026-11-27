@@ -1,3 +1,6 @@
+import { readFinalizeLifecycle, readFinalizeKaNumber } from './assertion-finalize-lifecycle.js';
+import type { AssertionFinalizeResult, InternalFinalizeOptions, WithFinalizeGuard, WithFinalizeOutcome } from './assertion-finalize-types.js';
+import { parseFinalizeGuard, readGuardedFinalizeLifecycle, requireFinalizeMatch } from './finalize-guard.js';
 import { admitQueuedCatalogPublicationV1 } from './internal/queued-catalog-publication-admission.js';
 import { ConfirmedCatalogObligationErrorV1, type ConfirmedCatalogObligationInputV1 } from './confirmed-catalog-obligation-error.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -5,7 +8,7 @@ import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from '
 import { incompleteNamedKaLifecycleOwner } from './incomplete-named-ka-lifecycle.js';
 import { tryWithKeyedLocks, assertionLifecycleWriteLockKey, type PromoteExecutionAuthority } from '@origintrail-official/dkg-publisher';
 
-import { createPromoteRetryableFailure } from '@origintrail-official/dkg-publisher';
+import { createPromoteRetryableFailure, rejectUserAuthoredProtocolMetadata } from '@origintrail-official/dkg-publisher';
 import { isTransientInventorySignerFailure } from './internal/promote/share-inventory-signing-capability.js';
 import { resolvePromoteRecipientsWithinBound } from './internal/promote/assertion-promote-precommit.js';
 import { finalizeQueuedKnowledgeAssetVmPublish, retireLegacySwmAfterConfirmedLocalPublish } from './queued-publish-finalization.js';
@@ -56,7 +59,7 @@ import {
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
   isTrustLevelQuad,
-  buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, type AuthorAttestationTypedData,
+  buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1,
   buildAssertionSealQuads, buildAssertionPublishReceiptQuads,
   parseAssertionSealQuads, type AssertionSeal,
   ASSERTION_SEAL_PREDICATES,
@@ -118,6 +121,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
 import {
+  controlStoreOptions,
   deleteByPatternWithoutCount,
   GraphManager,
   PrivateContentStore,
@@ -132,6 +136,7 @@ import {
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, operationalSigningOf, type AuthorSigner, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import { signAuthorTypedDataCompact, type WorkspaceGossipSigner } from './external-author-signing.js';
 import { externalAuthorSignerFor, heldAuthorSigner, registeredAgentAuthorSigner } from './author-signer.js';
+import { nodeHeldAuthorEnabled, nodeHeldDefaultAuthor, nodeHeldRosterSender } from './node-held-author.js';
 import  {
   DKGPublisher,
   PublishHandler,
@@ -162,7 +167,6 @@ import  {
   resolveKnowledgeAssetWorkspaceHead,
   workspaceHeadIncludesShareOperationId,
   KnowledgeAssetOperationPublicSnapshotNotFoundError,
-  workspacePublicQuadsDigest,
   subtractFinalizedExactQuads,
   TripleStoreAsyncLiftPublisher,
   TripleStoreAsyncPromoteQueue,
@@ -936,19 +940,12 @@ export class PublishMethods extends DKGAgentBase {
   }
 
   graphOwnerRoutePortsV1(this: DKGAgent): GraphOwnerRoutePorts {
-    const owners = graphOwnerPeersOf(this, async (contextGraphId, signal) => {
-      const lookUp = () => this.resolveCuratorPeerIdsForCg(contextGraphId, { maxPeerIds: 16, signal });
-      let resolution = await lookUp();
-      const ownerDid = deriveCuratorDidFromCgId(contextGraphId);
-      if (resolution.peerIds.length === 0 && !resolution.curatorIsLocal && ownerDid !== null) {
-        // An Edge keeps no `agents` phonebook: fetch the owner's profile from a
-        // Core's, then look the owner's peers up again.
-        await this.ensureAgentsInOnDemandPhonebook([ownerDid.slice('did:dkg:agent:'.length)], signal);
-        resolution = await lookUp();
-      }
-      return resolution.peerIds.filter((peerId) => peerId !== this.peerId);
-    });
     const isConnected = (peerId: string): boolean => this.node.libp2p.getPeers().some((peer) => peer.toString() === peerId);
+    const owners = graphOwnerPeersOf(this, (contextGraphId, signal) => this.lookUpGraphOwnerPeers(
+      contextGraphId,
+      { isConnected, failedRecently: (peerId) => owners.failedRecently(peerId) },
+      signal,
+    ));
     return {
       ownerPeerIds: (contextGraphId, signal) => owners.of(contextGraphId, signal),
       isConnected,
@@ -960,7 +957,10 @@ export class PublishMethods extends DKGAgentBase {
         return waitForPeerProtocol(this.node.libp2p.peerStore, { toString: () => peerId }, PROTOCOL_SWM_UPDATE, 20, 250, signal);
       },
       mayConnect: (peerId) => owners.mayConnect(peerId),
+      failedRecently: (peerId) => owners.failedRecently(peerId),
+      inConnectOrder: (peerIds) => owners.inConnectOrder(peerIds),
       connectFailed: (peerId) => owners.connectFailed(peerId),
+      connectSucceeded: (peerId) => owners.connectSucceeded(peerId),
       noteFollower: (contextGraphId, peerId) => sharedMemoryFollowersOf(this).note(contextGraphId, peerId),
     };
   }
@@ -1909,7 +1909,7 @@ export class PublishMethods extends DKGAgentBase {
 
     const fallbackAuthor = opts?.preSignedAuthorAttestation === undefined
       && opts?.authorAgentAddress === undefined
-      ? await this.publisher.publisherFallbackAuthorAddress()
+      ? nodeHeldDefaultAuthor(this.config, this.chain, this.localAgents, this.defaultAgentAddress) ?? await this.publisher.publisherFallbackAuthorAddress()
       : undefined;
     const lifecycleAgentAddress = ethers.getAddress(
       opts?.preSignedAuthorAttestation?.authorAddress
@@ -2417,6 +2417,9 @@ export class PublishMethods extends DKGAgentBase {
     this.log.info(ctx, `Starting update of kaId=${kaId} in context graph "${contextGraphId}" with ${quads.length} triples`);
     rejectOversizedRdfLiterals(quads, 'agent.update.quads');
     rejectOversizedRdfLiterals(privateQuads, 'agent.update.privateQuads');
+    if (opts?.[INTERNAL_ROOTLESS_UPDATE_ORIGIN] !== true) {
+      rejectUserAuthoredProtocolMetadata([...quads, ...(privateQuads ?? [])]);
+    }
 
     if (!opts?.precomputedUpdateAttestation) {
       throw new Error(
@@ -3095,39 +3098,16 @@ export class PublishMethods extends DKGAgentBase {
    *
    * See `assertion.finalize` (the public-facing wrapper) for usage docs.
    */
+  assertionFinalize(this: DKGAgent, contextGraphId: string, name: string, agentAddress: string,
+    opts: InternalFinalizeOptions & WithFinalizeGuard): Promise<AssertionFinalizeResult & WithFinalizeOutcome>;
+  assertionFinalize(this: DKGAgent, contextGraphId: string, name: string, agentAddress: string,
+    opts?: InternalFinalizeOptions): Promise<AssertionFinalizeResult>;
   async assertionFinalize(this: DKGAgent,
     contextGraphId: string,
     name: string,
     agentAddress: string,
-    opts?: {
-      executionAuthority?: import('@origintrail-official/dkg-publisher').PromoteExecutionAuthority;
-      subGraphName?: string;
-      authorAgentAddress?: string;
-      preSignedAuthorAttestation?: PreSignedAuthorAttestation;
-      authorSignTypedData?: (
-        typedData: AuthorAttestationTypedData,
-      ) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
-      schemeVersion?: number;
-    },
-  ): Promise<{
-    assertionUri: string;
-    merkleRoot: Uint8Array;
-    authorAddress: string;
-    /** Internal lifecycle identity used by seal-in-SWM migration. */
-    reservedKaId: bigint;
-    /** Internal exact payload boundary used by seal-in-SWM migration. */
-    rootEntities: string[];
-    contentScopeVersion: typeof GRAPH_KA_CONTENT_SCOPE_VERSION;
-    kaUal: string;
-    assertionVersion: string;
-    publicTripleCount: number;
-    privateMerkleRoot?: Uint8Array;
-    privateTripleCount: number;
-    schemeVersion: number;
-    chainId: bigint;
-    kav10Address: string;
-    eip712Digest: string;
-  }> {
+    opts?: InternalFinalizeOptions,
+  ): Promise<AssertionFinalizeResult> {
     if (
       opts?.preSignedAuthorAttestation != null
       && (opts.authorAgentAddress != null || opts.authorSignTypedData != null)
@@ -3140,7 +3120,14 @@ export class PublishMethods extends DKGAgentBase {
       throw new Error('assertionFinalize: authorSignTypedData requires authorAgentAddress');
     }
 
+    const guard = opts?.guard === undefined ? undefined : parseFinalizeGuard(opts.guard);
+    const specifiedAuthor = opts?.authorAgentAddress ?? opts?.preSignedAuthorAttestation?.address;
+    if (guard && specifiedAuthor) requireFinalizeMatch(specifiedAuthor.toLowerCase() === guard.expectedAuthorAddress);
     return this.publisher.prepareAssertionShareSeal(contextGraphId, name, agentAddress, opts?.subGraphName, async () => {
+    const guardedLifecycle = guard
+      ? await readGuardedFinalizeLifecycle(this.store, guard, contextGraphId, name, agentAddress, opts?.subGraphName)
+      : undefined;
+    if (guardedLifecycle) agentAddress = guardedLifecycle.author;
     // 1. Resolve URIs.
     const assertionUri = contextGraphAssertionUri(
       contextGraphId,
@@ -3161,6 +3148,7 @@ export class PublishMethods extends DKGAgentBase {
       name,
       opts?.subGraphName,
     );
+    if (guard) requireFinalizeMatch(sourceWmGraphUri === guard.expectedWmAssertionGraph);
     const xsdInteger = '<http://www.w3.org/2001/XMLSchema#integer>';
     const stampFinalizedLifecycle = async (
       assertionVersion: string | bigint,
@@ -3320,6 +3308,11 @@ export class PublishMethods extends DKGAgentBase {
       privateMerkleRoot ? [privateMerkleRoot] : [],
     );
     const publicTripleCount = normalizedKnowledgeAssetQuads.length;
+    if (guard) {
+      const target = guard.expectedTarget;
+      requireFinalizeMatch(ethers.hexlify(merkleRoot) === target.merkleRoot &&
+        publicTripleCount === target.publicTripleCount && privateTripleCount === target.privateTripleCount);
+    }
     const callerExpectedMerkleRoot = opts?.preSignedAuthorAttestation?.expectedMerkleRoot;
     if (
       callerExpectedMerkleRoot !== undefined
@@ -3335,8 +3328,14 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    const commitFinalized = async (ual: string, version: string, root: Uint8Array, persistFreshSeal?: () => Promise<void>) => {
+    const commitFinalized = async (ual: string, sealAuthor: string, version: string, root: Uint8Array, persistFreshSeal?: () => Promise<void>) => {
       const assertCurrent = () => opts?.executionAuthority?.assertCurrent();
+      if (guard) {
+        requireFinalizeMatch(ual === guard.expectedPredecessor.reservedUal && sealAuthor.toLowerCase() === guard.expectedAuthorAddress);
+        // Chain signing can take time. Sample lifecycle pointers again at the first storage write.
+        const current = await readGuardedFinalizeLifecycle(this.store, guard, contextGraphId, name, agentAddress, opts?.subGraphName);
+        requireFinalizeMatch(current.author === agentAddress && current.persistedAssertionVersion === guardedLifecycle?.persistedAssertionVersion);
+      }
       await assertCurrent();
       const canonicalGraph = await this.publisher.materializeCanonicalWorkingMemory(
         contextGraphId, ual, version, normalizedKnowledgeAssetQuads, opts?.subGraphName);
@@ -3402,14 +3401,8 @@ export class PublishMethods extends DKGAgentBase {
       // the binding, repack from the lifecycle-URN kaId stamp.
       let reReservedKaId = existingSeal.reservedKaId;
       if (reReservedKaId === undefined) {
-        const reKaIdRes = await this.store.query(
-          `SELECT ?n WHERE { GRAPH <${metaGraph}> { <${assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName)}> <${KA_ID_PRED}> ?n } } LIMIT 1`,
-          { source: 'agent.assertionFinalize.reservedKaId' },
-        );
-        const reNum =
-          reKaIdRes.type === 'bindings' && reKaIdRes.bindings[0]?.['n'] !== undefined
-            ? BigInt(String(reKaIdRes.bindings[0]['n']).replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim())
-            : 0n;
+        const reNum = guardedLifecycle?.number
+          ?? await readFinalizeKaNumber(this.store, metaGraph, lifecycleUri, 'agent.assertionFinalize.reservedKaId') ?? 0n;
         reReservedKaId = (BigInt(ethers.getAddress(existingSeal.authorAddress)) << 96n) | reNum;
       }
       const typedData = buildAuthorAttestationTypedData({
@@ -3421,8 +3414,9 @@ export class PublishMethods extends DKGAgentBase {
         schemeVersion: existingSeal.authorSchemeVersion,
       });
       // Repair an interrupted finalize through the same commit protocol as a fresh seal.
-      await commitFinalized(existingSeal.kaUal, existingSeal.assertionVersion, existingSeal.merkleRoot);
+      await commitFinalized(existingSeal.kaUal, existingSeal.authorAddress, existingSeal.assertionVersion, existingSeal.merkleRoot);
       return {
+        ...(guard ? { guardedOutcome: 'already_sealed' as const } : {}),
         assertionUri,
         merkleRoot: existingSeal.merkleRoot,
         authorAddress: existingSeal.authorAddress,
@@ -3476,6 +3470,8 @@ export class PublishMethods extends DKGAgentBase {
 
     // 7. Resolve author. preSigned > custodial agent > publisher fallback.
     const schemeVersion = opts?.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
+    // The agent named as author, else, with authors held on the node (nodeHeldAuthor), the default agent.
+    const authorAgent = opts?.authorAgentAddress ?? nodeHeldDefaultAuthor(this.config, this.chain, this.localAgents, this.defaultAgentAddress);
     let authorAddress: string;
     let authorSigner: AuthorSigner | undefined;
     let preSigned: PreSignedAuthorAttestation | undefined;
@@ -3486,12 +3482,12 @@ export class PublishMethods extends DKGAgentBase {
       // Self-sovereign callback: the daemon builds the exact typed data after
       // canonicalization and allocation, while the caller retains its key.
       authorAddress = ethers.getAddress(opts.authorAgentAddress!);
-    } else if (opts?.authorAgentAddress != null) {
+    } else if (authorAgent != null) {
       // #1116 (round 11) — a custodial agent without a key on file is a CAPABILITY GAP.
       authorSigner = await registeredAgentAuthorSigner(
-        this, this.config?.authorSigners, opts.authorAgentAddress, 'assertionFinalize', SEAL_CAPABILITY_GAP_CODE,
+        this, this.config?.authorSigners, authorAgent, 'assertionFinalize', SEAL_CAPABILITY_GAP_CODE,
       );
-      authorAddress = opts.authorAgentAddress;
+      authorAddress = authorAgent;
     } else {
       // Publisher-wallet fallback: use the daemon's own publisher EOA
       // as the author. This preserves Phase 4 mode (a) — node admin
@@ -3518,27 +3514,8 @@ export class PublishMethods extends DKGAgentBase {
     //   • update of a previously-stamped name → reuse the stable existing number;
     //   • fresh create with an allocator → reconcile-once then allocate ONE number;
     //   • no allocator → 0n (non-Option-1; the on-chain namespace check rejects).
-    const lifecycleScopeResult = await this.store.query(
-      `SELECT ?scope ?version ?vm WHERE { GRAPH <${metaGraph}> {
-        OPTIONAL { <${lifecycleUri}> <${ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION}> ?scope }
-        OPTIONAL { <${lifecycleUri}> <${ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION}> ?version }
-        OPTIONAL { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm }
-      } } LIMIT 1`,
-      { source: 'agent.assertionFinalize.lifecycleScope' },
-    );
-    const lifecycleScopeRow = lifecycleScopeResult.type === 'bindings'
-      ? lifecycleScopeResult.bindings[0]
-      : undefined;
-    const stripLifecycleLiteral = (value: unknown): string | undefined => {
-      if (value === undefined) return undefined;
-      return String(value).replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim();
-    };
-    const persistedScopeVersion = stripLifecycleLiteral(lifecycleScopeRow?.['scope']);
-    const persistedAssertionVersion = stripLifecycleLiteral(lifecycleScopeRow?.['version']);
-    const hasConfirmedVm = lifecycleScopeRow?.['vm'] !== undefined;
-    if (persistedScopeVersion !== String(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
-      throw new LegacyKnowledgeAssetReadOnlyError();
-    }
+    const { persistedAssertionVersion, hasConfirmedVm, number: stampedNumber, reservedUal: stampedReservedUal } =
+      guardedLifecycle ?? await readFinalizeLifecycle(this.store, metaGraph, lifecycleUri, !preSigned);
     let assertionVersion = 1n;
     if (hasConfirmedVm) {
       if (persistedAssertionVersion === undefined) {
@@ -3550,22 +3527,14 @@ export class PublishMethods extends DKGAgentBase {
     } else if (persistedAssertionVersion !== undefined) {
       assertionVersion = BigInt(persistedAssertionVersion);
     }
-    const existingKaIdRes = await this.store.query(
-      `SELECT ?n WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${KA_ID_PRED}> ?n } } LIMIT 1`,
-      { source: 'agent.assertionFinalize.existingKaId' },
-    );
-    const hasExistingKaId =
-      existingKaIdRes.type === 'bindings' && existingKaIdRes.bindings.length > 0;
     const packReservedKaId = (addr: string, num: bigint): bigint =>
       (BigInt(ethers.getAddress(addr)) << 96n) | num;
-    const parseStampedNumber = (raw: unknown): bigint =>
-      BigInt(String(raw).replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim());
     let reservedKaId: bigint;
     // freshNumber is set ONLY when a NEW number must be stamped on the lifecycle
     // URN (fresh create, or a preSigned author whose slot isn't yet stamped).
     let freshNumber: bigint | undefined;
     if (preSigned) {
-      if (hasExistingKaId) {
+      if (stampedNumber !== undefined) {
         // The lifecycle already owns a stable slot. A re-finalize / update must
         // commit to THAT id, not whatever the caller signed over — otherwise the
         // persisted seal + on-chain mint (publishFromFinalizedAssertion reuses the
@@ -3574,7 +3543,7 @@ export class PublishMethods extends DKGAgentBase {
         // different number is rejected rather than silently re-slotted.
         const stampedKaId = packReservedKaId(
           authorAddress,
-          parseStampedNumber(existingKaIdRes.bindings[0]['n']),
+          stampedNumber,
         );
         if (preSigned.reservedKaId !== stampedKaId) {
           throw new Error(
@@ -3601,7 +3570,7 @@ export class PublishMethods extends DKGAgentBase {
         reservedKaId = preSigned.reservedKaId;
         freshNumber = reservedKaId & ((1n << 96n) - 1n);
       }
-    } else if (hasExistingKaId) {
+    } else if (stampedNumber !== undefined) {
       // The lifecycle already owns a stable slot. The stamped `dkg:kaId` number
       // was allocated in the ORIGINAL author's namespace — its packed id is
       // (uint160(originalAuthor) << 96) | number, recorded authoritatively in the
@@ -3612,15 +3581,6 @@ export class PublishMethods extends DKGAgentBase {
       // it with KaIdNamespaceMismatch — sealed locally, unpublishable. Preserve the
       // original author bits and reject author changes on an already-stamped name
       // (OT-RFC-43 §F2).
-      const stampedNumber = parseStampedNumber(existingKaIdRes.bindings[0]['n']);
-      const reservedUalRes = await this.store.query(
-        `SELECT ?u WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${RESERVED_UAL_PRED}> ?u } } LIMIT 1`,
-        { source: 'agent.assertionFinalize.reservedUal' },
-      );
-      const stampedReservedUal =
-        reservedUalRes.type === 'bindings' && reservedUalRes.bindings[0]?.['u'] !== undefined
-          ? String(reservedUalRes.bindings[0]['u']).replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim()
-          : undefined;
       // did:dkg:<chainId>/<addrLower>/<number> — the second path segment is the
       // original author. A pre-binding seal may lack `dkg:reservedUal`; only then
       // do we fall back to the current author (no recorded original to preserve).
@@ -3846,10 +3806,11 @@ export class PublishMethods extends DKGAgentBase {
       });
     }
 
-    await commitFinalized(kaUal, assertionVersion.toString(), merkleRoot,
+    await commitFinalized(kaUal, authorAddress, assertionVersion.toString(), merkleRoot,
       () => this.store.insert(sealQuads));
 
     return {
+      ...(guard ? { guardedOutcome: 'sealed' as const } : {}),
       assertionUri,
       merkleRoot,
       authorAddress,
@@ -3972,17 +3933,19 @@ export class PublishMethods extends DKGAgentBase {
     // into is resolved separately at publish time (targetOnChainCgId/v10CgId).
 
     const schemeVersion = opts?.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
+    // The agent named as author, else, with authors held on the node (nodeHeldAuthor), the default agent.
+    const authorAgent = opts?.authorAgentAddress ?? nodeHeldDefaultAuthor(this.config, this.chain, this.localAgents, this.defaultAgentAddress);
     let authorAddress: string;
     let authorSigner: AuthorSigner | undefined;
     let preSigned: PreSignedAuthorAttestation | undefined;
     if (opts?.preSignedAuthorAttestation != null) {
       preSigned = opts.preSignedAuthorAttestation;
       authorAddress = preSigned.address;
-    } else if (opts?.authorAgentAddress != null) {
+    } else if (authorAgent != null) {
       authorSigner = await registeredAgentAuthorSigner(
-        this, this.config?.authorSigners, opts.authorAgentAddress, 'Selection-based VM publish',
+        this, this.config?.authorSigners, authorAgent, 'Selection-based VM publish',
       );
-      authorAddress = opts.authorAgentAddress;
+      authorAddress = authorAgent;
     } else {
       const fallbackAddress = await this.publisher.publisherFallbackAuthorAddress();
       if (!fallbackAddress) {
@@ -4240,7 +4203,16 @@ export class PublishMethods extends DKGAgentBase {
     }
     if (!targetIsCurated) return undefined;
 
-    const senderAddress = authorAgentAddress
+    // The bounded repeat of the share's recipient read (#3044): an authority
+    // that moved while the keys resolved is read again before the publish fails.
+    const resolveRecipients = () => resolvePromoteRecipientsWithinBound(() => withRpcUsageSite(
+      CG_AUTH_RPC_SITES.curatedKeyContext,
+      () => this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId }),
+    ));
+    // Authors held on the node (nodeHeldAuthor): a key of the graph's roster sends, as a share signs its gossip.
+    const rosterFirst = nodeHeldAuthorEnabled(this.config, this.chain) ? await resolveRecipients() : undefined;
+    const senderAddress = (rosterFirst && nodeHeldRosterSender(this.localAgents.values(), authorAgentAddress ?? this.defaultAgentAddress, rosterFirst.recipients)?.agentAddress)
+      ?? authorAgentAddress
       ?? this.defaultAgentAddress
       ?? this.peerId;
 
@@ -4253,13 +4225,7 @@ export class PublishMethods extends DKGAgentBase {
         `Refusing to publish curated CG payload via the plaintext-inline fallback.`,
       );
     }
-    // The bounded repeat of the share's recipient read (#3044): an authority
-    // that moved while the keys resolved is read again before the publish fails.
-    const resolveRecipients = () => resolvePromoteRecipientsWithinBound(() => withRpcUsageSite(
-      CG_AUTH_RPC_SITES.curatedKeyContext,
-      () => this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId }),
-    ));
-    const resolution = await resolveRecipients();
+    const resolution = rosterFirst ?? await resolveRecipients();
     if (!resolution.requiresEncryption) {
       throw new Error(
         `${logPrefix}: curated CG ${contextGraphId}: access-policy says curated but recipient resolver ` +
@@ -4770,9 +4736,10 @@ export class PublishMethods extends DKGAgentBase {
 
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const assertionUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, opts?.subGraphName);
+    // This seal point read gates publisher admission; keep it off the bulk-read lane.
     const metaResult = await this.store.query(
       `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
-      { source: 'agent.asyncVmPublish.seal' },
+      controlStoreOptions('publisher', 'agent.asyncVmPublish.seal'),
     );
     const metaQuads = metaResult.type === 'quads' ? metaResult.quads : [];
     const seal = parseAssertionSealQuads(metaQuads, assertionUri);
@@ -5285,7 +5252,7 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    let trustedPublicQuadsDigest: string | undefined;
+    let operationSnapshot: Awaited<ReturnType<typeof resolveKnowledgeAssetOperationPublicQuads>> | undefined;
     let trustedPublisherPeerId = this.peerId;
     const observeConfirmedPublication = () => this.afterConfirmedGraphScopedVmPublishV1({
       status: 'confirmed',
@@ -5309,10 +5276,8 @@ export class PublishMethods extends DKGAgentBase {
     });
 
     if (!recovered.materialization.superseded) {
-      let snapshot: Awaited<ReturnType<typeof resolveKnowledgeAssetOperationPublicQuads>>
-        | undefined;
       try {
-        snapshot = await resolveKnowledgeAssetOperationPublicQuads({
+        operationSnapshot = await resolveKnowledgeAssetOperationPublicQuads({
           store: this.store,
           graphManager: new GraphManager(this.store),
           contextGraphId: request.contextGraphId,
@@ -5342,19 +5307,18 @@ export class PublishMethods extends DKGAgentBase {
             + `using the immutable seal envelope: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
-      if (snapshot) {
-        if (snapshot.quads.length !== request.publicTripleCount) {
+      if (operationSnapshot) {
+        if (operationSnapshot.quads.length !== request.publicTripleCount) {
           throw Object.assign(
             new Error(
               `Named KA recovery rejected for "${request.name}": queued public count `
                 + `${request.publicTripleCount} does not match operation snapshot count `
-                + `${snapshot.quads.length}`,
+                + `${operationSnapshot.quads.length}`,
             ),
             { code: 'KA_VM_RECOVERY_INCONSISTENT' },
           );
         }
-        trustedPublicQuadsDigest = workspacePublicQuadsDigest(snapshot.quads);
-        trustedPublisherPeerId = snapshot.publisherPeerId ?? trustedPublisherPeerId;
+        trustedPublisherPeerId = operationSnapshot.publisherPeerId ?? trustedPublisherPeerId;
       }
     }
 
@@ -5439,8 +5403,9 @@ export class PublishMethods extends DKGAgentBase {
       subGraphName: request.subGraphName,
       trustedAssertionEvidence: {
         assertionVersion: request.assertionVersion,
-        ...(trustedPublicQuadsDigest
-          ? { publicQuadsDigest: trustedPublicQuadsDigest }
+        ...(operationSnapshot
+          ? { publicQuadsDigest: operationSnapshot.publicQuadsDigest,
+              operationSnapshot: { shareOperationId: request.shareOperationId, quads: operationSnapshot.quads } }
           : {}),
         publicTripleCount: request.publicTripleCount,
         ...(request.privateMerkleRoot

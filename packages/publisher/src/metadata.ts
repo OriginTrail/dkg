@@ -1,6 +1,7 @@
+import { assertSafeGraphIriForSparql } from './metadata-iri.js';
 import { GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES } from './graph-knowledge-asset-controls.js';
-import { parseConfirmedGraphKnowledgeAssetMetadataEnvelope, rdfLiteralLexicalValue,
-  type ConfirmedGraphKnowledgeAssetMetadataRead } from './graph-metadata-envelope.js';
+import { rdfLiteralLexicalValue } from './graph-metadata-envelope.js';
+export { readConfirmedGraphKnowledgeAssetMetadataEnvelope, readGraphKnowledgeAssetMetadataEnvelope } from './graph-metadata-reader.js';
 export { GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, parseConfirmedGraphKnowledgeAssetMetadataEnvelope,
   parseGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataEnvelope,
   type ConfirmedGraphKnowledgeAssetMetadataRead, type GraphKnowledgeAssetMetadataRead } from './graph-metadata-envelope.js';
@@ -10,7 +11,7 @@ import { nextEventId } from './assertion-lifecycle-events.js';
 export { generateAssertionWrittenMetadata, type AssertionWrittenMeta } from './assertion-lifecycle-events.js';
 import { ENTITY_SHARE_METADATA_PREDICATES as ENTITY_SHARE } from './entity-share-metadata.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
-import { deleteByPatternWithoutCount, GraphManager, LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from '@origintrail-official/dkg-storage';
+import { deleteByPatternWithoutCount, GraphManager, LOCAL_TRUSTED_KA_CONTROLS_GRAPH, tryUpdateWithTouchedGraphs } from '@origintrail-official/dkg-storage';
 import {
   validateSubGraphName,
   isSafeIri,
@@ -209,12 +210,6 @@ function assertSafeSubGraphNameForSparql(subGraphName: string): void {
   if (!v.valid) throw new Error(`Unsafe sub-graph name for SPARQL: ${v.reason}`);
 }
 
-function assertSafeGraphIriForSparql(graphIri: string): void {
-  // GRAPH <...> must not allow delimiter/control chars that can alter query structure.
-  if (/[<>"{}|^`\\\s]/.test(graphIri)) {
-    throw new Error(`Unsafe graph IRI for SPARQL query: "${graphIri}"`);
-  }
-}
 
 /**
  * Generate RDF metadata triples for a Knowledge Collection.
@@ -440,45 +435,6 @@ function canonicalMetadataObject(predicate: string, value: string): string {
     return `literal:${literal.replace(/^0x/i, '').toLowerCase()}`;
   }
   return `literal:${literal}`;
-}
-
-async function readGraphKnowledgeAssetMetadataRows(
-  store: TripleStore,
-  contextGraphId: string,
-  ual: string,
-): Promise<ReadonlyArray<Pick<Quad, 'predicate' | 'object'>>> {
-  const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
-  assertSafeGraphIriForSparql(metaGraph);
-  assertSafeGraphIriForSparql(ual);
-  const result = await store.query(
-    `SELECT ?predicate ?object WHERE {
-      GRAPH <${metaGraph}> { <${ual}> ?predicate ?object }
-    }`,
-  );
-  if (result.type !== 'bindings') {
-    throw new Error('Graph-scoped metadata SELECT expected a bindings result');
-  }
-  if (result.bindings.some((row) =>
-    row['predicate'] === undefined || row['object'] === undefined)) {
-    throw new Error('Graph-scoped metadata SELECT returned an incomplete binding');
-  }
-  return result.bindings.map((row) => ({
-    predicate: row['predicate']!,
-    object: row['object']!,
-  }));
-}
-
-/**
- * Read the immutable subset needed to recognize an exact, already-confirmed
- * graph-scoped Verifiable Memory assertion after its mutable workspace head has been lost.
- * Structural drift is reported separately from absence; store failures throw.
- */
-export async function readConfirmedGraphKnowledgeAssetMetadataEnvelope(
-  store: TripleStore,
-  input: { contextGraphId: string; ual: string },
-): Promise<ConfirmedGraphKnowledgeAssetMetadataRead> {
-  const rows = await readGraphKnowledgeAssetMetadataRows(store, input.contextGraphId, input.ual);
-  return parseConfirmedGraphKnowledgeAssetMetadataEnvelope(rows, input);
 }
 
 /**
@@ -1109,14 +1065,17 @@ export async function updateMetaMerkleRoot(
   // Prefer a single SPARQL DELETE/INSERT to avoid an intermediate
   // state with no dkg:merkleRoot when update succeeds.
   try {
-    await store.query(
+    const updated = await tryUpdateWithTouchedGraphs(
+      store,
       `DELETE { GRAPH <${metaGraph}> { <${ual}> <${DKG}merkleRoot> ?oldRoot } }
        INSERT { GRAPH <${metaGraph}> { <${ual}> <${DKG}merkleRoot> ${rootLiteral} } }
        WHERE  { GRAPH <${metaGraph}> { OPTIONAL { <${ual}> <${DKG}merkleRoot> ?oldRoot } } }`,
+      [metaGraph],
+      { writtenGraphs: [metaGraph] },
     );
-    return;
+    if (updated) return;
   } catch {
-    // Some backends may not support SPARQL updates via query().
+    // Some backends may not support SPARQL updates.
     // Fallback preserves correctness by inserting first, then pruning old roots.
   }
 

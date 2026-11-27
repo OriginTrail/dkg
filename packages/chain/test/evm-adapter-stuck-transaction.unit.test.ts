@@ -44,7 +44,7 @@ describe('transaction fee pricing at preparation', () => {
   // Regression, 2026-10-20: the same preparation priced a Gnosis publish at maxFee 150 / tip 100
   // wei over a 23-wei base fee, and at 614-736 / 100 wei over ~257-318 wei, minutes before the
   // base fee reached 4.9M-36M wei.
-  it('signs Gnosis transactions at or above the chain floor, whatever the base fee and suggested tip', async () => {
+  it('signs Gnosis transactions with base-fee headroom and the suggested tip', async () => {
     const adapter: any = new EVMChainAdapter(config({ staticNetwork: false }));
     for (const baseFeePerGas of [23n, 257n, 318n]) {
       const prepared = await adapter.prepareSignerTransaction(
@@ -57,7 +57,7 @@ describe('transaction fee pricing at preparation', () => {
         nonce: 6722,
         gasLimit: 966_191n,
         maxFeePerGas: 2n * GWEI,
-        maxPriorityFeePerGas: GWEI,
+        maxPriorityFeePerGas: 100n,
       });
       expect(prepared.maxFeePerGas).toBeGreaterThan(36_000_000n);
     }
@@ -96,7 +96,7 @@ describe('transaction fee pricing at preparation', () => {
 
     const prepared = await adapter.prepareSignerTransaction(wallet, request);
     expect(estimatedWith).toEqual([cap]);
-    expect(prepared).toMatchObject({ gasLimit: 50_000n, maxFeePerGas: cap, maxPriorityFeePerGas: cap });
+    expect(prepared).toMatchObject({ gasLimit: 50_000n, maxFeePerGas: cap, maxPriorityFeePerGas: 100n });
   });
 
   // otReviewAgent on #3393: a cap below the base fee must stay the typed FEE_CAP_BELOW_BASE_FEE
@@ -126,7 +126,7 @@ describe('transaction fee pricing at preparation', () => {
     const cap = 1_500_000_000n;
     const adapter: any = new EVMChainAdapter(config({ staticNetwork: false, maxFeePerGasWei: cap }));
     const prepared = await adapter.prepareSignerTransaction(walletOverStubEndpoint(23n, 100n, 100n), request);
-    expect(prepared).toMatchObject({ maxFeePerGas: cap, maxPriorityFeePerGas: GWEI });
+    expect(prepared).toMatchObject({ maxFeePerGas: cap, maxPriorityFeePerGas: 100n });
   });
 });
 
@@ -262,7 +262,7 @@ describe('V10 write speed-up through the adapter', () => {
     }
     expect(replacement.from).toBe(signer.address);
     expect(replacement.maxFeePerGas).toBe(2n * GWEI);
-    expect(replacement.maxPriorityFeePerGas).toBe(GWEI);
+    expect(replacement.maxPriorityFeePerGas).toBe(113n);
     expect(recoveryReads.map(([label]) => label)).toEqual(['stuck transaction check', 'replacement fee pricing']);
     for (const [, deadlineMs] of recoveryReads) expect(deadlineMs).toBeTypeOf('number');
   });

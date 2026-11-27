@@ -1,4 +1,5 @@
 import { isStoreResponseTooLargeError, StoreResponseTooLargeError } from './http-response-limit.js';
+import { isStoreInternalLimitError, recordStoreInternalLimitError, StoreInternalLimitError } from './graph-catalog-internal-limit.js';
 
 export interface GenericWorkerErrorEnvelopeV1 {
   readonly kind: 'generic';
@@ -13,9 +14,17 @@ export interface StoreResponseTooLargeWorkerErrorEnvelopeV1 {
   readonly actualBytes: number | bigint;
 }
 
+export interface StoreInternalLimitWorkerErrorEnvelopeV1 {
+  readonly kind: 'store-internal-limit';
+  readonly limitName: string;
+  readonly limitBytes: number;
+  readonly actualBytes: number;
+}
+
 export type WorkerErrorEnvelopeV1 =
   | GenericWorkerErrorEnvelopeV1
-  | StoreResponseTooLargeWorkerErrorEnvelopeV1;
+  | StoreResponseTooLargeWorkerErrorEnvelopeV1
+  | StoreInternalLimitWorkerErrorEnvelopeV1;
 
 export type WorkerResponseV1 =
   | { readonly id: number; readonly result: unknown }
@@ -27,6 +36,14 @@ export function serializeWorkerErrorV1(error: unknown): WorkerErrorEnvelopeV1 {
     return Object.freeze({
       kind: 'store-response-too-large',
       maxBytes: error.maxBytes,
+      actualBytes: error.actualBytes,
+    });
+  }
+  if (isStoreInternalLimitError(error)) {
+    return Object.freeze({
+      kind: 'store-internal-limit',
+      limitName: error.limitName,
+      limitBytes: error.limitBytes,
       actualBytes: error.actualBytes,
     });
   }
@@ -47,6 +64,12 @@ export function deserializeWorkerErrorV1(
 ): Error {
   if (envelope.kind === 'store-response-too-large') {
     return new StoreResponseTooLargeError(envelope.maxBytes, envelope.actualBytes);
+  }
+  if (envelope.kind === 'store-internal-limit') {
+    // A worker thread exports no metrics, so its limit is counted here, and a graph catalog limit warned about.
+    const limit = new StoreInternalLimitError(envelope.limitName, envelope.limitBytes, envelope.actualBytes);
+    recordStoreInternalLimitError(limit);
+    return limit;
   }
   const error = new Error(envelope.message) as Error & { code?: string };
   error.name = envelope.name;

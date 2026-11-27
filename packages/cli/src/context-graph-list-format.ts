@@ -42,13 +42,10 @@ const NONE = '—';
 
 /** The cleartext name, or null when the node knows the graph only by hash. */
 export function contextGraphDisplayName(row: ContextGraphListRowView): string | null {
-  if (row.nameKnown === false) return null;
-  const hashShaped = /^0x[0-9a-f]{64}$/i.test(row.name);
-  // Older daemons omit `nameKnown`; a name equal to its own on-chain hash was
-  // never a cleartext name either.
-  if (hashShaped && row.onChain?.nameHash && row.name.toLowerCase() === row.onChain.nameHash) {
-    return null;
-  }
+  if (row.nameKnown === false || row.name === undefined) return null;
+  // CLI compatibility: matching canonical chain provenance remains unresolved,
+  // even when an older daemon also marks a hash-shaped name as known.
+  if (/^0x[0-9a-f]{64}$/i.test(row.name) && row.name.toLowerCase() === row.onChain?.nameHash) return null;
   return row.name;
 }
 

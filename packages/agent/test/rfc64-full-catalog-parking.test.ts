@@ -185,11 +185,13 @@ describe('finalized-private placements of a full author catalog', () => {
     const s = supervisor(model);
     await s.pass();
     expect(model.state.attempts).toEqual([NEW_A.kaUal]);
-    // One decision per repair, plus one after the first placement refuses capacity.
+    // GH#3134: one authority read a graph between two awaits of the pass. The first repair's,
+    // the one after its placement refuses capacity, and the second repair's after that attempt.
     expect(s.resolvePlacement).toHaveBeenCalledTimes(3);
     s.resolvePlacement.mockClear();
     await s.pass();
-    expect(s.resolvePlacement).toHaveBeenCalledTimes(2);
+    // A pass that attempts nothing reads the authority of the graph once for both repairs.
+    expect(s.resolvePlacement).toHaveBeenCalledTimes(1);
     expect(model.state.attempts).toEqual([NEW_A.kaUal]);
     expect(s.capacity()).toEqual({ parkedPlacements: 2, scopesAtCap: 1 });
   });

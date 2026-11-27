@@ -1,3 +1,5 @@
+import { tracePromoteLock, type PromoteLockOperation } from './promote-lock-timing.js';
+
 /**
  * The share queue's mutex, one per control graph in the process.
  *
@@ -14,7 +16,7 @@
 const mutationQueues = new Map<string, Promise<void>>();
 
 /** Serializes control-graph mutations and consistent reads, including fallback replacements. */
-export async function withPromoteControlLock<T>(graphUri: string, fn: () => Promise<T>): Promise<T> {
+export async function withPromoteControlLock<T>(graphUri: string, fn: () => Promise<T>, operation: PromoteLockOperation = 'unlabelled'): Promise<T> {
   const previous = mutationQueues.get(graphUri) ?? Promise.resolve();
   let release!: () => void;
   const next = new Promise<void>((resolve) => {
@@ -22,10 +24,14 @@ export async function withPromoteControlLock<T>(graphUri: string, fn: () => Prom
   });
   mutationQueues.set(graphUri, next);
 
+  const timing = process.env.DKG_ASYNC_PROMOTE_ADMISSION_TRACE === '1'
+    ? tracePromoteLock(previous, next, operation) : undefined;
   await previous;
   try {
-    return await fn();
+    timing?.acquired();
+    return await (timing ? timing.run(fn) : fn());
   } finally {
+    timing?.releasing();
     release();
     if (mutationQueues.get(graphUri) === next) {
       mutationQueues.delete(graphUri);

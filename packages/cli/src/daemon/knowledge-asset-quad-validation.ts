@@ -1,7 +1,8 @@
 // Boundary validation for the quads the Knowledge Asset lifecycle write routes
 // store: `POST /api/knowledge-assets` (create) and
 // `POST /api/knowledge-assets/{name}/wm/write`. Both call
-// `validateWritableQuads` before any create or write.
+// `validateWritableQuads` before any create or write; `POST /api/update` calls
+// it through `validateUpdateQuadFields`.
 
 import {
   isAbsoluteRfc3987IriV1,
@@ -67,4 +68,23 @@ export function validateWritableQuads(
   }
   const literalSize = validateWritableQuadLiteralSizes(label, quads);
   return literalSize.ok ? null : literalSize.body;
+}
+
+/**
+ * `POST /api/update` takes optional `quads` and `privateQuads`: each must be an
+ * array when present, and every quad in it writable ({@link validateWritableQuads}),
+ * checked before the agent runs the update. Returns the 400 body for the first
+ * failure, or null.
+ */
+export function validateUpdateQuadFields(
+  body: { quads?: unknown; privateQuads?: unknown },
+): Record<string, unknown> | null {
+  for (const label of ['quads', 'privateQuads'] as const) {
+    const quads = body[label];
+    if (quads === undefined) continue;
+    if (!Array.isArray(quads)) return { error: `"${label}" must be an array when provided` };
+    const invalid = validateWritableQuads(label, quads);
+    if (invalid) return invalid;
+  }
+  return null;
 }

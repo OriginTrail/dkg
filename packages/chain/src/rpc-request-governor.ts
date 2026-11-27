@@ -28,20 +28,19 @@ const AUTHORITY_PRIORITY_QUEUE_RESERVE = 4;
 const BACKGROUND_AUTHORITY_MAX_PASSES = 4;
 
 /**
- * In the foreground class an authority read and an ordinary request take
- * turns under contention: an ordinary request that is waiting is passed by at
- * most this many authority admissions in a row.
+ * The kinds of waiter a permit can go to, in the order they take turns under
+ * contention. A kind with no waiter that may take a permit is passed over, so
+ * a kind alone takes every permit.
  *
  * An authority read answers a fail-closed check under a deadline of a few
  * seconds and goes first for that reason. What that needs is a bounded wait
- * whatever the ordinary backlog is, and one ordinary admission in front of it
- * keeps that. A stream of such reads that never ends must in turn leave a
- * transaction its permits: its signing step is several requests under one
- * deadline, so each of them has to be admitted soon, not eventually. There is
- * no grace period here as there is for background work, for the same reason:
- * a second a request is the whole deadline of such a step.
+ * whatever the backlog of other work is, and one admission of each other kind
+ * in front of it keeps that. A stream of such reads that never ends must in
+ * turn leave a transaction its permits: its signing step is several requests
+ * under one deadline, so each of them has to be admitted soon, not eventually.
  */
-const FOREGROUND_AUTHORITY_MAX_PASSES = 1;
+type RpcRequestTurn = 'authority' | 'ordinary' | 'background';
+const TURN_ORDER: readonly RpcRequestTurn[] = Object.freeze(['authority', 'ordinary', 'background']);
 
 export interface RpcRequestGovernorPolicyInput {
   /** Total node-process RPC request rate. Defaults to 10 requests/second. */
@@ -260,10 +259,16 @@ function zeroGovernorCounters(): MutableGovernorCounters {
 
 /**
  * Process-local, two-class token bucket placed immediately before the HTTP
- * transport. Foreground work can use the full budget and always jumps queued
- * background work; background work additionally consumes a smaller bucket,
- * so catalog warming cannot consume the reserved publishing/control-plane
+ * transport. Foreground work can use the full budget and goes in front of
+ * queued background work; background work additionally consumes a smaller
+ * bucket, so catalog warming cannot consume the reserved publishing/control-plane
  * capacity. The same instance is injected into every adapter in one daemon.
+ *
+ * When more is waiting than the budget admits, the kinds of waiter take turns
+ * ({@link TURN_ORDER}): an authority read, an ordinary foreground request,
+ * background work. No kind waits for more than one admission of each other
+ * kind. Background work has a turn only within its own bucket and, while
+ * foreground work is waiting, only once it has waited its grace period.
  *
  * An authority read keeps its caller's class and that class's budget, and goes
  * first inside it. It answers a fail-closed check under a deadline of a few
@@ -272,8 +277,7 @@ function zeroGovernorCounters(): MutableGovernorCounters {
  * start-up delay, which exists to spread bulk work. It still spends the
  * background bucket, yields to foreground work as any background request
  * does, and leaves bulk work that has waited a bounded share of the
- * background permits. In the foreground class it takes turns with ordinary
- * requests that are waiting.
+ * background permits.
  */
 export class RpcRequestGovernor {
   /**
@@ -297,14 +301,11 @@ export class RpcRequestGovernor {
   #lastRefillMs: number;
   /** See {@link RpcRequestGovernor.#nextBackgroundWaiter}. */
   #backgroundAuthorityPasses = 0;
-  /** See {@link RpcRequestGovernor.#nextForegroundWaiter}. */
-  #foregroundAuthorityPasses = 0;
   /**
-   * Background work has taken the ordinary turn that an authority read is
-   * being passed over for. It may take such a turn once; the next permit then
-   * goes to the ordinary request the turn belongs to.
+   * The kind the last contended permit went to; see {@link RpcRequestGovernor.#nextTurn}.
+   * It starts behind an authority read, which therefore goes first.
    */
-  #backgroundTookOrdinaryTurn = false;
+  #lastTurn: RpcRequestTurn = 'background';
   /** Queued waiters that hold a slot of the authority reserve. */
   #authorityReserveSlotsInUse = 0;
   #timer: ReturnType<typeof setTimeout> | null = null;
@@ -400,6 +401,11 @@ export class RpcRequestGovernor {
         : this.#canAdmitImmediately(requestClass)
     ) {
       this.#admit(requestClass, authorityPriority);
+      // An admission with nothing waiting is not a turn: the next time the
+      // kinds have to share, an authority read goes first again.
+      if (this.#foregroundQueue.length === 0 && this.#backgroundQueue.length === 0) {
+        this.#lastTurn = 'background';
+      }
       return;
     }
     const ordinarySlotsInUse = this.#foregroundQueue.length + this.#backgroundQueue.length
@@ -563,24 +569,37 @@ export class RpcRequestGovernor {
   }
 
   /**
-   * Index of the foreground waiter the next permit goes to.
+   * The waiter the next permit goes to, or `null` when none may take one.
    *
-   * Authority waiters sit at the front and go first. An ordinary waiter is
-   * passed by at most {@link FOREGROUND_AUTHORITY_MAX_PASSES} authority
-   * admission in a row, then takes a permit itself: under contention the two
-   * kinds take turns, and neither can take more than every other permit from
-   * the other.
+   * The kinds take turns in {@link TURN_ORDER}, starting behind the kind the
+   * last contended permit went to. A kind is passed over when it has no
+   * waiter that may take a permit now:
+   * - an authority read and an ordinary foreground request may whenever one
+   *   is waiting (authority reads sit at the front of the foreground queue);
+   * - background work may when its own bucket has a permit and its next
+   *   waiter is not held by the start-up delay, and, while any foreground
+   *   request is waiting, only once it has waited its grace period.
+   *
+   * So no kind waits for more than one admission of each other kind, a kind
+   * alone takes every permit, and background work stays inside its bucket.
    */
-  #nextForegroundWaiter(): number {
-    if (this.#foregroundQueue[0]?.admissionPriority !== 'authority') return 0;
-    if (this.#foregroundAuthorityPasses < FOREGROUND_AUTHORITY_MAX_PASSES) return 0;
-    const ordinary = this.#firstOrdinaryForegroundWaiter();
-    return ordinary < 0 ? 0 : ordinary;
-  }
-
-  /** Index of the first ordinary foreground waiter, or -1. */
-  #firstOrdinaryForegroundWaiter(): number {
-    return this.#foregroundQueue.findIndex((queued) => queued.admissionPriority !== 'authority');
+  #nextTurn(): { readonly turn: RpcRequestTurn; readonly index: number } | null {
+    const background = this.#nextBackgroundWaiter();
+    const waiting: Record<RpcRequestTurn, number> = {
+      authority: this.#foregroundQueue[0]?.admissionPriority === 'authority' ? 0 : -1,
+      ordinary: this.#foregroundQueue.findIndex((queued) => queued.admissionPriority !== 'authority'),
+      background: background >= 0
+        && this.#backgroundAvailableTokens >= 1
+        && (this.#foregroundQueue.length === 0 || this.#backgroundWorkHasWaited())
+        ? background
+        : -1,
+    };
+    const last = TURN_ORDER.indexOf(this.#lastTurn);
+    for (let step = 1; step <= TURN_ORDER.length; step += 1) {
+      const turn = TURN_ORDER[(last + step) % TURN_ORDER.length]!;
+      if (waiting[turn] >= 0) return { turn, index: waiting[turn] };
+    }
+    return null;
   }
 
   /**
@@ -605,11 +624,6 @@ export class RpcRequestGovernor {
       this.#backgroundAuthorityPasses = authorityPriority && this.#passedBackgroundWaiter() >= 0
         ? this.#backgroundAuthorityPasses + 1
         : 0;
-    } else {
-      this.#foregroundAuthorityPasses = authorityPriority && this.#firstOrdinaryForegroundWaiter() >= 0
-        ? this.#foregroundAuthorityPasses + 1
-        : 0;
-      this.#backgroundTookOrdinaryTurn = false;
     }
     this.#window[requestClass === 'foreground' ? 'foregroundAdmitted' : 'backgroundAdmitted'] += 1;
   }
@@ -639,47 +653,14 @@ export class RpcRequestGovernor {
   #processQueues = (): void => {
     this.#timer = null;
     this.#refill();
-    const backgroundNext = this.#nextBackgroundWaiter();
-    const agedBackgroundHasCapacity = backgroundNext >= 0
-      && this.#availableTokens >= 1
-      && this.#backgroundAvailableTokens >= 1
-      && this.#backgroundWorkHasWaited();
-    // At most one aged background request jumps the foreground queue per
-    // scheduling turn. Its own bucket keeps this within the background share;
-    // the single admission keeps foreground latency bounded. It jumps an
-    // ordinary foreground request, never an authority read, and which of the
-    // two the next permit goes to is the turn rule's decision: under that rule
-    // an ordinary request is admitted while an authority waiter still sits at
-    // the head of the queue, so the head alone would deny the background class
-    // its turn for as long as authority reads keep arriving.
-    //
-    // A turn taken from an ordinary request that an authority read is being
-    // passed over for is taken once. Admitting background work does not use
-    // the turn up, so without this a background class whose bucket never runs
-    // dry would take it again on every permit, and the authority read behind
-    // it would wait for as long as the background backlog lasts.
-    const foregroundNext = this.#nextForegroundWaiter();
-    const passesAuthorityRead = foregroundNext > 0;
-    if (
-      this.#foregroundQueue.length > 0
-      && this.#foregroundQueue[foregroundNext]?.admissionPriority !== 'authority'
-      && agedBackgroundHasCapacity
-      && !(passesAuthorityRead && this.#backgroundTookOrdinaryTurn)
-    ) {
-      this.#resolveWaiter(this.#backgroundQueue, backgroundNext);
-      if (passesAuthorityRead) this.#backgroundTookOrdinaryTurn = true;
-    }
-    while (this.#foregroundQueue.length > 0 && this.#availableTokens >= 1) {
-      this.#resolveWaiter(this.#foregroundQueue, this.#nextForegroundWaiter());
-    }
-    while (
-      this.#foregroundQueue.length === 0
-      && this.#availableTokens >= 1
-      && this.#backgroundAvailableTokens >= 1
-    ) {
-      const next = this.#nextBackgroundWaiter();
-      if (next < 0) break;
-      this.#resolveWaiter(this.#backgroundQueue, next);
+    while (this.#availableTokens >= 1) {
+      const next = this.#nextTurn();
+      if (next === null) break;
+      this.#lastTurn = next.turn;
+      this.#resolveWaiter(
+        next.turn === 'background' ? this.#backgroundQueue : this.#foregroundQueue,
+        next.index,
+      );
     }
     this.#schedule();
   };

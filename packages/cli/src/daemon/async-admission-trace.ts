@@ -1,9 +1,15 @@
+import { shareConnectionTiming, shareDispatchGc, type ConnectionTiming } from './share-connection-timing.js';
+import { createHash } from 'node:crypto';
 import type { ServerResponse } from 'node:http';
 import {
+  Logger,
+  createOperationContext,
   asyncAdmissionUsage,
+  createAsyncAdmissionDiagnosticTrace,
   type AsyncAdmissionPhase,
   type AsyncAdmissionRoute,
 } from '@origintrail-official/dkg-core';
+import { reportAdmissionTrace } from './async-admission-trace-diagnostics.js';
 
 /**
  * Follows one async admission request (`POST .../swm/share-async` and `.../vm/publish-async`)
@@ -26,6 +32,7 @@ import {
  * Every other request finds no trace and pays one `WeakMap` miss per hook.
  */
 
+const logger = new Logger('async-admission');
 const API_PREFIX = '/api/knowledge-assets/';
 /** The error body is parsed for its `code` only when it is this small. */
 const MAX_PARSED_BODY_CHARS = 16 * 1024;
@@ -48,8 +55,17 @@ interface AdmissionTrace {
   readonly route: AsyncAdmissionRoute;
   readonly startedAtMs: number;
   readonly clock: () => number;
+  readonly diagnostic: ReturnType<typeof createAsyncAdmissionDiagnosticTrace>;
   /** The step the request is in now. */
   phase: AsyncAdmissionPhase;
+  closed?: boolean;
+  shareTiming?: Partial<ConnectionTiming> & {
+    exchangeHash?: string;
+    handlerEnteredAtUnixMs?: number;
+    writePreflightStartedAfterMs?: number;
+    writePreflightSettledAfterMs?: number;
+    enqueueStartedAfterMs?: number;
+  };
   /** The first answer, with the phase it was given in. */
   answer?: { status: number; code: string; phase: AsyncAdmissionPhase; atMs: number };
 }
@@ -65,7 +81,18 @@ export function beginAsyncAdmissionTrace(
 ): void {
   const route = matchAsyncAdmissionRoute(method, pathname);
   if (route === null) return;
-  const trace: AdmissionTrace = { route, startedAtMs: clock(), clock, phase: 'request' };
+  const trace: AdmissionTrace = {
+    route, startedAtMs: clock(), clock, phase: 'request',
+    diagnostic: createAsyncAdmissionDiagnosticTrace(route),
+  };
+  if (route === 'share_async' && process.env.DKG_ASYNC_PROMOTE_ADMISSION_TRACE === '1') {
+    const id = res.req?.headers['x-scan-admission-id'];
+    const connection = shareConnectionTiming(res.req);
+    trace.shareTiming = connection ? { ...connection, handlerEnteredAtUnixMs: Math.round(performance.timeOrigin + trace.startedAtMs) } : {};
+    if (typeof id === 'string' && id.length === 32 && /^[0-9a-f]+$/.test(id)) {
+      trace.shareTiming.exchangeHash = createHash('sha256').update(id).digest('hex');
+    }
+  }
   traces.set(res, trace);
   res.once('close', () => finishTrace(res, trace));
 }
@@ -80,9 +107,18 @@ export async function admissionStep<T>(
   if (trace === undefined) return run();
   const previous = trace.phase;
   trace.phase = phase;
-  const result = await run();
-  trace.phase = previous;
-  return result;
+  if (phase === 'enqueue' && trace.shareTiming && trace.shareTiming.enqueueStartedAfterMs === undefined) {
+    trace.shareTiming.enqueueStartedAfterMs = Math.round(trace.clock() - trace.startedAtMs);
+  }
+  const preflight = phase === 'write_preflight' ? trace.shareTiming : undefined;
+  if (preflight) preflight.writePreflightStartedAfterMs = Math.round(trace.clock() - trace.startedAtMs);
+  try {
+    const result = await trace.diagnostic.run(phase, run);
+    trace.phase = previous;
+    return result;
+  } finally {
+    if (preflight) preflight.writePreflightSettledAfterMs = Math.round(trace.clock() - trace.startedAtMs);
+  }
 }
 
 /** The first answer a traced request sends wins; `body` is the serialized JSON the route sends. */
@@ -90,12 +126,17 @@ export function noteAdmissionResponse(res: ServerResponse, status: number, body:
   const trace = traces.get(res);
   if (trace === undefined || trace.answer !== undefined) return;
   const ok = status >= 200 && status < 300;
-  trace.answer = {
+  const answer = trace.answer = {
     status,
     code: ok ? '-' : errorCode(body),
     phase: ok ? 'enqueue' : trace.phase,
     atMs: trace.clock(),
   };
+  if (trace.closed) {
+    reportAdmissionTrace({
+      requestId: trace.diagnostic.requestId, route: trace.route, phase: answer.phase,
+    }, answer.status, answer.atMs - trace.startedAtMs, 'answer_after_close');
+  }
 }
 
 function errorCode(body: string): string {
@@ -109,17 +150,33 @@ function errorCode(body: string): string {
 }
 
 function finishTrace(res: ServerResponse, trace: AdmissionTrace): void {
-  if (traces.get(res) !== trace) return;
-  traces.delete(res);
+  if (traces.get(res) !== trace || trace.closed) return;
+  trace.closed = true;
+  // Weak ownership retains correlation for subsequent steps after a client close.
+  // It does not retain the response after the route and its work have finished.
   const { answer } = trace;
   // An answer sent outside the JSON helper (rate limiting, load shedding) is seen only here.
   const status = answer?.status ?? (res.headersSent ? res.statusCode : 0);
   const ok = status >= 200 && status < 300;
+  const phase = answer?.phase ?? (ok ? 'enqueue' : trace.phase);
+  const latencyMs = (answer?.atMs ?? trace.clock()) - trace.startedAtMs;
+  if (trace.shareTiming) {
+    try {
+      logger.info(createOperationContext('system'), JSON.stringify({
+        event: 'async_share_http_timing', requestId: trace.diagnostic.requestId, ...trace.shareTiming,
+        gcBeforeDispatch: shareDispatchGc(res.req),
+        phase, status, elapsedMs: Math.round(latencyMs),
+      }));
+    } catch { /* Timing cannot affect the response or ordinary usage accounting. */ }
+  }
+  // Local correlation survives a client's close in the already-running step.
+  // Neither this event nor a late answer implies non-admission or retry authority.
+  reportAdmissionTrace({ requestId: trace.diagnostic.requestId, route: trace.route, phase }, status, latencyMs);
   asyncAdmissionUsage.recordHttpOutcome({
     route: trace.route,
-    phase: answer?.phase ?? (ok ? 'enqueue' : trace.phase),
+    phase,
     status,
     code: answer?.code ?? (status === 0 ? 'client_closed' : '-'),
-    latencyMs: (answer?.atMs ?? trace.clock()) - trace.startedAtMs,
+    latencyMs,
   });
 }

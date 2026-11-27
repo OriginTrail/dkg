@@ -1,26 +1,17 @@
 import { useEffect, useMemo, useReducer } from 'react';
-import {
-  fetchPca,
-  fetchWalletsBalances,
-  HttpError,
-  type PcaSnapshot,
-} from '../api.js';
+import { fetchWalletsBalances } from '../api.js';
 import { usePcaStore } from '../stores/pca.js';
 import { healthForSnapshot, type PcaHealthState } from '../pca/health.js';
-import { classifyCoverage, isPcaSpendable } from '../pca/coverage.js';
+import { readPcaAccount } from '../pca/readAccount.js';
+import { nodeCoverage, type CoverageAccount, type CoverageProbe, type NodeCoverage } from '../pca/walletCoverage.js';
 import { eqAddress as eq } from '../web3/address.js';
 
-/** Per-(node wallet) registration probe against one account. `null` = couldn't determine. */
-export interface PcaWalletProbe {
-  wallet: string;
-  registered: boolean | null;
-}
+/** Per-(node wallet) probe against one account, with its canonical coverage result. */
+export type PcaWalletProbe = CoverageProbe;
 
 export type PcaClassification = 'owned' | 'approved' | 'unknown';
 
-export interface ResolvedPcaAccount {
-  accountId: string;
-  snapshot: PcaSnapshot | null;
+export interface ResolvedPcaAccount extends CoverageAccount {
   error: unknown;
   /** The daemon returned 404 — the tracked id no longer exists (offer Remove). */
   notFound: boolean;
@@ -67,6 +58,8 @@ export interface PcaOverview {
    */
   bestCoveringDiscountBps: number | null;
   covered: boolean;
+  /** One coverage state per publishing wallet; the same aggregate `covered` and the discount come from. */
+  coverage: NodeCoverage;
 }
 
 async function resolveAccount(accountId: string, wallets: string[]): Promise<ResolvedPcaAccount> {
@@ -83,26 +76,13 @@ async function resolveAccount(accountId: string, wallets: string[]): Promise<Res
     walletCount: wallets.length,
     probesInconclusive: false,
   };
-  let snapshot: PcaSnapshot;
-  try {
-    snapshot = await fetchPca(accountId, undefined, { extended: true });
-  } catch (err) {
-    return { ...blank, error: err, notFound: err instanceof HttpError && err.status === 404 };
-  }
-
-  const walletProbes: PcaWalletProbe[] = await Promise.all(
-    wallets.map((wallet) =>
-      fetchPca(accountId, wallet, { extended: true })
-        // S2/#9 (via shared classifyCoverage, #1344 — reads s.probedKey) —
-        // adapterSupported===false (the adapter couldn't answer) → registered null
-        // (couldn't determine), NOT not-registered → probesInconclusive (H2 path),
-        // excluded from approvedCount (which counts registered === true, not 'covers').
-        .then((s): PcaWalletProbe => ({ wallet, registered: classifyCoverage(s).registered }))
-        .catch((): PcaWalletProbe => ({ wallet, registered: null })),
-    ),
-  );
-  const approvedCount = walletProbes.filter((p) => p.registered === true).length;
-  const probesInconclusive = walletProbes.some((p) => p.registered === null);
+  const read = await readPcaAccount(accountId, wallets, { extended: true });
+  if (!read.ok) return { ...blank, error: read.error, notFound: read.notFound };
+  const { snapshot, probes: walletProbes } = read;
+  // An inconclusive probe (S2/#9) sets probesInconclusive (H2) and isn't counted as
+  // approved: approvedCount counts registered === true, not 'covers'.
+  const approvedCount = walletProbes.filter((p) => p.coverage.registered === true).length;
+  const probesInconclusive = walletProbes.some((p) => p.coverage.outcome === 'inconclusive');
   const owned = wallets.some((w) => eq(w, snapshot.owner));
   const classification: PcaClassification = owned
     ? 'owned'
@@ -235,6 +215,7 @@ function subscribeOverview(key: string, ids: string[], intervalMs: number, cb: (
 }
 
 const EMPTY_ACCOUNTS: ResolvedPcaAccount[] = [];
+const EMPTY_WALLETS: string[] = [];
 
 /**
  * The S1 overview resolution engine + the single source of truth for the
@@ -266,34 +247,26 @@ export function usePcaOverview(intervalMs = 30_000, extraIds: string[] = []): Pc
   const loading = entry ? entry.loading : true;
   const error = entry?.error ?? null;
 
-  const { bestCoveringDiscountBps, covered } = useMemo(() => {
-    let best: number | null = null;
-    for (const a of accounts) {
-      if (!a.snapshot || a.approvedCount <= 0) continue;
-      // U2 (via shared isPcaSpendable, #1344) — exclude expired/swept + zero-budget so
-      // the dashboard/settings don't advertise a discount S5 treats as not-covering.
-      if (!isPcaSpendable(a.snapshot)) continue;
-      const bps = a.snapshot.discountBps;
-      if (typeof bps === 'number' && (best == null || bps > best)) best = bps;
-    }
-    return { bestCoveringDiscountBps: best, covered: best != null };
-  }, [accounts]);
-
-  const wallets = entry?.data?.wallets ?? [];
+  const wallets = entry?.data?.wallets ?? EMPTY_WALLETS;
   const walletsError = entry?.data?.walletsError ?? false;
+  const walletsInconclusive = walletsError && wallets.length === 0;
+  // U2 (#1344) — coverage and the best discount come from ONE aggregate over the probes'
+  // canonical classifyCoverage outcomes, so no surface advertises a discount S5 treats as not-covering.
+  const coverage = useMemo(() => nodeCoverage(wallets, accounts, { walletsUnreadable: walletsInconclusive }), [wallets, accounts, walletsInconclusive]);
   return {
     accounts,
     wallets,
     walletsError,
     // T2 — unreadable wallets (error + empty) vs a genuine 0-wallet node (no error).
-    walletsInconclusive: walletsError && wallets.length === 0,
+    walletsInconclusive,
     loading,
     error,
     refresh: () => {
       const e = ENTRIES.get(idsKey);
       if (e) loadEntry(e);
     },
-    bestCoveringDiscountBps,
-    covered,
+    bestCoveringDiscountBps: coverage.bestCoveringDiscountBps,
+    covered: coverage.covered,
+    coverage,
   };
 }

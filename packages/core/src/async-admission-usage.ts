@@ -16,15 +16,22 @@ export type { LatencySummary } from './interval-latency.js';
  * failure: bookkeeping must never reach queue code.
  */
 
-export type AsyncAdmissionRoute = 'share_async' | 'publish_async';
+export const ASYNC_ADMISSION_ROUTES = Object.freeze(['share_async', 'publish_async'] as const);
+export type AsyncAdmissionRoute = typeof ASYNC_ADMISSION_ROUTES[number];
 
 /** The step that answered a request (or that it was in when the client left). */
-export type AsyncAdmissionPhase =
-  | 'request'
-  | 'write_preflight'
-  | 'intent_resolution'
-  | 'snapshot_preflight'
-  | 'enqueue';
+export const ASYNC_ADMISSION_PHASES = Object.freeze([
+  'request', 'write_preflight', 'intent_resolution', 'snapshot_preflight', 'enqueue',
+] as const);
+export type AsyncAdmissionPhase = typeof ASYNC_ADMISSION_PHASES[number];
+
+export function isAsyncAdmissionRoute(value: unknown): value is AsyncAdmissionRoute {
+  return typeof value === 'string' && (ASYNC_ADMISSION_ROUTES as readonly string[]).includes(value);
+}
+
+export function isAsyncAdmissionPhase(value: unknown): value is AsyncAdmissionPhase {
+  return typeof value === 'string' && (ASYNC_ADMISSION_PHASES as readonly string[]).includes(value);
+}
 
 export type AsyncQueueName = 'share' | 'lift';
 

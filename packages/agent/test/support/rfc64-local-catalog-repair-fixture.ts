@@ -22,6 +22,7 @@ import {
   type DecimalU64V1,
   type EvmAddressV1,
   type NetworkIdV1,
+  TypedEventBus, generateEd25519Keypair,
 } from '@origintrail-official/dkg-core';
 import {
   GraphManager,
@@ -31,12 +32,14 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
+  DKGPublisher,
   computeFlatKCRootV10,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
-import { afterEach, expect } from 'vitest';
+import { afterEach, expect, vi } from 'vitest';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 
 import { DKGAgent } from '../../src/index.js';
 import type {
@@ -241,10 +244,11 @@ export function bootstrapConfigV1(
 export async function authorSealV1(
   kaNumber: bigint,
   assertionVersion = '1',
+  quads: readonly Quad[] = PROJECTION_QUADS,
 ): Promise<CanonicalGraphScopedAuthorSealV1> {
   const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
   const assertionMerkleRoot = ethers.hexlify(
-    computeFlatKCRootV10([...PROJECTION_QUADS], []),
+    computeFlatKCRootV10([...quads], []),
   ) as Digest32V1;
   const typedData = buildAuthorAttestationTypedData({
     chainId: BigInt(NATIVE_DEPLOYMENT.assertedAtChainId),
@@ -271,7 +275,7 @@ export async function authorSealV1(
     contentScopeVersion: '2',
     kaUal: `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`,
     assertionVersion,
-    publicTripleCount: String(PROJECTION_QUADS.length),
+    publicTripleCount: String(quads.length),
     privateTripleCount: '0',
     privateMerkleRoot: null,
   } as unknown as CanonicalGraphScopedAuthorSealV1;
@@ -322,6 +326,11 @@ export async function seedDurableWorkspaceAssetV1(
   suffix: string,
   reservedKaId: bigint,
   accessPolicy: 'public' | 'ownerOnly' = 'public',
+  options: Readonly<{
+    seal?: CanonicalGraphScopedAuthorSealV1;
+    quads?: readonly Quad[];
+    shareOperationId?: string;
+  }> = {},
 ): Promise<Readonly<{
   seal: AssertionSeal;
   scopeDigest: Digest32V1;
@@ -329,8 +338,8 @@ export async function seedDurableWorkspaceAssetV1(
   shareOperationId: string;
 }>> {
   const assertionCoordinate = `repair-${suffix}`;
-  const shareOperationId = `repair-operation-${suffix}`;
-  const canonicalSeal = await authorSealV1(reservedKaId);
+  const shareOperationId = options.shareOperationId ?? `repair-operation-${suffix}`;
+  const canonicalSeal = options.seal ?? await authorSealV1(reservedKaId);
   const seal = assertionSealV1(canonicalSeal);
   const assertionUri = contextGraphAssertionUri(
     CONTEXT_GRAPH_ID,
@@ -363,7 +372,7 @@ export async function seedDurableWorkspaceAssetV1(
     shareOperationId,
     kaUal: canonicalSeal.kaUal,
     assertionVersion: canonicalSeal.assertionVersion,
-    quads: PROJECTION_QUADS,
+    quads: options.quads ?? PROJECTION_QUADS,
     privateTripleCount: 0,
     publisherPeerId: agent.peerId,
     accessPolicy,
@@ -392,5 +401,37 @@ export async function seedDurableWorkspaceAssetV1(
       authorAddress: AUTHOR,
       era: '0' as DecimalU64V1,
     }),
+  });
+}
+
+/** Real initial publisher and VM writes; only chain confirmation and ACKs are hermetic. */
+export async function publishInitialCatalogAssetV1(agent: DKGAgent,
+  seal: CanonicalGraphScopedAuthorSealV1, quads: readonly Quad[], onConfirmed: () => void) {
+  const chain = new MockChainAdapter(NETWORK_ID, AUTHOR);
+  chain.seedIdentity(AUTHOR, 1n); chain.minimumRequiredSignatures = 1;
+  vi.spyOn(chain, 'getEvmChainId').mockResolvedValue(BigInt(NATIVE_DEPLOYMENT.assertedAtChainId));
+  vi.spyOn(chain, 'getKnowledgeAssetsLifecycleAddress').mockResolvedValue(NATIVE_DEPLOYMENT.assertedAtKav10Address);
+  const create = chain.createKnowledgeAssets.bind(chain);
+  vi.spyOn(chain, 'createKnowledgeAssets').mockImplementation(async input => {
+    const result = await create(input);
+    // The mock appends a transaction index to its hash; the production reader expects 32 bytes.
+    const receipt = { ...result, txHash: ethers.keccak256(ethers.toUtf8Bytes(result.txHash)) };
+    onConfirmed(); return receipt;
+  });
+  const publisher = new DKGPublisher({ store: agent.store, chain, eventBus: new TypedEventBus(),
+    keypair: await generateEd25519Keypair(), publisherPrivateKey: AUTHOR_WALLET.privateKey,
+    publisherNodeIdentityId: 1n });
+  return publisher.publish({ contextGraphId: CONTEXT_GRAPH_ID, onChainContextGraphId: '1',
+    quads: [...quads], publisherPeerId: 'initial-catalog-fixture', accessPolicy: 'public',
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION, kaUal: seal.kaUal,
+    assertionVersion: seal.assertionVersion, publicTripleCount: Number(seal.publicTripleCount), privateTripleCount: 0,
+    precomputedAttestation: { expectedMerkleRoot: ethers.getBytes(seal.assertionMerkleRoot), authorAddress: AUTHOR,
+      reservedKaId: BigInt(seal.reservedKaId), schemeVersion: Number(seal.authorSchemeVersion), signature: { r: ethers.getBytes(seal.authorAttestationR),
+        vs: ethers.getBytes(seal.authorAttestationVS) } },
+    v10ACKProvider: async () => {
+      const signature = ethers.Signature.from(await AUTHOR_WALLET.signMessage('mock-initial-ack'));
+      return [{ peerId: 'mock-initial-core', nodeIdentityId: 1n,
+        signatureR: ethers.getBytes(signature.r), signatureVS: ethers.getBytes(signature.yParityAndS) }];
+    },
   });
 }

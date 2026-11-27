@@ -1082,7 +1082,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     await expect(WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority.call(
       host as never,
       CONTEXT_GRAPH_ID,
-    )).resolves.toEqual({ kind: 'available', agentAddresses: [member.address] });
+    )).resolves.toEqual({ kind: 'available', agentAddresses: [member.address], conclusive: true });
   });
 
   it('rechecks recovery authority after metadata and rejects a newly stale member', async () => {

@@ -71,7 +71,7 @@ function runner(
       executeExactSlice: async (_peerId: string, assetUals: readonly string[]) => {
         exactRequests.push([...assetUals]);
         const complete = await exact(assetUals);
-        return exactRecoveryActionOutcome({ ...createIncompleteDurableSyncResult(), insertedDataTriples: complete ? 7 : 0, complete });
+        return exactRecoveryActionOutcome({ ...createIncompleteDurableSyncResult(), insertedDataTriples: complete ? 7 : 0, complete }, true, 'work-started');
       },
     } : {}),
     logDebug: () => {},

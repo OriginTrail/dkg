@@ -38,7 +38,7 @@ interface PeerV1 {
   connectionGeneration: number;
 }
 
-interface SchedulingSweepV1 { turns: Array<{ peer: PeerV1; scopes: readonly ScopeV1[] }>; nextWake: number }
+interface SchedulingSweepV1 { turns: Array<{ peer: PeerV1; scopes: readonly ScopeV1[] }>; nextWake: number; nextRetry: number }
 
 /** One coalesced intent owns admission, its scan and all deferred graph leases. */
 class OverflowIntentV1 {
@@ -77,6 +77,8 @@ class OverflowIntentV1 {
 const DEFAULT_DEBOUNCE_MS = 60_000;
 const DEFAULT_MAX_PEERS = 256;
 const MAX_SCOPES_PER_TURN = 8;
+/** How long the eligibility notifier sleeps while only scheduled retries, minutes apart, wait. */
+const RETRY_WAIT_POLL_MS = 5_000;
 /**
  * Owns reconnect replay admission, retained cooldowns and bounded physical work.
  * Staged completeness fences are acquired synchronously before network admission;
@@ -84,6 +86,9 @@ const MAX_SCOPES_PER_TURN = 8;
  * peer has one serial stream owner; at most two peers run on the node. Short
  * disconnects retain scope backoff, while bounded turns allow other peers to
  * progress. A new graph activation adds only that graph, even during a pass.
+ * A replay that could not finish is retried on its cooldown while its peer stays
+ * connected and admitted, a bounded number of times. It holds no fence until the
+ * retry falls due, so a waiting retry does not hold the graph's replay open.
  */
 export class Rfc64CatalogReplayConnectionRuntimeV1 {
   readonly #byPeer = new Map<string, PeerV1>();
@@ -276,16 +281,26 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     this.#resumeOverflow();
     const turns: Array<{ peer: PeerV1; scopes: readonly ScopeV1[] }> = [];
     let nextWake = Infinity;
+    let nextRetry = Infinity;
+    let admitted: ReadonlySet<string> | undefined;
     for (const peer of this.#byPeer.values()) {
       const runnable: ScopeV1[] = [];
       for (const scope of peer.scopes.values()) {
+        const retryAt = scope.retryDueAt();
+        if (retryAt !== null && retryAt > now) nextRetry = Math.min(nextRetry, retryAt);
+        else if (retryAt !== null) {
+          admitted ??= new Set(this.#ports.admittedConnectedPeerIds());
+          if (peer.connected && admitted.has(peer.peerId)) {
+            scope.takeRetry(peer.connectionGeneration, () => this.#ports.reserveFence(scope.contextGraphId, peer.peerId))?.admit();
+          } else scope.dropRetry();
+        }
         if (scope.awaitingFence()) nextWake = Math.min(nextWake, now + 1_000);
         if (scope.queued && scope.eligibleAt > now) nextWake = Math.min(nextWake, scope.eligibleAt);
         if (scope.ready(now) && runnable.length < MAX_SCOPES_PER_TURN) runnable.push(scope);
       }
       if (!peer.active && runnable.length > 0) turns.push({ peer, scopes: runnable });
     }
-    return { turns, nextWake };
+    return { turns, nextWake, nextRetry };
   }
 
   #schedule(): void {
@@ -320,9 +335,10 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
         if (sweep.turns.length > 0) for (const slot of [0, 1] as const) {
           if (!this.#ports.schedule(slot, this.#worker)) { this.#retire(); return; }
         }
-        if (sweep.nextWake === Infinity) return;
+        if (sweep.nextWake === Infinity && sweep.nextRetry === Infinity) return;
         // One owned notifier; stream slots never wait for future eligibility.
-        await this.#ports.wait(signal, Math.min(1_000, Math.max(1, sweep.nextWake - Date.now())));
+        const limit = sweep.nextWake === Infinity ? RETRY_WAIT_POLL_MS : 1_000;
+        await this.#ports.wait(signal, Math.min(limit, Math.max(1, Math.min(sweep.nextWake, sweep.nextRetry) - Date.now())));
       }
     } finally { if (signal.aborted) this.#retire(); }
   };
@@ -372,7 +388,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
           if (!signal.aborted) this.#ports.warn(`RFC-64 catalog replay failed after ${peer.peerId.slice(-8)} connected: ${error instanceof Error ? error.message : String(error)}`);
         } finally {
           if (failed) peer.failed++;
-          scope.finish(execution, failed, Date.now());
+          scope.finish(execution, failed, Date.now(), peer.connectionGeneration);
           // The canonical collection also carries round-robin order.
           if (peer.scopes.get(scope.contextGraphId) === scope) {
             peer.scopes.delete(scope.contextGraphId); peer.scopes.set(scope.contextGraphId, scope);

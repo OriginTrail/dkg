@@ -122,6 +122,10 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'signMessageAs',          // pool-specific wallet-key signing; mock has no adapter-held private keys
   'getOperationalPrivateKey', // mock has no wallet keys
   'operationalSigning',     // optional; absent, an adapter is taken to sign with local wallets, as the mock's do
+  // #3591 — the async publisher's claim gate reads a refused wallet's balances through this. The
+  // mock holds no wallet balances; the publisher's reader treats the absent method as unreadable,
+  // which never keeps a wallet out.
+  'readPublisherWalletBalances',
   'getRequiredPublishTokenAmount', // TODO: missing on mock, cross-check below
   // Snapshot reuse requires a finalized block hash plus the exact physical
   // DKGKnowledgeAssets address and binding generation. Mock snapshots
@@ -162,6 +166,9 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'isWalletFundable',
   'nextRandomSamplingSigner',
   'sendRandomSamplingTx',
+  // The stale-eligibility self-heal shared by the RS send and the marketplace
+  // receipt batch: TS-protected, the same category as the two above.
+  'sendFromRegisteredSigner',
   // Funding-aware publish wallet selection internals (native+TRAC balance
   // reads, the fundability gate, the cache, and the insufficient-funds error
   // enrichment). EVM-only — the mock has no provider/ERC-20 balance surface
@@ -300,6 +307,10 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'requireConvictionNFT',
   'pcaWrite',
   'pcaWriteAndInvalidate',
+  // The send behind the marketplace writes (evm-adapter-marketplace.ts): the
+  // wallet `opts.from`, the Hub self-heal retry and the revert decoding. The
+  // writes it sends are mirrored on MockChainAdapter (mock-adapter-marketplace.ts).
+  'marketplaceSend',
   // Identity read-cache helpers are EVM-only: the mock's identity registry is
   // in-memory and its writes are already immediately visible.
   'invalidateIdentityStorageBinding',
@@ -357,6 +368,9 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'resolveContractDeployBlock',
   // probe-free accessor over the same immutable deploy-block cache — EVM-only.
   'resolveContractDeployBlockNumber',
+  // the same lookup, saying whether it pinned the block or fell back to genesis
+  // (the authority index reader's lower bound) — EVM-only, same rationale.
+  'resolveContractDeployBlockLookup',
   'resolveLogScanHead',
   // companion retry-wrapper for the deploy-block binary search's historical
   // eth_getCode probes — EVM-only, same rationale as resolveKaStorageDeployBlock.
