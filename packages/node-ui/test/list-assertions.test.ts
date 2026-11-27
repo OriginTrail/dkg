@@ -46,14 +46,8 @@ describe('listAssertions (WM) — URI parse + cg-scoped filter', () => {
   });
 
   function setBindings(bindings: unknown[]) {
-    // `listAssertions(wm)` now issues two scoped queries in parallel
-    // (membership from `<cg>/_meta`, then a top-level `GRAPH ?g` triple
-    // count) instead of one OPTIONAL-nested query — the latter tripped
-    // the scoped-graph-variable guard (PR #749). Feed the same fixture
-    // rows to both: the membership query reads `?g`, the count query
-    // reads `?g` + `?cnt`, and the parser merges counts back by graph
-    // URI. Order matches the Promise.all array: call[0] = membership,
-    // call[1] = count.
+    // Metadata determines membership first. Counts then read only the finite
+    // graph set on that page; this transport fixture supplies both responses.
     fetchMock.mockResolvedValueOnce(jsonResponse({ result: { bindings } }));
     fetchMock.mockResolvedValueOnce(jsonResponse({ result: { bindings } }));
   }
@@ -221,14 +215,10 @@ describe('listAssertions (WM) — URI parse + cg-scoped filter', () => {
     expect(body.sparql).toContain('did:dkg:context-graph:cg-A/_meta');
     expect(body.sparql).toContain('http://dkg.io/ontology/memoryLayer');
     expect(body.sparql).toContain('"WM"');
-    // The count query (call[1]) must ALSO gate on the `_meta` WM marker —
-    // counting only WM-marked partitions instead of scanning every graph
-    // under the CG (SWM/VM/meta included). Pins the Codex #944 perf fix.
+    // The count query can only read the graph set returned by membership.
     const [, countInit] = fetchMock.mock.calls[1] as [string, RequestInit];
     const countBody = JSON.parse(String(countInit.body));
-    expect(countBody.sparql).toContain('did:dkg:context-graph:cg-A/_meta');
-    expect(countBody.sparql).toContain('http://dkg.io/ontology/memoryLayer');
-    expect(countBody.sparql).toContain('"WM"');
+    expect(countBody.sparql).toContain('VALUES ?dg { <did:dkg:context-graph:cg-A/assertion/0xabc/notes> }');
     expect(countBody.sparql).toContain('COUNT');
   });
 
@@ -259,19 +249,22 @@ describe('listAssertions (WM) — URI parse + cg-scoped filter', () => {
     expect(out.map(item => item.name)).toEqual(['query-catalog-deadbeef', 'notes']);
     expect(out[0]).toMatchObject({ subGraph: 'meta', tripleCount: 12 });
     const [, listInit] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(JSON.parse(String(listInit.body)).sparql)
-      .not.toContain('!CONTAINS(STR(?g), "/meta/assertion/")');
+    expect(JSON.parse(String(listInit.body)).sparql).toContain('/query-catalog-');
   });
 
-  it('SPARQL excludes the meta namespace by path shape in both queries (Codex #944)', async () => {
-    setBindings([bRow('did:dkg:context-graph:cg-A/assertion/0xabc/notes', 5)]);
+  it('excludes reserved meta assertions before constructing the finite count graph set', async () => {
+    setBindings([
+      bRow('did:dkg:context-graph:cg-A/meta/assertion/0xabc/profile', 8),
+      bRow('did:dkg:context-graph:cg-A/assertion/0xabc/notes', 5),
+    ]);
     await listAssertions('cg-A', 'wm');
     const [, listInit] = fetchMock.mock.calls[0] as [string, RequestInit];
     const [, countInit] = fetchMock.mock.calls[1] as [string, RequestInit];
     // Path-shape match, not a `/_meta` suffix (which would drop assertions
     // named `_meta`).
     expect(JSON.parse(String(listInit.body)).sparql).toContain('!CONTAINS(STR(?g), "/meta/assertion/")');
-    expect(JSON.parse(String(countInit.body)).sparql).toContain('!CONTAINS(STR(?g), "/meta/assertion/")');
+    expect(JSON.parse(String(countInit.body)).sparql).not.toContain('/meta/assertion/');
+    expect(JSON.parse(String(countInit.body)).sparql).toContain('VALUES ?dg { <did:dkg:context-graph:cg-A/assertion/0xabc/notes> }');
     expect(JSON.parse(String(listInit.body)).sparql).not.toContain('STRENDS(STR(?g), "/_meta")');
   });
 

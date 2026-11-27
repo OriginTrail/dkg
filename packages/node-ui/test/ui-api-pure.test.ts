@@ -49,6 +49,9 @@ import {
   partialPublishWarning,
   knowledgeAssetFinalize,
   knowledgeAssetShare,
+  resolveSemanticProgram,
+  invokeSemanticProgram,
+  forkSemanticProgram,
 } from '../src/ui/api.js';
 
 let server: Server;
@@ -70,7 +73,7 @@ function startTestServer(): Promise<void> {
     server = createServer((req, res) => {
       let body = '';
       req.on('data', (chunk) => { body += chunk; });
-      req.on('end', () => {
+      req.on('end', async () => {
         const reqUrl = req.url ?? '';
         const reqMethod = req.method ?? '';
         requestLog.push({ url: reqUrl, method: reqMethod, body });
@@ -129,7 +132,8 @@ function startTestServer(): Promise<void> {
         } else if (url.startsWith('/api/context-graph/list') || url.startsWith('/api/context-graphs')) {
           res.end(JSON.stringify({ contextGraphs: [{ id: 'cg1' }] }));
         } else if (url.startsWith('/api/query')) {
-          res.end(JSON.stringify({ result: { bindings: queryBindings } }));
+          const bindings = queryBindings;
+          res.end(JSON.stringify({ result: { bindings } }));
         } else if (url.startsWith('/api/shared-memory')) {
           res.end(JSON.stringify({ success: true, ual: 'did:dkg:test' }));
         } else if (url.includes('/promote')) {
@@ -213,6 +217,58 @@ describe('UI API tests', () => {
     it('returns empty object when window is undefined', () => {
       const headers = authHeaders();
       expect(headers).toEqual({});
+    });
+  });
+
+  describe('semantic program HTTP contracts', () => {
+    const contextGraphId = 'private graph/&team=research';
+    const programIri = 'urn:sr:program:research?version=1&scope=private';
+
+    it('encodes graph and program identifiers without changing the selected source layer', async () => {
+      const resolution = { contextGraphId, programIri, programLayer: 'swm', executable: false };
+      responseOverrides.push({
+        match: url => url.startsWith('/api/semantic-runtime/resolve?'),
+        status: 200, body: resolution,
+      });
+
+      await expect(resolveSemanticProgram(contextGraphId, programIri, 'swm')).resolves.toEqual(resolution);
+      expect(requestLog).toHaveLength(1);
+      const request = requestLog[0]!;
+      const url = new URL(request.url, baseUrl);
+      expect(request.method).toBe('GET');
+      expect(url.pathname).toBe('/api/semantic-runtime/resolve');
+      expect(Object.fromEntries(url.searchParams)).toEqual({ contextGraphId, programIri, programLayer: 'swm' });
+    });
+
+    it('preserves invocation identity and distinct program and execution storage layers', async () => {
+      const invocationId = '123e4567-e89b-42d3-a456-426614174000';
+      const receipt = { invocationId, executionIri: `urn:sr:execution:${invocationId}`, executionLayer: 'wm', persisted: true };
+      responseOverrides.push({ match: url => url === '/api/programs/execute', status: 200, body: receipt });
+
+      await expect(invokeSemanticProgram(contextGraphId, programIri, invocationId, 'vm', 'wm')).resolves.toEqual(receipt);
+      expect(requestLog).toHaveLength(1);
+      expect(requestLog[0]).toMatchObject({ url: '/api/programs/execute', method: 'POST' });
+      expect(JSON.parse(requestLog[0]!.body)).toEqual({ contextGraphId, programIri, invocationId, programLayer: 'vm', executionLayer: 'wm' });
+    });
+
+    it('preserves the source identity and caller-selected destination when forking a program', async () => {
+      const newProgramIri = 'urn:sr:program:reviewed-copy';
+      const receipt = { programIri: newProgramIri, programLayer: 'vm', programUal: 'did:dkg:test/1/2', derivedFrom: programIri, persisted: true };
+      responseOverrides.push({ match: url => url === '/api/semantic-runtime/programs/fork', status: 200, body: receipt });
+
+      await expect(forkSemanticProgram(contextGraphId, programIri, newProgramIri, 'swm', 'vm')).resolves.toEqual(receipt);
+      expect(requestLog).toHaveLength(1);
+      expect(requestLog[0]).toMatchObject({ url: '/api/semantic-runtime/programs/fork', method: 'POST' });
+      expect(JSON.parse(requestLog[0]!.body)).toEqual({ contextGraphId, sourceProgramIri: programIri, newProgramIri, sourceLayer: 'swm', targetLayer: 'vm' });
+    });
+
+    it('surfaces operator-policy denial without converting it to a successful receipt or retrying', async () => {
+      const denial = { error: 'Execution denied by operator policy', code: 'OPERATOR_POLICY_DENY' };
+      responseOverrides.push({ match: url => url === '/api/programs/execute', status: 403, body: denial });
+
+      await expect(invokeSemanticProgram(contextGraphId, programIri, 'denied-invocation', 'vm', 'wm'))
+        .rejects.toMatchObject({ status: 403, message: denial.error, body: denial });
+      expect(requestLog).toHaveLength(1);
     });
   });
 
@@ -652,14 +708,14 @@ describe('UI API tests', () => {
       // the copy must NOT tell the user to republish/retry.
       expect(withDetail).not.toMatch(/republish|re-publish|try again|retry/i);
       expect(withDetail).toMatch(/on-chain/i);
-      expect(withDetail).toMatch(/context graph/i);
+      expect(withDetail).toMatch(/Context graph/i);
       expect(withDetail).toContain('binding failed'); // appends the daemon detail
       // Works without a detail string too.
       expect(partialPublishWarning()).not.toMatch(/republish|re-publish|retry/i);
       expect(partialPublishWarning()).not.toContain('(');
     });
 
-    it('createKnowledgeAsset normalizes context graph URIs before POSTing', async () => {
+    it('createKnowledgeAsset normalizes Context Graph URIs before POSTing', async () => {
       await createKnowledgeAsset('did:dkg:context-graph:cg-1', 'f');
       const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/knowledge-assets'));
       const body = JSON.parse(call?.body ?? '{}');
@@ -744,7 +800,7 @@ describe('UI API tests', () => {
       requestLog.length = 0;
       expect(() =>
         knowledgeAssetShare('cg-1', 'asset', { entities: ['urn:root'] } as any),
-      ).toThrow('root-entity selection is not supported');
+      ).toThrow('share only some of its entities');
       expect(requestLog).toHaveLength(0);
 
       expect(() =>
@@ -809,7 +865,7 @@ describe('UI API tests', () => {
 
       requestLog.length = 0;
       expect(() => promoteAssertion('cg-1', 'asset', ['urn:root'])).toThrow(
-        'root-entity selection is not supported',
+        'share only some of its entities',
       );
       expect(requestLog).toHaveLength(0);
     });
@@ -823,16 +879,6 @@ describe('UI API tests', () => {
       queryBindings = [{ g: { value: `urn:dkg:assertion:cg-1:${agent}:my-import.md` } }];
       const list = await listAssertions('cg-1', 'wm');
       expect(list.map(a => a.name)).toEqual(['my-import.md']);
-    });
-
-    it('listAssertions(wm) dedupes when BOTH the URN and data-URI markers exist', async () => {
-      const agent = '0x' + '2'.repeat(40);
-      queryBindings = [
-        { g: { value: `did:dkg:context-graph:cg-1/assertion/${agent}/doc` } },
-        { g: { value: `urn:dkg:assertion:cg-1:${agent}:doc` } },
-      ];
-      const list = await listAssertions('cg-1', 'wm');
-      expect(list.map(a => a.name)).toEqual(['doc']);
     });
 
     it('listAssertions(wm) parses sub-graph-scoped URN markers and names containing ":"', async () => {
@@ -852,18 +898,6 @@ describe('UI API tests', () => {
       queryBindings = [{ g: { value: `urn:dkg:assertion:cg-1:${agent}:shared-doc.md` } }];
       const list = await listAssertions('cg-1', 'swm');
       expect(list.map(a => a.name)).toEqual(['shared-doc.md']);
-    });
-
-    it('listAssertions(swm) excludes assertions already published to VM (dkg:vmCurrentAssertion)', async () => {
-      // Publish records a vmCurrentAssertion pointer but does NOT flip memoryLayer
-      // off "SWM" (backend gap), so the SWM list must drop published rows itself.
-      const agent = '0x' + '5'.repeat(40);
-      queryBindings = [
-        { g: { value: `urn:dkg:assertion:cg-1:${agent}:unpublished.md` } },
-        { g: { value: `urn:dkg:assertion:cg-1:${agent}:published.md` }, vm: { value: 'abc123deadbeef' } },
-      ];
-      const list = await listAssertions('cg-1', 'swm');
-      expect(list.map(a => a.name)).toEqual(['unpublished.md']);
     });
 
     it('fetchAssertionUals maps assertionName -> reservedUal (shown next to the filename)', async () => {

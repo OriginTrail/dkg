@@ -128,7 +128,7 @@ function createContext(
     apiPortRef: { value: 0 },
     url,
     path: url.pathname,
-    authentication: requestAuthentication({ kind: 'anonymous' }),
+    authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
     requestAgentAddress: '0x0',
   };
 }

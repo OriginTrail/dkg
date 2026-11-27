@@ -1090,3 +1090,106 @@ describe('createSwmAckQuorum: snapshot immutability + ordering', () => {
     });
   });
 });
+
+// A direct member is a recipient with no gossip path (a follower of a public
+// graph that is reached through a relay). The members a quorum leaves out get
+// the share by gossip; a direct member would get it from nobody.
+describe('createSwmAckQuorum: direct members', () => {
+  const SUBSCRIBERS = ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9'];
+
+  function tracked(now: { t: number }, directMembers: string[] = ['follower']) {
+    const topUp = makeTopUp();
+    const completed: string[] = [];
+    const q = makeQuorum({
+      now: () => now.t,
+      topUp: topUp.fn,
+      observers: { onQuorumCompleted: (e) => completed.push(e.shareOperationId) },
+    });
+    q.track({
+      shareOperationId: 'op-direct',
+      cgId: 'cg-1',
+      expectedMembers: [...SUBSCRIBERS, ...directMembers],
+      directMembers,
+      payload: PAYLOAD,
+      enumerationSource: 'topic-subscribers',
+      watchdogMs: 1_000,
+      deadlineHardMs: 60_000,
+    });
+    return { q, topUp, completed };
+  }
+
+  it('keeps the record while a direct member has not acknowledged, although the quorum has', () => {
+    const now = { t: 0 };
+    const { q, completed } = tracked(now);
+    for (const peer of SUBSCRIBERS) q.onAck('op-direct', peer);
+    // 9 of 10 is the quorum, and the one missing is the direct member.
+    expect(q.inspect('op-direct')).toMatchObject({ ackPct: 0.9, directMembers: ['follower'] });
+    expect(completed).toEqual([]);
+  });
+
+  it('sends again to the pending direct member only, once the quorum is reached', () => {
+    const now = { t: 0 };
+    const { q, topUp } = tracked(now);
+    for (const peer of SUBSCRIBERS.slice(0, 8)) q.onAck('op-direct', peer);
+    now.t = 1_000;
+    q.tick();
+    // Below the quorum every missing member is sent to, as before.
+    expect(topUp.calls.at(-1)?.missingPeers).toEqual(['s9', 'follower']);
+    q.onAck('op-direct', 's9');
+    q.rearmWatchdog('op-direct');
+    now.t = 2_000;
+    q.tick();
+    expect(topUp.calls.at(-1)?.missingPeers).toEqual(['follower']);
+  });
+
+  it('completes when the direct member acknowledges', () => {
+    const now = { t: 0 };
+    const { q, completed } = tracked(now);
+    for (const peer of SUBSCRIBERS) q.onAck('op-direct', peer);
+    q.onAck('op-direct', 'follower');
+    expect(completed).toEqual(['op-direct']);
+    expect(q.inspect('op-direct')).toBeUndefined();
+  });
+
+  it('completes when the pending direct member is dropped', () => {
+    const now = { t: 0 };
+    const { q, completed } = tracked(now);
+    for (const peer of SUBSCRIBERS) q.onAck('op-direct', peer);
+    q.dropPeer('op-direct', 'follower');
+    expect(completed).toEqual(['op-direct']);
+  });
+
+  it('still ends at the hard deadline with a direct member pending', () => {
+    const now = { t: 0 };
+    const { q, completed } = tracked(now);
+    for (const peer of SUBSCRIBERS) q.onAck('op-direct', peer);
+    now.t = 60_000;
+    q.tick();
+    expect(q.inspect('op-direct')).toBeUndefined();
+    expect(completed).toEqual([]);
+  });
+
+  it('completes at the quorum as before when the share has no direct member', () => {
+    const now = { t: 0 };
+    const { q, completed } = tracked(now, []);
+    for (const peer of SUBSCRIBERS.slice(0, 8)) q.onAck('op-direct', peer);
+    expect(completed).toEqual([]);
+    q.onAck('op-direct', 's9');
+    expect(completed).toEqual(['op-direct']);
+  });
+
+  it('ignores a direct member that is not an expected member', () => {
+    const q = makeQuorum();
+    q.track({
+      shareOperationId: 'op-stray',
+      cgId: 'cg-1',
+      expectedMembers: ['s1'],
+      directMembers: ['stranger'],
+      payload: PAYLOAD,
+      enumerationSource: 'topic-subscribers',
+    });
+    expect(q.inspect('op-stray')).not.toHaveProperty('directMembers');
+    q.onAck('op-stray', 's1');
+    expect(q.inspect('op-stray')).toBeUndefined();
+  });
+});

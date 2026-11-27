@@ -42,9 +42,15 @@ import {
 } from '../prime-agent.js';
 import {
   pipeDurableLocalAgentTurnSseStream,
+  writeLocalAgentSseHead,
   type DurableLocalAgentTurn,
 } from '../local-agent-sse.js';
+import {
+  isUndiciResponseTimeoutError,
+  localAgentChannelFetchInit,
+} from '../local-agent-channel-fetch.js';
 import { persistDurableChatTurn } from '../chat-turn-persistence.js';
+import { durableChatTurnResponseBody } from './durable-chat-turn-response.js';
 
 type PrimeAgentPersistRouteResult = {
   statusCode: number;
@@ -124,6 +130,7 @@ function isPrimeAgentTimeoutError(err: unknown): boolean {
   return (
     e?.name === 'TimeoutError'
     || e?.cause?.name === 'TimeoutError'
+    || isUndiciResponseTimeoutError(err)
     || /timeout/i.test(String(e?.message ?? err ?? ''))
   );
 }
@@ -214,16 +221,7 @@ async function persistPrimeAgentTurn(
         toolCalls: payload.toolCalls,
       },
     });
-    return {
-      statusCode: 200,
-      body: {
-        ok: true,
-        ...(outcome.kind === 'duplicate' ? { duplicate: true } : {}),
-        ...(outcome.kind === 'transitioned' ? { transitioned: true } : {}),
-        turnId,
-        sessionId,
-      },
-    };
+    return { statusCode: 200, body: { ...durableChatTurnResponseBody(outcome), sessionId } };
   } catch (err: any) {
     return { statusCode: 500, body: { error: err.message } };
   }
@@ -295,7 +293,7 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
         // Backstop only: the bridge's activity-based idle timeout is the
         // authority on turn liveness (and preserves partial output in its 504);
         // this abort exists to reap a transport that hung without answering.
-        signal: AbortSignal.timeout(PRIME_AGENT_CHANNEL_HARD_TIMEOUT_MS),
+        ...localAgentChannelFetchInit(PRIME_AGENT_CHANNEL_HARD_TIMEOUT_MS),
       });
       const text = await forwardRes.text();
       if (!forwardRes.ok) {
@@ -412,7 +410,7 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
         body: JSON.stringify(buildPrimeAgentChannelBody(payload, target, requestAgentAddress)),
         // Backstop only — see the /send fetch above. An abort at the bridge's
         // own window would kill actively-streaming long turns mid-flight.
-        signal: AbortSignal.timeout(PRIME_AGENT_CHANNEL_HARD_TIMEOUT_MS),
+        ...localAgentChannelFetchInit(PRIME_AGENT_CHANNEL_HARD_TIMEOUT_MS),
       });
 
       if (!transportRes.ok || !transportRes.body) {
@@ -430,19 +428,9 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
       // Declare SSE before the first byte. Without this the browser sees an
       // untyped body, EventSource-style parsing does not engage, and the client
       // fails with "The string did not match the expected pattern" instead of
-      // reading frames.
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream; charset=utf-8',
-        'Cache-Control': 'no-cache, no-transform',
-        Connection: 'keep-alive',
-        // The keepalive comments the bridge now emits only defeat proxy idle
-        // timeouts if they are FLUSHED to the client. Cache-Control does not
-        // govern proxy buffering; this header disables it on nginx-family
-        // fronts, whose default proxy_buffering would otherwise hold small
-        // comment frames in a buffer while the client sees a silent stream.
-        'X-Accel-Buffering': 'no',
-        ...corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)),
-      });
+      // reading frames. The bridge sends its own keepalive comments, which the
+      // pump below forwards.
+      writeLocalAgentSseHead(res, corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)));
 
       await pipeDurableLocalAgentTurnSseStream(
         req,

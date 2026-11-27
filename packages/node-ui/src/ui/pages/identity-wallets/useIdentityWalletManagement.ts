@@ -230,11 +230,18 @@ function useIdentityWalletMutations({
       dispatch({ type: 'failed', message: 'This node does not have an on-chain identity profile.' });
       return;
     }
+    if (!bootstrap) {
+      dispatch({
+        type: 'failed',
+        message: 'This version of the node can’t manage identity wallets. Upgrade the node and reload the page.',
+      });
+      return;
+    }
     dispatch({ type: 'signing', action, address });
     try {
       const result = await dispatchIdentityWalletAction(
         {
-          bootstrap: bootstrap ?? undefined,
+          bootstrap,
           onProgress: (event) => {
             if (event.state === 'submitted' && event.txHash) {
               dispatch({ type: 'submitted', action, address, txHash: event.txHash });

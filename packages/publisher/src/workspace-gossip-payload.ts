@@ -14,6 +14,44 @@ export interface EncodedWorkspaceGossipPayload {
         readonly kind: 'captured';
         readonly snapshot: WorkspaceAgentRecipientFanoutSnapshot;
       };
+  /**
+   * The network form of `message` (its signed gossip envelope) when the write
+   * prepared it before committing: fan-out sends these bytes as they are.
+   */
+  readonly envelope?: Uint8Array;
+}
+
+/**
+ * Prepares the network form of a share's gossip message before the write
+ * commits, for example by signing its envelope, and returns only those bytes.
+ * The publisher calls it once the message is built and size-checked, before
+ * the curator confirmation and before anything is stored, so a rejection
+ * aborts the write with nothing stored. The publisher attaches the bytes to
+ * the payload it built ({@link withWorkspaceGossipEnvelope}); that one payload
+ * goes to the confirmation and into the write result.
+ */
+export type PrepareWorkspaceGossip = (message: Uint8Array) => Promise<Uint8Array>;
+
+/**
+ * The strict curator-ack gate (OT-RFC-49 curator-leader) of a shared-memory
+ * write, share or promote alike: called once the write's gossip payload is
+ * built, with the envelope the write prepared for it if any, and BEFORE anything
+ * is stored. `message` is always `payload.message`, passed first so callbacks
+ * that take only those bytes keep working. `applied: false` aborts the write
+ * with nothing stored: `CuratorRejectedError` when `rejected: true`, otherwise
+ * `CuratorUnconfirmedError`.
+ */
+export type ConfirmWorkspaceGossipBeforeCommit = (
+  message: Uint8Array,
+  payload: EncodedWorkspaceGossipPayload,
+) => Promise<{ applied: boolean; rejected?: boolean }>;
+
+/** `payload` with the envelope prepared for its message; its message and fan-out provenance are kept. */
+export function withWorkspaceGossipEnvelope(
+  payload: EncodedWorkspaceGossipPayload,
+  envelope: Uint8Array,
+): EncodedWorkspaceGossipPayload {
+  return Object.freeze({ message: payload.message, fanout: payload.fanout, envelope });
 }
 
 export function createResolveCurrentWorkspaceGossipPayload(
@@ -52,6 +90,16 @@ export function createCapturedWorkspaceGossipPayload(
 export function parseEncodedWorkspaceGossipPayload(
   value: unknown,
 ): EncodedWorkspaceGossipPayload {
+  const payload = parseFanoutPayload(value);
+  const envelope = (value as Record<string, unknown>)['envelope'];
+  if (envelope === undefined) return payload;
+  if (!(envelope instanceof Uint8Array)) {
+    throw new TypeError('publishWorkspaceGossip requires a prepared envelope to be bytes');
+  }
+  return withWorkspaceGossipEnvelope(payload, envelope);
+}
+
+function parseFanoutPayload(value: unknown): EncodedWorkspaceGossipPayload {
   if (typeof value !== 'object' || value === null) {
     throw new TypeError('publishWorkspaceGossip requires encoded bytes with fan-out provenance');
   }

@@ -337,7 +337,7 @@ program
 
 program
   .command('subscribe <context-graph>')
-  .description('Subscribe to a context graph\'s GossipSub topic')
+  .description('Subscribe to a context graph by id, name hash or on-chain id (e.g. 32, or quoted \'#32\')')
   .option('--save', 'Also save to config so it auto-subscribes on restart')
   .option('--repair', 'Reconcile the graph even when existing readiness says it is complete')
   .action(async (contextGraph: string, opts: ActionOpts) => {
@@ -347,7 +347,16 @@ program
         syncMode: opts.save ? 'always-on' : 'on-demand',
         forceCatchup: opts.repair === true,
       });
-      console.log(`Subscribed to context graph: ${contextGraph}`);
+      // The daemon may have resolved an on-chain id to the graph it names, or
+      // an on-chain name hash to its verified cleartext id; the subscription
+      // then lives under that id, which is also the one to save.
+      const onChainReference = result.onChainReference;
+      const subscribedId = (onChainReference || result.identity?.state === 'resolved') && result.subscribed
+        ? result.subscribed
+        : contextGraph;
+      console.log(`Subscribed to context graph: ${subscribedId}`);
+      if (onChainReference) console.log(`Note: ${onChainReference.message}`);
+      if (result.identity) console.log(`Note: ${result.identity.message}`);
       console.log(
         result.syncMode === 'always-on'
           ? 'Synchronization mode: always on (restored after restart).'
@@ -369,11 +378,27 @@ program
       if (opts.save) {
         const config = await loadConfig();
         const cgs = new Set(resolveContextGraphs(config));
-        cgs.add(contextGraph);
-        config.contextGraphs = [...cgs];
+        // Save a stable identity (the verified cleartext id, or the name hash
+        // the daemon re-resolves at start), never the on-chain number. Only
+        // the entry spelled exactly as just typed is replaced: another
+        // spelling of the number may name a different graph, so it stays.
+        if (onChainReference) {
+          if (subscribedId !== contextGraph && cgs.delete(contextGraph)) {
+            console.log(`Replaced "${contextGraph}" in config.contextGraphs with ${subscribedId}.`);
+          }
+          const onChainId = onChainReference.onChainId;
+          for (const spelling of [onChainId, `#${onChainId}`]) {
+            if (spelling === contextGraph || !cgs.has(spelling)) continue;
+            console.log(
+              `Note: config.contextGraphs also lists "${spelling}"; if it was saved for on-chain `
+              + `Context Graph #${onChainId}, you can remove it.`,
+            );
+          }
+        }
+        cgs.add(subscribedId);
         config.contextGraphs = [...cgs];
         await saveConfig(config);
-        console.log('Saved to config (will auto-subscribe on restart).');
+        console.log(`Saved ${subscribedId} to config (will auto-subscribe on restart).`);
       }
     } catch (err) {
       console.error(toErrorMessage(err));

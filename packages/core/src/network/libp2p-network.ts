@@ -18,9 +18,10 @@ import type {
   Address,
   DialOpts,
   PeerConnectOpts,
+  PeerRecoveryStageOpts,
   ProtocolHandler,
 } from './network.js';
-import { connectLibp2pPeer } from './libp2p-peer-connect.js';
+import { connectLibp2pPeer, tryConnectLibp2pRecoveryStage } from './libp2p-peer-connect.js';
 import type { DKGNode } from '../node.js';
 
 const DEFAULT_DIAL_TIMEOUT_MS = 10_000;
@@ -89,6 +90,10 @@ export class LibP2PNetwork implements PeerConnectionNetwork {
       ...opts,
       configuredRelayTargets: this.node.getConfiguredRelayTargets(),
     });
+  }
+
+  async tryConnectRecoveryStage(peerId: NodeIdentity, stage: PeerRecoveryStageOpts): Promise<boolean> {
+    return tryConnectLibp2pRecoveryStage(this.node.libp2p, peerId, stage);
   }
 
   async handle(protocolId: string, handler: ProtocolHandler): Promise<void> {

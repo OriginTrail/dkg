@@ -18,6 +18,9 @@ export function durableMetaDelegationSubjectAdmissionExpression(
 ): string {
   const cgEntity = assertSafeIri(contextGraphDataGraphUri(contextGraphId));
   const subjectPrefix = `did:dkg:agent-delegation:${contextGraphId}:`;
+  // Bind the delegation again in the MINUS right-hand side: Blazegraph does
+  // not correlate its nested FILTER NOT EXISTS like Oxigraph does. Both
+  // operands now bind the subject and agent themselves, in this same graph.
   return `(
     STRSTARTS(STR(?s), ${sparqlString(subjectPrefix)})
     && EXISTS {
@@ -25,7 +28,8 @@ export function durableMetaDelegationSubjectAdmissionExpression(
         ?s <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}> ?delegatedAgent .
         <${cgEntity}> (<${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}>|<${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}>) ?memberAgent .
         FILTER(LCASE(STR(?delegatedAgent)) = LCASE(STR(?memberAgent)))
-        FILTER NOT EXISTS {
+        MINUS {
+          ?s <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}> ?delegatedAgent .
           <${cgEntity}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?revokedAgent .
           FILTER(LCASE(STR(?delegatedAgent)) = LCASE(STR(?revokedAgent)))
         }

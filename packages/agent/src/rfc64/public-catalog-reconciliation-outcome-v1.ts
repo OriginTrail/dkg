@@ -30,7 +30,9 @@ export type Rfc64PublicCatalogReceiverCompletionOutcomeV1 =
   | Rfc64CatalogReconciliationFailureOutcomeV1;
 
 export type Rfc64CatalogReconciliationTerminalReasonV1 =
-  | 'no-authorized-provider';
+  | 'no-authorized-provider'
+  /** GH#3134: the graph has more assets on chain than this node's pinned-snapshot scan reads. */
+  | 'chain-inventory-limit';
 
 interface Rfc64PublicCatalogReceiverCompletionBaseV1 {
   readonly providerAttempts: number;

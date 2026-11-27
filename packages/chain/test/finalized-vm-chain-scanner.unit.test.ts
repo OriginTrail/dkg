@@ -15,6 +15,7 @@ import {
 } from '../src/finalized-vm-chain-inventory.js';
 import {
   FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
+  FinalizedVmChainInventoryLimitErrorV1,
   createFinalizedVmChainScannerV1,
   scanFinalizedVmChainInventoryInSnapshotV1,
 } from '../src/finalized-vm-chain-scanner.js';
@@ -316,10 +317,16 @@ describe('RFC-64 finalized VM chain scanner', () => {
       ];
     })));
 
-    await expect(scanner({
+    const refusal = scanner({
       contextGraphId: CG_ID,
       signal: new AbortController().signal,
-    })).rejects.toMatchObject({ code: 'resource-limit' });
+    });
+    await expect(refusal).rejects.toMatchObject({ code: 'resource-limit' });
+    // GH#3134: its own class, which no other resource limit of a snapshot uses.
+    await expect(refusal).rejects.toBeInstanceOf(FinalizedVmChainInventoryLimitErrorV1);
+    await expect(refusal).rejects.toThrow(
+      `above the v1 pinned-scan limit ${FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1}, for on-chain context graph ${CG_ID}`,
+    );
     expect(batches).toBe(1);
   });
 

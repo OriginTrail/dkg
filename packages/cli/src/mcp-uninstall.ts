@@ -44,7 +44,7 @@ export async function mcpUninstallAction(
   const log = deps.log ?? console.log;
   // Validate against the stable catalog before consulting machine state.
   const selector = opts.client !== undefined ? parseMcpClientSelector(opts.client) : undefined;
-  const clients = (deps.detectClients ?? detectClients)();
+  const clients = (deps.detectClients ?? detectClients)({ selection: 'all' });
   const selected = selectMcpClientTargets(clients, selector);
 
   const planned: McpConfigSelection[] = [];

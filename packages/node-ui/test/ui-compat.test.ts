@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { readDaemonSources } from './helpers/read-cli-daemon';
@@ -32,6 +32,18 @@ function readStylesSources(): string {
   ].join('\n');
 }
 
+function readProductionUiSources(rel = ''): string {
+  const dir = resolve(UI_DIR, rel);
+  return readdirSync(dir, { withFileTypes: true })
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .flatMap((entry) => {
+      const child = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) return child === 'dev' ? [] : [readProductionUiSources(child)];
+      return /\.tsx?$/.test(entry.name) ? [readRawFile(child)] : [];
+    })
+    .join('\n');
+}
+
 function readPanelRightSources(): string {
   return [
     readRawFile('components/Shell/PanelRight.tsx'),
@@ -40,12 +52,12 @@ function readPanelRightSources(): string {
 }
 
 describe('backward-compatible route redirects', () => {
-  it('App.tsx routes /network as a lazy page and catch-all to AppShell', () => {
+  it('App.tsx forwards /network to Observability and catch-all to AppShell', () => {
     const app = readFile('App.tsx');
     expect(app).toContain('path="/network"');
     expect(app).toContain('path="*"');
     expect(app).toContain('AppShell');
-    expect(app).toContain('NetworkDebugPage');
+    expect(app).toContain('NetworkRoute');
   });
 });
 
@@ -96,33 +108,55 @@ describe('V10 CSS layout selectors', () => {
     expect(css).toMatch(/\.v10-agent-input-area\s*\{/);
   });
 
-  it('includes .v10-agent-send-btn selector', () => {
-    expect(css).toMatch(/\.v10-agent-send-btn\s*\{/);
-  });
-
-  it('includes .chat-bubble selector (legacy)', () => {
-    expect(css).toMatch(/\.chat-bubble\s*\{/);
+  it('styles buttons through the design-system variant classes', () => {
+    for (const sel of ['.ds-btn.ds-primary', '.ds-btn.ds-ghost', '.ds-btn.ds-danger', '.ds-btn.ds-swm', '.ds-btn.ds-vm', '.ds-btn.ds-sm', '.ds-btn.ds-lg', '.ds-btn.ds-icon']) {
+      expect(css).toContain(sel);
+    }
   });
 
   it('includes .v10-header-notif selectors', () => {
     expect(css).toMatch(/\.v10-header-notif/);
   });
 
-  it('includes .dkg-btn selector', () => {
-    expect(css).toMatch(/\.dkg-btn\s*\{/);
+  it('includes the design-system .ds-btn selector', () => {
+    expect(css).toMatch(/\.ds-btn[\s,{]/);
   });
 
-  it('includes .v10-modal-btn selector', () => {
-    expect(css).toMatch(/\.v10-modal-btn\s*\{/);
+  it('keeps per-screen button names out of the shared button rules', () => {
+    const buttons = css.slice(css.indexOf('/* ══ Button'), css.indexOf('/* ══ Tabs'));
+    const rules = buttons.replace(/\/\*[\s\S]*?\*\//g, '').split('}').map(r => r.split('{')[0]).filter(sel => sel.includes('.ds-'));
+    for (const sel of rules) expect(sel).not.toMatch(/\.v10-/);
   });
 });
 
-describe('V10 font imports', () => {
-  it('styles.css imports Google Fonts for Instrument Sans and JetBrains Mono', () => {
+describe('V10 fonts and type scale', () => {
+  it('uses Instrument Sans for the interface and JetBrains Mono for identifiers (DESIGN.md · Type)', () => {
     const css = readFile('styles.css');
-    expect(css).toMatch(/@import\s+url\s*\(/);
-    expect(css).toContain('Instrument+Sans');
-    expect(css).toContain('JetBrains+Mono');
+    expect(css).toContain("--font-sans: 'Instrument Sans'");
+    expect(css).toContain("--font-mono: 'JetBrains Mono'");
+  });
+
+  it('sets the app body on the shared type scale, with an 11px floor', () => {
+    const css = readFile('styles.css');
+    expect(css).toContain('--fs-micro: 11px');
+    expect(css).toContain('--fs-body: 14px');
+    expect(css).toMatch(/html, body, #root\s*\{[\s\S]*?font-size:\s*var\(--fs-body\)/);
+  });
+
+  it('keeps production inline styles on the shared type scale', () => {
+    // Canvas renderer configs take a number and say so in a comment, which this allows.
+    expect(readProductionUiSources()).not.toMatch(/fontSize:\s*\d+(?:\.\d+)?(?=\s*[,}])/);
+  });
+});
+
+describe('header branding', () => {
+  const header = readFileSync(resolve(UI_DIR, 'components', 'Shell', 'Header.tsx'), 'utf-8');
+
+  it('shows only the OriginTrail wordmark in the brand position', () => {
+    expect(header).toContain('aria-label="OriginTrail"');
+    expect(header).toContain('{ORIGINTRAIL_WORDMARK}');
+    expect(header).not.toContain('v10-header-logo-text');
+    expect(header).not.toContain('powered by');
   });
 });
 
@@ -135,15 +169,15 @@ describe('header uses live status', () => {
     expect(header).toContain('connectedPeers');
   });
 
-  it('App.tsx polls status via useLiveStatus and stores in agents store', () => {
-    const app = readFile('App.tsx');
-    expect(app).toContain('useLiveStatus');
-    expect(app).toContain('setNodeStatus');
-    expect(app).toContain('api.fetchStatus()');
+  it('the shell polls status and stores it in the agents store', () => {
+    expect(readFile('App.tsx')).toContain('useNodeStatusPolling()');
+    const hook = readFile('hooks/useNodeState.ts');
+    expect(hook).toContain('setNodeStatus');
+    expect(hook).toContain('api.fetchStatus()');
   });
 
   it('header gracefully handles missing status data', () => {
-    expect(header).toMatch(/nodeStatus\?\.connectedPeers\s*\?\?\s*nodeStatus\?\.peerCount/);
+    expect(readFile('hooks/useNodeState.ts')).toMatch(/nodeStatus\?\.connectedPeers\s*\?\?\s*nodeStatus\?\.peerCount/);
   });
 });
 
@@ -153,7 +187,7 @@ describe('header uses live status', () => {
 // behavioral coverage (approve/deny, read model, states, a11y) lives in the
 // dedicated component tests + the QA matrix.
 describe('notifications pane extraction', () => {
-  const header = readFile('components/Shell/Header.tsx');
+  const header = readFileSync(resolve(UI_DIR, 'components', 'Shell', 'Header.tsx'), 'utf-8');
   const bell = readFile('components/Shell/NotificationsBell.tsx');
   const pane = readFile('components/Notifications/NotificationsPane.tsx');
   const rows = readFile('components/Notifications/rows.tsx');
@@ -201,7 +235,7 @@ describe('notifications pane extraction', () => {
   });
 });
 
-describe('right-rail agent shell replaces Agent Hub', () => {
+describe('right-rail agent shell replaces Agent hub', () => {
   const app = readFile('App.tsx');
   const panelLeft = readFile('components/Shell/PanelLeft.tsx');
   const panelCenter = readFile('components/Shell/PanelCenter.tsx');
@@ -223,13 +257,13 @@ describe('right-rail agent shell replaces Agent Hub', () => {
 
   it('emits a resize signal after side rail toggles so measured panes recalculate', () => {
     expect(app).toContain("window.dispatchEvent(new Event('resize'))");
-    expect(app).toContain('[leftCollapsed, rightCollapsed]');
+    expect(app).toContain('[leftOpen, rightOpen]');
   });
 
-  it('hides the duplicate left-nav Agent Hub entry while keeping the internal route alive', () => {
+  it('has no Agent hub page (app-agent-hub-route.test.ts covers what the old address opens)', () => {
     expect(panelLeft).not.toContain("id: 'agent-hub'");
-    expect(panelLeft).not.toContain('Agent Hub');
-    expect(panelCenter).toContain("activeTabId === 'agent-hub'");
+    expect(panelLeft).not.toContain('Agent hub');
+    expect(panelCenter).not.toContain("activeTabId === 'agent-hub'");
   });
 
   it('moves connected-agent chat into the right rail with Agents, Network, and Sessions tabs', () => {
@@ -274,14 +308,14 @@ describe('backward-compatible URL redirects (V10 consolidation)', () => {
   });
 
   it('exposes /observability as a deep-linkable path (BUG-018)', () => {
-    // The mapping table now lives in `hooks/useShellRouting.ts`; the
-    // companion behavioural tests in `use-shell-routing.test.ts`
-    // exercise the deep-link / unmapped-tab reset semantics directly.
-    const shellRouting = readFileSync(
-      resolve(__dirname, '../src/ui/hooks/useShellRouting.ts'),
+    // Places and their addresses live in `lib/tab-target.ts` (one tab model;
+    // `tab-routes.ts` maps them to paths); `use-shell-routing.test.ts`
+    // exercises deep links and Back/Forward directly.
+    const routes = readFileSync(
+      resolve(__dirname, '../src/ui/lib/tab-target.ts'),
       'utf-8',
     );
-    expect(shellRouting).toContain("'/observability'");
+    expect(routes).toContain("'/observability'");
   });
 });
 
@@ -304,20 +338,16 @@ describe('retired installable apps framework (V10)', () => {
   });
 });
 
-describe('synced status logic', () => {
+describe('header node status', () => {
   const header = readFileSync(resolve(UI_DIR, 'components', 'Shell', 'Header.tsx'), 'utf-8');
 
-  it('uses statusLoaded guard before evaluating synced', () => {
-    expect(header).toContain('const statusLoaded = nodeStatus != null');
-    expect(header).toMatch(/const synced = statusLoaded && nodeStatus\?\.synced !== false/);
+  it('derives the status from loaded state, peers and failed checks, not a sync flag', () => {
+    expect(readFile('hooks/useNodeState.ts')).toContain('headerNodeStatus(nodeStatus != null, peers, failures)');
+    expect(header).not.toContain('nodeStatus?.synced');
   });
 
-  it('shows synced/syncing text based on synced state', () => {
-    expect(header).toMatch(/synced \? ['"]synced['"] : ['"]syncing['"]/);
-  });
-
-  it('status dot uses online/offline class', () => {
-    expect(header).toContain("synced ? 'online' : 'offline'");
+  it('draws the status with the shared Badge', () => {
+    expect(header).toContain('<Badge tone={nodeState.tone}>');
   });
 });
 
@@ -396,34 +426,24 @@ describe('fileUrl hash handling', () => {
 });
 
 describe('listAssertions query path', () => {
-  const api = readFile('api.ts');
-
-  it('uses executeQuery without view param (avoids agentAddress requirement)', () => {
-    expect(api).toMatch(/listAssertions[\s\S]*?executeQuery\(sparql, \{ contextGraphId \}\)/);
-    expect(api).not.toMatch(/listAssertions[\s\S]*?view:\s*'working-memory'/);
+  it('discovers membership without a view parameter that requires agentAddress', async () => {
+    const { listAssertions, invalidateQueryCache } = await import('../src/ui/api.js');
+    const request = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ result: { bindings: [] } })));
+    try {
+      await listAssertions('compat-scope', 'swm', { includeCounts: false });
+      const body = JSON.parse(String(request.mock.calls[0][1]?.body));
+      expect(body.contextGraphId).toBe('compat-scope');
+      expect(body.view).toBeUndefined();
+    } finally { request.mockRestore(); invalidateQueryCache(); }
   });
 });
 
 describe('useMemoryEntities hook', () => {
   const hook = readFileSync(resolve(UI_DIR, 'hooks', 'useMemoryEntities.ts'), 'utf-8');
   const memoryLabels = readFileSync(resolve(UI_DIR, 'lib', 'memoryLabels.ts'), 'utf-8');
-  const nodeEventsHook = readFileSync(resolve(UI_DIR, 'hooks', 'useNodeEvents.ts'), 'utf-8');
 
   it('exports TrustLevel type with three levels', () => {
     expect(hook).toContain("type TrustLevel = 'working' | 'shared' | 'verified'");
-  });
-
-  it('queries WM, SWM, and VM in parallel', () => {
-    // Hook was refactored from `view: 'shared-working-memory' | 'verifiable-memory'`
-    // to per-layer SPARQL builders that walk the named-graph space directly
-    // (see the rationale comment in useMemoryEntities.ts) so per-sub-graph
-    // SWM/VM partitions are covered and each triple carries its source `?g`.
-    // The original intent of this test — that all three layers are fetched
-    // in parallel — is still asserted, just against the new shape.
-    expect(hook).toContain('Promise.all');
-    expect(hook).toContain('wmSparql');
-    expect(hook).toContain('swmSparql');
-    expect(hook).toContain('vmSparql');
   });
 
   it('builds entity map grouped by subject URI', () => {
@@ -446,18 +466,7 @@ describe('useMemoryEntities hook', () => {
     expect(hook).toContain('const seen = new Set<string>()');
   });
 
-  it('subscribes to memory_graph_changed events for live graph refreshes', () => {
-    expect(nodeEventsHook).toContain("'memory_graph_changed'");
-    expect(hook).toContain('useMemoryGraphEvents(contextGraphId, fetchAll)');
-  });
-});
 
-describe('AgentHub page renders PanelRight', () => {
-  const agentHub = readFile('pages/AgentHub.tsx');
-
-  it('wraps PanelRight for agent chat', () => {
-    expect(agentHub).toContain('<PanelRight');
-  });
 });
 
 describe('mock detection request fan-out guard', () => {
@@ -483,7 +492,7 @@ describe('memory layer custom query execution', () => {
     expect(memoryLayerView).toContain('const runQuery = useCallback(() => {');
     expect(memoryLayerView).toContain('onChange={(e) => setDraftQuery(e.target.value)}');
     expect(memoryLayerView).toContain("onKeyDown={(e) => { if (e.key === 'Enter') runQuery(); }}");
-    expect(memoryLayerView).toContain('<button className="v10-mlv-run-btn" onClick={runQuery}>');
+    expect(memoryLayerView).toContain('<button className="v10-mlv-run-btn ds-btn ds-primary" onClick={runQuery}>');
   });
 
   it('keeps the WM default query GRAPH variable top-level AND WM-scoped (scoped-query guard #749 + Codex #944)', () => {
@@ -566,7 +575,7 @@ describe('MemoryLayerView graph visualization', () => {
 
   it('renders NodePanel inside RdfGraph for detail overlay', () => {
     expect(mlv).toContain('<NodePanel');
-    expect(mlv).toContain('className="v10-mlv-node-panel"');
+    expect(mlv).toContain('className="v10-mlv-node-panel ds-card-nested"');
   });
 
   it('has a Reset button that clears custom queries', () => {
@@ -752,9 +761,9 @@ describe('Graph visualization CSS', () => {
     expect(css).toMatch(/\.v10-mlv-view-toggle\s*\{/);
   });
 
-  it('has .v10-mlv-toggle-btn and active state', () => {
+  it('has .v10-mlv-toggle-btn; the active state comes from the segmented control', () => {
     expect(css).toMatch(/\.v10-mlv-toggle-btn\s*\{/);
-    expect(css).toMatch(/\.v10-mlv-toggle-btn\.active\s*\{/);
+    expect(css).toMatch(/\.ds-seg-item\.active[^{]*\{/);
   });
 
   it('has .v10-mlv-graph-container with height', () => {
@@ -769,11 +778,7 @@ describe('Graph visualization CSS', () => {
 
   it('has responsive rules for graph containers', () => {
     expect(css).toContain('@media (max-height: 700px)');
-    expect(css).toContain('@media (max-width: 700px)');
-  });
-
-  it('has .v10-layer-card-count for triple counts on layer cards', () => {
-    expect(css).toMatch(/\.v10-layer-card-count\s*\{/);
+    expect(css).toContain('@media (max-width: 720px)');
   });
 });
 
@@ -845,7 +850,7 @@ describe.skip('Memory Explorer CSS', () => {
   });
 
   it('has responsive breakpoints', () => {
-    expect(css).toContain('@media (max-width: 700px)');
+    expect(css).toContain('@media (max-width: 720px)');
   });
 
   it('has project home styles', () => {

@@ -1,3 +1,4 @@
+import { agentFromPrivateKey } from '../src/agent-keystore.js';
 import { describe, it, expect, beforeAll, afterAll, vi, DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy, OxigraphStore, getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, contextGraphMetaUri, sparqlString, DKGQueryEngine, sha256, EVMChainAdapter, MockChainAdapter, createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS, mintTokens, ethers, tmpdir, mkdtemp, readFile, readdir, rm, join, fileURLToPath, _wrapAgentPublisherForSeal, CapturingContextGraphChainAdapter, AsyncSignerAddressContextGraphChainAdapter, SignerListContextGraphChainAdapter, PcaCuratedRegistrationChainAdapter, NonRegisteringACKChainAdapter, FlakyRegistrationACKChainAdapter, TransientIdentityFailureChainAdapter, BrandNewCoreTransientChainAdapter, PermanentProfileFailureChainAdapter, RetryPathPermanentFailureChainAdapter, ContextAuthorizedPublisherChainAdapter, buildSnapshotFactQuads, ReferenceEvaluator, loadYaml, CCL_FACT_NS, OperationalKeyOnlyPublishChainAdapter, ExternalOperationalKeyPublishChainAdapter, AddressOnlyExternalOperationalKeyPublishChainAdapter, AsyncAddressSignMessageAsPublishChainAdapter, GenericSignMessageExternalOperationalKeyPublishChainAdapter, MultiSignerGenericSignMessagePublishChainAdapter, SingleAddressMismatchedGenericSignMessagePublishChainAdapter, SingleSignerAdapterPublishChainAdapter, ReservingAuthorityContextGraphChainAdapter, type Quad, type ChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type OnChainPublishResult, type V10PublishDirectParams } from './agent.shared';
 
 
@@ -260,6 +261,7 @@ decisions: []
         accessPolicy: 1,
         callerAgentAddress: ownerAgent,
       });
+      await (agent as any).persistAgentToStore(agentFromPrivateKey(HARDHAT_KEYS.REC1_OP, 'allowed-member'));
       await agent.inviteAgentToContextGraph('register-agent-allowlist-policy', allowedAgent, ownerAgent);
       await agent.registerContextGraph('register-agent-allowlist-policy', { callerAgentAddress: ownerAgent });
 
@@ -317,6 +319,45 @@ decisions: []
       await agent.stop().catch(() => {});
     });
 
+
+    it('adds the calling agent as a participant agent when the chain signer is promoted to on-chain owner', async () => {
+      const chain = new AsyncSignerAddressContextGraphChainAdapter();
+      const agent = await DKGAgent.create({
+        name: 'EoaPromotionRosterBot',
+        store: new OxigraphStore(),
+        chainAdapter: chain,
+        nodeRole: 'core',
+      });
+      await agent.start();
+      const caller = new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address;
+
+      // Public with a curated publish policy: the caller is not allow-listed at
+      // create time, so the promotion is what makes it a participant.
+      await agent.createContextGraph({ id: 'eoa-promotion-roster', name: 'EOA promotion roster', callerAgentAddress: caller });
+      await expect(agent.registerContextGraph('eoa-promotion-roster', { callerAgentAddress: caller, publishPolicy: 0 }))
+        .resolves.toMatchObject({ onChainId: expect.any(String) });
+      expect(chain.createOnChainContextGraphCalls.at(-1)).toMatchObject({
+        accessPolicy: 0,
+        publishPolicy: 0,
+        publishAuthority: ethers.getAddress(chain.signerAddress),
+        participantAgents: [caller],
+      });
+      expect(await agent.getContextGraphParticipantAgentAddresses('eoa-promotion-roster')).toEqual([caller]);
+
+      // A graph that already lists as many participant agents as a registration may carry.
+      await agent.createContextGraph({ id: 'eoa-promotion-roster-cap', name: 'EOA promotion roster cap', callerAgentAddress: caller });
+      await agent.store.insert(Array.from({ length: 256 }, (_, i) => ({
+        subject: 'did:dkg:context-graph:eoa-promotion-roster-cap',
+        predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
+        object: `"0x${(i + 1).toString(16).padStart(40, '0')}"`,
+        graph: contextGraphMetaUri('eoa-promotion-roster-cap'),
+      })));
+      const calls = chain.createOnChainContextGraphCalls.length;
+      await expect(agent.registerContextGraph('eoa-promotion-roster-cap', { callerAgentAddress: caller, publishPolicy: 0 }))
+        .rejects.toThrow(/participantAgents cannot exceed 256 addresses after auto-adding the calling agent as a participant/);
+      expect(chain.createOnChainContextGraphCalls).toHaveLength(calls);
+      await agent.stop().catch(() => {});
+    });
 
     it('uses best-effort adapter publisher-address inference for curated CG registration', async () => {
       const chain = new SignerListContextGraphChainAdapter();

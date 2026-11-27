@@ -13,7 +13,7 @@
  * public surface and delegate here.
  */
 
-import { createOperationContext, PROTOCOL_MESSAGE, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { advertisesSyncProtocol, createOperationContext, PROTOCOL_MESSAGE } from '@origintrail-official/dkg-core';
 import type { DKGNode, Logger } from '@origintrail-official/dkg-core';
 import type { SharedMemoryHandler } from '@origintrail-official/dkg-publisher';
 import type { Messenger } from './p2p/messenger.js';
@@ -188,6 +188,7 @@ export async function getPeerDiagnostics(
       // `connection.limits` (presence ⇒ limited). Defensive cast
       // against future shape drift.
       limited: Boolean((c as unknown as { limits?: unknown }).limits),
+      allowance: readConnectionAllowance((c as unknown as { limits?: unknown }).limits),
       streams: c.streams?.length ?? 0,
       openedAt: c.timeline?.open ?? null,
     };
@@ -282,8 +283,9 @@ export async function getPeerDiagnostics(
   // after sync moved off the messenger substrate), so a node
   // advertising the current protocol is reported sync-capable. Hard
   // cutover — peers on the older `/sync` wire ID are no longer
-  // compatible and intentionally report syncCapable=false.
-  const syncCapable = protocols.includes(PROTOCOL_SYNC);
+  // compatible and intentionally report syncCapable=false. The pooled
+  // overlay id (`/dkg/10.0.3/sync`) counts too (#2822).
+  const syncCapable = advertisesSyncProtocol(protocols);
   const syncCapability: PeerDiagnostics['syncStatus']['capability'] = peerStoreSnapshot == null
     ? 'unknown'
     : syncCapable
@@ -328,8 +330,13 @@ export async function getPeerDiagnostics(
 }
 
 /**
- * Ping all known peers to check liveness. Updates the peerHealth map with
- * latency and last-seen timestamps. Returns the number of peers that responded.
+ * Update the peerHealth map for every connected peer from libp2p's
+ * connection monitor, which pings each connection on its own schedule,
+ * records the round trip on `connection.rtt` and aborts a connection whose
+ * ping fails. Pinging from here as well would collide with it: the ping
+ * protocol allows one outbound stream per connection, and the monitor
+ * aborts a connection whose ping stream is refused. Returns the number of
+ * peers with an open connection.
  */
 export async function pingPeers(
   deps: { node: DKGNode; peerHealth: Map<string, PeerHealth>; log: Logger },
@@ -338,45 +345,34 @@ export async function pingPeers(
   const peers = deps.node.libp2p.getPeers();
   if (peers.length === 0) return 0;
 
-  const PING_TIMEOUT_MS = 10_000;
   let alive = 0;
   const now = Date.now();
-
-  const results = await Promise.allSettled(
-    peers.map(async (peerId) => {
-      const id = peerId.toString();
-      const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), PING_TIMEOUT_MS);
-      try {
-        const latency = await deps.node.libp2p.services.ping.ping(peerId, { signal: ac.signal });
-        clearTimeout(timer);
-        deps.peerHealth.set(id, {
-          peerId: id,
-          alive: true,
-          latencyMs: latency,
-          lastSeen: now,
-          lastChecked: now,
-        });
-        return true;
-      } catch {
-        clearTimeout(timer);
-        const prev = deps.peerHealth.get(id);
-        deps.peerHealth.set(id, {
-          peerId: id,
-          alive: false,
-          latencyMs: null,
-          lastSeen: prev?.lastSeen ?? null,
-          lastChecked: now,
-        });
-        return false;
-      }
-    }),
-  );
-
-  for (const r of results) {
-    if (r.status === 'fulfilled' && r.value) alive++;
+  for (const peerId of peers) {
+    const id = peerId.toString();
+    const open = deps.node.libp2p.getConnections(peerId).filter((connection) => connection.status === 'open');
+    const rtts = open.map((connection) => connection.rtt).filter((rtt): rtt is number => typeof rtt === 'number' && Number.isFinite(rtt));
+    if (open.length > 0) {
+      alive++;
+      deps.peerHealth.set(id, { peerId: id, alive: true, latencyMs: rtts.length > 0 ? Math.min(...rtts) : null, lastSeen: now, lastChecked: now });
+    } else {
+      const prev = deps.peerHealth.get(id);
+      deps.peerHealth.set(id, { peerId: id, alive: false, latencyMs: null, lastSeen: prev?.lastSeen ?? null, lastChecked: now });
+    }
   }
 
   deps.log.info(ctx, `Peer health ping: ${alive}/${peers.length} peers alive`);
   return alive;
+}
+
+/**
+ * The remaining allowance of a relayed connection in a JSON-safe shape. libp2p
+ * reports the bytes as a bigint and leaves out a limit the relay did not set.
+ */
+function readConnectionAllowance(limits: unknown): PeerConnectionSnapshot['allowance'] {
+  if (limits === undefined || limits === null || typeof limits !== 'object') return null;
+  const { bytes, seconds } = limits as { bytes?: unknown; seconds?: unknown };
+  return {
+    bytes: typeof bytes === 'bigint' || (typeof bytes === 'number' && Number.isFinite(bytes)) ? String(bytes) : null,
+    seconds: typeof seconds === 'number' && Number.isFinite(seconds) ? seconds : null,
+  };
 }

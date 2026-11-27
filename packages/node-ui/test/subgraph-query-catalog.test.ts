@@ -132,12 +132,13 @@ describe('SubGraphDetailView query catalog execution', () => {
     await act(async () => openIncidents.dispatchEvent(new MouseEvent('click', { bubbles: true })));
     expect(apiMocks.executeQuery).toHaveBeenCalledWith(
       'SELECT ?entity WHERE { ?entity ?p ?o }',
-      { contextGraphId: 'cg-test', subGraphName: 'incidents', view: 'working-memory' },
+      { contextGraphId: 'cg-test', subGraphName: 'incidents', view: 'working-memory', includeContextGraphPartitions: true },
+      { timeoutMs: null, maxResponseBytes: null },
     );
 
     apiMocks.executeQuery.mockClear();
     const byId = buttons.find((button) => button.textContent?.includes('Incident by ID'))!;
-    expect(byId.title).toContain('Open Query Catalogue to enter parameters');
+    expect(byId.title).toContain('Open Query catalogue to enter parameters');
     await act(async () => byId.dispatchEvent(new MouseEvent('click', { bubbles: true })));
     expect(apiMocks.executeQuery).not.toHaveBeenCalled();
     expect(onOpenQueryCatalog).toHaveBeenCalledTimes(1);

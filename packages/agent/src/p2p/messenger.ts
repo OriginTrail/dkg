@@ -1,6 +1,8 @@
+import type { SendReliableOpts, RequestOwnedSendOpts } from './messenger-send-options.js';
+export type { SendReliableOpts, RequestOwnedSendOpts } from './messenger-send-options.js';
 import { randomUUID } from 'node:crypto';
 import {
-  encodeReliableEnvelope,
+  encodeReliableEnvelope, resolveWithinAbort,
   decodeReliableEnvelope,
   RELIABLE_ENVELOPE_VERSION,
   RESPONSE_GONE_MARKER,
@@ -110,7 +112,7 @@ const DHT_WALK_TRIGGER_ERRORS = [
   'all multiaddr dials failed',
 ];
 
-function shouldTriggerDhtWalk(errMsg: string): boolean {
+export function shouldTriggerDhtWalk(errMsg: string): boolean {
   const lower = errMsg.toLowerCase();
   return DHT_WALK_TRIGGER_ERRORS.some((needle) => lower.includes(needle));
 }
@@ -192,27 +194,6 @@ export interface MessengerDeps {
 
 /** Router options exposed by Messenger's legacy pass-through send. */
 export type SendOpts = Pick<SendOptions, 'timeoutMs' | 'payloadReuse' | 'signal'>;
-
-export interface SendReliableOpts {
-  /**
-   * Caller-supplied message id. Used by the receiver-side idempotency
-   * cache to dedupe duplicate deliveries and by the sender-side
-   * "did-I-already-deliver-this" cache. If omitted, the Messenger
-   * generates a UUID v4 — but callers that have their own correlation
-   * id (e.g. chat `messageId`, query `requestId`) should pass it so
-   * retries replayed across daemon restarts stay keyed consistently.
-   */
-  messageId?: string;
-  timeoutMs?: number;
-  /**
-   * Max age (ms) before an outbox entry for this `(peer, protocol,
-   * messageId)` is considered stale and dropped. Defaults to the
-   * Messenger's instance-level `maxAgeMs` (24h). Override for callers
-   * that want shorter expiry (e.g. ephemeral chat) or longer
-   * (e.g. join-approval).
-   */
-  maxAgeMs?: number;
-}
 
 /**
  * Result of `Messenger.sendReliable`. Three terminal shapes:
@@ -313,7 +294,6 @@ export interface MessengerRegisterOptions {
    */
   maxWireBytes?: number;
 }
-
 
 /**
  * The Universal Messenger substrate.
@@ -710,7 +690,7 @@ export class Messenger {
     peerId: string,
     protocolId: string,
     payload: Uint8Array,
-    opts: SendReliableOpts = {},
+    opts: RequestOwnedSendOpts = {},
   ): Promise<ThrowingReliableSendResult> {
     return this.sendFramed(peerId, protocolId, payload, opts, 'request-owned');
   }
@@ -719,7 +699,7 @@ export class Messenger {
     peerId: string,
     protocolId: string,
     payload: Uint8Array,
-    opts: SendReliableOpts,
+    opts: RequestOwnedSendOpts,
     failurePolicy: 'durable-outbox',
   ): Promise<ReliableSendResult>;
 
@@ -727,7 +707,7 @@ export class Messenger {
     peerId: string,
     protocolId: string,
     payload: Uint8Array,
-    opts: SendReliableOpts,
+    opts: RequestOwnedSendOpts,
     failurePolicy: 'request-owned',
   ): Promise<ThrowingReliableSendResult>;
 
@@ -735,10 +715,12 @@ export class Messenger {
     peerId: string,
     protocolId: string,
     payload: Uint8Array,
-    opts: SendReliableOpts,
+    opts: RequestOwnedSendOpts,
     failurePolicy: FramedFailurePolicy,
   ): Promise<ReliableSendResult> {
     this.requireSubstrate('sendReliable');
+    const requestOptions = failurePolicy === 'request-owned' ? opts : undefined;
+    requestOptions?.signal?.throwIfAborted();
 
     const messageId = opts.messageId ?? randomUUID();
     const idem = this.idempotencyStore!;
@@ -817,8 +799,11 @@ export class Messenger {
         peerId,
         protocolId,
         envelope,
-        opts.timeoutMs,
+        requestOptions?.signal || requestOptions?.maxReadBytes !== undefined
+          ? { timeoutMs: opts.timeoutMs, signal: requestOptions.signal, maxReadBytes: requestOptions.maxReadBytes }
+          : opts.timeoutMs,
       );
+      requestOptions?.signal?.throwIfAborted();
       this.assertResponseAccepted(protocolId, response);
       idem.record(peerId, protocolId, messageId, 'out', response);
       outbox.markDelivered(peerId, protocolId, messageId);
@@ -826,6 +811,10 @@ export class Messenger {
       this.clearDhtWalkRateLimitIfDrained(peerId);
       return { delivered: true, response, attempts: 1, messageId };
     } catch (err) {
+      if (requestOptions?.signal?.aborted) {
+        this.firstAttemptAt.delete(sloK);
+        throw requestOptions.signal.reason;
+      }
       const errMsg = err instanceof Error ? err.message : String(err);
       // Non-recoverable: rethrow. The caller sees the real error;
       // the outbox stays out of it because retrying an encoding
@@ -835,7 +824,8 @@ export class Messenger {
         throw err;
       }
       if (failurePolicy === 'request-owned') {
-        await this.handleRequestOwnedRecoverableFailure(peerId, errMsg, sloK);
+        if (requestOptions?.recoverPeerAfterFailure === false) this.firstAttemptAt.delete(sloK);
+        else await this.handleRequestOwnedRecoverableFailure(peerId, errMsg, sloK, requestOptions?.signal);
         throw err;
       }
       return this.handleDurableRecoverableFailure({
@@ -947,6 +937,37 @@ export class Messenger {
     }
   }
 
+  /** Remove a handler registered through Messenger from both owned tables. */
+  unregister(protocolId: string): void {
+    this.handlers.delete(protocolId);
+    this.router.unregister(protocolId);
+  }
+
+  /** Register a protocol family atomically and return its disposal handle. */
+  registerGroup(
+    entries: readonly { protocolId: string; handler: ReliableHandler; options?: MessengerRegisterOptions }[],
+  ): () => void {
+    const ids = new Set<string>();
+    for (const { protocolId } of entries) {
+      if (ids.has(protocolId) || this.handlers.has(protocolId)) {
+        throw new Error(`Messenger protocol already registered: ${protocolId}`);
+      }
+      ids.add(protocolId);
+    }
+    const dispose = (): void => {
+      for (const { protocolId, handler } of entries) {
+        if (this.handlers.get(protocolId) === handler) this.unregister(protocolId);
+      }
+    };
+    try {
+      for (const { protocolId, handler, options } of entries) this.register(protocolId, handler, options);
+    } catch (error) {
+      dispose();
+      throw error;
+    }
+    return dispose;
+  }
+
   /**
    * Periodic-tick retry loop. The lifecycle.ts wiring (PR-3) calls
    * this every ~5s. For each outbox entry whose `nextAttemptAt`
@@ -1046,11 +1067,12 @@ export class Messenger {
   private async handleRequestOwnedRecoverableFailure(
     peerId: string,
     errMsg: string,
-    sloK: string,
+    sloK: string, signal?: AbortSignal,
   ): Promise<void> {
     this.firstAttemptAt.delete(sloK);
     if (!shouldTriggerDhtWalk(errMsg)) return;
-    await this.resolvePeerOnce(peerId, 'after a request-owned address failure');
+    await resolveWithinAbort(() => this.resolvePeerOnce(peerId, 'after a request-owned address failure'), signal);
+    signal?.throwIfAborted();
   }
 
   /** Durable failures enqueue first, then optionally schedule threshold recovery. */

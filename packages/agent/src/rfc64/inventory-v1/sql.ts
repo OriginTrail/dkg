@@ -12,7 +12,8 @@ export const INVENTORY_V1_LEGACY_USER_VERSION = 1;
 export const INVENTORY_V1_V2_USER_VERSION = 2;
 export const INVENTORY_V1_V3_USER_VERSION = 3;
 export const INVENTORY_V1_V4_USER_VERSION = 4;
-export const INVENTORY_V1_USER_VERSION = 5;
+export const INVENTORY_V1_V5_USER_VERSION = 5;
+export const INVENTORY_V1_USER_VERSION = 6;
 export const INVENTORY_V1_RELATIVE_PATH =
   `${RFC64_PERSISTENCE_ROOT_RELATIVE_PATH_V1}/${RFC64_INVENTORY_DATABASE_FILENAME_V1}`;
 export const INVENTORY_V1_DIRECTORY_MODE = RFC64_SECURE_DIRECTORY_MODE_V1;
@@ -463,6 +464,15 @@ CREATE TABLE rfc64_finalized_private_placement_repairs_v1 (
   PRIMARY KEY (repair_digest)
 ) WITHOUT ROWID, STRICT`;
 
+/** One bounded retry diagnostic per exact owed placement; never canonical authority. */
+export const INVENTORY_V1_PRIVATE_PLACEMENT_FAILURES_TABLE_SQL = `
+CREATE TABLE rfc64_private_placement_failures_v1 (
+  repair_digest BLOB NOT NULL CHECK (typeof(repair_digest) = 'blob' AND length(repair_digest) = 32),
+  state_json TEXT NOT NULL CHECK (typeof(state_json) = 'text' AND length(state_json) BETWEEN 1 AND 2048),
+  PRIMARY KEY (repair_digest),
+  FOREIGN KEY (repair_digest) REFERENCES rfc64_finalized_private_placement_repairs_v1 (repair_digest) ON DELETE CASCADE
+) WITHOUT ROWID, STRICT`;
+
 /**
  * One owner-signed unregistered authority seed per (network, Context Graph).
  * The row stores the exact canonical signed policy envelope so a replica can
@@ -508,6 +518,7 @@ export const INVENTORY_V1_DDL = [
   INVENTORY_V1_STAGED_HEADS_TABLE_SQL,
   INVENTORY_V1_FINALIZED_PRIVATE_PLACEMENT_REPAIRS_TABLE_SQL,
   INVENTORY_V1_UNREGISTERED_AUTHORITY_SEEDS_TABLE_SQL,
+  INVENTORY_V1_PRIVATE_PLACEMENT_FAILURES_TABLE_SQL,
 ].join(';\n\n').concat(';');
 
 export const INVENTORY_V1_LEGACY_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
@@ -542,11 +553,15 @@ export const INVENTORY_V1_V4_USER_OBJECTS: Readonly<Record<string, string>> = Ob
   ),
 });
 
-export const INVENTORY_V1_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
+export const INVENTORY_V1_V5_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
   ...INVENTORY_V1_V4_USER_OBJECTS,
   rfc64_unregistered_authority_seeds_v1: normalizeInventoryV1SchemaSql(
     INVENTORY_V1_UNREGISTERED_AUTHORITY_SEEDS_TABLE_SQL,
   ),
+});
+export const INVENTORY_V1_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
+  ...INVENTORY_V1_V5_USER_OBJECTS,
+  rfc64_private_placement_failures_v1: normalizeInventoryV1SchemaSql(INVENTORY_V1_PRIVATE_PLACEMENT_FAILURES_TABLE_SQL),
 });
 export const INVENTORY_V1_MIGRATE_V1_TO_V2_SQL = `
 ${INVENTORY_V1_APPLIED_HEADS_TABLE_SQL};
@@ -564,7 +579,16 @@ PRAGMA user_version = ${INVENTORY_V1_V4_USER_VERSION};`;
 
 export const INVENTORY_V1_MIGRATE_V4_TO_V5_SQL = `
 ${INVENTORY_V1_UNREGISTERED_AUTHORITY_SEEDS_TABLE_SQL};
+PRAGMA user_version = ${INVENTORY_V1_V5_USER_VERSION};`;
+
+export const INVENTORY_V1_MIGRATE_V5_TO_V6_SQL = `
+${INVENTORY_V1_PRIVATE_PLACEMENT_FAILURES_TABLE_SQL};
 PRAGMA user_version = ${INVENTORY_V1_USER_VERSION};`;
+
+/** Rollback to v5: v6 only adds retry diagnostics, so dropping them leaves the exact v5 schema. */
+export const INVENTORY_V1_DOWNGRADE_V6_TO_V5_SQL = `
+DROP TABLE rfc64_private_placement_failures_v1;
+PRAGMA user_version = ${INVENTORY_V1_V5_USER_VERSION};`;
 
 export function normalizeInventoryV1SchemaSql(sql: string): string {
   return sql.replace(/\s+/g, ' ').trim().replace(/;$/, '');

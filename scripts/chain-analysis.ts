@@ -292,7 +292,7 @@ async function analyzeChain(chain: ChainDef) {
   console.log(`\r    ${lastIdentityId}/${lastIdentityId} identities scanned.       `);
 
   // ── Publisher data: load from snapshot file ───────────────────────────
-  const snapshotPath = path.join(__dirname, '..', 'snapshots', chain.publisherSnapshotFile);
+  const snapshotPath = path.join(__dirname, '..', 'misc', 'snapshots', chain.publisherSnapshotFile);
   const snapshotData = JSON.parse(readFileSync(snapshotPath, 'utf8')) as any[];
 
   const publisherSet = new Set<string>();

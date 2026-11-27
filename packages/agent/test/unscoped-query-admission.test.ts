@@ -1,5 +1,20 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES,
+  GraphSetIndexStore,
+  OxigraphStore,
+  STORE_GRAPH_CATALOG_MAX_BYTES_ENV,
+  StoreResponseTooLargeError,
+  withDefaultStoreWorkPriority,
+  type TripleStore,
+  type StorePressureSnapshot,
+} from '@origintrail-official/dkg-storage';
+import {
+  DKGQueryEngine,
+  QUERY_CATALOG_LIMIT_NAME,
+  QUERY_CATALOG_MAX_RESPONSE_BYTES,
+  QueryMaterializationBudget,
+} from '@origintrail-official/dkg-query';
 import {
   canReadUnscopedQuery,
   type UnscopedQueryAdmissionDependencies,
@@ -33,6 +48,142 @@ function deferred<T>() {
 }
 
 describe('unscoped query admission', () => {
+  it('rejects admission with STORE_INTERNAL_LIMIT once a warm catalog passes its ceiling through another writer', async () => {
+    let now = 1_000;
+    const readable = 'did:dkg:context-graph:readable';
+    const inner = new OxigraphStore();
+    await inner.insert([{ graph: readable, subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
+    const store = new GraphSetIndexStore(inner, { revalidateMs: 100, revalidate: 'background', now: () => now });
+    const canRead = vi.fn(async (id: string) => id === 'readable');
+    const deps = { store, knownContextGraphIds: [], canReadContextGraph: canRead } satisfies UnscopedQueryAdmissionDependencies;
+    try {
+      await expect(canReadUnscopedQuery(deps)).resolves.toBe(true);
+      // A write through the inner store adds a context graph, and the catalog passes its ceiling.
+      vi.stubEnv(STORE_GRAPH_CATALOG_MAX_BYTES_ENV, String(Buffer.byteLength(JSON.stringify([readable]))));
+      await inner.insert([{ graph: 'did:dkg:context-graph:other', subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
+      now += 100;
+      // Admission reads a current catalog: the due read waits for the revalidation, which fails at the ceiling.
+      await expect(canReadUnscopedQuery(deps)).rejects.toMatchObject({ code: 'STORE_INTERNAL_LIMIT' });
+    } finally {
+      vi.unstubAllEnvs();
+      await store.close();
+    }
+  });
+
+  it('reads a current catalog: a due catalog makes admission wait, while a scoped read is answered warm', async () => {
+    let now = 1_000;
+    const readable = 'did:dkg:context-graph:readable';
+    class HeldListing extends OxigraphStore {
+      hold: Promise<void> | null = null;
+      override async listGraphs(options?: Parameters<OxigraphStore['listGraphs']>[0]): Promise<string[]> {
+        await this.hold;
+        return super.listGraphs(options);
+      }
+    }
+    const inner = new HeldListing();
+    await inner.insert([{ graph: readable, subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
+    const store = new GraphSetIndexStore(inner, { revalidateMs: 100, revalidate: 'background', now: () => now });
+    const canRead = vi.fn(async (id: string) => id === 'readable');
+    const deps = { store, knownContextGraphIds: [], canReadContextGraph: canRead } satisfies UnscopedQueryAdmissionDependencies;
+    try {
+      await expect(canReadUnscopedQuery(deps)).resolves.toBe(true);
+      await inner.insert([{ graph: 'did:dkg:context-graph:added', subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
+      now += 100;
+      const scan = deferred<void>();
+      inner.hold = scan.promise;
+
+      await expect(store.listGraphsByPrefix(readable)).resolves.toEqual([readable]);
+      let decided = false;
+      const admission = canReadUnscopedQuery(deps).finally(() => { decided = true; });
+      for (let turn = 0; turn < 4; turn++) await new Promise((resolve) => setImmediate(resolve));
+      expect(decided).toBe(false);
+      scan.resolve();
+      await expect(admission).resolves.toBe(false);
+      expect(canRead.mock.calls.map(([id]) => id)).toContain('added');
+    } finally {
+      inner.hold = null;
+      await store.close();
+    }
+  });
+
+  it('reads policy discovery and the owner inventory under the node limits, outside any caller budget', async () => {
+    const canRead = vi.fn(async () => true);
+    const deps = admissionDependencies(canRead, []);
+    const owner = 'private'.repeat(32);
+    deps.store.query.mockResolvedValue({ type: 'bindings', bindings: [{ cg: `did:dkg:context-graph:${owner}` }] });
+    await expect(canReadUnscopedQuery(deps)).resolves.toBe(true);
+    expect(deps.store.query.mock.calls[0]?.[1]).toMatchObject({ maxResponseBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES });
+    expect(deps.store.listGraphsByPrefix.mock.calls[0]?.[1])
+      .toMatchObject({ maxResponseBytes: DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES });
+    expect(canRead).toHaveBeenCalledWith(owner, expect.any(AbortSignal));
+  });
+
+  it('answers an access-policy read over its node limit with STORE_INTERNAL_LIMIT', async () => {
+    const canRead = vi.fn(async () => true);
+    const deps = admissionDependencies(canRead, []);
+    deps.store.query.mockRejectedValue(
+      new StoreResponseTooLargeError(QUERY_CATALOG_MAX_RESPONSE_BYTES, QUERY_CATALOG_MAX_RESPONSE_BYTES + 1));
+    await expect(canReadUnscopedQuery(deps)).rejects.toMatchObject({
+      code: 'STORE_INTERNAL_LIMIT', limitName: QUERY_CATALOG_LIMIT_NAME, limitBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES,
+    });
+    expect(canRead).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('charges the caller for its result only, whatever the owner inventory (prefix API: %s)', async (withPrefix) => {
+    const owner = 'c'.repeat(200);
+    const inventory = Array.from({ length: 1000 }, (_, i) =>
+      `did:dkg:context-graph:${owner}/_verifiable_memory/did:dkg:31337/0x${'1'.repeat(40)}/${i + 1}`);
+    const policy = { type: 'bindings' as const, bindings: [] };
+    const content = { type: 'bindings' as const, bindings: [{ value: 'x'.repeat(800_000) }] };
+    const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
+    const total = bytes(content);
+    const deps = admissionDependencies(vi.fn(async () => true), []);
+    deps.store.listGraphsByPrefix.mockResolvedValue(inventory);
+    deps.store.listGraphs.mockResolvedValue(inventory);
+    if (!withPrefix) delete deps.store.listGraphsByPrefix;
+    const run = async (limit: number) => {
+      deps.store.query.mockResolvedValueOnce(policy).mockResolvedValueOnce(content);
+      const budget = new QueryMaterializationBudget(limit);
+      await expect(canReadUnscopedQuery(deps)).resolves.toBe(true);
+      return new DKGQueryEngine(deps.store).query('SELECT ?value WHERE { ?s ?p ?value }', {
+        maxResponseBytes: limit, materializationBudget: budget,
+      });
+    };
+    // The inventory and the policy read are node work: the budget covers the result alone.
+    expect(bytes(inventory) + bytes(policy)).toBeGreaterThan(100_000);
+    await expect(run(total - 1)).rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE', actualBytes: total });
+    await expect(run(total)).resolves.toMatchObject({ bindings: content.bindings });
+    expect(new Set(deps.canReadContextGraph.mock.calls.map(([id]) => id))).toEqual(new Set([owner]));
+  });
+
+  it.each([
+    ['normal', 2, 1, 2], ['background', 2, 1, 1],
+    ['normal', 8, 8, 4], ['normal', 0, 1, 4],
+  ] as const)('bounds %s authority checks to the advertised lane (%s, %s)', async (lane, normal, background, expected) => {
+    let active = 0;
+    let peak = 0;
+    const canRead = vi.fn(async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      active -= 1;
+      return true;
+    });
+    const deps = admissionDependencies(canRead);
+    deps.store.getPressureSnapshot = () => ({ normalInflightLimit: normal, backgroundInflightLimit: background } as StorePressureSnapshot);
+    await expect(withDefaultStoreWorkPriority(lane, () => canReadUnscopedQuery(deps))).resolves.toBe(true);
+    expect(peak).toBe(expected);
+    expect(canRead).toHaveBeenCalledTimes(contextGraphIds.length);
+  });
+
+  it('still rejects a late private owner when reads use a single store slot', async () => {
+    const canRead = vi.fn(async (id: string) => id !== contextGraphIds.at(-1));
+    const deps = admissionDependencies(canRead);
+    deps.store.getPressureSnapshot = () => ({ normalInflightLimit: 1 } as StorePressureSnapshot);
+    await expect(canReadUnscopedQuery(deps)).resolves.toBe(false);
+    expect(canRead).toHaveBeenCalledTimes(contextGraphIds.length);
+  });
+
   it('starts independent discovery together and waits for the complete candidate union', async () => {
     const ontology = deferred<Awaited<ReturnType<ContextGraphQueryStore['query']>>>();
     const inventory = deferred<string[]>();

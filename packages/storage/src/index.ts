@@ -1,3 +1,16 @@
+export { asQueryReadAdmissionCapability, type QueryReadAdmissionCapability } from './query-read-admission-capability.js';
+export {
+  sparqlEngineOf, storeDefaultGraphIsGraphUnion, storeRestrictsQueryDataset, type SparqlEngineFamily,
+} from './sparql-engine-capability.js';
+export { SparqlTsvResultsShapeError } from './sparql-tsv-query-result.js';
+export { SparqlResultsShapeError } from './sparql-results-shape-error.js';
+export { nonEmptyNamedGraphEnumerationPattern } from './adapters/graph-enumeration-query.js';
+export { preparedSparqlNamesReadGraphPartition } from './read-graph-partition-reference.js';
+export { isReadGraphPartitionGraph } from './graph-enumeration-visibility.js';
+export { dropReadGraphPartitions, noteStoreMayHoldReadGraphPartitions, storeMayHoldReadGraphPartitions } from './read-graph-partition-store.js';
+export { clearReadGraphPartitionsNote, mayHoldReadGraphPartitions } from './read-graph-partition-marker.js';
+export { markReadGraphsDirtyAtStart } from './read-graph-partition-startup.js';
+export { isQueryDatasetUnrestrictedError } from './withheld-graph-query.js';
 export {
   BlazegraphNamespaceManager,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
@@ -15,9 +28,13 @@ export {
   type Quad,
   type TripleStore,
   type TripleStoreDecorator,
+  type LogicalStoreMutationCapability,
+  runLogicalStoreMutation,
+  type BoundedQueryResponseCapability,
   type QueryResult,
   type QueryOptions,
   type StoreWorkPriority,
+  type StoreControlQueue,
   type StorePressureSnapshot,
   type SelectResult,
   type ConstructResult,
@@ -31,6 +48,8 @@ export {
   isStoreWorkPriority,
   registerTripleStoreAdapter,
   findTripleStoreCapability,
+  supportsAtomicSparqlModify,
+  asBoundedQueryResponseCapability,
   deleteByPatternWithoutCount,
   createTripleStore,
   tryUpdateWithTouchedGraphs,
@@ -52,6 +71,11 @@ export {
   type AtomicGraphAndSubjectReplaceUpdate,
   type AtomicGraphReplaceUpdate,
 } from './atomic-graph-replace.js';
+export {
+  assertSubjectAndInsertPayload,
+  buildAtomicSubjectAndInsertUpdate,
+  tryReplaceSubjectAndInsertAtomically,
+} from './atomic-subject-insert.js';
 /**
  * Stable caller contract for one bounded RFC-64 author commit. Compilation,
  * receipt execution, normalization, and decorator mapping stay module-internal.
@@ -68,6 +92,10 @@ export {
   type Rfc64AuthorCommitStateTransitionV1,
   type Rfc64AuthorCommitSubjectReplacementV1,
 } from './rfc64-author-commit-cas.js';
+export {
+  describeRfc64AuthorCommitCasV1,
+  type Rfc64AuthorCommitMutationV1,
+} from './rfc64-author-commit-mutation.js';
 export {
   Rfc64SemanticAuthorCommitErrorV1,
   compileRfc64SemanticAuthorCommitV1,
@@ -88,6 +116,10 @@ export {
   isStoreSchedulerBusyError,
   externalStorePriorityScheduler,
   getExternalStorePrioritySchedulerSnapshot,
+  withDefaultStoreWorkPriority,
+  withoutDefaultStoreWorkPriority,
+  activeDefaultStoreWorkPriority,
+  storeLaneInflightLimit,
   DEFAULT_STORE_QUEUE_LIMIT,
   DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS,
   type StorePrioritySchedulerSnapshot,
@@ -98,6 +130,51 @@ export {
   type StoreSchedulerBusyErrorOptions,
   type StoreSchedulerBusyErrorLike,
 } from './store-priority-scheduler.js';
+export type { StoreSchedulerPriority } from './store-scheduler-timeout-diagnostics.js';
+export {
+  STORE_CONTROL_DEFAULT_BACKENDS,
+  STORE_CONTROL_MAX_SLOTS,
+  STORE_CONTROL_QUEUES,
+  STORE_CONTROL_RESERVED_SLOTS_CONFIG_KEY,
+  STORE_CONTROL_RESERVED_SLOTS_ENV,
+  STORE_CONTROL_SCHEDULER_ID_PREFIX,
+  configureStoreControlPath,
+  controlStoreOptions,
+  defaultStoreControlSlots,
+  describeStoreControlPath,
+  getStoreControlPath,
+  logStoreControlPathGeometry,
+  resolveStoreControlConfig,
+  selectStoreScheduler,
+  storeControlQueueInUse,
+  type StoreControlConfig,
+  type StoreControlPath,
+  type StoreControlPathSettings,
+  type StoreControlResolveOptions,
+  type StoreControlSlots,
+} from './store-control-path.js';
+/**
+ * Test hooks of the control path: build instances, register them with the diagnostics, and replace the
+ * process-wide path.
+ * @internal Not part of the package's supported API; production code never calls them.
+ */
+export {
+  buildStoreControlPath,
+  registerStoreControlPath,
+  setStoreControlPathForTesting,
+} from './store-control-path.js';
+export {
+  STORE_QUEUE_WAIT_BUCKET_UPPER_MS,
+  StoreSchedulerStats,
+  estimateQueueWaitPercentileMs,
+  registerStoreSchedulerStats,
+  takeStoreSchedulerStatsReports,
+  storeOperationFamily,
+  type StoreSchedulerLaneWait,
+  type StoreSchedulerRejectionTotal,
+  type StoreSchedulerStatsReport,
+  type StoreSchedulerStatsSource,
+} from './store-scheduler-stats.js';
 export {
   STORE_OPERATION_TIMEOUT_CODE,
   StoreOperationTimeoutError,
@@ -135,6 +212,7 @@ export {
   type SortedGraphCatalog,
   type SortedGraphSetSource,
 } from './graph-set-index-store.js';
+export type { GraphSetRevalidation } from './graph-set-refresh.js';
 export {
   CHANGELOG_GRAPH,
   CHANGELOG_SCHEMA_VERSION,
@@ -160,16 +238,30 @@ export {
   type GraphWriteScope,
 } from './graph-write-gen.js';
 export {
+  EXACT_GRAPH_EXPORT_MAX_ROWS,
+  EXACT_GRAPH_EXPORT_MAX_RESPONSE_BYTES,
   ExactGraphReadError,
   quadToNQuad,
   quadsToNQuads,
+  readBoundedGraphPayload,
+  readExactGraph,
   readExactGraphPaged,
   readExactGraphPagedWithDiscoveredCount,
+  supportsBoundedExactGraphExport,
   type ExactGraphReadErrorCode,
   type ExactGraphReadErrorKind,
   type ReadExactGraphPagedOptions,
+  type ReadExactGraphOptions,
+  type BoundedGraphPayloadProfile,
+  type ReadBoundedGraphPayloadOptions,
+  type BoundedGraphPayloadRefusalReason,
+  type BoundedGraphPayloadResult,
 } from './bounded-rdf.js';
-export { StoreResponseTooLargeError } from './http-response-limit.js';
+export {
+  StoreResponseTooLargeError,
+  isStoreResponseTooLargeError,
+  type StoreResponseTooLargeErrorLike,
+} from './http-response-limit.js';
 export {
   MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1,
   Rfc64SemanticReadGatewayErrorV1,
@@ -205,6 +297,12 @@ export {
 } from './rfc64-author-seal-read-gateway.js';
 export {
   createManagedOxigraphRuntimeStoreConfigV1,
+  withManagedOxigraphRuntimeStoreConfigV1,
+  type ManagedOxigraphRuntimeActivityLeaseV1,
+  type ManagedOxigraphRecoveryHandleV1,
+  type ManagedOxigraphRecoveryPhaseV1,
+  type ManagedOxigraphRuntimeHooksV1,
+  type ManagedOxigraphRuntimeStateV1,
   type ManagedOxigraphRuntimeStoreConfigV1,
 } from './managed-oxigraph-runtime-store.js';
 export {
@@ -226,6 +324,11 @@ export {
 } from './graph-knowledge-asset-metadata-loader.js';
 
 export { OxigraphStore } from './adapters/oxigraph.js';
+export {
+  OXIGRAPH_STORE_READ_ONLY_CODE,
+  OxigraphStoreReadOnlyError,
+  type OxigraphStoreOptions,
+} from './adapters/oxigraph-read-only.js';
 export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';
 export {
   BlazegraphStore,
@@ -290,3 +393,186 @@ import './adapters/oxigraph.js';
 import './adapters/oxigraph-worker.js';
 import './adapters/blazegraph.js';
 import './adapters/sparql-http.js';
+
+export { buildAtomicAssetGroupUpdate, ATOMIC_ASSET_GROUP_MAX_ASSETS, ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES, type AtomicAssetReplacement } from './atomic-asset-group.js';
+
+export { StoreReadTransportFailure, isStoreReadTransportFailure } from './store-read-transport-failure.js';
+
+export { readStoreOperationExecutionGeneration, asStoreRecoveryGenerationReader, type StoreRecoveryGenerationReader, type StoreRecoveryState } from './store-recovery-generation.js';
+
+export { readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
+export {
+  DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES,
+  QUERY_CATALOG_LIMIT_NAME,
+  STORE_GRAPH_CATALOG_LIMIT_NAME,
+  STORE_GRAPH_CATALOG_MAX_BYTES_ENV,
+  STORE_INTERNAL_LIMIT,
+  StoreInternalLimitError,
+  configureStoreGraphCatalogMaxBytes,
+  graphCatalogMaxBytesProblem,
+  isStoreInternalLimitError,
+  recordStoreInternalLimit,
+  storeGraphCatalogMaxBytes,
+  type GraphCatalogStoreConfig,
+  type StoreInternalLimitErrorLike,
+} from './graph-catalog-internal-limit.js';
+
+// Read graphs: membership, state rows and the contract with the adapters.
+export {
+  READ_GRAPH_MEMBERSHIP_RULE_VERSION,
+  isReadGraphMember,
+  matchesGraphNameTest,
+  readGraphMembership,
+  readGraphsOfMemberGraph,
+  registeredSubGraphNames,
+  workingMemoryIdentityRule,
+  type GraphNameTest,
+  type ReadGraphRegistrySnapshot,
+  type WorkingMemoryIdentityRule,
+} from './read-graph/membership.js';
+export {
+  CURRENT_READ_GRAPH_VERSIONS,
+  MAX_READ_GRAPH_GENERATION,
+  READ_GRAPH_BUILDER_VERSION,
+  READ_GRAPH_STATES,
+  READ_GRAPH_STATE_PREDICATES,
+  ReadGraphTransitionError,
+  isReadGraphRowAccepted,
+  newReadGraphGeneration,
+  nextReadGraphState,
+  parseReadGraphStateRows,
+  readGraphStateCompareAndSet,
+  readGraphStateFencePattern,
+  readGraphStateMarkAllDirty,
+  readGraphStateMarkDirty,
+  readGraphStateMarkDirtyAtStart,
+  readGraphStateReset,
+  readGraphStateRowQuery,
+  readGraphStateRowsQuery,
+  servingReadGraphGeneration,
+  type ReadGraphState,
+  type ReadGraphStateMirror,
+  type ReadGraphStateRow,
+  type ReadGraphTransition,
+  type ReadGraphVersions,
+} from './read-graph/state.js';
+export {
+  READ_GRAPH_METHOD_MAINTENANCE,
+  READ_GRAPH_PLANNED_METHODS,
+  missingReadGraphMethods,
+  readGraphCapabilitiesOf,
+  spliceReadGraphPlan,
+  type ReadGraphAdapterCapabilities,
+  type ReadGraphCapableAdapter,
+  type ReadGraphMaintenance,
+  type ReadGraphPlannedMethod,
+  type ReadGraphWriteOptions,
+  type ReadGraphWritePlan,
+  type TripleStoreMethodName,
+} from './read-graph/adapter-contract.js';
+export {
+  ReadGraphDeltaFormError,
+  readGraphBackfillBatch,
+  readGraphCopy,
+  readGraphDeltaDelete,
+  readGraphDeltaDeleteBySubjectPrefix,
+  readGraphDeltaDeleteMatching,
+  readGraphFencedDrop,
+  readGraphFirstHolderCountQuery,
+  readGraphHoldsTripleAsk,
+  readGraphInsertQuads,
+  readGraphMissingTripleAsk,
+  readGraphReferenceProcedure,
+  readGraphRepairLeave,
+  readGraphRetraction,
+  readGraphSizeQuery,
+  readGraphUnheldSubjectAsk,
+  renderGraphNameTest,
+  type ReadGraphFence,
+  type ReadGraphTarget,
+} from './read-graph/statements.js';
+export {
+  InMemoryReadGraphStateMirror,
+  ReadGraphLocks,
+  ReadGraphRegistryCache,
+  ReadGraphWriteTracker,
+  forgetReadGraphBackendRuntimeForTesting,
+  readGraphBackendIdentity,
+  readGraphBackendRuntime,
+  type ReadGraphBackendRuntime,
+} from './read-graph/runtime.js';
+export {
+  READ_GRAPHS_UNSUPPORTED_CODE,
+  READ_GRAPH_MAINTENANCE_FAILED_CODE,
+  READ_GRAPH_WRITE_REFUSED_CODE,
+  ReadGraphStore,
+  ReadGraphMaintenanceError,
+  ReadGraphWriteRefusedError,
+  ReadGraphsUnsupportedError,
+  readGraphLayerOf,
+  readGraphRuntimeOf,
+  wrapReadGraphLayer,
+  type ReadGraphStoreConfig,
+} from './read-graph/read-graph-store.js';
+export { readReadGraphRegistry } from './read-graph/registry.js';
+export { noteReadGraphStoreRestored } from './read-graph/store-restored.js';
+export {
+  READ_GRAPH_MODES,
+  VIEW_SEMANTICS,
+  keepsAnyReadGraph,
+  readGraphModeOf,
+  viewSemanticsOf,
+  type ReadGraphMode,
+  type ReadGraphModeRule,
+  type ReadGraphModes,
+  type ViewSemantics,
+  type ViewSemanticsSettings,
+} from './read-graph/settings.js';
+export {
+  DEFAULT_READ_GRAPH_BATCHING,
+  ReadGraphJobError,
+  buildReadGraph,
+  markReadGraphDirty,
+  refreshReadGraphRegistry,
+  withReadGraphBackgroundSlot,
+  readGraphEnumerationRoots,
+  readStoredReadGraphRow,
+  removeReadGraph,
+  repairReadGraph,
+  type ReadGraphBatching,
+  type ReadGraphJobContext,
+  type ReadGraphJobKind,
+  type ReadGraphJobResult,
+  type ReadGraphRepairInput,
+} from './read-graph/rebuild.js';
+export { startReadGraphs, type ReadGraphStartOptions, type ReadGraphStartResult } from './read-graph/startup.js';
+export {
+  READ_GRAPH_WORKING_MEMORY_IDENTITY_FILE,
+  installWorkingMemoryIdentity,
+  recordedWorkingMemoryIdentity,
+  type WorkingMemoryIdentityInstall,
+  type WorkingMemoryNodeIdentity,
+} from './read-graph/working-memory-identity.js';
+export {
+  DEFAULT_READ_GRAPH_BUILD_INTERVAL_MS,
+  ReadGraphBuilder,
+  type ReadGraphBuilderOptions,
+  type ReadGraphBuilderStatus,
+} from './read-graph/builder.js';
+export {
+  checkReadGraph,
+  type ReadGraphCheckDirection,
+  type ReadGraphCheckMode,
+  type ReadGraphCheckOptions,
+  type ReadGraphCheckOutcome,
+  type ReadGraphCheckResult,
+} from './read-graph/check.js';
+export {
+  READ_GRAPH_CHECK_DEFAULTS,
+  ReadGraphCheckSchedule,
+  startReadGraphChecks,
+  type ReadGraphCheckScheduleOptions,
+} from './read-graph/check-schedule.js';
+export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';
+
+export { ShareStoreHold, withoutShareStoreHold } from './share-store-timing.js';

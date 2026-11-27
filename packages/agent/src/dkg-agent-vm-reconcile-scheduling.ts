@@ -87,11 +87,11 @@ export class VmReconcileSchedulingMethods extends DKGAgentBase {
 
   protected prepareVmReconcileSweep(this: DKGAgent) {
     if (this.started && !this.vmReconcileRuntimeReady) return;
-    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
-    const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
+    const lifecycleGeneration = this.workLifetime.generation;
+    const lifecycleSignal = this.workLifetime?.signal;
     const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
       && !lifecycleSignal?.aborted
-      && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
+      && this.workLifetime.generation === lifecycleGeneration;
     const scheduling = this.vmReconcileScheduling;
     if (!isLifecycleCurrent() || !this.vmReconcileEnabled() || !scheduling) return;
     return { scheduling, isLifecycleCurrent, lifecycleSignal, ...this.selectVmReconcileTargets() };
@@ -114,5 +114,26 @@ export class VmReconcileSchedulingMethods extends DKGAgentBase {
       sweep.isLifecycleCurrent,
       sweep.lifecycleSignal,
     );
+  }
+
+  /**
+   * The phonebook now resolves these graphs' curators. Re-rank their exact
+   * recovery now: pre-network suppression sees only connected peers and cached
+   * curators, so a resolvable but unconnected curator would otherwise wait out
+   * an earlier negative backoff (up to ten minutes) before its first attempt.
+   */
+  scheduleVmRecoveryForResolvedCurators(
+    this: DKGAgent,
+    contextGraphIds: readonly string[],
+  ): void {
+    for (const contextGraphId of contextGraphIds) {
+      if (!this.subscribedContextGraphs.has(contextGraphId)) continue;
+      this.clearVmReconcileRotationStateForContextGraph(contextGraphId);
+      this.clearVmReconcileActiveFetchCooldown(contextGraphId);
+      this.vmReconcileCuratorPeersByCg.delete(contextGraphId);
+      this.vmReconcileCuratorPageCursorByCg.delete(contextGraphId);
+      this.vmReconcileScheduling?.releaseLiveHold(contextGraphId);
+      this.vmReconcileScheduling?.triggerLive(contextGraphId);
+    }
   }
 }

@@ -3,9 +3,11 @@ import type {
   Digest32V1,
   MemberRosterV1,
 } from '@origintrail-official/dkg-core';
+import { EVMChainAdapter, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { resolveChainRpcEndpointsV1 } from '../src/chain-rpc-endpoints-v1.js';
 import { createRfc64FinalizedPolicyAgentPrecommitV1 } from '../src/rfc64/finalized-policy-agent-precommit-v1.js';
 import {
   createLoopbackJsonRpcTestHarness,
@@ -191,6 +193,58 @@ describe('RFC-64 finalized policy agent precommit', () => {
       rfc64FinalizedVmPrecommitPlan(),
       new AbortController().signal,
     )).rejects.toThrow('requires trusted RPC configuration');
+    expect(getOnChainContextGraphId).not.toHaveBeenCalled();
+    expect(getEvmChainId).not.toHaveBeenCalled();
+  });
+
+  it('admits a chain-bound head from its policy and chain ids alone, with no RPC request', async () => {
+    const getOnChainContextGraphId = vi.fn(async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID);
+    const getEvmChainId = vi.fn(async () => BigInt(RFC64_VM_CHAIN_ID));
+    const live = await liveOptions();
+    const handler = createRfc64FinalizedPolicyAgentPrecommitV1({
+      ...live.options,
+      getOnChainContextGraphId,
+      getEvmChainId,
+    });
+    const { catalogScope, policyDigest, catalogHeadDigest } = rfc64FinalizedVmPrecommitPlan();
+
+    await expect(handler.admit!(
+      { catalogScope, policyDigest, catalogHeadDigest },
+      new AbortController().signal,
+    )).resolves.toBeUndefined();
+    expect(getOnChainContextGraphId).toHaveBeenCalledOnce();
+    expect(getEvmChainId).toHaveBeenCalledOnce();
+    expect(live.rpc.calls).toEqual([]);
+  });
+
+  it('refuses to admit a head without trusted RPC endpoints or under a changed policy, before chain reads', async () => {
+    const getOnChainContextGraphId = vi.fn(async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID);
+    const getEvmChainId = vi.fn(async () => BigInt(RFC64_VM_CHAIN_ID));
+    const withoutRpc = createRfc64FinalizedPolicyAgentPrecommitV1({
+      ...options(),
+      rpcEndpoints: [],
+      getOnChainContextGraphId,
+      getEvmChainId,
+    });
+    await expect(withoutRpc.admit!(
+      rfc64FinalizedVmPrecommitPlan(),
+      new AbortController().signal,
+    )).rejects.toThrow('requires trusted RPC configuration');
+
+    const changedPolicy = createRfc64FinalizedPolicyAgentPrecommitV1({
+      ...options(),
+      acceptedPolicySnapshotForCatalogScope: () => privateOwnerSnapshot(),
+      getOnChainContextGraphId,
+      getEvmChainId,
+    });
+    await expect(changedPolicy.admit!(
+      privateOwnerPlan(`0x${'a7'.repeat(32)}` as Digest32V1),
+      new AbortController().signal,
+    )).rejects.toThrow(/differs from the transfer plan/u);
+    await expect(changedPolicy.admit!(
+      privateOwnerPlan(),
+      new AbortController().signal,
+    )).resolves.toBeUndefined();
     expect(getOnChainContextGraphId).not.toHaveBeenCalled();
     expect(getEvmChainId).not.toHaveBeenCalled();
   });
@@ -413,5 +467,73 @@ describe('RFC-64 finalized policy agent precommit', () => {
       call.method === 'eth_call'
       && (call.params[0] as { data?: string } | undefined)?.data !== '0x'
     ))).toHaveLength(2);
+  });
+});
+
+describe('RFC-64 finalized precommit endpoints of a pre-built chain adapter', () => {
+  it('reads the endpoints a pre-built adapter was built with, so its finalized heads pass', async () => {
+    const live = await liveOptions();
+    const [endpoint] = live.options.rpcEndpoints;
+    // Construction is offline; the precommit dials the endpoint itself.
+    const adapter = new EVMChainAdapter({
+      rpcUrl: endpoint!,
+      hubAddress: `0x${'00'.repeat(19)}01`,
+      privateKey: `0x${'1'.repeat(64)}`,
+      allowNoAdminSigner: true,
+    });
+    const rpcEndpoints = resolveChainRpcEndpointsV1(adapter, undefined);
+    expect(rpcEndpoints).toEqual([endpoint]);
+    const handler = createRfc64FinalizedPolicyAgentPrecommitV1({
+      ...live.options,
+      rpcEndpoints,
+    });
+
+    await expect(handler(
+      rfc64FinalizedVmPrecommitPlan(),
+      new AbortController().signal,
+    )).resolves.toBeUndefined();
+    expect(live.rpc.calls.length).toBeGreaterThan(0);
+  });
+
+  it('refuses a finalized head before any chain read when neither adapter nor configuration names an endpoint', async () => {
+    const rpcEndpoints = resolveChainRpcEndpointsV1(
+      new MockChainAdapter('mock:31337', RFC64_VM_AUTHOR),
+      undefined,
+    );
+    expect(rpcEndpoints).toBeNull();
+    const getOnChainContextGraphId = vi.fn(async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID);
+    const getEvmChainId = vi.fn(async () => BigInt(RFC64_VM_CHAIN_ID));
+    const handler = createRfc64FinalizedPolicyAgentPrecommitV1({
+      ...options(),
+      rpcEndpoints,
+      getOnChainContextGraphId,
+      getEvmChainId,
+    });
+
+    await expect(handler(
+      rfc64FinalizedVmPrecommitPlan(),
+      new AbortController().signal,
+    )).rejects.toThrow('requires trusted RPC configuration');
+    expect(getOnChainContextGraphId).not.toHaveBeenCalled();
+    expect(getEvmChainId).not.toHaveBeenCalled();
+  });
+
+  it('prefers the adapter endpoints and falls back to the configured ones', () => {
+    const config = {
+      rpcUrl: ' http://127.0.0.1:8545 ',
+      rpcUrls: ['http://127.0.0.1:8546', 'http://127.0.0.1:8545'],
+    };
+    const configured = ['http://127.0.0.1:8545', 'http://127.0.0.1:8546'];
+    const fromAdapter = resolveChainRpcEndpointsV1({
+      getRpcUrls: () => ['http://127.0.0.1:9545', ' http://127.0.0.1:9545 '],
+    }, config);
+    expect(fromAdapter).toEqual(['http://127.0.0.1:9545']);
+    expect(Object.isFrozen(fromAdapter)).toBe(true);
+    expect(resolveChainRpcEndpointsV1({ getRpcUrls: () => [] }, config)).toEqual(configured);
+    expect(resolveChainRpcEndpointsV1({ getRpcUrls: () => [' '] }, config)).toEqual(configured);
+    expect(resolveChainRpcEndpointsV1({ getRpcUrls: () => 'http://127.0.0.1:9545' }, config))
+      .toEqual(configured);
+    expect(resolveChainRpcEndpointsV1({}, config)).toEqual(configured);
+    expect(resolveChainRpcEndpointsV1({}, undefined)).toBeNull();
   });
 });

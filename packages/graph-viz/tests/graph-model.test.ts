@@ -363,3 +363,28 @@ describe('GraphModel', () => {
     });
   });
 });
+
+
+describe('GraphModel metadata membership and incremental removal', () => {
+  const type = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+
+  it('collects KA members during ingestion and retains distinct metadata values', () => {
+    const model = new GraphModel(['urn:metadata']);
+    model.setKaMembershipPredicate('urn:member');
+    model.addTriples([{ subject: 'urn:a', predicate: 'urn:member', object: 'urn:asset' }, { subject: 'urn:b', predicate: 'urn:member', object: 'urn:asset' }, { subject: 'urn:a', predicate: 'urn:metadata', object: 'first' }, { subject: 'urn:a', predicate: 'urn:metadata', object: 'second' }]);
+    expect(model.kaGroups).toEqual(new Map([['urn:asset', new Set(['urn:a', 'urn:b'])]]));
+    expect(model.getNode('urn:a')?.metadata.get('urn:metadata')?.map(v => v.value)).toEqual(['first', 'second']);
+    model.setKaMembershipPredicate(null);
+    model.addTriple({ subject: 'urn:c', predicate: 'urn:member', object: 'urn:asset' });
+    expect(model.kaGroups.get('urn:asset')?.has('urn:c')).toBe(false);
+  });
+  it('preserves sibling values and ignores absent resources, types and properties', () => {
+    const model = new GraphModel(['urn:meta']);
+    model.addTriples([{ subject: 'urn:a', predicate: type, object: 'urn:Type' }, { subject: 'urn:a', predicate: type, object: 'urn:Type' }, { subject: 'urn:a', predicate: 'urn:meta', object: 'one' }, { subject: 'urn:a', predicate: 'urn:meta', object: 'two' }, { subject: 'urn:a', predicate: 'urn:p', object: 'first' }, { subject: 'urn:a', predicate: 'urn:p', object: 'second' }]);
+    model.removeTriples([{ subject: 'urn:a', predicate: 'urn:p', object: 'first' }, { subject: 'urn:a', predicate: 'urn:meta', object: 'one' }, { subject: 'missing', predicate: type, object: 'urn:Type' }, { subject: 'missing', predicate: 'urn:p', object: 'value' }, { subject: 'urn:a', predicate: 'urn:absent', object: 'value' }, { subject: 'urn:a', predicate: 'urn:edge', object: 'urn:absent' }]);
+    expect(model.getNode('urn:a')?.types).toEqual(['urn:Type']);
+    expect(model.getNode('urn:a')?.properties.get('urn:p')?.map(v => v.value)).toEqual(['second']);
+    expect(model.getNode('urn:a')?.metadata.get('urn:meta')?.map(v => v.value)).toEqual(['two']);
+    expect(model.nodes.size).toBe(1);
+  });
+});

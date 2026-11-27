@@ -84,6 +84,26 @@ export async function resolveEvmFinalityAnchorBlockV1<
 >(
   input: ResolveEvmFinalityAnchorBlockInputV1<TBlock>,
 ): Promise<TBlock & { readonly hash: string }> {
+  return (await resolveEvmFinalityAnchorWithHeadV1(input)).finalized;
+}
+
+export interface EvmFinalityAnchorWithHeadV1<
+  TBlock extends EvmFinalityAnchorBlockIdentityV1,
+> {
+  readonly head: TBlock & { readonly hash: string };
+  readonly finalized: TBlock & { readonly hash: string };
+}
+
+/**
+ * Resolve the finality anchor together with the exact head used to derive it.
+ * Callers that need both facts do not rely on `readHead` mutating an external
+ * capture; the one-head-read guarantee is explicit in this return value.
+ */
+export async function resolveEvmFinalityAnchorWithHeadV1<
+  TBlock extends EvmFinalityAnchorBlockIdentityV1,
+>(
+  input: ResolveEvmFinalityAnchorBlockInputV1<TBlock>,
+): Promise<EvmFinalityAnchorWithHeadV1<TBlock>> {
   const confirmations = input.finalityConfirmations;
   if (!Number.isSafeInteger(confirmations) || confirmations < 1) {
     throw input.unavailable(
@@ -105,13 +125,15 @@ export async function resolveEvmFinalityAnchorBlockV1<
   // At the default depth the anchor IS the head block already in hand. Re-asking
   // the endpoint for it buys no cross-check (there is only one self-report to
   // check) and costs a round-trip that a sibling backend can answer `null`.
-  if (anchorBlockNumber === head.number) return head;
-  return requireAnchorBlockV1(
-    await input.readBlockAt(anchorBlockNumber),
-    `anchor block ${anchorBlockNumber}`,
-    anchorBlockNumber,
-    input.unavailable,
-  );
+  const finalized = anchorBlockNumber === head.number
+    ? head
+    : requireAnchorBlockV1(
+        await input.readBlockAt(anchorBlockNumber),
+        `anchor block ${anchorBlockNumber}`,
+        anchorBlockNumber,
+        input.unavailable,
+      );
+  return Object.freeze({ head, finalized });
 }
 
 /**

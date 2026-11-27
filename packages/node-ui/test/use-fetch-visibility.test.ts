@@ -61,11 +61,14 @@ describe('useFetch visibility-pause (BUG-007 path B)', () => {
     await flush();
     expect(fetcher).toHaveBeenCalledTimes(1);
 
-    await act(async () => { vi.advanceTimersByTime(1000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
     await flush();
     expect(fetcher).toHaveBeenCalledTimes(2);
 
-    await act(async () => { vi.advanceTimersByTime(2000); });
+    // Let each resolved read settle between ticks, as the browser does.
+    // Synchronous timer advancement would simulate overlapping requests,
+    // which intentionally coalesce while a read is still in flight.
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
     await flush();
     expect(fetcher).toHaveBeenCalledTimes(4);
   });

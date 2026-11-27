@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 /**
  * RS-heal content-binding GATE.
  *
@@ -517,7 +518,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     ]]);
     agentLike.contextGraphBindingState = new ContextGraphBindingState();
     agentLike.reconcileCursors = new Map();
-    agentLike.vmReconcilePhysicalRuns = new Set();
+    agentLike.workLifetime = new AgentWorkLifetime();
     agentLike.vmReconcileEnabled = () => true;
     // This fixture isolates reconcile/heal result composition. Production
     // dispatcher entry proves canonical read authority before target lookup;
@@ -569,7 +570,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     ]]);
     agentLike.contextGraphBindingState = new ContextGraphBindingState();
     agentLike.reconcileCursors = new Map();
-    agentLike.vmReconcilePhysicalRuns = new Set();
+    agentLike.workLifetime = new AgentWorkLifetime();
     agentLike.vmReconcileScheduling = {
       dispatch: async <T>(_key: string, source: string): Promise<T> => {
         priorities.push(source === 'periodic' ? 'background' : 'foreground');

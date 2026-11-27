@@ -1,0 +1,77 @@
+import { describe, expect, it, vi } from 'vitest';
+import { createOperationContext, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
+import { quadsToNQuads } from '@origintrail-official/dkg-storage';
+import { generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
+import { SyncVerifyWorker } from '../src/sync-verify-worker.js';
+import { createAssetPayloadVerifier } from '../src/sync/requester/asset-payload-verifier.js';
+import type { VerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
+import { BulkCommitGroup } from '../src/sync/requester/bulk-commit-group.js';
+import { encodeNegotiatedExactSyncResponse } from '../src/sync/wire-compression.js';
+import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
+
+// Isolate the independent heap fence. In the production profile the 8 MiB
+// expanded target flushes these assets earlier; that path has receiver tests.
+vi.mock('../src/sync/bulk-graph-contract.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/sync/bulk-graph-contract.js')>(),
+  BULK_GROUP_EXPANDED_BYTES: 100 * 1024 * 1024,
+}));
+
+describe('bulk group independent parsed heap fence', () => {
+  it('append alone enforces eight members before a ninth arrives', async () => {
+    const sizes: number[] = [], events: string[] = [];
+    const group = new BulkCommitGroup(async members => { sizes.push(members.length); events.push('commit'); });
+    for (let index = 0; index < 9; index++) {
+      events.push('credit');
+      await group.append({ asset: { dataQuads: [], metadataQuads: [] } as unknown as VerifiedGraphScopedAsset,
+        index, encodedBytes: 1, plainBytes: 1 });
+    }
+    await group.flush(); expect(sizes).toEqual([8, 1]);
+    expect(events.indexOf('commit')).toBe(8);
+  });
+  it('splits real verified assets before 64 MiB or eight members', async () => {
+    const worker = new SyncVerifyWorker(), assets = [], sizes = [];
+    const cg = 'heap-fixture', address = '0x0000000000000000000000000000000000000001';
+    // Golden root for the 200 public triples below (the graph is not hashed).
+    // The real worker recomputes it for every asset. Avoid hashing the same
+    // 12 MB fixture again in the coverage-instrumented test thread six times.
+    const root = Buffer.from('adc2431ba3d563c081f0ed5fad9b3b7783fede8feb978602d194c142cf4ed361', 'hex');
+    const uals = [1, 2, 3, 4, 5, 6].map(id => `did:dkg:base:84532/${address}/${id}`);
+    const verify = createAssetPayloadVerifier({ contextGraphId: cg,
+      ctx: createOperationContext('sync'), parseAndFilter: worker.parseAndFilter.bind(worker),
+      processDurableBatchInWorker: (data, meta, _ctx, accept, mode) => worker.processDurableBatch(data, meta, accept, mode),
+    });
+    try {
+      for (const [index, ual] of uals.entries()) {
+        const graph = knowledgeAssetLayerGraphUri(cg, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(ual, 1));
+        // Few large valid literals exercise the real 64 MiB fence without
+        // hundreds of thousands of Merkle leaves under CI coverage.
+        const data = Array.from({ length: 200 }, (_, n) => ({ graph, subject: `urn:s:${n}`, predicate: 'urn:p', object: JSON.stringify('x'.repeat(60_000)) }));
+        const meta = generateGraphKnowledgeAssetMetadata({ contextGraphId: cg, ual, assertionGraph: graph,
+          assertionVersion: 1, publicTripleCount: data.length, privateTripleCount: 0, merkleRoot: root,
+          authorAddress: address, publisherPeerId: 'fixture', accessPolicy: 'public', allowedPeers: [], timestamp: new Date(),
+        }, { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
+          batchId: BigInt(index + 1), materializedVersion: { blockNumber: 1, txIndex: 0 },
+        } } });
+        const plain = Buffer.from(quadsToNQuads(data)), metadata = Buffer.from(quadsToNQuads(meta));
+        const body = await encodeNegotiatedExactSyncResponse(plain, { request: {
+          responseEncoding: 'gzip-nquads-v1', assetUals: [ual], phase: 'data',
+        } });
+        assets.push(await verify({ assetIndex: index, assetUal: ual, metadataBytes: metadata,
+          dataBytes: plain }));
+        sizes.push({ index, encodedBytes: body.length, plainBytes: plain.length });
+      }
+      const heaps = assets.map(a => [...a.dataQuads, ...a.metadataQuads].reduce((n, q) => n + estimateQuadHeapBytes(q), 0));
+      expect(heaps.every(n => n < 32 * 1024 * 1024)).toBe(true);
+      expect(heaps.reduce((a, b) => a + b, 0)).toBeGreaterThan(64 * 1024 * 1024);
+      const groups: number[] = [];
+      const group = new BulkCommitGroup(async members => {
+        groups.push(members.length);
+        const heap = members.reduce((n, m) => n + heaps[uals.indexOf(m.asset.ual)]!, 0);
+        expect(heap).toBeLessThanOrEqual(64 * 1024 * 1024);
+      });
+      for (const [index, asset] of assets.entries()) await group.append({ asset, ...sizes[index]! });
+      await group.flush();
+      expect(groups).toEqual([5, 1]);
+    } finally { await worker.close(); }
+  }, 60_000);
+});

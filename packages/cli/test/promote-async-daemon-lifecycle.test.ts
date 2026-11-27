@@ -91,6 +91,7 @@ describe('promote-async daemon lifecycle wiring', () => {
       },
       resolveAgentByToken: () => undefined,
       assertion: {
+        prepareQueuedShare: async (job: PromoteJob) => ({ job }),
         async promoteAsync(
           contextGraphId: string,
           name: string,

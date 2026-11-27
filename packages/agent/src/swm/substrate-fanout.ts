@@ -144,6 +144,14 @@ export interface FanOutPlan {
    * operators can see "gossip-only because 137 > 100".
    */
   enumeratedCount: number;
+  /**
+   * Followers of a public CG that are not topic subscribers
+   * ({@link CGMemberEnumeration.directFollowers}). A direct send is their
+   * only delivery path, so the caller sends to them whether or not
+   * `useSubstrate` is set, and does not narrow them as it narrows
+   * subscribers. Present only when there is at least one.
+   */
+  directFollowers?: readonly string[];
 }
 
 /** Decision input — kept narrow so the policy is easy to test. */
@@ -222,6 +230,12 @@ export function chooseFanOutTier(input: ChooseFanOutTierInput): FanOutPlan {
   const substrateTarget = enumeration.source === 'topic-subscribers'
     ? (enumeration.substrateEligibleMembers ?? enumeration.members)
     : enumeration.members;
+  // Carried through every public tier, the gossip-only one included: a
+  // follower has no gossip path, so the cap on subscribers must not drop it.
+  const directFollowers = (enumeration.source === 'topic-subscribers' || enumeration.source === 'none')
+    && enumeration.directFollowers !== undefined && enumeration.directFollowers.length > 0
+    ? { directFollowers: enumeration.directFollowers }
+    : {};
 
   switch (enumeration.source) {
     case 'allowlist': {
@@ -260,6 +274,7 @@ export function chooseFanOutTier(input: ChooseFanOutTierInput): FanOutPlan {
           enumeratedMembers: enumeration.members,
           enumerationSource: 'topic-subscribers',
           enumeratedCount,
+          ...directFollowers,
         };
       }
       // rc.9 PR-D codex follow-up #D3: keep the full subscriber
@@ -274,6 +289,7 @@ export function chooseFanOutTier(input: ChooseFanOutTierInput): FanOutPlan {
         enumeratedMembers: enumeration.members,
         enumerationSource: 'topic-subscribers',
         enumeratedCount,
+        ...directFollowers,
       };
     case 'none':
       return {
@@ -283,6 +299,7 @@ export function chooseFanOutTier(input: ChooseFanOutTierInput): FanOutPlan {
         enumeratedMembers: [],
         enumerationSource: 'none',
         enumeratedCount,
+        ...directFollowers,
       };
   }
 }

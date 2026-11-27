@@ -1,3 +1,5 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
+import { fixtureRoot } from './verified-asset-root-fixture.js';
 import { RandomSamplingRuntime } from '../src/random-sampling-runtime.js';
 import { resolveRandomSamplingBinding, type RandomSamplingHandle } from '../src/random-sampling-bind.js';
 import { createRandomSamplingEligibilityResolver } from '../src/random-sampling-eligibility.js';
@@ -261,6 +263,7 @@ describe('Random Sampling proof-time exact repair', () => {
           getKAContextGraphId,
         } as never,
         asset: {
+      merkleRootHex: fixtureRoot(metadataQuads),
           contextGraphId,
           ual: assetUal,
           assertionVersion: 1n,
@@ -425,12 +428,19 @@ describe('Random Sampling proof-time exact repair', () => {
           _includeSharedMemory: boolean,
           phase: 'data' | 'meta',
         ) => page(phase)),
+        runContextGraphSyncWithBackpressure: vi.fn(async (
+          _ctx: OperationContext,
+          _contextGraphId: string,
+          _lane: string,
+          _operationId: string,
+          work: () => Promise<unknown>,
+        ) => work()),
         processDurableBatchInWorker: vi.fn(processDurableBatchWithRealVerifier),
         insertSyncedQuadsAndInvalidateListCache,
         subscribedContextGraphs: new Map([[localContextGraphId, { subscribed: true }]]),
         contextGraphBindingState: new ContextGraphBindingState(),
         graphScopedStoreClosed: false,
-        graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
+        workLifetime: new AgentWorkLifetime(),
         syncCheckpoints: {
           delete: vi.fn(),
           set: vi.fn(),
@@ -438,22 +448,6 @@ describe('Random Sampling proof-time exact repair', () => {
         },
         requireLocalCgMatchesOnChainSlot: vi.fn(async () => true),
       };
-      agentLike.runLegacyDurableSyncDetailed = async (
-        ctx: OperationContext,
-        peerId: string,
-        contextGraphIds: string[],
-        _onPhase: unknown,
-        _onAccessDenied: unknown,
-        _sinceBatchIdFor: unknown,
-        options: unknown,
-      ) => LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraphDetailed.call(
-        agentLike,
-        ctx,
-        peerId,
-        contextGraphIds[0]!,
-        1,
-        options as never,
-      );
       agentLike.syncExactKnowledgeAssetsFromPeerDetailed =
         LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed;
       return { agentLike, insertSyncedQuadsAndInvalidateListCache, submitProof };
@@ -473,8 +467,9 @@ describe('Random Sampling proof-time exact repair', () => {
       ),
     ]);
     expect(repaired.privateRoots).toEqual([privateRoot]);
+    expect(clean.agentLike.runContextGraphSyncWithBackpressure).toHaveBeenCalledTimes(1);
     expect(clean.insertSyncedQuadsAndInvalidateListCache).not.toHaveBeenCalled();
-    expect(clean.agentLike.graphScopedStorePhysicalRuns.size).toBe(0);
+    expect(clean.agentLike.workLifetime.physicalRuns.size).toBe(0);
 
     const tampered = makeAgent({ ...historicalQuad, object: '"tampered"' });
     await expect(LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset.call(

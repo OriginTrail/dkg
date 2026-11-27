@@ -180,6 +180,7 @@ async function boot(): Promise<void> {
     store: new OxigraphStore(join(dataDir, 'store.nq')),
     syncSharedMemoryOnConnect: false,
     syncReconcilerEnabled: false,
+    vmReconcilerEnabled: false,
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,

@@ -30,6 +30,15 @@ export interface DKGNodeConfig {
   listenAddresses?: string[];
   /** Multiaddr strings to announce to the network (for nodes behind NAT/VPS with a public IP not bound to the interface). */
   announceAddresses?: string[];
+  /**
+   * Announce only the addresses a peer on a public network can dial: public
+   * addresses and relay circuits. Loopback, private (RFC 1918), shared
+   * (100.64/10), link-local and unique-local interface addresses stay out of
+   * identify, the peer record and `multiaddrs`. Ignored when
+   * `announceAddresses` is set: an explicit list is announced as given.
+   * Default false.
+   */
+  announcePublicAddressesOnly?: boolean;
   /** DKG bootstrap peer multiaddrs (NOT public IPFS nodes). */
   bootstrapPeers?: string[];
   /** Enable mDNS for local peer discovery. Default: true. */
@@ -44,6 +53,29 @@ export interface DKGNodeConfig {
   relayPeers?: string[];
   /** Active network identity used to isolate DHT, GossipSub, and relay wire paths. */
   networkIdentity?: DkgNetworkIdentity;
+  /**
+   * Relay multiaddrs (or bare peer ids) declared by the OTHER DKG networks
+   * bundled with this build. With a `networkIdentity`, the node refuses to dial
+   * these peers, store their addresses, or accept their connections. Peers in
+   * `relayPeers` are never refused for being on this static list, but a
+   * `relayPeers` entry that FAILS the network-identity proof is refused like
+   * any other peer (see `networkPeerIsolation`). Ignored without a
+   * `networkIdentity`.
+   */
+  otherNetworkRelays?: readonly string[];
+  /** Multiaddrs or bare peer ids exempt only from the static other-network
+   * dial list. Protocol admission and dynamic identity-mismatch denials remain
+   * authoritative. These peers are not selected as ordinary relays. */
+  staticDialExemptions?: readonly string[];
+  /**
+   * Transport-level network peer isolation: with a `networkIdentity`, refuse
+   * `otherNetworkRelays` and any peer that failed the network-identity proof
+   * (configured `relayPeers` included) at the connection gater. Default true. `false` is the operator kill switch:
+   * the node keeps exactly the pre-existing gater (the `/p2p-circuit` relay
+   * path gate and the relay flap guard), and admission alone rejects other
+   * networks' peers.
+   */
+  networkPeerIsolation?: boolean;
   /** Enable circuit relay server on this node (for nodes with public IPs). */
   enableRelayServer?: boolean;
   /**

@@ -3,9 +3,13 @@ import {
   assertNodeRuntimeSupported,
   inspectNodeRuntime,
   nodeRuntimeFailureMessage,
+  nodeSecurityAdvisory,
+  NODE_SECURITY_ADVISORY_URL,
+  NODE_SECURITY_RELEASE_DATE,
+  NODE_SECURITY_RELEASES,
   NODE_SQLITE_SUPPORTED_RANGE,
 } from '../src/node-runtime-preflight.js';
-import { runNodeRuntimeCheck } from '../src/doctor/checks/node-runtime.js';
+import { runNodeRuntimeCheck, runNodeSecurityCheck } from '../src/doctor/checks/node-runtime.js';
 import type { StateSummary } from '../src/doctor/types.js';
 import {
   inspectInstallNodeRuntime,
@@ -79,5 +83,92 @@ describe('node runtime preflight', () => {
       subject: 'v22.12.0',
       details: { supportedRange: NODE_SQLITE_SUPPORTED_RANGE },
     });
+  });
+});
+
+describe('node security advisory', () => {
+  it('flags releases older than the patched one on each supported line', () => {
+    expect(nodeSecurityAdvisory('v22.23.4')).toContain('Upgrade to Node.js 22.23.5 or later');
+    expect(nodeSecurityAdvisory('v22.13.0')).toContain(`missing the ${NODE_SECURITY_RELEASE_DATE} Node.js security release`);
+    expect(nodeSecurityAdvisory('v22.13.0')).toContain(NODE_SECURITY_ADVISORY_URL);
+    expect(nodeSecurityAdvisory('v24.22.2')).toContain('24.22.3');
+    expect(nodeSecurityAdvisory('v24.22.1')).toContain('24.22.3');
+    expect(nodeSecurityAdvisory('v24.9.5')).toContain('24.22.3');
+    expect(nodeSecurityAdvisory('v26.13.0')).toContain('26.13.1');
+    expect(nodeSecurityAdvisory('v26.12.1')).toContain('26.13.1');
+  });
+
+  it('pins the 2026-11-11 security release on every supported line', () => {
+    expect(NODE_SECURITY_RELEASES).toEqual({ 22: '22.23.5', 24: '24.22.3', 26: '26.13.1' });
+    expect(NODE_SECURITY_RELEASE_DATE).toBe('2026-11-11');
+    expect(NODE_SECURITY_ADVISORY_URL).toBe(
+      'https://nodejs.org/en/blog/vulnerability/november-2026-security-releases',
+    );
+  });
+
+  it('accepts the patched releases and anything newer on the same line', () => {
+    for (const release of Object.values(NODE_SECURITY_RELEASES)) {
+      expect(nodeSecurityAdvisory(`v${release}`)).toBeNull();
+    }
+    expect(nodeSecurityAdvisory('v22.24.0')).toBeNull();
+    expect(nodeSecurityAdvisory('v24.22.10')).toBeNull();
+    expect(nodeSecurityAdvisory('v26.13.2')).toBeNull();
+    expect(nodeSecurityAdvisory('v26.14.0')).toBeNull();
+  });
+
+  it('calls out end-of-life lines and leaves newer lines and unparsable versions alone', () => {
+    for (const version of ['v20.19.2', 'v23.11.0', 'v25.1.0']) {
+      expect(nodeSecurityAdvisory(version)).toContain('end-of-life');
+    }
+    expect(nodeSecurityAdvisory('v23.11.0')).toContain('22.23.5+, 24.22.3+ or 26.13.1+');
+    expect(nodeSecurityAdvisory('v28.0.0')).toBeNull();
+    expect(nodeSecurityAdvisory('unknown')).toBeNull();
+  });
+
+  it('warns without blocking when the runtime works but misses the fixes', () => {
+    const log = vi.fn();
+    const sqlite = vi.fn(() => ({ DatabaseSync: class {} }));
+    expect(assertNodeRuntimeSupported(log, { version: 'v22.20.0', getBuiltinModule: sqlite })).toBe(true);
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith(expect.stringMatching(/^WARNING: .*22\.23\.5/));
+
+    // Releases from before the latest security release now warn too.
+    const stale: ReadonlyArray<readonly [string, string]> = [
+      ['v22.23.4', '22.23.5'],
+      ['v24.22.2', '24.22.3'],
+      ['v26.13.0', '26.13.1'],
+    ];
+    for (const [version, patched] of stale) {
+      log.mockClear();
+      expect(assertNodeRuntimeSupported(log, { version, getBuiltinModule: sqlite })).toBe(true);
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(log).toHaveBeenCalledWith(expect.stringContaining(`Upgrade to Node.js ${patched} or later`));
+    }
+
+    for (const version of ['v22.23.5', 'v24.22.3', 'v26.13.1']) {
+      log.mockClear();
+      expect(assertNodeRuntimeSupported(log, { version, getBuiltinModule: sqlite })).toBe(true);
+      expect(log).not.toHaveBeenCalled();
+    }
+  });
+
+  it('surfaces a warning finding through the node-security doctor check', () => {
+    const findings = runNodeSecurityCheck(stateFor({
+      nodeVersion: 'v22.20.0',
+      nodeSqliteAvailable: true,
+      probe: 'getBuiltinModule',
+    }));
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      check: 'node-security',
+      severity: 'warning',
+      subject: 'v22.20.0',
+      details: { patchedReleases: { 22: '22.23.5', 24: '24.22.3', 26: '26.13.1' } },
+    });
+    expect(runNodeSecurityCheck(stateFor({
+      nodeVersion: 'v24.22.3',
+      nodeSqliteAvailable: true,
+      probe: 'getBuiltinModule',
+    }))).toEqual([]);
   });
 });

@@ -215,6 +215,59 @@ describe('Messenger.sendReliable (happy path semantics)', () => {
 });
 
 describe('Messenger.sendRequestOwned', () => {
+  it('can decline post-failure discovery for a one-shot caller-owned read', async () => {
+    const router = makeRouter(async () => { throw new Error('no valid addresses for peer'); });
+    const resolvePeer = recorder(async (_peer: string, _options: { signal: AbortSignal }) => {});
+    const { messenger, outboxStore } = makeSubstrate({ router, resolvePeer });
+    await expect(messenger.sendRequestOwned(PEER_A, PROTO, new Uint8Array([1]), {
+      recoverPeerAfterFailure: false,
+    })).rejects.toThrow('no valid addresses for peer');
+    expect(resolvePeer.calls).toHaveLength(0);
+    expect(outboxStore.size()).toBe(0);
+  });
+
+  it('does not send a request whose caller has already ended', async () => {
+    const { messenger, router, outboxStore } = makeSubstrate();
+    await expect(messenger.sendRequestOwned(PEER_A, PROTO, new Uint8Array([1]), {
+      signal: AbortSignal.abort(new Error('caller ended')),
+    })).rejects.toThrow('caller ended');
+    expect(router.send.calls).toHaveLength(0);
+    expect(outboxStore.size()).toBe(0);
+  });
+
+  it('propagates the caller signal and response bound to the transport without queueing', async () => {
+    const controller = new AbortController();
+    const router = makeRouter(async (_peer, _protocol, _payload, options) => {
+      const signal = (options as { signal?: AbortSignal })?.signal;
+      if (!signal) return new Uint8Array([1]);
+      return new Promise<Uint8Array>((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    });
+    const { messenger, outboxStore } = makeSubstrate({ router });
+    const sent = messenger.sendRequestOwned(PEER_A, PROTO, new Uint8Array([1]), {
+      signal: controller.signal, timeoutMs: 500, maxReadBytes: 1024,
+    });
+    controller.abort(new Error('caller ended'));
+    await expect(sent).rejects.toThrow('caller ended');
+    expect(router.send.calls[0][3]).toMatchObject({ signal: controller.signal, timeoutMs: 500, maxReadBytes: 1024 });
+    expect(outboxStore.size()).toBe(0);
+  });
+
+  it('does not cache or return a response that arrives after cancellation', async () => {
+    const controller = new AbortController();
+    const router = makeRouter(async () => {
+      controller.abort(new Error('caller ended'));
+      return new Uint8Array([1]);
+    });
+    const { messenger, idempotencyStore, outboxStore } = makeSubstrate({ router });
+    await expect(messenger.sendRequestOwned(PEER_A, PROTO, new Uint8Array([1]), {
+      messageId: FIXED_MSG_ID, signal: controller.signal,
+    })).rejects.toThrow('caller ended');
+    expect(idempotencyStore.check(PEER_A, PROTO, FIXED_MSG_ID, 'out').seen).toBe(false);
+    expect(outboxStore.size()).toBe(0);
+  });
+
   it('keeps reliable framing but does not persist recoverable failures', async () => {
     const router = makeRouter(async () => {
       throw new Error('no valid addresses for peer');

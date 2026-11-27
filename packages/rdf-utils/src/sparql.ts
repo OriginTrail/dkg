@@ -1,10 +1,13 @@
 export {
+  isSparqlKeyword,
   materializePreparedSparql,
   prepareSparql,
   type PreparedSparql,
   type SparqlLexicalToken,
   type ValidPreparedSparql,
 } from './sparql-lexical-scanner.js';
+
+export { isSparqlVariableNameRaw } from './sparql-lexical-primitives.js';
 
 export {
   indexSparqlStructure,
@@ -16,8 +19,11 @@ export {
 
 export {
   prepareSparqlQuery,
+  readSparqlQueryBoundaries,
   type PreparedSparqlQuery,
   type SparqlQueryGroupRange,
   type SparqlQueryVariable,
   type SparqlGraphTarget,
 } from './sparql-query.js';
+
+export { boundPreparedSelect, type SparqlSolutionModifiers } from './sparql-solution-modifiers.js';

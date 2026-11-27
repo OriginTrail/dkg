@@ -25,7 +25,7 @@ import {
 import {
   readFile, writeFile, mkdir, rm, chmod, copyFile, stat, rename, unlink,
 } from 'node:fs/promises';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { randomUUID, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -73,7 +73,7 @@ import { assertNodeRuntimeSupported, type NodeRuntimeProbe } from '../node-runti
 import {
   fetchNpmDistTags,
 } from '../update/npm-registry.js';
-import { cleanStaleWorkspacePackages } from './auto-update-workspace-clean.js';
+import { cleanGeneratedOutputs, cleanStaleWorkspacePackages } from './auto-update-workspace-clean.js';
 import {
   checkForNpmVersionUpdate as checkForNpmVersionUpdateShared,
   getCurrentCliVersion as getCurrentCliVersionShared,
@@ -801,92 +801,6 @@ function sweepOrphanBuildProcesses(slotDir: string, log: (m: string) => void): v
 }
 
 /**
- * Wipe per-package `dist/` directories and `tsconfig.tsbuildinfo` files in
- * the slot before building. Called on the default (`forceClean: false`) path
- * because most upstream packages build with bare `tsc`, which does not
- * remove generated files when their source is deleted/renamed. Without this,
- * a fetch-and-rebuild cycle could leave stale `.js` in `dist/` and quietly
- * activate it on the next slot swap. The `forceClean: true` path runs
- * `git clean -fdx` instead (which already covers dist/), so this helper is
- * not called there. We deliberately do NOT touch:
- *   - `node_modules/` (preserved → pnpm install stays incremental)
- *   - `packages/evm-module/cache/` and `.../artifacts/` (Hardhat compile
- *     cache; cold solc builds on ARM64 routinely exceed the build-step
- *     timeout, so this cache is critical to keep)
- *
- * Implemented in pure Node (`readdir` + `rm`/`unlink`) so it has no
- * dependency on POSIX `find`/`rm`. If even the Node implementation fails
- * (e.g. EACCES on `packages/`), we fall back to `git clean -fdx` so we
- * never proceed to build/swap with potentially stale `dist/*.js` from a
- * previous commit. If the fallback also fails the caller throws — better
- * to fail the update than to silently activate stale code.
- */
-async function cleanGeneratedOutputs(
-  targetDir: string,
-  log: (m: string) => void,
-): Promise<void> {
-  const { execFile: execFileAsync, readdir, rm } = _autoUpdateIo;
-  try {
-    const packagesDir = join(targetDir, 'packages');
-    let pkgEntries: Array<{ name: string; isDirectory: () => boolean }>;
-    try {
-      pkgEntries = await readdir(packagesDir, { withFileTypes: true });
-    } catch (err: any) {
-      // No packages/ dir is unusual but not fatal — nothing to clean.
-      if (err?.code === 'ENOENT') {
-        log('Auto-update: no packages/ directory found; nothing to pre-clean.');
-        return;
-      }
-      throw err;
-    }
-    let removedDist = 0;
-    let removedTsBuildInfo = 0;
-    for (const entry of pkgEntries) {
-      if (!entry.isDirectory()) continue;
-      const distPath = join(packagesDir, entry.name, 'dist');
-      const tsBuildInfoPath = join(packagesDir, entry.name, 'tsconfig.tsbuildinfo');
-      // `rm({ recursive: true, force: true })` is a no-op on missing paths.
-      await rm(distPath, { recursive: true, force: true });
-      await rm(tsBuildInfoPath, { force: true });
-      removedDist += 1;
-      removedTsBuildInfo += 1;
-    }
-    // Also wipe packages/cli's generated repo-root copies. The cli build
-    // script (`packages/cli/package.json#build`) copies repo-root
-    // `network/*.json` into `packages/cli/network/` and `project.json` into
-    // `packages/cli/project.json`. Without this step, deleting or renaming a
-    // root network config (e.g. removing `network/devnet.json`) leaves the
-    // stale package-local copy in the inactive slot, and `candidateRoots()`
-    // picks it up after the swap (monorepo-root precedence saves us in dev,
-    // but published-NPM / detached layouts do not have a monorepo ancestor).
-    // Use `force: true` so missing paths are a no-op (e.g. fresh clone where
-    // these have never been generated).
-    const cliPkgDir = join(packagesDir, 'cli');
-    await rm(join(cliPkgDir, 'network'), { recursive: true, force: true });
-    await rm(join(cliPkgDir, 'project.json'), { force: true });
-    await rm(dirname(nodeUiStaticIndexPath(targetDir)), { recursive: true, force: true });
-    log(
-      `Auto-update: cleared stale dist/ (${removedDist} pkgs) + tsconfig.tsbuildinfo (${removedTsBuildInfo} pkgs) + cli/network/ + cli/project.json + node-ui/dist-ui before build (incremental caches preserved).`,
-    );
-  } catch (primaryErr: any) {
-    log(
-      `Auto-update: Node-based pre-build clean failed (${primaryErr?.message ?? String(primaryErr)}); falling back to git clean -fdx.`,
-    );
-    // Fallback wipes more than we'd like (also nukes node_modules + Hardhat
-    // cache, so the next build is cold) but is correct: the alternative is
-    // proceeding with possibly-stale dist/*.js, which is exactly the bug
-    // we're trying to prevent. If even this fails, throw — abort the update
-    // rather than swap a dirty slot.
-    await execFileAsync('git', ['clean', '-fdx'], {
-      cwd: targetDir,
-      encoding: 'utf-8',
-      timeout: 120_000,
-    });
-    log('Auto-update: fallback git clean -fdx completed.');
-  }
-}
-
-/**
  * Core blue-green update logic. Builds the new version in the inactive slot,
  * then atomically swaps the `releases/current` symlink.
  * Returns true if an update was applied (caller should SIGTERM to restart).
@@ -1160,7 +1074,7 @@ async function _performUpdateInner(
   // from an older commit (the bug this whole helper exists to prevent).
   if (!opts.forceClean) {
     try {
-      await cleanGeneratedOutputs(targetDir, log);
+      await cleanGeneratedOutputs(targetDir, log, _autoUpdateIo);
     } catch (cleanErr: any) {
       log(
         `Auto-update: pre-build clean failed in slot ${target} — ${cleanErr?.message ?? String(cleanErr)}. ` +

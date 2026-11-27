@@ -12,6 +12,7 @@
 //   POST /api/notifications/read   → mark ids + digestKeys read (caller-scoped)
 
 import { scopeNotifications, type NotificationScopeContext } from '@origintrail-official/dkg-node-ui';
+import { mapWithConcurrency } from '@origintrail-official/dkg-agent';
 import { jsonResponse, readBody, SMALL_BODY_BYTES } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 
@@ -52,7 +53,7 @@ function resolveScopedCaller(ctx: RequestContext): string | undefined {
   // anonymous loopback caller the node default agent's feed). When auth is
   // enabled, httpAuthGuard already 401s tokenless requests before dispatch, so
   // this only guards the loopback-no-auth case.
-  if (!ctx.authentication.acceptedToken) return undefined;
+  if (ctx.authentication.principal.kind === 'anonymous') return undefined;
   // A token IS present (valid). Resolve it to the caller's agent: a per-agent
   // delegation token → that agent; the node's own API token (the owner's
   // normal UI token, which is NOT in the per-agent index → resolveAgentByToken
@@ -170,15 +171,18 @@ export async function handleNotificationRoutes(ctx: RequestContext): Promise<voi
       // against the node default agent and silently empty the pending set for
       // any non-default curator agent.
       const pendingByGraph = new Map<string, Set<string>>();
-      await Promise.all(
-        [...scope.curatedCgIds].map(async (cgId) => {
+      // Ingestion emits notification events for each assertion. A caller can
+      // curate hundreds of graphs; one feed refresh must not enqueue all of
+      // their store-backed join lookups at once.
+      await mapWithConcurrency(
+        [...scope.curatedCgIds], 4, async (cgId) => {
           try {
             const pending = await agent.listPendingJoinRequests(cgId, callerAddress);
             pendingByGraph.set(cgId, new Set(pending.map((r) => r.agentAddress.toLowerCase())));
           } catch {
             pendingByGraph.set(cgId, new Set());
           }
-        }),
+        },
       );
 
       const scopeCtx: NotificationScopeContext = {

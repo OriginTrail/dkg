@@ -19,4 +19,6 @@ The daemon also serves the skill at:
 GET /.well-known/skill.md
 ```
 
-Use the skill for exact tool names, HTTP routes, payload details, and agent execution rules. Use the docs corpus for system context, concepts, navigation, and task-level explanation.
+Use the running node's skill for its operational context and HTTP contract; discover the runtime's tool schemas for exact names and parameter spelling. The skill is a maintained template rendered with node state, not a generated API schema. Use the docs corpus for system context, concepts, navigation, and task-level explanation.
+
+Begin with [agent procedures](../agent-context/context-pack.md) for setup, ingestion, querying, collaboration, and explicit publication completion checks.

@@ -25,6 +25,12 @@ describe('buildActiveRelayNetworkPolicy', () => {
     ).toBe(true);
   });
 
+  it('names the relays a reservation is worth holding on', () => {
+    const policy = buildActiveRelayNetworkPolicy(new Set([RELAY_A]))!;
+    expect([...policy.allowedRelayPeerIds]).toEqual([RELAY_A]);
+    expect(buildActiveRelayNetworkPolicy(new Set())!.allowedRelayPeerIds.size).toBe(0);
+  });
+
   it('shares denial-log suppression across the policy path gate and connection gater', () => {
     const logs: string[] = [];
     const policy = buildActiveRelayNetworkPolicy(

@@ -397,10 +397,12 @@ describe("ChatTurnWriter", () => {
       // OpenClaw retains the channel transcript (Telegram, etc.) across
       // sessions, while DKG state can be wiped independently. On the first
       // agent_end after a fresh DKG home, `messages[]` carries the entire
-      // historical transcript; walking those pairs replays each one
-      // (the daemon does not idempotently dedupe — every storeChatExchange
-      // mints fresh userMsg/assistantMsg UUIDs even when turnId matches),
-      // bloating chat-turns by ~20 triples per replayed pair.
+      // historical transcript; walking those pairs replays each one. The
+      // daemon now dedupes a resent (sessionId, turnId) — a duplicate
+      // outcome, not a second storeChatExchange — but a fresh DKG home holds
+      // no earlier turn to match, so each replayed pair is a genuinely new
+      // turn: storeChatExchange mints fresh userMsg/assistantMsg UUIDs for
+      // it, bloating chat-turns by ~20 triples per replayed pair.
       //
       // The cold-start clamp inside `runAgentEndPersist` discards
       // historical pairs when savedUpTo === -1 and emits only the latest.

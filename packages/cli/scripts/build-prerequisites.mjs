@@ -8,6 +8,7 @@ export const CLI_PREREQUISITE_ROOTS = Object.freeze([
   '@origintrail-official/dkg-adapter-prime-agent',
   '@origintrail-official/dkg-mcp',
   '@origintrail-official/dkg-local-llm',
+  '@origintrail-official/dkg-marketplace',
   '@origintrail-official/dkg-okf',
 ]);
 

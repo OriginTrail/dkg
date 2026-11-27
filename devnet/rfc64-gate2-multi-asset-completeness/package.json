@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Connected two-process Gate 2 exact-set harness plus its closed product-shaped completeness contract.",
   "dependencies": {
-    "@multiformats/multiaddr": "^13.0.3",
+    "@multiformats/multiaddr": "13.0.3",
     "@origintrail-official/dkg-agent": "workspace:*",
     "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",

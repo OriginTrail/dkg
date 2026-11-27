@@ -11,7 +11,7 @@
  * rewritten sparql-http endpoints answer a REAL SPARQL ASK, and stop()
  * really releases the port.
  */
-import { afterAll, beforeAll, describe, it, expect } from 'vitest';
+import { afterAll, beforeAll, describe, it, expect, vi } from 'vitest';
 import { mkdtemp, mkdir, rm, writeFile, chmod } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -28,6 +28,7 @@ import {
   MANAGED_OXIGRAPH_BACKEND,
   DEFAULT_OXIGRAPH_PORT,
 } from '../src/daemon/oxigraph-managed.js';
+import { spawnOrphan, waitForCondition } from './fixtures/oxigraph-server-real-fixture.js';
 
 let systemOxigraphDir: string | undefined;
 let originalPath: string | undefined;
@@ -43,6 +44,11 @@ const args = process.argv.slice(2);
 if (args.includes('--version')) {
   console.log('Oxigraph 0.6.0');
   process.exit(0);
+}
+// Hold the store's LOCK open, as Oxigraph does, when a test asks for it.
+const locationIdx = args.indexOf('--location');
+if (process.env.OXIGRAPH_STANDIN_HOLD_LOCK === '1' && locationIdx >= 0) {
+  require('node:fs').openSync(require('node:path').join(args[locationIdx + 1], 'LOCK'), 'a');
 }
 const bindIdx = args.indexOf('--bind');
 if (bindIdx < 0 || !args[bindIdx + 1]) {
@@ -121,6 +127,8 @@ describe('planManagedOxigraph', () => {
     });
     expect(plan!.queryTimeoutS).toBeUndefined();
     expect(plan!.clientTimeoutMs).toBe(30_000);
+    // The maintenance reopen is opt-in: nothing configured, nothing planned.
+    expect(plan!.walRestartThresholdBytes).toBeUndefined();
   });
 
   it('honours operator overrides for port, location and cacheDir', () => {
@@ -128,7 +136,12 @@ describe('planManagedOxigraph', () => {
       {
         store: {
           backend: MANAGED_OXIGRAPH_BACKEND,
-          options: { port: 9999, location: '/mnt/oxi', cacheDir: '/mnt/oxi-bin' },
+          options: {
+            port: 9999,
+            location: '/mnt/oxi',
+            cacheDir: '/mnt/oxi-bin',
+            walRestartThresholdBytes: 1_234,
+          },
         },
       },
       '/data',
@@ -136,7 +149,24 @@ describe('planManagedOxigraph', () => {
     expect(plan!.port).toBe(9999);
     expect(plan!.location).toBe('/mnt/oxi');
     expect(plan!.cacheDir).toBe('/mnt/oxi-bin');
+    expect(plan!.walRestartThresholdBytes).toBe(1_234);
   });
+
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '4294967296', null])(
+    'leaves the WAL maintenance reopen off for the invalid threshold %s',
+    (walRestartThresholdBytes) => {
+      const plan = planManagedOxigraph(
+        {
+          store: {
+            backend: MANAGED_OXIGRAPH_BACKEND,
+            options: { walRestartThresholdBytes },
+          },
+        },
+        '/data',
+      );
+      expect(plan!.walRestartThresholdBytes).toBeUndefined();
+    },
+  );
 
   it('omits the unsafe native query timeout for bundled Oxigraph 0.5.x on macOS', () => {
     const plan = planManagedOxigraph(
@@ -615,41 +645,141 @@ describe('startManagedOxigraph (real download + real server)', () => {
     }
   });
 
-  it('wires query and construct timeouts to recovery while filtering mutations', async () => {
+  it('reclaims an earlier release\'s orphan that runs another binary from the managed cache', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
+    const port = await freePort();
+    const cacheDir = join(dataDir, 'oxigraph');
+    const location = join(dataDir, 'oxigraph-data');
+    await mkdir(cacheDir, { recursive: true });
+    await mkdir(location, { recursive: true });
+    // The binary an earlier release pinned, still serving this store after
+    // its worker was SIGKILLed: no owner record, and init adopted it.
+    const olderBinary = join(cacheDir, 'oxigraph-v0.5.7');
+    await writeFile(olderBinary, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+require('node:fs').openSync(require('node:path').join(args[args.indexOf('--location') + 1], 'LOCK'), 'a');
+const [host, port] = args[args.indexOf('--bind') + 1].split(':');
+require('node:http').createServer((_req, res) => res.end('orphan')).listen(Number(port), host);
+`);
+    await chmod(olderBinary, 0o755);
+    const orphanPid = await spawnOrphan(olderBinary, [
+      'serve', '--location', location, '--bind', `127.0.0.1:${port}`,
+    ]);
+    const lines: string[] = [];
+    let result: Awaited<ReturnType<typeof startManagedOxigraph>> = null;
+    try {
+      expect(await waitForCondition(async () => {
+        try { return (await fetch(`http://127.0.0.1:${port}/`)).ok; } catch { return false; }
+      })).toBe(true);
+      // The launch binary is the PATH stand-in, outside the cache, so only the
+      // forwarded cache directory identifies the orphan's binary as this node's.
+      result = await startManagedOxigraph({
+        config: {
+          store: { backend: MANAGED_OXIGRAPH_BACKEND, options: { port, readyTimeoutMs: 10_000 } },
+        },
+        dataDir,
+        platform: 'freebsd',
+        log: (line) => lines.push(line),
+      });
+      expect(lines.join('\n')).toContain(
+        `stopping orphaned Oxigraph pid ${orphanPid} (it was reparented to PID 1)`,
+      );
+      expect(await fetchManagedPid(port)).not.toBe(orphanPid);
+    } finally {
+      await result?.handle.stop();
+      try { process.kill(orphanPid, 'SIGKILL'); } catch { /* already gone */ }
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reclaims an earlier release\'s orphan that runs the oxigraph on PATH while the bundled binary launches', async () => {
+    // STABLE cache, as in the real-download test: the launch binary is the
+    // pinned release, so only the forwarded PATH binary identifies the
+    // orphan's binary as this node's.
+    const cacheDir = join(tmpdir(), 'dkg-test-oxigraph-cache');
+    await mkdir(cacheDir, { recursive: true });
+    const dataDir = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
+    const port = await freePort();
+    const location = join(dataDir, 'oxigraph-data');
+    await mkdir(location, { recursive: true });
+    process.env.OXIGRAPH_STANDIN_HOLD_LOCK = '1';
+    let orphanPid: number;
+    try {
+      orphanPid = await spawnOrphan(join(systemOxigraphDir!, 'oxigraph'), [
+        'serve', '--location', location, '--bind', `127.0.0.1:${port}`,
+      ]);
+    } finally {
+      delete process.env.OXIGRAPH_STANDIN_HOLD_LOCK;
+    }
+    const lines: string[] = [];
+    let result: Awaited<ReturnType<typeof startManagedOxigraph>> = null;
+    try {
+      expect(await waitForCondition(async () => {
+        try { return (await fetch(`http://127.0.0.1:${port}/`)).ok; } catch { return false; }
+      })).toBe(true);
+      result = await startManagedOxigraph({
+        config: { store: { backend: MANAGED_OXIGRAPH_BACKEND, options: { port, cacheDir } } },
+        dataDir,
+        log: (line) => lines.push(line),
+        readyTimeoutMs: 30_000,
+      });
+      expect(lines.join('\n')).toContain(
+        `stopping orphaned Oxigraph pid ${orphanPid} (it was reparented to PID 1)`,
+      );
+      const answer = await fetch(String(result!.storeConfig.options.queryEndpoint), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/sparql-query', Accept: 'application/sparql-results+json' },
+        body: 'ASK { ?s ?p ?o }',
+      });
+      expect(answer.ok).toBe(true);
+    } finally {
+      await result?.handle.stop();
+      try { process.kill(orphanPid, 'SIGKILL'); } catch { /* already gone */ }
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('wires read and mutation timeouts to supervised recovery', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
     const port = await freePort();
     const result = await startManagedOxigraph({
       config: {
         store: {
           backend: MANAGED_OXIGRAPH_BACKEND,
-          options: { port, readyTimeoutMs: 5_000 },
+          options: { port, readyTimeoutMs: 5_000, clientTimeoutMs: 50 },
         },
       },
       dataDir,
       platform: 'freebsd',
       log: () => {},
     });
+    const originalFetch = globalThis.fetch;
+    const endpointPrefix = `http://127.0.0.1:${port}/`;
+    globalThis.fetch = (async (input, init) => {
+      if (String(input).startsWith(endpointPrefix) && init?.method === 'POST') {
+        return await new Promise<Response>((_resolve, reject) => {
+          const signal = init.signal;
+          const onAbort = () => reject(
+            signal?.reason instanceof Error
+              ? signal.reason
+              : new Error('managed store request aborted'),
+          );
+          if (signal?.aborted) onAbort();
+          else signal?.addEventListener('abort', onAbort, { once: true });
+        });
+      }
+      return originalFetch(input, init);
+    }) as typeof fetch;
+    let store: Awaited<ReturnType<typeof createTripleStore>> | undefined;
     try {
-      const managedRecovery = result!.storeConfig.options.managedRecovery as {
-        recover: (operation: string) => void;
-        readState: () => {
-          recovering: boolean;
-          generation: number;
-        };
-      };
-      const recover = managedRecovery.recover;
-      const readState = managedRecovery.readState;
+      store = await createTripleStore(result!.storeConfig);
       const pid1 = await fetchManagedPid(port);
 
-      recover('insert');
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      expect(await fetchManagedPid(port)).toBe(pid1);
-      expect(readState().generation).toBe(0);
-
-      recover('query');
-      // Ownership verification is asynchronous; an unverified request is not
-      // yet a recovery generation and must not be exposed as one.
-      expect(readState()).toEqual({ recovering: false, generation: 0 });
+      await expect(store.update(
+        'INSERT DATA { <urn:mutation> <urn:must-restart> "true" }',
+      )).rejects.toMatchObject({ code: 'STORE_OPERATION_TIMEOUT' });
+      expect(result!.handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: true, generation: 0 });
       let pid2 = 0;
       for (let i = 0; i < 100; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -662,12 +792,20 @@ describe('startManagedOxigraph (real download + real server)', () => {
       }
       expect(pid2).toBeGreaterThan(0);
       expect(pid2).not.toBe(pid1);
-      for (let i = 0; i < 50 && readState().recovering; i++) {
+      for (let i = 0; i < 50 && (result!.handle.getRecoveryState().recovering || result!.handle.getRecoveryState().admissionsPaused); i++) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      expect(readState()).toEqual({ recovering: false, generation: 1 });
+      expect(result!.handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: false, generation: 1 });
 
-      recover('construct');
+      await expect(store.query('ASK { ?s ?p ?o }')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        operation: 'query',
+      });
+      // Close store admission while ownership verification is in flight. The
+      // generation advances only after the verified listener is signalled.
+      expect(result!.handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: true, generation: 1 });
       let pid3 = 0;
       for (let i = 0; i < 100; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -680,11 +818,37 @@ describe('startManagedOxigraph (real download + real server)', () => {
       }
       expect(pid3).toBeGreaterThan(0);
       expect(pid3).not.toBe(pid2);
-      for (let i = 0; i < 50 && readState().recovering; i++) {
+      for (let i = 0; i < 50 && (result!.handle.getRecoveryState().recovering || result!.handle.getRecoveryState().admissionsPaused); i++) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      expect(readState()).toEqual({ recovering: false, generation: 2 });
+      expect(result!.handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: false, generation: 2 });
+
+      await expect(store.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'))
+        .rejects.toMatchObject({
+          code: 'STORE_OPERATION_TIMEOUT',
+          operation: 'construct',
+        });
+      let pid4 = 0;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        try {
+          pid4 = await fetchManagedPid(port);
+          if (pid4 !== pid3) break;
+        } catch {
+          /* server is between processes */
+        }
+      }
+      expect(pid4).toBeGreaterThan(0);
+      expect(pid4).not.toBe(pid3);
+      for (let i = 0; i < 50 && (result!.handle.getRecoveryState().recovering || result!.handle.getRecoveryState().admissionsPaused); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(result!.handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: false, generation: 3 });
     } finally {
+      globalThis.fetch = originalFetch;
+      await store?.close();
       await result?.handle.stop();
       await rm(dataDir, { recursive: true, force: true });
     }
@@ -762,15 +926,32 @@ describe('startManagedOxigraph (real download + real server)', () => {
             timeout: 30_000,
             queryEndpoint: `http://127.0.0.1:${port}/query`,
             updateEndpoint: `http://127.0.0.1:${port}/update`,
-            managedRecovery: {
-              readState: expect.any(Function),
-              recover: expect.any(Function),
-            },
           },
         });
+        const activityReports: boolean[] = [];
+        const originalRegisterStoreActivity = result!.handle.registerStoreActivity.bind(result!.handle);
+        const registerStoreActivity = vi
+          .spyOn(result!.handle, 'registerStoreActivity')
+          .mockImplementation(() => {
+            const lease = originalRegisterStoreActivity();
+            return {
+              report: (activeOperations: boolean) => {
+                activityReports.push(activeOperations);
+                lease.report(activeOperations);
+              },
+              dispose: () => lease.dispose(),
+            };
+          });
         const runtimeStore = await createTripleStore(result!.storeConfig);
         try {
           expect(() => new SyncSharedProjectionStoreV1(runtimeStore)).not.toThrow();
+          await expect(runtimeStore.query('ASK { ?s ?p ?o }')).resolves.toMatchObject({
+            type: 'boolean',
+            value: false,
+          });
+          expect(registerStoreActivity).toHaveBeenCalledOnce();
+          expect(activityReports).toContain(true);
+          expect(activityReports.at(-1)).toBe(false);
         } finally {
           await runtimeStore.close();
         }

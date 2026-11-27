@@ -24,6 +24,7 @@ function memoryFor(triples: LayeredTriple[]): MemoryData {
     partial: false,
     layerStatus: { wm: 'ok', swm: 'ok', vm: 'ok' },
     refresh: () => {},
+    hasMore: false, canRetry: false, loadMore: () => {}, pageError: null, limitMessage: null,
   } as unknown as MemoryData;
 }
 

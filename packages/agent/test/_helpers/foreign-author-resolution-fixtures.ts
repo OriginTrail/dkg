@@ -1,3 +1,4 @@
+import { confirmedPublicationCatalogConfigV1 } from '../support/confirmed-publication-harness.js';
 import {
   buildAssertionSealQuads,
   contextGraphAssertionUri,
@@ -55,6 +56,7 @@ function makeLog() {
 export function stubAgent(store: TripleStore, defaultAgentAddress: string) {
   const agent = Object.create(DKGAgent.prototype) as any;
   agent.store = store;
+  agent.config = confirmedPublicationCatalogConfigV1();
   agent.log = makeLog();
   agent.defaultAgentAddress = defaultAgentAddress;
   Object.defineProperty(agent, 'peerId', {

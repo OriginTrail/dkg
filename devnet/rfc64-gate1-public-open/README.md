@@ -112,3 +112,26 @@ Every phase also proves that finalized public VM inventory selection remains
 chain-based. The adapter reports only product readbacks: service/bootstrap
 liveness, configured legacy scope, manual SWM admission result, chain-VM
 selection, exact staged/applied head, and exact semantic graph bytes.
+
+## Applied-head durability crash regression
+
+After building the agent workspace dependencies, run from the repository root:
+
+```sh
+node --experimental-sqlite --import tsx scripts/repro/rfc64-catalog-durable-head.mts
+```
+
+This focused native-receiver campaign uses the existing two-peer libp2p test
+fixture with real SQLite and persistent Oxigraph, rather than the full DKGAgent
+launcher above. It holds and verifies the embedded store's debounce path and
+SIGKILLs its disposable test process (both loopback peers) at three boundaries: after
+SWM/VM mutation but before flush, after RDF durability but before applied-head
+CAS, and immediately after the durable CAS. It reopens both stores without
+cleanup first, compares the complete RDF generation and exact applied head,
+and then starts fresh peers to replay the same signed catalog. No test-only
+flush is inserted between the target mutation and the applied-head commit.
+
+The ordinary native Gate-1 suite also covers an actual older snapshot held
+after serialization, decorator forwarding, flush rejection, cancellation while
+flushing, CAS refusal and commit-then-throw behavior. This campaign does not
+certify a remote store's own fsync implementation or power-loss guarantees.

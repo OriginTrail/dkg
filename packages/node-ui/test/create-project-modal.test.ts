@@ -10,6 +10,11 @@ const fetchCurrentAgentMock = vi.fn();
 const installOntologyMock = vi.fn();
 const publishProjectManifestMock = vi.fn();
 
+vi.mock('../src/ui/api-wrapper.js', () => ({ api: {
+  fetchContextGraphs: (options?: { fresh?: boolean }) => fetchContextGraphsMock(options),
+  fetchCurrentAgent: () => fetchCurrentAgentMock(),
+} }));
+
 vi.mock('../src/ui/api.js', async () => {
   const actual = await vi.importActual<any>('../src/ui/api.js');
   return {
@@ -97,7 +102,7 @@ describe('CreateProjectModal partial registration flow', () => {
     const { useTabsStore } = await import('../src/ui/stores/tabs.js');
     const { useJourneyStore } = await import('../src/ui/stores/journey.js');
     act(() => {
-      useProjectsStore.setState({ contextGraphs: [], loading: false, activeProjectId: null });
+      useProjectsStore.setState({ contextGraphs: [], loading: false, inventoryError: 'earlier inventory failure', activeProjectId: null });
       useTabsStore.setState({
         tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }],
         activeTabId: 'dashboard',
@@ -129,7 +134,7 @@ describe('CreateProjectModal partial registration flow', () => {
 
     const createButton = Array
       .from(container!.querySelectorAll('button'))
-      .find((button) => button.textContent === 'Create Context Graph') as HTMLButtonElement | undefined;
+      .find((button) => button.textContent === 'Create context graph') as HTMLButtonElement | undefined;
     expect(createButton).toBeTruthy();
     await act(async () => {
       createButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -143,6 +148,9 @@ describe('CreateProjectModal partial registration flow', () => {
       undefined,
       expect.objectContaining({ register: true }),
     );
+    expect(fetchContextGraphsMock).toHaveBeenCalledWith({ fresh: true });
+    expect(useProjectsStore.getState().inventoryError).toBeNull();
+    expect(useProjectsStore.getState().loading).toBe(false);
     expect(useProjectsStore.getState().activeProjectId).toBe(cgId);
     expect(container!.querySelector('[data-testid="wire-workspace"]')).toBeTruthy();
     expect(container!.textContent).toContain('On-chain registration failed: rpc unavailable');
@@ -166,7 +174,7 @@ describe('CreateProjectModal partial registration flow', () => {
   function findCreateButton(): HTMLButtonElement {
     const btn = Array
       .from(container!.querySelectorAll('button'))
-      .find((b) => b.textContent === 'Create Context Graph') as HTMLButtonElement | undefined;
+      .find((b) => b.textContent === 'Create context graph') as HTMLButtonElement | undefined;
     if (!btn) throw new Error('Create button not found');
     return btn;
   }
@@ -177,16 +185,13 @@ describe('CreateProjectModal partial registration flow', () => {
     return helper;
   }
 
-  it('shows the HTML-stripped warning when the user types `<b>foo</b>` (Codex Y2 raw-input visibility)', async () => {
+  it('shows the HTML tags error when the user types `<b>foo</b>` (Codex Y2 raw-input visibility)', async () => {
     await renderModal();
     const input = findNameInput();
     await act(async () => { setInputValue(input, '<b>foo</b>'); });
     await flush();
     const helper = findNameHelper();
-    expect(helper.textContent ?? '').toMatch(/HTML tags are not allowed/i);
-    // The slug preview should still reflect the *sanitised* value
-    // (so the user knows what ID they'd actually get if they
-    // accepted the strip):
+    expect(helper.textContent ?? '').toBe('Remove the HTML tags from the name.');
     expect(helper.getAttribute('aria-invalid')).toBe(null);
     expect(input.getAttribute('aria-invalid')).toBe('true');
   });
@@ -209,7 +214,7 @@ describe('CreateProjectModal partial registration flow', () => {
     const helper = findNameHelper();
     // Either of two warnings is acceptable depending on which
     // branch the validator hits first — both are user-actionable.
-    expect(helper.textContent ?? '').toMatch(/trimmed to 80 characters|letter or digit/i);
+    expect(helper.textContent ?? '').toMatch(/Shorten the name to 80 characters or fewer|letter or digit/i);
   });
 
   it('rejects punctuation-only names that slugify to empty (e.g. !!!) and disables the Create button (Codex RED-3 regression)', async () => {
@@ -282,7 +287,7 @@ describe('CreateProjectModal partial registration flow', () => {
     const { useTabsStore } = await import('../src/ui/stores/tabs.js');
     const { useJourneyStore } = await import('../src/ui/stores/journey.js');
     act(() => {
-      useProjectsStore.setState({ contextGraphs: [], loading: false, activeProjectId: null });
+      useProjectsStore.setState({ contextGraphs: [], loading: false, inventoryError: 'earlier inventory failure', activeProjectId: null });
       useTabsStore.setState({
         tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }],
         activeTabId: 'dashboard',
@@ -401,7 +406,7 @@ describe('CreateProjectModal progress copy honesty', () => {
     const { useTabsStore } = await import('../src/ui/stores/tabs.js');
     const { useJourneyStore } = await import('../src/ui/stores/journey.js');
     act(() => {
-      useProjectsStore.setState({ contextGraphs: [], loading: false, activeProjectId: null });
+      useProjectsStore.setState({ contextGraphs: [], loading: false, inventoryError: 'earlier inventory failure', activeProjectId: null });
       useTabsStore.setState({
         tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }],
         activeTabId: 'dashboard',
@@ -420,7 +425,7 @@ describe('CreateProjectModal progress copy honesty', () => {
   function getCreateButton(): HTMLButtonElement {
     const button = Array
       .from(container!.querySelectorAll('button'))
-      .find((b) => b.textContent === 'Create Context Graph' || b.textContent?.includes('locally') || b.textContent?.includes('network'));
+      .find((b) => b.textContent === 'Create context graph' || b.textContent?.includes('locally') || b.textContent?.includes('network'));
     if (!button) throw new Error('Create button not found');
     return button as HTMLButtonElement;
   }

@@ -10,76 +10,66 @@
   height: 100dvh;
   width: 100vw;
   overflow: hidden;
+  /* `clip`, not only `hidden`: a hidden box can still be scrolled by focus
+     or scrollIntoView, which shifted the whole app up on Settings. */
+  overflow: clip;
 }
 
-/* ── Demo/mock-data fallback banner (GH #904) ── */
-.v10-mock-banner {
+/* ── API token entry, shown when the node rejects the page's credentials ── */
+.v10-token-prompt {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  padding: 6px 14px;
-  font-size: 12px;
-  line-height: 1.4;
-  color: #7c2d12;
-  background: var(--amber-dim, rgba(251, 191, 36, 0.18));
-  border-bottom: 1px solid rgba(251, 191, 36, 0.45);
-  z-index: 30;
+  gap: var(--space-8);
+  padding: var(--space-6) var(--space-16);
+  font-size: var(--fs-control);
+  line-height: var(--lh-snug);
+  color: var(--text-warning);
+  background: var(--warning-bg);
+  border-bottom: 1px solid var(--warning-border);
+  z-index: var(--z-banner);
 }
-.v10-mock-banner strong {
-  font-weight: 700;
+.v10-token-prompt-text {
+  flex: 1 1 320px;
 }
-.v10-mock-banner-dot {
+.v10-token-prompt-input {
+  flex: 0 1 280px;
+  min-width: 160px;
+  padding: var(--space-4) var(--space-8);
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border: 1px solid var(--warning-border);
+}
+.v10-token-prompt-submit {
   flex: 0 0 auto;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #f59e0b;
-  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.25);
-}
-.v10-mock-banner-reload {
-  flex: 0 0 auto;
-  margin-left: auto;
-  font-size: 11px;
+  font-size: var(--fs-label);
   font-weight: 600;
-  padding: 3px 12px;
-  border-radius: 6px;
+  padding: var(--space-4) var(--space-12);
+  border-radius: var(--radius-control);
   cursor: pointer;
-  color: #7c2d12;
-  background: rgba(251, 191, 36, 0.35);
-  border: 1px solid rgba(251, 191, 36, 0.6);
+  color: var(--text-warning);
+  background: var(--warning-bg-strong);
+  border: 1px solid var(--warning-border);
 }
-.v10-mock-banner-reload:hover {
-  background: rgba(251, 191, 36, 0.55);
+.v10-token-prompt-submit:disabled {
+  cursor: default;
+  opacity: var(--opacity-disabled);
 }
 
 /* ── Inline stale-refresh banner for an open project (GH #905) ── */
 .v10-stale-banner {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
-  padding: 5px 12px;
-  font-size: 11px;
-  color: #7c2d12;
-  background: var(--amber-dim, rgba(251, 191, 36, 0.16));
-  border-bottom: 1px solid rgba(251, 191, 36, 0.4);
+  gap: var(--space-8);
+  padding: var(--space-4) var(--space-12);
+  font-size: var(--fs-label);
+  color: var(--text-warning);
+  background: var(--warning-bg);
+  border-bottom: 1px solid var(--warning-border);
 }
-.v10-stale-banner .v10-retry-btn {
-  margin-left: auto;
-}
-
-/* ── Retry control for failed view fetches (GH #905) ── */
-.v10-retry-btn {
-  font-size: 12px;
-  padding: 4px 14px;
-  border-radius: 6px;
-  cursor: pointer;
-  color: var(--text-primary, #e5e7eb);
-  background: var(--bg-elevated, rgba(255, 255, 255, 0.06));
-  border: 1px solid var(--border, rgba(255, 255, 255, 0.16));
-}
-.v10-retry-btn:hover {
-  background: var(--bg-hover, rgba(255, 255, 255, 0.12));
-}
+.v10-stale-banner > span { flex: 1 1 220px; min-width: 0; }
+.v10-stale-banner .v10-retry-btn { margin-left: auto; }
 
 /* ── Header ── */
 .v10-header {
@@ -89,31 +79,18 @@
   border-bottom: 1px solid var(--border-subtle);
   display: flex;
   align-items: center;
-  padding: 0 16px;
-  gap: 2px;
-  z-index: 100;
+  padding: 0 var(--space-16);
+  gap: var(--space-2);
+  z-index: var(--z-header);
 }
 .v10-header-logo {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-8);
   color: var(--text-primary);
   user-select: none;
 }
-.v10-header-logo-ot {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin-left: 10px;
-  padding-left: 10px;
-  border-left: 1px solid var(--border-default);
-}
-.v10-header-logo-ot-by {
-  font-size: 9px;
-  color: var(--text-tertiary);
-  letter-spacing: 0.02em;
-  white-space: nowrap;
-}
+.v10-header-ot-mark { display: none; flex: none; color: var(--text-primary); line-height: 0; }
 .v10-header-ot-wordmark {
   display: block;
   color: var(--text-secondary);
@@ -124,27 +101,20 @@
   stroke: none;
   fill: currentColor;
 }
-.v10-header-logo-text {
-  font-family: var(--font-mono);
-  font-weight: 600;
-  font-size: 13px;
-  letter-spacing: 0.5px;
-}
-.v10-header-logo-version { color: var(--text-tertiary); font-weight: 300; }
 .v10-header-sep {
   width: 1px;
   height: 20px;
   background: var(--border-default);
-  margin: 0 12px 0 16px;
+  margin: 0 var(--space-12) 0 var(--space-16);
 }
 .v10-header-agent-switcher {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
-  border-radius: 4px;
+  gap: var(--space-6);
+  padding: var(--space-4) var(--space-12);
+  border-radius: var(--radius-xs);
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background var(--motion-base);
 }
 .v10-header-agent-switcher:hover { background: var(--bg-hover); }
 .v10-header-agent-dot {
@@ -155,65 +125,41 @@
 }
 .v10-header-agent-name {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 500;
   color: var(--text-primary);
 }
 .v10-header-agent-addr {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-label);
   color: var(--text-secondary);
   opacity: 0.85;
 }
 .v10-header-spacer { flex: 1; }
 .v10-header-meta {
+  white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-secondary);
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-right: 16px;
+  gap: var(--space-6);
+  margin-right: var(--space-16);
 }
-.v10-header-status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  display: inline-block;
-}
-.v10-header-status-dot.online { background: var(--accent-green); }
-.v10-header-status-dot.offline { background: var(--accent-amber); }
 .v10-header-meta-sep { color: var(--text-ghost); }
-.v10-header-actions { display: flex; align-items: center; gap: 4px; }
-.v10-header-icon-btn {
-  width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 4px;
-  color: var(--text-tertiary);
-  transition: all 0.15s;
-  position: relative;
-}
-.v10-header-icon-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
-.v10-header-icon-btn.active-toggle { color: var(--text-secondary); }
+.v10-header-actions { display: flex; align-items: center; gap: var(--space-4); }
+.v10-header-icon-btn { width: 32px; position: relative; }
 .v10-header-notif-wrap { position: relative; }
-.v10-header-notif-badge {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  min-width: 14px;
-  height: 14px;
-  border-radius: 7px;
-  background: var(--accent-red);
-  color: #fff;
-  font-size: 9px;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 3px;
+.v10-header-notif-badge { position: absolute; top: 2px; right: 2px; }
+/* Unread count sits on the button's corner, clear of the bell glyph, as a
+   solid brand purple disc with a ring in the header colour. With unread items the
+   bell itself brightens, so the icon stays the strongest mark (dark-first). */
+.v10-header-notif-badge.ds-count.ds-tone-attention {
+  top: -1px; right: -3px;
+  min-width: 16px; height: 16px; padding: 0 var(--space-4);
+  background: var(--notify);
+  color: var(--text-on-notify);
+  box-shadow: 0 0 0 2px var(--bg-panel);
 }
 /* ── Notifications pane (redesign) ─────────────────────────────────────────
    Bell dropdown surface + the two sections (pinned "Needs your action" +
@@ -225,16 +171,15 @@
   position: absolute;
   top: 100%;
   right: 0;
-  margin-top: 8px;
+  margin-top: var(--space-8);
   width: 380px;
   max-height: min(70vh, 560px);
   display: flex;
   flex-direction: column;
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-  z-index: 200;
+  box-shadow: var(--shadow-menu);
+  z-index: var(--z-popover);
   overflow: hidden;
 }
 .v10-notif-pane:focus { outline: none; }
@@ -242,49 +187,38 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 14px;
+  padding: var(--pad-nested);
   border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
 .v10-notif-pane-title {
-  font-size: 11px;
+  font-size: var(--fs-label);
   font-weight: 600;
-  letter-spacing: 0.5px;
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--text-tertiary);
 }
-.v10-notif-pane-markread {
-  font-family: var(--font-sans);
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 0;
-}
-.v10-notif-pane-markread:hover { color: var(--text-primary); }
 /* Body scrolls under the sticky titlebar; the pinned action section sits
    first in the same scroll container (never a nested scrollbar). */
-.v10-notif-pane-body { overflow-y: auto; padding: 6px 0; }
+.v10-notif-pane-body { overflow-y: auto; padding: var(--space-6) 0; }
 
 /* States */
 .v10-notif-pane-state,
 .v10-notif-pane-error {
-  padding: 18px 14px;
+  padding: var(--space-16) var(--space-16);
   text-align: center;
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-tertiary);
 }
 .v10-notif-pane-error { color: var(--text-secondary); }
 .v10-notif-pane-error-inline {
-  padding: 8px 14px;
+  padding: var(--space-8) var(--space-16);
   text-align: left;
-  font-size: 11px;
+  font-size: var(--fs-label);
 }
-.v10-notif-pane-empty { padding: 24px 16px; text-align: center; }
-.v10-notif-pane-empty-lead { font-size: 13px; color: var(--text-secondary); margin-bottom: 4px; }
-.v10-notif-pane-empty-sub { font-size: 11px; color: var(--text-tertiary); line-height: 1.4; }
+.v10-notif-pane-empty { padding: var(--space-24) var(--space-16); text-align: center; }
+.v10-notif-pane-empty-lead { font-size: var(--fs-body); color: var(--text-secondary); margin-bottom: var(--space-4); }
+.v10-notif-pane-empty-sub { font-size: var(--fs-label); color: var(--text-tertiary); line-height: var(--lh-snug); }
 .v10-notif-retry {
   font-family: var(--font-sans);
   font-size: inherit;
@@ -299,60 +233,45 @@
 .v10-notif-retry:hover { color: var(--text-primary); }
 
 /* Sections */
-.v10-notif-section { padding: 4px 0; }
+.v10-notif-section { padding: var(--space-4) 0; }
 .v10-notif-section + .v10-notif-section { border-top: 1px solid var(--border-subtle); }
 .v10-notif-section-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 14px 4px;
+  gap: var(--space-8);
+  padding: var(--space-6) var(--space-16) var(--space-4);
 }
 .v10-notif-section-label {
-  font-size: 10px;
+  font-size: var(--fs-micro);
   font-weight: 700;
-  letter-spacing: 0.6px;
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--text-tertiary);
 }
-.v10-notif-section-count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 5px;
-  border-radius: 999px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 700;
-  background: rgba(245, 158, 11, 0.16);
-  color: var(--text-warning);
-  border: 1px solid rgba(245, 158, 11, 0.4);
-}
 .v10-notif-section-rows { display: flex; flex-direction: column; }
-.v10-notif-section-empty { padding: 6px 14px 10px; font-size: 11px; color: var(--text-tertiary); font-style: italic; }
+.v10-notif-section-empty { padding: var(--space-6) var(--space-16) var(--space-12); font-size: var(--fs-label); color: var(--text-tertiary); font-style: italic; }
 
 /* Rows (shared) */
 .v10-notif-row {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: var(--space-8);
   width: 100%;
   text-align: left;
-  padding: 9px 14px;
+  padding: var(--space-8) var(--space-16);
   font-family: var(--font-sans);
   background: none;
   border: none;
   border-radius: 0;
   color: var(--text-primary);
 }
-button.v10-notif-row { cursor: pointer; transition: background 0.1s; }
+button.v10-notif-row { cursor: pointer; transition: background var(--motion-fast); }
 button.v10-notif-row:hover { background: var(--bg-hover); }
 .v10-notif-row[aria-disabled="true"] { opacity: 0.78; }
-.v10-notif-row-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
-.v10-notif-row-title { font-size: 12px; font-weight: 600; color: var(--text-primary); }
-.v10-notif-row-detail { font-size: 12px; color: var(--text-secondary); line-height: 1.35; }
-.v10-notif-row-sub { display: flex; align-items: center; gap: 6px; margin-top: 1px; }
+.v10-notif-row-body { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; flex: 1; }
+.v10-notif-row-title { font-size: var(--fs-control); font-weight: 600; color: var(--text-primary); }
+.v10-notif-row-detail { font-size: var(--fs-control); color: var(--text-secondary); line-height: var(--lh-snug); }
+.v10-notif-row-sub { display: flex; align-items: center; gap: var(--space-6); margin-top: 1px; }
 .v10-notif-actor { font-weight: 600; color: var(--text-primary); }
 .v10-notif-cg-name { font-weight: 600; color: var(--text-primary); }
 .v10-notif-cg-link {
@@ -367,59 +286,45 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
   text-underline-offset: 2px;
 }
 .v10-notif-cg-link:hover { color: var(--text-secondary); }
-.v10-notif-addr { font-size: 10px; font-family: var(--font-mono); color: var(--text-tertiary); }
+.v10-notif-addr { font-size: var(--fs-micro); font-family: var(--font-mono); color: var(--text-tertiary); }
 .v10-notif-dot { color: var(--text-tertiary); }
-.v10-notif-time { font-size: 10px; font-family: var(--font-mono); color: var(--text-tertiary); white-space: nowrap; flex-shrink: 0; }
+.v10-notif-time { font-size: var(--fs-micro); font-family: var(--font-mono); color: var(--text-tertiary); white-space: nowrap; flex-shrink: 0; }
 /* Unread accent rail — colour-not-alone is covered by the row's text + glyph;
    this is a supplementary scan cue. */
-.v10-notif-unread { box-shadow: inset 2px 0 0 var(--accent-red); }
+.v10-notif-unread { box-shadow: inset 2px 0 0 var(--text-warning); } /* unread = needs a look: amber, never red */
 
 /* Self-authored activity — the operator's OWN agent. The row text leads with
    "You …" for the explicit signal; this faint tint is a supplementary scan cue
    so own-agent activity is distinguishable at a glance (colour-not-alone). */
-.v10-notif-by-self { background: rgba(110, 168, 254, 0.07); }
+.v10-notif-by-self { background: color-mix(in srgb, var(--role) 8%, transparent); }
 
 /* Glyph cell */
 .v10-notif-glyph {
   flex-shrink: 0;
   width: 18px;
   text-align: center;
-  font-size: 13px;
-  line-height: 1.4;
+  font-size: var(--fs-body);
+  line-height: var(--lh-snug);
 }
-.v10-notif-glyph-join { color: var(--text-warning); }
+.v10-notif-glyph-join { color: var(--role-text); }
+.v10-notif-agent { margin-right: var(--space-4); vertical-align: -3px; }
 .v10-notif-glyph-created { color: var(--text-tertiary); }
-.v10-notif-glyph-promoted { color: var(--text-warning); }
-.v10-notif-glyph-published { color: var(--text-success); }
+.v10-notif-glyph-promoted { color: var(--layer-shared-text); }   /* C13: shared to SWM */
+.v10-notif-glyph-published { color: var(--layer-verified-text); } /* C13: published to VM */
 .v10-notif-glyph-approved { color: var(--text-success); }
 .v10-notif-glyph-rejected { color: var(--text-danger); }
 
 /* Join request actions */
-.v10-notif-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.v10-notif-btn {
-  font-family: var(--font-sans);
-  font-size: 11px;
-  font-weight: 600;
-  padding: 4px 10px;
-  border-radius: 4px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.v10-notif-btn:disabled { opacity: 0.5; cursor: default; }
-.v10-notif-btn-approve { background: rgba(34, 197, 94, 0.12); color: var(--text-success); border: 1px solid rgba(34, 197, 94, 0.32); }
-.v10-notif-btn-approve:hover:not(:disabled) { background: rgba(34, 197, 94, 0.2); }
-.v10-notif-btn-ghost { background: none; color: var(--text-secondary); border: 1px solid var(--border-default); }
-.v10-notif-btn-ghost:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
-.v10-notif-btn-deny { background: rgba(239, 68, 68, 0.12); color: var(--text-danger); border: 1px solid rgba(239, 68, 68, 0.32); }
-.v10-notif-btn-deny:hover:not(:disabled) { background: rgba(239, 68, 68, 0.2); }
-.v10-notif-deny-confirm { display: inline-flex; align-items: center; gap: 6px; }
-.v10-notif-deny-confirm-label { font-size: 11px; color: var(--text-danger); font-weight: 600; }
+.v10-notif-row-actions { display: flex; align-items: center; gap: var(--space-6); flex-shrink: 0; }
+.v10-notif-btn:disabled { opacity: var(--opacity-disabled); }
+.v10-notif-deny-confirm { display: inline-flex; align-items: center; gap: var(--space-6); }
+.v10-notif-deny-confirm-label { font-size: var(--fs-label); color: var(--text-danger); font-weight: 600; }
 
 /* Terminal confirmation line (post approve/deny) + inline errors */
-.v10-notif-row-terminal { align-items: center; color: var(--text-tertiary); font-size: 12px; }
+.v10-notif-row-terminal { align-items: center; color: var(--text-tertiary); font-size: var(--fs-control); }
 .v10-notif-row-terminal .v10-notif-glyph { color: var(--text-success); }
 .v10-notif-terminal-text { color: var(--text-secondary); }
-.v10-notif-row-error { font-size: 11px; color: var(--text-danger); margin-top: 3px; }
+.v10-notif-row-error { font-size: var(--fs-label); color: var(--text-danger); margin-top: var(--space-4); }
 
 /* ── Body ── */
 .v10-app-body {
@@ -436,20 +341,25 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
   flex-shrink: 0;
   background: var(--border-subtle);
   cursor: col-resize;
-  transition: background 0.15s, width 0.1s;
+  transition: background var(--motion-base), width var(--motion-fast);
 }
+/* The line stays 1px; the target around it is 9px, because a 1px target is hard to catch. */
+.v10-resize-handle-h, .v10-resize-handle-v { position: relative; z-index: 1; }
+.v10-resize-handle-h::after, .v10-resize-handle-v::after { content: ''; position: absolute; }
+.v10-resize-handle-h::after { inset: 0 -4px; }
+.v10-resize-handle-v::after { inset: -4px 0; }
 .v10-resize-handle-h:hover,
-.v10-resize-handle-h.active { background: var(--accent-green); width: 3px; }
+.v10-resize-handle-h.active { background: var(--border-prominent); width: 3px; }
 /* Vertical twin for the bottom panel (drag the top edge up/down). */
 .v10-resize-handle-v {
   height: 1px;
   flex-shrink: 0;
   background: var(--border-subtle);
   cursor: row-resize;
-  transition: background 0.15s, height 0.1s;
+  transition: background var(--motion-base), height var(--motion-fast);
 }
 .v10-resize-handle-v:hover,
-.v10-resize-handle-v.active { background: var(--accent-green); height: 3px; }
+.v10-resize-handle-v.active { background: var(--border-prominent); height: 3px; }
 
 /* ── Responsive: narrow / split-screen viewports (F8) ──
    The shell is a fixed three-column desktop layout (left tree · center ·
@@ -476,9 +386,12 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
     position: absolute;
     top: 0;
     bottom: 0;
-    z-index: 40;
-    box-shadow: 0 0 24px rgba(0, 0, 0, 0.35);
+    z-index: var(--z-panel);
+    box-shadow: var(--shadow-menu);
   }
+  .v10-app-body > .v10-panel-left,
+  .v10-app-body > .v10-panel-right { max-width: calc(100% - var(--h-control-lg)); }
+  .v10-panel-scrim { position: absolute; inset: 0; z-index: calc(var(--z-panel) - 1); border: 0; padding: 0; background: var(--scrim); }
   .v10-app-body > .v10-panel-left { left: 0; }
   .v10-app-body > .v10-panel-right { right: 0; }
   /* The drag-to-resize handles are pointless at this width and, with the
@@ -492,12 +405,25 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
     flex: 1 1 100% !important;
     min-width: 0;
   }
+  /* The OriginTrail mark stands in for the wordmark, so the brand stays in view. */
+  .v10-header-ot-mark { display: inline-flex; }
+  .v10-header-ot-wordmark,
+  .v10-header-agent-addr { display: none; }
+  .v10-header-meta { margin-right: var(--space-8); }
+  .v10-header-actions { flex: none; }
 }
 @media (max-width: 600px) {
-  .v10-header {
-    overflow-x: auto;
-    overflow-y: hidden;
-    scrollbar-width: none;
+  .v10-header { padding: 0 var(--space-8); }
+  .v10-header-sep,
+  .v10-header-agent-switcher,
+  .v10-header-meta-sep { display: none; }
+  /* Connected shows as its icon and the peer count; screen readers keep the words. */
+  .v10-header-compact-text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
-  .v10-header::-webkit-scrollbar { display: none; }
 }

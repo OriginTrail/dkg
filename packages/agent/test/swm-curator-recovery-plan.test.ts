@@ -14,6 +14,24 @@ describe('private SWM curator recovery planning', () => {
     }));
   });
 
+  it('continues planning other graphs when one metadata chain proof is unknown', async () => {
+    const agent = await createAgent('UnknownMetadataRecoveryPlan');
+    const unknown = 'unknown-metadata-proof', confirmed = 'confirmed-metadata-proof';
+    const authority = vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockResolvedValue({
+      outcome: 'allowed', grantScope: 'public', source: 'system', reason: 'fixture', metadataBootstrap: 'eligible',
+    });
+    vi.spyOn(agent, 'resolveAcceptedRfc64SharedMemoryAuthorityV1').mockReturnValue(undefined);
+    vi.spyOn(agent, 'resolveMetadataConfirmation').mockImplementation(async id => id === unknown
+      ? { outcome: 'unavailable', source: 'chain-proof', proof: { state: 'unknown', reason: 'rpc-failure' } }
+      : { outcome: 'confirmed' });
+    vi.spyOn(agent, 'isPrivateContextGraph').mockResolvedValue(false);
+    vi.spyOn(agent, 'resolveRfc64CompleteSwmProviderPeerIdsV1').mockReturnValue([]);
+    await expect(agent.planSharedMemorySyncContextGraphs('ordinary-peer', [unknown, confirmed], createOperationContext('sync')))
+      .resolves.toEqual({ targets: [{ contextGraphId: confirmed, lane: 'selected-public' }] });
+    expect(authority).toHaveBeenCalledTimes(1);
+    expect(authority.mock.calls[0][0]).toBe(confirmed);
+  });
+
   it('recovers wallet-scoped private CGs from the structural curator even when local meta self-stamps curator rows', async () => {
     const curator = ethers.Wallet.createRandom().address.toLowerCase();
     const member = ethers.Wallet.createRandom().address.toLowerCase();

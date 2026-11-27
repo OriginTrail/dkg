@@ -10,9 +10,11 @@ import React from 'react';
 import { useMemoryEntities } from '../hooks/useMemoryEntities.js';
 import { useProjectProfile, ProjectProfileContext } from '../hooks/useProjectProfile.js';
 import { useAgents, AgentsContext } from '../hooks/useAgents.js';
-import { useTabsStore } from '../stores/tabs.js';
+import { chooseTab as openTab } from '../lib/shellNavigation.js';
 import { useProjectsStore } from '../stores/projects.js';
 import { AgentProfileView } from './AgentProfileView.js';
+import { MemoryReadStatus } from './MemoryReadStatus.js';
+import { useContextGraphCrumb } from '../hooks/useContextGraphCrumb.js';
 
 export interface AgentProfilePageProps {
   contextGraphId: string;
@@ -26,7 +28,6 @@ export const AgentProfilePage: React.FC<AgentProfilePageProps> = ({
   const profile = useProjectProfile(contextGraphId);
   const agentsData = useAgents(contextGraphId);
   const memory = useMemoryEntities(contextGraphId);
-  const { openTab, closeTab, activeTabId } = useTabsStore();
   const { setActiveProject } = useProjectsStore();
 
   const selectEntity = React.useCallback((uri: string) => {
@@ -58,10 +59,7 @@ export const AgentProfilePage: React.FC<AgentProfilePageProps> = ({
     });
   }, [contextGraphId, agentsData, openTab]);
 
-  const goBack = React.useCallback(() => {
-    if (activeTabId) closeTab(activeTabId);
-  }, [activeTabId, closeTab]);
-
+  const graph = useContextGraphCrumb(contextGraphId);
   const agentsContextValue = React.useMemo(
     () => ({ ...agentsData, openAgent }),
     [agentsData, openAgent],
@@ -70,12 +68,15 @@ export const AgentProfilePage: React.FC<AgentProfilePageProps> = ({
   return (
     <ProjectProfileContext.Provider value={profile}>
       <AgentsContext.Provider value={agentsContextValue}>
+        <MemoryReadStatus memory={memory} />
         <AgentProfileView
           agentUri={agentUri}
           entityList={memory.entityList}
+          partial={memory.partial || memory.loading}
           onSelectEntity={selectEntity}
           onOpenAgent={openAgent}
-          onBack={goBack}
+          onBack={graph.onClick!}
+          contextGraphName={graph.label}
         />
       </AgentsContext.Provider>
     </ProjectProfileContext.Provider>

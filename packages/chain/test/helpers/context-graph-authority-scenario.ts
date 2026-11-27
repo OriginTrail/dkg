@@ -173,6 +173,7 @@ export interface AuthorityScenarioOptions {
   /** Operator depth; the anchor resolves to `finalizedNumber - this + 1`. */
   readonly finalityConfirmations?: number;
   readonly secondContextGraph?: boolean;
+  readonly extraContextGraph?: Readonly<{ contextGraphId: bigint; nameHash: string }>;
   readonly zeroHashContextGraphs?: number;
   readonly lateContextGraphNameHash?: string;
   readonly finalizedNumber?: number;
@@ -302,6 +303,28 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
         to: MEMBER,
         tokenId: 10n,
       }] : []),
+      ...(options.extraContextGraph === undefined ? [] : [{
+        name: 'ContextGraphCreated' as const,
+        blockNumber: 19,
+        blockHash: `0x${'68'.repeat(32)}`,
+        index: 1,
+        contextGraphId: options.extraContextGraph.contextGraphId,
+        owner: MEMBER,
+        nameHash: options.extraContextGraph.nameHash,
+        participantAgents: [MEMBER],
+        accessPolicy: 1n,
+        publishPolicy: 0n,
+        publishAuthority: SECOND_AUTHORITY,
+        publishAuthorityAccountId: 8n,
+      }, {
+        name: 'Transfer' as const,
+        blockNumber: 19,
+        blockHash: `0x${'68'.repeat(32)}`,
+        index: 0,
+        from: ethers.ZeroAddress,
+        to: MEMBER,
+        tokenId: options.extraContextGraph.contextGraphId,
+      }]),
       {
         name: 'PublishPolicyUpdated',
         blockNumber: 20,

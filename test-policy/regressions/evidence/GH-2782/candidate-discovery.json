@@ -1,0 +1,6 @@
+[
+  {
+    "name": "VM reconcile cursor follows the subscription lifetime > advances an on-demand subscription through its pending ordinals without a durable write",
+    "file": "/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/candidate/packages/agent/test/regression-on-demand-cursor.test.ts"
+  }
+]

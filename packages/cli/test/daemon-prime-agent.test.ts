@@ -3,10 +3,12 @@ import { createServer, type Server } from 'node:http';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Agent, errors as undiciErrors } from 'undici';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { DkgConfig } from '../src/config.js';
 import {
+  PRIME_AGENT_CHANNEL_HARD_TIMEOUT_MS,
   getPrimeAgentChannelTargets,
   isPrimeAgentLoopbackUrl,
   normalizePrimeAgentChatPayload,
@@ -545,6 +547,41 @@ describe('/api/prime-agent-channel/send', () => {
     expect(body.code).toBe('PRIME_AGENT_BRIDGE_RESPONSE_TIMEOUT');
     expect(body.text).toBe('partial answer');
     expect(body.timedOut).toBe(true);
+  });
+
+  it("reports undici's header timer as a response timeout rather than a bridge fault", async () => {
+    writeDescriptor('s1', 'http://127.0.0.1:9555');
+    let sendInit: RequestInit | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/health')) {
+        return new Response(JSON.stringify({ ok: true, sessionId: 's1', pid: process.pid }), { status: 200 });
+      }
+      sendInit = init;
+      // What Node's fetch throws when undici's headersTimeout fires before the bridge answers.
+      throw new TypeError('fetch failed', { cause: new undiciErrors.HeadersTimeoutError() });
+    }));
+    try {
+      const res = makeJsonResponse();
+      await handlePrimeAgentRoutes({
+        req: makeJsonRequest('POST', '/api/prime-agent-channel/send', { text: 'hi', correlationId: 'c-undici' }),
+        res,
+        config: enabledConfig(),
+        bridgeAuthToken: 'bridge-token',
+        path: '/api/prime-agent-channel/send',
+      } as any);
+
+      expect(res.statusCode).toBe(504);
+      expect(JSON.parse(res.body)).toMatchObject({
+        code: 'PRIME_AGENT_BRIDGE_RESPONSE_TIMEOUT',
+        source: 'prime-agent-channel',
+        sessionId: 's1',
+        correlationId: 'c-undici',
+        timeoutMs: PRIME_AGENT_CHANNEL_HARD_TIMEOUT_MS,
+      });
+      expect((sendInit as { dispatcher?: unknown } | undefined)?.dispatcher).toBeInstanceOf(Agent);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

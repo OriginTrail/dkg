@@ -15,7 +15,7 @@ import {
   InMemoryMetricExporter,
   AggregationTemporality,
 } from '@opentelemetry/sdk-metrics';
-import { rebuildMetrics } from '@origintrail-official/dkg-core';
+import { GRAPH_KA_CONTENT_SCOPE_VERSION, rebuildMetrics } from '@origintrail-official/dkg-core';
 import { PublishMethods } from '../src/dkg-agent-publish.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
@@ -69,9 +69,10 @@ describe('publish outcome metrics — recorded by the real publish entry points'
     // inside the try, exercising the swm catch → recordPublishOutcome('error','swm').
     await expect(
       PublishMethods.prototype.publishFromSharedMemory.call(
-        { log: { info: vi.fn(), warn: vi.fn() } } as never, 'cg', 'all', {},
+        { log: { info: vi.fn(), warn: vi.fn() } } as never, 'cg', 'all',
+        { contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION },
       ),
-    ).rejects.toBeTruthy();
+    ).rejects.toBeInstanceOf(TypeError);
     const pts = await publishPoints();
     expect(pts.some((a) => a.outcome === 'error' && a.source === 'swm')).toBe(true);
   });

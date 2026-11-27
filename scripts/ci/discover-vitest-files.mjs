@@ -2,9 +2,9 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 
 /** Vitest owns eligibility; listing files does not execute globalSetup. */
-export function discoverVitestFiles(packageRoot, { run = spawnSync } = {}) {
+export function discoverVitestFiles(packageRoot, { run = spawnSync, config } = {}) {
   packageRoot = path.resolve(packageRoot);
-  const result = run('pnpm', ['exec', 'vitest', 'list', '--filesOnly', '--json'], {
+  const result = run('pnpm', ['exec', 'vitest', 'list', '--filesOnly', '--json', ...(config ? ['--config', config] : [])], {
     cwd: packageRoot, encoding: 'utf8', timeout: 60_000, maxBuffer: 8 * 1024 * 1024,
   });
   if (result.error || result.status !== 0) {

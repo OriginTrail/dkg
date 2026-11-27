@@ -345,7 +345,6 @@ describe('RFC-64 author catalog transport v1', () => {
       'announce-inbound',
       'fetch-outbound',
       'fetch-outbound',
-      'fetch-outbound',
     ]);
     },
     30_000,

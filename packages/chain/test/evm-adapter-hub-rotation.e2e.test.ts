@@ -52,8 +52,10 @@ const HUB_ABI = [
   'function setAssetStorageAddress(string, address) external',
   'event ContractChanged(string contractName, address newContractAddress)',
   'event NewContract(string contractName, address newContractAddress)',
+  'event ContractRemoved(string contractName, address contractAddress)',
   'event AssetStorageChanged(string contractName, address newContractAddress)',
   'event NewAssetStorage(string contractName, address newContractAddress)',
+  'event AssetStorageRemoved(string contractName, address contractAddress)',
 ];
 
 let ctx: HardhatContext;

@@ -6,6 +6,7 @@ import {
 import {
   isNamedSubgraphSharedMemoryDataGraph,
   isNamedSubgraphSharedMemoryMetaGraph,
+  sharedMemoryGraphSubGraphName,
 } from '../src/sync/shared-memory-graphs.js';
 
 const CG = '0x0000000000000000000000000000000000000001/scope-test';
@@ -33,5 +34,19 @@ describe('named-subgraph Shared Memory graph classification', () => {
     expect(isNamedSubgraphSharedMemoryMetaGraph(CG, root)).toBe(false);
     expect(isNamedSubgraphSharedMemoryMetaGraph(CG, `${named}/child`)).toBe(false);
     expect(isNamedSubgraphSharedMemoryMetaGraph(CG, `${root}/child/_shared_memory_meta`)).toBe(false);
+  });
+
+  it('names the subgraph of a named-subgraph Shared Memory data or metadata graph only', () => {
+    const named = contextGraphSharedMemoryUri(CG, SUBGRAPH);
+    const namedMeta = contextGraphSharedMemoryMetaUri(CG, SUBGRAPH);
+
+    expect(sharedMemoryGraphSubGraphName(CG, named)).toBe(SUBGRAPH);
+    expect(sharedMemoryGraphSubGraphName(CG, `${named}/0xabc/7`)).toBe(SUBGRAPH);
+    expect(sharedMemoryGraphSubGraphName(CG, namedMeta)).toBe(SUBGRAPH);
+    expect(sharedMemoryGraphSubGraphName(CG, contextGraphSharedMemoryUri(CG))).toBeUndefined();
+    expect(sharedMemoryGraphSubGraphName(CG, contextGraphSharedMemoryMetaUri(CG))).toBeUndefined();
+    expect(sharedMemoryGraphSubGraphName(CG, `${named}/staging/op`)).toBeUndefined();
+    expect(sharedMemoryGraphSubGraphName(CG, `did:dkg:context-graph:${CG}/${SUBGRAPH}`)).toBeUndefined();
+    expect(sharedMemoryGraphSubGraphName(CG, `did:dkg:context-graph:${CG}/_private/_shared_memory`)).toBeUndefined();
   });
 });

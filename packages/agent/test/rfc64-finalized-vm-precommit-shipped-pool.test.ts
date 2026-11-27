@@ -86,8 +86,8 @@ describe('RFC-64 finalized VM precommit on a shipped RPC pool', () => {
     expect([...new Set(dialled)]).toEqual([href(pool[0]!), href(pool[1]!)]);
     // And the third is stranded — stated as a tested fact rather than left as a
     // silent consequence. Selection is health-blind and configuration-ordered,
-    // so `base-sepolia.drpc.org` is never reached by a strict finalized read even
-    // when the primary is degraded. Tracked as a follow-up, not fixed here.
+    // so the third shipped endpoint is never reached by a strict finalized read
+    // even when the primary is degraded. Tracked as a follow-up, not fixed here.
     expect(dialled).not.toContain(href(pool[2]!));
   });
 });

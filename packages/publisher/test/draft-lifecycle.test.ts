@@ -25,7 +25,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
-  type DurableRootPromotionAtomicCompanion,
+  type DurableRootPromotionAtomicCompanionResolver,
   type DurableRootPromotionIdentity,
   getPromoteFailureDisposition,
   createPromoteRetryableFailure,
@@ -125,9 +125,7 @@ describe('Working Memory Assertion Lifecycle', () => {
   const createPublisher = async (
     writeLocks?: Map<string, Promise<void>>,
     publisherStore: OxigraphStore = store,
-    resolveDurableRootPromotionAtomicCompanion?: (
-      input: Readonly<DurableRootPromotionIdentity>,
-    ) => Readonly<DurableRootPromotionAtomicCompanion> | undefined,
+    resolveDurableRootPromotionAtomicCompanion?: DurableRootPromotionAtomicCompanionResolver,
   ): Promise<DKGPublisher> => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
@@ -1251,7 +1249,13 @@ describe('Working Memory Assertion Lifecycle', () => {
     const companionPredicate = 'urn:test:root-promotion-companion';
     const identities: DurableRootPromotionIdentity[] = [];
     const settle = vi.fn();
-    const hookedPublisher = await createPublisher(undefined, store, (input) => {
+    // The promote stays behind the resolver's admission wait until it ends.
+    let admit!: () => void;
+    const admission = new Promise<void>((resolve) => { admit = resolve; });
+    const awaitAdmission = vi.fn(() => admission);
+    const hookedPublisher = await createPublisher(undefined, store, Object.assign((
+      input: Readonly<DurableRootPromotionIdentity>,
+    ) => {
       identities.push(input);
       const subject = `urn:test:root-promotion:${input.shareOperationId}`;
       return {
@@ -1265,7 +1269,7 @@ describe('Working Memory Assertion Lifecycle', () => {
         }],
         settle,
       };
-    });
+    }, { awaitAdmission }));
     const confirmBeforeCommit = vi.fn(async () => {
       expect(identities).toHaveLength(1);
       expect(await store.hasGraph(companionGraph)).toBe(false);
@@ -1273,15 +1277,26 @@ describe('Working Memory Assertion Lifecycle', () => {
       return { applied: true };
     });
 
-    const promoted = await hookedPublisher.assertionPromote(
+    const promoting = hookedPublisher.assertionPromote(
       CG_ID,
       ASSERTION_NAME,
       AGENT,
       { publisherPeerId: PEER, confirmBeforeCommit },
     );
+    await vi.waitFor(() => expect(awaitAdmission).toHaveBeenCalledOnce());
+    await new Promise<void>((resolve) => { setTimeout(resolve, 25); });
+    expect(identities).toHaveLength(0);
+    expect(confirmBeforeCommit).not.toHaveBeenCalled();
+    admit();
+    const promoted = await promoting;
     expect(confirmBeforeCommit).toHaveBeenCalledTimes(1);
+    // The same contract as a share: the message and the payload it belongs to, which the promote returns.
+    expect(promoted.gossipPayload).toBeDefined();
+    expect(confirmBeforeCommit).toHaveBeenCalledWith(promoted.gossipPayload!.message, promoted.gossipPayload);
     expect(settle).toHaveBeenCalledOnce();
     expect(settle).toHaveBeenCalledWith(true);
+    expect(awaitAdmission).toHaveBeenCalledOnce();
+    expect(awaitAdmission).toHaveBeenCalledWith({ contextGraphId: CG_ID, kaUal: finalized.kaUal });
     expect(identities).toEqual([expect.objectContaining({
       contextGraphId: CG_ID,
       assertionCoordinate: ASSERTION_NAME,
@@ -1819,12 +1834,12 @@ describe('Working Memory Assertion Lifecycle', () => {
     const bothClaimsInserted = new Promise<void>((resolve) => {
       releaseClaims = resolve;
     });
-    const shareOperationIdPredicateToken = `<${SHARE_OPERATION_ID_PREDICATE}>`;
     store.query = async (sparql) => {
       const result = await query(sparql);
       if (
-        sparql.includes('SELECT ?shareOperationId')
-        && sparql.split(/\s+/u).some((token) => token === shareOperationIdPredicateToken)
+        sparql.includes('CONSTRUCT { ?s ?p ?o }')
+        && sparql.includes('VALUES ?s')
+        && sparql.includes(assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME))
       ) {
         initialClaimReads += 1;
         if (initialClaimReads === 2) releaseInitialReads();
@@ -1921,7 +1936,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(true);
   });
 
-  it('fails closed when a legacy durable operation ID has no immutable intent', async () => {
+  it.each(['ordinary', 'durable'])('fails closed when a legacy durable operation ID has no immutable intent (%s)', async path => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
     await finalizeAssertion();
@@ -1941,14 +1956,16 @@ describe('Working Memory Assertion Lifecycle', () => {
       subject: lifecycle,
       predicate: PROMOTE_OPERATION_INTENT_PREDICATE,
     });
+    await publisher.markSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT);
     await expect(
-      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
-    ).rejects.toMatchObject({ code: 'KA_PROMOTE_OPERATION_INTENT_MISSING' });
+      path === 'ordinary' ? publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER })
+        : publisher.prepareAssertionPromoteRecovery(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }, false),
+    ).rejects.toMatchObject({ code: path === 'ordinary' ? 'KA_PROMOTE_OPERATION_INTENT_MISSING' : 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT' });
     expect(await readShareOperationId()).toBeTruthy();
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
   });
 
-  it('clears a stale completion marker before rejecting corrupt recovery intent', async () => {
+  it.each(['ordinary', 'durable'])('clears a stale completion marker before rejecting corrupt recovery intent (%s)', async path => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
     await finalizeAssertion();
@@ -1978,7 +1995,8 @@ describe('Working Memory Assertion Lifecycle', () => {
     }]);
 
     await expect(
-      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+      path === 'ordinary' ? publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER })
+        : publisher.prepareAssertionPromoteRecovery(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }, false),
     ).rejects.toMatchObject({ code: 'KA_PROMOTE_OPERATION_INTENT_CORRUPT' });
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
   });
@@ -3378,6 +3396,7 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
   // assertions in the tests below now pin the DERIVATION contract.
   const LAYER_BY_EVENT_TYPE: Record<string, { from: string; to: string }> = {
     AssertionCreated: { from: 'none', to: 'WM' },
+    AssertionWritten: { from: 'WM', to: 'WM' },
     AssertionPromoted: { from: 'WM', to: 'SWM' },
     AssertionUpdated: { from: 'VM', to: 'VM' },
     AssertionDiscarded: { from: 'WM', to: 'none' },
@@ -3455,10 +3474,11 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
     await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
 
     const events = await queryEvents();
-    expect(events).toHaveLength(2);
-    expect(events[1].type).toBe('AssertionPromoted');
-    expect(events[1].fromLayer).toBe('WM');
-    expect(events[1].toLayer).toBe('SWM');
+    expect(events).toEqual([
+      { type: 'AssertionCreated', fromLayer: 'none', toLayer: 'WM' },
+      { type: 'AssertionWritten', fromLayer: 'WM', toLayer: 'WM' },
+      { type: 'AssertionPromoted', fromLayer: 'WM', toLayer: 'SWM' },
+    ]);
   });
 
   it('promote records shareOperationId without root-entity member metadata', async () => {
@@ -3534,9 +3554,11 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
     await publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT);
 
     const events = await queryEvents();
-    expect(events).toHaveLength(2);
-    expect(events[0].type).toBe('AssertionCreated');
-    expect(events[1].type).toBe('AssertionDiscarded');
+    expect(events).toEqual([
+      { type: 'AssertionCreated', fromLayer: 'none', toLayer: 'WM' },
+      { type: 'AssertionWritten', fromLayer: 'WM', toLayer: 'WM' },
+      { type: 'AssertionDiscarded', fromLayer: 'WM', toLayer: 'none' },
+    ]);
   });
 
   it('different agents have separate lifecycle records', async () => {

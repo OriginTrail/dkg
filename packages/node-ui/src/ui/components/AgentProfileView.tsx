@@ -18,14 +18,16 @@ import type { MemoryEntity } from '../hooks/useMemoryEntities.js';
 import { useAgentsContext, type AgentSummary } from '../hooks/useAgents.js';
 import { useProjectProfileContext } from '../hooks/useProjectProfile.js';
 import { ActivityFeed } from './ActivityFeed.js';
-import { AgentChip } from './AgentChip.js';
+import { AgentChip, AgentTitle } from './AgentChip.js';
+import { Copy } from 'lucide-react';
+import { Breadcrumbs } from './ds/Breadcrumbs.js';
 
 const PROV_WAS_ATTRIBUTED_TO = 'http://www.w3.org/ns/prov#wasAttributedTo';
 
 const PRIMARY_TYPES: Array<{ iri: string; label: string }> = [
   { iri: 'http://dkg.io/ontology/decisions/Decision',   label: 'Decisions' },
   { iri: 'http://dkg.io/ontology/tasks/Task',           label: 'Tasks' },
-  { iri: 'http://dkg.io/ontology/github/PullRequest',   label: 'Pull Requests' },
+  { iri: 'http://dkg.io/ontology/github/PullRequest',   label: 'Pull requests' },
   { iri: 'http://dkg.io/ontology/github/Issue',         label: 'Issues' },
   { iri: 'http://dkg.io/ontology/github/Commit',        label: 'Commits' },
 ];
@@ -33,17 +35,21 @@ const PRIMARY_TYPES: Array<{ iri: string; label: string }> = [
 export interface AgentProfileViewProps {
   agentUri: string;
   entityList: MemoryEntity[];
+  partial?: boolean;
   onSelectEntity: (uri: string) => void;
   onOpenAgent?: (uri: string) => void;
   onBack: () => void;
+  contextGraphName?: string;
 }
 
 export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
   agentUri,
   entityList,
+  partial = false,
   onSelectEntity,
   onOpenAgent,
   onBack,
+  contextGraphName = 'Context graph',
 }) => {
   const agents = useAgentsContext();
   const profile = useProjectProfileContext();
@@ -82,9 +88,9 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
   return (
     <div className="v10-agent-profile">
       <div className="v10-agent-profile-header">
-        <button type="button" className="v10-ka-back" onClick={onBack}>← Back</button>
+        <Breadcrumbs items={[{ label: contextGraphName, onClick: onBack }, { label: 'Agent' }]} />
         <div className="v10-agent-profile-head">
-          <AgentChip agent={agent ?? undefined} fallbackUri={agentUri} size="lg" showOperator />
+          <AgentTitle agent={agent} fallbackUri={agentUri} />
           {agent?.reputation && (
             <div className="v10-agent-profile-reputation">
               {agent.reputation}
@@ -104,9 +110,9 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                     e.stopPropagation();
                     navigator.clipboard?.writeText(agent.walletAddress!).catch(() => {});
                   }}
-                  title="Copy wallet address"
+                  aria-label="Copy wallet address" title="Copy wallet address"
                 >
-                  ⎘
+                  <Copy size={12} />
                 </button>
               </span>
             </div>
@@ -141,22 +147,22 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
       <div className="v10-agent-profile-stats">
         <button
           type="button"
-          className={`v10-agent-profile-stat${typeFilter === null ? ' active' : ''}`}
+          className={`v10-agent-profile-stat ds-card-nested${typeFilter === null ? ' active' : ''}`}
           onClick={() => setTypeFilter(null)}
         >
           <span className="v10-agent-profile-stat-val">{total}</span>
-          <span className="v10-agent-profile-stat-lbl">All activity</span>
+          <span className="v10-agent-profile-stat-lbl">{partial ? 'Loaded activity' : 'All activity'}</span>
         </button>
         {PRIMARY_TYPES.map(t => {
           const arr = authoredByType.get(t.iri) ?? [];
           if (arr.length === 0) return null;
           const binding = profile?.forType(t.iri);
-          const color = binding?.color ?? '#a855f7';
+          const color = binding?.color ?? 'var(--text-tertiary)';
           return (
             <button
               key={t.iri}
               type="button"
-              className={`v10-agent-profile-stat${typeFilter === t.iri ? ' active' : ''}`}
+              className={`v10-agent-profile-stat ds-card-nested${typeFilter === t.iri ? ' active' : ''}`}
               style={{ '--stat-color': color } as React.CSSProperties}
               onClick={() => setTypeFilter(t.iri)}
             >
@@ -177,12 +183,12 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
         onOpenAgent={onOpenAgent}
         title={
           <>
-            All activity
+            {partial ? 'Loaded activity' : 'All activity'}
             {agent && <span className="v10-agent-profile-feed-sub"> · authored by {agent.name}</span>}
           </>
         }
         emptyHint={
-          total === 0
+          partial ? 'No entries for this agent in the loaded preview. Load more memory to check later assets.' : total === 0
             ? `${agent?.name ?? agentUri} hasn't authored anything in this project yet.`
             : 'No entries match the current filter.'
         }

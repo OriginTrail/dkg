@@ -27,6 +27,8 @@ import {
   CopyButton,
 } from '../../components/Pca/index.js';
 import { isWrongNetwork, useWalletStore } from '../../stores/wallet.js';
+import { StatusGlyph } from '../../components/ds/Badge.js';
+import { RefreshCw } from 'lucide-react';
 
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 
@@ -240,7 +242,7 @@ export function ApproveWalletsModal({
     <PcaModalShell
       onClose={onClose}
       testId="pca-approve-modal"
-      title={`Approve publishing wallets — PCA #${accountId}`}
+      title={`Approve publishing wallets: PCA #${accountId}`}
       dismissDisabled={walletBatchSigning}
     >
       <div className="v10-modal-body">
@@ -260,7 +262,7 @@ export function ApproveWalletsModal({
 
         {mode === 'self' ? (
           <section className="v10-pca-approve-self">
-            <p className="v10-pca-create-warn">
+            <p className="v10-pca-create-warn ds-card-nested">
               {agentCount} / 100 slots used — {alreadyApprovedCount} of this node&apos;s wallets are
               already approved here. Unapproved wallets pay the direct cost until you approve them.
             </p>
@@ -285,7 +287,7 @@ export function ApproveWalletsModal({
                 <p className="v10-pca-handshake-empty">No operational wallets detected on this node.</p>
               )}
             </div>
-            <div className="v10-modal-tip">
+            <div className="v10-modal-tip ds-card-nested">
               A new PCA covers NOTHING until you approve your own signing wallets. Each is a separate
               on-chain tx you sign (~30s, owner gas).
             </div>
@@ -297,7 +299,7 @@ export function ApproveWalletsModal({
               testId="pca-approve-address"
               value={bulk}
               onChange={setBulk}
-              label="Wallet address(es) — one per line"
+              label="Wallet address(es): one per line"
               disabled={running}
             />
             <p className="v10-pca-approve-counts">
@@ -307,8 +309,8 @@ export function ApproveWalletsModal({
             {deregisterFrom ? (
               // Renew (#1344) — these are the node's OWN carried-over wallets,
               // not a third party, so the sponsor-can't-verify warning is wrong here.
-              <div className="v10-modal-warning" data-testid="pca-renew-reapprove-note">
-                ⓘ Re-approving PCA #{deregisterFrom}’s wallets on #{accountId}. Each wallet is MOVED —
+              <div className="v10-modal-warning ds-card-nested" data-testid="pca-renew-reapprove-note">
+                <StatusGlyph tone="warning" /> Re-approving PCA #{deregisterFrom}’s wallets on #{accountId}. Each wallet is MOVED —
                 deregistered from #{deregisterFrom}, then approved on #{accountId} (two txs per wallet,
                 owner gas). Account expiry alone doesn’t free a wallet, so this is required to re-use them.
                 {seedAgentsResolved === false && (
@@ -319,8 +321,8 @@ export function ApproveWalletsModal({
                 )}
               </div>
             ) : (
-              <div className="v10-modal-warning">
-                ⚠ We can only check the address is well-formed — we can’t verify it’s the node’s real
+              <div className="v10-modal-warning ds-card-nested">
+                <StatusGlyph tone="warning" /> We can only check the address is well-formed — we can’t verify it’s the node’s real
                 signing wallet. A typo / admin / author address still “approves” and burns a cap slot.
                 Confirm it shows as approved in the other operator&apos;s Get added to a PCA panel.
               </div>
@@ -331,18 +333,18 @@ export function ApproveWalletsModal({
         {overCap && (
           // U1 — SOFT heads-up, not a command to remove: some of these may already be
           // approved here (no slot consumed), so we don't know the real overage pre-probe.
-          <div className="v10-modal-warning" role="status">
-            ⚠ Up to {cap} of these can be approved. Any already approved here are skipped (no slot
+          <div className="v10-modal-warning ds-card-nested" role="status">
+            <StatusGlyph tone="warning" /> Up to {cap} of these can be approved. Any already approved here are skipped (no slot
             used); any genuinely beyond the {cap}-slot cap are marked “cap reached”.
           </div>
         )}
 
         {aborted && (
-          <div className="v10-modal-error" role="alert">{aborted}</div>
+          <div className="v10-modal-error ds-card-nested" role="alert">{aborted}</div>
         )}
 
         {verificationDelayed && (
-          <div className="v10-modal-warning" role="status">{verificationDelayed}</div>
+          <div className="v10-modal-warning ds-card-nested" role="status">{verificationDelayed}</div>
         )}
 
         {deviceSteps.length > 0 && (
@@ -385,8 +387,8 @@ export function ApproveWalletsModal({
             failed, so it's temporarily UNCOVERED. Surface it loudly + offer the one-click re-run
             (the footer "Retry to finish" button re-runs the loop; the now-unbound wallet registers). */}
         {done && counts.stranded > 0 && (
-          <div className="v10-modal-warning" role="alert" data-testid="pca-approve-stranded">
-            ⚠ {counts.stranded} wallet{counts.stranded === 1 ? ' was' : 's were'} removed from the old
+          <div className="v10-modal-warning ds-card-nested" role="alert" data-testid="pca-approve-stranded">
+            <StatusGlyph tone="warning" /> {counts.stranded} wallet{counts.stranded === 1 ? ' was' : 's were'} removed from the old
             PCA but not yet re-approved on #{accountId} — temporarily UNCOVERED. Click “Retry to finish”
             to complete the move.
           </div>
@@ -396,8 +398,8 @@ export function ApproveWalletsModal({
             OWN wallets (#1344), so the "remind the other operator" handshake is off. */}
         {done && mode === 'sponsor' && !deregisterFrom && (
           <div className="v10-pca-approve-handoff">
-            <div className="v10-modal-warning">
-              Remind the other operator: these wallets must hold NATIVE GAS to publish — the account
+            <div className="v10-modal-warning ds-card-nested">
+              Remind the other operator: these wallets must hold native gas to publish — the account
               covers TRAC, never gas.
             </div>
             <SponsorshipHandshake wallets={approvedWallets} accountId={accountId} role="core" />
@@ -410,17 +412,17 @@ export function ApproveWalletsModal({
       </div>
 
       <div className="v10-modal-footer">
-        <button type="button" className="v10-modal-btn" onClick={onClose} disabled={walletBatchSigning}>
+        <button type="button" className="v10-modal-btn ds-btn" onClick={onClose} disabled={walletBatchSigning}>
           {done ? 'Done' : 'Cancel'}
         </button>
         {running ? (
-          <button type="button" className="v10-modal-btn" onClick={() => { stopRef.current = true; }}>
+          <button type="button" className="v10-modal-btn ds-btn" onClick={() => { stopRef.current = true; }}>
             Stop
           </button>
         ) : !done ? (
           <button
             type="button"
-            className="v10-modal-btn primary"
+            className="v10-modal-btn primary ds-btn ds-primary"
             data-testid="pca-approve-submit"
             onClick={run}
             disabled={addresses.length === 0}
@@ -430,8 +432,8 @@ export function ApproveWalletsModal({
         ) : counts.stranded > 0 ? (
           // One-click re-run to finish the stranded migrations. `run()` re-processes the
           // selected wallets; a stranded one is now UNBOUND (we deregistered it) → it registers.
-          <button type="button" className="v10-modal-btn primary" data-testid="pca-approve-retry-stranded" onClick={run}>
-            Retry to finish
+          <button type="button" className="v10-modal-btn primary ds-btn ds-primary" data-testid="pca-approve-retry-stranded" onClick={run}>
+            <RefreshCw size={12} />Retry to finish
           </button>
         ) : null}
       </div>

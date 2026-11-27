@@ -1,7 +1,9 @@
 import type {
   Digest32V1,
+  EvmAddressV1,
   SwmAuthorInventoryRowV1,
   SwmAuthorInventorySnapshotV1,
+  SwmAuthorInventoryScopeV1,
 } from '@origintrail-official/dkg-core';
 import type { VerifiedControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
@@ -57,7 +59,104 @@ export interface CompareAndSwapSwmAuthorInventoryInputV1 {
   readonly expectedCurrentHeadDigest: Digest32V1 | null;
 }
 
+/**
+ * Exact signed successor produced by merging a non-empty canonical row set into
+ * the current inventory. Persistence verifies the merge again under the CAS
+ * transaction before replacing the SQL row set.
+ */
+export interface CompareAndSwapMergeSwmAuthorInventoryInputV1 {
+  readonly snapshot: SwmAuthorInventorySnapshotV1;
+  readonly mergeRows: readonly SwmAuthorInventoryRowV1[];
+  readonly issuerSignature?: VerifiedControlEnvelopeIssuerSignatureV1;
+  /** `null` initializes version 0; otherwise the exact current head must match. */
+  readonly expectedCurrentHeadDigest: Digest32V1 | null;
+}
+
 export interface SwmAuthorInventoryCasResultV1 {
   readonly status: 'applied' | 'existing';
   readonly snapshot: SwmAuthorInventorySnapshotV1;
+}
+
+/** Exact retirement of one obsolete authority-generation inventory. */
+export interface DeleteSwmAuthorInventoryInputV1 {
+  readonly inventoryScopeDigest: Digest32V1;
+  readonly authorAddress: EvmAddressV1;
+  readonly expectedCurrentHeadDigest: Digest32V1;
+}
+
+export interface Rfc64SwmAuthorInventoryOperationsV1 {
+  /** Durable discovery includes empty heads and authors not registered locally. */
+  listSwmAuthorInventoryScopesV1(): readonly SwmAuthorInventoryScopeV1[];
+  readSwmAuthorInventoryHeadDigestV1(
+    inventoryScopeDigest: Digest32V1,
+    authorAddress: EvmAddressV1,
+  ): Digest32V1 | null;
+  /** A local row hint; callers still verify its author seal and semantic content. */
+  readSwmAuthorInventoryRowV1(
+    inventoryScopeDigest: Digest32V1,
+    authorAddress: EvmAddressV1,
+    kaUal: SwmAuthorInventoryRowV1['kaUal'],
+  ): Readonly<SwmAuthorInventoryRowV1> | null;
+  readSwmAuthorInventorySnapshotV1(
+    inventoryScopeDigest: Digest32V1,
+    authorAddress: EvmAddressV1,
+  ): SwmAuthorInventorySnapshotV1 | null;
+  compareAndSwapSwmAuthorInventoryV1(
+    input: CompareAndSwapSwmAuthorInventoryInputV1,
+  ): SwmAuthorInventoryCasResultV1;
+  compareAndSwapMergeSwmAuthorInventoryV1(
+    input: CompareAndSwapMergeSwmAuthorInventoryInputV1,
+  ): SwmAuthorInventoryCasResultV1;
+  deleteSwmAuthorInventoryV1(input: DeleteSwmAuthorInventoryInputV1): void;
+}
+
+
+/** Build the feature-owned non-owning SWM author-inventory capability. */
+export function createRfc64SwmAuthorInventoryOperationsViewV1(
+  inventory: Rfc64SwmAuthorInventoryOperationsV1,
+  requireOwnerOpen: () => void,
+): Rfc64SwmAuthorInventoryOperationsV1 {
+  return Object.freeze({
+    listSwmAuthorInventoryScopesV1: () => {
+      requireOwnerOpen();
+      return inventory.listSwmAuthorInventoryScopesV1();
+    },
+    readSwmAuthorInventoryHeadDigestV1: (
+      inventoryScopeDigest: Digest32V1,
+      authorAddress: EvmAddressV1,
+    ): Digest32V1 | null => {
+      requireOwnerOpen();
+      return inventory.readSwmAuthorInventoryHeadDigestV1(inventoryScopeDigest, authorAddress);
+    },
+    readSwmAuthorInventoryRowV1: (scope: Digest32V1, author: EvmAddressV1, kaUal: SwmAuthorInventoryRowV1['kaUal']) => {
+      requireOwnerOpen();
+      return inventory.readSwmAuthorInventoryRowV1(scope, author, kaUal);
+    },
+    readSwmAuthorInventorySnapshotV1: (
+      inventoryScopeDigest: Digest32V1,
+      authorAddress: EvmAddressV1,
+    ): SwmAuthorInventorySnapshotV1 | null => {
+      requireOwnerOpen();
+      return inventory.readSwmAuthorInventorySnapshotV1(
+        inventoryScopeDigest,
+        authorAddress,
+      );
+    },
+    compareAndSwapSwmAuthorInventoryV1: (
+      input: CompareAndSwapSwmAuthorInventoryInputV1,
+    ): SwmAuthorInventoryCasResultV1 => {
+      requireOwnerOpen();
+      return inventory.compareAndSwapSwmAuthorInventoryV1(input);
+    },
+    compareAndSwapMergeSwmAuthorInventoryV1: (
+      input: CompareAndSwapMergeSwmAuthorInventoryInputV1,
+    ): SwmAuthorInventoryCasResultV1 => {
+      requireOwnerOpen();
+      return inventory.compareAndSwapMergeSwmAuthorInventoryV1(input);
+    },
+    deleteSwmAuthorInventoryV1: (input: DeleteSwmAuthorInventoryInputV1): void => {
+      requireOwnerOpen();
+      inventory.deleteSwmAuthorInventoryV1(input);
+    },
+  });
 }

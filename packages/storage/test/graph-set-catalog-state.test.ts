@@ -1,6 +1,9 @@
+import { filterGraphInventory, measureGraphInventory } from '../src/graph-inventory-materialization.js';
+import { measureGraphCatalogBytes } from '../src/graph-catalog-response-limit.js';
 import { createSortedUniqueStringCatalog } from '@origintrail-official/dkg-core';
 import { describe, expect, it, vi } from 'vitest';
 import { GraphSetCatalogState } from '../src/graph-set-catalog-state.js';
+import { STORE_GRAPH_CATALOG_MAX_BYTES_ENV, StoreInternalLimitError } from '../src/graph-catalog-internal-limit.js';
 
 vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@origintrail-official/dkg-core')>();
@@ -8,6 +11,11 @@ vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
     ...actual,
     createSortedUniqueStringCatalog: vi.fn(actual.createSortedUniqueStringCatalog),
   };
+});
+
+vi.mock('../src/graph-catalog-response-limit.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/graph-catalog-response-limit.js')>();
+  return { ...actual, measureGraphCatalogBytes: vi.fn(actual.measureGraphCatalogBytes) };
 });
 
 describe('GraphSetCatalogState', () => {
@@ -97,4 +105,47 @@ describe('GraphSetCatalogState', () => {
     expect(createSortedCatalog).toHaveBeenCalledOnce();
     expect(state.sortedFor(members)).toEqual(['urn:keep', ...additions].sort());
   });
+});
+
+it('measures each immutable catalog once, bounds it by the internal ceiling only, and invalidates on membership changes', () => {
+  const measure = vi.mocked(measureGraphCatalogBytes); measure.mockClear();
+  const state = new GraphSetCatalogState(); state.replace(new Set(['urn:a']));
+  const members = state.current!;
+  const bytes = Buffer.byteLength(JSON.stringify(['urn:a']));
+  try {
+    for (let i = 0; i < 3; i++) expect(state.measuredFor(members))
+      .toEqual({ graphs: ['urn:a'], materializedBytes: bytes });
+    expect(measure).toHaveBeenCalledOnce();
+    vi.stubEnv(STORE_GRAPH_CATALOG_MAX_BYTES_ENV, String(bytes));
+    expect(state.sortedFor(members)).toEqual(['urn:a']);
+    vi.stubEnv(STORE_GRAPH_CATALOG_MAX_BYTES_ENV, String(bytes - 1));
+    expect(() => state.sortedFor(members)).toThrow(StoreInternalLimitError);
+    vi.unstubAllEnvs();
+    state.reconcile([{ graph: 'urn:b', present: true }]);
+    const updatedBytes = Buffer.byteLength(JSON.stringify(['urn:a', 'urn:b']));
+    for (let i = 0; i < 3; i++) expect(state.measuredFor(members))
+      .toEqual({ graphs: ['urn:a', 'urn:b'], materializedBytes: updatedBytes });
+    expect(measure).toHaveBeenCalledTimes(2);
+    state.reconcile([{ graph: 'urn:b', present: true }]);
+    expect(state.measuredFor(members)?.materializedBytes).toBe(updatedBytes);
+    expect(measure).toHaveBeenCalledTimes(2);
+    state.replace(new Set(['urn:c']));
+    expect(state.measuredFor(state.current!)?.materializedBytes).toBe(bytes);
+    expect(measure).toHaveBeenCalledTimes(3);
+  } finally { vi.unstubAllEnvs(); }
+});
+
+
+it('charges a projection for the graphs it keeps, through filtering, copies, sorting, and cache replay', () => {
+  const raw = measureGraphInventory(['urn:z', 'urn:hidden:' + 'x'.repeat(1000), 'urn:a']);
+  const visible = filterGraphInventory(raw, graph => !graph.startsWith('urn:hidden:'));
+  expect(visible).toEqual({ graphs: ['urn:z', 'urn:a'], materializedBytes: measureGraphCatalogBytes(['urn:z', 'urn:a']) });
+  expect(visible.materializedBytes).toBeLessThan(raw.materializedBytes);
+  const cache = new GraphSetCatalogState();
+  cache.replace(new Set(visible.graphs));
+  for (let request = 0; request < 2; request++) {
+    const replay = cache.measuredFor(cache.current!)!;
+    expect([...replay.graphs]).toEqual(['urn:a', 'urn:z']);
+    expect(replay.materializedBytes).toBe(visible.materializedBytes);
+  }
 });

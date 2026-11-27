@@ -15,6 +15,7 @@ import {
 } from '../sync/requester/finalized-swm-twin-reconciliation.js';
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-policy-v1.js';
 import type {
+  Rfc64PublicCatalogNativeAdmissionPlanV1,
   Rfc64PublicCatalogNativeAppliedHeadLifecycleV1,
   Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1,
   Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
@@ -60,12 +61,11 @@ export function createRfc64CatalogAppliedHeadCoordinatorV1(
 ): Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1<
   Rfc64CatalogAppliedHeadEvidenceV1
 > {
-  return Object.freeze(async (plan, signal) => {
-    const accepted = options.acceptedPolicySnapshotForCatalogScope(plan.catalogScope);
-    if (
-      accepted.policy.accessPolicy === 1
-      && accepted.policy.source.kind === 'finalized-chain'
-    ) {
+  return Object.freeze(Object.assign(async (
+    plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
+    signal: AbortSignal,
+  ) => {
+    if (usesFinalizedVmPrecommitV1(options, plan)) {
       return createFinalizedVmAppliedHeadLifecycleV1(options, plan, signal);
     }
     const transaction = await options.finalizedPolicyPrecommit(plan, signal);
@@ -76,7 +76,27 @@ export function createRfc64CatalogAppliedHeadCoordinatorV1(
     } satisfies Rfc64PublicCatalogNativeAppliedHeadLifecycleV1<
       Rfc64CatalogAppliedHeadEvidenceV1
     >);
-  });
+  }, {
+    // The row-independent half of whichever precommit this plan reaches.
+    admit: async (
+      plan: Readonly<Rfc64PublicCatalogNativeAdmissionPlanV1>,
+      signal: AbortSignal,
+    ): Promise<void> => {
+      const precommit = usesFinalizedVmPrecommitV1(options, plan)
+        ? options.finalizedVmPrecommit
+        : options.finalizedPolicyPrecommit;
+      await precommit.admit?.(plan, signal);
+    },
+  }));
+}
+
+function usesFinalizedVmPrecommitV1(
+  options: Rfc64CatalogAppliedHeadCoordinatorOptionsV1,
+  plan: Readonly<Rfc64PublicCatalogNativeAdmissionPlanV1>,
+): boolean {
+  const accepted = options.acceptedPolicySnapshotForCatalogScope(plan.catalogScope);
+  return accepted.policy.accessPolicy === 1
+    && accepted.policy.source.kind === 'finalized-chain';
 }
 
 async function createFinalizedVmAppliedHeadLifecycleV1(

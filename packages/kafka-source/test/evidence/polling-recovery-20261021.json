@@ -1,0 +1,47 @@
+{
+  "verifiedAt": "2026-10-21T13:28:38.628Z",
+  "baseCanaryCommit": "23ccf2fd37e8c16aca29be7af5ebf96ce898cb27",
+  "sourceFilesSha256": "7f1e0a06300a38f27c103007448039fa41f9c2af80ff3f4bf3d076d1c1dde616",
+  "kafkaJsPatchSha256": "d9e175a6f3fb040faee97b6ffb2af1780b75cf4ed113f29a905c11f8fe99fa3e",
+  "environment": {
+    "node": "24.11.1",
+    "broker": "Redpanda v24.3.18 on localhost",
+    "kafkaJs": "2.2.4 with pinned opt-in fail-closed patch"
+  },
+  "mode": "polling-only; no DKG requests/writes; no unverified Kafka acknowledgement",
+  "fetchExpiration": {
+    "boundsBeforeFetch": "0",
+    "lowAtFetch": "1",
+    "lastError": "KAFKA_OFFSET_OUT_OF_RANGE",
+    "brokerCommittedOffset": "0",
+    "brokerOffsetBeforeFetch": "0",
+    "journalNextOffset": "0",
+    "newKAs": 0,
+    "partitionMarkedDone": false
+  },
+  "delayedJoin": {
+    "startupDelayMs": 87,
+    "readTimeoutMs": 20,
+    "delivered": 1,
+    "acknowledged": false,
+    "brokerCommittedOffset": "-1",
+    "emptyStartupReported": false
+  },
+  "focusedSuite": {
+    "node": "22.23.1",
+    "tests": 45,
+    "passed": 45,
+    "lineCoverage": 96.61
+  },
+  "repositoryScripts": {
+    "node": "22.23.1",
+    "tests": 772,
+    "passed": 772
+  },
+  "testInventory": {
+    "files": 2730,
+    "vitestPackages": 24
+  },
+  "faultInjection": "The admin snapshot wrapper truncates a disposable broker topic after obtaining valid bounds. The startup wrapper delays consumer.run by 80ms. Both use the real installed KafkaJS and real broker.",
+  "scope": "The 21 October run verifies polling defects only. Full DKG lifecycle/replay evidence remains the separately dated 20 October run. No IDENER, JPB deployment, public-chain or SASL/TLS proof."
+}

@@ -4,9 +4,8 @@ import { sel } from '../helpers/selectors.js';
 /**
  * DashboardPage — page object for the rc11 redesigned dashboard.
  *
- * The legacy dashboard had quick-action buttons, demo project cards
- * (`.v10-dash-project-card`), and a recent-operations feed
- * (`.v10-recent-op`). All three were removed in the rc11 redesign.
+ * The legacy dashboard had quick-action buttons, demo project cards and a
+ * recent-operations feed. All three were removed in the rc11 redesign.
  * The current dashboard ships:
  *   - 3 StatCards (My Context Graphs / Context Graph Size /
  *     Collaborating Agents) in `.v10-dash-stats.v10-dash-stats-3`,
@@ -17,7 +16,7 @@ import { sel } from '../helpers/selectors.js';
  * The PO surface still exposes `clickQuickAction(label)` as a shim so
  * specs that just need to *open the create-project modal* as a
  * precondition keep working — the shim delegates to the left panel's
- * "+ New Context Graph" button. Methods that have no replacement in
+ * "New" button under My Context Graphs. Methods that have no replacement in
  * the new UI (project cards, recent ops, "view all" link) have been
  * removed.
  */
@@ -27,7 +26,6 @@ export class DashboardPage {
   readonly title: Locator;
   readonly subtitle: Locator;
   readonly statsContainer: Locator;
-  readonly quickActions: Locator;
 
   // Newly-named handles for the rc11 dashboard. The CG list IS the
   // project picker now — clicking a `.v10-cg-row` opens that project's
@@ -44,7 +42,6 @@ export class DashboardPage {
     this.title = page.locator(sel.dashboard.title);
     this.subtitle = page.locator(sel.dashboard.subtitle);
     this.statsContainer = page.locator(sel.dashboard.stats);
-    this.quickActions = page.locator(sel.dashboard.quickAction);
     this.cgRows = page.locator('.v10-cg-list .v10-cg-row');
     this.cgEmpty = page.locator('.v10-cg-empty');
     this.walletsSection = page
@@ -75,33 +72,24 @@ export class DashboardPage {
   async clickQuickAction(label: string) {
     // The legacy `.v10-quick-action` row on the dashboard was removed in
     // the rc11 redesign — the entry points moved into the left panel
-    // ("+ New Context Graph") and into the project view ("Import files"
-    // hub). Rather than ripping every spec that opens these modals as a
-    // precondition, this method now resolves to the still-extant entry
-    // point per label so the *modal-under-test* is what gets asserted,
+    // (the "New" button under My Context Graphs) and into the project view
+    // ("Import files" hub). Rather than ripping every spec that opens these
+    // modals as a precondition, this method now resolves to the still-extant
+    // entry point per label so the *modal-under-test* is what gets asserted,
     // not the obsolete dashboard row.
     const entryByLabel: Record<string, () => Promise<void>> = {
       'Create Project': async () => {
         await this.page
-          .locator('.v10-new-project-btn')
-          .filter({ hasText: /New Context Graph/i })
+          .locator(sel.leftPanel.root)
+          .locator(sel.leftPanel.newProjectBtn)
+          .filter({ hasText: /^New$/i })
           .first()
           .click();
       },
     };
-    const direct = this.quickActions.filter({ hasText: label });
-    if ((await direct.count()) > 0) {
-      await direct.first().click();
-      return;
-    }
-    const fallback = entryByLabel[label];
-    if (fallback) {
-      await fallback();
-      return;
-    }
-    // Preserve the original locator-error if neither path resolves so a
-    // future regression doesn't silently no-op.
-    await direct.click();
+    const entry = entryByLabel[label];
+    if (!entry) throw new Error(`No entry point for "${label}"`);
+    await entry();
   }
 
   /**

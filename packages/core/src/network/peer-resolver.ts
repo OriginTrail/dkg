@@ -43,8 +43,11 @@ import type {
   PeerConnectionNetwork,
   NodeIdentity,
   Address,
+  PeerConnectOpts,
 } from './network.js';
 import { PeerConnectionUnresolvedError } from './network.js';
+import { startRequestAbortLifecycle } from '../request-abort-lifecycle.js';
+import { resolveWithinAbort } from '../abort-boundary.js';
 import type { NetworkStateRegistry } from './network-state-registry.js';
 
 /**
@@ -179,6 +182,13 @@ export interface ConnectOpts extends ResolveOpts {
   candidateTimeoutMs?: number;
   /** Optional diagnostic sink for transport candidate selection. */
   log?: (message: string) => void;
+  /** Optional ordered recovery for a peer with a trusted persisted address. */
+  recovery?: {
+    verifiedInitialAddress?: Address;
+    initialTimeoutMs?: number;
+    cachedTimeoutMs?: number;
+    resolverTimeoutMs?: number;
+  };
 }
 
 export type PeerConnectionOutcome =
@@ -376,8 +386,11 @@ export class PeerResolver {
     // skipping steps 4+).
     if (aborted()) return accumulated;
     try {
-      const registryAddrs = await this.registry.lookup(peerId);
-      await primeAndAppend(registryAddrs, 'registry');
+      const registryAddrs = await resolveWithinAbort(
+        () => this.registry.lookup(peerId),
+        opts?.signal,
+      );
+      if (registryAddrs) await primeAndAppend(registryAddrs, 'registry');
     } catch (err) {
       this.logger.debug?.(`registry lookup for ${peerId} failed: ${errMsg(err)}`);
     }
@@ -396,9 +409,11 @@ export class PeerResolver {
     try {
       let handledByRicher = false;
       if (typeof this.agentDirectory.findAgentDialAddresses === 'function') {
-        const dial = await this.agentDirectory.findAgentDialAddresses(peerId, {
-          signal: opts?.signal,
-        });
+        const dial = await resolveWithinAbort(
+          (signal) => this.agentDirectory.findAgentDialAddresses!(peerId, { signal }),
+          opts?.signal,
+        );
+        if (aborted()) return accumulated;
         if (dial) {
           handledByRicher = true;
           // Codex review of PR #700 round 2: only use direct multiaddrs
@@ -435,9 +450,11 @@ export class PeerResolver {
         // PR yet) still resolves. Codex review of PR #700 caught this.
       }
       if (!handledByRicher) {
-        const relay = await this.agentDirectory.findRelayForPeer(peerId, {
-          signal: opts?.signal,
-        });
+        const relay = await resolveWithinAbort(
+          (signal) => this.agentDirectory.findRelayForPeer(peerId, { signal }),
+          opts?.signal,
+        );
+        if (aborted()) return accumulated;
         if (relay) {
           const circuitAddr = `${relay}/p2p-circuit/p2p/${peerId}`;
           await primeAndAppend([circuitAddr], 'agents-CG');
@@ -471,23 +488,102 @@ export class PeerResolver {
    * genuine miss from being mistaken for a successful connection.
    */
   async connect(peerId: NodeIdentity, opts: ConnectOpts = {}): Promise<PeerConnectionOutcome> {
-    const addresses = await this.resolve(peerId, opts);
-    if (opts.signal?.aborted) {
-      throw new DOMException('Peer connection aborted', 'AbortError');
+    const network = supportsPeerConnection(this.network) ? this.network : undefined;
+    if (opts.recovery) {
+      return this.connectWithRecovery(peerId, opts, opts.recovery, network);
     }
+    return this.resolveAndConnect(peerId, opts, network, opts.signal);
+  }
+
+  /** The recovery strategy owns its ordered fast paths and final deadline. */
+  private async connectWithRecovery(
+    peerId: NodeIdentity,
+    opts: ConnectOpts,
+    recovery: NonNullable<ConnectOpts['recovery']>,
+    network: PeerConnectionNetwork | undefined,
+  ): Promise<PeerConnectionOutcome> {
+    const recoveryNetwork = network?.tryConnectRecoveryStage;
+    if (network && recoveryNetwork) {
+      if (opts.signal?.aborted) throw new DOMException('Peer connection aborted', 'AbortError');
+      if (this.network.getConnections(peerId).length > 0) {
+        return { status: 'connected', resolvedAddresses: [] };
+      }
+      const tryStage = async (
+        stage: Parameters<NonNullable<PeerConnectionNetwork['tryConnectRecoveryStage']>>[1],
+      ): Promise<boolean> => {
+        try {
+          const succeeded = await recoveryNetwork.call(network, peerId, stage);
+          if (opts.signal?.aborted) throw new DOMException('Peer connection aborted', 'AbortError');
+          return succeeded && this.network.getConnections(peerId).length > 0;
+        } catch {
+          if (opts.signal?.aborted) throw new DOMException('Peer connection aborted', 'AbortError');
+          return false;
+        }
+      };
+      if (recovery.verifiedInitialAddress && await tryStage({
+        kind: 'hint',
+        address: recovery.verifiedInitialAddress,
+        signal: opts.signal,
+        timeoutMs: recovery.initialTimeoutMs ?? 5_000,
+        log: opts.log,
+      })) return { status: 'connected', resolvedAddresses: [] };
+      if (await tryStage({
+        kind: 'cached',
+        signal: opts.signal,
+        timeoutMs: recovery.cachedTimeoutMs ?? 5_000,
+        log: opts.log,
+      })) return { status: 'connected', resolvedAddresses: [] };
+
+      if (opts.signal?.aborted) throw new DOMException('Peer connection aborted', 'AbortError');
+    }
+    const lifecycle = startRequestAbortLifecycle(recovery.resolverTimeoutMs ?? 15_000, [opts.signal]);
     try {
-      if (!supportsPeerConnection(this.network)) {
+      const outcome = await this.resolveAndConnect(
+        peerId, opts, network, lifecycle.signal,
+        recoveryNetwork
+          ? { skipIdentityFallback: true, allowResolvedPrivateDirect: true }
+          : {},
+      );
+      if (lifecycle.signal.aborted) throw lifecycle.signal.reason;
+      if (outcome.status === 'connected' && this.network.getConnections(peerId).length === 0) {
+        if (outcome.resolvedAddresses.length === 0) {
+          return { status: 'unresolved', resolvedAddresses: [] };
+        }
+        throw new PeerConnectionUnresolvedError('Peer connection was not observed');
+      }
+      return outcome;
+    } catch (error) {
+      if (lifecycle.signal.aborted) throw lifecycle.signal.reason;
+      throw error;
+    } finally {
+      lifecycle.release();
+    }
+  }
+
+  /** Shared resolution, transport call, and unresolved-error mapping. */
+  private async resolveAndConnect(
+    peerId: NodeIdentity,
+    opts: ConnectOpts,
+    network: PeerConnectionNetwork | undefined,
+    signal?: AbortSignal,
+    transportOptions: Pick<PeerConnectOpts, 'skipIdentityFallback' | 'allowResolvedPrivateDirect'> = {},
+  ): Promise<PeerConnectionOutcome> {
+    const addresses = await this.resolve(peerId, { ...opts, signal });
+    if (signal?.aborted) throw new DOMException('Peer connection aborted', 'AbortError');
+    try {
+      if (!network) {
         throw new Error('Network transport does not implement the peer-connection capability');
       }
-      await this.network.connectPeer(peerId, addresses, {
-        signal: opts.signal,
+      await network.connectPeer(peerId, addresses, {
+        signal,
         candidateTimeoutMs: opts.candidateTimeoutMs,
         log: opts.log,
+        ...transportOptions,
       });
       return { status: 'connected', resolvedAddresses: addresses };
     } catch (error) {
       if (
-        !opts.signal?.aborted
+        !signal?.aborted
         && addresses.length === 0
         && error instanceof PeerConnectionUnresolvedError
       ) {

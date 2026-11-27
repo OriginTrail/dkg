@@ -9,11 +9,13 @@ import {
   '@origintrail-official/dkg-chain';
 import {
   DKG_ONTOLOGY,
-  SYSTEM_CONTEXT_GRAPHS,
-  contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
 } from '@origintrail-official/dkg-core';
-import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  StoreSchedulerBusyError,
+  type Quad,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 
 type RegistrationAgent = DKGAgent & {
@@ -45,10 +47,12 @@ async function registrationStatus(agent: RegistrationAgent, id: string): Promise
     : undefined;
 }
 
+// The fixture graph is private, so its recovery binding lives only in its own
+// `_meta`, like the rest of its metadata.
 async function hasOnChainBinding(agent: RegistrationAgent, id: string): Promise<boolean> {
   const result = await agent.store.query(`
     ASK WHERE {
-      GRAPH <${contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)}> {
+      GRAPH <${contextGraphMetaGraphUri(id)}> {
         <did:dkg:context-graph:${id}>
           <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?onChainId
       }
@@ -57,10 +61,9 @@ async function hasOnChainBinding(agent: RegistrationAgent, id: string): Promise<
   return result.type === 'boolean' && result.value;
 }
 
-async function fixture(id: string): Promise<{
+async function bareAgent(id: string): Promise<{
   agent: RegistrationAgent;
   chain: MockChainAdapter;
-  ownerAddress: string;
 }> {
   const chain = new MockChainAdapter();
   const agent = await DKGAgent.create({
@@ -76,6 +79,15 @@ async function fixture(id: string): Promise<{
     onMessage: vi.fn(),
     publish: vi.fn(async () => undefined),
   };
+  return { agent, chain };
+}
+
+async function fixture(id: string): Promise<{
+  agent: RegistrationAgent;
+  chain: MockChainAdapter;
+  ownerAddress: string;
+}> {
+  const { agent, chain } = await bareAgent(id);
   const ownerAddress = chain.signerAddress;
   await agent.createContextGraph({
     id,
@@ -164,6 +176,174 @@ describe('Context Graph registration durability transition', () => {
       .rejects.toThrow('registered status commit unavailable');
 
     expect(await registrationStatus(agent, id)).toBe('pending');
+    expect(await hasOnChainBinding(agent, id)).toBe(true);
+  });
+
+  it('waits out a busy store at the create existence check', async () => {
+    const id = 'registration-busy-create';
+    const { agent, chain } = await bareAgent(id);
+    const graphUri = `did:dkg:context-graph:${id}`;
+    let refusals = 0;
+    const originalQuery = agent.store.query.bind(agent.store);
+    agent.store.query = async (sparql, options) => {
+      if (options?.source === 'agent.contextGraph.exists' && sparql.includes(`<${graphUri}>`) && refusals === 0) {
+        refusals += 1;
+        throw new StoreSchedulerBusyError('queue_full', 'normal', options.source);
+      }
+      return originalQuery(sparql, options);
+    };
+
+    await agent.createContextGraph({
+      id,
+      name: id,
+      private: true,
+      callerAgentAddress: chain.signerAddress,
+    });
+
+    expect(refusals).toBe(1);
+    await expect(agent.contextGraphExists(id)).resolves.toBe(true);
+  });
+
+  it('ends a create whose declaration write is refused, so a competing create keeps its own metadata', async () => {
+    const id = 'registration-busy-create-competing';
+    const { agent, chain } = await bareAgent(id);
+    const graphUri = `did:dkg:context-graph:${id}`;
+    const declaration = (quads: Quad[]) => quads.some(
+      (quad) => quad.subject === graphUri && quad.predicate === DKG_ONTOLOGY.RDF_TYPE,
+    );
+    let refusals = 0;
+    const originalInsert = agent.store.insert.bind(agent.store);
+    agent.store.insert = async (quads: Quad[], options) => {
+      if (declaration(quads) && refusals === 0) {
+        refusals += 1;
+        throw new StoreSchedulerBusyError('queue_full', 'normal', 'insert');
+      }
+      await originalInsert(quads, options);
+    };
+    const create = (name: string) => agent.createContextGraph({
+      id,
+      name,
+      private: true,
+      callerAgentAddress: chain.signerAddress,
+    });
+
+    await expect(create('first request')).rejects.toMatchObject({
+      code: 'STORE_SCHEDULER_BUSY',
+      reason: 'queue_full',
+    });
+    await expect(agent.contextGraphExists(id)).resolves.toBe(false);
+    await create('second request');
+    await expect(create('third request')).rejects.toThrow(`Context graph "${id}" already exists`);
+
+    const names = await agent.store.query(`
+      SELECT ?name WHERE { GRAPH ?g { <${graphUri}> <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name } }
+    `);
+    expect(names.type === 'bindings'
+      ? names.bindings.map((binding) => binding['name']?.replace(/^"|"$/g, ''))
+      : []).toEqual(['second request']);
+    expect(refusals).toBe(1);
+  });
+
+  it('waits out a busy store before the pending marker and submits one transaction', async () => {
+    const id = 'registration-busy-pending-marker';
+    const { agent, ownerAddress } = await fixture(id);
+    const events: string[] = [];
+    agent.registerContextGraphOnChain = vi.fn(async () => {
+      events.push(`chain:${await registrationStatus(agent, id)}`);
+      return successfulRegistration();
+    });
+    const originalUpdate = agent.store.update?.bind(agent.store);
+    expect(originalUpdate).toBeTypeOf('function');
+    agent.store.update = async (sparql, options) => {
+      if (
+        options?.source === 'agent.contextGraph.registrationStatus.persist'
+        && sparql.includes('"pending"')
+        && events.filter((event) => event === 'refused').length < 2
+      ) {
+        events.push('refused');
+        throw new StoreSchedulerBusyError('queue_full', 'normal', options.source);
+      }
+      await originalUpdate!(sparql, options);
+    };
+
+    await expect(agent.registerContextGraph(id, { callerAgentAddress: ownerAddress }))
+      .resolves.toMatchObject({ onChainId: '42' });
+
+    expect(events).toEqual(['refused', 'refused', 'chain:pending']);
+    expect(agent.registerContextGraphOnChain).toHaveBeenCalledOnce();
+    expect(await registrationStatus(agent, id)).toBe('registered');
+  });
+
+  it('completes a mined registration when the store is briefly busy for its bindings', async () => {
+    const id = 'registration-busy-after-chain';
+    const { agent, ownerAddress } = await fixture(id);
+    agent.registerContextGraphOnChain = vi.fn(async () => successfulRegistration());
+    const refused: string[] = [];
+    const originalInsert = agent.store.insert.bind(agent.store);
+    agent.store.insert = async (quads: Quad[], options) => {
+      if (
+        refused.length === 0
+        && quads.some((quad) => quad.predicate === `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`)
+      ) {
+        refused.push('binding');
+        throw new StoreSchedulerBusyError('queue_full', 'normal', 'insert');
+      }
+      await originalInsert(quads, options);
+    };
+    const originalUpdate = agent.store.update?.bind(agent.store);
+    expect(originalUpdate).toBeTypeOf('function');
+    agent.store.update = async (sparql, options) => {
+      if (
+        options?.source === 'agent.contextGraph.registrationStatus.persist'
+        && sparql.includes('"registered"')
+        && !refused.includes('registered')
+      ) {
+        refused.push('registered');
+        throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', options.source);
+      }
+      await originalUpdate!(sparql, options);
+    };
+
+    await expect(agent.registerContextGraph(id, { callerAgentAddress: ownerAddress }))
+      .resolves.toMatchObject({ onChainId: '42' });
+
+    expect(refused).toEqual(['binding', 'registered']);
+    expect(agent.registerContextGraphOnChain).toHaveBeenCalledOnce();
+    expect(await registrationStatus(agent, id)).toBe('registered');
+    expect(await hasOnChainBinding(agent, id)).toBe(true);
+  });
+
+  it('stays pending until a refused binding flush succeeds, then registers once', async () => {
+    const id = 'registration-busy-binding-flush';
+    const { agent, ownerAddress } = await fixture(id);
+    const events: string[] = [];
+    agent.registerContextGraphOnChain = vi.fn(async () => {
+      events.push('chain');
+      return successfulRegistration();
+    });
+    const originalFlush = agent.store.flush?.bind(agent.store);
+    agent.store.flush = async () => {
+      const state = `${await registrationStatus(agent, id)}:${await hasOnChainBinding(agent, id)}`;
+      if (events.includes('chain') && !events.some((event) => event.startsWith('refused'))) {
+        events.push(`refused:${state}`);
+        throw new StoreSchedulerBusyError('queue_full', 'normal', 'flush');
+      }
+      events.push(`flush:${state}`);
+      await originalFlush?.();
+    };
+
+    await expect(agent.registerContextGraph(id, { callerAgentAddress: ownerAddress }))
+      .resolves.toMatchObject({ onChainId: '42' });
+
+    expect(events.slice(0, 5)).toEqual([
+      'flush:pending:false',
+      'chain',
+      'refused:pending:true',
+      'flush:pending:true',
+      'flush:registered:true',
+    ]);
+    expect(agent.registerContextGraphOnChain).toHaveBeenCalledOnce();
+    expect(await registrationStatus(agent, id)).toBe('registered');
     expect(await hasOnChainBinding(agent, id)).toBe(true);
   });
 

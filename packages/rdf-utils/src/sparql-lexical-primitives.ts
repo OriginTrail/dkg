@@ -120,6 +120,24 @@ function isSparqlVariableContinuationCodePoint(codePoint: number): boolean {
     || (codePoint >= 0x203f && codePoint <= 0x2040);
 }
 
+/** Validate a raw VARNAME without interpreting SPARQL UCHAR escapes. */
+export function isSparqlVariableNameRaw(value: string): boolean {
+  if (value.length === 0) return false;
+  let index = 0;
+  const initial = value.codePointAt(index);
+  if (initial === undefined || !isSparqlVariableInitialCodePoint(initial)) return false;
+  index += initial > 0xffff ? 2 : 1;
+  while (index < value.length) {
+    const continuation = value.codePointAt(index);
+    if (
+      continuation === undefined
+      || !isSparqlVariableContinuationCodePoint(continuation)
+    ) return false;
+    index += continuation > 0xffff ? 2 : 1;
+  }
+  return true;
+}
+
 export function sparqlVariableInitialWidth(source: string, index: number): number {
   return logicalWidthWhen(source, index, isSparqlVariableInitialCodePoint);
 }

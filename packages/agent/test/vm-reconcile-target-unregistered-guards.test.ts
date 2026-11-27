@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 /**
  * Fail-closed guards that stop an accepted RFC-64 *unregistered* authority from
  * silently degrading into legacy current-state chain resolution, plus the
@@ -46,9 +47,8 @@ function createFetchHost(chain: Record<string, unknown>) {
     vmReconcileRuntimeReady: true,
     graphScopedStoreClosed: false,
     vmReconcileRotationClosed: false,
-    vmReconcileLifecycleGeneration: 1,
-    vmReconcileLifecycleController: new AbortController(),
-    vmReconcilePhysicalRuns: new Set<Promise<unknown>>(),
+    workLifetime: new AgentWorkLifetime(),
+
     subscribedContextGraphs: new Map([[CONTEXT_GRAPH, {
       subscribed: true,
       onChainId: ON_CHAIN_ID,

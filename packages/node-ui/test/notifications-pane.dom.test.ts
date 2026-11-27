@@ -34,7 +34,7 @@ vi.mock('../src/ui/stores/projects.js', () => ({
   useProjectsStore: (sel: (s: any) => unknown) => sel({ setActiveProject: vi.fn() }),
 }));
 vi.mock('../src/ui/stores/tabs.js', () => ({
-  useTabsStore: () => ({ openTab: vi.fn() }),
+  useTabsStore: Object.assign(() => ({ openTab: vi.fn() }), { getState: () => ({ activeTabId: 'dashboard', openTab: vi.fn() }) }),
 }));
 
 // Imported AFTER the mocks are declared (hoisting keeps the mocks first).
@@ -116,6 +116,12 @@ describe('NotificationsPane — interaction + a11y (happy-dom)', () => {
       yesBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(deny).toHaveBeenCalledTimes(1);
+  });
+
+  it('a join request from a separator-only agent name renders a "?" avatar instead of crashing', () => {
+    render(makeFeed({ joinRequests: [joinItem({ agentName: '_' })] }));
+    expect(container.querySelector('.v10-notif-agent')?.textContent).toBe('?');
+    expect(container.textContent).toContain('wants to join');
   });
 
   it('Escape inside the Deny-confirm cancels the confirm (does not reject)', () => {

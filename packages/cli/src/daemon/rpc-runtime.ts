@@ -1,11 +1,13 @@
 import type {
   RpcRequestGovernor,
+  RpcRequestGovernorWindow,
   RpcUsageWindow,
 } from '@origintrail-official/dkg-chain';
 import {
   createRpcRequestProvider,
   createRpcUsageRecorder,
   isRpcRequestGovernorQueueFullError,
+  numericChainIdOf,
   resolveRpcUrls,
   RpcRequestGovernor as ProcessRpcRequestGovernor,
   withRpcRequestContext,
@@ -31,10 +33,23 @@ export interface DaemonRpcEndpointProbe {
 
 /** One bound transport shared by every daemon-owned direct RPC route. */
 export interface DaemonRouteRpcTransport {
-  createProvider(
+  /** Non-draining snapshot; interval counters reset only at the daemon's log tick. */
+  snapshotGovernor(): RpcRequestGovernorWindow;
+  /**
+   * Run `read` over providers built for this call and destroyed once it settles.
+   *
+   * ethers retries network discovery once a second for as long as a provider
+   * lives, so a provider left behind keeps asking an endpoint that never
+   * answers `eth_chainId` through the shared governor until the process exits.
+   * The providers take the configured chain's network and send no discovery;
+   * when the chain id has no numeric part they discover it, and destruction
+   * ends that.
+   */
+  withProvider<T>(
     rpcUrl: string,
-    rpcUrls?: readonly string[],
-  ): ethers.JsonRpcProvider | ethers.FallbackProvider;
+    rpcUrls: readonly string[] | undefined,
+    read: (provider: ethers.JsonRpcProvider | ethers.FallbackProvider) => Promise<T>,
+  ): Promise<T>;
   probeEndpoint(rpcUrl: string, index: number): Promise<DaemonRpcEndpointProbe>;
 }
 
@@ -56,10 +71,11 @@ export function createDaemonRpcRuntime(
   if (!chain?.rpcUrl) return undefined;
   const projected = projectRuntimeEvmChainConfig(chain);
   const governor = new ProcessRpcRequestGovernor(chain.rpcRequestBudget);
-  const usage = createRpcUsageRecorder(() => chain.chainId ?? 'unknown');
+  const usage = createRpcUsageRecorder(() => chain.chainId ?? 'unknown', 'route_runtime');
   const onRequest = (method: string, endpointSlot?: number) => {
     usage.record(method, endpointSlot);
   };
+  const staticChainId = numericChainIdOf(chain.chainId);
   const createProvider = (
     rpcUrl: string,
     rpcUrls?: readonly string[],
@@ -68,6 +84,7 @@ export function createDaemonRpcRuntime(
     const providers = urls.map((url, index) => createRpcRequestProvider(url, {
       maxRetries: urls.length > 1 ? 0 : undefined,
       providerOptions: { cacheTimeout: -1, batchMaxCount: 1 },
+      ...(staticChainId === undefined ? {} : { network: ethers.Network.from(staticChainId) }),
       endpointSlot: index,
       admission: governor,
       onRequest,
@@ -83,6 +100,19 @@ export function createDaemonRpcRuntime(
       undefined,
       { quorum: 1 },
     );
+  };
+  const withProvider = async <T>(
+    rpcUrl: string,
+    rpcUrls: readonly string[] | undefined,
+    read: (provider: ethers.JsonRpcProvider | ethers.FallbackProvider) => Promise<T>,
+  ): Promise<T> => {
+    const provider = createProvider(rpcUrl, rpcUrls);
+    try {
+      return await read(provider);
+    } finally {
+      // A FallbackProvider destroys each endpoint provider with itself.
+      await provider.destroy();
+    }
   };
   const probeEndpoint = async (
     rpcUrl: string,
@@ -154,7 +184,7 @@ export function createDaemonRpcRuntime(
     ...(projected === undefined
       ? {}
       : { chainConfig: bindRuntimeRpcRequestGovernor(projected, governor) }),
-    routeTransport: Object.freeze({ createProvider, probeEndpoint }),
+    routeTransport: Object.freeze({ withProvider, probeEndpoint, snapshotGovernor: () => governor.snapshot() }),
     drainRouteRpcUsage: () => usage.drainRpcUsage(),
   });
 }

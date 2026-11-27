@@ -2,29 +2,44 @@
 
 import { describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
-import { StoreOperationTimeoutError, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
+import { StoreReadTransportFailure, StoreOperationTimeoutError, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import {
+  CuratorRejectedError, CuratorUnconfirmedError,
   createPromotePostCommitFailure,
   createPromoteRetryableFailure,
+  PROMOTE_STEP_NAMES,
 } from '@origintrail-official/dkg-publisher';
 import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
+import { diagnosticPromoteStage, untagPromoteMessage } from '../src/daemon/promote-stage-diagnostics.js';
 import {
   classifyPromoteError,
-  diagnosticPromoteStage,
   safePromoteErrorIdentity,
 } from '../src/daemon/worker/async-promote-error-classification.js';
 
 const PROMOTE_RETRYABLE_FAILURE_CODE = 'PROMOTE_RETRYABLE_FAILURE';
 
 describe('diagnosticPromoteStage', () => {
-  it.each([
+  // Independent expectation: the CLI's own contract for which stages it will
+  // echo verbatim into an operator log line. Deriving the cases below from
+  // PROMOTE_STEP_NAMES instead would make them true by construction — a stage
+  // added to the publisher tuple would silently add a passing case rather than
+  // fail. Hand-written here so drift in either direction fails THIS assertion,
+  // while the publisher stays the single owner of the runtime set.
+  const EXPECTED_STAGES = [
     'ensureSubGraphRegistered',
     'assertGraphScopedLifecycleWritable',
+    'assertNoUnfinishedBoundShare',
     'knowledgeAssetPrivateQuads',
     'assertionScopedQuads',
     'assertTrustedCatalogTriplesAllowed',
     'encodeWorkspaceGossipPayload',
-  ])('retains the producer-owned %s stage without its message', (stage) => {
+  ];
+
+  it('matches the publisher-owned stage tuple exactly', () => {
+    expect([...PROMOTE_STEP_NAMES].sort()).toEqual([...EXPECTED_STAGES].sort());
+  });
+
+  it.each(EXPECTED_STAGES)('retains the producer-owned %s stage without its message', (stage) => {
     expect(diagnosticPromoteStage(`[promote:${stage}] opaque secret-sentinel failure`)).toBe(stage);
   });
 
@@ -35,6 +50,25 @@ describe('diagnosticPromoteStage', () => {
     'untagged failure',
   ])('maps an unowned or absent stage to unknown: %s', (message) => {
     expect(diagnosticPromoteStage(message)).toBe('unknown');
+  });
+});
+
+describe('untagPromoteMessage', () => {
+  it.each([
+    ['[promote:assertionScopedQuads] store timeout', 'store timeout'],
+    // The tag is removed whoever chose the label: it is a label, never message text.
+    ['[promote:callerControlled]   network failure', 'network failure'],
+    ['[promote:] failure', 'failure'],
+  ])('removes a leading stage tag: %s', (message, untagged) => {
+    expect(untagPromoteMessage(message)).toBe(untagged);
+  });
+
+  it.each([
+    'untagged failure',
+    'prefix [promote:assertionScopedQuads] failure',
+    '',
+  ])('leaves a message without a leading tag as it is: %j', (message) => {
+    expect(untagPromoteMessage(message)).toBe(message);
   });
 });
 
@@ -73,6 +107,17 @@ describe('safePromoteErrorIdentity', () => {
 });
 
 describe('classifyPromoteError', () => {
+  it.each(['network-cg', 'timeout', 'ECONNRESET'])('does not retry a typed curator rejection named %s', graph => {
+    for (const boundRecovery of [false, true]) {
+      expect(classifyPromoteError(new CuratorRejectedError(graph), { boundRecovery }))
+        .toEqual({ classification: 'fatal', retryable: false });
+    }
+    expect(classifyPromoteError(new CuratorUnconfirmedError(graph), { boundRecovery: true }))
+      .toEqual({ classification: 'transient', retryable: true });
+    expect(classifyPromoteError(new Error(graph), { boundRecovery: true }))
+      .toEqual({ classification: 'fatal', retryable: false });
+  });
+
   // RFC §10 / plan §10.3 — the three patterns surfaced by the rc.10 Graphify import
   // (`INTEGRATION_NOTES_GRAPHIFY.md`), plus the fatal default.
 
@@ -328,3 +373,12 @@ describe('classifyPromoteError', () => {
     expect(classifyPromoteError(undefined).classification).toBe('fatal');
   });
 });
+
+// A typed read remains safe even when a dependency returns cap-like diagnostic text.
+it.each(['payload too large', 'gossip limit', 'promoted assertion too large'])(
+  'retains bound recovery for proven read failure: %s', message => {
+    expect(classifyPromoteError(new StoreReadTransportFailure(new Error(message)), { boundRecovery: true }))
+      .toEqual({ classification: 'transient', retryable: true });
+    expect(classifyPromoteError(new Error(message), { boundRecovery: true }).retryable).toBe(false);
+  },
+);

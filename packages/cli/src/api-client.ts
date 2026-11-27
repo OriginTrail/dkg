@@ -1,3 +1,12 @@
+import { createPublicCheckpointClient } from './public-checkpoint-client.js';
+import { normalizeContextGraphIdOrUri } from './context-graph-identifiers.js';
+import type { FinalizedAssertionPublishResponse, KnowledgeAssetPublishResponse } from './knowledge-asset-publish-response.js';
+export type { KnowledgeAssetPublishResponse, ConfirmedCatalogObligationPendingResponseV1, ConfirmedCatalogTransactionResponseV1 } from './knowledge-asset-publish-response.js';
+import type { QueryOptions } from './query-options.js';
+import { shareJobsPath, shareReconciliationPath, type ShareJobsListOptions, type ShareJobsListResult } from './share-job-client-paths.js';
+import { publisherJobsPath, type PublisherJobsPageOptions, type PublisherJobsResult } from './publisher-job-client-paths.js';
+import { createEntityClient } from './entity-search/client.js';
+import { createViewSemanticsClient } from './view-semantics-client.js';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import type {
@@ -7,6 +16,7 @@ import type {
   RandomSamplingDisabledReason,
 } from '@origintrail-official/dkg-agent';
 import type {
+  ShareReconciliationInput, ShareReconciliationResult, AssertionPullFromOptions,
   AsyncLiftRetryOutcome,
   AsyncPreparedPublishPayload,
   JournalReadResult,
@@ -14,30 +24,104 @@ import type {
   PersistedLiftJob,
   PublicationPricingPolicy,
 } from '@origintrail-official/dkg-publisher';
-import {
-  isSafeJobId,
-  SAFE_JOB_ID_ERROR,
-} from '@origintrail-official/dkg-publisher';
+import { isSafeJobId, SAFE_JOB_ID_ERROR } from '@origintrail-official/dkg-publisher';
 import { DkgHomeFiles, isProcessRunning } from './config.js';
+import type { ContextGraphListOnChainView } from './context-graph-list-format.js';
+import type { ContextGraphJoinResult } from './context-graph-join-result.js';
 import {
   serializeAgentListOptions,
   type AgentListPageOptions,
 } from '@origintrail-official/dkg-core';
 import { loadApiClientToken } from './auth.js';
+import type { KnowledgeAssetWritableQuad } from './knowledge-asset-write-contract.js';
 import {
   finalizedPublishOptionsPayload,
   type KnowledgeAssetFinalizedPublishOptions,
 } from './finalized-publish-options.js';
-import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
-import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import { parseRegisterPcaAgentResult, type RegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import { CPU_PROFILE_PATH, cpuProfileRequestTimeoutMs, type CpuProfileResult } from './cpu-profile-wire.js';
+import type { Dispatcher } from 'undici';
+import { DaemonOutcomeUnknownError } from './daemon-outcome-unknown-error.js';
+import { longRequestDispatcher } from './daemon/local-agent-channel-fetch.js';
+import { READ_GRAPHS_PATH, READ_GRAPHS_REQUEST_TIMEOUT_MS, readGraphsStatusPath, type ReadGraphsAction, type ReadGraphsRequest } from './read-graphs-wire.js';
+import {
+  serializeStatusQuery,
+  type StatusQueryOptions,
+  type StoreQuadsStatusFields,
+  type StoreReachabilityFields,
+} from './status-store-quads-wire.js';
+import type { DaemonRuntimeStatusFields } from './status-runtime-wire.js';
 import type {
+  CatchupContextGraphIdentity,
   CatchupStatusResponse,
   CatchupStatusWireResponse,
+  ContextGraphOnChainReferenceNote,
 } from './catchup-status.js';
 import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
-import type { PublicQueryResult } from '@origintrail-official/dkg-core';
-
+import {
+  resolveDaemonRequestDeadlines,
+  type DaemonRequestDeadlines,
+} from '@origintrail-official/dkg-core/daemon-request-deadlines';
+import type { PublicQueryResult, ViewQuerySemantics } from '@origintrail-official/dkg-core';
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
+export type { KnowledgeAssetWritableQuad } from './knowledge-asset-write-contract.js';
+/**
+ * `/api/verify` collects signatures for up to 30 minutes when the request names
+ * no `timeoutMs` (the agent default in packages/agent/src/dkg-agent-endorse.ts).
+ * Its deadline follows the request plus this margin, so the client never cuts
+ * the collection short; Node's fetch still stops waiting for headers after
+ * 300 s, as it did before this client had deadlines of its own.
+ */
+const VERIFY_DEFAULT_COLLECTION_TIMEOUT_MS = 30 * 60_000;
+const REQUEST_CARRIED_TIMEOUT_MARGIN_MS = 30_000;
+
+export { DaemonOutcomeUnknownError };
+
+interface RequestDeadline {
+  /** Overrides the method's default deadline. */
+  timeoutMs?: number;
+  /**
+   * Set on the long Knowledge Asset mutations: a timeout then throws
+   * {@link DaemonOutcomeUnknownError} carrying this hint.
+   */
+  outcomeUnknownHint?: string;
+  /** For a request that may run past undici's 300 s header and body timers: a dispatcher whose timers outlast the deadline. */
+  dispatcher?: Dispatcher;
+}
+
+/**
+ * Whether a failed request got no daemon answer: the client deadline expired,
+ * or Node's fetch (undici) stopped waiting on its own after 300 s without
+ * headers or body progress (a `fetch failed` / `terminated` TypeError with an
+ * `UND_ERR_HEADERS_TIMEOUT` / `UND_ERR_BODY_TIMEOUT` cause). An HTTP error
+ * answer never counts, even one that lands as the deadline expires.
+ */
+function isUnansweredRequest(err: unknown, signal: AbortSignal): boolean {
+  const facts = classifyTransportError(err);
+  if (facts.httpStatus !== undefined) return false;
+  return signal.aborted
+    || facts.codes.has('UND_ERR_HEADERS_TIMEOUT')
+    || facts.codes.has('UND_ERR_BODY_TIMEOUT');
+}
+
+function knowledgeAssetHistoryHint(name: string, contextGraphId: string, subGraphName?: string): string {
+  const subGraph = subGraphName ? ` --sub-graph-name ${subGraphName}` : '';
+  return `Check \`dkg ka history ${name} --context-graph-id ${contextGraphId}${subGraph}\` before retrying.`;
+}
+
+function knowledgeAssetMutationDeadline(name: string, contextGraphId: string, subGraphName?: string): RequestDeadline {
+  return { outcomeUnknownHint: knowledgeAssetHistoryHint(name, contextGraphId, subGraphName) };
+}
+
+/** An unanswered async admission may still have stored a job: point at the job list, not at a re-run. */
+function asyncJobAdmissionDeadline(kind: 'share' | 'publish', name: string, contextGraphId: string): RequestDeadline {
+  // Jobs are stored under the bare ID, and the share-job list compares its filter as given.
+  const id = normalizeContextGraphIdOrUri(contextGraphId);
+  const jobList = kind === 'share'
+    ? `dkg ka share-jobs --context-graph-id ${id}`
+    : `dkg publisher jobs --context-graph ${id}`;
+  return { outcomeUnknownHint: `A ${kind} job for "${name}" may exist: look for it with \`${jobList}\` before retrying.` };
+}
 
 export interface PublisherJobResponse {
   job: PersistedLiftJob;
@@ -98,13 +182,6 @@ export interface PreSignedAuthorAttestationPayload {
   signature: { r: string; vs: string };
 }
 
-export interface KnowledgeAssetWritableQuad {
-  subject: string;
-  predicate: string;
-  object: string;
-  graph?: string;
-}
-
 export interface KnowledgeAssetCreateOptions {
   subGraphName?: string;
   quads?: KnowledgeAssetWritableQuad[];
@@ -128,7 +205,7 @@ export interface KnowledgeAssetCreateResponse {
   status?: string;
   written?: number;
   merkleRoot?: string;
-  shareOperationId?: string;
+  shareOperationId?: string; catalogHandoff?: KnowledgeAssetShareResponse['catalogHandoff'];
   swmShared?: boolean;
   promotedCount?: number;
   publishReady?: boolean;
@@ -147,7 +224,7 @@ export interface KnowledgeAssetShareResponse {
   promotedCount: number;
   sealed?: boolean;
   publishReady?: boolean;
-  shareOperationId?: string;
+  shareOperationId?: string; catalogHandoff?: { state: 'pending'; reason: string; recoveryJobId: string; recoveryStatusUrl: string };
   errors?: KnowledgeAssetLifecycleError[];
 }
 
@@ -164,19 +241,6 @@ export interface KnowledgeAssetShareOptions extends KnowledgeAssetShareTargetOpt
 }
 
 export type KnowledgeAssetShareAsyncOptions = KnowledgeAssetShareTargetOptions;
-
-export interface KnowledgeAssetPublishResponse {
-  kaId?: string;
-  ual?: string;
-  txHash?: string;
-  status?: string;
-  /** Core peers whose StorageACKs backed a confirmed VM publish. */
-  storageAckPeerIds?: string[];
-  error?: string;
-  errors?: KnowledgeAssetLifecycleError[];
-  contextGraphError?: unknown;
-  [key: string]: unknown;
-}
 
 export interface KnowledgeAssetLifecycleError {
   phase?: string;
@@ -226,8 +290,11 @@ export interface KnowledgeAssetShareJobView {
   startedAt?: string;
   finishedAt?: string;
   entitiesPromoted?: number;
+  /** The attempts counted against the job's budget: never more than `maxAttempts`. */
   attempts: number;
   maxAttempts: number;
+  /** The attempts automatic recovery made after the budget was spent; absent when there were none. */
+  recoveryAttempts?: number;
   nextRetryAt?: string;
   lastError?: {
     code: string;
@@ -349,6 +416,18 @@ export interface RandomSamplingStatusResponse {
     submittedCount: number;
     lastSubmittedTxHash: string | null;
     lastSubmittedAt: string | null;
+    /**
+     * Distinct challenges (proof periods) first seen in the daemon's trailing
+     * 24-hour window; repeated ticks on one period count once. This and the
+     * three health fields below are optional because older daemons omit them;
+     * the CLI renders a missing counter as `n/a`, never as 0.
+     */
+    challengesReceived24h?: number;
+    /** Of those periods, how many this daemon submitted a proof for. */
+    proofsSubmitted24h?: number;
+    /** Kind of the most recent failed tick (for example `kc-not-synced`), or null. */
+    lastFailureClassification?: string | null;
+    lastFailureAt?: string | null;
   };
 }
 
@@ -364,7 +443,7 @@ export interface RelayStatusResponse {
   configuredAnnounceAddresses: string[];
 }
 
-export interface DaemonStatusResponse {
+export interface DaemonStatusResponse extends StoreQuadsStatusFields, StoreReachabilityFields, DaemonRuntimeStatusFields {
   name: string;
   peerId: string;
   nodeRole?: string;
@@ -383,9 +462,24 @@ export interface DaemonStatusResponse {
    */
   rfc64SelectedPublicSync?: {
     defaultEnabled: boolean;
-    /** Requested scheduling scope; runtime classification still chooses the lane. */
+    /**
+     * Requested scheduling scope; runtime classification still chooses the
+     * lane. Without a node-operator token, only its catalog-backed graphs.
+     */
     requestedContextGraphs: string[];
+    /** Size of the whole requested scope. Absent on older daemons. */
+    requestedContextGraphCount?: number;
     catalogBackedContextGraphs: string[];
+  };
+  /**
+   * Subscriptions known only by their on-chain name hash (aggregate only;
+   * the admin subscription list names them). Absent on older daemons.
+   */
+  contextGraphIdentity?: {
+    nameHashOnly: number;
+    /** Of those, blocked by a conflicting on-chain binding on this node. */
+    bindingConflicts?: number;
+    message?: string;
   };
   chain?: {
     chainId: string | null;
@@ -395,14 +489,10 @@ export interface DaemonStatusResponse {
   } | null;
   // Triple-store backend fields (RFC 120). For local backends only
   // `storeBackend` is meaningful; external backends additionally surface
-  // `storeUrl` and a TTL-cached `storeQuads` count. `storeQuadsStatus`
-  // distinguishes an initial background refresh from an unreachable store.
-  // Older daemons omit the status; consumers should retain the legacy
-  // `null` = unreachable fallback in that case.
+  // `storeUrl`, the cached quad count described by StoreQuadsStatusFields and,
+  // when requested, StoreReachabilityFields (status-store-quads-wire.ts).
   storeBackend?: string;
   storeUrl?: string | null;
-  storeQuads?: number | null;
-  storeQuadsStatus?: 'pending' | 'ready' | 'unreachable';
   // Concurrency admission control (PR #1209 limiter, surfaced by #1230):
   // inFlight = requests currently holding a slot, max = effective cap
   // (0 = disabled), rejectedTotal = cumulative 503-shed count since boot.
@@ -412,6 +502,14 @@ export interface DaemonStatusResponse {
     max: number;
     rejectedTotal: number;
   };
+  // Event-loop delay over the last complete window (ms; null before the first
+  // sample). Null when the daemon runs no gauge; absent on older daemons.
+  eventLoopDelay?: {
+    p50Ms: number | null;
+    p99Ms: number | null;
+    maxMs: number | null;
+    windowMs: number;
+  } | null;
   // Auto-update status (surfaced by /api/status). Optional — daemons may omit.
   // `updateAvailable` is null until the first check completes;
   // `updateChannelTargetMissing` is true when a pinned auto-update channel has
@@ -572,13 +670,22 @@ interface ConfigFallbackContext {
 }
 
 export class ApiClient {
+  readonly checkpoints = createPublicCheckpointClient({ get: (path, opts) => this.get(path, opts), post: (path, body) => this.post(path, body) });
   private baseUrl: string;
   private token?: string;
   private readonly configFallback?: Readonly<ConfigFallbackContext>;
+  private readonly deadlines: DaemonRequestDeadlines;
   readonly controlPlaneWarning?: string;
 
   constructor(portOrBaseUrl: number | string, token?: string, opts?: {
     configFallback?: ConfigFallbackContext;
+    /** Deadline in ms for GET reads (default `DKG_API_READ_TIMEOUT_MS`, else 30 000). */
+    readTimeoutMs?: number;
+    /**
+     * Deadline in ms for every other request (default `DKG_API_LONG_TIMEOUT_MS`,
+     * else 240 000; never below `readTimeoutMs`).
+     */
+    longTimeoutMs?: number;
   }) {
     this.baseUrl = typeof portOrBaseUrl === 'number'
       ? `http://127.0.0.1:${portOrBaseUrl}`
@@ -586,6 +693,7 @@ export class ApiClient {
     this.token = token;
     this.configFallback = opts?.configFallback && Object.freeze({ ...opts.configFallback });
     this.controlPlaneWarning = this.configFallback?.controlPlaneWarning;
+    this.deadlines = resolveDaemonRequestDeadlines(opts);
   }
 
   static async connect(opts: ApiClientConnectOptions = {}): Promise<ApiClient> {
@@ -639,10 +747,16 @@ export class ApiClient {
     return new ApiClient(portOrBaseUrl, token, { configFallback });
   }
 
-  async status(): Promise<DaemonStatusResponse> {
+  /**
+   * Both options cost store work on the daemon ({@link StatusQueryOptions}):
+   * set them only when that is actually needed, never for polling.
+   */
+  async status(options: StatusQueryOptions = {}): Promise<DaemonStatusResponse> {
+    const query = serializeStatusQuery(options);
+    const path = query ? `/api/status?${query}` : '/api/status';
     let status: unknown;
     try {
-      status = await this.get<unknown>('/api/status', { auth: false });
+      status = await this.get<unknown>(path, { auth: false });
     } catch (err) {
       if (this.configFallback && isConnectionFailure(err)) {
         throw new Error(daemonNotRunningMessage(this.configFallback.selectedHome));
@@ -840,7 +954,14 @@ export class ApiClient {
     if (options?.alsoPublishVm !== undefined) {
       payload.alsoPublishVm = createAlsoPublishVmPayload(options.alsoPublishVm);
     }
-    return this.post('/api/knowledge-assets', payload);
+    // A create that also shares or publishes runs that work inside this request.
+    const sharesOrPublishes = payload.alsoShareSwm === true
+      || (payload.alsoPublishVm !== undefined && payload.alsoPublishVm !== false);
+    return this.post(
+      '/api/knowledge-assets',
+      payload,
+      sharesOrPublishes ? knowledgeAssetMutationDeadline(name, contextGraphId, options?.subGraphName) : {},
+    );
   }
 
   /** GET a KA's lifecycle state by name. */
@@ -901,7 +1022,7 @@ export class ApiClient {
     contextGraphId: string,
     name: string,
     layer: 'swm' | 'vm',
-    options?: { subGraphName?: string; onConflict?: 'reject' | 'replace' },
+    options?: AssertionPullFromOptions,
   ): Promise<Record<string, unknown>> {
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/pull-from`, { contextGraphId, layer, ...(options ?? {}) });
   }
@@ -916,7 +1037,11 @@ export class ApiClient {
     if (options?.skipSeal === true) {
       throw new Error('skipSeal is not supported; graph-scoped Knowledge Assets are always seal-before-share');
     }
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, { contextGraphId, ...(options ?? {}) });
+    return this.post(
+      `/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`,
+      { contextGraphId, ...(options ?? {}) },
+      knowledgeAssetMutationDeadline(name, contextGraphId, options?.subGraphName),
+    );
   }
 
   async knowledgeAssetShareAsync(
@@ -925,22 +1050,20 @@ export class ApiClient {
     options?: KnowledgeAssetShareAsyncOptions,
   ): Promise<{ jobId: string; state: 'queued' }> {
     assertSupportedAsyncShareOptions(options);
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share-async`, { contextGraphId, ...(options ?? {}) });
+    return this.post(
+      `/api/knowledge-assets/${encodeURIComponent(name)}/swm/share-async`,
+      { contextGraphId, ...(options ?? {}) },
+      asyncJobAdmissionDeadline('share', name, contextGraphId),
+    );
   }
 
-  async knowledgeAssetShareJobs(options?: {
-    contextGraphId?: string;
-    state?: KnowledgeAssetShareJobState | KnowledgeAssetShareJobState[];
-    limit?: number;
-  }): Promise<{ jobs: KnowledgeAssetShareJobView[] }> {
-    const params = new URLSearchParams();
-    if (options?.contextGraphId) params.set('contextGraphId', options.contextGraphId);
-    if (options?.state) {
-      params.set('state', Array.isArray(options.state) ? options.state.join(',') : options.state);
-    }
-    if (options?.limit !== undefined) params.set('limit', String(options.limit));
-    const qs = params.toString();
-    return this.get(`/api/knowledge-assets/swm/share-jobs${qs ? `?${qs}` : ''}`);
+  async knowledgeAssetShareJobs(options?: ShareJobsListOptions): Promise<ShareJobsListResult> {
+    return this.get(shareJobsPath(options));
+  }
+
+  /** Read retained execution evidence; never infer retry permission from an unproven result. */
+  async knowledgeAssetReconcileShare(input: ShareReconciliationInput): Promise<ShareReconciliationResult> {
+    return this.get(shareReconciliationPath(input));
   }
 
   async knowledgeAssetShareJob(jobId: string): Promise<KnowledgeAssetShareJobView> {
@@ -983,7 +1106,7 @@ export class ApiClient {
       // letting normal author resolution publish a different author.
       ...(selectedAuthorAgentAddress !== undefined ? { selectedAuthorAgentAddress } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
-    });
+    }, knowledgeAssetMutationDeadline(name, contextGraphId, subGraphName));
   }
 
   async knowledgeAssetPublishAsync(
@@ -1002,7 +1125,7 @@ export class ApiClient {
       // letting normal author resolution publish a different author.
       ...(selectedAuthorAgentAddress !== undefined ? { selectedAuthorAgentAddress } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
-    });
+    }, asyncJobAdmissionDeadline('publish', name, contextGraphId));
   }
 
   async createAssertion(
@@ -1068,6 +1191,10 @@ export class ApiClient {
     chainId: string;
     kav10Address: string;
     eip712Digest: string;
+    /** The KA the draft belongs to (absent from a daemon that predates GH#2958). */
+    kaUal?: string;
+    /** The number the draft will be published as: one above the KA's confirmed version (absent from a daemon that predates GH#2958). */
+    assertionVersion?: string;
   }> {
     return this.post(
       `/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`,
@@ -1115,30 +1242,9 @@ export class ApiClient {
       pricingPolicy?: PublicationPricingPolicy;
       publisherNodeIdentityIdOverride?: bigint;
     },
-  ): Promise<{
-    kaId: string;
-    status: 'tentative' | 'confirmed';
-    assertionUri: string;
-    authorAddress: string;
-    merkleRoot: string;
-    kas: Array<{ tokenId: string; rootEntity: string }>;
-    txHash?: string;
-    blockNumber?: number;
-    storageAckPeerIds?: string[];
-    contextGraphError?: string;
-  }> {
-    return this.knowledgeAssetPublish(contextGraphId, assertionName, options) as Promise<{
-      kaId: string;
-      status: 'tentative' | 'confirmed';
-      assertionUri: string;
-      authorAddress: string;
-      merkleRoot: string;
-      kas: Array<{ tokenId: string; rootEntity: string }>;
-      txHash?: string;
-      blockNumber?: number;
-      storageAckPeerIds?: string[];
-      contextGraphError?: string;
-    }>;
+  ): Promise<FinalizedAssertionPublishResponse> {
+    return this.knowledgeAssetPublish(contextGraphId, assertionName, options) as Promise<FinalizedAssertionPublishResponse>;
+
   }
 
   /**
@@ -1162,16 +1268,7 @@ export class ApiClient {
       pricingPolicy?: PublicationPricingPolicy;
       publisherNodeIdentityIdOverride?: bigint;
     },
-  ): Promise<{
-    assertionUri: string;
-    kaId: string;
-    status: 'tentative' | 'confirmed';
-    authorAddress: string;
-    merkleRoot: string;
-    kas: Array<{ tokenId: string; rootEntity: string }>;
-    txHash?: string;
-    blockNumber?: number;
-  }> {
+  ): Promise<FinalizedAssertionPublishResponse> {
     const created = await this.createAssertion(contextGraphId, name, {
       ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
       quads,
@@ -1206,6 +1303,7 @@ export class ApiClient {
           : {}),
       },
     );
+    if (published.catalogObligationPending) return published;
     return {
       assertionUri: created.assertionUri,
       kaId: published.kaId,
@@ -1337,6 +1435,11 @@ export class ApiClient {
     return this.post(`/api/pca/${encodeURIComponent(accountId)}/primary-node`, { node });
   }
 
+  async marketplace<T = unknown>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body: unknown = {}): Promise<T> {
+    const route = `/api/marketplace${path}`;
+    return { GET: () => this.get<T>(route), DELETE: () => this.del<T>(route), PUT: () => this.put<T>(route, body), POST: () => this.post<T>(route, body) }[method]();
+  }
+
   // ─── Node operational wallets (Identity operational keys) ────────────
 
   /** List the node's local operational wallets (addresses only) + on-chain status. */
@@ -1392,9 +1495,8 @@ export class ApiClient {
     return this.get(`/api/agent/${encodeURIComponent(address)}/encryption-keys`);
   }
 
-  async publisherJobs(status?: string): Promise<{ jobs: any[] }> {
-    const qs = status ? `?status=${encodeURIComponent(status)}` : '';
-    return this.get(`/api/publisher/jobs${qs}`);
+  async publisherJobs(status?: string, contextGraphId?: string, page?: PublisherJobsPageOptions): Promise<PublisherJobsResult> {
+    return this.get(publisherJobsPath(status, contextGraphId, page));
   }
 
   // GH#2270 — `retryState` is the daemon's DERIVED answer to "will this node retry this
@@ -1480,7 +1582,7 @@ export class ApiClient {
 
   // #1837 — atomic by-exact-jobId TERMINAL clear (distinct from publisherCancel and the
   // status-scoped publisherClear). cleared / already_absent resolve normally (200);
-  // rejected (nonterminal/unknown → 409, malformed → 400) throws via the post() helper
+  // rejected (nonterminal/pending_transaction/unknown → 409, malformed → 400) throws via the post() helper
   // carrying { outcome:'rejected', reason } in the response body.
   //
   // GH#2270 follow-up (🔴 3824098486) — `allowPendingTransaction` opts in to clearing a job whose
@@ -1566,17 +1668,20 @@ export class ApiClient {
     body: unknown;
     nextPageUrl: string | null;
   }> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      headers: this.authHeaders(),
+    return this.withDeadline('GET', path, {}, async (signal) => {
+      const res = await fetch(`${this.baseUrl}${path}`, {
+        headers: this.authHeaders(),
+        signal,
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: res.statusText }));
+        throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(body, res.statusText), body);
+      }
+      const body = (await res.json()) as unknown;
+      const linkHeader = res.headers.get('Link') ?? res.headers.get('link');
+      const nextPageUrl = parseNextLink(linkHeader);
+      return { body, nextPageUrl };
     });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({ error: res.statusText }));
-      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(body, res.statusText), body);
-    }
-    const body = (await res.json()) as unknown;
-    const linkHeader = res.headers.get('Link') ?? res.headers.get('link');
-    const nextPageUrl = parseNextLink(linkHeader);
-    return { body, nextPageUrl };
   }
 
   /**
@@ -1590,33 +1695,16 @@ export class ApiClient {
   async query(
     sparql: string,
     contextGraphId?: string,
-    opts?: {
-      graphSuffix?: string;
-      includeSharedMemory?: boolean;
-      includeContextGraphPartitions?: boolean;
-      view?: 'working-memory' | 'shared-working-memory' | 'verifiable-memory';
-      agentAddress?: string;
-      assertionName?: string;
-      subGraphName?: string;
-      verifiedGraph?: string;
-      minTrust?:
-        | 'SelfAttested'
-        | 'Endorsed'
-        | 'PartiallyVerified'
-        | 'ConsensusVerified'
-        | 0
-        | 1
-        | 2
-        | 3;
-    },
-  ): Promise<{ result: QueryResult }> {
+    opts?: QueryOptions,
+  ): Promise<{ result: QueryResult; semantics?: ViewQuerySemantics }> {
     return this.post('/api/query', {
       sparql,
       contextGraphId,
       graphSuffix: opts?.graphSuffix,
       includeSharedMemory: opts?.includeSharedMemory,
       includeContextGraphPartitions: opts?.includeContextGraphPartitions,
-      view: opts?.view,
+      includeSharedMemoryMeta: opts?.includeSharedMemoryMeta,
+      view: opts?.view, semantics: opts?.semantics,
       agentAddress: opts?.agentAddress,
       assertionName: opts?.assertionName,
       subGraphName: opts?.subGraphName,
@@ -1720,6 +1808,10 @@ export class ApiClient {
         includeWorkspace: boolean;
         jobId: string;
       };
+    /** Present when the requested id is (or was) known only by its on-chain name hash. */
+    identity?: CatchupContextGraphIdentity;
+    /** Present when the request named an on-chain id (`32`, `#32`): what it resolved to. */
+    onChainReference?: ContextGraphOnChainReferenceNote;
   }> {
     return this.post('/api/context-graph/subscribe', {
       contextGraphId,
@@ -1998,26 +2090,20 @@ export class ApiClient {
   }
 
   /**
-   * Forward a previously-signed join delegation to the curator over
-   * P2P. The daemon dials `curatorPeerId` directly (DHT-resolved if
-   * not currently connected). Returns the delivery count so callers can detect
-   * "no curator reachable" without inspecting log output.
+   * Forward a previously-signed join delegation to the curator over P2P (the daemon dials
+   * `curatorPeerId` directly). Returns the delivery count so callers can detect "no curator
+   * reachable"; `reRequest` sends a request even while an approval's member list is pending.
    */
   async requestJoin(
     contextGraphId: string,
     delegation: unknown,
     curatorPeerId: string,
     agentName?: string,
-  ): Promise<{
-    ok: boolean;
-    status: string;
-    delivered: number | 'local';
-    alreadyMember?: boolean;
-    autoApproved?: boolean;
-  }> {
+    options: { reRequest?: boolean } = {},
+  ): Promise<ContextGraphJoinResult> {
     return this.post(
       `/api/context-graph/${encodeURIComponent(contextGraphId)}/request-join`,
-      { delegation, curatorPeerId, ...(agentName ? { agentName } : {}) },
+      { delegation, curatorPeerId, ...(agentName ? { agentName } : {}), ...(options.reRequest ? { reRequest: true } : {}) },
     );
   }
 
@@ -2083,6 +2169,11 @@ export class ApiClient {
       curator?: string;
       accessPolicy?: string;
       callerInvolved?: boolean;
+      onChainId?: string;
+      /** `false` when the node knows the graph only by its on-chain name hash. */
+      nameKnown?: boolean;
+      /** Chain-public ContextGraphStorage facts (additive; absent on older daemons). */
+      onChain?: ContextGraphListOnChainView;
     }>;
   }> {
     return this.get('/api/context-graph/list');
@@ -2106,7 +2197,13 @@ export class ApiClient {
     status?: 'verified' | 'partial' | 'no_quorum';
     trustLevel?: number;
   }> {
-    return this.post('/api/verify', request);
+    const collectionMs = request.timeoutMs ?? VERIFY_DEFAULT_COLLECTION_TIMEOUT_MS;
+    return this.post('/api/verify', request, {
+      timeoutMs: Math.max(
+        this.deadlines.longTimeoutMs,
+        collectionMs + REQUEST_CARRIED_TIMEOUT_MARGIN_MS,
+      ),
+    });
   }
 
   async endorse(request: {
@@ -2154,7 +2251,11 @@ export class ApiClient {
     if (request.ontologyRef) form.append('ontologyRef', request.ontologyRef);
     if (request.subGraphName) form.append('subGraphName', request.subGraphName);
 
-    return this.postForm(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/import-file`, form);
+    return this.postForm(
+      `/api/knowledge-assets/${encodeURIComponent(name)}/wm/import-file`,
+      form,
+      knowledgeAssetMutationDeadline(name, request.contextGraphId, request.subGraphName),
+    );
   }
 
   async assertionExtractionStatus(name: string, contextGraphId: string, subGraphName?: string): Promise<{
@@ -2186,7 +2287,11 @@ export class ApiClient {
     sharedMemoryGraph?: string;
     rootEntities?: string[];
   }> {
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, request);
+    return this.post(
+      `/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`,
+      request,
+      knowledgeAssetMutationDeadline(name, request.contextGraphId, request.subGraphName),
+    );
   }
 
   async queryAssertion(name: string, request: {
@@ -2299,6 +2404,26 @@ export class ApiClient {
     return this.get(`/api/ccl/results?${params.toString()}`);
   }
 
+  /**
+   * Node-admin token only. The node records a CPU profile of its main thread
+   * for `seconds` (its default when absent; clamped to 1-60 s), writes it on
+   * its own host and answers with the file's path.
+   */
+  async recordCpuProfile(seconds?: number): Promise<CpuProfileResult> {
+    return this.post(CPU_PROFILE_PATH, seconds === undefined ? {} : { seconds },
+      { timeoutMs: cpuProfileRequestTimeoutMs(seconds) });
+  }
+
+  /**
+   * Node-admin token only: the node's read graphs (`dkg store read-graphs`).
+   * `status` lists them; `check`, `rebuild` and `drop` act on them.
+   */
+  async readGraphs<T>(action: ReadGraphsAction, request: ReadGraphsRequest = {}): Promise<T> {
+    if (action === 'status') return this.get<T>(readGraphsStatusPath(request));
+    const timeoutMs = READ_GRAPHS_REQUEST_TIMEOUT_MS;
+    return this.post<T>(`${READ_GRAPHS_PATH}/${action}`, request, { timeoutMs, dispatcher: longRequestDispatcher(timeoutMs) });
+  }
+
   async shutdown(): Promise<void> {
     try {
       await this.post('/api/shutdown', {});
@@ -2311,70 +2436,72 @@ export class ApiClient {
   }
 
   private authHeaders(): Record<string, string> {
-    if (!this.token) return {};
-    return { Authorization: `Bearer ${this.token}` };
+    return this.token ? { Authorization: `Bearer ${this.token}` } : {};
   }
 
-  private async get<T>(path: string, opts: { auth?: boolean } = {}): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      headers: opts.auth === false ? {} : this.authHeaders(),
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({ error: res.statusText }));
-      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(body, res.statusText), body);
-    }
-    return res.json() as Promise<T>;
-  }
+  private async get<T>(path: string, opts: { auth?: boolean } = {}): Promise<T> { return this.send<T>(path, { headers: opts.auth === false ? {} : this.authHeaders() }); }
 
-  private async post<T>(path: string, body: unknown): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
+  readonly entities = createEntityClient((path, body, deadline) => this.post(path, body, deadline));
+  readonly viewSemantics = createViewSemanticsClient(<T>(path: string) => this.get<T>(path));
+
+  private async post<T>(path: string, body: unknown, deadline: RequestDeadline = {}): Promise<T> {
+    return this.send<T>(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
       body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({ error: res.statusText }));
-      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
-    }
-    return res.json() as Promise<T>;
+    }, deadline);
   }
 
   private async put<T>(path: string, body: unknown): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
+    return this.send<T>(path, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
       body: JSON.stringify(body),
     });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({ error: res.statusText }));
-      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
-    }
-    return res.json() as Promise<T>;
   }
 
   private async del<T>(path: string): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      method: 'DELETE',
-      headers: this.authHeaders(),
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({ error: res.statusText }));
-      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
-    }
-    return res.json() as Promise<T>;
+    return this.send<T>(path, { method: 'DELETE', headers: this.authHeaders() });
   }
 
-  private async postForm<T>(path: string, body: FormData): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      method: 'POST',
-      headers: this.authHeaders(),
-      body,
+  private async postForm<T>(path: string, body: FormData, deadline: RequestDeadline = {}): Promise<T> {
+    return this.send<T>(path, { method: 'POST', headers: this.authHeaders(), body }, deadline);
+  }
+
+  private async send<T>(path: string, init: RequestInit, deadline: RequestDeadline = {}): Promise<T> {
+    return this.withDeadline(init.method ?? 'GET', path, deadline, async (signal) => {
+      const res = await fetch(`${this.baseUrl}${path}`, { ...init, signal, ...(deadline.dispatcher ? { dispatcher: deadline.dispatcher } : {}) } as RequestInit);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: res.statusText }));
+        throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
+      }
+      return (await res.json()) as T;
     });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({ error: res.statusText }));
-      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
+  }
+
+  /**
+   * Run one daemon round-trip under its deadline: the shared daemon policy's
+   * deadline for the method and path, unless the route overrides it. The
+   * deadline also covers reading the body. A long Knowledge Asset mutation
+   * that times out throws {@link DaemonOutcomeUnknownError}; other timeouts
+   * keep fetch's TimeoutError.
+   */
+  private async withDeadline<T>(
+    method: string,
+    path: string,
+    deadline: RequestDeadline,
+    run: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    const timeoutMs = deadline.timeoutMs ?? this.deadlines.timeoutMsFor({ method, path });
+    const signal = AbortSignal.timeout(timeoutMs);
+    try {
+      return await run(signal);
+    } catch (err) {
+      if (deadline.outcomeUnknownHint !== undefined && isUnansweredRequest(err, signal)) {
+        throw new DaemonOutcomeUnknownError(method, path, timeoutMs, deadline.outcomeUnknownHint);
+      }
+      throw err;
     }
-    return res.json() as Promise<T>;
   }
 
   /** Create an Error with an `httpStatus` property so callers can distinguish

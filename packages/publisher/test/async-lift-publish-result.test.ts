@@ -158,6 +158,61 @@ describe('async lift publish result mapping', () => {
     expect(failure.resolution).toBe('reset_to_accepted');
   });
 
+  it('keeps broadcast failure precedence explicit when markers overlap', () => {
+    const authorFailure = mapPublishExceptionToLiftJobFailure({
+      error: Object.assign(
+        new Error('cannot re-sign UpdateAuthorAttestation: no operational wallet has enough funds'),
+        { code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' },
+      ),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:precedence-author',
+    });
+    expect(authorFailure.code).toBe('authority_forbidden');
+
+    const walletFailure = mapPublishExceptionToLiftJobFailure({
+      error: Object.assign(
+        new Error('No operational wallet has enough funds; QuorumUnmetError(collected=0/3, dialled=0)'),
+        { code: 'NO_FUNDED_PUBLISHER_WALLET' },
+      ),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:precedence-wallet',
+    });
+    expect(walletFailure.code).toBe('insufficient_funds');
+
+    const quorumFailure = mapPublishExceptionToLiftJobFailure({
+      error: new QuorumUnmetError({
+        collected: 0,
+        required: 3,
+        dialled: 0,
+        legacyMessage: 'insufficient funds while collecting ACKs',
+      }),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:precedence-quorum',
+    });
+    expect(quorumFailure.code).toBe('quorum_unmet');
+  });
+
+  it.each([
+    ['PUBLISH_AUTHOR_NOT_CUSTODIAL', 'authority_forbidden', false],
+    ['NO_FUNDED_PUBLISHER_WALLET', 'insufficient_funds', true],
+  ] as const)('records the %s failure without evaluating a later rule that would throw', (code, expected, retryable) => {
+    // The quorum rule uses `instanceof`, which runs this trap. The rules stop
+    // at the first match, so an error the author or wallet rule already owns
+    // must still be recorded.
+    const hostile = new Proxy({ code }, {
+      getPrototypeOf() { throw new Error('boom'); },
+    });
+
+    const failure = mapPublishExceptionToLiftJobFailure({
+      error: hostile,
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:hostile-prototype',
+    });
+
+    expect(failure.code).toBe(expected);
+    expect(failure.retryable).toBe(retryable);
+  });
+
   it('drops submit-timeout metadata from a quorum failure with legacy timeout text', () => {
     const failure = mapPublishExceptionToLiftJobFailure({
       error: new QuorumUnmetError({
@@ -180,11 +235,12 @@ describe('async lift publish result mapping', () => {
     expect(failure.timeout).toBeUndefined();
   });
 
-  it('classifies a NO_FUNDED_PUBLISHER_WALLET error as a TERMINAL insufficient_funds failure (not retryable)', () => {
+  it('classifies a NO_FUNDED_PUBLISHER_WALLET error as insufficient_funds (bounded retry, never rpc_unavailable)', () => {
     // The funded-wallet-selection error message intentionally does NOT contain
     // the literal "insufficient funds" substring; without code-based
-    // recognition it would fall through to the retryable rpc_unavailable
-    // default and retry an unfundable job forever.
+    // recognition it would fall through to the rpc_unavailable default and
+    // re-run an unfundable job as a transport failure. As insufficient_funds it
+    // is retried on the bounded lane, by a wallet that can pay (#3591).
     const err = Object.assign(
       new Error('No operational wallet has enough funds to publish to Verifiable Memory — fund a wallet and retry.'),
       { code: 'NO_FUNDED_PUBLISHER_WALLET' },
@@ -196,7 +252,31 @@ describe('async lift publish result mapping', () => {
     });
 
     expect(failure.code).toBe('insufficient_funds');
+    expect(failure.resolution).toBe('reset_to_accepted');
+  });
+
+  it('classifies a revert that mentions funds as tx_reverted, never the retried insufficient_funds (#3591)', () => {
+    const failure = mapPublishExceptionToLiftJobFailure({
+      error: new Error('execution reverted: insufficient funds'),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:funds-revert',
+    });
+
+    expect(failure.code).toBe('tx_reverted');
     expect(failure.retryable).toBe(false);
+  });
+
+  it('classifies inconclusive PCA funding as retryable RPC unavailability', () => {
+    const err = Object.assign(new Error('PCA funding verification is inconclusive; retry when chain reads recover.'), {
+      code: 'PCA_FUNDING_UNKNOWN',
+    });
+    const failure = mapPublishExceptionToLiftJobFailure({
+      error: err,
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:pca-funding-unknown',
+    });
+    expect(failure.code).toBe('rpc_unavailable');
+    expect(failure.retryable).toBe(true);
   });
 
   it('classifies PUBLISH_AUTHOR_NOT_CUSTODIAL as a TERMINAL authority_forbidden failure (not retryable)', () => {
@@ -243,9 +323,9 @@ describe('async lift publish result mapping', () => {
     expect(failure.phase).toBe('validation');
   });
 
-  it('classifies a code-stripped funds error (message marker only) as terminal insufficient_funds from broadcast', () => {
+  it('classifies a code-stripped funds error (message marker only) as insufficient_funds from broadcast', () => {
     // A re-wrap could drop .code but preserve the message — the marker fallback
-    // must still keep it terminal (mirrors the daemon + node-ui robustness).
+    // must still recognize it (mirrors the daemon + node-ui robustness).
     const failure = mapPublishExceptionToLiftJobFailure({
       error: new Error('No operational wallet has enough funds to publish to Verifiable Memory — fund a wallet and retry.'),
       failedFromState: 'broadcast',
@@ -253,7 +333,7 @@ describe('async lift publish result mapping', () => {
     });
 
     expect(failure.code).toBe('insufficient_funds');
-    expect(failure.retryable).toBe(false);
+    expect(failure.phase).toBe('broadcast');
   });
 
   // GH#1786 — the ONE predicate behind three decisions: the failed-from STATE (no send
@@ -292,6 +372,32 @@ describe('async lift publish result mapping', () => {
       expect(isPermanentAuthorCapabilityFailure(
         { message: 'cannot re-sign UpdateAuthorAttestation for author 0xabc' },
       )).toBe(true);
+    });
+
+    it('decides the broadcast failure code for every error shape', () => {
+      // The broadcast mapper asks this predicate instead of repeating its checks. Whatever
+      // it accepts must fail the job terminally from 'broadcast'; whatever it rejects must
+      // not be reported as an authority failure.
+      const hostile = { get code(): never { throw new Error('boom'); }, message: 'x' };
+      const shapes: unknown[] = [
+        Object.assign(new Error('wrapped and reworded'), { code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' }),
+        new Error('publishFromFinalizedAssertion (update path): cannot re-sign UpdateAuthorAttestation for author 0xabc'),
+        { message: 'cannot re-sign UpdateAuthorAttestation for author 0xabc' },
+        new Error('connection reset by peer'),
+        new Error('No operational wallet has enough funds to publish to Verifiable Memory'),
+        hostile,
+        Object.create(null),
+        undefined,
+        null,
+      ];
+      const authorityFailures = shapes.map((error) => mapPublishExceptionToLiftJobFailure({
+        error,
+        failedFromState: 'broadcast',
+        errorPayloadRef: 'urn:error:author-predicate-agreement',
+      }).code === 'authority_forbidden');
+
+      expect(authorityFailures).toEqual(shapes.map((error) => isPermanentAuthorCapabilityFailure(error)));
+      expect(authorityFailures).toEqual([true, true, true, false, false, false, false, false, false]);
     });
   });
 

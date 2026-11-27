@@ -31,8 +31,9 @@ import {
   type EntitySource,
 } from './sparql.js';
 import { EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION } from './tools/context-graph-description.js';
-import { filterContextGraphsForScope } from './tools/context-graph-scope.js';
+import { listContextGraphsForScope } from './tools/context-graph-scope.js';
 import { resolveWorkingMemoryAgentAddress } from './tools/working-memory-identity.js';
+import { contextGraphDisplayName } from './project-row.js';
 
 type ToolResult = {
   content: Array<{ type: 'text'; text: string }>;
@@ -80,7 +81,7 @@ export function registerReadTools(
       // terminology); the follow-up sentence is the existing
       // mcp-dkg per-row payload notes.
       description:
-        "List context graphs (called 'projects' in the DKG node UI). " +
+        "List context graphs (shown as 'Context Graphs' in the DKG node UI). " +
         "Defaults to this caller's created/joined context graphs so agents " +
         'do not have to sift through noisy discovered public graphs. Pass ' +
         'scope: "all" to inspect every known graph.',
@@ -93,7 +94,7 @@ export function registerReadTools(
     },
     async ({ scope = 'mine' }): Promise<ToolResult> => {
       try {
-        const rows = filterContextGraphsForScope(await client.listProjects(), scope);
+        const rows = await listContextGraphsForScope(client, scope);
         if (!rows.length) return ok('No context graphs found on this DKG node.');
         const pinned = config.defaultProject;
         const table = rows
@@ -101,7 +102,8 @@ export function registerReadTools(
             const star = pinned && r.id === pinned ? ' ★' : '';
             const role = r.role ? ` · ${r.role}` : '';
             const layer = r.layer ? ` · ${r.layer}` : '';
-            return `- **${r.id}**${star} — ${r.name ?? '(unnamed)'}${role}${layer}${
+            const name = contextGraphDisplayName(r);
+            return `- **${r.id}**${star} — ${name ?? '(name unresolved)'}${role}${layer}${
               r.description ? `\n    ${r.description}` : ''
             }`;
           })
@@ -200,14 +202,18 @@ export function registerReadTools(
           .enum(['working-memory', 'shared-working-memory', 'verifiable-memory'])
           .optional()
           .describe('Memory tier: working-memory (default, private), shared-working-memory (team), verifiable-memory (on-chain).'),
+        semantics: z.enum(['merged', 'per-asset']).optional()
+          .describe('With a view: "merged" matches patterns outside GRAPH across the view\'s assets; "per-asset" (the default) inside one asset at a time.'),
         includeSharedMemory: z
           .boolean()
           .optional()
           .describe('When set with view: "working-memory", include SWM in the result set (the legacy `layer: "union"` semantics).'),
+        includeContextGraphPartitions: z.boolean().optional().describe('Without view, expand scoped GRAPH variables to registered content partitions.'),
+        includeSharedMemoryMeta: z.boolean().optional().describe('With includeContextGraphPartitions and no view, also read registered subgraph SWM attribution metadata; child context graphs remain excluded.'),
         limit: z.number().optional().describe('Row cap when rendering to markdown; does NOT modify the query'),
       },
     },
-    async ({ sparql, projectId, subGraphName, view, includeSharedMemory, limit }): Promise<ToolResult> => {
+    async ({ sparql, projectId, subGraphName, view, semantics, includeSharedMemory, includeContextGraphPartitions, includeSharedMemoryMeta, limit }): Promise<ToolResult> => {
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
       const fullSparql = sparql.startsWith('PREFIX') ? sparql : `${PREFIXES}\n${sparql}`;
@@ -220,7 +226,10 @@ export function registerReadTools(
           contextGraphId: pid,
           subGraphName,
           view,
+          semantics,
           includeSharedMemory,
+          includeContextGraphPartitions,
+          includeSharedMemoryMeta,
           agentAddress,
         });
         if (result.type === 'boolean') {

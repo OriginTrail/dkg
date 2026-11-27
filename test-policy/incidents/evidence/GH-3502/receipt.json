@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "GH-3502",
+  "method": "guard-mutation",
+  "sourceCommit": "c4ecf9459434b02f8e15cc5da17aec3b9a09f868",
+  "production": {
+    "file": "packages/agent/src/dkg-agent-swm-change-notice.ts",
+    "sha256": "3b81478e12e512ce784d20ebbe56cfc1c6ea06562e9bac500c39bee72abc8d5b"
+  },
+  "test": {
+    "file": "packages/agent/test/rfc64-catalog-head-replay-peers.test.ts",
+    "sha256": "ca2ac2f3cb6def3511bbfd7b88df02d0d1da12d435542d2421e974a2d8e42a0b",
+    "fullName": "an agent answering a peer's replay request it cannot serve now GH-3502: a change before the first replay after an empty owner restart triggers the real notice receiver"
+  },
+  "mutation": {
+    "old": "onNewFollower: (contextGraphId, peerId) => this.swmChangeNotifierV1().afterNewFollower(contextGraphId, peerId),",
+    "new": "onNewFollower: () => {},"
+  },
+  "red": {
+    "file": "test-policy/incidents/evidence/GH-3502/red.json",
+    "sha256": "7e715410bd12d73077ce67ea8aa8c6bcc80d7e7ea02fa6fc1f3f6ca608f62306"
+  },
+  "green": {
+    "file": "test-policy/incidents/evidence/GH-3502/green.json",
+    "sha256": "91fcbe5a9ca1bd8fdbd9c9e9bed65f2cb50d3c5b7e120521ae5f1edf9615cad9"
+  }
+}

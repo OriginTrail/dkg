@@ -453,6 +453,7 @@ describe('OpenClaw channel routing helpers', () => {
         inboundUrl: 'http://127.0.0.1:9201/inbound',
       },
       'secret-token',
+      'http://127.0.0.1:9201/inbound',
       { 'Content-Type': 'application/json' },
     );
     expect(bridgeHeaders).toEqual({
@@ -466,9 +467,33 @@ describe('OpenClaw channel routing helpers', () => {
         inboundUrl: 'http://gateway.local/api/dkg-channel/inbound',
       },
       'secret-token',
+      'http://gateway.local/api/dkg-channel/inbound',
       { 'Content-Type': 'application/json' },
     );
     expect(gatewayHeaders).toEqual({ 'Content-Type': 'application/json' });
+  });
+
+  it.each([
+    'http://127.0.0.1:9201/inbound',
+    'http://127.8.0.1:9201/inbound',
+    'http://localhost:9201/inbound',
+    'http://[::1]:9201/inbound',
+  ])('sends the bridge auth header to a loopback bridge at %s', (url) => {
+    expect(buildOpenClawChannelHeaders({ name: 'bridge', inboundUrl: url }, 'secret-token', url))
+      .toEqual({ 'x-dkg-bridge-token': 'secret-token' });
+  });
+
+  it.each([
+    'http://bridge.example:9201/inbound',
+    'https://10.0.0.5:9201/inbound',
+    'http://127.0.0.1.attacker.example/inbound',
+    'http://localhost.attacker.example/inbound',
+    'file:///tmp/inbound',
+    'not a url',
+    undefined,
+  ])('keeps the bridge auth header from a bridge request to %s', (url) => {
+    expect(buildOpenClawChannelHeaders({ name: 'bridge', inboundUrl: 'http://127.0.0.1:9201/inbound' }, 'secret-token', url))
+      .toEqual({});
   });
 
 });

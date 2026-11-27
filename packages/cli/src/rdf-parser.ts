@@ -1,10 +1,19 @@
+import { randomUUID } from 'node:crypto';
 import { Parser, type Quad as N3Quad } from 'n3';
+import type { JsonLdDocument, Options as JsonLdOptions } from 'jsonld';
+import { formatCanonicalRdfTerm } from '@origintrail-official/dkg-rdf-utils';
 
 export interface SimpleQuad {
   subject: string;
   predicate: string;
   object: string;
   graph: string;
+}
+
+/** Neutral syntax provenance; consumers own policies for the resulting dataset. */
+export interface ParsedRdf {
+  sourceKind: 'jsonld' | 'legacy-quads' | 'rdf';
+  quads: SimpleQuad[];
 }
 
 export type RdfFormat = 'nquads' | 'ntriples' | 'turtle' | 'trig' | 'json' | 'jsonld';
@@ -39,68 +48,103 @@ export function supportedExtensions(): string[] {
  * For formats without named graph support (N-Triples, Turtle),
  * the defaultGraph is used.
  */
-export async function parseRdf(
+export async function parseRdfInput(
   content: string,
   format: RdfFormat,
   defaultGraph: string,
-): Promise<SimpleQuad[]> {
-  if (format === 'json') {
-    const parsed = JSON.parse(content);
-    const arr = Array.isArray(parsed) ? parsed : parsed.quads;
-    return arr.map((q: any) => ({
-      subject: q.subject,
-      predicate: q.predicate,
-      object: q.object,
-      graph: q.graph || defaultGraph,
-    }));
-  }
-
-  if (format === 'jsonld') {
-    // JSON-LD → N-Quads conversion would require the jsonld library.
-    // For now, treat as our JSON quad format if it has subject/predicate/object,
-    // otherwise report unsupported.
-    const parsed = JSON.parse(content);
-    if (Array.isArray(parsed) && parsed[0]?.subject) {
-      return parsed.map((q: any) => ({
-        subject: q.subject,
-        predicate: q.predicate,
-        object: q.object,
-        graph: q.graph || defaultGraph,
-      }));
+  baseIRI?: string,
+): Promise<ParsedRdf> {
+  if (format === 'json' || format === 'jsonld') {
+    const parsed: unknown = JSON.parse(content);
+    const legacy = decodeLegacyQuads(
+      format === 'json' && isRecord(parsed) ? parsed.quads : parsed,
+      defaultGraph,
+    );
+    if (legacy) return { sourceKind: 'legacy-quads', quads: legacy };
+    if (format === 'json') throw new Error('JSON input must contain an array of subject/predicate/object quads');
+    if (parsed === null || typeof parsed !== 'object') {
+      throw new Error('JSON-LD input must be an object or array');
     }
-    throw new Error('JSON-LD with @context requires the jsonld library. Use .nq, .nt, .ttl, or .trig instead.');
+    const { default: jsonld } = await import('jsonld');
+    const remoteContextError = new Error('Remote JSON-LD contexts are disabled; embed an inline @context before ingesting the file');
+    let remoteLoadAttempted = false;
+    // jsonld.js 8 supports safe mode; the older upstream declaration omits it.
+    const options: JsonLdOptions.ToRdf & { safe: true } = {
+      format: 'application/n-quads',
+      base: baseIRI,
+      safe: true,
+      documentLoader: async () => {
+        remoteLoadAttempted = true;
+        throw remoteContextError;
+      },
+    };
+    let nquads: object | string;
+    try {
+      // jsonld.js validates the JSON-LD grammar and rejects lossy expansion.
+      nquads = await jsonld.toRDF(parsed as JsonLdDocument, options);
+    } catch (error) {
+      // The loader owns this policy error, regardless of how jsonld.js wraps it.
+      if (remoteLoadAttempted) throw remoteContextError;
+      throw error;
+    }
+    if (typeof nquads !== 'string') throw new Error('JSON-LD conversion did not return N-Quads');
+    // Blank-node labels are document-local. Separate CLI processes otherwise
+    // restart the N3/jsonld counters and conflate anonymous nodes in one KA.
+    return {
+      sourceKind: 'jsonld',
+      quads: await parseN3Quads(nquads, 'nquads', defaultGraph, `dkg${randomUUID()}_`),
+    };
   }
 
+  return { sourceKind: 'rdf', quads: await parseN3Quads(content, format, defaultGraph) };
+}
+
+function parseN3Quads(
+  content: string,
+  format: Exclude<RdfFormat, 'json' | 'jsonld'>,
+  defaultGraph: string,
+  blankNodePrefix?: string,
+): Promise<SimpleQuad[]> {
   // N3 parser handles N-Triples, N-Quads, Turtle, TriG
   const n3Format = N3_FORMAT_MAP[format];
   if (!n3Format) throw new Error(`Unsupported format: ${format}`);
 
   return new Promise((resolve, reject) => {
     const quads: SimpleQuad[] = [];
-    const parser = new Parser({ format: n3Format });
+    const parser = new Parser({ format: n3Format, blankNodePrefix });
 
     parser.parse(content, (error: Error | null, quad: N3Quad | null) => {
       if (error) { reject(error); return; }
       if (!quad) { resolve(quads); return; }
 
       quads.push({
-        subject: termToString(quad.subject),
-        predicate: termToString(quad.predicate),
-        object: termToString(quad.object),
-        graph: quad.graph.value ? termToString(quad.graph) : defaultGraph,
+        subject: formatCanonicalRdfTerm(quad.subject),
+        predicate: formatCanonicalRdfTerm(quad.predicate),
+        object: formatCanonicalRdfTerm(quad.object),
+        graph: quad.graph.value ? formatCanonicalRdfTerm(quad.graph) : defaultGraph,
       });
     });
   });
 }
 
-function termToString(term: { termType: string; value: string; language?: string; datatype?: { value: string } }): string {
-  if (term.termType === 'Literal') {
-    if (term.language) return `"${term.value}"@${term.language}`;
-    if (term.datatype && term.datatype.value !== 'http://www.w3.org/2001/XMLSchema#string') {
-      return `"${term.value}"^^<${term.datatype.value}>`;
-    }
-    return `"${term.value}"`;
-  }
-  if (term.termType === 'BlankNode') return `_:${term.value}`;
-  return term.value;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+type LegacyQuad = Omit<SimpleQuad, 'graph'> & { graph?: string | null };
+
+function isLegacyQuad(value: unknown): value is LegacyQuad {
+  return isRecord(value)
+    && typeof value.subject === 'string'
+    && typeof value.predicate === 'string'
+    && typeof value.object === 'string'
+    && (value.graph == null || typeof value.graph === 'string')
+    && !Object.keys(value).some((key) => key.startsWith('@'));
+}
+
+function decodeLegacyQuads(value: unknown, defaultGraph: string): SimpleQuad[] | undefined {
+  if (!Array.isArray(value) || !value.every(isLegacyQuad)) return undefined;
+  return value.map(({ subject, predicate, object, graph }) => ({
+    subject, predicate, object, graph: graph || defaultGraph,
+  }));
 }

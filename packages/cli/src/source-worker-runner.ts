@@ -1,10 +1,8 @@
 import { pathToFileURL } from 'node:url';
-import {
-  loadSourceWorkerState,
-  runSourceWorkerOnce,
-  type SourceWorkerDeps,
-  type SourceWorkerJobState,
-  type SourceWorkerSource,
+import type {
+  SourceWorkerDeps,
+  SourceWorkerJobState,
+  SourceWorkerSource,
 } from '@origintrail-official/dkg-agent';
 import {
   createDaemonKnowledgeAssetLifecycleClient,
@@ -29,6 +27,7 @@ export interface SourceWorkerHandlerModule<TSource extends SourceWorkerSource = 
 }
 
 export async function runConfiguredSourceWorker(configPath: string, options: { once?: boolean } = {}): Promise<void> {
+  const { loadSourceWorkerState, runSourceWorkerOnce } = await import('@origintrail-official/dkg-agent');
   const config = await loadSourceWorkerConfig<SourceWorkerSource>(configPath);
   const knowledgeAssets = createDaemonKnowledgeAssetLifecycleClient(config.daemonUrl, config.daemonToken);
   const handlerModule = await loadHandlerModule(config);

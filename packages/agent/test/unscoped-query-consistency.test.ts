@@ -2,9 +2,18 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   GraphWriteGenTracker, OxigraphStore, type GraphWriteRevisionSource,
 } from '@origintrail-official/dkg-storage';
-import { contextGraphDataUri, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
+import {
+  contextGraphDataUri,
+  DKG_ONTOLOGY,
+  UNSCOPED_QUERY_INVALIDATED_CODE,
+  UNSCOPED_QUERY_INVALIDATED_MESSAGE,
+} from '@origintrail-official/dkg-core';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
-import { captureUnscopedQueryConsistency, executeUnscopedQuery } from '../src/unscoped-query-consistency.js';
+import {
+  captureUnscopedQueryConsistency,
+  executeUnscopedQuery,
+  UnscopedQueryInvalidatedError,
+} from '../src/unscoped-query-consistency.js';
 
 const quad = (graph: string, object = '"public"') => ({
   graph, subject: 'urn:subject', predicate: 'urn:predicate', object,
@@ -44,6 +53,35 @@ describe('unscoped query execution consistency', () => {
       })).rejects.toThrow(/changed/);
       expect(execute).toHaveBeenCalledTimes(phase === 'execution' ? 1 : 0);
     } finally { await store.close(); }
+  });
+
+  it('marks a withheld result as retryable, and a store that can never serve the query as not', async () => {
+    const store = new OxigraphStore();
+    try {
+      // The marker is what a caller-facing layer keys a retryable answer on, so
+      // it has to come out of the executor itself, not only out of the check.
+      const withheld = await executeUnscopedQuery({
+        store, readMetadataRevision: () => 0,
+        admit: async () => { await store.insert([quad('urn:new')]); return true; },
+        execute: async () => ({ bindings: [] }), denied: () => ({ bindings: [] }),
+      }).catch((error: unknown) => error);
+      expect(withheld).toBeInstanceOf(UnscopedQueryInvalidatedError);
+      // Code and sentence are the dkg-core contract the daemon answers with.
+      expect(withheld).toMatchObject({
+        name: 'UnscopedQueryInvalidatedError',
+        code: UNSCOPED_QUERY_INVALIDATED_CODE,
+        message: UNSCOPED_QUERY_INVALIDATED_MESSAGE,
+        retryable: true,
+      });
+    } finally { await store.close(); }
+
+    // Retrying cannot give a process-local store all-writer coverage.
+    let unsupported: unknown;
+    try { captureUnscopedQueryConsistency(new GraphWriteGenTracker(), () => 0); } catch (error) { unsupported = error; }
+    expect(unsupported).toBeInstanceOf(Error);
+    expect(unsupported).not.toBeInstanceOf(UnscopedQueryInvalidatedError);
+    expect(unsupported).not.toHaveProperty('code');
+    expect(unsupported).not.toHaveProperty('retryable');
   });
 
   it('returns the denial shape without executing user SPARQL', async () => {

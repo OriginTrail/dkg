@@ -1,3 +1,4 @@
+import type { JournalOperation } from '../src/async-lift-journal-completion.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -476,17 +477,17 @@ describe('GH#2270 chain-proof cadence', () => {
       // Stall pass A between its snapshot and its chain-proof dispatch — the window the
       // ordering claim is about — by parking the first recovery-lane call on its way through.
       const impl = publisher as unknown as {
-        recoverInterruptedPreBroadcastJobs(inventory: unknown): Promise<number>;
+        recoverInterruptedPreBroadcastJobs(owner: JournalOperation, inventory: unknown): Promise<number>;
       };
       const originalLane = impl.recoverInterruptedPreBroadcastJobs.bind(publisher);
       let firstLaneCall = true;
-      impl.recoverInterruptedPreBroadcastJobs = async (inventory: unknown) => {
+      impl.recoverInterruptedPreBroadcastJobs = async (owner: JournalOperation, inventory: unknown) => {
         if (firstLaneCall) {
           firstLaneCall = false;
           signalStalled();
           await stalled;
         }
-        return originalLane(inventory);
+        return originalLane(owner, inventory);
       };
 
       const passA = publisher.recover();
@@ -521,7 +522,7 @@ describe('GH#2270 chain-proof cadence', () => {
     });
 
     it('inventory acquisition is a linearization boundary — concurrent passes cannot interleave it', async () => {
-      // r6 (🔴 3883453447) — overlapping list() reads may RESOLVE out of store-side capture
+      // r6 (🔴 3883453447) — overlapping inventory reads may RESOLVE out of store-side capture
       // order, so the seam serializes acquisitions: the second pass's read must not start
       // until the first pass's snapshot (and its token) is complete, even when the first
       // read is slow. Interleaved enters here mean tokens can order by completion again.
@@ -531,15 +532,16 @@ describe('GH#2270 chain-proof cadence', () => {
         chainProofResolver: async () => ({ status: 'pending-mempool' }),
       });
       const events: string[] = [];
-      const originalList = publisher.list.bind(publisher);
-      let firstListCall = true;
-      (publisher as { list: typeof publisher.list }).list = async (filter) => {
+      const originalQuery = h.store.query.bind(h.store);
+      let firstInventoryRead = true;
+      h.store.query = async (...args) => {
+        if (args[1]?.source !== 'publisher.asyncLift.reconciliationInventory') return originalQuery(...args);
         events.push('enter');
-        if (firstListCall) {
-          firstListCall = false;
+        if (firstInventoryRead) {
+          firstInventoryRead = false;
           await new Promise((resolve) => setTimeout(resolve, 25));
         }
-        const result = await originalList(filter);
+        const result = await originalQuery(...args);
         events.push('exit');
         return result;
       };
@@ -566,24 +568,25 @@ describe('GH#2270 chain-proof cadence', () => {
       const events: string[] = [];
       let releaseB!: () => void;
       const gateB = new Promise<void>((resolve) => { releaseB = resolve; });
-      const originalList = publisher.list.bind(publisher);
-      let listCalls = 0;
-      (publisher as { list: typeof publisher.list }).list = async (filter) => {
-        listCalls += 1;
-        const call = listCalls;
+      const originalQuery = h.store.query.bind(h.store);
+      let inventoryReads = 0;
+      h.store.query = async (...args) => {
+        if (args[1]?.source !== 'publisher.asyncLift.reconciliationInventory') return originalQuery(...args);
+        inventoryReads += 1;
+        const call = inventoryReads;
         if (call === 1) {
           return new Promise(() => undefined); // A: hangs forever
         }
         events.push(`enter${call}`);
         if (call === 2) await gateB; // B: held open across C's would-be bypass window
-        const result = await originalList(filter);
+        const result = await originalQuery(...args);
         events.push(`exit${call}`);
         return result;
       };
 
       vi.useFakeTimers();
       try {
-        const passA = publisher.recover(); // owner: hangs in list()
+        const passA = publisher.recover(); // owner: hangs in the inventory query
         void passA;
         const passB = publisher.recover(); // head waiter
         const passC = publisher.recover(); // queued behind B, NOT behind A
@@ -625,17 +628,18 @@ describe('GH#2270 chain-proof cadence', () => {
       const gate = new Promise<void>((resolve) => { releaseCapture = resolve; });
       let signalCaptured!: () => void;
       const captured = new Promise<void>((resolve) => { signalCaptured = resolve; });
-      const originalList = publisher.list.bind(publisher);
-      let firstListCall = true;
-      (publisher as { list: typeof publisher.list }).list = async (filter) => {
-        if (firstListCall) {
-          firstListCall = false;
-          const result = await originalList(filter); // captures the PRE-held state...
+      const originalQuery = h.store.query.bind(h.store);
+      let firstInventoryRead = true;
+      h.store.query = async (...args) => {
+        if (args[1]?.source !== 'publisher.asyncLift.reconciliationInventory') return originalQuery(...args);
+        if (firstInventoryRead) {
+          firstInventoryRead = false;
+          const result = await originalQuery(...args); // captures the PRE-held state...
           signalCaptured();
           await gate; // ...but resolves only when released, far past the cap
           return result;
         }
-        return originalList(filter);
+        return originalQuery(...args);
       };
 
       const passA = publisher.recover(); // old snapshot drawn; response stalled
@@ -679,14 +683,14 @@ describe('GH#2270 chain-proof cadence', () => {
       await publisher.recover(); // observed + installed, batch 0: never dispatched
       expect(schedule.retainedEntryCount()).toBe(1);
 
-      await publisher.clearTerminalJob(jobId, { pendingTransactionOverride: { kind: 'agent', agentAddress: 'operator' } });
+      await publisher.clearTerminalJob(jobId, { pendingTransactionOverride: { kind: 'nodeOperator' } });
       await publisher.recover(); // empty held population: the sweep collects the residue
       expect(schedule.retainedEntryCount()).toBe(0);
     });
 
     it('a failed inventory acquisition does not poison the chain — the next pass reads fresh', async () => {
       // r7 (🟡 3883690945) — the rejection handler on the acquisition chain is load-bearing:
-      // the chain must carry only settlement, never the failure. A one-shot list() failure
+      // the chain must carry only settlement, never the failure. A one-shot inventory read failure
       // rejects its own pass; the NEXT pass performs a fresh read (not the memoized rejection)
       // and real dispatch work proceeds.
       let asks = 0;
@@ -700,22 +704,23 @@ describe('GH#2270 chain-proof cadence', () => {
       });
       const { jobId } = await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
 
-      const originalList = publisher.list.bind(publisher);
-      let listCalls = 0;
+      const originalQuery = h.store.query.bind(h.store);
+      let inventoryReads = 0;
       let failNext = true;
-      (publisher as { list: typeof publisher.list }).list = async (filter) => {
-        listCalls += 1;
+      h.store.query = async (...args) => {
+        if (args[1]?.source !== 'publisher.asyncLift.reconciliationInventory') return originalQuery(...args);
+        inventoryReads += 1;
         if (failNext) {
           failNext = false;
           throw new Error('transient store read failure');
         }
-        return originalList(filter);
+        return originalQuery(...args);
       };
 
       await expect(publisher.recover()).rejects.toThrow('transient store read failure');
-      const callsAfterFailure = listCalls;
+      const callsAfterFailure = inventoryReads;
       await publisher.recover();
-      expect(listCalls).toBe(callsAfterFailure + 1); // a fresh read, not a replayed rejection
+      expect(inventoryReads).toBe(callsAfterFailure + 1); // a fresh read, not a replayed rejection
       expect(asks).toBe(1); // the held job was actually dispatched
       expect((await publisher.getStatus(jobId))?.status).toBe('failed');
     });
@@ -739,19 +744,20 @@ describe('GH#2270 chain-proof cadence', () => {
       });
       const { jobId } = await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
 
-      const originalList = publisher.list.bind(publisher);
-      let firstListCall = true;
-      (publisher as { list: typeof publisher.list }).list = async (filter) => {
-        if (firstListCall) {
-          firstListCall = false;
+      const originalQuery = h.store.query.bind(h.store);
+      let firstInventoryRead = true;
+      h.store.query = async (...args) => {
+        if (args[1]?.source !== 'publisher.asyncLift.reconciliationInventory') return originalQuery(...args);
+        if (firstInventoryRead) {
+          firstInventoryRead = false;
           return new Promise(() => undefined); // a store read that never settles
         }
-        return originalList(filter);
+        return originalQuery(...args);
       };
 
       vi.useFakeTimers();
       try {
-        const hung = publisher.recover(); // acquisition 1: wedged inside list() forever
+        const hung = publisher.recover(); // acquisition 1: wedged inside the inventory read forever
         void hung;
         let secondSettled = false;
         const second = publisher.recover().then((n) => {
@@ -795,7 +801,7 @@ describe('GH#2270 chain-proof cadence', () => {
       while (asks === 0) await new Promise((resolve) => setTimeout(resolve, 5));
 
       // The real operator exit, serialized on the same claim lock the disposition uses.
-      await publisher.clearTerminalJob(jobId, { pendingTransactionOverride: { kind: 'agent', agentAddress: 'operator' } });
+      await publisher.clearTerminalJob(jobId, { pendingTransactionOverride: { kind: 'nodeOperator' } });
 
       release();
       await firstPass;

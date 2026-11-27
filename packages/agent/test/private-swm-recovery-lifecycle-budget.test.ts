@@ -91,6 +91,7 @@ function harness(
     log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
     resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+    rfc64LegacySwmGossipAllowedForContextGraph: () => true,
     createSwmTargetExecutorSessionV1: () => factory(),
     privateSnapshotWalks,
     syncSharedMemoryFromPeerDetailedExecution: LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
@@ -249,6 +250,18 @@ describe('private recovery job ownership and lifecycle outcome', () => {
         putSnapshot: async () => { throw new Error('No snapshot write expected'); },
       },
       snapshotMaterializer: {
+        withKaWriteLock: async (
+          _contextGraphId: string,
+          _subGraphName: string | undefined,
+          _kaUal: string,
+          fn: () => Promise<unknown>,
+        ) => fn(),
+        readStoredHead: async () => ({
+          version: null,
+          shareOperationId: null,
+          shareOperationIds: [],
+          needsRepair: false,
+        }),
         isGraphAssetMaterialized,
         preserveStoredIdentityForSkippedAsset: async () => ({ outcome: 'replace' }),
       } as unknown as SharedMemorySnapshotMaterializer,
@@ -284,6 +297,9 @@ describe('private recovery job ownership and lifecycle outcome', () => {
       completed: true,
       readySnapshots: 3,
       totalSnapshots: 3,
+      // Every ref was resolved by an earlier invocation and re-validated as
+      // still materialized: all three assets were already held (#3296).
+      alreadyHeldGraphs: 3,
     });
     expect(isGraphAssetMaterialized).toHaveBeenCalledTimes(3);
     expect(retained.resolvedCount()).toBe(3);

@@ -33,6 +33,12 @@ import {
   buildOpenClawAttachmentImportContextEntries,
 } from '../openclaw.js';
 import { persistDurableChatTurn } from '../chat-turn-persistence.js';
+import { durableChatTurnResponseBody } from './durable-chat-turn-response.js';
+import { startLocalAgentSseKeepalive, writeLocalAgentSseHead } from '../local-agent-sse.js';
+import {
+  isUndiciResponseTimeoutError,
+  localAgentChannelFetchInit,
+} from '../local-agent-channel-fetch.js';
 
 type HermesPersistRouteResult = {
   statusCode: number;
@@ -45,6 +51,7 @@ function isHermesBridgeTimeoutError(err: any): boolean {
   const message = String(err?.message ?? err ?? '');
   return err?.name === 'TimeoutError'
     || err?.cause?.name === 'TimeoutError'
+    || isUndiciResponseTimeoutError(err)
     || /agent response timeout|response timeout|aborted due to timeout/i.test(message);
 }
 
@@ -235,7 +242,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             'Content-Type': 'application/json',
           }, target.inboundUrl, apiServerKey),
           body: JSON.stringify(forwardBody),
-          signal: AbortSignal.timeout(HERMES_CHANNEL_RESPONSE_TIMEOUT_MS),
+          ...localAgentChannelFetchInit(HERMES_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
         if (!forwardRes.ok) {
           const details = await forwardRes.text().catch(() => '');
@@ -369,7 +376,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             Accept: 'text/event-stream',
           }, streamUrl, apiServerKey),
           body: JSON.stringify(forwardBody),
-          signal: AbortSignal.timeout(HERMES_CHANNEL_RESPONSE_TIMEOUT_MS),
+          ...localAgentChannelFetchInit(HERMES_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
 
         if (!transportRes.ok) {
@@ -414,12 +421,10 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
 
         const contentType = (transportRes.headers.get('content-type') ?? '').toLowerCase();
         if (contentType.includes('text/event-stream') && transportRes.body) {
-          res.writeHead(200, {
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache',
-            Connection: 'keep-alive',
-            ...corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)),
-          });
+          writeLocalAgentSseHead(res, corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)));
+          // The channel pump keeps itself alive. The OpenAI relay drops Hermes's
+          // comment frames and persists before `final`, so it needs its own (#3886).
+          const stopKeepalive = target.protocol === 'hermes-openai' ? startLocalAgentSseKeepalive(res) : undefined;
           try {
             if (target.protocol === 'hermes-openai') {
               const streamed = await pipeHermesOpenAiStream(
@@ -466,6 +471,8 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
                 : { type: 'error', error: err.message };
               res.write(`data: ${JSON.stringify(event)}\n\n`);
             }
+          } finally {
+            stopKeepalive?.();
           }
           if (!res.writableEnded) res.end();
           return;
@@ -482,12 +489,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             return jsonResponse(res, 500, buildHermesUiPersistenceErrorBody(err));
           }
         }
-        res.writeHead(200, {
-          'Content-Type': 'text/event-stream; charset=utf-8',
-          'Cache-Control': 'no-cache',
-          Connection: 'keep-alive',
-          ...corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)),
-        });
+        writeLocalAgentSseHead(res, corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)));
         res.write(`data: ${JSON.stringify({
           type: 'final',
           text: reply.text ?? '',
@@ -855,15 +857,7 @@ async function persistHermesTurnWithDuplicateLock(
         payload.assistantReply,
       ),
     });
-    return {
-      statusCode: 200,
-      body: {
-        ok: true,
-        ...(outcome.kind === 'duplicate' ? { duplicate: true } : {}),
-        ...(outcome.kind === 'transitioned' ? { transitioned: true } : {}),
-        turnId: payload.turnId,
-      },
-    };
+    return { statusCode: 200, body: durableChatTurnResponseBody(outcome) };
   } catch (err: any) {
     return { statusCode: 500, body: { error: err.message } };
   }

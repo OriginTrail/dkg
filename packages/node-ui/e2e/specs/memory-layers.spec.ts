@@ -10,7 +10,7 @@ test.describe('Memory Layer Views (rc.12 project layer switcher)', () => {
       await leftPanel.clickLayer(PRIMARY_CG, 'wm');
     });
 
-    test('opens project tab for the primary context graph', async ({ centerPanel }) => {
+    test('opens project tab for the primary Context Graph', async ({ centerPanel }) => {
       const tabs = await centerPanel.getTabNames();
       expect(tabs.some((t) => t.includes(PRIMARY_CG))).toBe(true);
     });

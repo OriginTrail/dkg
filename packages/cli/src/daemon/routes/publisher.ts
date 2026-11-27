@@ -1,3 +1,8 @@
+import { handlePublisherLiveControlRoute } from './publisher-live-control.js';
+import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
+import { hasNodeOperatorReadAccess, requireContextGraphReadAuthority } from './context-graph-read-authority.js';
+import { parsePublisherJobsQuery, respondPublisherJobs } from './publisher-job-page.js';
+import { publisherIntentLookupView, publisherJobView } from './publisher-job-view.js';
 // daemon/routes/publisher.ts
 //
 // Route handlers for publisher jobs / stats / cancel / retry / clear.
@@ -60,12 +65,16 @@ import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chai
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import {
+  publisherJobReadScope,
+  readPublisherJournalWithScope,
+  type PublisherReadScope,
   findReservedSubjectPrefix,
   isSafeJobId,
   isSkolemizedUri,
   SAFE_JOB_ID_ERROR,
 } from '@origintrail-official/dkg-publisher';
 import type {
+  AsyncLiftLastChainCheck,
   AsyncPreparedPublishPayload,
   LiftJobRetryProjection,
   PendingTransactionClearOverride,
@@ -205,7 +214,6 @@ import {
   safeParseJson,
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
-  normalizeContextGraphIdOrUri,
   validateEntities,
   validateConditions,
   MAX_BODY_BYTES,
@@ -227,6 +235,7 @@ import {
   sleep,
   deriveBlockExplorerUrl,
 } from '../http-utils.js';
+import { requireNodeAdmin } from '../node-admin-guard.js';
 import {
   normalizeRepo,
   isValidRepoSpec,
@@ -334,6 +343,19 @@ import type { RequestContext } from './context.js';
 import { actorFromRequestContext } from './context.js';
 
 
+async function requirePublisherReadScope(ctx: RequestContext, scope: PublisherReadScope): Promise<boolean> {
+  if (hasNodeOperatorReadAccess(ctx)) return true;
+  if (scope.kind !== 'context-graph') {
+    jsonResponse(ctx.res, 403, { error: 'Not authorized to read this publisher job.' });
+    return false;
+  }
+  return requireContextGraphReadAuthority(ctx, scope.contextGraphId);
+}
+
+async function requirePublisherJobReadAuthority(ctx: RequestContext, job: PersistedLiftJob): Promise<boolean> {
+  return requirePublisherReadScope(ctx, publisherJobReadScope(job));
+}
+
 interface PublisherLifecycleFacts {
   contextGraphId: string;
   name: string;
@@ -393,7 +415,8 @@ function parsePublisherLifecycleFactsFromQuery(
  * all is what keeps a fifth surface from shipping without `retryState`.
  *
  * `retryState` is DERIVED (never persisted), so it sits BESIDE the job rather than inside it: the
- * job stays byte-identical to what the store holds.
+ * job stays what the store holds, apart from a failure reason stored before reasons were bounded
+ * (`publisherJobView`).
  *
  * `payload` is included only when passed — omitting it drops the key, while `null` is a REAL value
  * (a named lifecycle publish job has no raw prepared payload).
@@ -404,7 +427,7 @@ function wrappedJobDetailBody(
   payload?: AsyncPreparedPublishPayload | null,
 ): { job: PersistedLiftJob; payload?: AsyncPreparedPublishPayload | null; retryState: LiftJobRetryProjection } {
   return {
-    job,
+    job: publisherJobView(job),
     ...(payload === undefined ? {} : { payload }),
     retryState: runtimeRetryState(ctx, job),
   };
@@ -417,7 +440,7 @@ function legacyJobDetailBody(
   payload?: AsyncPreparedPublishPayload | null,
 ): PersistedLiftJob & { payload?: AsyncPreparedPublishPayload | null; retryState: LiftJobRetryProjection } {
   return {
-    ...job,
+    ...publisherJobView(job),
     ...(payload === undefined ? {} : { payload }),
     retryState: runtimeRetryState(ctx, job),
   };
@@ -428,10 +451,28 @@ type JobDetailContext = Pick<RequestContext, 'publisherControl' | 'publisherStat
 /** The ONE place the operator-facing retry answer is derived: the publisher's configured view, */
 /** narrowed by this daemon's runtime availability. */
 function runtimeRetryState(ctx: JobDetailContext, job: PersistedLiftJob): LiftJobRetryProjection {
-  return narrowRetryStateToRuntime(
-    ctx.publisherControl.describeConfiguredRetryState(job),
-    ctx.publisherState.availability,
+  return withLastChainCheck(
+    narrowRetryStateToRuntime(
+      ctx.publisherControl.describeConfiguredRetryState(job),
+      ctx.publisherState.availability,
+    ),
+    // GH#2945 — only the RUNTIME publisher runs the chain-proof dispatcher, so only it can say what the
+    // latest re-check found; the control instance this route reads the record through has no schedule.
+    ctx.publisherState.runtime?.publisher.lastChainProofCheck?.(job),
   );
+}
+
+/**
+ * GH#2945 — a held job's `chain_recheck_pending` blocker carries what the running publisher's latest
+ * re-check found, when it has an observation for this exact incarnation. Nothing else is touched: no
+ * runtime, no observation or any other blocker leaves the projection exactly as derived.
+ */
+function withLastChainCheck(
+  projection: LiftJobRetryProjection,
+  lastCheck: AsyncLiftLastChainCheck | undefined,
+): LiftJobRetryProjection {
+  if (lastCheck === undefined || projection.blocker?.code !== 'chain_recheck_pending') return projection;
+  return { ...projection, blocker: { ...projection.blocker, lastCheck } };
 }
 
 /**
@@ -481,6 +522,7 @@ async function readSmallJsonObject(
 }
 
 export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> {
+  if (await handlePublisherLiveControlRoute(ctx)) return;
   const {
     req,
     res,
@@ -516,16 +558,16 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
   } = actor;
 
 
-  // GET /api/publisher/jobs?status=...
+  // GET /api/publisher/jobs?status=...  (complete); &pageSize=...&cursor=... pages it (publisher-job-page.ts)
   if (req.method === "GET" && path === "/api/publisher/jobs") {
-    const status =
-      typeof url.searchParams.get("status") === "string"
-        ? url.searchParams.get("status")!
-        : undefined;
-    const jobs = await publisherControl.list(
-      status ? { status: status as any } : undefined,
-    );
-    return jsonResponse(res, 200, { jobs });
+    const query = parsePublisherJobsQuery(url, res);
+    if (!query) return; // a 400 was already sent
+    const rawContextGraphId = url.searchParams.get('contextGraphId');
+    const contextGraphId = rawContextGraphId === null ? null : normalizeContextGraphIdOrUri(rawContextGraphId);
+    if (contextGraphId !== null || !hasNodeOperatorReadAccess(ctx)) {
+      if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
+    }
+    return respondPublisherJobs(res, publisherControl, query, contextGraphId);
   }
 
   // GET /api/publisher/job?id=...  (new route, wrapped response)
@@ -537,6 +579,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       return jsonResponse(res, 404, {
         error: `Publisher job not found: ${jobId}`,
       });
+    if (!(await requirePublisherJobReadAuthority(ctx, job))) return;
     return jsonResponse(res, 200, wrappedJobDetailBody(ctx, job));
   }
 
@@ -549,6 +592,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       return jsonResponse(res, 404, {
         error: `Publisher job not found: ${jobId}`,
       });
+    if (!(await requirePublisherJobReadAuthority(ctx, job))) return;
     const payload = await publisherControl.inspectPreparedPayload(jobId);
     return jsonResponse(res, 200, wrappedJobDetailBody(ctx, job, payload));
   }
@@ -560,8 +604,9 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
   if (req.method === "GET" && path === "/api/publisher/job-by-intent") {
     const facts = parsePublisherLifecycleFactsFromQuery(url, res, requestAgentAddress);
     if (!facts) return; // a 400 was already sent
+    if (!(await requireContextGraphReadAuthority(ctx, facts.contextGraphId))) return;
     const lookup = await publisherControl.lookupKnowledgeAssetVmPublishJobByIntent(facts);
-    const { kind, ...rest } = lookup;
+    const { kind, ...rest } = publisherIntentLookupView(lookup);
     return jsonResponse(res, 200, { result: kind, ...rest });
   }
 
@@ -572,11 +617,18 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
   if (req.method === "GET" && path === "/api/publisher/journal") {
     const jobId = url.searchParams.get("jobId")?.trim() || undefined;
     if (jobId !== undefined) {
-      const result = await publisherControl.readJournalByJob(jobId);
-      return jsonResponse(res, 200, result);
+      if (hasNodeOperatorReadAccess(ctx)) return jsonResponse(res, 200, await publisherControl.readJournalByJob(jobId));
+      const result = await readPublisherJournalWithScope(publisherControl, jobId);
+      if (result.scope.kind === 'missing') {
+        return jsonResponse(res, 404, { error: `Publisher job not found: ${jobId}` });
+      }
+      if (!(await requirePublisherReadScope(ctx, result.scope))) return;
+      return jsonResponse(res, 200, result.journal);
     }
+
     const facts = parsePublisherLifecycleFactsFromQuery(url, res, requestAgentAddress);
     if (!facts) return; // a 400 was already sent
+    if (!(await requireContextGraphReadAuthority(ctx, facts.contextGraphId))) return;
     const result = await publisherControl.readJournalByIntent(facts);
     return jsonResponse(res, 200, result);
   }
@@ -594,9 +646,11 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     // GH#2270 — this legacy shape spreads the job at the top level, so `retryState` joins it
     // there (as `payload` already does); the shared builder keeps every job field's value.
     if (segments[1] === "payload") {
+      if (!(await requirePublisherJobReadAuthority(ctx, job))) return;
       const payload = await publisherControl.inspectPreparedPayload(jobId);
       return jsonResponse(res, 200, legacyJobDetailBody(ctx, job, payload));
     }
+    if (!(await requirePublisherJobReadAuthority(ctx, job))) return;
     return jsonResponse(res, 200, legacyJobDetailBody(ctx, job));
   }
 
@@ -606,8 +660,10 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     return jsonResponse(res, 200, stats);
   }
 
-  // POST /api/publisher/cancel
+  // POST /api/publisher/cancel — node-admin only: it cancels any job in the
+  // node's queue by id, whichever agent submitted it.
   if (req.method === "POST" && path === "/api/publisher/cancel") {
+    if (!requireNodeAdmin(authentication, res, 'POST /api/publisher/cancel', 'cancel publisher jobs')) return;
     const parsed = await readSmallJsonObject(req, res);
     if (!parsed) return;
     const jobId = parsed.jobId as string | undefined;
@@ -616,8 +672,10 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     return jsonResponse(res, 200, { cancelled: jobId });
   }
 
-  // POST /api/publisher/retry
+  // POST /api/publisher/retry — node-admin only: with no jobId it reaccepts every
+  // failed job in the node's queue, whichever agent submitted it.
   if (req.method === "POST" && path === "/api/publisher/retry") {
+    if (!requireNodeAdmin(authentication, res, 'POST /api/publisher/retry', 'reaccept publisher jobs')) return;
     const parsed = await readSmallJsonObject(req, res);
     if (!parsed) return;
     const status = parsed.status as string | undefined;
@@ -646,8 +704,10 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     });
   }
 
-  // POST /api/publisher/clear
+  // POST /api/publisher/clear — node-admin only: it bulk-clears every job with
+  // the given status across the node's queue.
   if (req.method === "POST" && path === "/api/publisher/clear") {
+    if (!requireNodeAdmin(authentication, res, 'POST /api/publisher/clear', 'clear publisher jobs')) return;
     const parsed = await readSmallJsonObject(req, res);
     if (!parsed) return;
     const status = parsed.status as string | undefined;

@@ -5,7 +5,7 @@
 // call, so a route regression would not be caught by the helper unit test alone.
 // Driven in-process via handleKnowledgeAssetsRoutes with a stub agent — no
 // daemon / storage / native deps.
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import {
@@ -17,6 +17,15 @@ import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-asse
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
+
+import { withDurableShareOwner } from './_helpers/durable-share-owner.js';
+import { daemonState } from '../src/daemon/state.js';
+import type { OxigraphStore } from '@origintrail-official/dkg-storage';
+const shareStores: OxigraphStore[] = [];
+afterEach(async () => {
+  daemonState.promoteWorkerAvailable = false;
+  await Promise.all(shareStores.splice(0).map(store => store.close()));
+});
 
 function fakeRes() {
   const res: any = { statusCode: 0, body: '', headers: {} };
@@ -81,7 +90,7 @@ const ACCEPT_PROBE = {
   callerAuthorized: true,
 };
 function publishAgent(extra: Record<string, unknown>) {
-  return { probeContextGraphWritePreflight: async () => ACCEPT_PROBE, ...extra };
+  return withDurableShareOwner({ probeContextGraphWritePreflight: async () => ACCEPT_PROBE, ...extra }, shareStores);
 }
 
 const STORE_FAILURE_CASES = [
@@ -109,13 +118,13 @@ const STORE_FAILURE_CASES = [
 
 function expectStoreUnavailableResponse(
   res: ReturnType<typeof fakeRes>,
-  expected: { code: string; outcome: string },
+  expected: { code: string; outcome: string; retryable?: boolean },
 ): void {
   expect(res.statusCode).toBe(503);
   expect(res.headers['Retry-After']).toBe('1');
   expect(JSON.parse(res.body)).toMatchObject({
     code: expected.code,
-    retryable: true,
+    retryable: expected.retryable ?? true,
     outcome: expected.outcome,
   });
 }
@@ -365,7 +374,8 @@ describe('knowledge-assets publish routes — transport-status mapping (#1329)',
       );
 
       await done;
-      expectStoreUnavailableResponse(res, { code, outcome });
+      expectStoreUnavailableResponse(res, { code, outcome, retryable: outcome !== 'indeterminate' });
+      if (outcome === 'indeterminate') expect(JSON.parse(res.body)).toMatchObject({ recoveryState: 'inspection-required', recoveryJobId: expect.any(String) });
       expect(JSON.parse(res.body)).toMatchObject({
         created: true,
         name: 'partial-swm',

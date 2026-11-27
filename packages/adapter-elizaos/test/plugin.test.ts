@@ -1,4 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+// These surface/stopped-service tests must not construct an external DKG node.
+vi.mock('@origintrail-official/dkg-agent', () => ({ DKGAgent: { create: vi.fn() } }));
 import {
   dkgPlugin,
   dkgPublish,
@@ -18,15 +21,15 @@ describe('dkgPlugin', () => {
   });
 
   it('exports 5 actions', () => {
-    expect(dkgPlugin.actions).toHaveLength(5);
+    expect(dkgPlugin.actions).toEqual([dkgPublish, dkgQuery, dkgFindAgents, dkgSendMessage, dkgInvokeSkill]);
   });
 
   it('exports at least 1 provider', () => {
-    expect(dkgPlugin.providers!.length).toBeGreaterThanOrEqual(1);
+    expect(dkgPlugin.providers).toEqual([dkgKnowledgeProvider]);
   });
 
   it('exports at least 1 service', () => {
-    expect(dkgPlugin.services!.length).toBeGreaterThanOrEqual(1);
+    expect(dkgPlugin.services).toEqual([dkgService]);
   });
 });
 

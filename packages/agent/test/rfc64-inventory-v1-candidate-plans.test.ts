@@ -211,6 +211,8 @@ function collectPlanClass(database: DatabaseSync): PlanClass {
 
 function parametersFor(sql: string): Record<string, Uint8Array | number | string | null> {
   const all: Readonly<Record<string, Uint8Array | number | string | null>> = {
+    digest: hexBytes('77'.repeat(32)),
+    json: '{}',
     session: hexBytes(NEW_SESSION_HEX),
     oldSession: hexBytes(OLD_SESSION_HEX),
     newSession: hexBytes(NEW_SESSION_HEX),
@@ -354,6 +356,12 @@ function expectPlanGate(plans: PlanClass): void {
       plans[statementId].some((detail) => detail.includes('USING PRIMARY KEY')),
       `${INVENTORY_V1_STATEMENT_IDS[statementId]} must use its exact scope/UAL key`,
     ).toBe(true);
+  }
+
+  for (const statementId of ['getFinalizedPrivatePlacementFailure',
+    'upsertFinalizedPrivatePlacementFailure'] as const) {
+    expect(plans[statementId].some(detail => detail.includes('USING PRIMARY KEY')),
+      `${INVENTORY_V1_STATEMENT_IDS[statementId]} must use its exact repair digest key`).toBe(true);
   }
 
   expect(

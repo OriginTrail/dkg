@@ -1,3 +1,6 @@
+import { InventoryV1OpenError } from '../src/rfc64/inventory-v1/open-error.js';
+import { DatabaseSync } from 'node:sqlite';
+import { isInventoryPersistenceFailure } from '../src/rfc64/inventory-persistence-failure.js';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,11 +29,14 @@ import {
   openInventoryV1,
   type Rfc64InventoryV1Foundation,
   type Rfc64InventoryV1OperationsV1,
+  type Rfc64SwmAuthorInventoryOperationsV1,
 } from '../src/rfc64/inventory-v1/index.js';
 import {
   maintainRfc64SwmAuthorInventoryV1,
+  mergeRfc64SwmAuthorInventoryRowsV1,
   removeRfc64SwmAuthorInventoryRowV1,
   type MaintainRfc64SwmAuthorInventoryInputV1,
+  type MergeRfc64SwmAuthorInventoryRowsInputV1,
 } from '../src/rfc64/swm-author-inventory-producer-v1.js';
 
 const PRIVATE_KEY = `0x${'31'.repeat(32)}`;
@@ -75,6 +81,215 @@ afterEach(() => {
 });
 
 describe('RFC-64 SWM author inventory producer', () => {
+  it('initializes a multi-row inventory with one signature and replays idempotently', async () => {
+    const inventory = await createInventory();
+    const signDigest = vi.fn((digest: `0x${string}`) => wallet.signMessage(digest));
+    const mergeInput = exactMergeInput([ROW_A, ROW_B], signDigest);
+
+    const initialized = await mergeRfc64SwmAuthorInventoryRowsV1(inventory, mergeInput);
+    expect(initialized).toMatchObject({ status: 'applied', attempts: 1 });
+    expect(initialized.snapshot.head.payload).toMatchObject({ version: '0', totalRows: '2' });
+    expect(initialized.snapshot.rows).toEqual([ROW_A, ROW_B]);
+    expect(signDigest).toHaveBeenCalledTimes(1);
+
+    expect(inventory.compareAndSwapMergeSwmAuthorInventoryV1({
+      snapshot: initialized.snapshot,
+      mergeRows: [ROW_A, ROW_B],
+      expectedCurrentHeadDigest: null,
+    })).toMatchObject({
+      status: 'existing',
+      snapshot: { head: { objectDigest: initialized.snapshot.head.objectDigest } },
+    });
+
+    const replay = await mergeRfc64SwmAuthorInventoryRowsV1(inventory, mergeInput);
+    expect(replay).toMatchObject({ status: 'existing', attempts: 1 });
+    expect(replay.snapshot.head.objectDigest).toBe(initialized.snapshot.head.objectDigest);
+    expect(signDigest).toHaveBeenCalledTimes(1);
+  });
+
+  it('merges in one successor while preserving target-only rows and replacing the same UAL', async () => {
+    const inventory = await createInventory();
+    await maintainRfc64SwmAuthorInventoryV1(inventory, input(ROW_A));
+    await maintainRfc64SwmAuthorInventoryV1(inventory, input(ROW_C));
+    const predecessor = inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)!;
+    const signDigest = vi.fn((digest: `0x${string}`) => wallet.signMessage(digest));
+
+    const merged = await mergeRfc64SwmAuthorInventoryRowsV1(
+      inventory,
+      exactMergeInput([ROW_A_V2, ROW_B], signDigest),
+    );
+
+    expect(merged).toMatchObject({ status: 'applied', attempts: 1 });
+    expect(merged.snapshot.head.payload).toMatchObject({ version: '2', totalRows: '3' });
+    expect(merged.snapshot.head.payload.previousHeadDigest).toBe(predecessor.head.objectDigest);
+    expect(merged.snapshot.rows).toEqual([ROW_A_V2, ROW_B, ROW_C]);
+    expect(signDigest).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-reads and preserves a concurrent target row before retrying an exact merge', async () => {
+    const inventory = await createInventory();
+    await maintainRfc64SwmAuthorInventoryV1(inventory, input(ROW_A));
+    const predecessor = inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)!;
+    const winner = await signedSuccessor(predecessor, [ROW_A, ROW_C]);
+    const signDigest = vi.fn((digest: `0x${string}`) => wallet.signMessage(digest));
+    let conflicts = 1;
+    const conflictOnce: Pick<
+      Rfc64SwmAuthorInventoryOperationsV1,
+      'readSwmAuthorInventorySnapshotV1' | 'compareAndSwapMergeSwmAuthorInventoryV1'
+    > = {
+      readSwmAuthorInventorySnapshotV1:
+        inventory.readSwmAuthorInventorySnapshotV1.bind(inventory),
+      compareAndSwapMergeSwmAuthorInventoryV1: (candidate) => {
+        if (conflicts-- > 0) {
+          inventory.compareAndSwapSwmAuthorInventoryV1({
+            snapshot: winner,
+            mutation: { kind: 'upsert', row: ROW_C },
+            expectedCurrentHeadDigest: predecessor.head.objectDigest as `0x${string}`,
+          });
+          throw new InventoryV1CandidateError(
+            'swm-inventory-cas-conflict',
+            'injected concurrent writer',
+          );
+        }
+        return inventory.compareAndSwapMergeSwmAuthorInventoryV1(candidate);
+      },
+    };
+
+    const merged = await mergeRfc64SwmAuthorInventoryRowsV1(
+      conflictOnce,
+      exactMergeInput([ROW_B], signDigest),
+    );
+    expect(merged).toMatchObject({ status: 'applied', attempts: 2 });
+    expect(merged.snapshot.rows).toEqual([ROW_A, ROW_B, ROW_C]);
+    expect(merged.snapshot.head.payload.previousHeadDigest).toBe(winner.head.objectDigest);
+    expect(signDigest).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects empty exact merges before signing or persistence', async () => {
+    const inventory = await createInventory();
+    const signDigest = vi.fn((digest: `0x${string}`) => wallet.signMessage(digest));
+    await expect(mergeRfc64SwmAuthorInventoryRowsV1(
+      inventory,
+      exactMergeInput([], signDigest),
+    )).rejects.toMatchObject({ code: 'swm-inventory-producer-input' });
+    expect(signDigest).not.toHaveBeenCalled();
+    expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toBeNull();
+  });
+
+  it('rejects exact-merge rows outside the scoped author and network', async () => {
+    const inventory = await createInventory();
+    const foreignRow = Object.freeze({
+      ...ROW_A,
+      kaUal: `did:dkg:otp:20430/${otherWallet.address.toLowerCase()}/7`,
+    }) as SwmAuthorInventoryRowV1;
+
+    await expect(mergeRfc64SwmAuthorInventoryRowsV1(
+      inventory,
+      exactMergeInput([foreignRow]),
+    )).rejects.toMatchObject({ code: 'swm-inventory-producer-input' });
+    expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toBeNull();
+  });
+
+  it('rejects an exact-merge signer and retry bound that are not scope-bound', async () => {
+    const inventory = await createInventory();
+    await expect(mergeRfc64SwmAuthorInventoryRowsV1(inventory, {
+      ...exactMergeInput([ROW_A]),
+      signer: {
+        issuer: otherWallet.address.toLowerCase() as EvmAddressV1,
+        signDigest: (digest) => otherWallet.signMessage(digest),
+      },
+    })).rejects.toMatchObject({ code: 'swm-inventory-producer-input' });
+    await expect(mergeRfc64SwmAuthorInventoryRowsV1(inventory, {
+      ...exactMergeInput([ROW_A]),
+      maxCasAttempts: 0,
+    })).rejects.toMatchObject({ code: 'swm-inventory-producer-input' });
+  });
+
+  it('wraps a merged row-set uniqueness violation as producer input', async () => {
+    const inventory = await createInventory();
+    await maintainRfc64SwmAuthorInventoryV1(inventory, input(ROW_A));
+    const duplicateShareOperation = Object.freeze({
+      ...ROW_B,
+      shareOperationId: ROW_A.shareOperationId,
+    }) as SwmAuthorInventoryRowV1;
+
+    await expect(mergeRfc64SwmAuthorInventoryRowsV1(
+      inventory,
+      exactMergeInput([duplicateShareOperation]),
+    )).rejects.toMatchObject({ code: 'swm-inventory-producer-input' });
+  });
+
+  it('distinguishes terminal CAS conflicts from unrelated persistence errors', async () => {
+    const terminalConflict = {
+      readSwmAuthorInventorySnapshotV1: () => null,
+      compareAndSwapMergeSwmAuthorInventoryV1: () => {
+        throw new InventoryV1CandidateError(
+          'swm-inventory-cas-conflict',
+          'injected terminal conflict',
+        );
+      },
+    } satisfies Pick<
+      Rfc64SwmAuthorInventoryOperationsV1,
+      'readSwmAuthorInventorySnapshotV1' | 'compareAndSwapMergeSwmAuthorInventoryV1'
+    >;
+    await expect(mergeRfc64SwmAuthorInventoryRowsV1(terminalConflict, {
+      ...exactMergeInput([ROW_A]),
+      maxCasAttempts: 1,
+    })).rejects.toMatchObject({ code: 'swm-inventory-producer-conflict' });
+
+    const persistenceFailure = {
+      ...terminalConflict,
+      compareAndSwapMergeSwmAuthorInventoryV1: () => {
+        throw new Error('injected persistence failure');
+      },
+    } satisfies Pick<
+      Rfc64SwmAuthorInventoryOperationsV1,
+      'readSwmAuthorInventorySnapshotV1' | 'compareAndSwapMergeSwmAuthorInventoryV1'
+    >;
+    await expect(mergeRfc64SwmAuthorInventoryRowsV1(
+      persistenceFailure,
+      exactMergeInput([ROW_A]),
+    )).rejects.toThrow('injected persistence failure');
+  });
+
+  it('rejects a signed exact snapshot that is not the requested merge', async () => {
+    const source = await createInventory();
+    const signed = await mergeRfc64SwmAuthorInventoryRowsV1(
+      source,
+      exactMergeInput([ROW_A, ROW_B]),
+    );
+    const target = await createInventory();
+
+    expect(() => target.compareAndSwapMergeSwmAuthorInventoryV1({
+      snapshot: signed.snapshot,
+      mergeRows: [ROW_A],
+      expectedCurrentHeadDigest: null,
+    })).toThrow(expect.objectContaining({ code: 'swm-inventory-input' }));
+    expect(target.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toBeNull();
+  });
+
+  it('rejects an exact merge whose signed head does not recover to the author', async () => {
+    const source = await createInventory();
+    const signed = await mergeRfc64SwmAuthorInventoryRowsV1(
+      source,
+      exactMergeInput([ROW_A, ROW_B]),
+    );
+    const target = await createInventory();
+    const invalidHead = Object.freeze({
+      ...signed.snapshot.head,
+      signature: await otherWallet.signMessage(
+        ethers.getBytes(signed.snapshot.head.objectDigest),
+      ),
+    }) as SignedSwmAuthorInventoryHeadEnvelopeV1;
+
+    expect(() => target.compareAndSwapMergeSwmAuthorInventoryV1({
+      snapshot: Object.freeze({ head: invalidHead, rows: signed.snapshot.rows }),
+      mergeRows: signed.snapshot.rows,
+      expectedCurrentHeadDigest: null,
+    })).toThrow(expect.objectContaining({ code: 'swm-inventory-input' }));
+    expect(target.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toBeNull();
+  });
+
   it('signs genesis and successor heads, preserves both rows, and makes replay a no-op', async () => {
     const inventory = await createInventory();
     const first = await maintainRfc64SwmAuthorInventoryV1(inventory, input(ROW_A));
@@ -312,6 +527,19 @@ function input(rowValue: SwmAuthorInventoryRowV1): MaintainRfc64SwmAuthorInvento
   };
 }
 
+function exactMergeInput(
+  rows: readonly SwmAuthorInventoryRowV1[],
+  signDigest: (digest: `0x${string}`) => Promise<string> =
+    (digest) => wallet.signMessage(digest),
+): MergeRfc64SwmAuthorInventoryRowsInputV1 {
+  return {
+    scope: SCOPE,
+    rows,
+    issuedAt: '1700000000200' as TimestampMsV1,
+    signer: { issuer: AUTHOR, signDigest },
+  };
+}
+
 function row(
   kaNumber: string,
   assertionCoordinate: string,
@@ -332,6 +560,37 @@ function row(
     expiresAt: null,
   }) as SwmAuthorInventoryRowV1;
 }
+
+it.each(['before-write', 'lost-commit-ack'])('preserves real SQLite persistence provenance and exact CAS effects: %s', async fault => {
+  const foundation = await createInventory();
+  const inventory = foundation;
+  const request = input(ROW_A);
+  const exec = DatabaseSync.prototype.exec;
+  let armed = true, writeStarted = false;
+  const spy = vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementation(function(this: DatabaseSync, sql: string) {
+    if (armed && fault === 'before-write' && sql.trim().toUpperCase() === 'BEGIN IMMEDIATE') {
+      armed = false; throw new Error('injected SQLite begin interruption');
+    }
+    const result = exec.call(this, sql);
+    if (sql.trim().toUpperCase() === 'BEGIN IMMEDIATE') writeStarted = true;
+    if (armed && writeStarted && fault === 'lost-commit-ack' && sql.trim().toUpperCase() === 'COMMIT') {
+      armed = false; throw new Error('injected lost SQLite commit acknowledgement');
+    }
+    return result;
+  });
+  try {
+    const result = await maintainRfc64SwmAuthorInventoryV1(inventory, request).catch(error => error);
+    expect(armed).toBe(false);
+    if (fault === 'before-write') {
+      expect(result).toBeInstanceOf(InventoryV1CandidateError);
+      expect(isInventoryPersistenceFailure(result)).toBe(true);
+    } else expect(result.status).toBe('applied');
+    const replay = await maintainRfc64SwmAuthorInventoryV1(inventory, request);
+    expect(replay.status).toBe(fault === 'before-write' ? 'applied' : 'existing');
+    expect(replay.snapshot.rows).toHaveLength(1);
+    expect(replay.snapshot.head.payload.version).toBe('0');
+  } finally { spy.mockRestore(); }
+});
 
 async function createInventory(): Promise<Rfc64InventoryV1Foundation> {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'dkg-rfc64-swm-producer-')));
@@ -376,3 +635,55 @@ async function signedSuccessor(
   }) as SignedSwmAuthorInventoryHeadEnvelopeV1;
   return Object.freeze({ head, rows: Object.freeze([...rows]) });
 }
+
+it.each(['busy', 'filesystem-io', 'integrity'] as const)('retains only storage provenance after failed native reopen: %s', async failure => {
+  const inventory = await createInventory(), directory = directories.at(-1)!;
+  const request = input(ROW_A), exec = DatabaseSync.prototype.exec, prepare = DatabaseSync.prototype.prepare;
+  let writing = false, reopening = false;
+  const execSpy = vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementation(function(this: DatabaseSync, sql: string) {
+    if (sql.trim().toUpperCase() === 'BEGIN IMMEDIATE') writing = true;
+    if (writing && sql.trim().toUpperCase() === 'COMMIT') {
+      reopening = true;
+      throw Object.assign(new Error('lost commit outcome'), {code:'ERR_SQLITE_ERROR',errcode:10});
+    }
+    return exec.call(this, sql);
+  });
+  const prepareSpy = vi.spyOn(DatabaseSync.prototype, 'prepare').mockImplementation(function(this: DatabaseSync, sql: string) {
+    if (reopening) {
+      if (failure === 'busy') throw Object.assign(new Error('reopen busy'), {code:'ERR_SQLITE_ERROR',errcode:5});
+      if (failure === 'filesystem-io') throw Object.assign(new Error('reopen I/O unavailable'), {code:'EIO',syscall:'open'});
+      throw new InventoryV1OpenError('newer-schema', 'incompatible schema');
+    }
+    return prepare.call(this, sql);
+  });
+  try {
+    const error = await maintainRfc64SwmAuthorInventoryV1(inventory, request).catch(e => e);
+    expect(reopening).toBe(true);
+    expect(inventory.closed).toBe(true);
+    expect(isInventoryPersistenceFailure(error)).toBe(failure !== 'integrity');
+    const unavailable = await maintainRfc64SwmAuthorInventoryV1(inventory, request).catch(e => e);
+    expect(isInventoryPersistenceFailure(unavailable)).toBe(failure !== 'integrity');
+  } finally { execSpy.mockRestore(); prepareSpy.mockRestore(); inventory.close(); }
+  const healthy = await openInventoryV1(directory); foundations.push(healthy);
+  const result = await maintainRfc64SwmAuthorInventoryV1(healthy, request);
+  expect(result.status).toBe('applied');
+  expect(result.snapshot.rows).toHaveLength(1);
+  expect(result.snapshot.head.payload.version).toBe('0');
+});
+
+
+it.each([[1, false], [11, false], [17, false], [19, false], [26, false], [267, false],
+  [257, false], [8202, false], [8458, false], [5, true], [6, true], [10, true], [266, true], [513, true], [769, true]] as const)(
+  'classifies native SQLite error %s with persistence retry provenance %s', async (errcode, retryable) => {
+  const inventory = await createInventory(), prepare = DatabaseSync.prototype.prepare;
+  const native = Object.assign(new Error('native inventory failure'), { code: 'ERR_SQLITE_ERROR', errcode });
+  const spy = vi.spyOn(DatabaseSync.prototype, 'prepare').mockImplementation(function(this: DatabaseSync, sql: string) {
+    if (/SELECT/i.test(sql) && /swm_author_inventory/i.test(sql)) throw native;
+    return prepare.call(this, sql);
+  });
+  try {
+    const error = await maintainRfc64SwmAuthorInventoryV1(inventory, input(ROW_A)).catch(e => e);
+    expect(error).toMatchObject({ code: 'candidate-database-error', cause: native });
+    expect(isInventoryPersistenceFailure(error)).toBe(retryable);
+  } finally { spy.mockRestore(); inventory.close(); }
+});

@@ -57,6 +57,24 @@ export function isNamedSubgraphSharedMemoryMetaGraph(
   return validateSubGraphName(subGraphName).valid;
 }
 
+/**
+ * The named subgraph whose Shared Memory data graph (aggregate or per-KA) or
+ * META graph `graph` is; `undefined` for the root's graphs and anything else.
+ */
+export function sharedMemoryGraphSubGraphName(
+  contextGraphId: string,
+  graph: string,
+): string | undefined {
+  if (
+    !isNamedSubgraphSharedMemoryDataGraph(contextGraphId, graph)
+    && !isNamedSubgraphSharedMemoryMetaGraph(contextGraphId, graph)
+  ) {
+    return undefined;
+  }
+  // A valid subgraph name has no "/", so it is the first segment after the prefix.
+  return graph.slice(`did:dkg:context-graph:${contextGraphId}/`.length).split('/', 1)[0];
+}
+
 /** Resolve the in-memory ownership partition for a Shared Memory data graph. */
 export function sharedMemoryOwnershipKeyFromGraph(
   contextGraphId: string,

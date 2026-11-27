@@ -1,4 +1,5 @@
 import { normalizeContextGraphNameHashBatch } from './context-graph-name-hash-resolver.js';
+import { verifyMockACKIdentity } from './mock-ack-identity.js';
 import type {
   ChainAdapter,
   IdentityProof,
@@ -8,6 +9,9 @@ import type {
   CanonicalFinalizationReceiptReadOptions,
   CanonicalFinalizationReceiptResolution,
   ChainReadOptions,
+  IdentityReadOptions,
+  ContextGraphAuthorityReadOptions,
+  ContextGraphLiveAuthorityReadOptions,
   CreateKCParams,
   FinalizedChainProofSnapshot,
   UpdateKCParams,
@@ -39,18 +43,24 @@ import type {
   VerifyACKIdentityResult,
   KnowledgeAssetUpdateContext,
   ContextGraphAuthoritySnapshot,
+  ContextGraphFinalizedCreation,
 } from './chain-adapter.js';
+import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
+import type { ContextGraphLiveAuthority } from './chain-adapter.js';
 import type { RandomSamplingAvailability } from './random-sampling-availability.js';
 import { emptyRpcUsageWindow, type RpcUsageWindow } from './rpc-usage.js';
-import {
-  NoEligibleContextGraphError,
-  NoEligibleKnowledgeCollectionError,
-  MerkleRootMismatchError,
-  ChallengeNoLongerActiveError,
-} from './chain-adapter.js';
+import { NoEligibleContextGraphError, NoEligibleKnowledgeCollectionError, MerkleRootMismatchError, ChallengeNoLongerActiveError } from './chain-adapter.js';
 import { ethers } from 'ethers';
+import { MockMarketplaceMethods } from './mock-adapter-marketplace.js';
+import { ChainWriteAheadHookError } from './write-ahead-hook-error.js';
+import {
+  isNonexistentContextGraphStorageRevert,
+  readContextGraphStorageRangeV1,
+} from './evm-context-graph-storage-enumeration.js';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
+/** Fixed ContextGraphStorage address the mock reports for its enumeration. */
+export const MOCK_CONTEXT_GRAPH_STORAGE_ADDRESS = '0x' + 'c6'.repeat(20);
 
 export interface MockChainAdapterOptions {
   /** Seed the first CG allocation for fixtures that model an existing registry. */
@@ -116,6 +126,8 @@ interface MockContextGraph {
   publishAuthority?: string;
   publishAuthorityAccountId: bigint;
   active: boolean;
+  /** Creation time in unix seconds, as `ContextGraphStorage` records it. */
+  createdAt?: number;
   batches: bigint[];
   // OT-RFC-38 / LU-6 Phase B — curator-committed wire id.
   // `null` indicates the curator opted out at create time.
@@ -192,8 +204,9 @@ function applyV10UpdateContext(
 /**
  * In-memory mock chain adapter for off-chain development.
  * Implements both V9 (UAL-based) and V8 (legacy KC) interfaces.
+ * Its base class models the marketplace (mock-adapter-marketplace.ts).
  */
-export class MockChainAdapter implements ChainAdapter {
+export class MockChainAdapter extends MockMarketplaceMethods implements ChainAdapter {
   readonly chainType = 'evm' as const;
   readonly chainId: string;
   readonly signerAddress: string;
@@ -250,6 +263,7 @@ export class MockChainAdapter implements ChainAdapter {
     signerAddress = MOCK_DEFAULT_SIGNER,
     options: Readonly<MockChainAdapterOptions> = {},
   ) {
+    super();
     this.chainId = chainId;
     this.signerAddress = signerAddress;
     this.allowedPublisherAddresses = new Set([ethers.getAddress(signerAddress).toLowerCase()]);
@@ -260,7 +274,8 @@ export class MockChainAdapter implements ChainAdapter {
     this.nextContextGraphId = initialContextGraphId;
   }
 
-  async getIdentityId(): Promise<bigint> {
+  async getIdentityId(options: IdentityReadOptions = {}): Promise<bigint> {
+    options.signal?.throwIfAborted();
     const existing = this.identities.get(this.signerAddress);
     return existing ?? 0n;
   }
@@ -657,9 +672,10 @@ export class MockChainAdapter implements ChainAdapter {
       // Codex PR #241 iter-7: `await` an async WAL hook.
       await params.onBroadcast?.({ txHash: mockUpdateTxHash });
     } catch (hookErr) {
-      throw new Error(
+      throw new ChainWriteAheadHookError(
         `chain:writeahead hook failed before updateKnowledgeCollectionV10 broadcast (mock): ` +
         `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+        hookErr,
       );
     }
 
@@ -829,6 +845,55 @@ export class MockChainAdapter implements ChainAdapter {
 
   async hasContextGraphRegistryScanWatermark(): Promise<boolean> {
     return false;
+  }
+
+  /** The mock's registry scans above always return nothing, as on mainnet. */
+  async hasContextGraphNameRegistry(): Promise<boolean> {
+    return false;
+  }
+
+  /**
+   * ContextGraphStorage id enumeration over the in-memory graphs, through the
+   * same range semantics as the EVM adapter. The anchor is the last mined block.
+   */
+  async readContextGraphStorageRange(
+    options: import('./chain-adapter.js').ContextGraphStorageRangeOptions,
+  ): Promise<import('./chain-adapter.js').ContextGraphStorageRange> {
+    const anchorBlockNumber = Math.max(0, this.nextBlock - 1);
+    const latestId = this.nextContextGraphId - 1n;
+    const nonexistent = (contextGraphId: bigint) => Object.assign(
+      new Error(`ERC721NonexistentToken(${contextGraphId})`),
+      {
+        code: 'CALL_EXCEPTION',
+        revert: { name: 'ERC721NonexistentToken', args: [contextGraphId] },
+      },
+    );
+    return readContextGraphStorageRangeV1({
+      storageAddress: MOCK_CONTEXT_GRAPH_STORAGE_ADDRESS,
+      readAnchor: async () => ({
+        number: anchorBlockNumber,
+        hash: mockBlockHash(anchorBlockNumber),
+      }),
+      readLatestId: async () => latestId,
+      readContextGraph: async (contextGraphId) => {
+        const cg = this.contextGraphs.get(contextGraphId);
+        if (!cg) throw nonexistent(contextGraphId);
+        return [
+          cg.manager,
+          cg.participantAgents,
+          cg.metadataBatchId,
+          cg.active,
+          BigInt(cg.createdAt ?? 0),
+          cg.accessPolicy,
+          cg.publishPolicy,
+          cg.publishAuthority ?? ethers.ZeroAddress,
+          cg.publishAuthorityAccountId,
+        ];
+      },
+      readNameHash: async (contextGraphId) =>
+        this.contextGraphs.get(contextGraphId)?.nameHash ?? ethers.ZeroHash,
+      isNonexistentContextGraph: isNonexistentContextGraphStorageRevert,
+    }, options);
   }
 
   // --- V10 Publishing Conviction NFT (DKGPublishingConvictionNFT) ---
@@ -1325,6 +1390,7 @@ export class MockChainAdapter implements ChainAdapter {
       publishAuthority,
       publishAuthorityAccountId,
       active: true,
+      createdAt: Math.floor(Date.now() / 1000),
       batches: [],
       nameHash,
       ownershipEra: 0n,
@@ -1364,9 +1430,11 @@ export class MockChainAdapter implements ChainAdapter {
    * the historical zero-byte stub so we don't accidentally bind a
    * signer identity that test setup didn't ask for.
    */
-  async signMessage(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }> {
+  async signMessage(messageHash: Uint8Array, options: ChainReadOptions = {}): Promise<{ r: Uint8Array; vs: Uint8Array }> {
+    options.signal?.throwIfAborted();
     if (this.mockACKSigner) {
       const sig = ethers.Signature.from(await this.mockACKSigner.signMessage(messageHash));
+      options.signal?.throwIfAborted();
       return {
         r: ethers.getBytes(sig.r),
         vs: ethers.getBytes(sig.yParityAndS),
@@ -1418,8 +1486,8 @@ export class MockChainAdapter implements ChainAdapter {
     return identityId > 0n;
   }
 
-  async verifyACKIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {
-    return (await this.verifyACKIdentityDetailed(recoveredAddress, claimedIdentityId)).valid;
+  async verifyACKIdentity(recoveredAddress: string, claimedIdentityId: bigint, options: ChainReadOptions = {}): Promise<boolean> {
+    return (await this.verifyACKIdentityDetailed(recoveredAddress, claimedIdentityId, options)).valid;
   }
 
   /**
@@ -1432,14 +1500,9 @@ export class MockChainAdapter implements ChainAdapter {
   async verifyACKIdentityDetailed(
     recoveredAddress: string,
     claimedIdentityId: bigint,
+    options: ChainReadOptions = {},
   ): Promise<VerifyACKIdentityResult> {
-    const normalizedAddress = recoveredAddress.toLowerCase();
-    for (const [addr, id] of this.identities) {
-      if (id === claimedIdentityId && addr.toLowerCase() === normalizedAddress) {
-        return { valid: true };
-      }
-    }
-    return { valid: false, reason: 'key-not-registered' };
+    return verifyMockACKIdentity(this.identities, recoveredAddress, claimedIdentityId, options);
   }
 
   async isOperationalWalletRegistered(identityId: bigint, address: string): Promise<boolean> {
@@ -1544,6 +1607,28 @@ export class MockChainAdapter implements ChainAdapter {
 
   isRandomSamplingReady(): boolean {
     return true;
+  }
+
+  /** The mock exposes the same cohesive solved-period capability as EVM. */
+  getRandomSamplingReadContextReader(): RandomSamplingReadContextReader {
+    const getBindingId = () => 'mock-random-sampling:mock-random-sampling-storage';
+    const isCurrent = (bindingId: string): boolean =>
+      this.isRandomSamplingReady() && bindingId === getBindingId();
+    return Object.freeze({
+      getRandomSamplingBindingId: getBindingId,
+      readRandomSamplingContext: async () => {
+        if (!this.isRandomSamplingReady()) return undefined;
+        return Object.freeze({
+          bindingId: getBindingId(),
+          chronosEpoch: await this.getCurrentEpoch(),
+        });
+      },
+      isRandomSamplingBindingCurrent: isCurrent,
+    });
+  }
+
+  async getCurrentEpoch(): Promise<bigint> {
+    return this.rsEpoch;
   }
 
   async resolveRandomSamplingAvailability(identityId: bigint): Promise<RandomSamplingAvailability> {
@@ -1737,10 +1822,41 @@ export class MockChainAdapter implements ChainAdapter {
     return agents.map((a) => ethers.getAddress(a));
   }
 
+  /**
+   * Live single-read mirror, composed from the three point reads so tests that
+   * stub any of them keep observing exactly the calls they did before.
+   */
+  async getContextGraphLiveAuthority(
+    contextGraphId: bigint,
+    options: ContextGraphLiveAuthorityReadOptions = {},
+  ): Promise<ContextGraphLiveAuthority | null> {
+    options.signal?.throwIfAborted();
+    // Sequential and conditional on purpose: the three-read path this mirrors
+    // never read the policy of an inactive graph nor the roster of a public
+    // one, and suites that stub the point reads observe exactly those calls.
+    // Never `null`: the mock has no "minted but burned" state, and a graph the
+    // mock does not know is exactly what a stubbed liveness probe describes.
+    // Same call arity as the point-read wiring this replaces: options only when
+    // a signal is present. Note the agent now always supplies one on this path
+    // (the read is shared in flight, so a timed-out caller must be able to
+    // leave it), so a spy should pin the id rather than the whole call.
+    const readOptions = options.signal === undefined ? undefined : { signal: options.signal };
+    const live = await (readOptions === undefined
+      ? this.isContextGraphActiveOnChain(contextGraphId)
+      : this.isContextGraphActiveOnChain(contextGraphId, readOptions));
+    if (!live) return { active: false, accessPolicy: 0, participantAgents: [] };
+    const accessPolicy = await (readOptions === undefined
+      ? this.getContextGraphAccessPolicy(contextGraphId)
+      : this.getContextGraphAccessPolicy(contextGraphId, readOptions));
+    if (accessPolicy !== 1) return { active: true, accessPolicy, participantAgents: [] };
+    const participantAgents = await this.getContextGraphParticipantAgents(contextGraphId);
+    return { active: true, accessPolicy, participantAgents };
+  }
+
   /** Offline-development mirror of the finalized RFC-64 authority snapshot. */
   async getContextGraphAuthoritySnapshot(
     contextGraphId: bigint,
-    options: ChainReadOptions = {},
+    options: ContextGraphAuthorityReadOptions = {},
   ): Promise<ContextGraphAuthoritySnapshot> {
     options.signal?.throwIfAborted();
     const cg = this.contextGraphs.get(contextGraphId);
@@ -1773,6 +1889,21 @@ export class MockChainAdapter implements ChainAdapter {
       rosterVersion: cg.rosterVersion.toString(10),
       sourceBlockNumber: cg.authoritySourceBlockNumber.toString(10),
       sourceBlockHash: cg.authoritySourceBlockHash,
+    });
+  }
+
+  async getContextGraphFinalizedCreation(
+    contextGraphId: bigint,
+    options: ContextGraphAuthorityReadOptions = {},
+  ): Promise<ContextGraphFinalizedCreation | undefined> {
+    options.signal?.throwIfAborted();
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (cg === undefined || typeof cg.nameHash !== 'string'
+      || cg.nameHash === ethers.ZeroHash) return undefined;
+    if (cg.accessPolicy !== 0 && cg.accessPolicy !== 1) return undefined;
+    return Object.freeze({
+      nameHash: cg.nameHash,
+      accessPolicy: cg.accessPolicy as 0 | 1,
     });
   }
 
@@ -2059,9 +2190,10 @@ export class MockChainAdapter implements ChainAdapter {
       // completion before the mock "broadcasts".
       await params.onBroadcast?.({ txHash: mockPublishTxHash });
     } catch (hookErr) {
-      throw new Error(
+      throw new ChainWriteAheadHookError(
         `chain:writeahead hook failed before createKnowledgeAssets broadcast (mock): ` +
         `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+        hookErr,
       );
     }
 
@@ -2177,7 +2309,7 @@ export class MockChainAdapter implements ChainAdapter {
     this.events.push({ type, blockNumber: this.nextBlock, data });
   }
 
-  private txResult(success: boolean): TxResult {
+  protected txResult(success: boolean): TxResult {
     const blockNumber = this.nextBlock;
     const txIndex = this.txIndexInBlock++;
     const hash = `0x${blockNumber.toString(16).padStart(64, '0')}${txIndex.toString(16).padStart(4, '0')}`;
@@ -2547,45 +2679,47 @@ export class MockChainAdapter implements ChainAdapter {
     }
   }
 
-  async getKnowledgeAssetUpdateContext(kaId: bigint): Promise<KnowledgeAssetUpdateContext> {
+  private collectionOf(kaId: bigint): MockKnowledgeCollection {
     const entry = this.collections.get(kaId);
     if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return { ...entry.updateContext };
+    return entry;
+  }
+
+  async getKnowledgeAssetUpdateContext(kaId: bigint): Promise<KnowledgeAssetUpdateContext> {
+    return { ...this.collectionOf(kaId).updateContext };
+  }
+
+  /** Charged as the contract charges an extension, at an ask of 1 wei per KiB and epoch; refused once the asset expired. */
+  async extendKnowledgeAssetLifetime(kaId: bigint, epochs: number) {
+    const context = this.collectionOf(kaId).updateContext;
+    if (this.rsEpoch > context.endEpoch) throw new Error(`Mock: Knowledge Asset ${kaId} expired at epoch ${context.endEpoch}`);
+    const tokenAmount = (context.byteSize * BigInt(epochs)) / 1024n || 1n;
+    Object.assign(context, { endEpoch: context.endEpoch + BigInt(epochs), tokenAmount: context.tokenAmount + tokenAmount });
+    return { ...this.txResult(true), tokenAmount, endEpoch: Number(context.endEpoch) };
   }
 
   async getMerkleLeafCount(kaId: bigint): Promise<number> {
-    const entry = this.collections.get(kaId);
-    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return entry.updateContext.merkleLeafCount;
+    return this.collectionOf(kaId).updateContext.merkleLeafCount;
   }
 
   async getCatalogRoot(kaId: bigint): Promise<Uint8Array> {
-    const entry = this.collections.get(kaId);
-    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return entry.catalogRoot;
+    return this.collectionOf(kaId).catalogRoot;
   }
 
   async getCatalogLeafCount(kaId: bigint): Promise<number> {
-    const entry = this.collections.get(kaId);
-    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return entry.catalogLeafCount;
+    return this.collectionOf(kaId).catalogLeafCount;
   }
 
   async getLatestMerkleRootPublisher(kaId: bigint): Promise<string> {
-    const entry = this.collections.get(kaId);
-    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return entry.publisherAddress;
+    return this.collectionOf(kaId).publisherAddress;
   }
 
   async getLatestMerkleRootAuthor(kaId: bigint): Promise<string> {
-    const entry = this.collections.get(kaId);
-    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return entry.authorAddress;
+    return this.collectionOf(kaId).authorAddress;
   }
 
   async getKAContextGraphId(kaId: bigint): Promise<bigint> {
-    const entry = this.collections.get(kaId);
-    return entry?.cgId ?? 0n;
+    return this.collections.get(kaId)?.cgId ?? 0n;
   }
 
   /**

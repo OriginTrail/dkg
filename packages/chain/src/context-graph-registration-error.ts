@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
+import { isTransactionNotSubmitted } from './transaction-submission.js';
 
 const DEFINITIVE_CONTEXT_GRAPH_REGISTRATION_ERROR_CODES = new Set([
   'ACTION_REJECTED',
@@ -33,7 +34,11 @@ export function classifyContextGraphRegistrationFailure(
 ): ContextGraphRegistrationFailureDisposition {
   if (!error || typeof error !== 'object') return 'outcome-ambiguous';
   const record = error as ContextGraphRegistrationFailureLike;
-  if (record.contextGraphRegistrationSubmitted === false) return 'definitive-failure';
+  // The registration, or the create transaction itself, was never sent: a
+  // failure before the broadcast, such as a signer refusing to sign it.
+  if (record.contextGraphRegistrationSubmitted === false || isTransactionNotSubmitted(error)) {
+    return 'definitive-failure';
+  }
   if (record.receipt?.status === 0) return 'definitive-failure';
   const code = typeof record.code === 'string' ? record.code : '';
   if (DEFINITIVE_CONTEXT_GRAPH_REGISTRATION_ERROR_CODES.has(code)) {

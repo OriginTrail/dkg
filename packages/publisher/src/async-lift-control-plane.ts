@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { validateContextGraphId } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { AdmissionJournalEntry, LiftJob, LiftJobHex, LiftJobRequest, PersistedJournalKind, PersistedLiftJob } from './lift-job.js';
 import {
@@ -36,6 +37,8 @@ export const CONTROL_ACCEPTED_AT = 'urn:dkg:publisher:acceptedAt';
 export const CONTROL_CLAIMED_AT = 'urn:dkg:publisher:claimedAt';
 export const CONTROL_VALIDATED_AT = 'urn:dkg:publisher:validatedAt';
 export const CONTROL_BROADCAST_AT = 'urn:dkg:publisher:broadcastAt';
+export const CONTROL_RECEIPT_OBSERVED_AT = 'urn:dkg:publisher:receiptObservedAt';
+export const CONTROL_FINALITY_OBSERVED_AT = 'urn:dkg:publisher:finalityObservedAt';
 export const CONTROL_INCLUDED_AT = 'urn:dkg:publisher:includedAt';
 export const CONTROL_FINALIZED_AT = 'urn:dkg:publisher:finalizedAt';
 export const CONTROL_FAILED_AT = 'urn:dkg:publisher:failedAt';
@@ -183,6 +186,8 @@ export function serializeJob(
   pushOptional(quads, jobRef, CONTROL_CLAIMED_AT, job.timestamps.claimedAt, graphUri, integer);
   pushOptional(quads, jobRef, CONTROL_VALIDATED_AT, job.timestamps.validatedAt, graphUri, integer);
   pushOptional(quads, jobRef, CONTROL_BROADCAST_AT, job.timestamps.broadcastAt, graphUri, integer);
+  pushOptional(quads, jobRef, CONTROL_RECEIPT_OBSERVED_AT, job.timestamps.receiptObservedAt, graphUri, integer);
+  pushOptional(quads, jobRef, CONTROL_FINALITY_OBSERVED_AT, job.timestamps.finalityObservedAt, graphUri, integer);
   pushOptional(quads, jobRef, CONTROL_INCLUDED_AT, job.timestamps.includedAt, graphUri, integer);
   pushOptional(quads, jobRef, CONTROL_FINALIZED_AT, job.timestamps.finalizedAt, graphUri, integer);
   pushOptional(quads, jobRef, CONTROL_FAILED_AT, job.timestamps.failedAt, graphUri, integer);
@@ -583,4 +588,69 @@ function pushOptional<T>(
 ): void {
   if (value === undefined) return;
   quads.push(quad(subject, predicate, formatter(value), graph));
+}
+
+/** Journal lifecycle tuples survive mutable job deletion and are writer-owned. */
+export function journalEntriesContextGraphId(entries: readonly AdmissionJournalEntry[]): string | null {
+  const keys = new Set(entries.map(entry => entry.lineageKey));
+  if (keys.size === 0) return null;
+  if (keys.size !== 1) throw new Error('Publisher journal has conflicting lifecycle provenance');
+  const components = [...keys][0]!.split(String.fromCharCode(0x1f));
+  // The writer excludes only the tuple delimiter from names and other lane
+  // components. Graph identity has its own canonical validation; applying that
+  // restriction to every component would reject valid writer-created journals.
+  if (components.length !== 4 || !validateContextGraphId(components[0]).valid || !components[1]) {
+    throw new Error('Publisher journal has malformed lifecycle provenance');
+  }
+  return components[0];
+}
+
+// `entries` is the queried subset returned to the caller; `lineage` is the full
+// per-lineageKey set the completeness check is computed over (defaults to `entries`
+// for a full-lineage read). maxSeq/complete describe the LINEAGE (no seq gap); a
+// subset read never spuriously reports incomplete. On oxigraph `complete` is
+// authoritative; on external SPARQL backends (no fsync) the highest-seq entry can be
+// lost on crash without a visible gap — documented on JournalReadResult as best-effort.
+export function summarizeJournal(entries: AdmissionJournalEntry[], lineage: AdmissionJournalEntry[] = entries): JournalReadResult {
+  const maxSeq = lineage.reduce((max, e) => Math.max(max, e.seq), -1);
+  const complete = lineage.length === maxSeq + 1;
+  const txHashes = [...new Set(entries.map((e) => e.txHash).filter((h): h is string => h !== undefined))];
+  return { entries, maxSeq, complete, txHashes };
+}
+
+/** #1829 — read query for the append-only journal (facts-pure, or by jobId). */
+export interface JournalReadInput {
+  readonly contextGraphId: string;
+  readonly name: string;
+  readonly subGraphName?: string;
+  readonly agentAddress?: string;
+  /** Optional per-version filter WITHIN the lineage; never the lineage key itself. */
+  readonly intentKey?: string;
+}
+
+/**
+ * #1829 — result of a journal read. `entries` are seq-ordered; `maxSeq` is -1 for an
+ * empty lineage. `complete` = `entries.length === maxSeq + 1` (no seq gap) — authoritative
+ * on oxigraph-worker; best-effort on external SPARQL backends (no fsync, so the
+ * highest-seq entry can be lost on a crash without a gap being visible). `txHashes` are
+ * ATTEMPTED submissions — a reconciler MUST verify each against chain; a hash here is
+ * never proof the tx was sent (a pre-flush 'broadcast' entry can survive a rolled-back
+ * attempt).
+ */
+export interface JournalReadResult {
+  readonly entries: readonly AdmissionJournalEntry[];
+  readonly maxSeq: number;
+  readonly complete: boolean;
+  readonly txHashes: readonly string[];
+}
+
+/**
+ * #1829 — read-only append-only journal reader. Segregated off the base contract (like
+ * the #1828 recovery lookup): only the daemon control instance serves it.
+ */
+export interface VmPublishAdmissionJournalReader {
+  /** Facts-pure lineage read (derives lineageKey from facts, never the ephemeral index). */
+  readJournalByIntent(facts: JournalReadInput): Promise<JournalReadResult>;
+  /** All journal entries bearing this jobId (a successor job continues the lineage seq). */
+  readJournalByJob(jobId: string): Promise<JournalReadResult>;
 }

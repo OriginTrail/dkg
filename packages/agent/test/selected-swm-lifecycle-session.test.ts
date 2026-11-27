@@ -199,6 +199,61 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
     }
   });
 
+  it('reads the manifest again when the kept one names a snapshot the peer no longer serves', async () => {
+    // A Core keeps a copy of an asset it signed a StorageACK for, and its
+    // manifest names the copy's snapshot. Once the asset is in Verified Memory
+    // the Core drops the copy. A member that read the manifest before then
+    // must not keep asking for that snapshot from the manifest it kept.
+    const publicCg = 'selected-kept-manifest-names-a-dropped-snapshot';
+    const manifest = snapshotManifest(publicCg, 1);
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest: { meta: manifest.meta, payloadByRef: new Map() },
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      metaPages: [
+        {
+          quads: manifest.meta,
+          resumedFromOffset: 0,
+          nextOffset: manifest.meta.length,
+          completed: true,
+          timedOut: false,
+        },
+        // The copy is gone: the peer's manifest is empty now.
+        {
+          quads: [],
+          resumedFromOffset: 0,
+          nextOffset: 0,
+          completed: true,
+          timedOut: false,
+        },
+      ],
+      snapshotAnswer: () => [],
+    });
+    const options = {
+      selectedSwmPriority: true,
+      recoveryTargets: [{ contextGraphId: publicCg, lane: 'selected-public' as const }],
+    };
+
+    try {
+      // The first job reads the manifest, and its continuation pass replays
+      // it: the snapshot is asked for twice and never served.
+      const first = await callSelectedSharedMemorySummary(harness.agent, [publicCg], options);
+      expect(harness.probes.metaFetches()).toBe(1);
+      expect(first.continuationPasses).toBe(1);
+      expect(harness.probes.snapshotFetches).toHaveLength(2);
+      expect(first.swmCoverage).toMatchObject({ snapshotsResolved: 0, snapshotsTotal: 1 });
+      expect(classifySharedMemoryFreshness(first).phaseFailed).toBe(true);
+
+      // The next job reads the peer's current manifest instead of the kept one.
+      const second = await callSelectedSharedMemorySummary(harness.agent, [publicCg], options);
+      expect(harness.probes.metaFetches()).toBe(2);
+      expect(harness.probes.snapshotFetches).toHaveLength(2);
+      expect(classifySharedMemoryFreshness(second).phaseFailed).toBe(false);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('treats a responder restart as a new progress generation and completes its replacement prefix', async () => {
     const publicCg = 'selected-restarted-metadata-generation';
     const manifest = snapshotManifest(publicCg, 3);

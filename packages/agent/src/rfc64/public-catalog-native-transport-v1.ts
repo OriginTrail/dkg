@@ -44,6 +44,8 @@ import type {
   Rfc64CatalogAccessAuthorizationV1,
   Rfc64CatalogAccessPolicyRegistryV1,
 } from './catalog-access-policy-v1.js';
+import { withRfc64CatalogAccessAuthorizationScopeV1 } from
+  './catalog-access-policy-v1.js';
 import {
   normalizeRfc64CatalogTransportAuthorizerV1,
   recheckCurrentRfc64CatalogPolicyAfterAwaitV1,
@@ -398,14 +400,14 @@ export class Rfc64PublicCatalogNativeTransportV1 {
     this.requireStarted();
     const remotePeerId = snapshotPeerId(remotePeerIdInput);
     const request = parseCatalogObjectRequest(encodeRequest(requestInput));
-    const response = await this.withCurrentCatalogPolicy(
+    return this.withCurrentCatalogPolicy(
       'catalog-object-fetch-outbound',
       remotePeerId,
       request,
       'select-outbound',
-      (authorization) => {
+      async (authorization) => {
         const privateContent = authorization.accessPolicy === 1;
-        return this.router.send(
+        const response = await this.router.send(
           remotePeerId,
           privateContent
             ? RFC64_CATALOG_OBJECT_FETCH_PROTOCOL_V2
@@ -415,21 +417,13 @@ export class Rfc64PublicCatalogNativeTransportV1 {
             : encodeRequest(request),
           sendOptions,
         );
+        const envelope = parseCatalogObjectResponse(response);
+        if (envelope === null) return null;
+        assertCatalogObjectMatchesRequest(envelope, request);
+        const issuerSignature = await this.verifyExactIssuerSignature(envelope);
+        return Object.freeze({ envelope: deepFreeze(envelope), issuerSignature });
       },
     );
-    const envelope = parseCatalogObjectResponse(response);
-    if (envelope === null) return null;
-    assertCatalogObjectMatchesRequest(envelope, request);
-    const issuerSignature = await recheckCurrentRfc64CatalogPolicyAfterAwaitV1(
-      () => this.assertCatalogPolicyCurrent(
-        'catalog-object-fetch-outbound',
-        remotePeerId,
-        request,
-        'select-outbound',
-      ),
-      () => this.verifyExactIssuerSignature(envelope),
-    );
-    return Object.freeze({ envelope: deepFreeze(envelope), issuerSignature });
   }
 
   async fetchKaBundle(
@@ -563,23 +557,25 @@ export class Rfc64PublicCatalogNativeTransportV1 {
       authorization: Rfc64PublicCatalogNativeAuthorizationV1,
     ) => Value | Promise<Value>,
   ): Promise<Rfc64AuthorizedCatalogWorkResultV1<Value>> {
-    let authorization: Rfc64PublicCatalogNativeAuthorizationV1;
-    try {
-      authorization = await this.requireCatalogPolicy(
-        operation,
-        remotePeerId,
-        request,
-        protocol,
-      );
-    } catch (cause) {
-      if (isPolicyDenied(cause)) return Object.freeze({ authorized: false });
-      throw cause;
-    }
-    const value = await work(authorization);
-    if (!await this.isCatalogPolicyAuthorized(operation, remotePeerId, request, protocol)) {
-      return Object.freeze({ authorized: false });
-    }
-    return Object.freeze({ authorized: true, value });
+    return withRfc64CatalogAccessAuthorizationScopeV1(async () => {
+      let authorization: Rfc64PublicCatalogNativeAuthorizationV1;
+      try {
+        authorization = await this.requireCatalogPolicy(
+          operation,
+          remotePeerId,
+          request,
+          protocol,
+        );
+      } catch (cause) {
+        if (isPolicyDenied(cause)) return Object.freeze({ authorized: false });
+        throw cause;
+      }
+      const value = await work(authorization);
+      if (!await this.isCatalogPolicyAuthorized(operation, remotePeerId, request, protocol)) {
+        return Object.freeze({ authorized: false });
+      }
+      return Object.freeze({ authorized: true, value });
+    });
   }
 
   private async isCatalogPolicyAuthorized(
@@ -611,7 +607,7 @@ export class Rfc64PublicCatalogNativeTransportV1 {
       authorization: Rfc64PublicCatalogNativeAuthorizationV1,
     ) => Value | Promise<Value>,
   ): Promise<Value> {
-    return (async () => {
+    return withRfc64CatalogAccessAuthorizationScopeV1(async () => {
       const authorization = await this.requireCatalogPolicy(
         operation,
         remotePeerId,
@@ -621,7 +617,7 @@ export class Rfc64PublicCatalogNativeTransportV1 {
       const value = await work(authorization);
       await this.assertCatalogPolicyCurrent(operation, remotePeerId, request, protocol);
       return value;
-    })();
+    });
   }
 
   private async assertCatalogPolicyCurrent(

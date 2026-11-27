@@ -127,7 +127,9 @@ describe('endpoint-stickiness carve-outs: tip-sensitive reads pass skipPreferred
     // eslint-disable-next-line no-empty
     for await (const _ of a.listenForEvents({ eventTypes: ['KnowledgeBatchCreated'], fromBlock: 0 })) { void _; }
     expect(readContractWith.calls).toHaveLength(1);
-    expect(readContractWith.calls[0][3]).toMatchObject({ policy: 'wideLogScan', skipPreferred: true });
+    // Uncapped per attempt: each physical eth_getLogs of the (possibly split)
+    // range carries the wide-scan deadline itself.
+    expect(readContractWith.calls[0][3]).toMatchObject({ policy: 'durablePagedLogScan', skipPreferred: true });
   });
 });
 

@@ -1,5 +1,8 @@
+import type { WorkerLiftJobClaimSession } from '../src/lift-job-transition-scope.js';
+import type { AsyncLiftJournalCompletion, JournalOperation } from '../src/async-lift-journal-completion.js';
+import type { ActiveLiftJobClaim } from '../src/async-lift-publisher-types.js';
 import { beforeAll, beforeEach, afterAll, describe, expect, it } from 'vitest';
-import { GraphManager, OxigraphStore, PrivateContentStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, PrivateContentStore, StoreReadTransportFailure } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -148,6 +151,16 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       maxRetries: options.config?.maxRetries,
       graphUri: options.config?.graphUri,
     });
+  }
+
+  function recordAcceptedWithinOperation(publisher: unknown, claim: ActiveLiftJobClaim, txHash: string): Promise<void> {
+    const internal = publisher as {
+      journalCompletion: AsyncLiftJournalCompletion;
+      claimCoordinator: { openWorkerSession(owner: JournalOperation, claim: ActiveLiftJobClaim): WorkerLiftJobClaimSession };
+      recordRpcAccepted(session: WorkerLiftJobClaimSession, record: { txHash: string; nonce: number }): Promise<void>;
+    };
+    return internal.journalCompletion.runPublicOperation((owner) =>
+      internal.recordRpcAccepted(internal.claimCoordinator.openWorkerSession(owner, claim), { txHash, nonce: 4 }));
   }
 
   function confirmedPublishResult() {
@@ -881,6 +894,134 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(processed?.broadcast).toBeUndefined();
   });
 
+  it.each([
+    'finalized-name-absence-unaccepted',
+    'chain-name-binding-unavailable',
+    'authority-circuit-open',
+    'local-chain-binding-unavailable',
+    'local-existence-unavailable',
+    'chain-access-policy-unavailable',
+    'chain-access-policy-timeout',
+    'chain-participant-authority-unavailable',
+    'rfc64-private-read-roster-unavailable',
+    'approved-member-metadata-pending',
+  ])('retries transient authority reason %s from validated without inventing broadcast evidence', async (reason) => {
+    const publisher = createPublisher({
+      config: {
+        retryBackoffBaseMs: 100,
+        retryBackoffMaxMs: 1_000,
+        rand: () => 0.5,
+        knowledgeAssetVmPublishHandler: {
+          execute: async () => {
+            throw Object.assign(
+              new Error(`signing authority is unavailable (${reason})`),
+              {
+                code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+                reason,
+              },
+            );
+          },
+        },
+      },
+    });
+    const shareOperationId = `rootless-authority-${reason}-op`;
+    await stageRootlessSnapshot(shareOperationId);
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure).toMatchObject({
+      failedFromState: 'validated',
+      code: 'authority_unavailable',
+      retryable: true,
+      resolution: 'reset_to_accepted',
+    });
+    expect(processed?.broadcast).toBeUndefined();
+    expect((processed?.timestamps.nextRetryAt ?? 0) - (processed?.timestamps.updatedAt ?? 0))
+      .toBe(100);
+    expect(publisher.describeConfiguredRetryState(processed!)).toMatchObject({
+      autoRetryEligible: true,
+      waitingReason: 'backoff',
+    });
+  });
+
+  it.each([
+    'chain-access-policy-unknown',
+    'chain-participant-authority-unsupported',
+    'chain-participant-authority-invalid',
+    'future-unclassified-authority-reason',
+  ])('keeps terminal/unknown structured authority reason %s out of the retry lane', async (reason) => {
+    const publisher = createPublisher({
+      config: {
+        knowledgeAssetVmPublishHandler: {
+          execute: async () => {
+            throw Object.assign(new Error(`unsupported registered authority (${reason})`), {
+              code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+              reason,
+            });
+          },
+        },
+      },
+    });
+    const shareOperationId = `rootless-terminal-authority-${reason}-op`;
+    await stageRootlessSnapshot(shareOperationId);
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.failure).toMatchObject({
+      failedFromState: 'validated',
+      code: 'authority_forbidden',
+      retryable: false,
+    });
+    expect(processed?.broadcast).toBeUndefined();
+    expect(processed?.timestamps.nextRetryAt).toBeUndefined();
+    expect(publisher.describeConfiguredRetryState(processed!)).toMatchObject({
+      autoRetryEligible: false,
+    });
+  });
+
+  it('fails closed when a structured authority reason cannot be read', async () => {
+    const publisher = createPublisher({
+      config: {
+        knowledgeAssetVmPublishHandler: {
+          execute: async () => {
+            const failure = Object.assign(new Error('unreadable registered authority reason'), {
+              code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+            });
+            Object.defineProperty(failure, 'reason', {
+              get: () => { throw new Error('hostile reason getter'); },
+            });
+            throw failure;
+          },
+        },
+      },
+    });
+    const shareOperationId = 'rootless-hostile-authority-reason-op';
+    await stageRootlessSnapshot(shareOperationId);
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.failure).toMatchObject({
+      failedFromState: 'validated',
+      code: 'authority_forbidden',
+      retryable: false,
+    });
+    expect(processed?.broadcast).toBeUndefined();
+    expect(processed?.timestamps.nextRetryAt).toBeUndefined();
+  });
+
   it('exposes the SWM share operation contract', async () => {
     const publisherContract: Publisher = makeTestPublisher({
       store,
@@ -1323,8 +1464,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       },
     });
     const writtenStatuses: string[] = [];
-    const originalReplaceSubject = store.replaceSubject.bind(store);
-    store.replaceSubject = async (...args) => {
+    const originalReplaceSubject = store.replaceSubjectAndInsert.bind(store);
+    store.replaceSubjectAndInsert = async (...args) => {
       if (args[0] === DEFAULT_CONTROL_GRAPH_URI && args[1] === jobSubject(jobId)) {
         const status = args[2].find((entry) => entry.predicate === CONTROL_STATUS)?.object;
         if (status) writtenStatuses.push(status);
@@ -1817,7 +1958,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(processed?.failure?.code).toBe('canonicalization_failed');
   });
 
-  it('classifies transient shared-memory resolution failures as retryable validation failures', async () => {
+  it.each([true, false])('classifies shared-memory resolution failures using typed evidence: %s', async (typed) => {
     const publisher = createPublisher({
       config: {
         publishExecutor: async () => {
@@ -1833,7 +1974,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const originalQuery = store.query.bind(store);
     store.query = async (sparql: string) => {
       if (sparql.includes('_shared_memory_meta')) {
-        throw new Error('shared memory store timeout');
+        throw typed ? new StoreReadTransportFailure(new TypeError('fetch failed')) : new Error('shared memory store timeout');
       }
       return originalQuery(sparql);
     };
@@ -1841,8 +1982,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const processed = await publisher.processNext('wallet-1');
 
     expect(processed?.status).toBe('failed');
-    expect(processed?.failure?.code).toBe('workspace_unavailable');
-    expect(processed?.failure?.retryable).toBe(true);
+    expect(processed?.failure?.code).toBe(typed ? 'workspace_unavailable' : 'validation_unknown');
+    expect(processed?.failure?.retryable).toBe(typed);
   });
 
   it('lists and counts jobs by status', async () => {
@@ -1960,7 +2101,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     });
 
     await expect(Promise.all([
-      (publisher as any).recordRpcAccepted(claim, { txHash, nonce: 4 }),
+      recordAcceptedWithinOperation(publisher, claim!, txHash),
       publisher.reconcileTransactions(),
     ])).resolves.toBeDefined();
     expect(await publisher.getStatus(jobId)).toMatchObject({
@@ -2007,7 +2148,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     expect(await reconciler.reconcileTransactions()).toBe(1);
     await expect(
-      (worker as any).recordRpcAccepted(claim, { txHash, nonce: 4 }),
+      recordAcceptedWithinOperation(worker, claim, txHash),
     ).resolves.toBeUndefined();
     expect(await worker.getStatus(jobId)).toMatchObject({
       jobId,

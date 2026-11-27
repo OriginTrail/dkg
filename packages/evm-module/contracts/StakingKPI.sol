@@ -16,6 +16,7 @@ import {IdentityLib} from "./libraries/IdentityLib.sol";
 import {EpochStorage} from "./storage/EpochStorage.sol";
 import {RandomSamplingStorage} from "./storage/RandomSamplingStorage.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
+import {QueryInferenceSettlement} from "./QueryInferenceSettlement.sol";
 
 contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "StakingKPI";
@@ -29,7 +30,13 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
     //           simulator) remain V8 stake-base keyed; they are accurate for
     //           V8 archive queries but return 0 for V10 nodes. A V10
     //           tokenId-keyed equivalent is a separate follow-up PR.
-    string private constant _VERSION = "10.0.2";
+    //   10.1.0 — Mirrors StakingV10 10.1.0: a node's gross reward for an
+    //           epoch adds its gross from the query/inference pool (OT-RFC-27)
+    //           to the publishing pool's score share before the operator fee,
+    //           read through `QueryInferenceSettlement.queryInferenceGross`.
+    //           The settlement is read from the Hub at each use, where the Hub
+    //           holds it.
+    string private constant _VERSION = "10.1.0";
     uint256 public constant SCALE18 = 1e18;
 
     IdentityStorage public identityStorage;
@@ -77,6 +84,14 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
         randomSamplingStorage = RandomSamplingStorage(hub.getContractAddress("RandomSamplingStorage"));
         epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
+    }
+
+    /// @notice The query/inference pool's settlement (OT-RFC-27, 10.1.0), read
+    ///         from the Hub at each use, as `StakingV10` reads it; 0 where the
+    ///         Hub holds none, as on a network without the pool.
+    function queryInferenceSettlement() public view returns (QueryInferenceSettlement) {
+        if (!hub.isContract("QueryInferenceSettlement")) return QueryInferenceSettlement(address(0));
+        return QueryInferenceSettlement(hub.getContractAddress("QueryInferenceSettlement"));
     }
 
     /**
@@ -205,6 +220,9 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
      * @dev Fetch the net rewards for all node's delegators in an epoch (rewards of node's delegators - operator fee)
      * Calculates the total rewards available to node's delegators after operator fees are deducted
      * Handles both cases: when operator fee has been claimed and when it hasn't
+     * 10.1.0 — as `StakingV10._nodeEpochReward` computes it: the node's score share of the publishing
+     * pool plus its gross from the query/inference pool (OT-RFC-27), less the operator fee. For an ended
+     * epoch that is what a claim pays; for the current epoch it is the split as if the epoch ended now.
      * @param identityId Node's identity ID to get net rewards for
      * @param epoch Epoch number to calculate net rewards for
      * @return Net rewards available for distribution to the node's delegators in the epoch
@@ -225,9 +243,13 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
         if (allNodesScore18 == 0) return 0;
 
         uint256 epocRewardsPool = epochStorage.getEpochPool(1, epoch);
-        if (epocRewardsPool == 0) return 0;
 
         uint256 totalNodeRewards = (epocRewardsPool * nodeScore18) / allNodesScore18;
+        QueryInferenceSettlement settlement = queryInferenceSettlement();
+        if (address(settlement) != address(0)) {
+            totalNodeRewards += settlement.queryInferenceGross(epoch, identityId);
+        }
+        if (totalNodeRewards == 0) return 0;
 
         uint256 feePercentageForEpoch = profileStorage.getOperatorFeePercentageByTimestampReverse(
             identityId,

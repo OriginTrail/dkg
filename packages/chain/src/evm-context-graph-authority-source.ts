@@ -2,10 +2,6 @@
 
 import { ethers } from 'ethers';
 import type { ContextGraphPublishDomainV1 } from '@origintrail-official/dkg-core';
-import type { ContextGraphAuthorityHistoryResolution } from './context-graph-authority-history.js';
-import type {
-  ContextGraphAuthorityIndexState,
-} from './context-graph-authority-index-checkpoint.js';
 import type { RawContextGraphAuthorityIndexEvent } from
   './context-graph-authority-index-reducer.js';
 import {
@@ -30,24 +26,6 @@ export type EvmContextGraphCurrentAuthorityState = Readonly<{
   accessPolicy: ContextGraphAuthorityState['accessPolicy'];
   participantAgents: readonly string[];
 }> & ContextGraphPublishDomainV1;
-
-export interface EvmContextGraphAuthoritySourceResult {
-  readonly state: ContextGraphAuthorityState;
-  /** Final cross-read fence or legacy checkpoint publication. */
-  stabilize(): Promise<void>;
-}
-
-export type EvmContextGraphAuthoritySource =
-  | Readonly<{
-      kind: 'indexed';
-      readSnapshot(): Promise<ContextGraphAuthorityIndexState>;
-      stabilize(): Promise<void>;
-    }>
-  | Readonly<{
-      kind: 'legacy';
-      readCurrent(): Promise<unknown>;
-      readHistory(): Promise<ContextGraphAuthorityHistoryResolution>;
-    }>;
 
 function tupleField(value: unknown, name: string, index: number): unknown {
   if (value === null || typeof value !== 'object') return undefined;
@@ -97,33 +75,6 @@ export function normalizeEvmContextGraphCurrentAuthorityState(
     accessPolicy,
     ...publishDomain,
     participantAgents: Object.freeze(participantAgents),
-  });
-}
-
-/** Resolve either authority source into one typed model for snapshot assembly. */
-export async function resolveEvmContextGraphAuthoritySource(
-  source: EvmContextGraphAuthoritySource,
-): Promise<EvmContextGraphAuthoritySourceResult> {
-  if (source.kind === 'indexed') {
-    const indexed = await source.readSnapshot();
-    return Object.freeze({
-      state: indexed,
-      stabilize: source.stabilize,
-    });
-  }
-  const [rawCurrent, history] = await Promise.all([
-    source.readCurrent(),
-    source.readHistory(),
-  ]);
-  const { throughBlockNumber: _number, throughBlockHash: _hash, ...generation } =
-    history.state;
-  return Object.freeze({
-    state: Object.freeze(Object.assign(
-      {},
-      normalizeEvmContextGraphCurrentAuthorityState(rawCurrent),
-      generation,
-    )),
-    stabilize: history.publish,
   });
 }
 

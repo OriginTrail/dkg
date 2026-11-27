@@ -11,6 +11,10 @@ import type {
   StrictCurrentFinalizedEvmReadCallV1,
   StrictCurrentFinalizedEvmSnapshotScopeV1,
 } from '@origintrail-official/dkg-chain';
+import {
+  FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
+  FinalizedVmChainInventoryLimitErrorV1,
+} from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import {
   OxigraphStore,
@@ -203,6 +207,26 @@ describe('RFC-64 finalized VM runtime', () => {
       /known-incomplete: no-authorized-provider/u,
     );
     expect(materialize).not.toHaveBeenCalled();
+  });
+
+  it('refuses a graph with more assets on chain than one pinned scan reads, with the scanner\'s own typed error (GH#3134)', async () => {
+    const placement = await createRfc64FinalizedVmPlacementFixture({ kaNumber: 1n });
+    const transport = snapshotTransport({
+      accessPolicy: 1,
+      kaCount: BigInt(FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 + 1),
+    });
+    const materialize = vi.fn<FinalizedVmMaterializerV1>(async () => receipt());
+    const runtime = createFinalizedVmRuntimeV1(runtimeConfig(transport.snapshot, materialize));
+
+    const refusal = await runtime(privateRequest(placement)).then(
+      () => { throw new Error('the runtime was expected to refuse'); },
+      (error: unknown) => error,
+    );
+    // Not wrapped on the way up: the receiver classifies exactly this class.
+    expect(refusal).toBeInstanceOf(FinalizedVmChainInventoryLimitErrorV1);
+    expect(refusal).toMatchObject({ code: 'resource-limit' });
+    expect(materialize).not.toHaveBeenCalled();
+    expect(transport.isOpen()).toBe(false);
   });
 
   it('atomically promotes the verified catalog projection into an exact VM graph', async () => {
@@ -847,6 +871,8 @@ function snapshotTransport(options: {
   readonly nameHash?: string;
   readonly assertionRoot?: string;
   readonly kaNumbers?: readonly bigint[];
+  /** The graph's asset count on chain, when it is not the number of `kaNumbers`. */
+  readonly kaCount?: bigint;
 } = {}) {
   const kaNumbers = options.kaNumbers ?? [1n];
   let open = false;
@@ -895,7 +921,10 @@ function snapshotTransport(options: {
       case CG.getFunction('isContextGraphActive')!.selector:
         return CG.encodeFunctionResult('isContextGraphActive', [true]);
       case CG.getFunction('getContextGraphKaCount')!.selector:
-        return CG.encodeFunctionResult('getContextGraphKaCount', [BigInt(kaNumbers.length)]);
+        return CG.encodeFunctionResult(
+          'getContextGraphKaCount',
+          [options.kaCount ?? BigInt(kaNumbers.length)],
+        );
       case CG.getFunction('getContextGraphKaAt')!.selector: {
         const [, ordinal] = CG.decodeFunctionData('getContextGraphKaAt', call.data);
         const kaNumber = kaNumbers[Number(ordinal)];

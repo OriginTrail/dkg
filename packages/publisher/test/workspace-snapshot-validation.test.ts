@@ -1,5 +1,6 @@
 import { mkdtemp, mkdir, readFile, rename, rm, stat, symlink, truncate, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import type { BigIntStats } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -18,6 +19,30 @@ const quads = [{ subject: 'urn:validation:subject', predicate: 'urn:predicate', 
 const digest = workspacePublicQuadsDigest(quads);
 const tempDirs: string[] = [];
 const options = { gc: { enabled: false } };
+
+// Same-size writes can share mtime/ctime even on a nanosecond-stat filesystem (WSL ext4).
+// Fault fixtures must change the metadata they intend validation to observe, not depend on a tick.
+async function writeWithChangedMtime(path: string, content: string): Promise<void> {
+  const before = await stat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') throw error;
+    return undefined;
+  });
+  await writeFile(path, content);
+  if (before) await utimes(path, before.atime, new Date(before.mtimeMs + 1000));
+}
+
+async function restoreMtimeWithChangedCtime(path: string, before: BigIntStats): Promise<void> {
+  const deadline = performance.now() + 2000;
+  for (;;) {
+    await utimes(path, before.atime, before.mtime);
+    const after = await stat(path, { bigint: true });
+    expect(after.size).toBe(before.size);
+    expect(after.mtimeNs).toBe(before.mtimeNs);
+    if (after.ctimeNs !== before.ctimeNs) return;
+    if (performance.now() >= deadline) throw new Error('Fixture ctime did not advance within 2 seconds');
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+}
 
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-validation-'));
@@ -61,9 +86,11 @@ describe('immutable snapshot validation cache', () => {
   it.each(['delete', 'truncate', 'corrupt', 'replace', 'same-size-restored-mtime'] as const)(
     'rejects %s after a successful validation and caches any parseable observed facts', async (change) => {
       const f = await fixture();
+      // Pin an exactly restorable mtime before caching; Date otherwise drops sub-ms precision.
+      if (change === 'same-size-restored-mtime') await utimes(f.path, new Date(0), new Date(0));
       expect(await f.validate()).toBe(true);
       const original = await readFile(f.path, 'utf8');
-      const before = await stat(f.path);
+      const before = await stat(f.path, { bigint: true });
       if (change === 'delete') await rm(f.path);
       if (change === 'truncate') await truncate(f.path, 0);
       if (change === 'corrupt') await writeFile(f.path, 'invalid N-Quads');
@@ -73,13 +100,13 @@ describe('immutable snapshot validation cache', () => {
       }
       if (change === 'same-size-restored-mtime') {
         await writeFile(f.path, original.replace('value', 'other'));
-        await utimes(f.path, before.atime, before.mtime);
+        await restoreMtimeWithChangedCtime(f.path, before);
       }
       await expect(f.validate()).resolves.toBe(false);
       const reads = f.load.mock.calls.length;
       await expect(f.validate()).resolves.toBe(false);
       expect(f.load).toHaveBeenCalledTimes(change === 'corrupt' ? reads + 1 : reads);
-      await writeFile(f.path, original);
+      await writeWithChangedMtime(f.path, original);
       await expect(f.validate()).resolves.toBe(true);
       const recoveredReads = f.load.mock.calls.length;
       await expect(f.validate()).resolves.toBe(true);
@@ -170,7 +197,7 @@ describe('immutable snapshot validation cache', () => {
     const originalLoad = f.load.getMockImplementation()!;
     const load = f.load.mockImplementationOnce(async (source) => {
       const result = await originalLoad(source);
-      if (change === 'modify') await writeFile(f.path, (await readFile(f.path, 'utf8')).replace('value', 'other'));
+      if (change === 'modify') await writeWithChangedMtime(f.path, (await readFile(f.path, 'utf8')).replace('value', 'other'));
       if (change === 'delete') await rm(f.path);
       if (change === 'replace-identical') {
         await writeFile(`${f.path}.replacement`, await readFile(f.path));

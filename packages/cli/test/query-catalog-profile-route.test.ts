@@ -4,6 +4,7 @@ import {
   buildQueryCatalogWrite,
   QUERY_CATALOG_READ_CAPABILITIES,
   QUERY_CATALOG_SCHEMA_VERSION,
+  queryCatalogProfileUri,
 } from '@origintrail-official/dkg-core/query-catalog';
 import { StoreSchedulerBusyError, type Quad } from '@origintrail-official/dkg-storage';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
@@ -96,7 +97,9 @@ function fakeCatalogAgent(options: FakeCatalogAgentOptions = {}) {
       accessPolicy: 'private' as const,
     })),
     resolveAgentByToken: vi.fn(() => undefined),
-    canReadContextGraph: vi.fn(async () => true),
+    resolveContextGraphReadAuthority: vi.fn(async (): Promise<import('@origintrail-official/dkg-agent').ContextGraphReadAuthorityDecision> => ({
+      outcome: 'allowed', grantScope: 'caller', source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'forbidden',
+    })),
     _test: { assertions, assertionGraphs, registered },
   };
 }
@@ -190,10 +193,33 @@ function writeContext(
 }
 
 describe('/api/profile/query-catalog/read', () => {
+  it('filters one catalog before every layer read and safely encodes its identity', async () => {
+    const agent = fakeCatalogAgent();
+    const slug = 'current"> } ?x ?y ?z { #';
+    const {context,response}=requestContext('/api/profile/query-catalog/read',{contextGraphId:CONTEXT_GRAPH_ID,catalogSlug:slug},agent);
+    await handleMemoryRoutes(context);
+    expect(response.statusCode).toBe(200);
+    const pattern=`VALUES ?catalog { <${queryCatalogProfileUri(CONTEXT_GRAPH_ID,'catalog',slug)}> }`;
+    for(const [sparql,options] of agent.query.mock.calls){
+      expect(sparql).toContain(pattern);expect(options).toMatchObject({contextGraphId:CONTEXT_GRAPH_ID,subGraphName:'meta'});
+    }
+    expect(agent.query).toHaveBeenCalledTimes(3);
+    expect(agent.store.query.mock.calls[0][0]).toContain(pattern);
+  });
+
+  it('rejects invalid catalog filters without querying data', async () => {
+    for(const catalogSlug of ['',42,'x'.repeat(513)]){
+      const agent=fakeCatalogAgent();const {context,response}=requestContext('/api/profile/query-catalog/read',{contextGraphId:CONTEXT_GRAPH_ID,catalogSlug},agent);
+      await handleMemoryRoutes(context);expect(response.statusCode).toBe(400);
+      expect(agent.query).not.toHaveBeenCalled();expect(agent.store.query).not.toHaveBeenCalled();
+    }
+  });
   it('denies an agent-scoped private catalog read before querying any graph', async () => {
     const agent = fakeCatalogAgent();
     agent.resolveAgentByToken.mockReturnValue('0x1111111111111111111111111111111111111111');
-    agent.canReadContextGraph.mockResolvedValue(false);
+    agent.resolveContextGraphReadAuthority.mockResolvedValue({
+      outcome: 'denied', grantScope: 'none', source: 'registered-chain', reason: 'agent-not-in-chain-roster', metadataBootstrap: 'forbidden',
+    });
     const { context, response } = readContext(agent);
     context.requestAgentAddress = '0x1111111111111111111111111111111111111111';
     context.authentication = requestAuthentication({
@@ -206,9 +232,10 @@ describe('/api/profile/query-catalog/read', () => {
     await handleMemoryRoutes(context);
 
     expect(response.statusCode).toBe(403);
-    expect(agent.canReadContextGraph).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, {
+    expect(agent.resolveContextGraphReadAuthority).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, expect.objectContaining({
       callerAgentAddress: '0x1111111111111111111111111111111111111111',
-    });
+      signal: expect.any(AbortSignal),
+    }));
     expect(agent.query).not.toHaveBeenCalled();
     expect(agent.store.query).not.toHaveBeenCalled();
   });
@@ -216,7 +243,9 @@ describe('/api/profile/query-catalog/read', () => {
   it('keeps an auth-disabled agent principal behind the private-graph ACL', async () => {
     const agentAddress = '0x1111111111111111111111111111111111111111';
     const agent = fakeCatalogAgent();
-    agent.canReadContextGraph.mockResolvedValue(false);
+    agent.resolveContextGraphReadAuthority.mockResolvedValue({
+      outcome: 'denied', grantScope: 'none', source: 'registered-chain', reason: 'agent-not-in-chain-roster', metadataBootstrap: 'forbidden',
+    });
     const { context, response } = readContext(agent);
     context.authentication = requestAuthentication({
       kind: 'agent',
@@ -228,16 +257,18 @@ describe('/api/profile/query-catalog/read', () => {
     await handleMemoryRoutes(context);
 
     expect(response.statusCode).toBe(403);
-    expect(agent.canReadContextGraph).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, {
-      callerAgentAddress: agentAddress,
-    });
+    expect(agent.resolveContextGraphReadAuthority).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, expect.objectContaining({
+      callerAgentAddress: agentAddress, signal: expect.any(AbortSignal),
+    }));
     expect(agent.query).not.toHaveBeenCalled();
     expect(agent.store.query).not.toHaveBeenCalled();
   });
 
   it('reads the registered meta subgraph through all Context Graph layers', async () => {
     const agent = fakeCatalogAgent();
-    agent.canReadContextGraph.mockResolvedValue(false);
+    agent.resolveContextGraphReadAuthority.mockResolvedValue({
+      outcome: 'denied', grantScope: 'none', source: 'registered-chain', reason: 'agent-not-in-chain-roster', metadataBootstrap: 'forbidden',
+    });
     const { context, response } = readContext(agent);
     context.authentication = requestAuthentication({ kind: 'nodeOperator', token: 'node-admin-token' });
     context.validTokens = new Set(['node-admin-token']);
@@ -245,7 +276,7 @@ describe('/api/profile/query-catalog/read', () => {
     await handleMemoryRoutes(context);
 
     expect(response.statusCode).toBe(200);
-    expect(agent.canReadContextGraph).not.toHaveBeenCalled();
+    expect(agent.resolveContextGraphReadAuthority).not.toHaveBeenCalled();
     expect(agent.query).toHaveBeenCalledTimes(3);
     for (const view of ['working-memory', 'shared-working-memory', 'verifiable-memory']) {
       expect(agent.query).toHaveBeenCalledWith(
@@ -436,7 +467,7 @@ describe('/api/profile/query-catalog/read', () => {
     }));
     await handleMemoryRoutes(large.context);
     expect(large.response.statusCode).toBe(413);
-    expect(JSON.parse(large.response.body)).toMatchObject({ limitBytes: 1024 * 1024 });
+    expect(JSON.parse(large.response.body)).toMatchObject({ limitBytes: 2 * 1024 * 1024 });
   });
 });
 

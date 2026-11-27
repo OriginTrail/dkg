@@ -1,8 +1,18 @@
 /** Agent-owned admission and scheduling for chain-driven VM reconciliation. */
 
+import {
+  VmReconcileLocalAdmissionWait,
+  type LocalAdmissionWaitOptions,
+} from './internal/vm-reconcile-local-admission-wait.js';
+import {
+  VmReconcileAbsentTargetBackoff,
+  type VmReconcileAbsentTargetBackoffOptions,
+} from './internal/vm-reconcile-absent-target-backoff.js';
+import { VmReconcileLocalRpcRefusalWindow } from './internal/vm-reconcile-local-rpc-refusal.js';
 import type { VmReconcileSweepAdmission } from './internal/vm-reconcile-sweep-admission.js';
 import { VmReconcileSweepPlanner } from './internal/vm-reconcile-sweep.js';
 import {
+  ContextGraphNameAbsentError,
   VmReconcileQueueClosedError,
   VmReconcileQueueFullError,
   type VmReconcileSource,
@@ -56,6 +66,13 @@ export interface VmReconcileDispatcherOptions {
   maxForegroundBurst?: number;
 }
 
+export interface VmReconcileSchedulingOptions extends VmReconcileDispatcherOptions {
+  discoveryBatchSize?: number;
+  periodicBoundBatchSize?: number;
+  /** How long the sweep's unbound lane leaves a graph the chain does not hold. */
+  absentTargetBackoff?: VmReconcileAbsentTargetBackoffOptions;
+}
+
 function vmReconcileSourceRank(source: VmReconcileSource): number {
   if (source === 'manual') return 2;
   if (source === 'live') return 1;
@@ -85,6 +102,8 @@ export class VmReconcileDispatcher<T> {
   private readonly concurrency: number;
   private readonly maxPending: number;
   private readonly maxForegroundBurst: number;
+  private timerBoundOutstanding = 0;
+  private readonly timerBoundOutstandingLimit: number;
   constructor(
     private readonly run: (key: string, source: VmReconcileSource) => Promise<T>,
     private readonly onFailure: (key: string, error: unknown) => void,
@@ -107,12 +126,26 @@ export class VmReconcileDispatcher<T> {
     this.concurrency = concurrency;
     this.maxPending = maxPending;
     this.maxForegroundBurst = maxForegroundBurst;
+    this.timerBoundOutstandingLimit = 2 * concurrency;
   }
 
   /** Enqueue a low-latency chain-event nudge; suppressed until a sweep after failure. */
   triggerLive(key: string): void {
     if (this.states.get(key)?.hold === 'live-blocked') return;
     void this.dispatch(key, 'live').catch(() => undefined);
+  }
+
+  /**
+   * A live nudge with its completion handle. Undefined in the two cases
+   * `triggerLive` drops without a trace: the nudge is held after a failed
+   * pass, or the bounded queue has no room for it.
+   */
+  protected tryDispatchLive(key: string): Promise<T> | undefined {
+    if (this.states.get(key)?.hold === 'live-blocked') return undefined;
+    const outcome = this.admit(key, 'live');
+    if (!('completion' in outcome)) return undefined;
+    void outcome.completion.catch(() => undefined);
+    return outcome.completion;
   }
 
   /** A newly established binding is fresh evidence, so its first live nudge must not inherit an old discovery miss. */
@@ -148,6 +181,26 @@ export class VmReconcileDispatcher<T> {
   protected tryDispatchPeriodic(key: string): Promise<T> | undefined {
     const outcome = this.admit(key, 'periodic');
     if (!('completion' in outcome)) return undefined;
+    void outcome.completion.catch(() => undefined);
+    return outcome.completion;
+  }
+
+  /** Count only newly admitted timer work; coalesced calls create no backlog. */
+  protected tryDispatchPeriodicBoundTimer(key: string): Promise<T> | undefined {
+    if (this.timerBoundOutstanding >= this.timerBoundOutstandingLimit) {
+      const state = this.states.get(key);
+      // Pending/trailing work can coalesce without creating another task.
+      if (!state?.pending && !state?.trailing) return undefined;
+    }
+    const outcome = this.admit(key, 'periodic');
+    if (!('completion' in outcome)) return undefined;
+    if (outcome.kind === 'admitted') {
+      this.timerBoundOutstanding += 1;
+      void outcome.completion.then(
+        () => { this.timerBoundOutstanding -= 1; },
+        () => { this.timerBoundOutstanding -= 1; },
+      );
+    }
     void outcome.completion.catch(() => undefined);
     return outcome.completion;
   }
@@ -469,12 +522,20 @@ class VmReconcileRuntimeDispatcher<T> extends VmReconcileDispatcher<T> {
     super(run, onFailure, options);
     installSweepAdmission(Object.freeze({
       tryAdmit: (key: string) => this.tryDispatchPeriodic(key),
+      tryAdmitBoundTimer: (key: string) => this.tryDispatchPeriodicBoundTimer(key),
       waitForChange: (signal?: AbortSignal) => this.waitForPeriodicStateChange(signal),
       isClosed: () => this.closed,
       retainCapacity: (signal: AbortSignal) => this.retainPeriodicCapacity(signal),
     }));
   }
+
+  /** The runtime's nudge for a graph that waited for sync admission. */
+  nudgeLive(key: string): Promise<T> | undefined {
+    return this.tryDispatchLive(key);
+  }
 }
+
+export type { LocalAdmissionWaitOptions };
 
 /**
  * Cohesive host-owned runtime for foreground nudges and periodic sweep work.
@@ -487,26 +548,146 @@ export class VmReconcileSchedulingRuntime<T> {
   private readonly dispatcher: VmReconcileRuntimeDispatcher<T>;
   private readonly planner: VmReconcileSweepPlanner;
   private readonly sweepAdmission: VmReconcileSweepAdmission<T>;
+  private readonly localAdmissionWait: VmReconcileLocalAdmissionWait;
+  private readonly localRpcRefusals: VmReconcileLocalRpcRefusalWindow;
+  private readonly absentTargets: VmReconcileAbsentTargetBackoff;
 
   constructor(
     run: (key: string, source: VmReconcileSource) => Promise<T>,
     onFailure: (key: string, error: unknown) => void,
-    options: VmReconcileDispatcherOptions = {},
-    discoveryBatchSize = 8,
+    options: VmReconcileSchedulingOptions = {},
   ) {
     let sweepAdmission!: VmReconcileSweepAdmission<T>;
     this.dispatcher = new VmReconcileRuntimeDispatcher(
-      run,
+      async (key, source) => {
+        const pass = this.localAdmissionWait.passStarted(key);
+        let succeeded = false;
+        try {
+          const result = await run(key, source);
+          succeeded = true;
+          this.absentTargets.clear(key);
+          return result;
+        } catch (error) {
+          if (error instanceof ContextGraphNameAbsentError) this.absentTargets.noteAbsent(key);
+          throw error;
+        } finally {
+          this.localRpcRefusals.passEnded(key, succeeded);
+          this.localAdmissionWait.passEnded(pass);
+        }
+      },
       onFailure,
       options,
       (admission) => { sweepAdmission = admission; },
     );
-    this.planner = new VmReconcileSweepPlanner(discoveryBatchSize, sweepAdmission.retainCapacity);
+    this.localAdmissionWait = new VmReconcileLocalAdmissionWait({
+      nudge: (key, deferred) => {
+        if (deferred) {
+          // A pass of the graph that is queued or running, the sweep's for
+          // one, already asks what this nudge would, and parks the graph
+          // again if it must. A second pass queued behind it would run with
+          // no delay between the two and without the hold a failure leaves.
+          if (this.dispatcher.isInFlight(key)) return undefined;
+          // A deferred graph's failed pass left the live hold. This nudge is
+          // that pass's retry, so it lifts the hold it is about to use;
+          // nudges from elsewhere stayed held meanwhile.
+          this.dispatcher.releaseLiveHold(key);
+        }
+        return this.dispatcher.nudgeLive(key);
+      },
+      maxWaiters: options.maxPending ?? 256,
+    });
+    this.localRpcRefusals = new VmReconcileLocalRpcRefusalWindow(options.maxPending ?? 256);
+    this.absentTargets = new VmReconcileAbsentTargetBackoff(options.absentTargetBackoff);
+    this.planner = new VmReconcileSweepPlanner({
+      discoveryBatchSize: options.discoveryBatchSize ?? 8,
+      periodicBoundBatchSize: options.periodicBoundBatchSize ?? 8,
+    }, sweepAdmission.retainCapacity);
     this.sweepAdmission = sweepAdmission;
   }
 
   triggerLive(key: string): void { this.dispatcher.triggerLive(key); }
-  releaseLiveHold(key: string): void { this.dispatcher.releaseLiveHold(key); }
+  /**
+   * Local sync pressure earns a bounded retry, rather than peer backoff: the
+   * graph waits in arrival order and is nudged once the node's sync admission
+   * can take its fetch (see `internal/vm-reconcile-local-admission-wait.ts`).
+   * The nudge re-enters the ordinary bounded dispatcher, including
+   * foreground-burst and periodic fairness.
+   */
+  retryLocalAdmission(key: string, options: LocalAdmissionWaitOptions): void {
+    this.localAdmissionWait.retry(key, options);
+  }
+
+  /**
+   * A graph that just used the node's sync admission and has more to fetch
+   * goes behind the graphs already waiting for it. Returns false, and parks
+   * nothing, when no other graph is waiting.
+   */
+  yieldLocalAdmissionTurn(key: string, options: LocalAdmissionWaitOptions): boolean {
+    return this.localAdmissionWait.yieldTurn(key, options);
+  }
+
+  /**
+   * A pass whose read-authority check got no answer did none of its work, so
+   * its end says nothing about the graph. The graph waits with those refused
+   * by sync admission and is asked again from there (see `defer` in
+   * `internal/vm-reconcile-local-admission-wait.ts`). The pass still ends as
+   * a failed one, so live nudges from elsewhere stay held; only the wait's own
+   * nudge lifts that hold. Undefined when the wait did not take the graph: the
+   * periodic sweep then retries it, as after any failed pass.
+   */
+  deferForReadAuthority(
+    key: string,
+    options: LocalAdmissionWaitOptions,
+  ): 'parked' | 'again' | undefined {
+    return this.localAdmissionWait.defer(key, options);
+  }
+
+  /**
+   * The graph's running pass met a chain read whose attempt the node's own
+   * RPC admission refused, so that attempt was never sent. The graph waits
+   * like one whose read-authority check got no answer, and is asked again
+   * from there, while it is inside its window (see
+   * `internal/vm-reconcile-local-rpc-refusal.ts`). Undefined when the window
+   * has run out or the wait did not take the graph: the periodic sweep then
+   * retries it, as after any pass that ended this way before.
+   */
+  deferForLocalRpcRefusal(
+    key: string,
+    options: LocalAdmissionWaitOptions,
+  ): 'parked' | 'again' | undefined {
+    if (!this.localRpcRefusals.refused(key)) return undefined;
+    return this.localAdmissionWait.defer(key, options);
+  }
+
+  /**
+   * The graph's running pass met such a read and is not asked again for it.
+   * Its window stays as it is all the same: only a pass that succeeds
+   * without meeting one shows the node's RPC admission open again.
+   */
+  noteLocalRpcRefusal(key: string): void {
+    this.localRpcRefusals.refused(key);
+  }
+
+  /**
+   * The graph's running pass was overtaken: its target changed under it on a
+   * node that is not shutting down (see
+   * `internal/vm-reconcile-overtaken-pass.ts`). The graph waits like one whose
+   * read was refused and is asked again from there. One window bounds both:
+   * a graph whose passes keep ending either way is left to the periodic sweep
+   * once it has run out. Undefined when it has, or when the wait did not take
+   * the graph.
+   */
+  deferForOvertakenPass(
+    key: string,
+    options: LocalAdmissionWaitOptions,
+  ): 'parked' | 'again' | undefined {
+    return this.deferForLocalRpcRefusal(key, options);
+  }
+  /** Fresh evidence for the graph, such as a new binding: no earlier failure holds it back. */
+  releaseLiveHold(key: string): void {
+    this.absentTargets.clear(key);
+    this.dispatcher.releaseLiveHold(key);
+  }
   triggerPeriodic(key: string): void { this.dispatcher.triggerPeriodic(key); }
   tryTriggerPeriodic(key: string): boolean { return this.dispatcher.tryTriggerPeriodic(key); }
   triggerManual(key: string): Promise<T> { return this.dispatcher.triggerManual(key); }
@@ -529,8 +710,12 @@ export class VmReconcileSchedulingRuntime<T> {
   ): void {
     this.planner.admit(
       boundKeys,
-      unboundKeys,
-      key => isCurrent() ? this.sweepAdmission.tryAdmit(key) : undefined,
+      this.absentTargets.due(unboundKeys),
+      {
+        tryAdmit: key => isCurrent() ? this.sweepAdmission.tryAdmit(key) : undefined,
+        tryAdmitBoundTimer: key => isCurrent()
+          ? this.sweepAdmission.tryAdmitBoundTimer(key) : undefined,
+      },
     );
   }
 
@@ -542,7 +727,7 @@ export class VmReconcileSchedulingRuntime<T> {
   ): Promise<void> {
     return this.planner.complete(
       boundKeys,
-      unboundKeys,
+      this.absentTargets.due(unboundKeys),
       this.sweepAdmission,
       isCurrent,
       signal,
@@ -552,6 +737,7 @@ export class VmReconcileSchedulingRuntime<T> {
   resetSweep(): void { this.planner.reset(); }
 
   close(): Promise<void> {
+    this.localAdmissionWait.close();
     this.planner.reset();
     return this.dispatcher.close();
   }

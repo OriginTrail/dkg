@@ -21,12 +21,14 @@ import { ethers } from 'ethers';
 import { join } from 'node:path';
 import {
   FileWorkspacePublicSnapshotStore,
+  snapshotReferenceCheck,
   type SharedMemoryPublicSnapshotStorageConfig,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type {
   Quad,
   TripleStoreConfig,
+  TripleStore,
   LargeLiteralStorageConfig,
 } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
@@ -127,18 +129,26 @@ export function recoverCompactSigner(message: Uint8Array, compact: { r: Uint8Arr
   return ethers.verifyMessage(message, signature);
 }
 
-export function adapterOperationalPrivateKeyAddress(chain: ChainAdapter): string | undefined {
+/**
+ * An adapter's local operational key, if it exposes one: none without a
+ * `getOperationalPrivateKey`, or when that throws (an adapter that signs
+ * through an external signer has no key to expose) or returns no key.
+ */
+export function adapterOperationalPrivateKey(chain: ChainAdapter): string | undefined {
   const operationalKeyGetter = (chain as unknown as { getOperationalPrivateKey?: () => unknown })
     .getOperationalPrivateKey;
   if (typeof operationalKeyGetter !== 'function') return undefined;
   try {
     const privateKey = operationalKeyGetter.call(chain);
-    return typeof privateKey === 'string' && privateKey.length > 0
-      ? privateKeyAddress(privateKey)
-      : undefined;
+    return typeof privateKey === 'string' && privateKey.length > 0 ? privateKey : undefined;
   } catch {
     return undefined;
   }
+}
+
+/** The address of an adapter's local operational key, if it exposes a valid one. */
+export function adapterOperationalPrivateKeyAddress(chain: ChainAdapter): string | undefined {
+  return privateKeyAddress(adapterOperationalPrivateKey(chain));
 }
 
 export function adapterHasOperationalPrivateKey(chain: ChainAdapter): boolean {
@@ -277,12 +287,13 @@ export function defaultLargeLiteralStorage(
 export function createPublicSnapshotStore(
   dataDir: string | undefined,
   config: SharedMemoryPublicSnapshotStorageConfig | undefined,
+  store?: TripleStore,
 ): WorkspacePublicSnapshotStore | undefined {
   if (!dataDir || config?.enabled === false) return undefined;
   return new FileWorkspacePublicSnapshotStore(
     config?.directory ?? join(dataDir, 'swm-public-snapshots'),
     undefined,
-    { gc: config?.gc },
+    { gc: config?.gc, isSnapshotReferenced: store ? snapshotReferenceCheck(store) : undefined },
   );
 }
 
@@ -324,4 +335,24 @@ export function sliceIntoCiphertextChunks(plaintext: Uint8Array): Uint8Array[] {
     chunks.push(plaintext.subarray(off, Math.min(off + CIPHERTEXT_CHUNK_SIZE_BYTES, plaintext.length)));
   }
   return chunks;
+}
+
+export function readNonNegativeNumberEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
+}
+
+export function readPositiveSafeIntegerEnv(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function readNonNegativeIntegerEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return n;
 }

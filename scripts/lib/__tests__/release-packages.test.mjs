@@ -6,15 +6,20 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { fixture as packageCertificateFixture, releaseGitFixture } from './package-certification-fixture.mjs';
+import { preparedRelease } from '../package-certification/publish.mjs';
 import ts from 'typescript';
 
 import {
+  NODE_SQLITE_INSTALL_GUARD,
+  SUBCOMMAND_CHILD_COMMANDS,
   buildInfoPayload,
   discoverPublishablePackages,
   findNodeSqliteEngineViolations,
   findNodeSqliteInstallGuardViolations,
   findMissingCliPackAssets,
   findReleaseVersionMismatches,
+  verifyPack,
   verifyReleaseTag,
   writeBuildInfo,
 } from '../../release-packages.mjs';
@@ -50,8 +55,6 @@ const REPO_CHECKOUT_AVAILABLE = GIT_AVAILABLE && spawnSync('git', [
   '-C', REPO_ROOT, 'rev-parse', '--is-inside-work-tree',
 ], { encoding: 'utf8' }).stdout?.trim() === 'true';
 
-
-const SCRIPT_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../release-packages.mjs');
 
 function writePackage(root, rel, pkg) {
   const filePath = path.join(root, rel, 'package.json');
@@ -336,31 +339,72 @@ test('verifyReleaseTag flags a tag/version mismatch and a missing local tag', ()
   assert.match(missing[0], /not found locally/);
 });
 
-// Regression for the release-blocking promote crash: `run()` with stdio:'inherit'
-// returned null stdout and threw AFTER the first successful `npm dist-tag add`,
-// so a non-dry-run promote moved exactly one tag and exited 1. Exercise the real
-// CLI end-to-end against a stubbed `npm` binary.
-test('promote survives interactive npm calls for the whole package set', () => {
+// The real promotion runner and dist-tag reader against a stubbed `npm` that
+// keeps each package's dist-tags in its own file and answers a code it does not
+// take the way npm does. npm runs without a terminal, the code reaches it only
+// in its environment (an inherited one is dropped), and npm's EOTP stops the run.
+test('promote runs npm without a terminal and hands it the code only in its environment', async (t) => {
+  const fixture = packageCertificateFixture(t);
   const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-npm-shim-'));
-  try {
-    const logPath = path.join(shimDir, 'calls.log');
-    fs.writeFileSync(path.join(shimDir, 'npm'), '#!/bin/sh\necho "$@" >> "$NPM_SHIM_LOG"\n');
-    fs.chmodSync(path.join(shimDir, 'npm'), 0o755);
-    const result = spawnSync(process.execPath, [
-      SCRIPT_PATH, 'promote', '--version', '0.0.0-shimtest', '--tags', 'faketag', '--otp', '000000',
-    ], {
-      encoding: 'utf8',
-      env: { ...process.env, PATH: `${shimDir}:${process.env.PATH}`, NPM_SHIM_LOG: logPath },
-    });
-    assert.equal(result.status, 0, `stderr: ${result.stderr}`);
-    const calls = fs.readFileSync(logPath, 'utf8').trim().split('\n');
-    assert.ok(calls.length >= 2, `expected one npm call per publishable package, got ${calls.length}`);
-    for (const call of calls) {
-      assert.match(call, /^dist-tag add @origintrail-official\/\S+@0\.0\.0-shimtest faketag --otp=000000$/);
-    }
-  } finally {
-    fs.rmSync(shimDir, { recursive: true, force: true });
+  t.after(() => fs.rmSync(shimDir, { recursive: true, force: true }));
+  const calls = path.join(shimDir, 'calls.jsonl'), script = path.join(shimDir, 'npm.cjs');
+  const tagsOf = (name) => {
+    const file = path.join(shimDir, `${encodeURIComponent(name)}.json`);
+    return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
+  };
+  fs.writeFileSync(script, `const fs = require('node:fs');
+const path = require('node:path');
+const args = process.argv.slice(2), [command, action, spec, tag] = args;
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ args, otp: process.env.npm_config_otp ?? null, inherited: process.env.NPM_CONFIG_OTP ?? null, terminal: Boolean(process.stdin.isTTY) }) + '\\n');
+const file = (name) => path.join(${JSON.stringify(shimDir)}, encodeURIComponent(name) + '.json');
+const tagsOf = (name) => fs.existsSync(file(name)) ? JSON.parse(fs.readFileSync(file(name), 'utf8')) : {};
+if (command === 'dist-tag' && action === 'ls') {
+  for (const [name, version] of Object.entries(tagsOf(spec))) console.log(name + ': ' + version);
+} else if (command === 'dist-tag' && action === 'add') {
+  if (process.env.npm_config_otp !== '222222') { console.error('npm error code EOTP'); process.exit(1); }
+  const at = spec.lastIndexOf('@'), name = spec.slice(0, at);
+  fs.writeFileSync(file(name), JSON.stringify({ ...tagsOf(name), [tag]: spec.slice(at + 1) }));
+  console.log('+' + tag + ': ' + spec);
+} else process.exit(91);
+`);
+  fs.writeFileSync(path.join(shimDir, 'npm'), `#!/bin/sh\nexec '${process.execPath}' '${script}' "$@"\n`, { mode: 0o755 });
+  const previous = { PATH: process.env.PATH, NPM_CONFIG_OTP: process.env.NPM_CONFIG_OTP };
+  process.env.PATH = `${shimDir}${path.delimiter}${previous.PATH}`;
+  process.env.NPM_CONFIG_OTP = '999999';
+  t.after(() => {
+    process.env.PATH = previous.PATH;
+    if (previous.NPM_CONFIG_OTP === undefined) delete process.env.NPM_CONFIG_OTP;
+    else process.env.NPM_CONFIG_OTP = previous.NPM_CONFIG_OTP;
+  });
+  const promote = (otp) => preparedRelease({
+    mode: 'promote', bundle: fixture.bundle, receiptFile: fixture.receiptFile, expected: fixture.expected,
+    tags: ['testnet', 'mainnet'], otp, ...releaseGitFixture(fixture.expected),
+    readDist: (pkg) => ({ integrity: pkg.integrity }), askOtp: null, settle: 0, log: () => {},
+  });
+  const packages = fixture.manifest.packages.length;
+
+  // A code npm does not take: the first write goes alone, and npm's own EOTP stops the run.
+  await assert.rejects(promote('111111'), (error) => {
+    assert.match(error.message, /no longer accepts the one-time code \(EOTP/);
+    assert.deepEqual(error.progress.completed, []);
+    assert.equal(error.progress.remaining.length, packages * 2);
+    return true;
+  });
+  const progress = await promote('222222');
+  assert.equal(progress.completed.length, packages * 2);
+  assert.deepEqual(progress.remaining, []);
+
+  const recorded = fs.readFileSync(calls, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  const writes = recorded.filter(({ args }) => args[1] === 'add');
+  assert.equal(writes.length, 1 + packages * 2, 'the refused code was sent once');
+  assert.deepEqual(writes.map(({ otp }) => otp), ['111111', ...Array(packages * 2).fill('222222')]);
+  for (const call of recorded) {
+    assert.equal(call.terminal, false, 'npm must not get a terminal to prompt on');
+    assert.equal(call.inherited, null, 'an inherited code must not reach npm');
+    assert.ok(!call.args.some((arg) => /otp|111111|222222|999999/.test(arg)), `the code must not be an npm argument: ${call.args}`);
+    if (call.args[1] === 'ls') assert.equal(call.otp, null, 'reads carry no code');
   }
+  for (const pkg of fixture.manifest.packages) assert.deepEqual(tagsOf(pkg.name), { testnet: pkg.version, mainnet: pkg.version });
 });
 
 function writeCliPackFixture(root) {
@@ -720,6 +764,77 @@ test('findMissingCliPackAssets runs npm pack in the cli package dir (correct cwd
   };
   findMissingCliPackAssets(root, spyRunner);
   assert.equal(seenCwd, path.join(root, 'packages', 'cli'));
+}));
+
+// The install guards verify-pack checks first: both preinstall hooks and the
+// CLI's guard script.
+function writeInstallGuards(root) {
+  writePackage(root, '.', { name: 'dkg-v10', version: '1.2.3', private: true, scripts: { preinstall: NODE_SQLITE_INSTALL_GUARD.rootCommand } });
+  writePackage(root, 'packages/cli', { name: '@origintrail-official/dkg', version: '1.2.3', scripts: { preinstall: NODE_SQLITE_INSTALL_GUARD.cliCommand } });
+  const guard = path.join(root, 'packages', 'cli', ...NODE_SQLITE_INSTALL_GUARD.cliAsset.split('/'));
+  fs.mkdirSync(path.dirname(guard), { recursive: true });
+  fs.writeFileSync(guard, '');
+}
+
+// A publishable package that imports node:sqlite without the supported
+// engines range, which verify-pack checks second.
+function writeUndeclaredNodeSqliteConsumer(root) {
+  fs.mkdirSync(path.join(root, 'packages', 'query', 'src'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'packages', 'query', 'src', 'index.js'), "import 'node:sqlite';\n");
+}
+
+const refusePack = () => {
+  throw new Error('verify-pack ran the pack after a failed check');
+};
+
+test('verify-pack stops at a missing install guard, before the engines check and the pack', () => withFixture((root) => {
+  // The engines range is wrong too: the install guards are checked first, so
+  // only their violations are returned, and nothing is packed.
+  writeCliPackFixture(root);
+  writeUndeclaredNodeSqliteConsumer(root);
+  assert.equal(findNodeSqliteEngineViolations(root).length, 1);
+  assert.deepEqual(verifyPack({ rootDir: root, runner: refusePack }), {
+    installGuardViolations: findNodeSqliteInstallGuardViolations(root),
+    runtimeViolations: [],
+    missing: [],
+  });
+  assert.deepEqual(findNodeSqliteInstallGuardViolations(root).map(({ path: file }) => file), [
+    'package.json',
+    'packages/cli/package.json',
+    'packages/cli/scripts/verify-node-sqlite-runtime.mjs',
+  ]);
+}));
+
+test('verify-pack stops at a wrong node:sqlite engines range, before the pack', () => withFixture((root) => {
+  writeCliPackFixture(root);
+  writeInstallGuards(root);
+  writeUndeclaredNodeSqliteConsumer(root);
+  const { installGuardViolations, runtimeViolations, missing } = verifyPack({ rootDir: root, runner: refusePack });
+  assert.deepEqual(installGuardViolations, []);
+  assert.deepEqual(runtimeViolations.map(({ name, actual }) => [name, actual]), [['@origintrail-official/dkg-query', undefined]]);
+  assert.deepEqual(missing, []);
+}));
+
+test('verify-pack runs exactly the child commands it declares to the CI routing guard', () => withFixture((root) => {
+  // SUBCOMMAND_CHILD_COMMANDS is what the routing guard's execution graph
+  // reads for `release-packages.mjs verify-pack` (its route to the CLI's
+  // prepack), so the subcommand must run those commands and no others. The
+  // fixture passes the install-guard and engine checks so the pack runs.
+  writeCliPackFixture(root);
+  writeInstallGuards(root);
+  const observed = [];
+  const runner = (command, args, { cwd }) => {
+    observed.push({ command, args, cwd: path.relative(root, cwd).split(path.sep).join('/') });
+    return JSON.stringify([{ files: [] }]);
+  };
+  const { installGuardViolations, runtimeViolations, missing } = verifyPack({ rootDir: root, runner });
+  assert.deepEqual([installGuardViolations, runtimeViolations], [[], []]);
+  assert.ok(missing.length > 0, 'the check reads the pack report');
+  // The pack must stay a dry run in the CLI package: pinned here on its own,
+  // so a change to the declaration cannot move both sides of the check.
+  const pack = { command: 'npm', args: ['pack', '--dry-run', '--json'], cwd: 'packages/cli' };
+  assert.deepEqual(observed, [pack]);
+  assert.deepEqual(SUBCOMMAND_CHILD_COMMANDS['verify-pack'].map(({ command, args, cwd }) => ({ command, args: [...args], cwd })), [pack]);
 }));
 
 // The integration test the mocked-runner unit tests can't give: run the REAL

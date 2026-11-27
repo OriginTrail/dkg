@@ -60,11 +60,15 @@ describe('/api/query error mapping (real daemon)', () => {
   });
 
   it('a valid SELECT is not misclassified as 400 (the #889 widening stays narrow)', async () => {
-    const { status } = await postJson(daemon, '/api/query', {
+    // Scoped like the case above: an unscoped query can be withheld when it
+    // meets a store write, and this daemon has only just started and is still
+    // publishing its agent profile. That answer would say nothing about the
+    // classifier.
+    const { status, body } = await postJson(daemon, '/api/query', {
       sparql: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 1',
-      contextGraphId: 'all',
+      contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
     });
-    expect(status).toBe(200);
+    expect(status, JSON.stringify(body)).toBe(200);
   });
 
   it('rejects a SPARQL mutation (INSERT/DELETE) with a 4xx, not a 500', async () => {

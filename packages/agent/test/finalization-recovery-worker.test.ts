@@ -5,28 +5,23 @@ import {
 } from '../src/finalization-recovery-worker.js';
 
 describe('FinalizationRecoveryWorker', () => {
-  it('continues full batches immediately and uses the configured SQLite batch size', async () => {
-    const processDueBatch = vi.fn()
-      .mockResolvedValueOnce(FINALIZATION_RECOVERY_WORKER_BATCH_SIZE)
-      .mockResolvedValueOnce(0);
-    const worker = new FinalizationRecoveryWorker(
-      processDueBatch,
-      { info: () => {}, warn: () => {} },
-      { pollIntervalMs: 60_000 },
-    );
+  it('yields one poll interval after a full batch and keeps the configured batch size', async () => {
+    vi.useFakeTimers();
+    const processDueBatch = vi.fn().mockResolvedValue(FINALIZATION_RECOVERY_WORKER_BATCH_SIZE);
+    const worker = new FinalizationRecoveryWorker(processDueBatch,
+      { info: () => {}, warn: () => {} }, { pollIntervalMs: 100 });
     try {
       worker.start();
-      await vi.waitFor(() => expect(processDueBatch).toHaveBeenCalledTimes(2));
-      expect(processDueBatch).toHaveBeenNthCalledWith(
-        1,
-        FINALIZATION_RECOVERY_WORKER_BATCH_SIZE,
-      );
-      expect(processDueBatch).toHaveBeenNthCalledWith(
-        2,
-        FINALIZATION_RECOVERY_WORKER_BATCH_SIZE,
-      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(processDueBatch).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(99);
+      expect(processDueBatch).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(processDueBatch).toHaveBeenCalledTimes(2);
+      expect(processDueBatch.mock.calls.every(([limit]) => limit === FINALIZATION_RECOVERY_WORKER_BATCH_SIZE)).toBe(true);
     } finally {
       await worker.stop();
+      vi.useRealTimers();
     }
   });
 

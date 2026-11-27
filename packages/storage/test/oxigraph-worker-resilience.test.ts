@@ -33,9 +33,8 @@ function makeStore(opts?: { operationTimeoutMs?: number }, persistPath?: string)
   }
 }
 
-// For the timeout tests the worker is left mid-operation; close() forcibly
-// terminates the thread, but the graceful close reply may itself time out, so
-// swallow any error during teardown.
+// Timeout tests leave a worker mutation in flight. Drain and close the worker
+// during teardown without replacing an assertion failure with a cleanup error.
 async function closeQuietly(store: OxigraphWorkerStore): Promise<void> {
   await store.close().catch(() => {});
 }
@@ -81,7 +80,9 @@ function abortDuringListenerRegistration(message: string): AbortSignal {
 // busy worker — the production "wedged worker" signature in miniature.
 const BUSY_QUERY = 'ASK { GRAPH <urn:test:g> { ?s ?p ?o } }';
 
-describe('OxigraphWorkerStore resilience', () => {
+// Worker startup, a 50k-quad insert, and the final flush share this harness
+// budget. The 5/10 ms operation deadlines asserted below remain unchanged.
+describe('OxigraphWorkerStore resilience', { timeout: 60_000 }, () => {
   const GRAPH_A = 'urn:test:tracked:a';
   const GRAPH_B = 'urn:test:tracked:b';
   const GRAPH_C = 'urn:test:tracked:c';
@@ -336,8 +337,9 @@ describe('OxigraphWorkerStore resilience', () => {
     // test must assert the quads survive a reopen, not just that close resolves.
     const dir = mkdtempSync(join(tmpdir(), 'oxigraph-worker-close-'));
     const path = join(dir, 'store.nq');
+    let store: OxigraphWorkerStore | undefined;
     try {
-      const store = makeStore({ operationTimeoutMs: 10 }, path);
+      store = makeStore({ operationTimeoutMs: 10 }, path);
       const busy = store.insert(quads(50_000)); // occupies the worker
       // A read queued behind it times out at 10ms — proves the worker is busy.
       await expect(store.query(BUSY_QUERY)).rejects.toThrow(/timed out/);
@@ -356,7 +358,10 @@ describe('OxigraphWorkerStore resilience', () => {
         await closeQuietly(reopened);
       }
     } finally {
-      try { rmSync(dir, { recursive: true, force: true }); } catch { /* */ }
+      // Close even if the queued-read assertion fails, before removing files
+      // that the worker may still be flushing. close() is safe to repeat.
+      if (store) await closeQuietly(store);
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

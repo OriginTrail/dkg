@@ -61,6 +61,8 @@ export interface RpcEndpointsExhaustedErrorLike extends ChainRpcTransportErrorLi
   code: 'RPC_ENDPOINTS_EXHAUSTED';
   exhaustionKind?: RpcEndpointExhaustionKind;
   retryAfterMs?: number;
+  /** Broadcasts only: an endpoint in this pass may have accepted the transaction and lost its answer. */
+  mayHaveBeenAccepted?: boolean;
 }
 
 export class ChainRpcTransportError extends Error {
@@ -96,6 +98,7 @@ export class RpcEndpointsExhaustedError
   declare readonly code: 'RPC_ENDPOINTS_EXHAUSTED';
   readonly exhaustionKind?: RpcEndpointExhaustionKind;
   readonly retryAfterMs?: number;
+  readonly mayHaveBeenAccepted?: boolean;
 
   constructor(
     message: string,
@@ -105,11 +108,13 @@ export class RpcEndpointsExhaustedError
       txHash?: string;
       exhaustionKind?: RpcEndpointExhaustionKind;
       retryAfterMs?: number;
+      mayHaveBeenAccepted?: boolean;
     },
   ) {
     super('RPC_ENDPOINTS_EXHAUSTED', message, opts);
     if (opts?.exhaustionKind) this.exhaustionKind = opts.exhaustionKind;
     if (opts?.retryAfterMs !== undefined) this.retryAfterMs = opts.retryAfterMs;
+    if (opts?.mayHaveBeenAccepted !== undefined) this.mayHaveBeenAccepted = opts.mayHaveBeenAccepted;
   }
 }
 
@@ -117,6 +122,36 @@ export function isRpcEndpointsExhaustedError(
   err: unknown,
 ): err is RpcEndpointsExhaustedErrorLike {
   return isChainRpcTransportError(err) && err.code === 'RPC_ENDPOINTS_EXHAUSTED';
+}
+
+/**
+ * GH#2942 — a TRANSIENT transport failure that names no transaction.
+ *
+ * The three codes are the ones a lookup, estimate or admission wait raises while a transaction is
+ * still being PREPARED: every endpoint failed over (`RPC_ENDPOINTS_EXHAUSTED`), the local request
+ * governor had no capacity (`RPC_REQUEST_GOVERNOR_QUEUE_FULL`), or a bounded request ran out of time
+ * (`RPC_TIMEOUT`). Each of them is also what a failure AFTER a send looks like — a broadcast that
+ * exhausted every endpoint, a receipt wait that timed out — and the field that tells the two apart
+ * is `txHash`: the broadcast and receipt emitters always stamp the hash they were handling, so an
+ * error that carries one is about a transaction and never qualifies. `RPC_RECEIPT_LOOKUP_FAILED` is
+ * excluded for the same reason (it is only ever raised for a transaction that was sent).
+ *
+ * This is a statement about the CAUSE, not a proof that nothing was sent: an absent `txHash` proves
+ * nothing, which is why the publisher accepts it only together with its own positional proof that
+ * the write-ahead hook never durably recorded a hash. Nothing is unwrapped: a re-wrapped error that
+ * lost its `code` simply does not qualify, and prose never does. Throw-safe, because it runs on the
+ * publisher's failure-recording path: a throwing accessor reads as "no".
+ */
+export function isTransientRpcTransportFailureWithoutTransaction(err: unknown): boolean {
+  try {
+    if (!isChainRpcTransportError(err)) return false;
+    if (err.txHash) return false;
+    return err.code === 'RPC_ENDPOINTS_EXHAUSTED'
+      || err.code === 'RPC_REQUEST_GOVERNOR_QUEUE_FULL'
+      || err.code === 'RPC_TIMEOUT';
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -130,6 +165,21 @@ export function createRpcTimeoutError(
   opts?: { cause?: unknown; txHash?: string },
 ): ChainRpcTransportError {
   return new ChainRpcTransportError('RPC_TIMEOUT', message, opts);
+}
+
+/**
+ * An endpoint attempt whose deadline expired while its next request waited in
+ * the process-local RPC governor, with no endpoint request still in flight. It carries the
+ * local-capacity code, so failover treats it like a full queue: no endpoint is
+ * blamed and none is tried next, because every endpoint shares that queue.
+ * Earlier requests may have completed in this operation. This classification
+ * is not evidence that the enclosing publication has never dispatched a write.
+ */
+export function createRpcAdmissionTimeoutError(
+  message: string,
+  opts?: { cause?: unknown },
+): ChainRpcTransportError {
+  return new ChainRpcTransportError('RPC_REQUEST_GOVERNOR_QUEUE_FULL', message, opts);
 }
 
 /**

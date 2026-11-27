@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, symlinkSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { selectMcpClientTargets, type ClientTarget } from '../src/mcp-client-registry.js';
-import { readRegisteredServerKeys, readRegistration, removeRegistration, writeRegistration } from '../src/mcp-client-config.js';
+import { classifyRegistration, readRegisteredServerKeys, readRegistration, removeRegistration, writeRegistration } from '../src/mcp-client-config.js';
 import { mcpConfigPersistenceStrategy } from '../src/mcp-config-metadata.js';
 import { detectMcpRuntime } from '../src/mcp-runtime.js';
 
@@ -118,4 +118,39 @@ it('detects process runtime when persisting a physical config', () => {
   writeRegistration(file, desired);
   expect(detectMcpRuntime).toHaveBeenCalledTimes(1);
   expect(readRegistration(file)).toMatchObject({ kind: 'entry', registration: { command: desired.command } });
+});
+
+it.each([undefined, 'PRESERVED/pl:DKG_PROJECT/l:DKG_TOKEN/w'])('forwards preserved WSL settings and refreshes idempotently (WSLENV: %s)', wslenv => {
+  const { file } = fixture(false);
+  const env = {
+    DKG_PROJECT: "project 'literal' $HOME",
+    DKG_TOKEN: 'fixture-only-token;$HOME',
+    DKG_API: 'http://127.0.0.1:59231',
+    ...(wslenv === undefined ? {} : { WSLENV: wslenv }),
+  };
+  writeFileSync(file.destination, JSON.stringify({ setting: 'keep', mcpServers: {
+    dkg: { ...desired, env: { ...env, ...desired.env }, disabled: false }, sibling: { command: 'keep' },
+  } }));
+  const entry = { ...desired, environmentTransfer: { kind: 'windows-wsl' as const, inherited: 'INHERITED/p' } };
+  expect(classifyRegistration(readRegistration(file), entry)).toBe('stale');
+  writeRegistration(file, entry);
+  const first = readFileSync(file.destination, 'utf8');
+  const document = JSON.parse(first);
+  expect(document.setting).toBe('keep');
+  expect(document.mcpServers.sibling).toEqual({ command: 'keep' });
+  expect(document.mcpServers.dkg).toEqual({ ...desired, disabled: false, env: { ...env, ...desired.env,
+    WSLENV: wslenv === undefined
+      ? 'INHERITED/p:DKG_API/u:DKG_HOME/u:DKG_PROJECT/u:DKG_TOKEN/u'
+      : 'PRESERVED/pl:DKG_PROJECT/l:DKG_TOKEN:DKG_API/u:DKG_HOME/u',
+  } });
+  expect(classifyRegistration(readRegistration(file), entry)).toBe('registered');
+  writeRegistration(file, entry);
+  expect(readFileSync(file.destination, 'utf8')).toBe(first);
+  // Adding a preserved custom setting also requires a refresh to forward it.
+  document.mcpServers.dkg.env.EXTRA = 'literal spaces';
+  writeFileSync(file.destination, JSON.stringify(document));
+  expect(classifyRegistration(readRegistration(file), entry)).toBe('stale');
+  writeRegistration(file, entry);
+  expect(JSON.parse(readFileSync(file.destination, 'utf8')).mcpServers.dkg.env.WSLENV).toMatch(/:EXTRA\/u$/);
+  expect(classifyRegistration(readRegistration(file), entry)).toBe('registered');
 });

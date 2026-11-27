@@ -26,9 +26,17 @@ function createSchedulerHarness() {
     handle: ReturnType<typeof setInterval>;
   }>> = [];
   const cleared: Array<ReturnType<typeof setInterval>> = [];
+  const timeouts: Array<Readonly<{
+    callback: () => void;
+    delayMs: number;
+    handle: ReturnType<typeof setTimeout>;
+  }>> = [];
+  const clearedTimeouts: Array<ReturnType<typeof setTimeout>> = [];
   return {
     scheduled,
     cleared,
+    timeouts,
+    clearedTimeouts,
     scheduler: {
       setInterval(callback: () => void, intervalMs: number) {
         const handle = Object.freeze({ ordinal: scheduled.length + 1 }) as unknown as
@@ -39,8 +47,34 @@ function createSchedulerHarness() {
       clearInterval(handle: ReturnType<typeof setInterval>) {
         cleared.push(handle);
       },
+      setTimeout(callback: () => void, delayMs: number) {
+        const handle = Object.freeze({ timeout: timeouts.length + 1 }) as unknown as
+          ReturnType<typeof setTimeout>;
+        timeouts.push(Object.freeze({ callback, delayMs, handle }));
+        return handle;
+      },
+      clearTimeout(handle: ReturnType<typeof setTimeout>) {
+        clearedTimeouts.push(handle);
+      },
     },
   };
+}
+
+const FINALIZED_ABSENCE = Object.freeze({ kind: 'finalized-absence' as const });
+
+function finalizedAbsenceFor(
+  contextGraphIds: readonly string[],
+): ReadonlyMap<string, typeof FINALIZED_ABSENCE> {
+  return new Map(contextGraphIds.map((contextGraphId) => [
+    contextGraphId,
+    FINALIZED_ABSENCE,
+  ]));
+}
+
+/** Let promise chains that settled outside the loop's own awaits run out. */
+async function settleEventLoopTurns(): Promise<void> {
+  await new Promise<void>((resolve) => { setImmediate(resolve); });
+  await new Promise<void>((resolve) => { setImmediate(resolve); });
 }
 
 function completeRevisionRead(
@@ -1038,6 +1072,229 @@ describe('RFC-64 catalog authority refresh loop', () => {
 
     expect(attempts).toEqual(['registered', 'unregistered', 'unregistered']);
     expect(readFailures).toEqual([failure]);
+    await loop.close();
+  });
+
+  it('gives a lane that was still refreshing at selection no request the pass did not create', async () => {
+    // An unregistered public graph has no revision, so every pass selects it
+    // unless its lane is busy. A pass that left it out, and whose finalized
+    // read took longer than the lane's refresh, used to hand the idle lane an
+    // `auto` request, and `auto` cannot consume an owner-signed replica seed.
+    const { scheduler } = createSchedulerHarness();
+    const refreshes: Array<readonly [string, string]> = [];
+    let requestBatches = 0;
+    let markFirstRefreshStarted!: () => void;
+    let releaseFirstRefresh!: () => void;
+    let markSecondBatchStarted!: () => void;
+    let releaseSecondBatch!: () => void;
+    const firstRefreshStarted = new Promise<void>((resolve) => {
+      markFirstRefreshStarted = resolve;
+    });
+    const firstRefreshGate = new Promise<void>((resolve) => { releaseFirstRefresh = resolve; });
+    const secondBatchStarted = new Promise<void>((resolve) => {
+      markSecondBatchStarted = resolve;
+    });
+    const secondBatchGate = new Promise<void>((resolve) => { releaseSecondBatch = resolve; });
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['public-replica'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      createRefreshRequests: async (contextGraphIds) => {
+        requestBatches += 1;
+        if (requestBatches === 2) {
+          markSecondBatchStarted();
+          await secondBatchGate;
+        }
+        return finalizedAbsenceFor(contextGraphIds);
+      },
+      refreshContextGraph: async (contextGraphId, _signal, request) => {
+        refreshes.push([contextGraphId, request.kind]);
+        if (refreshes.length === 1) {
+          markFirstRefreshStarted();
+          await firstRefreshGate;
+        }
+        return COMMITTED;
+      },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await firstRefreshStarted;
+    // A lifecycle nudge while the lane is busy: the pass leaves the lane out
+    // and waits for its finalized read, during which the lane goes idle.
+    loop.trigger();
+    await secondBatchStarted;
+    releaseFirstRefresh();
+    await settleEventLoopTurns();
+    releaseSecondBatch();
+    await loop.whenIdle();
+
+    expect(requestBatches).toBe(2);
+    expect(refreshes).toEqual([['public-replica', 'finalized-absence']]);
+    await loop.close();
+  });
+
+  it('retries a failed graph from its own timer and asks for that graph only', async () => {
+    const { timeouts, scheduler } = createSchedulerHarness();
+    const requestBatches: string[][] = [];
+    const attempts: string[] = [];
+    const failures: string[] = [];
+    let failReplica = true;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['public-replica', 'healthy'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      createRefreshRequests: async (contextGraphIds) => {
+        requestBatches.push([...contextGraphIds]);
+        return finalizedAbsenceFor(contextGraphIds);
+      },
+      refreshContextGraph: async (contextGraphId) => {
+        attempts.push(contextGraphId);
+        if (contextGraphId === 'public-replica' && failReplica) {
+          throw new Error('authority composition failed');
+        }
+        return COMMITTED;
+      },
+      onRefreshFailure: (contextGraphId) => { failures.push(contextGraphId); },
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    expect(failures).toEqual(['public-replica']);
+    expect(timeouts.map(({ delayMs }) => delayMs)).toEqual([1_000]);
+
+    // No lifecycle nudge and no interval tick: the retry alone brings it back.
+    failReplica = false;
+    timeouts[0]!.callback();
+    await loop.whenIdle();
+
+    expect(requestBatches).toEqual([['public-replica', 'healthy'], ['public-replica']]);
+    expect(attempts).toEqual(['public-replica', 'healthy', 'public-replica']);
+    expect(failures).toEqual(['public-replica']);
+    expect(timeouts).toHaveLength(1);
+    await loop.close();
+  });
+
+  it('bounds the retries of a graph that keeps failing and starts over after a commit', async () => {
+    const { scheduled, timeouts, clearedTimeouts, scheduler } = createSchedulerHarness();
+    const attempts: string[] = [];
+    let fail = true;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['public-replica'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      createRefreshRequests: async (contextGraphIds) => finalizedAbsenceFor(contextGraphIds),
+      refreshContextGraph: async (contextGraphId) => {
+        attempts.push(contextGraphId);
+        if (fail) throw new Error('no authenticated owner authority');
+        return COMMITTED;
+      },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    for (let retry = 0; retry < RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.failureRetryDelaysMs.length; retry += 1) {
+      timeouts[retry]!.callback();
+      await loop.whenIdle();
+    }
+    expect(timeouts.map(({ delayMs }) => delayMs))
+      .toEqual([...RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.failureRetryDelaysMs]);
+    expect(attempts).toHaveLength(4);
+
+    // Once the retries are spent, a failure waits for an ordinary pass.
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(attempts).toHaveLength(5);
+    expect(timeouts).toHaveLength(3);
+
+    fail = false;
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(attempts).toHaveLength(6);
+
+    fail = true;
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(timeouts).toHaveLength(4);
+    expect(timeouts[3]!.delayMs).toBe(RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.failureRetryDelaysMs[0]);
+
+    await loop.close();
+    expect(clearedTimeouts).toEqual([timeouts[3]!.handle]);
+    timeouts[3]!.callback();
+    expect(attempts).toHaveLength(7);
+  });
+
+  it('keeps retrying when a superseded refresh or a failed request batch leaves the graph unresolved', async () => {
+    const { timeouts, scheduler } = createSchedulerHarness();
+    const readFailures: unknown[] = [];
+    let refreshResult: 'fail' | typeof SUPERSEDED | typeof COMMITTED = 'fail';
+    let failBatch = false;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['public-replica'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      onAuthorityRevisionsReadFailure: (error) => { readFailures.push(error); },
+      createRefreshRequests: async (contextGraphIds) => {
+        if (failBatch) throw new Error('finalized index unavailable');
+        return finalizedAbsenceFor(contextGraphIds);
+      },
+      refreshContextGraph: async () => {
+        if (refreshResult === 'fail') throw new Error('authority composition failed');
+        return refreshResult;
+      },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    refreshResult = SUPERSEDED;
+    timeouts[0]!.callback();
+    await loop.whenIdle();
+    expect(timeouts.map(({ delayMs }) => delayMs)).toEqual([1_000, 5_000]);
+
+    failBatch = true;
+    timeouts[1]!.callback();
+    await loop.whenIdle();
+    expect(readFailures).toHaveLength(1);
+    expect(timeouts.map(({ delayMs }) => delayMs)).toEqual([1_000, 5_000, 30_000]);
+
+    failBatch = false;
+    refreshResult = COMMITTED;
+    timeouts[2]!.callback();
+    await loop.whenIdle();
+    expect(timeouts).toHaveLength(3);
+    await loop.close();
+  });
+
+  it('drops the pending retry of a graph that leaves the active set', async () => {
+    const { timeouts, clearedTimeouts, scheduler } = createSchedulerHarness();
+    let active = ['public-replica'];
+    const attempts: string[] = [];
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => active,
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      refreshContextGraph: async (contextGraphId) => {
+        attempts.push(contextGraphId);
+        throw new Error('no authenticated owner authority');
+      },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    expect(timeouts).toHaveLength(1);
+
+    active = [];
+    loop.trigger();
+    await loop.whenIdle();
+    expect(clearedTimeouts).toEqual([timeouts[0]!.handle]);
+
+    // A timer that fires anyway after its graph left asks for nothing.
+    timeouts[0]!.callback();
+    await loop.whenIdle();
+    expect(attempts).toEqual(['public-replica']);
     await loop.close();
   });
 });

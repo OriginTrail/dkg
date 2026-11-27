@@ -13,6 +13,12 @@ export interface Rfc64CatalogAuthorityRefreshSchedulerV1 {
     intervalMs: number,
   ): ReturnType<typeof setInterval>;
   clearInterval(timer: ReturnType<typeof setInterval>): void;
+  /** One failed graph's next retry; see `failureRetryDelaysMs`. */
+  setTimeout(
+    callback: () => void,
+    delayMs: number,
+  ): ReturnType<typeof setTimeout>;
+  clearTimeout(timer: ReturnType<typeof setTimeout>): void;
 }
 
 /** Production cadence boundary. Tests inject a scheduler per loop instance. */
@@ -25,6 +31,14 @@ const rfc64CatalogAuthorityRefreshSchedulerV1:
   },
   clearInterval(timer) {
     clearInterval(timer);
+  },
+  setTimeout(callback, delayMs) {
+    const timer = setTimeout(callback, delayMs);
+    timer.unref?.();
+    return timer;
+  },
+  clearTimeout(timer) {
+    clearTimeout(timer);
   },
 };
 
@@ -248,6 +262,10 @@ class Rfc64CatalogAuthorityRefreshLaneV1 {
     ) => Promise<Rfc64CatalogAuthorityRefreshResultV1>,
     admission: Rfc64CatalogAuthorityRefreshAdmissionV1,
     onFailure: (contextGraphId: string, error: unknown) => void,
+    onSettled: (
+      contextGraphId: string,
+      result: Rfc64CatalogAuthorityRefreshResultV1,
+    ) => void,
   ) {
     this.#task = new CoalescingRecurringTask({
       requestWhileRunning: 'coalesce',
@@ -263,9 +281,11 @@ class Rfc64CatalogAuthorityRefreshLaneV1 {
           if (signal.aborted) return;
           if (result === 'superseded') {
             if (target.force) this.#acceptedRevision = undefined;
+            onSettled(this.contextGraphId, result);
             return;
           }
           if (target.revision !== null) this.#acceptedRevision = target.revision;
+          onSettled(this.contextGraphId, result);
         } catch (error) {
           if (signal.aborted) return;
           if (target.force) this.#acceptedRevision = undefined;
@@ -319,9 +339,16 @@ implements Rfc64CatalogRefreshableWorkloadOwnerV1 {
   readonly #lanes = new Map<string, Rfc64CatalogAuthorityRefreshLaneV1>();
   readonly #refreshAdmission = new Rfc64CatalogAuthorityRefreshAdmissionV1();
   readonly #retirements = new Set<Promise<void>>();
+  /** Graphs whose last refresh failed, with the retries they have used. */
+  readonly #failureRetries = new Map<string, {
+    attempts: number;
+    timer: ReturnType<typeof setTimeout> | null;
+  }>();
+  readonly #dueRetryContextGraphIds = new Set<string>();
   #passOwner: CoalescingRecurringTask | null = null;
   #passActivityRevision = 0;
   #pass = 0;
+  #fullPassRequested = false;
   #timer: ReturnType<typeof setInterval> | null = null;
   #started = false;
   #close: Promise<void> | null = null;
@@ -351,8 +378,52 @@ implements Rfc64CatalogRefreshableWorkloadOwnerV1 {
       contextGraphId,
       this.options.refreshContextGraph,
       this.#refreshAdmission,
-      this.options.onRefreshFailure,
+      (failedContextGraphId, error) => {
+        this.options.onRefreshFailure(failedContextGraphId, error);
+        if (this.#started && !this.#failureRetries.has(failedContextGraphId)) {
+          this.#failureRetries.set(failedContextGraphId, { attempts: 0, timer: null });
+        }
+        this.#armFailureRetry(failedContextGraphId);
+      },
+      (settledContextGraphId, result) => {
+        // A superseded refresh leaves the outcome to another composition or
+        // to the next pass; a graph that is retrying a failure keeps retrying.
+        if (result === 'committed') this.#clearFailureRetry(settledContextGraphId);
+        else this.#armFailureRetry(settledContextGraphId);
+      },
     );
+  }
+
+  /**
+   * Arm the next retry of a graph whose last refresh failed. A failed graph
+   * has no usable authority (`blocked`, or `resolving` without the accepted
+   * policy on a replica), and nothing else promises another pass soon: the
+   * lifecycle nudges that trigger passes can wait behind a large sync
+   * transfer, and the interval is minutes. The retry runs on this loop's own
+   * timer and asks for that graph only.
+   */
+  #armFailureRetry(contextGraphId: string): void {
+    const retry = this.#failureRetries.get(contextGraphId);
+    if (retry === undefined || retry.timer !== null || !this.#started) return;
+    const delayMs = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1
+      .failureRetryDelaysMs[retry.attempts];
+    if (delayMs === undefined) return;
+    retry.attempts += 1;
+    retry.timer = this.#scheduler.setTimeout(() => {
+      retry.timer = null;
+      if (!this.#started || this.#failureRetries.get(contextGraphId) !== retry) return;
+      this.#dueRetryContextGraphIds.add(contextGraphId);
+      this.#passActivityRevision += 1;
+      this.#passOwner?.request();
+    }, delayMs);
+  }
+
+  #clearFailureRetry(contextGraphId: string): void {
+    const retry = this.#failureRetries.get(contextGraphId);
+    if (retry === undefined) return;
+    if (retry.timer !== null) this.#scheduler.clearTimeout(retry.timer);
+    this.#failureRetries.delete(contextGraphId);
+    this.#dueRetryContextGraphIds.delete(contextGraphId);
   }
 
   #retireLane(
@@ -361,6 +432,7 @@ implements Rfc64CatalogRefreshableWorkloadOwnerV1 {
   ): void {
     if (this.#lanes.get(contextGraphId) !== lane) return;
     this.#lanes.delete(contextGraphId);
+    this.#clearFailureRetry(contextGraphId);
     const retirement = lane.close();
     this.#retirements.add(retirement);
     void retirement.then(
@@ -386,11 +458,41 @@ implements Rfc64CatalogRefreshableWorkloadOwnerV1 {
 
   readonly trigger = (): void => {
     if (!this.#started) return;
+    this.#fullPassRequested = true;
     this.#passActivityRevision += 1;
     this.#passOwner?.request();
   };
 
   async #runRefreshPass(signal: AbortSignal): Promise<void> {
+    // A pass that only failure retries asked for refreshes only the graphs
+    // whose retry is due. Any other pass covers those graphs as well.
+    const dueRetryContextGraphIds = new Set(this.#dueRetryContextGraphIds);
+    const retryOnly = !this.#fullPassRequested;
+    this.#fullPassRequested = false;
+    this.#dueRetryContextGraphIds.clear();
+    const requestedContextGraphIds = new Set<string>();
+    try {
+      await this.#runSelectedRefreshPass(
+        signal,
+        retryOnly ? dueRetryContextGraphIds : null,
+        requestedContextGraphIds,
+      );
+    } finally {
+      // A pass that ended before it handed a due graph a request (a failed
+      // shared read, a busy lane) keeps that graph's retries going.
+      for (const contextGraphId of dueRetryContextGraphIds) {
+        if (!requestedContextGraphIds.has(contextGraphId)) {
+          this.#armFailureRetry(contextGraphId);
+        }
+      }
+    }
+  }
+
+  async #runSelectedRefreshPass(
+    signal: AbortSignal,
+    retryContextGraphIds: ReadonlySet<string> | null,
+    requestedContextGraphIds: Set<string>,
+  ): Promise<void> {
     const admissionGeneration = this.#refreshAdmission.beginPass();
     let activeContextGraphIds: readonly string[];
     try {
@@ -407,16 +509,28 @@ implements Rfc64CatalogRefreshableWorkloadOwnerV1 {
       }
     }
 
-    this.#pass += 1;
-    const pass = this.#pass;
-    const initial = pass === 1;
-    const safety = !initial && (pass - 1)
-      % RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.safetyRevalidationIntervalCount === 0;
+    // A retry pass reads and refreshes only its due graphs, and it is no step
+    // of the initial and safety cadence.
+    const candidateContextGraphIds = retryContextGraphIds === null
+      ? [...desiredContextGraphIds]
+      : [...desiredContextGraphIds].filter((contextGraphId) => (
+        retryContextGraphIds.has(contextGraphId)
+      ));
+    if (retryContextGraphIds !== null && candidateContextGraphIds.length === 0) return;
+    let initial = false;
+    let safety = false;
+    if (retryContextGraphIds === null) {
+      this.#pass += 1;
+      const pass = this.#pass;
+      initial = pass === 1;
+      safety = !initial && (pass - 1)
+        % RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.safetyRevalidationIntervalCount === 0;
+    }
     let revisions: Rfc64CatalogAuthorityRevisionReadV1 = new Map();
     let ordinaryFailureFallbackContextGraphIds: ReadonlySet<string> | undefined;
     try {
       revisions = await this.#authorityRevisionSource.read(
-        Object.freeze([...desiredContextGraphIds]),
+        Object.freeze(candidateContextGraphIds),
         signal,
       );
     } catch (error) {
@@ -440,7 +554,7 @@ implements Rfc64CatalogRefreshableWorkloadOwnerV1 {
       }
     }
     signal.throwIfAborted();
-    const selectedContextGraphIds = [...desiredContextGraphIds].filter((contextGraphId) => (
+    const selectedContextGraphIds = candidateContextGraphIds.filter((contextGraphId) => (
       ordinaryFailureFallbackContextGraphIds === undefined
       || ordinaryFailureFallbackContextGraphIds.has(contextGraphId)
     )).filter((contextGraphId) => {
@@ -467,24 +581,25 @@ implements Rfc64CatalogRefreshableWorkloadOwnerV1 {
       }
     }
 
-    for (const contextGraphId of desiredContextGraphIds) {
-      if (
-        ordinaryFailureFallbackContextGraphIds !== undefined
-        && !ordinaryFailureFallbackContextGraphIds.has(contextGraphId)
-      ) continue;
+    // Request exactly the lanes this pass selected, each with the request
+    // created for it. A lane left out because it was still refreshing must
+    // not take a fallback request when that refresh ends during the await
+    // above: its own refresh owns the outcome, and an `auto` request cannot
+    // consume an unregistered replica's owner-signed seed, so it failed and
+    // closed a readable public graph (#3386).
+    for (const contextGraphId of selectedContextGraphIds) {
       let lane = this.#lanes.get(contextGraphId);
       if (lane === undefined || lane.closed) {
         lane = this.#createLane(contextGraphId);
         this.#lanes.set(contextGraphId, lane);
       }
       const revision = revisions.get(contextGraphId) ?? null;
-      lane.request(
+      if (lane.request(
         revision,
         initial || safety,
-        refreshRequests.get(contextGraphId)
-          ?? AUTO_RFC64_CATALOG_AUTHORITY_REFRESH_REQUEST_V1,
+        refreshRequests.get(contextGraphId)!,
         admissionGeneration,
-      );
+      )) requestedContextGraphIds.add(contextGraphId);
     }
   }
 
@@ -527,6 +642,12 @@ implements Rfc64CatalogRefreshableWorkloadOwnerV1 {
       this.#scheduler.clearInterval(this.#timer);
       this.#timer = null;
     }
+    for (const retry of this.#failureRetries.values()) {
+      if (retry.timer !== null) this.#scheduler.clearTimeout(retry.timer);
+    }
+    this.#failureRetries.clear();
+    this.#dueRetryContextGraphIds.clear();
+    this.#fullPassRequested = false;
     const passOwner = this.#passOwner;
     const closing = (async () => {
       await passOwner?.close();

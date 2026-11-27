@@ -376,16 +376,9 @@ describe('CLI-2 — CORS policy for /api/*', () => {
         'Access-Control-Request-Headers': 'Content-Type, Authorization',
       },
     });
-    // Either 403 (strict) or 204/200 without ACAO echoing evil origin.
-    const acao = res.headers.get('access-control-allow-origin');
-    // PROD-BUG guard: assert we do NOT blanket wildcard when apiHost is
-    // loopback (the default — daemon should return a narrow whitelist).
-    expect(acao).not.toBe('https://evil.example.com');
-    // Accept either a loopback origin or absence of the header; wildcard on
-    // an auth-enabled endpoint would be a security regression.
-    if (acao && acao !== '*') {
-      expect(acao).toMatch(/^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):\d+$/);
-    }
+    // This fixture binds to loopback with the default narrow allowlist.
+    expect(res.status).toBe(403);
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
   });
 
   it('echoes a loopback origin on CORS preflight (expected: allowed)', async () => {
@@ -398,9 +391,8 @@ describe('CLI-2 — CORS policy for /api/*', () => {
         'Access-Control-Request-Headers': 'Content-Type, Authorization',
       },
     });
-    expect([200, 204]).toContain(res.status);
-    const acao = res.headers.get('access-control-allow-origin');
-    expect(acao === `http://127.0.0.1:${d.apiPort}` || acao === '*').toBe(true);
+    expect(res.status).toBe(204);
+    expect(res.headers.get('access-control-allow-origin')).toBe(`http://127.0.0.1:${d.apiPort}`);
   });
 });
 
@@ -1089,6 +1081,15 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
             throw new Error('timeout-only catchup must not mark subscription synced');
           },
           reconcileRfc64CatalogResponsibilityV1: async () => undefined,
+          prepareContextGraphReadinessWithPrivateEmptyVmV1: async () => ({
+            inspectAndCommit: async (
+              _input: unknown,
+              commit: (completion: { proven: false; inspection: Record<string, unknown> }) => unknown,
+            ) => commit({ proven: false, inspection: {
+              kind: 'current', metadata: { kind: 'absent' },
+              authority: { outcome: 'allowed', source: 'legacy-local' },
+            } }),
+          }),
           resolveAgentByToken: () => undefined,
           getDefaultAgentAddress: () => '0x0000000000000000000000000000000000000001',
         };

@@ -1,0 +1,27 @@
+{
+  "_base": "Lane trace of the scripted publisher workload (test/_helpers/publisher-queue-scenarios.ts) recorded on the base SHA e4c90c92b (origin/testnet-canary with P3 and P7 merged), before the publisher tagging of P5. Key: <store stack>/<ambient lane>; value: calls per '<resolved lane> <operation family>' with the control path off.",
+  "atomic/none": {
+    "background publisher.queueUsage": 2,
+    "normal (unlabelled)": 26,
+    "normal publisher.asyncLift": 166,
+    "normal test.worker": 9
+  },
+  "atomic/background": {
+    "background (unlabelled)": 26,
+    "background publisher.asyncLift": 166,
+    "background publisher.queueUsage": 2,
+    "background test.worker": 9
+  },
+  "fallback/none": {
+    "background publisher.queueUsage": 2,
+    "normal (unlabelled)": 26,
+    "normal publisher.asyncLift": 223,
+    "normal test.worker": 9
+  },
+  "fallback/background": {
+    "background (unlabelled)": 26,
+    "background publisher.asyncLift": 223,
+    "background publisher.queueUsage": 2,
+    "background test.worker": 9
+  }
+}
