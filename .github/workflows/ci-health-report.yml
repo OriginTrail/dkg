@@ -1,0 +1,65 @@
+name: CI health report
+
+# A weekly digest of ci.yml, written to the run summary and to the one open
+# `ci-health` issue (rewritten each week, with the headline as a comment): PR
+# time to green, failure and cancellation rates, the jobs failed runs fail
+# in, flaky jobs, lane timings and shard balance, the nightly, and the test
+# exceptions about to expire (scripts/ci/ci-health-report.mjs). It only reads
+# CI history; nothing here gates a merge.
+#
+# GitHub fires `schedule` only from the default branch (main), which takes
+# testnet-canary at releases, so the Monday report starts once this file
+# reaches main. Until then run it by hand (workflow_dispatch) on
+# testnet-canary. GitHub dispatches only a workflow it has seen on the default
+# branch or seen run, so the push trigger, limited to this report's own
+# files, runs it once when it lands on testnet-canary, and again whenever it
+# changes there.
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      days:
+        description: Days of ci.yml runs to report on (the same span before is the comparison)
+        type: number
+        default: 7
+  push:
+    branches: [testnet-canary]
+    paths:
+      - .github/workflows/ci-health-report.yml
+      - scripts/ci/ci-health-report.mjs
+      - scripts/lib/ci-health.mjs
+      - scripts/lib/github-rest.mjs
+
+permissions: {}
+
+concurrency:
+  group: ci-health-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: CI health report
+    if: github.repository == 'OriginTrail/dkg'
+    runs-on: ubuntu-24.04
+    # A week reads about 500 job listings, four at a time: minutes, with
+    # room for GitHub's 502s and rate-limit waits.
+    timeout-minutes: 30
+    # Never pull request code: the triggers are protected-branch only.
+    permissions:
+      contents: read # check out the report script and the test files it scans for exceptions
+      actions: read # list ci.yml and nightly-ci.yml runs and their jobs
+      issues: write # create the ci-health label and rewrite the report issue
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      # The report is dependency-free Node: no install, no cache.
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+      - name: Report on ci.yml and update the ci-health issue
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPORT_DAYS: ${{ inputs.days || 7 }}
+        run: node scripts/ci/ci-health-report.mjs --days "$REPORT_DAYS" --summary "$GITHUB_STEP_SUMMARY" --publish-issue
