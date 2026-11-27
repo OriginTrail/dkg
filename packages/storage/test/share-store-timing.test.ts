@@ -12,11 +12,14 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 it('splits contention from actual HTTP work, preserving queue failure and private inputs', async () => {
   vi.stubEnv('DKG_ASYNC_PROMOTE_ADMISSION_TRACE', '1');
   const scheduler = new StorePriorityScheduler({ maxConcurrent: 1, controlId: 'store-control-share', queueWaitTimeoutMs: 2000 });
+  // Each pause is well past the 15 ms the timing checks below need. The client
+  // can take its headers sample late when its event loop is busy, which
+  // shortens the gaps it measures.
   const server = createServer(async (_req, res) => {
-    await delay(20);
+    await delay(80);
     res.writeHead(200);
     res.write('yes');
-    await delay(20);
+    await delay(80);
     res.end();
   });
   server.listen(0,'127.0.0.1'); await once(server,'listening');
