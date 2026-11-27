@@ -1279,15 +1279,13 @@ async function runDaemonInnerWithStartupOwnership(
     emit: (level, message) => log(`[${level}] ${message}`),
   });
 
-  configureApiQueryPriority(process.env.DKG_API_QUERY_PRIORITY, {
-    info: log,
-    warn: log,
-  });
-  configureApiQueryTimeLimit(process.env.DKG_API_QUERY_TIME_LIMIT_MS, { info: log, warn: log });
+  const policyLog = { info: log, warn: log };
+  configureApiQueryPriority(process.env.DKG_API_QUERY_PRIORITY, policyLog);
+  configureApiQueryTimeLimit(process.env.DKG_API_QUERY_TIME_LIMIT_MS, policyLog);
   // Configure the backend's control path before any store call (OT-RFC-73 P14); later configuration is refused.
-  configureStoreControlPath({ backend: config.store?.backend ?? 'oxigraph-worker', configured: config.store?.controlReservedSlots }, { warn: log });
-  logStoreControlPathGeometry({ info: log, warn: log });
-  const writePreflightCoalescing = configureWritePreflightCoalescing(process.env, { info: log, warn: log });
+  configureStoreControlPath({ backend: config.store?.backend ?? 'oxigraph-worker', configured: config.store?.controlReservedSlots }, policyLog);
+  logStoreControlPathGeometry(policyLog);
+  const writePreflightCoalescing = configureWritePreflightCoalescing(process.env, policyLog);
 
   const startupLogRotationMessage = startupLogRotation
     && describeDaemonLogRotation(startupLogRotation, 'during startup');
