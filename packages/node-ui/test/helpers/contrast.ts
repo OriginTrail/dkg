@@ -5,30 +5,16 @@
  * with getComputedStyle so the real cascade decides what a badge looks like.
  */
 
+import { parseColour as parseCssColour } from '../../scripts/colour.mjs';
+
 /** sRGB channels 0–1 plus alpha 0–1. */
 export type Rgba = [number, number, number, number];
 
-/** Parse `#rgb`, `#rrggbb`, `rgb()`, `rgba()` or `color(srgb r g b / a)`. */
+/** Parse a colour (scripts/colour.mjs lists the formats) as channels 0–1 plus alpha; throws on anything else. */
 export function parseColour(value: string): Rgba {
-  const v = value.trim().toLowerCase();
-  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/.exec(v);
-  if (hex) {
-    const raw = hex[1].length === 3 ? hex[1].split('').map((ch) => ch + ch).join('') : hex[1];
-    return [0, 2, 4].map((i) => parseInt(raw.slice(i, i + 2), 16) / 255).concat(1) as Rgba;
-  }
-  if (v === 'transparent') return [0, 0, 0, 0];
-  const rgb = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)(?:\s*[,/]\s*([\d.]+%?))?\s*\)$/.exec(v);
-  if (rgb) {
-    return [Number(rgb[1]) / 255, Number(rgb[2]) / 255, Number(rgb[3]) / 255, alpha(rgb[4])];
-  }
-  const srgb = /^color\(srgb\s+([-\d.e]+)\s+([-\d.e]+)\s+([-\d.e]+)(?:\s*\/\s*([\d.]+%?))?\s*\)$/.exec(v);
-  if (srgb) return [Number(srgb[1]), Number(srgb[2]), Number(srgb[3]), alpha(srgb[4])];
-  throw new Error(`Cannot parse colour ${value}`);
-}
-
-function alpha(raw: string | undefined): number {
-  if (raw === undefined) return 1;
-  return raw.endsWith('%') ? Number(raw.slice(0, -1)) / 100 : Number(raw);
+  const c = parseCssColour(value);
+  if (!c) throw new Error(`Cannot parse colour ${value}`);
+  return [c.rgb[0] / 255, c.rgb[1] / 255, c.rgb[2] / 255, c.alpha];
 }
 
 /** Paint `top` over an opaque `bottom`, as the screen shows it. */

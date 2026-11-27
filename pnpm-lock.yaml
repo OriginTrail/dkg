@@ -1479,9 +1479,15 @@ importers:
       esbuild:
         specifier: 0.25.12
         version: 0.25.12
+      entities:
+        specifier: ^7.0.1
+        version: 7.0.1
       happy-dom:
         specifier: 20.8.9
         version: 20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10)
+      postcss:
+        specifier: ^8.5.15
+        version: 8.5.15
       react:
         specifier: ^19
         version: 19.2.4

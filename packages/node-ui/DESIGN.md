@@ -266,15 +266,17 @@ None today.
 `test/design-tokens.test.ts` runs with the normal test suite and fails when the node UI has:
 
 - a hard-coded colour (hex, `rgb()`, `hsl()`) in a stylesheet other than `00-theme.css`, or anywhere in component code, including `var()` fallbacks, gradients and shadows;
-- a hard-coded corner size (`border-radius` / `borderRadius` in px) instead of a `--radius-*` token. `0` and `50%` (circles) are allowed.
+- a hard-coded corner size (`border-radius` / `borderRadius` in px, a bare number or another unit) instead of a `--radius-*` token, a pill written as a number (`999px`, or any corner of 100px or more) included. `0` and `50%` (circles) are allowed.
 
-There are no exceptions. If no token fits, add one (see below). Canvas palettes (`*-colors.ts`) are the only code allowed literal colours, because graph-viz can't read CSS variables.
+It uses the design check's own rules (below), so the two never disagree: stylesheets are read exactly as `design:check` reads them, and the test only adds reach, finding colours and corners in any string in component code, not just in style objects. There are no exceptions. If no token fits, add one (see below). Canvas palettes (`*-colors.ts`) are the only code allowed literal colours, because graph-viz can't read CSS variables.
 - `test/icons.test.ts`: one icon set, and the refresh icon on Refresh and Retry buttons.
 - `test/a11y-rules.test.ts`: names, keyboard access, dialog names and focus rings.
 - `test/feedback-states.test.ts`: loading copy, empty states, the disabled look and form errors.
 - `test/data-format.test.ts`: shared formats and table scrolling.
 - `test/layout-tokens.test.ts`: layers, breakpoints, motion and line height.
 - `test/retired-names.test.ts`: stylesheet classes no markup uses, tokens nothing reads, and e2e selectors for classes that are gone.
+- `test/design-check.test.ts`: runs the design check (below) over the stylesheets, so a value off the system fails with the token to use instead. It also fails on a `var(--name)` that nothing defines.
+- `test/design-docs.test.ts`: every token and component is described here, and every component in `components/ds/` is on the reference page.
 
 `test/writing-rules.test.ts` fails when text a person can read uses a word [Writing](#writing) rules out. Lines waiting for a wording decision sit in its `PENDING` list, which only gets shorter: a line that changes has to leave the list. In `src/ui`, an object property named like copy (`label`, `message`, `reason` and the others in the test) counts as visible text. If an object is internal data that never reaches the screen, mark it with `// writing-rules: not shown`, on its line or on a comment line just above. Every value in the Marketplace text table, `src/ui/marketplace/copy.generated.ts`, counts as visible text too, except the component gallery's.
 
@@ -284,6 +286,24 @@ There are no exceptions. If no token fits, add one (see below). Canvas palettes 
 2. A new colour or size is a new token in `00-theme.css`, with a value for both themes and a line in this file saying what job it does.
 3. A new component goes in `components/ds/` with its CSS in `27-ds-components.css`, a section on the reference page, and a row in the page's state matrix (`design-system-states.tsx`) if it's interactive.
 4. Put the shared classes on the element (`ds-btn ds-primary ds-sm`, `ds-tab`, `ds-seg-item`, `ds-filter`, `ds-card`, `ds-card-nested`, `ds-input ds-sm`, or render `<Button>`) and keep the screen's own class only for layout. `27-ds-components.css` holds the shared rules and never lists screen classes; a screen that needs a variation refines it in its own stylesheet (`test/button-classes.test.ts` and `test/ds-classes.test.ts` check both directions).
+
+## Checking a new design
+
+Run the design check on a mock-up before it's built, and on a branch before it's reviewed:
+
+```bash
+pnpm --filter @origintrail-official/dkg-node-ui design:check path/to/mockup.html
+pnpm --filter @origintrail-official/dkg-node-ui design:check --changed
+```
+
+It reads the scale from `00-theme.css`, so it's never behind the tokens. It checks CSS, TSX and HTML, including a mock-up's `<style>` blocks, `style` attributes and the variables a file defines (a mock-up's surface variable set to `#141414` gets matched to `--bg-surface`, and a stylesheet's `--gap: 10px` is checked where `gap: var(--gap)` uses it). `design:check --changed` looks only at the lines a branch adds against `origin/testnet-canary`; pass another base after it if needed. Every finding comes with a next step, and every one but heights makes the check exit 1:
+
+- **On the system, written as a literal:** a colour, size, corner or timing that a token has, written as its value (`16px`, `#ffffff`, `999px`). Use the token it names.
+- **Off the system:** a colour, size, corner, weight, layer or timing that no token has, or a variable that isn't a token. It names the nearest token. Either use it, or this is a new rule: add the token (or the component) as described in [Adding to the system](#adding-to-the-system), in the same PR.
+- **Height:** a height that matches a control, badge or row height names that token. It doesn't fail, because a fixed height is often layout, not a control.
+- **Component (mock-ups only):** markup that redraws something the system has, such as a button without `ds-btn`, a tag instead of `<Badge>`, or a card or dialog without the shared class. In code, `test/ds-classes.test.ts` and `test/button-classes.test.ts` check this.
+
+A mock-up that needs something new is how the system grows: keep the finding, propose the token or component with its job, and add it in the PR that builds the screen.
 
 ## Data display
 
