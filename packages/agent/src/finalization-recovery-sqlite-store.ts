@@ -1,4 +1,3 @@
-import { finalizationRecoveryTransaction } from './finalization-recovery-sqlite-transaction.js';
 import type { DatabaseSync } from 'node:sqlite';
 import { VerifiedGraphScopedFinalizationEvidenceCodec } from './finalization-graph-envelope.js';
 import {
@@ -254,7 +253,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       let promoted = 0;
       this.transaction(() => {
         const now = this.#policy.now();
-        this.pruneWithinTransaction(now);
+        pruneFinalizationRecoveryRowsWithinTransaction(this.database, this.#policy, now);
         const rows = this.database.prepare(`
           SELECT * FROM finalization_pending_v2
           ORDER BY created_at ASC, key ASC
@@ -620,7 +619,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
           WHERE key = ? AND generation = ? AND state = 'SETTLED'
         `).run(lastError, now, key, generation);
         changed = result.changes > 0;
-        this.pruneWithinTransaction(now);
+        pruneFinalizationRecoveryRowsWithinTransaction(this.database, this.#policy, now);
       });
       return changed;
     });
@@ -716,7 +715,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
             AND state IN ('RECEIVED','VERIFIED','REORGED')
         `).run(state, state, lastError ?? null, now, key, generation);
         changed = result.changes > 0;
-        this.pruneWithinTransaction(now);
+        pruneFinalizationRecoveryRowsWithinTransaction(this.database, this.#policy, now);
       });
       return changed;
     });
@@ -864,23 +863,29 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
   }
 
   private transaction<T>(operation: () => T): T {
-    return finalizationRecoveryTransaction(this.database, operation);
+    let open = false;
+    try {
+      this.database.exec('BEGIN IMMEDIATE');
+      open = true;
+      const result = operation();
+      this.database.exec('COMMIT');
+      open = false;
+      return result;
+    } catch (error) {
+      if (open) {
+        try { this.database.exec('ROLLBACK'); } catch { /* retain transaction failure */ }
+      }
+      throw error;
+    }
   }
 
   private prune(): void {
     const now = this.#policy.now();
     this.transaction(() => {
-      this.pruneWithinTransaction(now);
+      pruneFinalizationRecoveryRowsWithinTransaction(this.database, this.#policy, now);
     });
   }
 
-  private pruneWithinTransaction(now: number): void {
-    pruneFinalizationRecoveryRowsWithinTransaction(
-      this.database,
-      this.#policy,
-      now,
-    );
-  }
 }
 
 export async function openSqliteFinalizationRecoveryStore(

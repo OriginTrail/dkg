@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { transitionFinalizationRecoveryEntry } from '../src/finalization-recovery-transition.js';
+import { describe, expect, it, vi } from 'vitest';
 import { readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -104,6 +105,28 @@ describe('SQLite finalization recovery store', () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it('rolls back a failed settlement, reports the SQL error, and permits a later commit', async () => {
+    const directory = await temporaryDirectory();
+    const store = await openSqliteFinalizationRecoveryStore(directory);
+    const control = new DatabaseSync(store.databasePath);
+    try {
+      await store.receive(received());
+      await commitOriginalEvidence(store, 'entry-1', 0, evidence());
+      const entry = await store.get('entry-1');
+      if (!entry) throw new Error('fixture entry missing');
+      control.exec(`CREATE TRIGGER reject_settlement BEFORE UPDATE OF state ON finalization_inbox_v1
+        WHEN NEW.state = 'SETTLED' BEGIN SELECT RAISE(ABORT, 'settlement write rejected'); END`);
+      const warn = vi.fn();
+      await expect(transitionFinalizationRecoveryEntry(store, entry, 'SETTLED', undefined, { warn })).resolves.toBe(false);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('settlement write rejected'));
+      await expect(store.get(entry.key)).resolves.toMatchObject({ state: 'VERIFIED', generation: 0, verifiedEvidence: evidence() });
+      control.exec('DROP TRIGGER reject_settlement');
+      await expect(transitionFinalizationRecoveryEntry(store, entry, 'SETTLED', undefined, { warn })).resolves.toBe(true);
+      await expect(store.get(entry.key)).resolves.toMatchObject({ state: 'SETTLED', verifiedEvidence: evidence() });
+      expect(warn).toHaveBeenCalledOnce();
+    } finally { control.close(); await store.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
   it('lists only due live work in bounded oldest-first batches', async () => {
