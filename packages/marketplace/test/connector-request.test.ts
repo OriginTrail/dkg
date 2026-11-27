@@ -18,12 +18,14 @@ const CALL = { messages: [{ role: 'user' as const, content: 'q' }], maxTokens: 7
 const TEST_KEY = ['test', 'backend', 'value', '1234'].join('-');
 const OTHER_BEARER = ['unrelated', 'token', '5678'].join('-');
 
-/** `fetch` answering `body` with `status`; each request's URL and body are kept. */
-function stubFetch(status: number, body: unknown): Array<{ url: string; body: Record<string, unknown> }> {
+/** `fetch` answering `body` as JSON with `status`, or `raw` text as it is; each request's URL and body are kept. */
+function stubFetch(status: number, body: unknown, raw?: { text: string; type: string }): Array<{ url: string; body: Record<string, unknown> }> {
   const seen: Array<{ url: string; body: Record<string, unknown> }> = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string | URL, init?: RequestInit) => {
     seen.push({ url: String(url), body: JSON.parse(String(init?.body)) });
-    return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+    return raw
+      ? new Response(raw.text, { status, headers: { 'content-type': raw.type } })
+      : new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
   }));
   return seen;
 }
@@ -84,7 +86,7 @@ describe("a backend's reasoning effort with tools", () => {
   it('is sent as the settings name it with a call that carries tools, and with no other', async () => {
     const seen = stubFetch(200, OK);
     const backend = connectorOf({ ...SOL, reasoningEffortWithTools: 'none' });
-    await backend.complete({ ...CALL, tools: TOOLS, toolChoice: 'auto' });
+    await backend.complete({ ...CALL, tools: TOOLS, tool_choice: 'auto' });
     expect(seen[0]!.body).toEqual({
       model: 'gpt-5.6-sol', messages: CALL.messages, max_completion_tokens: 7, stream: false, tools: TOOLS, tool_choice: 'auto', reasoning_effort: 'none',
     });
@@ -148,7 +150,8 @@ describe("a backend's refusal", () => {
     // Each by its own rule: the key itself, anything shaped as an API key, and any bearer token.
     expect((err as Error).message).toBe('the backend answered 401: Incorrect API key provided: [redacted] Sent: [redacted]. Forwarded: Authorization: Bearer [redacted]');
     for (const secret of [TEST_KEY, 'sk-proj', OTHER_BEARER]) expect((err as Error).message).not.toContain(secret);
-    stubFetch(502, '<html>bad gateway</html>');
+    // A proxy's page, not JSON at all: reading it as JSON fails, and the refusal says its status alone.
+    stubFetch(502, undefined, { text: '<html><body>502 Bad Gateway</body></html>', type: 'text/html' });
     await expect(connectorOf({ kind: 'openai', baseUrl: 'http://127.0.0.1:1/v1', model: 'm' }).complete(CALL)).rejects.toMatchObject(upstream('the backend answered 502', 502));
   });
 
