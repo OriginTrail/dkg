@@ -6,7 +6,7 @@
 // that the system needs a new one). The JSDoc types are checked: tsconfig.type-tests.json
 // runs tsc with checkJs over this file.
 import { CssReadError, cssDeclarations } from './css.mjs';
-import { literalWords, parseValue, varRefs } from './css-value.mjs';
+import { literalWords, parseValue, readValue, varRefs } from './css-value.mjs';
 import { readHtml } from './html.mjs';
 import { styleDeclarations } from './jsx.mjs';
 
@@ -204,14 +204,13 @@ export function declarations(text, ext) {
  *   motion       a transition duration or delay over MOTION_FREE_MS, in ms
  *
  * @param {string} prop
- * @param {string} value
- * @param {import('./css-value.mjs').ValueNode[]} [nodes] the value already read by parseValue, so it's read once
+ * @param {string | import('./css-value.mjs').ParsedValue} value the value as written, or
+ *   already read by readValue (without !important), so it's read once
  * @returns {Hit[]}
  */
-export function classify(prop, value, nodes) {
+export function classify(prop, value) {
   const p = prop.toLowerCase();
-  const v = value.replace(/!important/, '').trim();
-  const tree = nodes ?? parseValue(v);
+  const { text: v, nodes: tree } = typeof value === 'string' ? readValue(value.replace(/!important/, '').trim()) : value;
   // The words the value says itself: var() is a token, so `var(--space-4) 10px` is checked as 10px.
   const words = literalWords(tree);
   /** @param {RegExp} re */
@@ -241,7 +240,8 @@ export function classify(prop, value, nodes) {
       : before[before.length - 1];
     // Checked as font-size would check it: a word, or a function such as calc() or clamp()
     // by the literals inside it (a var() is a token, so it adds nothing).
-    if (size && (size.type === 'word' || size.type === 'function')) out.push(...classify('font-size', size.value, [size]));
+    // The size's own text is read again, so its tree and text agree.
+    if (size && (size.type === 'word' || size.type === 'function')) out.push(...classify('font-size', readValue(v.slice(size.start, size.end))));
     // The weight (a number before the size) and line height (after the "/") follow the
     // same rules as font-weight and line-height.
     const weight = before.find((n) => n !== size && n.type === 'word' && /^\d+$/.test(n.value));

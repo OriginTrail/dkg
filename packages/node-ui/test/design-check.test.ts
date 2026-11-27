@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildSystem, checkDeclaration, checkText, inUi, isExempt, parseColour, readTokens, runtimeProps } from '../scripts/design-core.mjs';
 import { classify } from '../scripts/design-rules.mjs';
-import { parseValue, varRefs } from '../scripts/css-value.mjs';
+import { parseValue, readValue, varRefs } from '../scripts/css-value.mjs';
 import { customPropertyNames } from '../scripts/jsx.mjs';
 import { cssFiles, read, where } from './helpers/source.js';
 
@@ -386,6 +386,18 @@ describe('design check', () => {
     }
   });
 
+  it('checks the literals in a var() fallback, which the browser uses when the variable is unset', () => {
+    const off = (css: string) => checkText(system, css, 'src/ui/styles/x.css', { known: new Set(['--runtime-gap']) })
+      .filter((f: { offScale?: boolean }) => f.offScale).map((f: { kind: string; value: string }) => `${f.kind} ${f.value}`);
+    expect(off('.x { padding: var(--space-8, 10px); }')).toEqual(['spacing 10px']);
+    expect(off('.x { gap: var(--runtime-gap, 10px); }')).toEqual(['spacing 10px']);
+    expect(off('.x { border-radius: var(--radius-card, 7px); }')).toEqual(['corner 7px']);
+    expect(off('.x { transition: opacity var(--motion-fast, 1s); }')).toEqual(['motion 1s']);
+    // A fallback of tokens only passes; the variable's own name is never a literal.
+    expect(off('.x { gap: var(--runtime-gap, var(--space-8)); }')).toEqual([]);
+    expect(off('.x { transition: opacity var(--motion-fast); }')).toEqual([]);
+  });
+
   it('still checks a var() fallback when the variable resolves', () => {
     const off = (css: string, file = 'src/ui/styles/x.css') => checkText(system, css, file, { known: new Set() })
       .filter((f: { offScale?: boolean }) => f.offScale).map((f: { kind: string; value: string }) => `${f.kind} ${f.value}`);
@@ -443,13 +455,13 @@ describe('design check', () => {
   });
 
   it('classifies the words of a value read once, beside its tokens', () => {
-    const kinds = (prop: string, value: string) => classify(prop, value, parseValue(value)).map((h: { kind: string; value: string }) => `${h.kind} ${h.value}`);
+    const kinds = (prop: string, value: string) => classify(prop, readValue(value)).map((h: { kind: string; value: string }) => `${h.kind} ${h.value}`);
     expect(kinds('gap', 'var(--space-4) 10px')).toEqual(['spacing 10px']);
     expect(kinds('margin', 'calc(-1 * var(--space-4)) 12px')).toEqual(['spacing 12px']);
     expect(kinds('transition', 'opacity var(--motion-fast), color 1s')).toEqual(['motion 1s']);
     expect(kinds('border-radius', '999px')).toEqual(['corner 999px']);
     expect(kinds('font', '600 15px/1.4 "Inter 10px", sans-serif')).toEqual(['type size 15px', 'line height 1.4']); // text in quotes isn't a size
-    expect(classify('gap', 'var(--space-4) 10px')).toEqual(classify('gap', 'var(--space-4) 10px', parseValue('var(--space-4) 10px')));
+    expect(classify('gap', 'var(--space-4) 10px')).toEqual(classify('gap', readValue('var(--space-4) 10px')));
   });
 
   it("skips only the package's own theme, palettes and reference page", () => {

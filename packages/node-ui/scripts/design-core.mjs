@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { NAMED_COLOURS, parseColour } from './colour.mjs';
 import { CssReadError, cssDeclarations } from './css.mjs';
 import { classify, declarations, lineIndex, resolveVarsFrom } from './design-rules.mjs';
-import { literalWords, parseValue, varRefs, walkValue } from './css-value.mjs';
+import { literalWords, readValue, varRefs, walkValue } from './css-value.mjs';
 import { readHtml } from './html.mjs';
 import { ADD, suggest } from './design-suggest.mjs';
 import { attrText, attrsOf, classNames, customPropertyNames, opening, parseTsx, tagName, walkJsx } from './jsx.mjs';
@@ -178,11 +178,11 @@ const COLOUR_FUNCTIONS = new Set(['rgb', 'rgba', 'hsl', 'hsla', 'hwb', 'lab', 'l
  * a shadow, a color-mix() or a var() fallback. Strings and url() are text, so
  * `content: "#ff00ff"` and `url(#mask)` aren't colours.
  * @param {string} prop
- * @param {string} value
- * @param {import('./css-value.mjs').ValueNode[]} [nodes] the value already read by parseValue
+ * @param {string | import('./css-value.mjs').ParsedValue} input the value, or the value already read by readValue
  * @returns {string[]}
  */
-export function colourTokens(prop, value, nodes = parseValue(value)) {
+export function colourTokens(prop, input) {
+  const { text: value, nodes } = typeof input === 'string' ? readValue(input) : input;
   const named = COLOUR_PROPS.test(prop.toLowerCase());
   /** @type {string[]} */
   const found = [];
@@ -300,7 +300,8 @@ export function checkDeclaration(system, prop, value, { known, mockup = false } 
   const p = prop.toLowerCase();
   const v = value.replace(/!important/, '').trim();
   // The value is read once (css-value.mjs); every check below walks the same tree.
-  const nodes = parseValue(v);
+  const parsed = readValue(v);
+  const { nodes } = parsed;
 
   // Colour, wherever it appears, custom-property definitions included: a mock-up's own
   // `--surface: #141414` says which node UI token it stands for, and the UI's own
@@ -308,7 +309,7 @@ export function checkDeclaration(system, prop, value, { known, mockup = false } 
   // system itself (00-theme.css isn't checked); a redefinition of one anywhere else is
   // reported by checkText.
   if (!p.startsWith('--') || !system.tokens.has(p)) {
-    for (const text of colourTokens(p, v, nodes)) {
+    for (const text of colourTokens(p, parsed)) {
       const f = checkColour(system, p, text);
       if (f) out.push(f);
     }
@@ -321,7 +322,7 @@ export function checkDeclaration(system, prop, value, { known, mockup = false } 
     }
   }
   // Literal values. A token in the same declaration doesn't excuse the literals beside it.
-  for (const hit of classify(p, v, nodes)) {
+  for (const hit of classify(p, parsed)) {
     const finding = suggest(system, hit);
     if (finding) out.push(finding);
   }

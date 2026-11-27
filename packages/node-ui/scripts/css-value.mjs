@@ -13,6 +13,14 @@
  * @typedef {{ type: 'function', value: string, start: number, end: number, nodes: ValueNode[] }} FunctionNode
  * @typedef {Leaf | FunctionNode} ValueNode
  */
+/**
+ * A value read once: its text and its tree, kept together so every node's start and end
+ * are positions in `text`.
+ * @typedef {{ text: string, nodes: ValueNode[] }} ParsedValue
+ */
+
+/** A value with its tree. @param {string} text @returns {ParsedValue} */
+export const readValue = (text) => ({ text, nodes: parseValue(text) });
 
 /**
  * A declaration value as a tree. Never throws: an unclosed string or function runs to the end.
@@ -78,9 +86,10 @@ export function walkValue(nodes, visit) {
 }
 
 /**
- * The words a value says itself, in order: what's outside var() (a token), url() and
- * strings (text), including inside other functions such as calc(). `var(--space-4) 10px`
- * gives 10px.
+ * The words a value says itself, in order: everything but a var()'s name (a token), url()
+ * and strings (text), including inside other functions such as calc(), and a var()'s
+ * fallback, which the browser uses when the variable isn't set. `var(--space-4) 10px` and
+ * `var(--gap, 10px)` both give 10px.
  * @param {ValueNode[]} nodes
  * @returns {string[]}
  */
@@ -88,7 +97,14 @@ export function literalWords(nodes) {
   /** @type {string[]} */
   const out = [];
   walkValue(nodes, (n) => {
-    if (n.type === 'function') return n.value !== 'var' && n.value !== 'url';
+    if (n.type === 'function') {
+      if (n.value === 'url') return false;
+      if (n.value !== 'var') return true;
+      // Past the first comma is the fallback, read like any other value.
+      const comma = n.nodes.findIndex((c) => c.type === 'div' && c.value === ',');
+      if (comma !== -1) out.push(...literalWords(n.nodes.slice(comma + 1)));
+      return false;
+    }
     if (n.type === 'word') out.push(n.value);
     return true;
   });

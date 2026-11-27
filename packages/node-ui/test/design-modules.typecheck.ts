@@ -3,6 +3,7 @@
 // expected error below marks a misuse that must stay a type error.
 import type ts from 'typescript';
 import { parseColour } from '../scripts/colour.mjs';
+import { parseValue, readValue } from '../scripts/css-value.mjs';
 import { classify, declarations, resolveVars, type Hit, type Kind } from '../scripts/design-rules.mjs';
 import { suggest, type Finding, type Scales } from '../scripts/design-suggest.mjs';
 import { attrsOf, parseTsx, walkJsx, type Declaration, type Jsx } from '../scripts/jsx.mjs';
@@ -14,6 +15,11 @@ export const channels: [number, number, number] | undefined = colour?.rgb;
 export const unchecked: number = parseColour('#fff').alpha;
 
 export const hits: Hit[] = classify('padding', '10px');
+export const fromParsed: Hit[] = classify('padding', readValue('10px'));
+// @ts-expect-error: a tree alone has no text to report, so it comes with its text (readValue)
+classify('padding', parseValue('10px'));
+// @ts-expect-error: text and a separate tree can't disagree any more: classify takes one value
+classify('padding', '10px', parseValue('10px'));
 export const kind: Kind = 'spacing';
 // @ts-expect-error: colours aren't one of the literal rules
 export const notAKind: Kind = 'colour';
