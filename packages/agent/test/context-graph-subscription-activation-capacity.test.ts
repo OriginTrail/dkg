@@ -102,7 +102,7 @@ describe('demand and rolling activation share commit ownership', () => {
     f.owner.transition({ id: target.id, kind: 'dormancy', reason: 'activationCap' });
     const controller = new AbortController(), prepare = vi.fn()
       .mockRejectedValueOnce(new Error('reconciliation failed')).mockResolvedValue(undefined);
-    const activate = vi.fn(async (record, onChainId, _revision, isCurrent) => {
+    const activate = vi.fn(async (record, onChainId, isCurrent) => {
       await f.owner.activate(record, f.ports, { onChainId, isCurrent, prepare });
     });
     const demand = new StorageAckDemandActivations({
@@ -145,17 +145,20 @@ describe('demand and rolling activation share commit ownership', () => {
     const held = new Promise<void>(resolve => { release = resolve; });
     const controller = new AbortController(), recovery = new SubscriptionRecoveryCoordinator();
     const rolling = promoteDormantContextGraphSubscriptions({
-      recovery,
-      store: { load: async () => ({ ...target }), loadAll: async () => [target] },
+      row: {
+        recovery, isCurrent: () => !controller.signal.aborted,
+        dormancy: id => f.dormancy.get(id), revision: () => 0, subscription: id => f.live.get(id),
+        load: async () => ({ ...target }), clear: () => {}, capped: () => {},
+        retire: (id, reason) => f.owner.transition({ id, kind: 'dormancy', reason }),
+        resolveAuthority: async () => { beginRead(); await reading; return authority; },
+        activate: async () => { throw new Error('rolling must not adopt the provisional row'); },
+      },
       getStatus: f.status, isCurrent: () => !controller.signal.aborted,
       contextGraphSubscriptionRollingChecks: new RollingSubscriptionChecks({ minPauseMs: 0, pausePerCheckTime: 0 }),
       contextGraphSubscriptionRehydrationPendingIds: f.pending, contextGraphSubscriptionRehydrationSlotIds: f.slots,
-      contextGraphSubscriptionDormancyById: f.dormancy, contextGraphSubscriptionPersistRevisions: new Map(),
+      contextGraphSubscriptionDormancyById: f.dormancy,
       subscribedContextGraphs: f.live, log: { info: () => {}, warn: () => {}, debug: () => {} },
-      transitionDormancy: (id, reason) => f.owner.transition({ id, kind: 'dormancy', reason }),
-      touchStatus: () => {}, recordContextGraphSubscriptionClear: () => {}, wakeAuthorityRecovery: () => {},
-      resolveAuthority: async () => { beginRead(); await reading; return authority; },
-      activate: async () => { throw new Error('rolling must not adopt the provisional row'); },
+      touchStatus: () => {}, wakeAuthorityRecovery: () => {},
     }, controller.signal);
     await readStarted;
     const demand = new StorageAckDemandActivations({
@@ -163,7 +166,7 @@ describe('demand and rolling activation share commit ownership', () => {
       signal: controller.signal, isCurrent: () => !controller.signal.aborted,
       dormancy: id => f.dormancy.get(id), revision: () => 0, subscription: id => f.live.get(id),
       load: async () => ({ ...target }), resolveAuthority: async () => authority,
-      activate: async (record, onChainId, _revision, isCurrent) => { await f.owner.activate(record, f.ports, {
+      activate: async (record, onChainId, isCurrent) => { await f.owner.activate(record, f.ports, {
         onChainId, isCurrent, prepare: async () => { beginPreparation(); await held;
         },
       }); },
@@ -223,7 +226,7 @@ describe('one recovery owner across scheduling policies', () => {
       recovery, isCurrent: () => !controller.signal.aborted,
       dormancy: id => f.dormancy.get(id), revision: () => 0, subscription: id => f.live.get(id),
       load: async () => ({ ...target }), resolveAuthority,
-      activate: async (record, onChainId, _revision, isCurrent) => {
+      activate: async (record, onChainId, isCurrent) => {
         await f.owner.activate(record, f.ports, { onChainId, isCurrent, prepare, respectActivationCap: true });
       },
       clear: () => {}, capped: () => {}, retire: () => {},

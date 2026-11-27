@@ -1,4 +1,3 @@
-import { subscriptionRecoveryCoordinatorOf } from './subscription-recovery-owner.js';
 import { exactRecoveryActionOutcome } from './sync/durable-recovery-action.js';
 import { runGraphOwnedDurableRecovery, type AgentGraphOwnedRecoveryRequest } from './durable-recovery-owned-round.js';
 import { installReadGraphWorkingMemoryIdentity } from './read-graph-view-source.js';
@@ -8833,29 +8832,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * an unsubscribe/delete racing with the timer cannot resurrect stale state.
    */
   async promoteDormantContextGraphSubscriptions(this: DKGAgent, signal: AbortSignal): Promise<'rearm' | 'idle'> {
+    const row = this.subscriptionRecoveryRowPorts(() => this.started);
+    if (!row) return 'idle';
     return promoteDormantContextGraphSubscriptions({
-      recovery: subscriptionRecoveryCoordinatorOf(this),
-      store: this.config.contextGraphSubscriptionStore,
+      row: {
+        ...row,
+        activate: (saved, onChainId, current) => activateRollingSubscriptionPromotion({
+          activate: this.activatePersistedContextGraphSubscriptionRecord.bind(this),
+          reconcile: this.reconcileRfc64CatalogResponsibilityV1.bind(this),
+        }, saved, onChainId, subscription => current() && row.subscription(saved.id) === subscription),
+      },
       getStatus: () => this.contextGraphSubscriptionRehydrationStatus,
       isCurrent: (ownerSignal) => this.started
         && this.contextGraphSubscriptionRehydrationPromotionRuntime?.owns(ownerSignal) === true,
       contextGraphSubscriptionRollingChecks: this.contextGraphSubscriptionRollingChecks,
-      transitionDormancy: this.transitionContextGraphSubscriptionDormancy.bind(this),
       contextGraphSubscriptionRehydrationPendingIds: this.contextGraphSubscriptionRehydrationPendingIds,
       contextGraphSubscriptionRehydrationSlotIds: this.contextGraphSubscriptionRehydrationSlotIds,
       contextGraphSubscriptionDormancyById: this.contextGraphSubscriptionDormancyById,
-      contextGraphSubscriptionPersistRevisions: this.contextGraphSubscriptionPersistRevisions,
       subscribedContextGraphs: this.subscribedContextGraphs,
       log: this.log,
-      recordContextGraphSubscriptionClear: this.recordContextGraphSubscriptionClear.bind(this),
-      resolveAuthority: (binding, ownerSignal) => this.resolveContextGraphSubscriptionBootstrapAuthority(binding.contextGraphId, {
-        allowSubscriptionFallback: false, signal: ownerSignal,
-        durableSubscriptionBinding: binding,
-      }),
-      activate: (row, onChainId, isCurrent) => activateRollingSubscriptionPromotion({
-        activate: this.activatePersistedContextGraphSubscriptionRecord.bind(this),
-        reconcile: this.reconcileRfc64CatalogResponsibilityV1.bind(this),
-      }, row, onChainId, isCurrent),
       wakeAuthorityRecovery: () => wakeDeferredContextGraphSubscriptionAuthorityRecovery(this.contextGraphSubscriptionAuthorityRecoveryRuntime),
       touchStatus: () => {
         const current = this.contextGraphSubscriptionRehydrationStatus;
