@@ -3,12 +3,16 @@ import {
   SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS,
   SHUTDOWN_FORCED_OFFSET,
   SHUTDOWN_HARD_TIMEOUT_MS,
+  DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS,
+  MIN_SHUTDOWN_HARD_TIMEOUT_MS,
+  MAX_SHUTDOWN_HARD_TIMEOUT_MS,
   decodeForcedExitCode,
   encodeForcedShutdownExitCode,
   isForcedShutdownExitCode,
   raceShutdownWithTimeout,
 } from '../src/daemon/shutdown.js';
 import { DAEMON_EXIT_CODE_RESTART } from '../src/daemon/manifest.js';
+import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 
 describe('shutdown constants', () => {
   it('declares SHUTDOWN_FORCED_OFFSET = 100 so 0+offset and 75+offset both fit in an 8-bit exit code', () => {
@@ -21,12 +25,44 @@ describe('shutdown constants', () => {
   });
 
   it('uses a 15s default hard-timeout — generous enough to let normal shutdowns finish, tight enough to recover from a stuck Core in one update cycle', () => {
-    expect(SHUTDOWN_HARD_TIMEOUT_MS).toBe(15_000);
+    expect(SHUTDOWN_HARD_TIMEOUT_MS).toBe(DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS);
   });
 
   it('uses a 1s default forced-cleanup timeout — bounded separately from the wall-clock cutoff so a stalled FS op cannot recreate the zombie shape', () => {
     expect(SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS).toBe(1_000);
   });
+});
+
+describe('resolveShutdownPolicy', () => {
+  it('preserves defaults and validates only the worker hard-timeout policy', () => {
+    expect(resolveShutdownPolicy(undefined)).toEqual({
+      hardTimeoutMs: 15_000,
+    });
+    expect(resolveShutdownPolicy(String(MIN_SHUTDOWN_HARD_TIMEOUT_MS)).hardTimeoutMs).toBe(5_000);
+    expect(resolveShutdownPolicy(String(MAX_SHUTDOWN_HARD_TIMEOUT_MS))).toEqual({
+      hardTimeoutMs: 300_000,
+    });
+    expect(resolveShutdownPolicy('60000')).toEqual({
+      hardTimeoutMs: 60_000,
+    });
+  });
+
+  it.each([
+    '',
+    'not-a-number',
+    '1.5',
+    '-1',
+    '0',
+    String(MIN_SHUTDOWN_HARD_TIMEOUT_MS - 1),
+    String(MAX_SHUTDOWN_HARD_TIMEOUT_MS + 1),
+    String(Number.MAX_SAFE_INTEGER + 1),
+    'Infinity',
+  ])('rejects malformed or unsafe override %j', (value) => {
+    expect(() => resolveShutdownPolicy(value)).toThrow(
+      /DKG_SHUTDOWN_HARD_TIMEOUT_MS must be an integer/u,
+    );
+  });
+
 });
 
 describe('isForcedShutdownExitCode', () => {

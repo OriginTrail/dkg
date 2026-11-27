@@ -3,11 +3,27 @@ import { homedir, tmpdir } from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
 import { toEip55Checksum } from '@origintrail-official/dkg-core';
+import {
+  decodeQueryCatalogBindings,
+  QUERY_CATALOG_READ_CAPABILITIES,
+  QUERY_CATALOG_SCHEMA_VERSION,
+} from '@origintrail-official/dkg-core/query-catalog';
 import { DkgNodePlugin } from '../src/DkgNodePlugin.js';
 import { DkgChannelPlugin } from '../src/DkgChannelPlugin.js';
 import { ChatTurnWriter } from '../src/ChatTurnWriter.js';
 import { INTERNAL_HOOK_SYMBOL } from '../src/HookSurface.js';
 import type { OpenClawPluginApi, OpenClawTool } from '../src/types.js';
+
+function queryCatalogEnvelope(bindings: Array<Record<string, unknown>>) {
+  return {
+    schemaVersion: QUERY_CATALOG_SCHEMA_VERSION,
+    capabilities: QUERY_CATALOG_READ_CAPABILITIES,
+    contextGraphId: 'cg-1',
+    graph: 'did:dkg:context-graph:cg-1/meta',
+    items: decodeQueryCatalogBindings(bindings, { contextGraphId: 'cg-1' }),
+    result: { type: 'bindings' as const, bindings },
+  };
+}
 
 describe("DkgNodePlugin", () => {
 
@@ -75,10 +91,7 @@ describe("DkgNodePlugin", () => {
   it('round-trips query catalog resultColumn metadata in list output', async () => {
     const plugin = new DkgNodePlugin();
     (plugin as any).client = {
-      readQueryCatalog: vi.fn(async () => ({
-        result: {
-          type: 'bindings',
-          bindings: [
+      readQueryCatalog: vi.fn(async () => queryCatalogEnvelope([
             {
               q: 'urn:dkg:profile:cg-1:query:orders',
               catalog: 'urn:dkg:profile:cg-1:catalog:saved',
@@ -87,9 +100,7 @@ describe("DkgNodePlugin", () => {
               resultColumn: '"uri"',
               subGraph: '"__context_graph"',
             },
-          ],
-        },
-      })),
+      ])),
     };
 
     const result = await (plugin as any).handleQueryCatalogList({ context_graph_id: 'cg-1' });
@@ -107,10 +118,7 @@ describe("DkgNodePlugin", () => {
     const query = vi.fn(async () => ({ result: { bindings: [] } }));
     const plugin = new DkgNodePlugin();
     (plugin as any).client = {
-      readQueryCatalog: vi.fn(async () => ({
-        result: {
-          type: 'bindings',
-          bindings: [
+      readQueryCatalog: vi.fn(async () => queryCatalogEnvelope([
             {
               q: 'urn:dkg:profile:cg-1:query:orders',
               catalog: 'urn:dkg:profile:cg-1:catalog:saved',
@@ -119,9 +127,7 @@ describe("DkgNodePlugin", () => {
               resultColumn: '"s"',
               subGraph: '"production"',
             },
-          ],
-        },
-      })),
+      ])),
       query,
     };
 
@@ -137,6 +143,65 @@ describe("DkgNodePlugin", () => {
     });
   });
 
+  it('renders declared saved-query parameters and preserves the execution view', async () => {
+    const query = vi.fn(async () => ({ result: { bindings: [] } }));
+    const plugin = new DkgNodePlugin();
+    (plugin as any).client = {
+      readQueryCatalog: vi.fn(async () => queryCatalogEnvelope([{
+            q: 'urn:dkg:profile:cg-1:query:configuration-trace',
+            catalog: 'urn:dkg:profile:cg-1:catalog:kamstrup',
+            name: '"Configuration trace"',
+            sparql: '"SELECT ?record WHERE { ?record <urn:configuration> {{configurationId}} }"',
+            queryParameters: '"[{\\"name\\":\\"configurationId\\",\\"type\\":\\"string\\"}]"',
+            executionView: '"verifiable-memory"',
+            subGraph: '"__context_graph"',
+      }])),
+      query,
+    };
+
+    const result = await (plugin as any).handleQueryCatalogRun({
+      context_graph_id: 'cg-1',
+      query: 'configuration-trace',
+      parameters: { configurationId: '748387' },
+    });
+
+    expect(query).toHaveBeenCalledWith(
+      'SELECT ?record WHERE { ?record <urn:configuration> "748387" }',
+      { contextGraphId: 'cg-1', view: 'verifiable-memory' },
+    );
+    expect((result.details as any).savedQuery.parameters).toEqual([
+      { name: 'configurationId', type: 'string' },
+    ]);
+  });
+
+  it('forwards the resolved agent identity for a saved working-memory query', async () => {
+    const query = vi.fn(async () => ({ result: { type: 'bindings', bindings: [] } }));
+    const plugin = new DkgNodePlugin();
+    (plugin as any).client = {
+      readQueryCatalog: vi.fn(async () => queryCatalogEnvelope([{
+        q: 'urn:dkg:profile:cg-1:query:drafts',
+        catalog: 'urn:dkg:profile:cg-1:catalog:saved',
+        name: 'Drafts',
+        sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+        executionView: 'working-memory',
+        subGraph: '__context_graph',
+      }])),
+      query,
+    };
+
+    await (plugin as any).handleQueryCatalogRun({
+      context_graph_id: 'cg-1',
+      query: 'drafts',
+      agent_address: 'did:dkg:agent:peer-session',
+    });
+
+    expect(query).toHaveBeenCalledWith('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId: 'cg-1',
+      view: 'working-memory',
+      agentAddress: 'peer-session',
+    });
+  });
+
 
   it('saves query catalog timestamp ranks as unbounded integer literals', async () => {
     const rank = 1_714_000_000_000;
@@ -149,7 +214,9 @@ describe("DkgNodePlugin", () => {
       const result = await (plugin as any).handleQueryCatalogSave({
         context_graph_id: 'cg-1',
         name: 'Orders',
-        sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+        sparql: 'SELECT ?s WHERE { ?s <urn:order> {{shopOrderNo}} }',
+        parameters: [{ name: 'shopOrderNo', type: 'string', label: 'Shop order' }],
+        execution_view: 'verifiable-memory',
       });
 
       const savedQuery = (result.details as any).savedQuery;
@@ -159,9 +226,46 @@ describe("DkgNodePlugin", () => {
       );
 
       expect(rankQuad?.object).toBe(`"${rank}"^^<http://www.w3.org/2001/XMLSchema#integer>`);
+      expect(savedQuery).toMatchObject({
+        parameters: [{ name: 'shopOrderNo', type: 'string', label: 'Shop order' }],
+        view: 'verifiable-memory',
+      });
+      expect(quads).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          subject: savedQuery.queryUri,
+          predicate: 'http://dkg.io/ontology/profile/queryParameters',
+          object: '"[{\\"name\\":\\"shopOrderNo\\",\\"type\\":\\"string\\",\\"label\\":\\"Shop order\\"}]"',
+        }),
+        expect.objectContaining({
+          subject: savedQuery.queryUri,
+          predicate: 'http://dkg.io/ontology/profile/executionView',
+          object: '"verifiable-memory"',
+        }),
+      ]));
     } finally {
       nowSpy.mockRestore();
     }
+  });
+
+  it.each([
+    { value: 'working-memory' },
+    null,
+    '',
+    'unsupported-memory',
+  ])('rejects malformed execution_view values before writing: %j', async (executionView) => {
+    const writeQueryCatalog = vi.fn();
+    const plugin = new DkgNodePlugin();
+    (plugin as any).client = { writeQueryCatalog };
+
+    const result = await (plugin as any).handleQueryCatalogSave({
+      context_graph_id: 'cg-1',
+      name: 'Orders',
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      execution_view: executionView,
+    });
+
+    expect(result.details?.error).toMatch(/"execution_view" must be working-memory/);
+    expect(writeQueryCatalog).not.toHaveBeenCalled();
   });
 
 

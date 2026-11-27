@@ -201,7 +201,7 @@ fi
 
 # Sanity: the value "curator-only-secret-B" must NEVER appear anywhere
 # in member-A's CG-B view.
-if printf '%s' "$QUERY_B" | grep -q "curator-only-secret-B"; then
+if grep -q "curator-only-secret-B" <<<"$QUERY_B"; then
   fail "PRIVACY LEAK: 'curator-only-secret-B' leaked into member-A's view of CG-B"
 fi
 log "✓ string 'curator-only-secret-B' not present in member-A's CG-B view"
@@ -237,7 +237,7 @@ log "Polling curator log for CG-B denial..."
 DENIAL=0
 for _ in $(seq 1 45); do
   CURATOR_NEW=$(tail -n "+$((CURATOR_LOG_BASE + 1))" "$(node_log "$CURATOR_NODE")")
-  if printf '%s' "$CURATOR_NEW" | grep -qE "(Denied sync request for \"$CG_B\"|Private sync auth for \"$CG_B\".*signer=$MEMBER_AGENT.*allowed=false)"; then
+  if grep -qE "(Denied sync request for \"$CG_B\"|Private sync auth for \"$CG_B\".*signer=$MEMBER_AGENT.*allowed=false)" <<<"$CURATOR_NEW"; then
     DENIAL=1
     break
   fi
@@ -260,7 +260,7 @@ QUERY_B_CURATOR=$(api_call "$CURATOR_NODE" POST /api/query "$(cat <<EOF
 EOF
 )")
 log "curator query B: $QUERY_B_CURATOR"
-if printf '%s' "$QUERY_B_CURATOR" | grep -q "curator-only-secret-B"; then
+if grep -q "curator-only-secret-B" <<<"$QUERY_B_CURATOR"; then
   log "✓ curator can still decrypt CG-B (positive control)"
 else
   fail "regression: curator cannot decrypt its OWN CG-B"

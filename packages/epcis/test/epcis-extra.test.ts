@@ -18,10 +18,8 @@
  *
  * Per QA policy: no production-code edits.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
-import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { createRequire } from 'node:module';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { handleCaptureAsync, handleEventsQuery, EpcisQueryError, EpcisValidationError } from '../src/handlers.js';
 import type { AsyncPublisher, QueryEngine, CaptureOptions, EPCISDocument } from '../src/types.js';
 import {
@@ -33,9 +31,6 @@ import {
 
 const CONTEXT_GRAPH_ID = 'epcis-contract-test';
 const BASE_PATH = '/api/epcis/events';
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-const E2E_PATH = resolve(HERE, 'epcis-api.e2e.test.ts');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // In-memory DI implementations of AsyncPublisher + QueryEngine. These are the
@@ -61,12 +56,20 @@ function inMemoryPublisher(store: Captured[]): AsyncPublisher {
   };
 }
 
-function capturedDocument(content: unknown): EPCISDocument {
-  if (content && typeof content === 'object' && !Array.isArray(content)) {
-    const envelope = content as { public?: unknown; private?: unknown };
-    return (envelope.public ?? envelope.private ?? content) as EPCISDocument;
-  }
-  return content as EPCISDocument;
+const jsonld = createRequire(import.meta.url)('jsonld') as {
+  compact(document: unknown, context: unknown): Promise<unknown>;
+  toRDF(document: unknown, options: { format: string }): Promise<string>;
+};
+async function capturedDocument(content: unknown): Promise<EPCISDocument> {
+  const envelope = content as { public?: unknown; private?: unknown };
+  // The capture boundary supplies expanded JSON-LD. Compact only inside this
+  // small contract fixture; real RDF query coverage lives in external-event-query.
+  const context = {
+    ...VALID_OBJECT_EVENT_DOC['@context'] as Record<string, unknown>,
+    ...Object.fromEntries(['eventList', 'epcList', 'childEPCs', 'inputEPCList', 'outputEPCList'].map(key =>
+      [key, { '@id': `https://gs1.github.io/EPCIS/${key}`, '@container': '@set' }])),
+  };
+  return await jsonld.compact(envelope.public ?? envelope.private ?? content, context) as EPCISDocument;
 }
 
 /**
@@ -87,10 +90,10 @@ function inMemoryQueryEngine(store: Captured[]): QueryEngine & { lastSparql?: st
       // `{ ?event epcis:epcList "<epc>" }` UNION form. Parse the new
       // shape so our fake engine narrows results the way the daemon
       // would (match on epcList OR childEPCs, mirroring the VALUES set).
-      const epcPredMatch = sparql.match(/\?event \?_epcPred "([^"]+)"/);
+      const epcPredMatch = sparql.match(/FILTER\(STR\(\?_epcValue\) = "([^"]+)"\)/);
       const wantEpc = epcPredMatch?.[1];
       for (const c of store) {
-        const doc = capturedDocument(c.content);
+        const doc = await capturedDocument(c.content);
         const events = doc.epcisBody?.eventList ?? doc.eventList ?? [];
         for (const e of events) {
           if (
@@ -103,7 +106,7 @@ function inMemoryQueryEngine(store: Captured[]): QueryEngine & { lastSparql?: st
 
           bindings.push({
             event: `urn:uuid:fixture-${bindings.length}`,
-            eventType: `https://gs1.github.io/EPCIS/${String(e.type)}`,
+            eventType: `https://gs1.github.io/EPCIS/${String(Array.isArray(e.type) ? e.type[0] : e.type)}`,
             eventTime: String(e.eventTime ?? ''),
             action: String(e.action ?? ''),
             bizStep: String(e.bizStep ?? ''),
@@ -126,19 +129,6 @@ function inMemoryQueryEngine(store: Captured[]): QueryEngine & { lastSparql?: st
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// K-6  e2e skip gap — static evidence
-// ─────────────────────────────────────────────────────────────────────────────
-describe('[K-6] e2e suite skip pattern exists (evidence this file is needed)', () => {
-  it('epcis-api.e2e.test.ts still contains a beforeEach(..., skip()) hook', async () => {
-    const src = await readFile(E2E_PATH, 'utf8');
-    // Be tolerant of whitespace / destructuring style; only require that some
-    // beforeEach somewhere in the file invokes skip().
-    expect(src).toMatch(/beforeEach\(\s*\([^)]*skip[^)]*\)\s*=>/);
-    expect(src).toMatch(/skip\(\)/);
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
 // K-6  Contract test — always runs; exercises the full capture → query flow
 // ─────────────────────────────────────────────────────────────────────────────
 describe('[K-6] EPCIS capture → query contract (always runs, no devnet)', () => {
@@ -146,7 +136,8 @@ describe('[K-6] EPCIS capture → query contract (always runs, no devnet)', () =
   let publisher: AsyncPublisher;
   let engine: QueryEngine & { lastSparql?: string };
 
-  beforeAll(() => {
+  beforeEach(() => {
+    store.length = 0;
     publisher = inMemoryPublisher(store);
     engine = inMemoryQueryEngine(store);
   });
@@ -172,10 +163,19 @@ describe('[K-6] EPCIS capture → query contract (always runs, no devnet)', () =
       expect(result.eventCount).toBe(1);
     });
 
-    it('publisher received submitted JSON-LD documents as private content', () => {
-      expect(store.length).toBeGreaterThanOrEqual(2);
-      expect(store[0].content).toEqual({ private: VALID_OBJECT_EVENT_DOC });
-      expect(store[1].content).toEqual({ private: VALID_TRANSFORMATION_EVENT_DOC });
+    it('publisher received private content preserving the submitted event fields', async () => {
+      for (const epcisDocument of [VALID_OBJECT_EVENT_DOC, VALID_TRANSFORMATION_EVENT_DOC]) {
+        await handleCaptureAsync({ epcisDocument }, { contextGraphId: CONTEXT_GRAPH_ID, publisher });
+      }
+      expect(store).toHaveLength(2);
+      const actual = await jsonld.toRDF((store[0].content as { private: unknown }).private, { format: 'application/n-quads' });
+      const original = await jsonld.toRDF(VALID_OBJECT_EVENT_DOC, { format: 'application/n-quads' });
+      expect(actual.split('\n').filter(line => !line.includes('<http://dkg.io/ontology/epcisEventType>')).sort())
+        .toEqual(original.split('\n').sort());
+      const transformed = await jsonld.toRDF((store[1].content as { private: unknown }).private, { format: 'application/n-quads' });
+      const transformation = await jsonld.toRDF(VALID_TRANSFORMATION_EVENT_DOC, { format: 'application/n-quads' });
+      expect(transformed.split('\n').filter(line => !line.includes('<http://dkg.io/ontology/epcisEventType>')).sort())
+        .toEqual(transformation.split('\n').sort());
     });
   });
 
@@ -236,6 +236,11 @@ describe('[K-6] EPCIS capture → query contract (always runs, no devnet)', () =
   });
 
   describe('Category D: query round-trip (mirrors e2e Category 4)', () => {
+    beforeEach(async () => {
+      for (const epcisDocument of [VALID_OBJECT_EVENT_DOC, VALID_TRANSFORMATION_EVENT_DOC]) {
+        await handleCaptureAsync({ epcisDocument }, { contextGraphId: CONTEXT_GRAPH_ID, publisher });
+      }
+    });
     it('returns an EPCISQueryDocument with correct shape', async () => {
       const { body } = await handleEventsQuery(
         new URLSearchParams(''),
@@ -282,15 +287,12 @@ describe('[K-6] EPCIS capture → query contract (always runs, no devnet)', () =
     });
 
     it('EpcisQueryError is a real class (not just a tagged Error)', async () => {
-      try {
-        await handleEventsQuery(
-          new URLSearchParams('from=2024-12-31T00:00:00Z&to=2024-01-01T00:00:00Z'),
-          { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
-        );
-      } catch (err) {
-        expect(err).toBeInstanceOf(EpcisQueryError);
-        expect((err as EpcisQueryError).statusCode).toBe(400);
-      }
+      const result = handleEventsQuery(
+        new URLSearchParams('from=2024-12-31T00:00:00Z&to=2024-01-01T00:00:00Z'),
+        { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
+      );
+      await expect(result).rejects.toBeInstanceOf(EpcisQueryError);
+      await expect(result).rejects.toMatchObject({ statusCode: 400 });
     });
   });
 

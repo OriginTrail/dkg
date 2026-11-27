@@ -273,4 +273,30 @@ describe('buildEntities — MemoryEntity.tripleCount', () => {
     expect(isFirstClassEntity(sectionEntity!)).toBe(true);
     expect(sectionEntity?.properties.get('http://schema.org/description')).toEqual(['see /.well-known/genid/a']);
   });
+
+  it('renders a rootless Markdown KA received in Shared Working Memory as document and section entities', () => {
+    const root = 'did:dkg:context-graph:construction/assertion/0xauthor/readme.md';
+    const section = 'urn:dkg:ka-skolem:c14n0';
+    const file = 'urn:dkg:file:keccak256:abc';
+    const entities = buildEntities([
+      triple(root, 'http://schema.org/name', '"Construction notes"', 'shared'),
+      triple(root, 'http://dkg.io/ontology/sourceContentType', '"text/markdown"', 'shared'),
+      triple(root, 'http://dkg.io/ontology/sourceFile', file, 'shared'),
+      triple(root, 'http://dkg.io/ontology/markdownForm', file, 'shared'),
+      triple(root, 'http://dkg.io/ontology/rootEntity', root, 'shared'),
+      triple(root, 'http://dkg.io/ontology/hasSection', section, 'shared'),
+      triple(section, 'http://schema.org/name', '"Safety"', 'shared'),
+    ]);
+
+    const rootEntity = entities.get(root);
+    const sectionEntity = entities.get(section);
+    expect(rootEntity).toBeDefined();
+    expect(rootEntity?.trustLevel).toBe('shared');
+    expect(rootEntity?.properties.get('http://dkg.io/ontology/sourceContentType')).toEqual(['text/markdown']);
+    expect(rootEntity?.tripleCount).toBe(6);
+    expect(isFirstClassEntity(rootEntity!)).toBe(true);
+    expect(sectionEntity).toBeDefined();
+    expect(sectionEntity?.trustLevel).toBe('shared');
+    expect(isFirstClassEntity(sectionEntity!)).toBe(true);
+  });
 });

@@ -1,0 +1,135 @@
+/* Hardware-wallet management for the node's on-chain identity keys. */
+
+.v10-identity-wallets {
+  overflow: visible;
+}
+
+.v10-identity-wallet-header {
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-12);
+}
+
+.v10-identity-wallet-description,
+.v10-identity-wallet-status {
+  margin: var(--space-8) 0 0;
+  font-size: var(--fs-label);
+  line-height: var(--lh-body);
+  color: var(--text-tertiary);
+}
+
+.v10-identity-wallet-status {
+  font-size: var(--fs-control);
+  color: var(--text-secondary);
+}
+
+.v10-identity-wallet-btn.ds-btn { max-width: 100%; height: auto; min-height: var(--h-control-md); white-space: normal; }
+.v10-identity-wallet-btn:disabled { opacity: var(--opacity-disabled); }
+
+.v10-identity-wallet-counts,
+.v10-identity-wallet-signer,
+.v10-identity-wallet-actions,
+.v10-identity-wallet-row-actions,
+.v10-identity-wallet-confirm {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  flex-wrap: wrap;
+}
+
+.v10-identity-wallet-signer {
+  justify-content: space-between;
+  padding: var(--pad-nested);
+  margin-bottom: var(--space-12);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+.v10-identity-wallet-signer .v10-wallet-connect,
+.v10-identity-wallet-signer .v10-wallet-pill-wrap {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.v10-identity-wallet-known {
+  margin: var(--space-12) 0;
+}
+
+.v10-identity-wallet-subtitle {
+  margin: 0 0 var(--space-8);
+  font-size: var(--fs-label);
+  font-weight: 700;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: var(--ls-caps);
+}
+
+.v10-identity-wallet-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  margin-top: var(--space-8);
+  max-width: none;
+}
+
+.v10-identity-wallet-row-actions {
+  justify-content: flex-end;
+}
+
+.v10-identity-wallet-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-12);
+  margin-top: var(--space-12);
+}
+
+.v10-identity-wallet-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  min-width: 0;
+  padding: var(--pad-compact);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+.v10-identity-wallet-card h3 {
+  margin: 0;
+  font-size: var(--fs-body);
+  color: var(--text-primary);
+}
+
+.v10-identity-wallet-card p,
+.v10-identity-wallet-card label {
+  margin: 0;
+  font-size: var(--fs-label);
+  line-height: var(--lh-body);
+  color: var(--text-tertiary);
+}
+
+.v10-identity-wallet-card label {
+  margin-top: auto;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.v10-identity-wallet-card .v10-form-input {
+  width: 100%;
+}
+
+.v10-identity-wallet-confirm {
+  margin-top: var(--space-12);
+}
+
+.v10-identity-wallet-confirm > span:first-child {
+  flex: 1 1 360px;
+  overflow-wrap: anywhere;
+}
+.v10-center-content[data-narrow] .v10-identity-wallet-grid {
+    grid-template-columns: 1fr; }
+.v10-center-content[data-narrow] .v10-identity-wallet-signer {
+    align-items: flex-start;
+    flex-direction: column; }
+.v10-center-content[data-narrow] .v10-identity-wallet-known .v10-wallet-trailing {
+    width: 100%;
+    margin-left: 0; }

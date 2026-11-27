@@ -39,6 +39,70 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     const lastCall = client.queryCalls.at(-1)!;
     expect(lastCall.view).toBe('working-memory');
     expect(lastCall.includeSharedMemory).toBe(true);
+    expect(lastCall.agentAddress).toBe('peer-test');
+  });
+
+  it('passes the scoped metadata opt-ins through the public tool schema', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',
+      projectId: 'parent', includeContextGraphPartitions: true, includeSharedMemoryMeta: true,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(client.queryCalls.at(-1)).toMatchObject({ contextGraphId: 'parent',
+      includeContextGraphPartitions: true, includeSharedMemoryMeta: true });
+  });
+
+  it('passes semantics through the public tool schema, and refuses other values', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }', projectId: 'parent', view: 'verifiable-memory', semantics: 'merged',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(client.queryCalls.at(-1)).toMatchObject({ contextGraphId: 'parent', view: 'verifiable-memory', semantics: 'merged' });
+    await expect(server.call('dkg_query', { sparql: 'SELECT ?s WHERE { ?s ?p ?o }', projectId: 'parent', semantics: 'joined' }))
+      .rejects.toThrow();
+  });
+
+  it('renders CONSTRUCT quads instead of dropping graph-shaped results', async () => {
+    client = new FakeClient({
+      query: async () => ({
+        type: 'quads',
+        quads: [{
+          subject: 'urn:model:05',
+          predicate: 'http://www.w3.org/2000/01/rdf-schema#label',
+          object: '"Catalog Model 05"',
+          graph: 'did:dkg:context-graph:test-cg/model-families/_working_memory/0xabc/5',
+        }],
+      }),
+    });
+    server = new FakeServer();
+    registerReadTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
+
+    const result = await server.call('dkg_query', {
+      sparql: `PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+CONSTRUCT { ?s rdfs:label ?label } WHERE { ?s rdfs:label ?label }`,
+      view: 'working-memory',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toContain('| subject | predicate | object | graph |');
+    expect(result.content[0].text).toContain('urn:model:05');
+    expect(result.content[0].text).toContain('Catalog Model 05');
+  });
+
+  it.each([true, false])('renders ASK %s without dropping the boolean result', async (value) => {
+    client = new FakeClient({
+      query: async () => ({ type: 'boolean', value }),
+    });
+    server = new FakeServer();
+    registerReadTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
+
+    const result = await server.call('dkg_query', {
+      sparql: 'ASK { ?s ?p ?o }',
+      view: 'working-memory',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toBe(String(value));
   });
 
   it.each(['working-memory', 'shared-working-memory', 'verifiable-memory'])(
@@ -166,6 +230,49 @@ describe('F1 schema-migration sweep — no public tool exposes legacy `layer` fi
     expect(lastCall.view).toBe('verifiable-memory');
   });
 
+  it('dkg_get_entity scopes both neighbourhood queries to the requested named subgraph', async () => {
+    const server = new FakeServer();
+    const client = new FakeClient();
+    registerReadTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
+    const result = await server.call('dkg_get_entity', {
+      uri: 'urn:test:entity',
+      subGraphName: 'model-families',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(client.queryCalls).toHaveLength(4);
+    for (const call of client.queryCalls) {
+      expect(call.subGraphName).toBe('model-families');
+    }
+    expect(client.queryCalls.filter((call) => call.view === 'working-memory')).toHaveLength(2);
+    expect(client.queryCalls.filter((call) => call.graphSuffix === '_shared_memory')).toHaveLength(2);
+  });
+
+  it('dkg_get_entity forwards explicit working-memory view instead of falling into legacy data-graph routing', async () => {
+    const server = new FakeServer();
+    const client = new FakeClient();
+    registerReadTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
+    await server.call('dkg_get_entity', {
+      uri: 'urn:test:entity',
+      view: 'working-memory',
+    });
+    for (const call of client.queryCalls) expect(call.view).toBe('working-memory');
+    for (const call of client.queryCalls) expect(call.agentAddress).toBe('peer-test');
+  });
+
+  it('dkg_get_entity implements working-memory plus SWM as two strict scoped reads', async () => {
+    const server = new FakeServer();
+    const client = new FakeClient();
+    registerReadTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
+    await server.call('dkg_get_entity', {
+      uri: 'urn:test:entity',
+      view: 'working-memory',
+      includeSharedMemory: true,
+    });
+    expect(client.queryCalls).toHaveLength(4);
+    expect(client.queryCalls.filter((call) => call.view === 'working-memory')).toHaveLength(2);
+    expect(client.queryCalls.filter((call) => call.graphSuffix === '_shared_memory')).toHaveLength(2);
+  });
+
   it('F27: dkg_get_entity silently drops legacy `layer: "union"`, falls back to V9-era default WM∪SWM scope', async () => {
     // Post-F1 the legacy `layer` field is no longer on the schema
     // (replaced by `view + includeSharedMemory`). Production MCP SDK
@@ -248,9 +355,9 @@ describe('dkg_list_context_graphs — rename + UX-note pair', () => {
     expect(server.tools.has('dkg_list_projects')).toBe(false);
   });
 
-  it("description includes the canonical-naming reconciliation note: \"called 'projects' in the DKG node UI\"", () => {
+  it("description includes the canonical-naming reconciliation note: \"shown as 'Context Graphs' in the DKG node UI\"", () => {
     const tool = server.get('dkg_list_context_graphs');
-    expect(tool.config.description).toContain("called 'projects' in the DKG node UI");
+    expect(tool.config.description).toContain("shown as 'Context Graphs' in the DKG node UI");
   });
 
   it('happy path: invokes client.listProjects and renders rows', async () => {

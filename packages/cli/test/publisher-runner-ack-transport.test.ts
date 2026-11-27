@@ -23,16 +23,17 @@ import {
   type PublishOptions,
   type V10ACKProviderParams,
 } from '@origintrail-official/dkg-publisher';
+import { seedLegacyRawLiftTestJob } from '../../publisher/test/_helpers/legacy-raw-lift.js';
 import { createTripleStore } from '@origintrail-official/dkg-storage';
 import { addPublisherWallet } from '../src/publisher-wallets.js';
 import { createPublisherRuntimeFromAgent } from '../src/publisher-runner.js';
 
 type V10ReadyNoChainPrototype = typeof NoChainAdapter.prototype & {
   getMinimumRequiredSignatures?: () => Promise<number>;
-  verifyACKIdentity?: (recoveredAddress: string, claimedIdentityId: bigint) => Promise<boolean>;
+  verifyACKIdentity?: (recoveredAddress: string, claimedIdentityId: bigint, options?: { signal?: AbortSignal }) => Promise<boolean>;
   verifyACKIdentityDetailed?: (
     recoveredAddress: string,
-    claimedIdentityId: bigint,
+    claimedIdentityId: bigint, options?: { signal?: AbortSignal },
   ) => Promise<{ valid: boolean; reason?: 'key-not-registered' | 'not-in-sharding-table' | 'rpc-error' }>;
 };
 
@@ -144,12 +145,11 @@ describe('publisher runner ACK transport handoff', () => {
         store,
         keypair,
         chainBase: undefined,
-        pollIntervalMs: 10,
-        errorBackoffMs: 10,
+        runnerOptions: { pollIntervalMs: 10, errorBackoffMs: 10 },
         ackTransportFactory,
       });
 
-      const jobId = await runtime.publisher.lift({
+      const jobId = await seedLegacyRawLiftTestJob(store, {
         swmId: 'swm-main',
         shareOperationId: write.shareOperationId,
         roots: ['urn:local:/ack-transport'],
@@ -174,6 +174,12 @@ describe('publisher runner ACK transport handoff', () => {
       expect(capturedCollectorDeps?.log).toBe(log);
       expect(capturedCollectorDeps?.verifyIdentity).toBeTypeOf('function');
       expect(capturedCollectorDeps?.verifyIdentityDetailed).toBeTypeOf('function');
+      const signal = new AbortController().signal;
+      await capturedCollectorDeps!.verifyIdentity!('signer', 7n, { signal });
+      expect(noChainPrototype.verifyACKIdentity).toHaveBeenCalledWith('signer', 7n, { signal });
+      await capturedCollectorDeps!.verifyIdentityDetailed!('signer', 7n, { signal });
+      expect(noChainPrototype.verifyACKIdentityDetailed).toHaveBeenCalledWith('signer', 7n, { signal });
+
 
       expect(capturedCollectorParams).toMatchObject({
         publisherPeerId: 'publisher-peer-from-factory',

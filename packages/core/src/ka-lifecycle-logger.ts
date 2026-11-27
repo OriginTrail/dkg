@@ -1,6 +1,8 @@
 import { Logger, type OperationContext } from './logger.js';
 
-export type KaLifecycleLogLevel = 'debug' | 'info' | 'warn' | 'error';
+import type { LogLevel } from './logger.js';
+
+export type KaLifecycleLogLevel = LogLevel;
 export type KaLifecycleLogDetail = 'summary' | 'debug';
 
 export const KA_LIFECYCLE_STAGES = [

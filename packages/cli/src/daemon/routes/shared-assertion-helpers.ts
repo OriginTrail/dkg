@@ -1,3 +1,4 @@
+import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
 // daemon/routes/shared-assertion-helpers.ts
 //
 // Shared helper functions / types / classes extracted verbatim from
@@ -8,6 +9,7 @@
 
 import type { ServerResponse } from "node:http";
 import {
+  validateContextGraphId,
   validateSubGraphName,
   validateAssertionName,
   isSafeIri,
@@ -20,15 +22,16 @@ import {
   resolveImportedArtifactMetadata,
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
-import { type PromoteJob, type PromoteJobState } from '@origintrail-official/dkg-publisher';
+import {
+  SAFE_JOB_ID_PATTERN,
+  SAFE_JOB_ID_MAX_LENGTH,
+} from '@origintrail-official/dkg-publisher';
 import { daemonState } from '../state.js';
 import {
   jsonResponse,
   oversizedRdfLiteralResponseBody,
   isNoFundedPublisherWalletLike,
   safeDecodeURIComponent,
-  normalizeContextGraphIdOrUri,
-  isValidContextGraphId,
 } from '../http-utils.js';
 import { getExtractionStatusRecord } from '../../extraction-status.js';
 import type { RequestContext } from './context.js';
@@ -116,9 +119,12 @@ export class ImportArtifactRouteError extends Error {
 }
 
 export function validatePromoteJobId(jobId: string): { valid: true } | { valid: false; reason: string } {
+  // Grammar + length bound are imported from the publisher (the single authoritative
+  // job-id contract, also enforced control-plane-side by `isSafeJobId`) so route
+  // acceptance and control-plane acceptance cannot drift.
   if (!jobId) return { valid: false, reason: "jobId is required" };
-  if (jobId.length > 256) return { valid: false, reason: "jobId is too long" };
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(jobId)) {
+  if (jobId.length > SAFE_JOB_ID_MAX_LENGTH) return { valid: false, reason: "jobId is too long" };
+  if (!SAFE_JOB_ID_PATTERN.test(jobId)) {
     return {
       valid: false,
       reason: "jobId may only contain letters, numbers, '.', '_', ':', and '-'",
@@ -144,99 +150,7 @@ export function scopedTokenPromoteLane(agentAddress?: string): { agentAddress?: 
     : {};
 }
 
-// ── Async-promote wire schema (RFC §3.2 + §3.3) ──────────────────────────────
-//
-// The internal `PromoteJob` shape persisted by the queue carries
-// implementation details the HTTP contract is not allowed to leak:
-//   - `lease.claimToken` (opaque worker-side capability),
-//   - `lease.workerId` / heartbeat metadata,
-//   - numeric epoch timestamps,
-//   - `commitMarker` (internal idempotency bookkeeping).
-//
-// `PromoteJobView` is the documented public shape per RFC §3.2; ISO-8601
-// timestamps, a flat top level for assertion identity, and a stable
-// `lastError.code` enum mapped from the queue's failure classification.
-// The list (§3.3) and status (§3.2) endpoints share `promoteJobToView()`
-// so both surfaces stay in lockstep.
-
-export interface PromoteJobErrorView {
-  code: string;
-  message: string;
-  retryable: boolean;
-}
-
-export interface PromoteJobView {
-  jobId: string;
-  state: PromoteJobState;
-  contextGraphId: string;
-  assertionName: string;
-  subGraphName?: string;
-  entities: readonly string[] | 'all';
-  enqueuedAt: string;
-  updatedAt: string;
-  startedAt?: string;
-  finishedAt?: string;
-  entitiesPromoted?: number;
-  attempts: number;
-  maxAttempts: number;
-  nextRetryAt?: string;
-  lastError?: PromoteJobErrorView;
-  reason?: string;
-}
-
-export function isoFromEpochMs(ms: number | undefined): string | undefined {
-  if (ms === undefined || ms === null) return undefined;
-  if (!Number.isFinite(ms)) return undefined;
-  return new Date(ms).toISOString();
-}
-
-export function promoteJobToView(job: PromoteJob): PromoteJobView {
-  // `startedAt` reflects the current attempt's lease acquisition; while
-  // running the lease is present, after success/failure the queue clears
-  // it so the field naturally goes away. `finishedAt` is sourced from
-  // the terminal-state evidence the queue already records:
-  // `result.succeededAt` for success and `attempt.lastError.recordedAt`
-  // for failed / failed_retrying. Cancelled jobs (no lastError, no
-  // result) fall back to `updatedAt` because that's the only durable
-  // timestamp for that transition.
-  const startedAt = isoFromEpochMs(job.lease?.acquiredAt);
-  let finishedAt: string | undefined;
-  if (job.state === 'succeeded') {
-    finishedAt = isoFromEpochMs(job.result?.succeededAt) ?? isoFromEpochMs(job.updatedAt);
-  } else if (job.state === 'failed' || job.state === 'failed_retrying') {
-    finishedAt =
-      isoFromEpochMs(job.attempt.lastError?.recordedAt) ?? isoFromEpochMs(job.updatedAt);
-  }
-
-  const lastError: PromoteJobErrorView | undefined = job.attempt.lastError
-    ? {
-        code: job.attempt.lastError.classification,
-        message: job.attempt.lastError.message,
-        retryable: job.attempt.lastError.retryable,
-      }
-    : undefined;
-
-  const view: PromoteJobView = {
-    jobId: job.jobId,
-    state: job.state,
-    contextGraphId: job.request.contextGraphId,
-    assertionName: job.request.assertionName,
-    entities: job.request.entities,
-    enqueuedAt: new Date(job.enqueuedAt).toISOString(),
-    updatedAt: new Date(job.updatedAt).toISOString(),
-    attempts: job.attempt.count,
-    maxAttempts: job.attempt.maxRetries,
-  };
-  if (job.request.subGraphName !== undefined) view.subGraphName = job.request.subGraphName;
-  if (startedAt !== undefined) view.startedAt = startedAt;
-  if (finishedAt !== undefined) view.finishedAt = finishedAt;
-  if (job.result?.promotedCount !== undefined) view.entitiesPromoted = job.result.promotedCount;
-  const nextRetryAt = isoFromEpochMs(job.attempt.nextRetryAt);
-  if (nextRetryAt !== undefined) view.nextRetryAt = nextRetryAt;
-  if (lastError !== undefined) view.lastError = lastError;
-  if (job.reason !== undefined) view.reason = job.reason;
-  return view;
-}
+export { isoFromEpochMs, promoteJobToView, type PromoteJobErrorView, type PromoteJobView } from './promote-job-view.js';
 
 // Helper used by the five `/promote-async` routes below to refuse work
 // when no worker is actually draining the queue (RFC §3.1 — the
@@ -604,7 +518,7 @@ export async function resolveImportedArtifact(
   if (!contextGraphId) {
     throw new ImportArtifactRouteError(400, '"contextGraphId" is required');
   }
-  if (!isValidContextGraphId(contextGraphId)) {
+  if (!validateContextGraphId(contextGraphId).valid) {
     throw new ImportArtifactRouteError(400, 'Invalid contextGraphId');
   }
 

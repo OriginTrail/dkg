@@ -1,4 +1,4 @@
-import { Logger, type OperationContext } from '@origintrail-official/dkg-core';
+import { Logger, type LogLevel, type OperationContext } from '@origintrail-official/dkg-core';
 import type { DashboardDB } from './db.js';
 
 /**
@@ -31,7 +31,7 @@ export class StructuredLogger extends Logger {
     this.persist('error', ctx, message);
   }
 
-  private persist(level: string, ctx: OperationContext, message: string): void {
+  private persist(level: LogLevel, ctx: OperationContext, message: string): void {
     try {
       this.db.insertLog({
         ts: Date.now(),

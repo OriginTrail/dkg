@@ -42,13 +42,20 @@ export {
   type V10MerkleCommitment,
 } from './proof-material.js';
 
-export { canonicalize, hashTriple, hashTripleV10, tripleContentV10 } from './canonicalize.js';
+export {
+  canonicalize,
+  canonicalBlankNodeIdMap,
+  hashTriple,
+  hashTripleV10,
+  tripleContentV10,
+} from './canonicalize.js';
 export { canonicalizeObjectTermForHash } from './term-canon.js';
 
 export { hexToBytes } from './oracle-verify.js';
 
 export {
   computeACKDigest,
+  computeVerifyApprovalDigest,
   computePublishACKDigest,
   computeUpdateACKDigest,
   computePublishPublisherDigest,

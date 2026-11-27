@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { MemoryLayer, contextGraphLayerUri } from '@origintrail-official/dkg-core';
 import {
   OxigraphStore,
   type TripleStore,
@@ -20,6 +21,20 @@ async function removeTempSubGraph(store: TripleStore): Promise<void> {
 }
 
 describe('removeSubGraph graph-set maintenance', () => {
+  it('removes every canonical memory layer and legacy assertions, retaining neighboring subgraphs', async () => {
+    const store = new OxigraphStore();
+    const layers = [MemoryLayer.WorkingMemory, MemoryLayer.SharedWorkingMemory, MemoryLayer.VerifiableMemory];
+    const removed = layers.map(layer => contextGraphLayerUri('review-cg', layer, '0x00000000000000000000000000000000000000ef', 7, 'temp'));
+    removed.push('did:dkg:context-graph:review-cg/temp/assertion/legacy/7');
+    const retained = layers.map(layer => contextGraphLayerUri('review-cg', layer, '0x00000000000000000000000000000000000000ef', 7, 'temp-other'));
+    try {
+      await store.insert([...removed, ...retained].map(graph => ({ graph, subject: 'urn:s', predicate: 'urn:p', object: '"value"' })));
+      await removeTempSubGraph(store);
+      for (const graph of removed) expect(await store.countQuads(graph)).toBe(0);
+      for (const graph of retained) expect(await store.countQuads(graph)).toBe(1);
+    } finally { await store.close(); }
+  });
+
   it('declares the context-graph meta graph on the server-side deregistration update', async () => {
     const inner = new OxigraphStore();
     const updateCalls: Array<{ sparql: string; options?: UpdateOptions }> = [];
@@ -47,6 +62,7 @@ describe('removeSubGraph graph-set maintenance', () => {
     expect(updateCalls[0].options).toEqual({
       source: 'agent.cg.removeSubGraph.registration',
       touchedGraphs: ['did:dkg:context-graph:review-cg/_meta'],
+      writtenGraphs: ['did:dkg:context-graph:review-cg/_meta'],
     });
   });
 
@@ -77,7 +93,7 @@ describe('removeSubGraph graph-set maintenance', () => {
     expect(queryCalls[0]).toContain('DELETE WHERE');
   });
 
-  it('falls back to deleteByPattern() when the SPARQL update fails', async () => {
+  it('falls back to a no-count pattern delete when the SPARQL update fails', async () => {
     const inner = new OxigraphStore();
     const deletePatterns: Array<{ graph?: string; subject?: string }> = [];
     const store = new Proxy(inner, {
@@ -85,10 +101,9 @@ describe('removeSubGraph graph-set maintenance', () => {
         if (prop === 'update') {
           return async () => { throw new Error('update unsupported'); };
         }
-        if (prop === 'deleteByPattern') {
+        if (prop === 'deleteByPatternWithoutCount') {
           return async (pattern: { graph?: string; subject?: string }) => {
             deletePatterns.push(pattern);
-            return 0;
           };
         }
         const value = Reflect.get(target, prop, receiver);

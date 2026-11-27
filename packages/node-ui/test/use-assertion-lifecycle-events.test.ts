@@ -65,7 +65,7 @@ describe('buildLifecycleEventsQuery — SPARQL shape', () => {
     expect(q).not.toMatch(/UNION\s*\{/);
   });
 
-  it('scopes the query to the project `_meta` graph for the given context graph id', () => {
+  it('scopes the query to the project `_meta` graph for the given Context Graph id', () => {
     const q = buildLifecycleEventsQuery('cg-42');
     expect(q).toContain('GRAPH <did:dkg:context-graph:cg-42/_meta>');
   });

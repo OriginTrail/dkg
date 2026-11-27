@@ -7,18 +7,73 @@
  * is unchanged — this module is a 1:1 move.
  */
 
-import type { OperationContext } from '@origintrail-official/dkg-core';
+import {
+  DEFAULT_MAX_READ_BYTES,
+  JAVA_WRITE_UTF_MAX_BYTES,
+  type OperationContext,
+} from '@origintrail-official/dkg-core';
 
 /** Anchor predicate stamped on every root entity that has a private partition. */
 export const PRIVATE_DATA_ANCHOR = 'http://dkg.io/ontology/privateDataAnchor';
 
 // ── Sync ──────────────────────────────────────────────────────────────
+/** Legacy signed responder-side maximum accepted row limit. Keep at 500 so a
+ * new responder remains compatible with requesters from an older rolling node. */
 export const SYNC_PAGE_SIZE = 500;
+/**
+ * Requester page size derived from the wire frame cap, not only row count.
+ *
+ * A legal RDF literal may occupy JAVA_WRITE_UTF_MAX_BYTES. At the historical
+ * 500-row request size, 32 KiB literals already produced ~16 MiB responses and
+ * tripped ProtocolRouter's 10 MiB read limit before page parsing. Reserve six
+ * MiB for subjects, predicates, graph IRIs, N-Quads syntax, and framing; the
+ * remaining four MiB admits 64 maximum-sized literal rows. That value remains
+ * the retry floor for pathological payloads.
+ *
+ * Upgraded durable-sync peers negotiate a byte-budgeted page through additive
+ * hints. Authenticated JSON requests keep the signed `limit` capped at the
+ * legacy 500,
+ * so an old responder authenticates the request and simply returns 500 rows;
+ * a new responder may return up to the row hint but serializes only a bounded
+ * response body. EOF-only pagination makes both responses unambiguous. A
+ * transport failure retries at the conservative 64-row floor.
+ */
+export const SYNC_RESPONSE_FRAME_HEADROOM_BYTES = 6 * 1024 * 1024;
+export const SYNC_REQUEST_SAFE_PAGE_SIZE = Math.max(
+  1,
+  Math.floor(
+    (DEFAULT_MAX_READ_BYTES - SYNC_RESPONSE_FRAME_HEADROOM_BYTES) /
+    JAVA_WRITE_UTF_MAX_BYTES,
+  ),
+);
+/** Additive wire capability understood by upgraded sync responders. */
+export const SYNC_BYTE_BUDGET_PAGE_MODE = 'byte-budget-v1' as const;
+/** Maximum rows a responder may materialize for one byte-budgeted sync page. */
+export const SYNC_BYTE_BUDGET_MAX_ROWS = 8_192;
+/** Exact DATA uses page-only store reads; never buffer a whole assertion. */
+export const SYNC_BYTE_BUDGET_EXACT_MAX_ROWS = 512;
+/**
+ * Conservative first request for a previously unseen peer/path.
+ *
+ * The 8,192-row byte-budget ceiling remains available after the requester has
+ * observed sustained success, but opening at that ceiling amplifies cold
+ * relay and responder-queue churn: one reset throws away a much larger page
+ * and occupies a scarce durable lane while the transport retries. 512 stays
+ * above the legacy 500-row cap (so byte-budget EOF semantics remain active)
+ * while bounding the first response.
+ */
+export const SYNC_REQUEST_INITIAL_PAGE_SIZE = 512;
+/** Target serialized body. Six MiB of the 10 MiB router cap remains as headroom. */
+export const SYNC_BYTE_BUDGET_RESPONSE_BYTES = DEFAULT_MAX_READ_BYTES - SYNC_RESPONSE_FRAME_HEADROOM_BYTES;
+/** Maximum throughput-oriented row hint; the signed legacy limit remains 500. */
+export const SYNC_REQUEST_PAGE_SIZE = SYNC_BYTE_BUDGET_MAX_ROWS;
+/** Successful pages required before the requester doubles its learned size. */
+export const SYNC_PAGE_GROWTH_SUCCESS_THRESHOLD = 8;
 export const SYNC_PAGE_RETRY_ATTEMPTS = 3;
 export const SYNC_TOTAL_TIMEOUT_MS = 120_000;
 /** Per-page timeout for sync when we have budget (relay links can be slow). */
 export const SYNC_PAGE_TIMEOUT_MS = 45_000;
-/** ProtocolRouter.send retries internally 3 times with the same timeout; cap so 3× fits in remaining budget. */
+/** Fresh signed request attempts; each envelope is marked single-use at the ProtocolRouter boundary. */
 export const SYNC_ROUTER_ATTEMPTS = 3;
 export const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
 export const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
@@ -106,6 +161,12 @@ export const GOSSIP_DIAL_COOLDOWN_MS = 30_000;
 /** Per-dial-attempt timeout for reconnect-on-gossip so a stuck dial can't starve the gossip handler path. */
 export const GOSSIP_DIAL_TIMEOUT_MS = 10_000;
 /**
+ * How long a private share waits for an on-demand phonebook fetch of a roster
+ * member whose encryption key it lacks (#2849). The fetch itself keeps its own
+ * budget and serves a later share if this one stops waiting.
+ */
+export const SWM_RECIPIENT_KEY_FETCH_WAIT_MS = 30_000;
+/**
  * Cooldown for catchup-on-connection:open: suppresses duplicate catchup kicks
  * when the same peer briefly has overlapping direct + relayed connections
  * (each of which fires its own connection:open).
@@ -151,9 +212,12 @@ export const SYNC_STALENESS_THRESHOLD_MS = 10 * 60_000;
  * The backoff grows the per-peer retry gap as
  * `SYNC_BACKOFF_BASE_MS * 2^(failures-1)` (capped at
  * `SYNC_BACKOFF_MAX_MS`, ±`SYNC_BACKOFF_JITTER` to de-correlate peers)
- * and resets the instant a sync succeeds. Only the periodic reconciler
- * is gated — connection:open and peer:update still trigger an immediate
- * attempt, so new information is never delayed.
+ * and resets the instant a sync succeeds. A new connection is gated as
+ * well: `queueSyncFromPeerOnConnect` skips a peer in backoff, as it skips
+ * one synced within `SYNC_STALENESS_THRESHOLD_MS` and one queued within
+ * `CATCHUP_ON_CONNECT_COOLDOWN_MS`; only an accepted authority change
+ * (`authorityScopeChanged`) passes the backoff. Shared memory such a peer
+ * holds is pulled by the change notice and the safety-net pull instead.
  */
 export const SYNC_BACKOFF_BASE_MS = 5 * 60_000;
 export const SYNC_BACKOFF_MAX_MS = 60 * 60_000;
@@ -283,13 +347,49 @@ export const ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS = 60_000;
 /**
  * #884 review — bound the on-chain liveness / access-policy reads on the
  * share/promote/publish hot path (`isContextGraphPublicOnChain`). Mirrors
- * `CHAIN_RPC_FALLBACK_TIMEOUT_MS` in `DKGAgent.getContextGraphOnChainPolicy`:
+ * the chain-RPC fallback race in `DKGAgent.getContextGraphOnChainPolicy`:
  * if the RPC layer HANGS (rather than rejecting), the helper must still
  * resolve so the caller fails closed to "not public / not known" instead of
  * blocking the request indefinitely. 2.5s stays well under the daemon-ready
  * budget while allowing a single slow eth_call hop under normal load.
+ *
+ * This is the DEFAULT request-scoped deadline. Operators can raise it through
+ * `chainConfig.authorityReadTimeoutMs` (`chain.authorityReadTimeoutMs` in the
+ * CLI config) or the `DKG_CHAIN_AUTHORITY_READ_TIMEOUT_MS` environment
+ * override; runtime code reads the resolved value from
+ * `DKGAgent.chainAuthorityReadBudgets` rather than this constant.
  */
 export const CHAIN_POLICY_READ_TIMEOUT_MS = 2_500;
+
+/**
+ * Default budget for one COLD finalized Context Graph authority resolution:
+ * the first read of a graph the local finalized authority index has never
+ * projected walks the contract's event log (dozens of `eth_getLogs` calls on
+ * a public endpoint) before it can answer. A request-scoped deadline must
+ * still fail closed on time, but it must NOT abort that resolution: aborting
+ * it discards the scan, caches nothing, and makes every retry repeat the full
+ * cold walk. The resolution therefore runs as one detached single flight per
+ * graph under this budget and populates the chain reader's projection cache,
+ * so the next request answers from the snapshot without RPC.
+ *
+ * Configurable through `chainConfig.authorityColdResolutionTimeoutMs`
+ * (`chain.authorityColdResolutionTimeoutMs` in the CLI config) or the
+ * `DKG_CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_MS` environment override; never
+ * resolved below the request-scoped deadline.
+ */
+export const CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_MS = 20_000;
+
+/**
+ * Cold Context Graph name-hash resolution may need to build the adapter's
+ * bounded, provider-fenced reverse index before it can answer the first
+ * lookup.  That work is deliberately heavier than one policy eth_call (up to
+ * the chain adapter's fixed current-slot enumeration bound), so applying the
+ * 2.5s hot-path policy deadline leaves valid persisted subscriptions dormant
+ * on a mature registry.  Keep a finite startup/discovery deadline while
+ * allowing the adapter-owned index build to complete; subsequent lookups
+ * reuse the process-local index and remain fast.
+ */
+export const CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS = 120_000;
 
 // ── SWM sender-key ────────────────────────────────────────────────────
 /** Shared operation context for pending sender-key drain logging. */

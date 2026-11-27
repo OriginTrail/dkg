@@ -93,8 +93,11 @@ function renderConnectedAgentsTab(overrides: Record<string, unknown> = {}) {
     onSelectIntegration: noop,
     onConnectIntegration: noop,
     onDisconnectIntegration: noop,
-    onRefreshIntegrations: noop,
+    onRefreshIntegration: noop,
+    onClearIntegrationSession: noop,
     connectBusyId: null,
+    refreshBusyId: null,
+    clearBusyId: null,
     connectNotice: null,
     connectError: null,
     localMessages: [],
@@ -382,10 +385,10 @@ describe('ConnectedAgentsTab rendering', () => {
       connectError: 'error',
     });
 
-    expect(markup).toContain('Connect Another Agent');
+    expect(markup).toContain('Connect another agent');
     expect(markup).toContain('Connecting...');
     expect(markup).toContain('Docs');
-    expect(markup).toContain('Release Notes');
+    expect(markup).toContain('Release notes');
     expect(markup).toContain('Connect Hermes');
     expect(markup).toContain('local Hermes profile');
     expect(markup).toContain('connected');
@@ -510,7 +513,7 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(markup).not.toContain('aria-label="Uploading attachments"');
   });
 
-  it('shows the animated "Thinking…" indicator while an assistant turn is streaming with no content yet (PR5)', () => {
+  it('shows the animated "Connecting dots..." indicator while an assistant turn is streaming with no content yet (PR5)', () => {
     const markup = renderConnectedAgentsTab({
       localMessages: [
         { id: 'u', role: 'user', content: 'give me some friday ideas', ts: '10:00' },
@@ -519,7 +522,8 @@ describe('ConnectedAgentsTab rendering', () => {
       localSending: true,
     });
     expect(markup).toContain('v10-chat-thinking');
-    expect(markup).toContain('Thinking');
+    expect(markup).toContain('v10-chat-thinking-orb');
+    expect(markup).toContain('Connecting dots...');
     expect(markup).toContain('role="status"');
     // No inline caret yet — there is no text node to anchor it to.
     expect(markup).not.toContain('v10-chat-cursor');
@@ -610,8 +614,8 @@ describe('ConnectedAgentsTab rendering', () => {
       bridgeOnline: false,
       chatReady: false,
       status: 'degraded',
-      statusLabel: 'Degraded',
-      bridgeStatusLabel: 'Degraded',
+      statusLabel: 'Partial',
+      bridgeStatusLabel: 'Partial',
     });
     const markup = renderConnectedAgentsTab({
       integrations: [degraded],
@@ -687,7 +691,7 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(markup).toContain('More actions for Hermes');
   });
 
-  it('H-AC-47b: Warning chip surfaces lastError on disconnected integration in Connect Another Agent tab', () => {
+  it('H-AC-47b: Warning chip surfaces lastError on disconnected integration in Connect another agent tab', () => {
     // After UI Disconnect with restore-failure: daemon writes
     // enabled:false + runtime.status:'disconnected' + runtime.lastError:'restore failed: …'.
     // The api.ts mapper routes that to status:'available', detail = lastError,

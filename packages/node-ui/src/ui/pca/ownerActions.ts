@@ -115,7 +115,7 @@ function walletUnavailableReason(): string | null {
     return 'Connect the PCA owner wallet before signing.';
   }
   if (!walletState.bootstrap || walletState.expectedChainId == null) {
-    return 'PCA contract addresses are not bootstrapped yet.';
+    return 'The node hasn’t sent the PCA contract details yet. Reload the page and try again.';
   }
   if (walletState.chainId !== walletState.expectedChainId) {
     return "Switch the connected wallet to this node's PCA network.";

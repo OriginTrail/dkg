@@ -38,6 +38,7 @@ const CG_META = `${CG_PREFIX}/_meta`;
 const PER_CG_DATA = `${CG_PREFIX}/context/1`;
 const PER_CG_META = `${CG_PREFIX}/context/1/_meta`;
 const PRIVATE_GRAPH = `${CG_PREFIX}/_private/secret`;
+const RFC64_CONTROL_GRAPH = `${CG_PREFIX}/_sync/catalog/key/author/current`;
 
 const KC_URI = 'did:dkg:evm:31337/0x1234567890123456789012345678901234567890';
 const DKG_NS = 'http://dkg.io/ontology/';
@@ -103,6 +104,7 @@ describe('sync responder data phase — per-cgId meta inclusion', () => {
       { graph: PER_CG_META, subject: KC_URI, predicate: `${DKG_NS}tokenId`, object: '"1"' },
       // Private subgraph — must remain excluded.
       { graph: PRIVATE_GRAPH, subject: 'urn:secret:x', predicate: `${DKG_NS}redacted`, object: '"shh"' },
+      { graph: RFC64_CONTROL_GRAPH, subject: 'urn:dkg:sync:catalog:test', predicate: `${DKG_NS}sealDigest`, object: '"reserved"' },
     ]);
 
     cap = captureHandler();
@@ -176,6 +178,20 @@ describe('sync responder data phase — per-cgId meta inclusion', () => {
     const graphs = lineGraphsFromNquads(out);
     expect(graphs.has(PRIVATE_GRAPH)).toBe(false);
     expect(out).not.toContain('"shh"');
+  });
+
+  it('never serves RFC-64 semantic control graphs through legacy durable sync', async () => {
+    const out = await cap.invoke({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: 5000,
+      includeSharedMemory: false,
+      phase: 'data',
+    });
+
+    const graphs = lineGraphsFromNquads(out);
+    expect(graphs.has(RFC64_CONTROL_GRAPH)).toBe(false);
+    expect(out).not.toContain('"reserved"');
   });
 
   it('does NOT regress the meta phase — top-level _meta still flows through it', async () => {

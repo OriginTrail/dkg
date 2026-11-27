@@ -12,7 +12,7 @@ import {
   formatFileSize,
   getProjectDisplayName,
 } from './format.js';
-import { isSendableAttachmentDraft } from './attachments.js';
+import { isSendableAttachmentDraft } from '../../../conversations/attachments.js';
 import { renderMessageContent } from './messages.js';
 import {
   compareLocalAgentIntegrations,
@@ -20,6 +20,27 @@ import {
   shouldPreserveSessionForIntegrationSelection,
 } from './selection.js';
 import type { LocalAgentAttachmentDraft, LocalAgentMessage } from './types.js';
+import { agentLogoDataUri } from './agentLogos.js';
+import { ContextGraphMark } from '../../../context-graph-colors.js';
+import { IntegrationStatusBadge } from './IntegrationStatusBadge.js';
+
+/**
+ * The agent's own mark, drawn as a mask so it inherits the panel's text colour
+ * in both themes. Purely decorative — the agent name sits right next to it, so
+ * it is hidden from assistive tech rather than duplicating that name.
+ */
+function AgentLogo({ integrationId }: { integrationId: string }): React.ReactElement | null {
+  const uri = agentLogoDataUri(integrationId);
+  if (!uri) return null;
+  return (
+    <span
+      className="v10-local-agent-logo"
+      aria-hidden="true"
+      data-agent-logo={integrationId}
+      style={{ maskImage: `url("${uri}")`, WebkitMaskImage: `url("${uri}")` }}
+    />
+  );
+}
 
 export function ConnectedAgentsTab(props: {
   integrations: LocalAgentIntegration[];
@@ -32,8 +53,10 @@ export function ConnectedAgentsTab(props: {
   onConnectIntegration: (id: string) => void;
   onDisconnectIntegration: (id: string) => void;
   onRefreshIntegration: (id: string) => void;
+  onClearIntegrationSession: (id: string) => void;
   connectBusyId: string | null;
   refreshBusyId: string | null;
+  clearBusyId: string | null;
   connectNotice: string | null;
   connectError: string | null;
   localMessages: LocalAgentMessage[];
@@ -68,8 +91,10 @@ export function ConnectedAgentsTab(props: {
     onConnectIntegration,
     onDisconnectIntegration,
     onRefreshIntegration,
+    onClearIntegrationSession,
     connectBusyId,
     refreshBusyId,
+    clearBusyId,
     connectNotice,
     connectError,
     localMessages,
@@ -241,7 +266,7 @@ export function ConnectedAgentsTab(props: {
     localHistoryLoaded,
     localMessagesCount: localMessages.length,
   });
-  const inputDisabled = localSending || !selected?.chatReady;
+  const inputDisabled = localSending || !selected?.chatReady || selected.busy === true;
   // Single source of truth for "is the user allowed to fire a send right
   // now". Both the button click AND the keyboard Enter / Cmd+Enter
   // handlers gate on this — earlier the button correctly disabled while
@@ -257,7 +282,7 @@ export function ConnectedAgentsTab(props: {
 
   return (
     <div className="v10-agents-tab">
-      <div className="v10-agent-subtabs" role="tablist" aria-label="Integrated agents">
+      <div className="v10-agent-subtabs" role="group" aria-label="Integrated agents">
         {visibleAgentTabs.map((integration) => {
           const isActive = selected?.id === integration.id && !showAddFlow;
           return (
@@ -275,10 +300,10 @@ export function ConnectedAgentsTab(props: {
                   }),
                   sessionId: integration.defaultSessionId,
                 })}
-                role="tab"
-                aria-selected={isActive}
+                aria-pressed={isActive}
               >
                 <span className={`v10-agents-stat-dot ${bridgeStatusDotClass(integration)}`} />
+                <AgentLogo integrationId={integration.id} />
                 <span>{integration.name}</span>
               </button>
               {isActive && (
@@ -287,9 +312,12 @@ export function ConnectedAgentsTab(props: {
                   statusLabel={localAgentToolbarLabel(integration, showingSessionHistory)}
                   statusDotClass={bridgeStatusDotClass(integration)}
                   refreshBusy={refreshBusyId === integration.id}
-                  canDisconnect={integration.persistentChat}
+                  clearBusy={clearBusyId === integration.id}
+                  canDisconnect={integration.connectSupported && integration.persistentChat}
+                  canClearSession={integration.id === 'local-llm'}
                   onRefresh={() => onRefreshIntegration(integration.id)}
                   onDisconnect={() => onDisconnectIntegration(integration.id)}
+                  onClearSession={() => onClearIntegrationSession(integration.id)}
                 />
               )}
             </div>
@@ -298,8 +326,7 @@ export function ConnectedAgentsTab(props: {
         <button
           className={`v10-agent-subtab add ${showAddFlow ? 'active' : ''}`}
           onClick={() => onSelectIntegration(ADD_AGENT_TAB_ID)}
-          role="tab"
-          aria-selected={showAddFlow}
+          aria-pressed={showAddFlow}
           aria-label="Add another integrated agent"
           title="Add another integrated agent"
         >
@@ -309,9 +336,9 @@ export function ConnectedAgentsTab(props: {
 
       {showAddFlow ? (
         <div className="v10-agent-add-surface">
-          <div className="v10-agents-section-label">Connect Another Agent</div>
-          {connectNotice && <div className="v10-local-agent-notice">{connectNotice}</div>}
-          {connectError && <div className="v10-local-agent-error">{connectError}</div>}
+          <div className="v10-agents-section-label">Connect another agent</div>
+          {connectNotice && <div className="v10-local-agent-notice ds-card-nested">{connectNotice}</div>}
+          {connectError && <div className="v10-local-agent-error ds-card-nested">{connectError}</div>}
           <div className="v10-local-agent-list" aria-label="Available agent integrations">
             {addableIntegrations.length === 0 && (
               <div className="v10-agent-empty-state">
@@ -319,20 +346,21 @@ export function ConnectedAgentsTab(props: {
               </div>
             )}
             {addableIntegrations.map((integration) => (
-              <div key={integration.id} className="v10-local-agent-detail v10-local-agent-choice">
+              <div key={integration.id} className="v10-local-agent-detail ds-card v10-local-agent-choice">
                 <div className="v10-local-agent-detail-head">
                   <div>
-                    <div className="v10-local-agent-title">{integration.name}</div>
+                    <div className="v10-local-agent-title">
+                      <AgentLogo integrationId={integration.id} />
+                      {integration.name}
+                    </div>
                     <div className="v10-local-agent-subtitle">{integration.description}</div>
                   </div>
-                  <span className={`v10-local-agent-status-pill ${integration.status}`}>
-                    {integration.statusLabel}
-                  </span>
+                  <IntegrationStatusBadge status={integration.status} label={integration.statusLabel} />
                 </div>
                 <p className="v10-local-agent-copy">{integration.detail}</p>
                 {integration.error && (
                   <div
-                    className="v10-local-agent-warning offline"
+                    className="v10-local-agent-warning ds-card-nested offline"
                     role="status"
                     data-testid={`local-agent-warning-${integration.id}`}
                   >
@@ -346,19 +374,54 @@ export function ConnectedAgentsTab(props: {
                     </p>
                     <div className="v10-local-agent-actions">
                       <button
-                        className="v10-agent-send-btn secondary"
+                        className="v10-agent-send-btn secondary ds-btn"
                         onClick={() => onConnectIntegration(integration.id)}
                         disabled={connectBusyId === integration.id}
                       >
                         {connectBusyId === integration.id ? 'Connecting...' : 'Connect OpenClaw'}
                       </button>
-                      <a className="v10-agent-link-btn" href={OPENCLAW_DOCS_URL} target="_blank" rel="noreferrer">
+                      <a className="v10-agent-link-btn ds-btn" href={OPENCLAW_DOCS_URL} target="_blank" rel="noreferrer">
                         Docs
                       </a>
-                      <a className="v10-agent-link-btn" href={OPENCLAW_RELEASE_URL} target="_blank" rel="noreferrer">
-                        Release Notes
+                      <a className="v10-agent-link-btn ds-btn" href={OPENCLAW_RELEASE_URL} target="_blank" rel="noreferrer">
+                        Release notes
                       </a>
                     </div>
+                  </>
+                )}
+                {integration.id === 'prime-agent' && (
+                  <>
+                    <p className="v10-local-agent-copy">
+                      Connect a local Prime Agent through the node, then this tab becomes the persistent chat surface for it. Prime Agent publishes a bridge per live session; the first chat pins one session, and you can switch explicitly when several are live.
+                    </p>
+                    {/*
+                      Sessions are ephemeral by nature, so "none live" is normal
+                      rather than broken. Say that plainly instead of showing an
+                      error state the operator cannot act on.
+                    */}
+                    {typeof integration.sessionCount === 'number' && (
+                      <p
+                        className="v10-local-agent-copy"
+                        data-testid={`local-agent-sessions-${integration.id}`}
+                      >
+                        {integration.sessionCount === 0
+                          ? 'No live session. Start a Prime Agent session, then refresh — the extension publishes its bridge on session start.'
+                          : integration.sessionCount === 1
+                          ? '1 live session.'
+                          : `${integration.sessionCount} live sessions — choose which session this chat should use.`}
+                      </p>
+                    )}
+                    {integration.connectSupported && (
+                      <div className="v10-local-agent-actions">
+                        <button
+                          className="v10-agent-send-btn secondary ds-btn"
+                          onClick={() => onConnectIntegration(integration.id)}
+                          disabled={connectBusyId === integration.id}
+                        >
+                          {connectBusyId === integration.id ? 'Connecting...' : 'Connect Prime Agent'}
+                        </button>
+                      </div>
+                    )}
                   </>
                 )}
                 {integration.id === 'hermes' && (
@@ -369,7 +432,7 @@ export function ConnectedAgentsTab(props: {
                     {integration.connectSupported && (
                       <div className="v10-local-agent-actions">
                         <button
-                          className="v10-agent-send-btn secondary"
+                          className="v10-agent-send-btn secondary ds-btn"
                           onClick={() => onConnectIntegration(integration.id)}
                           disabled={connectBusyId === integration.id}
                         >
@@ -386,12 +449,12 @@ export function ConnectedAgentsTab(props: {
       ) : (
         selected && (
           <div {...dropzone.getRootProps({ className: 'v10-local-agent-chat-shell' })}>
-            <input {...dropzone.getInputProps()} />
-            {connectNotice && <div className="v10-local-agent-notice">{connectNotice}</div>}
-            {connectError && <div className="v10-local-agent-error">{connectError}</div>}
+            <input aria-label="Attach files" {...dropzone.getInputProps()} />
+            {connectNotice && <div className="v10-local-agent-notice ds-card-nested">{connectNotice}</div>}
+            {connectError && <div className="v10-local-agent-error ds-card-nested">{connectError}</div>}
 
             {!selected.chatReady && (
-              <div className={`v10-local-agent-warning ${selected.status === 'connecting' ? 'connecting' : 'offline'}`}>
+              <div className={`v10-local-agent-warning ds-card-nested ${selected.status === 'connecting' ? 'connecting' : 'offline'}`}>
                 {showingSessionHistory
                   ? `${selected.name} is not currently attached to this node. Session history remains available here; reconnect from the + tab when you want live chat again.`
                   : selected.status === 'connecting'
@@ -404,13 +467,41 @@ export function ConnectedAgentsTab(props: {
               </div>
             )}
 
+            {selected.id === 'prime-agent' && selected.busy === true && (
+              <div
+                className="v10-local-agent-warning ds-card-nested connecting"
+                role="status"
+                data-testid="prime-agent-active-turn-status"
+              >
+                {selected.detail}
+              </div>
+            )}
+
+            {selected.id === 'prime-agent' && (selected.liveSessions?.length ?? 0) > 1 && (
+              <div className="v10-composer-target" data-testid="prime-agent-session-picker">
+                <span className="v10-local-agent-target-label">Prime session</span>
+                <Select
+                  className="v10-local-agent-target-select"
+                  value={selectedSessionId ?? selected.defaultSessionId ?? ''}
+                  onChange={(sessionId) => onSelectIntegration(selected.id, { sessionId })}
+                  options={selected.liveSessions!.map((session, index) => ({
+                    value: session.sessionId,
+                    label: session.sessionName?.trim()
+                      || `${index === 0 ? 'Most recent' : `Session ${index + 1}`} · ${session.sessionId.slice(0, 8)}…`,
+                  }))}
+                  ariaLabel="Prime Agent session"
+                  disabled={localSending || selected.busy === true}
+                />
+              </div>
+            )}
+
             {dropzone.isDragActive && (
               <div
                 className={`v10-drop-overlay active ${attachmentsEnabled ? 'accept' : 'refuse'}`}
                 role="status"
                 aria-live="polite"
               >
-                <div className="v10-drop-overlay-card">
+                <div className="v10-drop-overlay-card ds-overlay">
                   {attachmentsEnabled ? (
                     <Upload className="v10-drop-overlay-icon" size={32} aria-hidden="true" />
                   ) : (
@@ -444,7 +535,7 @@ export function ConnectedAgentsTab(props: {
             >
               {shouldShowConversationLoader && (
                 <div className="v10-agent-empty-state">
-                  Loading the latest conversation from DKG memory...
+                  Loading the latest conversation from DKG memory…
                 </div>
               )}
               {(!shouldShowConversationLoader && localMessages.length === 0) && (() => {
@@ -486,28 +577,23 @@ export function ConnectedAgentsTab(props: {
                     )}
                   </div>
                   {message.attachments && message.attachments.length > 0 && (
-                    <div className="v10-local-agent-attachment-row" style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                    <div className="v10-local-agent-attachment-row">
                       {message.attachments.map((attachment) => (
                         <span
                           key={attachment.id ?? attachment.assertionUri ?? attachment.fileHash}
                           className="v10-local-agent-attachment-chip"
-                          style={{
-                            padding: '2px 8px',
-                            borderRadius: 999,
-                            // `--panel-elevated` is undefined in styles.css —
-                            // the token is `--bg-elevated`. Pre-existing typo
-                            // surfaced by UI-lead's PR4 audit (Task #69):
-                            // when the bubble was removed, the silent
-                            // fallback used to land near `--bg-surface` and
-                            // happened to look right; now it falls back to
-                            // `--bg-panel` and the chip blends in.
-                            background: 'var(--bg-elevated)',
-                            fontSize: 11,
-                          }}
                         >
                           {attachment.fileName}
                         </span>
                       ))}
+                    </div>
+                  )}
+                  {message.role === 'assistant' && (message.toolCalls?.length || message.traceFile) && (
+                    <div className="v10-local-agent-copy" data-testid="local-llm-turn-metadata">
+                      {message.toolCalls?.length
+                        ? `Tools: ${message.toolCalls.map((call) => call.name).join(', ')}`
+                        : 'Tools: none'}
+                      {message.traceFile ? ` · Trace: ${message.traceFile}` : ''}
                     </div>
                   )}
                   {message.ts && (
@@ -540,7 +626,7 @@ export function ConnectedAgentsTab(props: {
               </button>
             </div>
             <div className="v10-agent-input-area">
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}>
+              <div className="v10-local-agent-stack">
                 {selectedAttachmentDrafts.length > 0 && (
                   <div className="v10-attachment-chips" role="list" aria-label="Attached files">
                     {selectedAttachmentDrafts.map((attachment) => {
@@ -593,7 +679,7 @@ export function ConnectedAgentsTab(props: {
                 )}
 
                 {hasMismatchedAttachmentTargets && (
-                  <div className="v10-local-agent-copy" style={{ margin: 0, color: 'var(--text-tertiary)' }}>
+                  <div className="v10-local-agent-copy v10-local-agent-copy-flat">
                     {attachmentTargetIds.length > 1
                       ? 'Queued files keep their stored targets and may span multiple projects.'
                       : `Queued files keep their stored target (${getProjectDisplayName(availableProjects, attachmentTargetIds[0]!)}), not the active project.`}
@@ -604,7 +690,7 @@ export function ConnectedAgentsTab(props: {
                   ref={attachmentInputRef}
                   type="file"
                   multiple
-                  style={{ display: 'none' }}
+                  className="v10-local-agent-file-input"
                   onChange={(e) => {
                     if (e.target.files) {
                       onAddAttachments(e.target.files);
@@ -614,7 +700,7 @@ export function ConnectedAgentsTab(props: {
                 />
 
                 <div className="v10-local-agent-composer-row">
-                  <div className="v10-local-agent-composer-shell">
+                  <div className="v10-local-agent-composer-shell ds-card">
                     <TextareaAutosize
                       placeholder={
                         showingSessionHistory
@@ -625,7 +711,7 @@ export function ConnectedAgentsTab(props: {
                             ? `${selected.name} is still connecting...`
                             : `${selected.name} bridge offline...`
                       }
-                      className="v10-agent-input"
+                      aria-label={`Message ${selected.name}`} className="v10-agent-input"
                       value={localInput}
                       onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => onLocalInputChange(e.target.value)}
                       onKeyDown={(e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -704,7 +790,7 @@ export function ConnectedAgentsTab(props: {
                               ...(activeProjectId
                                 ? [{ value: '', label: 'No context graph (clear selection)' }]
                                 : []),
-                              ...selectableProjects.map((project) => ({ value: project.id, label: project.name })),
+                              ...selectableProjects.map((project) => ({ value: project.id, label: project.name, mark: <ContextGraphMark id={project.id} name={project.name} /> })),
                             ]}
                             placeholder={projectsLoading ? 'Loading context graphs…' : 'Choose a context graph'}
                             // Disable while loading. When no project is active

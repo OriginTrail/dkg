@@ -25,7 +25,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, FANOUT_RESPONSE_RETRYABLE } from '../src/index.js';
 import type { ReliableSendResult } from '../src/p2p/messenger.js';
 
-const SELF_PEER = '12D3KooWSelfPubC';
+const SELF_PEER = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
 
 class CapturingGossip {
   publishes: Array<{ topic: string; bytes: number }> = [];
@@ -331,6 +331,7 @@ describe('DKGAgent SWM substrate fan-out integration (rc.9 PR-C)', () => {
     }).getOrCreateCGMemberEnumerator();
     enumerator.enumerate = async () => ({
       source: 'allowlist',
+      isPrivate: false,
       members: ['12D3KooWAllowedA', '12D3KooWAllowedB'],
     });
 

@@ -350,15 +350,22 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
       // ~zero reverts in practice but tolerate one defensively.
       let successes = 0;
       for (let i = 0; i < 30; i++) {
+        const draw = RandomSamplingContract.previewChallengeForSeed(testSeed(i));
+        let preview: Awaited<typeof draw>;
         try {
-          const preview = await RandomSamplingContract.previewChallengeForSeed(testSeed(i));
-          expect(preview.kaId).to.equal(committedKaId);
-          successes++;
+          preview = await draw;
         } catch {
-          // Tolerated — see note above.
+          // Only retry exhaustion is tolerated, never an assertion failure or
+          // an unrelated contract revert.
+          await expect(draw).to.be.revertedWithCustomError(
+            RandomSamplingContract, 'NoEligibleKnowledgeAsset',
+          );
+          continue;
         }
+        expect(preview.kaId).to.equal(committedKaId);
+        successes++;
       }
-      expect(successes).to.be.greaterThanOrEqual(25);
+      expect(successes).to.be.greaterThanOrEqual(29);
     });
 
     it('reverts NoEligibleKnowledgeAsset on a single curated CG whose only KAs lack commitment', async () => {

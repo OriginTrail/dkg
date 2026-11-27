@@ -23,12 +23,12 @@ const DEVNET_NODE = process.env.DEVNET_NODE || process.env.UI_NODE_ID || '1';
 //     reads `connectedPeers` from — reports exactly N-1 connected peers.
 // scripts/devnet.sh pins `minimumRequiredSignatures = 3` (the real mainnet
 // 3-of-N StorageACK quorum — DO NOT lower it). A publisher collects ACKs from
-// its PEERS only (it does not self-sign quorum), so a VM publish needs minSig
-// OTHER reachable core nodes — i.e. >= minSig + 1 = 4 nodes total. With only 3
-// the publish aborts `QuorumUnmetError: need 3 ACKs but only 2 core peers
-// connected`. We therefore boot FOUR nodes: node1 sees 3 peers (still a real
-// multi-peer topology, satisfies `peer-connectivity.spec.ts` ">1 peer"), and a
-// VM publish can collect its 3 ACKs. Override with PLAYWRIGHT_DEVNET_NUM_NODES.
+// Core nodes only; a publishing Core also counts its own StorageACK, so a Core
+// publish needs minSig - 1 OTHER reachable cores and an Edge publish needs
+// minSig. We boot FOUR nodes: node1 sees 3 peers (still a real multi-peer
+// topology, satisfies `peer-connectivity.spec.ts` ">1 peer"), and a VM publish
+// collects its 3 ACKs with a spare core. Override with
+// PLAYWRIGHT_DEVNET_NUM_NODES.
 const NUM_NODES = process.env.PLAYWRIGHT_DEVNET_NUM_NODES || '4';
 
 // Mesh-settle budget for the chained `bootstrap-devnet.ts` (it reads this via
@@ -45,6 +45,17 @@ const WEB_SERVER_TIMEOUT_MS = CI
   : DEVNET_BOOTSTRAP_TIMEOUT_MS + 120_000;
 
 export default defineConfig({
+  metadata: {
+    subject: process.env.DKG_CI_SUBJECT ?? process.env.GITHUB_SHA,
+    profile: process.env.DKG_CI_PROFILE,
+    seed: process.env.DKG_PROPERTY_SEED,
+    requestedTrials: process.env.DKG_PROPERTY_RUNS,
+    managedLocal: process.env.PW_DEVNET_LOCAL === '1',
+    runId: process.env.GITHUB_RUN_ID,
+    attempt: process.env.GITHUB_RUN_ATTEMPT,
+    node: process.version,
+    platform: process.platform,
+  },
   testDir: './e2e/specs',
   // `devnet-local/` holds the heavy devnet specs trimmed OUT of the CI lane in
   // #1403 (on-chain KA mint + update attestation, destructive `clearAfter`
@@ -75,8 +86,9 @@ export default defineConfig({
   // Real-node round-trips (UI boot + live API) are far slower than the old
   // mock lane, which ran in 15–30s. Give every test room to talk to the daemon.
   timeout: CI ? 120_000 : 60_000,
+  // The HTML reporter clears its output folder; keep JSON outside that folder.
   reporter: CI
-    ? [['github'], ['html', { open: 'never' }], ['junit', { outputFile: 'results.xml' }]]
+    ? [['github'], ['json', { outputFile: 'playwright-report/results.json' }], ['html', { outputFolder: 'playwright-report/html', open: 'never' }], ['junit', { outputFile: 'results.xml' }]]
     : [['list'], ['html', { open: 'on-failure' }], ['junit', { outputFile: 'results.xml' }]],
 
   // globalTeardown stops the devnet ONLY if our bootstrap started it (it leaves

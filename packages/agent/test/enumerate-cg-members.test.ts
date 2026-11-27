@@ -9,9 +9,11 @@ const SELF = '12D3KooWSelf';
 function makeDeps(overrides: Partial<CGMemberEnumeratorDeps>): CGMemberEnumeratorDeps {
   return {
     getContextGraphAllowedPeers: async () => null,
+    getContextGraphAllowedAgentPeers: async () => null,
     // Default: NOT private. The dedicated "private CG without
-    // allowlist" describe-block below overrides this to true to
-    // exercise the fail-closed branch (codex review on #571 bug #1).
+    // peer allowlist" describe-block below overrides this to true
+    // to exercise authorized-agent enumeration and its empty-roster
+    // fallback.
     isPrivateContextGraph: async () => false,
     getTopicSubscribers: () => [],
     topicForCG: (cgId) => `dkg/context-graph/${cgId}/shared-memory`,
@@ -315,17 +317,39 @@ describe('createCGMemberEnumerator: public CG (topic-subscribers source)', () =>
  * private via `DKG_ALLOWED_AGENT` / `DKG_PARTICIPANT_AGENT` without
  * any peer-allowlist triples, and falling through to live topic
  * subscribers for those CGs would fan SWM shares out to GossipSub
- * subscribers who are not actually allowed members. The fix
- * disambiguates via the same `isPrivateContextGraph` predicate the
- * responder uses for sync / SWM-share auth — fail closed for any
- * private CG that lacks an enumerable peer roster.
+ * subscribers who are not actually allowed members. Private CGs
+ * therefore enumerate the same authorized agents used by Sender Key
+ * distribution, projected to their advertised peer IDs.
  */
 describe('createCGMemberEnumerator: private CG WITHOUT peer allowlist (agent-gated)', () => {
-  it('returns source=none and empty members, ignoring topic subscribers', async () => {
+  it('returns the authorized agent peer roster, deduped with self excluded', async () => {
     let subscribersCalled = 0;
     const enumerator = createCGMemberEnumerator(makeDeps({
       getContextGraphAllowedPeers: async () => null,
       isPrivateContextGraph: async () => true,
+      getContextGraphAllowedAgentPeers: async () => ({
+        source: 'agent-roster',
+        members: ['peerA', SELF, 'peerA', 'peerB'],
+        complete: true,
+      }),
+      getTopicSubscribers: () => {
+        subscribersCalled += 1;
+        return ['nonMemberWhoHappensToSubscribe'];
+      },
+    }));
+
+    const result = await enumerator.enumerate('cg-agent-gated-with-peers');
+
+    expect(result).toEqual({ source: 'agent-roster', members: ['peerA', 'peerB'], complete: true });
+    expect(subscribersCalled).toBe(0);
+  });
+
+  it('returns source=none for an empty agent roster, ignoring topic subscribers', async () => {
+    let subscribersCalled = 0;
+    const enumerator = createCGMemberEnumerator(makeDeps({
+      getContextGraphAllowedPeers: async () => null,
+      isPrivateContextGraph: async () => true,
+      getContextGraphAllowedAgentPeers: async () => null,
       getTopicSubscribers: () => {
         subscribersCalled += 1;
         return ['nonMemberWhoHappensToSubscribe'];
@@ -335,17 +359,17 @@ describe('createCGMemberEnumerator: private CG WITHOUT peer allowlist (agent-gat
     const result = await enumerator.enumerate('cg-agent-gated');
 
     expect(result).toEqual({ source: 'none', members: [] });
-    // The whole point of fail-closed: even though there ARE live
-    // topic subscribers, we MUST NOT consult them for private CGs
-    // without a peer allowlist (would risk fan-out to non-members).
+    // Even though there ARE live topic subscribers, we MUST NOT
+    // consult them for private CGs without an authorized peer
+    // roster (would risk fan-out to non-members).
     expect(subscribersCalled).toBe(0);
   });
 
   it('still uses the allowlist when one exists (private + peer-allowlisted)', async () => {
     // Sanity check: a private CG that DOES have a peer allowlist
     // (e.g. curated by both `DKG_ALLOWED_PEER` and `DKG_ALLOWED_AGENT`)
-    // takes the normal allowlist path and never consults
-    // `isPrivateContextGraph`.
+    // takes the allowlist path while carrying the resolved privacy
+    // classification into the fan-out plan.
     let isPrivateCalled = 0;
     const enumerator = createCGMemberEnumerator(makeDeps({
       getContextGraphAllowedPeers: async () => ['peerA', 'peerB'],
@@ -359,7 +383,8 @@ describe('createCGMemberEnumerator: private CG WITHOUT peer allowlist (agent-gat
 
     expect(result.source).toBe('allowlist');
     expect(result.members.sort()).toEqual(['peerA', 'peerB']);
-    expect(isPrivateCalled).toBe(0);
+    expect(result).toMatchObject({ isPrivate: true });
+    expect(isPrivateCalled).toBe(1);
   });
 });
 
@@ -391,6 +416,67 @@ describe('createCGMemberEnumerator: TTL cache', () => {
     await enumerator.enumerate('cg-cached');
 
     expect(allowedCalls).toBe(1);
+  });
+
+  it('does not cache agent rosters, so membership/profile changes are immediate', async () => {
+    let agentPeers = ['peerOld'];
+    let rosterCalls = 0;
+    const enumerator = createCGMemberEnumerator(makeDeps({
+      cacheTtlMs: 60_000,
+      isPrivateContextGraph: async () => true,
+      getContextGraphAllowedAgentPeers: async () => {
+        rosterCalls += 1;
+        return { source: 'agent-roster', members: agentPeers, complete: true };
+      },
+    }));
+
+    expect(await enumerator.enumerate('cg-agent-membership-refresh')).toEqual({
+      source: 'agent-roster',
+      members: ['peerOld'],
+      complete: true,
+    });
+    expect(await enumerator.enumerate('cg-agent-membership-refresh')).toEqual({
+      source: 'agent-roster',
+      members: ['peerOld'],
+      complete: true,
+    });
+    expect(rosterCalls).toBe(2);
+
+    agentPeers = ['peerNew'];
+
+    expect(await enumerator.enumerate('cg-agent-membership-refresh')).toEqual({
+      source: 'agent-roster',
+      members: ['peerNew'],
+      complete: true,
+    });
+    expect(rosterCalls).toBe(3);
+  });
+
+  it('does not cache none while a private agent roster becomes available within the TTL', async () => {
+    let roster: Awaited<ReturnType<NonNullable<CGMemberEnumeratorDeps['getContextGraphAllowedAgentPeers']>>> = null;
+    let rosterCalls = 0;
+    const enumerator = createCGMemberEnumerator(makeDeps({
+      cacheTtlMs: 60_000,
+      isPrivateContextGraph: async () => true,
+      getContextGraphAllowedAgentPeers: async () => {
+        rosterCalls += 1;
+        return roster;
+      },
+    }));
+
+    expect(await enumerator.enumerate('cg-agent-roster-appears')).toEqual({
+      source: 'none',
+      members: [],
+    });
+
+    roster = { source: 'agent-roster', members: ['peerNew'], complete: true };
+
+    expect(await enumerator.enumerate('cg-agent-roster-appears')).toEqual({
+      source: 'agent-roster',
+      members: ['peerNew'],
+      complete: true,
+    });
+    expect(rosterCalls).toBe(2);
   });
 
   it('recomputes after TTL elapses', async () => {

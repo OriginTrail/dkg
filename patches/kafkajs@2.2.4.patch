@@ -1,0 +1,118 @@
+diff --git a/src/consumer/consumerGroup.js b/src/consumer/consumerGroup.js
+index 442312c1a8ddeabf498060575b70f217c46049c6..b91bc44d7c359e67f05b54b8e1962ed6b705b0e0 100644
+--- a/src/consumer/consumerGroup.js
++++ b/src/consumer/consumerGroup.js
+@@ -54,6 +54,7 @@ module.exports = class ConsumerGroup {
+    * @param {number} options.minBytes
+    * @param {number} options.maxBytes
+    * @param {number} options.maxWaitTimeInMs
++   * @param {boolean} [options.autoOffsetReset] Reset expired offsets; false fails closed.
+    * @param {boolean} options.autoCommit
+    * @param {number} options.autoCommitInterval
+    * @param {number} options.autoCommitThreshold
+@@ -77,6 +78,7 @@ module.exports = class ConsumerGroup {
+     maxBytes,
+     maxWaitTimeInMs,
+     autoCommit,
++    autoOffsetReset = true,
+     autoCommitInterval,
+     autoCommitThreshold,
+     isolationLevel,
+@@ -99,6 +101,7 @@ module.exports = class ConsumerGroup {
+     this.minBytes = minBytes
+     this.maxBytes = maxBytes
+     this.maxWaitTime = maxWaitTimeInMs
++    this.autoOffsetReset = autoOffsetReset
+     this.autoCommit = autoCommit
+     this.autoCommitInterval = autoCommitInterval
+     this.autoCommitThreshold = autoCommitThreshold
+@@ -595,6 +598,11 @@ module.exports = class ConsumerGroup {
+   }
+
+   async recoverFromOffsetOutOfRange(e) {
++    // Explicit manual ingestion must not commit a default offset before the
++    // application has persisted the records. Check before any reset/recovery IO.
++    if (this.autoOffsetReset === false) {
++      throw new KafkaJSNonRetriableError('KAFKA_OFFSET_OUT_OF_RANGE', { cause: e })
++    }
+     // If we are fetching from a follower try with the leader before resetting offsets
+     const preferredReadReplicas = this.preferredReadReplicasPerTopicPartition[e.topic]
+     if (preferredReadReplicas && typeof preferredReadReplicas[e.partition] === 'number') {
+diff --git a/src/consumer/index.js b/src/consumer/index.js
+index 0489dcf1da1c340255e92b75b889038faf6d675d..235894d1ad37a1d1aa38cfb16c82cee172b45294 100644
+--- a/src/consumer/index.js
++++ b/src/consumer/index.js
+@@ -31,6 +31,7 @@ const specialOffsets = [
+  * @param {import('../../types').RetryOptions} [params.retry]
+  * @param {import('../../types').Logger} params.logger
+  * @param {import('../../types').PartitionAssigner[]} [params.partitionAssigners]
++ * @param {boolean} [params.autoOffsetReset] Reset expired offsets; false fails closed.
+  * @param {number} [params.sessionTimeout]
+  * @param {number} [params.rebalanceTimeout]
+  * @param {number} [params.heartbeatInterval]
+@@ -51,6 +52,7 @@ module.exports = ({
+   retry,
+   logger: rootLogger,
+   partitionAssigners = [roundRobin],
++  autoOffsetReset = true,
+   sessionTimeout = 30000,
+   rebalanceTimeout = 60000,
+   heartbeatInterval = 3000,
+@@ -222,6 +224,7 @@ module.exports = ({
+         rackId,
+         metadataMaxAge,
+         autoCommit,
++        autoOffsetReset,
+         autoCommitInterval,
+         autoCommitThreshold,
+       })
+@@ -504,6 +507,7 @@ module.exports = ({
+   const getLogger = () => logger
+
+   return {
++    get autoOffsetReset() { return autoOffsetReset },
+     connect,
+     disconnect,
+     subscribe,
+diff --git a/src/index.js b/src/index.js
+index d6369d7eb87c6fa89d97b48d5daea7651f7a017b..cffe496bf911439a1d51a650abe910e016fcc49f 100644
+--- a/src/index.js
++++ b/src/index.js
+@@ -148,6 +148,7 @@ module.exports = class Client {
+     maxWaitTimeInMs,
+     retry = { retries: 5 },
+     allowAutoTopicCreation,
++    autoOffsetReset = true,
+     maxInFlightRequests,
+     readUncommitted = false,
+     rackId = '',
+@@ -170,6 +171,7 @@ module.exports = class Client {
+       logger: this[PRIVATE.LOGGER],
+       cluster,
+       groupId,
++      autoOffsetReset,
+       partitionAssigners,
+       sessionTimeout,
+       rebalanceTimeout,
+diff --git a/types/index.d.ts b/types/index.d.ts
+index 26bcbfea3ad5cda12616e3f4ed7ec43c27fd187c..4d680b5dc0926126923ea6e8728926a3c9af34e8 100644
+--- a/types/index.d.ts
++++ b/types/index.d.ts
+@@ -150,6 +150,8 @@ export interface IHeaders {
+ }
+
+ export interface ConsumerConfig {
++  /** Default true. False fails on expired fetch offsets instead of resetting/committing a default. */
++  autoOffsetReset?: boolean
+   groupId: string
+   partitionAssigners?: PartitionAssigner[]
+   metadataMaxAge?: number
+@@ -1030,6 +1032,8 @@ export type ConsumerSubscribeTopic = { topic: string | RegExp; fromBeginning?: b
+ export type ConsumerSubscribeTopics = { topics: (string | RegExp)[]; fromBeginning?: boolean }
+
+ export type Consumer = {
++  /** Effective policy, exposed so applications can require fail-closed support. */
++  readonly autoOffsetReset: boolean
+   connect(): Promise<void>
+   disconnect(): Promise<void>
+   subscribe(subscription: ConsumerSubscribeTopics | ConsumerSubscribeTopic): Promise<void>

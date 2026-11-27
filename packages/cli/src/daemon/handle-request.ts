@@ -1,3 +1,4 @@
+import { handlePrivateAccessRoutes } from './routes/private-access.js';
 // daemon/handle-request.ts
 //
 // The `handleRequest` HTTP router (~5,160 lines) extracted verbatim
@@ -100,7 +101,6 @@ import {
   CLI_NPM_PACKAGE,
 } from '../config.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -202,7 +202,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
@@ -310,11 +309,24 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from './local-agents.js';
-import type { MemoryGraphChangedEvent, NotificationSseEvent, RequestContext } from './routes/context.js';
+import type {
+  MemoryGraphChangedEvent,
+  NotificationSseEvent,
+  RequestContext,
+  RequestContextInputFields,
+} from './routes/context.js';
+import { createRequestActor } from './routes/context.js';
+import type { AllowedHttpAuthentication } from '../auth.js';
 import { handleStatusRoutes } from './routes/status.js';
+import { handleBackpressureRoutes } from './routes/backpressure.js';
+import { handleViewSemanticsRoutes } from './routes/view-semantics.js';
+import { handleCpuProfileRoutes } from './routes/cpu-profile.js';
+import { handleReadGraphRoutes } from './routes/read-graphs.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
 import { handleOpenclawRoutes } from './routes/openclaw.js';
 import { handleHermesRoutes } from './routes/hermes.js';
+import { handlePrimeAgentRoutes } from './routes/prime-agent.js';
+import { handleLocalLlmRoutes } from './routes/local-llm.js';
 import { handleMemoryRoutes } from './routes/memory.js';
 import { handlePublisherRoutes } from './routes/publisher.js';
 import { handleContextGraphRoutes } from './routes/context-graph.js';
@@ -322,43 +334,74 @@ import { handleKnowledgeAssetsRoutes } from './routes/knowledge-assets.js';
 import { handleKcChainMetadataRoutes } from './routes/kc-chain-metadata.js';
 import { handleFileServingRoutes } from './routes/file-serving.js';
 import { handleQueryRoutes } from './routes/query.js';
+import { handleEntityRoutes } from './routes/entities.js';
+import { handleBoundedQueryRoutes } from './routes/bounded-query.js';
+import { handleCclRoutes } from './routes/ccl.js';
+import { handleSemanticRuntimeRoutes } from './routes/semantic-runtime.js';
 import { handleLocalAgentsRoutes } from './routes/local-agents.js';
 import { handleEpcisRoutes } from './routes/epcis.js';
 import { handlePcaRoutes } from './routes/pca.js';
+import { handleMarketplaceRoutes } from './routes/marketplace.js';
 import { handleOperationalWalletRoutes } from './routes/operational-wallets.js';
+import { handleIdentityWalletRoutes } from './routes/identity-wallets.js';
 import { handleNotificationRoutes } from './routes/notifications.js';
 import { handlePluginRoutes } from './routes/plugins.js';
 import type { RoutePlugin } from './plugin-api.js';
 
 
 export type HandleRequestInput = Omit<
-  RequestContext,
+  RequestContextInputFields,
   | 'url'
   | 'path'
-  | 'requestToken'
+  | 'actor'
+  | 'authentication'
   | 'requestAgentAddress'
->;
+> & { readonly authentication: AllowedHttpAuthentication };
 
 export async function handleRequest(input: HandleRequestInput): Promise<void> {
-  const { req, res, agent } = input;
+  const { req, res, agent, authentication, ...contextInput } = input;
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
 
-  // Resolve the requesting agent's address from the Bearer token.
-  // Agent tokens (dkg_at_...) resolve to their specific agent; node-level tokens
-  // fall back to the default owner agent.
-  const requestToken = extractBearerToken(req.headers.authorization);
-  const requestAgentAddress = agent.resolveAgentAddress(requestToken);
-
-  const ctx: RequestContext = {
-    ...input,
+  // Build one actor from the accepted authentication decision. Compatibility properties are
+  // read-only getters over this value, never independently stored request state.
+  const actor = createRequestActor(
+    authentication,
+    (acceptedToken) => agent.resolveAgentAddress(acceptedToken),
+  );
+  const ctxBase = {
+    ...contextInput,
+    req,
+    res,
+    agent,
     url,
     path,
-    requestToken,
-    requestAgentAddress,
+    actor,
   };
+  const ctx = Object.defineProperties(ctxBase, {
+    authentication: {
+      enumerable: true,
+      get: () => actor.authentication,
+    },
+    requestAgentAddress: {
+      enumerable: true,
+      get: () => actor.effectiveAgentAddress,
+    },
+  }) as RequestContext;
 
   await handleStatusRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleBackpressureRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleViewSemanticsRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleCpuProfileRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleReadGraphRoutes(ctx);
   if (res.writableEnded) return;
 
   await handleAgentChatRoutes(ctx);
@@ -370,9 +413,17 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
   await handleHermesRoutes(ctx);
   if (res.writableEnded) return;
 
+  await handlePrimeAgentRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleLocalLlmRoutes(ctx);
+  if (res.writableEnded) return;
+
   await handleMemoryRoutes(ctx);
   if (res.writableEnded) return;
 
+  await handlePrivateAccessRoutes(ctx);
+  if (res.writableEnded || req.aborted || res.destroyed) return;
   await handlePublisherRoutes(ctx);
   if (res.writableEnded) return;
 
@@ -388,7 +439,19 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
   await handleFileServingRoutes(ctx);
   if (res.writableEnded) return;
 
+  await handleEntityRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleBoundedQueryRoutes(ctx);
+  if (res.writableEnded) return;
+
   await handleQueryRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleCclRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleSemanticRuntimeRoutes(ctx);
   if (res.writableEnded) return;
 
   await handleLocalAgentsRoutes(ctx);
@@ -400,7 +463,12 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
   await handlePcaRoutes(ctx);
   if (res.writableEnded) return;
 
+  await handleMarketplaceRoutes(ctx);
+  if (res.writableEnded) return;
+
   await handleOperationalWalletRoutes(ctx);
+  if (res.writableEnded) return;
+  await handleIdentityWalletRoutes(ctx);
   if (res.writableEnded) return;
 
   await handleNotificationRoutes(ctx);

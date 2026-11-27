@@ -18,6 +18,31 @@ export async function canonicalize(nquads: string): Promise<string> {
 }
 
 /**
+ * Return the RDFC-1.0 blank-node identifier mapping for an RDF dataset.
+ *
+ * The map keys and values omit the `_:` prefix (for example `b0 -> c14n0`).
+ * Keeping this primitive in core prevents feature packages from inventing
+ * label-order based "canonicalization", which is not invariant when a parser
+ * or triple store assigns different blank-node labels to the same RDF graph.
+ */
+export async function canonicalBlankNodeIdMap(
+  nquads: string,
+): Promise<ReadonlyMap<string, string>> {
+  const canonicalIdMap = new Map<string, string>();
+  await canonize.canonize(nquads, {
+    algorithm: 'RDFC-1.0',
+    inputFormat: 'application/n-quads',
+    format: 'application/n-quads',
+    canonicalIdMap,
+    // Bound pathological N-degree blank-node work. This is rdf-canonize's
+    // linear work-factor guard and is also its safe default; spell it out so
+    // this consensus boundary cannot silently become unbounded on upgrade.
+    maxWorkFactor: 1,
+  });
+  return canonicalIdMap;
+}
+
+/**
  * Compute a deterministic hash for a single triple (s, p, o).
  * The graph component is excluded per spec — only subject, predicate, object participate.
  * The triple is formatted as a canonical N-Triple line before hashing.

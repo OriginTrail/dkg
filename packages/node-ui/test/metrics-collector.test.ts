@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DashboardDB } from '../src/db.js';
-import { MetricsCollector, type MetricsSource } from '../src/metrics-collector.js';
+import {
+  MetricsCollector,
+  STORE_METRICS_CACHE_TTL_MS,
+  type MetricsSource,
+} from '../src/metrics-collector.js';
 
 let db: DashboardDB;
 let dir: string;
@@ -15,11 +19,13 @@ function mockSource(overrides: Partial<MetricsSource> = {}): MetricsSource {
     getRelayedPeerCount: () => 2,
     getMeshPeerCount: () => 4,
     getContextGraphCount: async () => 2,
-    getTotalTriples: async () => 1000,
-    getTotalKCs: async () => 15,
-    getTotalKAs: async () => 30,
-    getConfirmedKCs: async () => 12,
-    getTentativeKCs: async () => 3,
+    getStoreCountSnapshot: async () => ({
+      totalTriples: 1000,
+      totalKCs: 15,
+      totalKAs: 30,
+      confirmedKCs: 12,
+      tentativeKCs: 3,
+    }),
     getStoreBytes: async () => 65536,
     getRpcLatencyMs: async () => 25,
     isRpcHealthy: async () => true,
@@ -73,6 +79,30 @@ describe('MetricsCollector', () => {
     expect(stored!.total_triples).toBe(1000);
   });
 
+  it('awaits the coherent count snapshot before persisting a collection', async () => {
+    let release!: (value: {
+      totalTriples: number; totalKCs: number; totalKAs: number;
+      confirmedKCs: number; tentativeKCs: number;
+    }) => void;
+    const counts = new Promise<{
+      totalTriples: number; totalKCs: number; totalKAs: number;
+      confirmedKCs: number; tentativeKCs: number;
+    }>((resolve) => { release = resolve; });
+    const collector = new MetricsCollector(db, mockSource({
+      getStoreCountSnapshot: () => counts,
+    }), dir);
+
+    const collection = collector.collectAndStore();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(db.getLatestSnapshot() ?? null).toBeNull();
+    release({
+      totalTriples: 200, totalKCs: 20, totalKAs: 40,
+      confirmedKCs: 18, tentativeKCs: 2,
+    });
+    await collection;
+    expect(db.getLatestSnapshot()?.total_triples).toBe(200);
+  });
+
   it('gracefully handles source errors', async () => {
     const broken: MetricsSource = {
       getPeerCount: () => 1,
@@ -80,11 +110,7 @@ describe('MetricsCollector', () => {
       getRelayedPeerCount: () => 0,
       getMeshPeerCount: () => 0,
       getContextGraphCount: async () => { throw new Error('db locked'); },
-      getTotalTriples: async () => { throw new Error('store error'); },
-      getTotalKCs: async () => { throw new Error('fail'); },
-      getTotalKAs: async () => { throw new Error('fail'); },
-      getConfirmedKCs: async () => { throw new Error('fail'); },
-      getTentativeKCs: async () => { throw new Error('fail'); },
+      getStoreCountSnapshot: async () => { throw new Error('store error'); },
       getStoreBytes: async () => { throw new Error('fail'); },
       getRpcLatencyMs: async () => { throw new Error('fail'); },
       isRpcHealthy: async () => { throw new Error('fail'); },
@@ -274,46 +300,53 @@ describe('MetricsCollector', () => {
 
 // ─── #1066 Item 1: store-metrics presence gate ──────────────────────
 //
-// The six store getters (total triples + KC/KA/confirmed/tentative +
-// context-graph count) are full-store SPARQL scans. When nothing is
+// The exact store-count snapshot and context-graph count are store scans. When nothing is
 // consuming metrics the collector skips them, leaving those columns null,
 // while the cheap system/network metrics keep flowing.
 describe('MetricsCollector store-metrics presence gate', () => {
   function countingSource() {
     const calls = {
-      getContextGraphCount: 0, getTotalTriples: 0, getTotalKCs: 0,
-      getTotalKAs: 0, getConfirmedKCs: 0, getTentativeKCs: 0,
+      getContextGraphCount: 0, getStoreCountSnapshot: 0,
       getStoreBytes: 0, getPeerCount: 0,
+    };
+    const values = {
+      contextGraphCount: 2,
+      totalTriples: 1000,
+      totalKCs: 15,
+      totalKAs: 30,
+      confirmedKCs: 12,
+      tentativeKCs: 3,
     };
     const source: MetricsSource = {
       getPeerCount: () => { calls.getPeerCount++; return 5; },
       getDirectPeerCount: () => 3,
       getRelayedPeerCount: () => 2,
       getMeshPeerCount: () => 4,
-      getContextGraphCount: async () => { calls.getContextGraphCount++; return 2; },
-      getTotalTriples: async () => { calls.getTotalTriples++; return 1000; },
-      getTotalKCs: async () => { calls.getTotalKCs++; return 15; },
-      getTotalKAs: async () => { calls.getTotalKAs++; return 30; },
-      getConfirmedKCs: async () => { calls.getConfirmedKCs++; return 12; },
-      getTentativeKCs: async () => { calls.getTentativeKCs++; return 3; },
+      getContextGraphCount: async () => { calls.getContextGraphCount++; return values.contextGraphCount; },
+      getStoreCountSnapshot: async () => {
+        calls.getStoreCountSnapshot++;
+        return {
+          totalTriples: values.totalTriples,
+          totalKCs: values.totalKCs,
+          totalKAs: values.totalKAs,
+          confirmedKCs: values.confirmedKCs,
+          tentativeKCs: values.tentativeKCs,
+        };
+      },
       getStoreBytes: async () => { calls.getStoreBytes++; return 65536; },
       getRpcLatencyMs: async () => 25,
       isRpcHealthy: async () => true,
     };
-    return { source, calls };
+    return { source, calls, values };
   }
 
-  it('closed gate: skips the six store scans and nulls their columns; cheap metrics still collect', async () => {
+  it('closed gate: skips store scans and nulls their columns; cheap metrics still collect', async () => {
     const { source, calls } = countingSource();
     const collector = new MetricsCollector(db, source, dir, () => false);
     const snap = await collector.collect();
 
     // None of the full-store scans ran.
-    expect(calls.getTotalTriples).toBe(0);
-    expect(calls.getTotalKCs).toBe(0);
-    expect(calls.getTotalKAs).toBe(0);
-    expect(calls.getConfirmedKCs).toBe(0);
-    expect(calls.getTentativeKCs).toBe(0);
+    expect(calls.getStoreCountSnapshot).toBe(0);
     expect(calls.getContextGraphCount).toBe(0);
 
     // Their columns are null.
@@ -339,7 +372,7 @@ describe('MetricsCollector store-metrics presence gate', () => {
     const collector = new MetricsCollector(db, source, dir, () => true);
     const snap = await collector.collect();
 
-    expect(calls.getTotalTriples).toBe(1);
+    expect(calls.getStoreCountSnapshot).toBe(1);
     expect(calls.getContextGraphCount).toBe(1);
     expect(snap.total_triples).toBe(1000);
     expect(snap.contextGraph_count).toBe(2);
@@ -350,7 +383,7 @@ describe('MetricsCollector store-metrics presence gate', () => {
     const collector = new MetricsCollector(db, source, dir);
     const snap = await collector.collect();
 
-    expect(calls.getTotalTriples).toBe(1);
+    expect(calls.getStoreCountSnapshot).toBe(1);
     expect(snap.total_triples).toBe(1000);
   });
 
@@ -361,11 +394,73 @@ describe('MetricsCollector store-metrics presence gate', () => {
 
     const idle = await collector.collect();
     expect(idle.total_triples).toBeNull();
-    expect(calls.getTotalTriples).toBe(0);
+    expect(calls.getStoreCountSnapshot).toBe(0);
 
     watching = true;
     const active = await collector.collect();
     expect(active.total_triples).toBe(1000);
-    expect(calls.getTotalTriples).toBe(1);
+    expect(calls.getStoreCountSnapshot).toBe(1);
+  });
+
+  it('reuses one complete store snapshot inside the freshness window', async () => {
+    const { source, calls, values } = countingSource();
+    let now = 1_000;
+    const collector = new MetricsCollector(
+      db, source, dir, () => true, { cacheClock: () => now },
+    );
+
+    const initial = await collector.collect();
+    expect(initial.total_triples).toBe(1000);
+    expect(initial.contextGraph_count).toBe(2);
+    values.totalTriples = 1001;
+    values.contextGraphCount = 3;
+    now += STORE_METRICS_CACHE_TTL_MS - 1;
+    const cached = await collector.collect();
+    expect(cached.total_triples).toBe(1000);
+    expect(cached.contextGraph_count).toBe(2);
+    expect(calls.getStoreCountSnapshot).toBe(1);
+    expect(calls.getContextGraphCount).toBe(1);
+
+    now += 1;
+    const refreshed = await collector.collect();
+    expect(refreshed.total_triples).toBe(1001);
+    expect(refreshed.contextGraph_count).toBe(3);
+    expect(calls.getStoreCountSnapshot).toBe(2);
+    expect(calls.getContextGraphCount).toBe(2);
+  });
+
+  it('coalesces concurrent refreshes into one set of full-store scans', async () => {
+    const { source, calls } = countingSource();
+    const original = source.getStoreCountSnapshot;
+    source.getStoreCountSnapshot = async () => {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      return original();
+    };
+    const collector = new MetricsCollector(
+      db, source, dir, () => true, { cacheClock: () => 1_000 },
+    );
+    const [first, second] = await Promise.all([collector.collect(), collector.collect()]);
+
+    expect(first.total_triples).toBe(1000);
+    expect(second.total_triples).toBe(1000);
+    expect(calls.getStoreCountSnapshot).toBe(1);
+    expect(calls.getContextGraphCount).toBe(1);
+  });
+
+  it('refreshes after a backwards clock step rather than presenting an old count as fresh', async () => {
+    const { source, calls, values } = countingSource();
+    let now = 10_000;
+    const collector = new MetricsCollector(
+      db, source, dir, () => true, { cacheClock: () => now },
+    );
+    const initial = await collector.collect();
+    expect(initial.total_triples).toBe(1000);
+    values.totalTriples = 1002;
+    values.contextGraphCount = 4;
+    now = 9_999;
+    const refreshed = await collector.collect();
+    expect(calls.getStoreCountSnapshot).toBe(2);
+    expect(refreshed.total_triples).toBe(1002);
+    expect(refreshed.contextGraph_count).toBe(4);
   });
 });

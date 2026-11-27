@@ -60,7 +60,12 @@ interface AgentStub {
    * the cache-hit path will fall through to the chain-RPC fallback.
    */
   onChainPublishPolicyCacheUpdatedAt: Map<string, number>;
+  localContextGraphProvenance: { hasLocalCreate(id: string): boolean };
   subscribedContextGraphs: Map<string, { onChainId?: string }>;
+  readLocalContextGraphRegistrationStatus: (
+    id: string,
+  ) => Promise<'registered' | 'unregistered' | null>;
+  isLocalFirstUnregisteredContextGraph: (id: string) => Promise<boolean>;
   getContextGraphOnChainId: (id: string) => Promise<string | null>;
   isContextGraphRegistered: (id: string) => Promise<boolean>;
   getStoredContextGraphRegistrationOptions: (id: string) => Promise<{
@@ -77,7 +82,10 @@ function makeStub(overrides: Partial<AgentStub> = {}): AgentStub {
     onChainAccessPolicyCache: new Map(),
     onChainPublishPolicyCache: new Map(),
     onChainPublishPolicyCacheUpdatedAt: new Map(),
+    localContextGraphProvenance: { hasLocalCreate: () => false },
     subscribedContextGraphs: new Map(),
+    readLocalContextGraphRegistrationStatus: recorder(async () => null),
+    isLocalFirstUnregisteredContextGraph: recorder(async () => false),
     getContextGraphOnChainId: recorder(async () => null),
     isContextGraphRegistered: recorder(async () => false),
     getStoredContextGraphRegistrationOptions: recorder(async () => ({})),
@@ -208,6 +216,62 @@ describe('DKGAgent.resolveCgCurationForAck', () => {
 });
 
 describe('DKGAgent.getContextGraphOnChainPolicy', () => {
+  it('parses typed durable registration-status literals through the canonical RDF helper', async () => {
+    const store = {
+      query: recorder(async () => ({
+        type: 'bindings' as const,
+        bindings: [{
+          status: '"unregistered"^^<http://www.w3.org/2001/XMLSchema#string>',
+        }],
+      })),
+    };
+
+    await expect(
+      (DKGAgent.prototype as any).readLocalContextGraphRegistrationStatus.call(
+        { store },
+        'cg-typed-registration-status',
+      ),
+    ).resolves.toBe('unregistered');
+  });
+
+  it('does not resolve a name hash for an explicitly local-created durable unregistered CG', async () => {
+    const getContextGraphOnChainId = recorder(async () => {
+      throw new Error('CG registry RPC must not gate local-first SWM');
+    });
+    const readRegistrationStatus = recorder(async () => 'unregistered' as const);
+    const stub = makeStub({
+      localContextGraphProvenance: { hasLocalCreate: (id) => id === 'cg-local-first' },
+      subscribedContextGraphs: new Map([['cg-local-first', {}]]),
+      readLocalContextGraphRegistrationStatus: readRegistrationStatus,
+      isLocalFirstUnregisteredContextGraph: recorder(async () => {
+        return await readRegistrationStatus('cg-local-first') === 'unregistered';
+      }),
+      getContextGraphOnChainId,
+    });
+
+    await expect(callPolicy(stub, 'cg-local-first')).resolves.toEqual({});
+    expect(readRegistrationStatus.calls).toEqual([['cg-local-first']]);
+    expect(getContextGraphOnChainId.calls).toEqual([]);
+    expect((stub.isContextGraphRegistered as any).calls).toEqual([]);
+  });
+
+  it('does not infer local-first policy when the durable registration marker is missing', async () => {
+    const getContextGraphOnChainId = recorder(async () => null);
+    const stub = makeStub({
+      localContextGraphProvenance: { hasLocalCreate: (id) => id === 'cg-local-marker-missing' },
+      subscribedContextGraphs: new Map([['cg-local-marker-missing', {}]]),
+      readLocalContextGraphRegistrationStatus: recorder(async () => null),
+      isLocalFirstUnregisteredContextGraph: recorder(async () => false),
+      getContextGraphOnChainId,
+    });
+
+    await expect(callPolicy(stub, 'cg-local-marker-missing')).resolves.toEqual({});
+    expect(getContextGraphOnChainId.calls.length).toBeGreaterThan(0);
+    expect((stub.isContextGraphRegistered as any).calls).toEqual([
+      ['cg-local-marker-missing'],
+    ]);
+  });
+
   // Cache-hit path: chain-event-populated entries answer immediately
   // without consulting registration status or local triples.
   it('returns cached on-chain policies when both enums are present', async () => {
@@ -644,5 +708,89 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
     const result = await callPolicy(stub, 'cg-no-onchain-id');
     expect(result).toEqual({ accessPolicy: 0 });
     expect(getContextGraphPublishPolicy.calls).toEqual([]);
+  });
+
+  it('forwards a caller signal to the on-chain id lookup and the finalized snapshot read', async () => {
+    // The id lookup can fall back to a reverse name-hash scan of chain history,
+    // so a caller with a deadline must be able to cancel it.
+    const getContextGraphOnChainId = recorder(async () => '42');
+    const readFinalizedSnapshot = recorder(async () => ({ kind: 'absent' as const }));
+    const stub = Object.assign(makeStub({
+      getContextGraphOnChainId,
+      isContextGraphRegistered: recorder(async () => false),
+      chain: {
+        contextGraphAuthorityIndexRevisionReader: {
+          readContextGraphAuthorityIndexSnapshots: async () => new Map(),
+        },
+      } as ChainStub,
+    }), {
+      readFinalizedContextGraphAuthoritySnapshotV1: readFinalizedSnapshot,
+      isWireIdKeyedSubscription: () => false,
+    });
+    const { signal } = new AbortController();
+
+    await expect(
+      (DKGAgent.prototype as any).getContextGraphOnChainPolicy.call(stub, 'cg-deadline', { signal }),
+    ).resolves.toEqual({});
+
+    expect(getContextGraphOnChainId.calls).toEqual([['cg-deadline', { signal }]]);
+    expect(readFinalizedSnapshot.calls).toEqual([[
+      42n,
+      { label: 'getContextGraphOnChainPolicy finalized(42)', signal },
+    ]]);
+  });
+
+  describe('a named graph on an indexed adapter (#2827 follow-up)', () => {
+    // The current-state id lookup falls back to a live registry range scan;
+    // a member of a graph that was never registered paid it twice per share.
+    function indexedStub(binding: unknown) {
+      const getContextGraphOnChainId = recorder(async (): Promise<string | null> => {
+        throw new Error('the live name-hash lookup must not run on an indexed adapter');
+      });
+      const resolveContextGraphRegistrationBinding = recorder(async () => binding);
+      const readFinalizedSnapshot = recorder(async () => ({ kind: 'absent' as const }));
+      const stub = Object.assign(makeStub({
+        getContextGraphOnChainId,
+        isContextGraphRegistered: recorder(async () => false),
+        chain: {
+          contextGraphAuthorityIndexRevisionReader: {
+            readContextGraphAuthorityIndexSnapshots: async () => new Map(),
+          },
+        } as ChainStub,
+      }), {
+        resolveContextGraphRegistrationBinding,
+        readFinalizedContextGraphAuthoritySnapshotV1: readFinalizedSnapshot,
+        isWireIdKeyedSubscription: () => false,
+      });
+      return { stub, getContextGraphOnChainId, resolveContextGraphRegistrationBinding, readFinalizedSnapshot };
+    }
+
+    it('reads a member graph that was never registered from the finalized binding, once', async () => {
+      const f = indexedStub({ kind: 'unavailable', reason: 'finalized-name-absence-unaccepted' });
+      const { signal } = new AbortController();
+
+      await expect(
+        (DKGAgent.prototype as any).getContextGraphOnChainPolicy.call(f.stub, 'cg-member', { signal }),
+      ).resolves.toEqual({});
+
+      expect(f.getContextGraphOnChainId.calls).toEqual([]);
+      expect(f.resolveContextGraphRegistrationBinding.calls).toEqual([['cg-member', { signal }]]);
+      expect(f.readFinalizedSnapshot.calls).toEqual([]);
+    });
+
+    it('takes a registered id from the finalized binding', async () => {
+      const f = indexedStub({ kind: 'registered', onChainId: 42n, provenance: 'name-hash' });
+      const { signal } = new AbortController();
+
+      await expect(
+        (DKGAgent.prototype as any).getContextGraphOnChainPolicy.call(f.stub, 'cg-registered', { signal }),
+      ).resolves.toEqual({});
+
+      expect(f.getContextGraphOnChainId.calls).toEqual([]);
+      expect(f.readFinalizedSnapshot.calls).toEqual([[
+        42n,
+        { label: 'getContextGraphOnChainPolicy finalized(42)', signal },
+      ]]);
+    });
   });
 });

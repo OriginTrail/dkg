@@ -1,0 +1,8 @@
+SELECT ?project ?database ?source WHERE {
+  GRAPH ?g {
+    ?p <https://schema.org/name> ?project ;
+       <https://example.org/dkg-tutorial/usesDatabase> ?db ;
+       <https://schema.org/citation> ?source .
+    ?db <https://schema.org/name> ?database .
+  }
+}

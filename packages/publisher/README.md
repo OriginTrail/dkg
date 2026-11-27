@@ -16,6 +16,14 @@ Publishing protocol for DKG V10. Handles the complete lifecycle of getting Knowl
 - **ChainEventPoller** — monitors on-chain events for KA finalization confirmations
 - **Access control** — `AccessHandler` for serving private triple access requests; `AccessClient` for requesting them
 
+## Async queues
+
+- **Async publish queue** (`TripleStoreAsyncLiftPublisher`): `list()` reads every job; `listPage({ status?, contextGraphId?, cursor?, limit? })` reads one page, `{ jobs, nextCursor, complete }`, with `limit` from 1 to 1000 (100 by default). A bad cursor or limit throws `LiftJobPageError` (`malformed_cursor`, `invalid_limit`); a stored row it cannot read or order throws it too (`unreadable_row`, `unordered_page`). `getStats()` counts jobs per status with one query. `clear(status)` is the guarded bulk clear: it never changes which job holds a Knowledge Asset. `clearTerminalJob(jobId)` is the unguarded override for one job.
+- **Share queue** (`TripleStoreAsyncPromoteQueue`): `list()`, `listPage(filter?, request?)` and `getStats()`.
+- **Retention cores** (`createShareRetention`, `createPublisherRetention`): finished-job cleanup, off by default. They do not check who calls them. Only the daemon's admission instance may run them, because the only exclusion is the daemon's in-process lock.
+
+Operator settings are in [Async Queue Operations](../../docs/use-dkg/async-queue-operations.md). How the queues admit, list, clear and retain jobs internally is in [`docs/async-queue-internals.md`](docs/async-queue-internals.md).
+
 ## Usage
 
 ```typescript
@@ -48,7 +56,26 @@ await publisher.writeConditionalToWorkspace('urn:contextGraph:example', quads, {
 
 ## Internal Dependencies
 
+Successful `assertionWrite` calls add an `AssertionWritten` activity to the context graph's `_meta` graph alongside the payload insert. Each activity identifies the writer, timestamp, assertion and every physical WM graph receiving payload quads, and records the total number of payload quads submitted in that call. Repeated writes have separate activities even when the store deduplicates their data. Assertion history reports these activities as `written` within WM while the lifecycle state remains unchanged. Setting `provenanceEvents: false` continues to omit lifecycle events while retaining payload and lifecycle state.
+
 - `@origintrail-official/dkg-core` — P2P networking, protocol streams, crypto
 - `@origintrail-official/dkg-chain` — on-chain KC creation and finalization
 - `@origintrail-official/dkg-query` — entity resolution during publishing
 - `@origintrail-official/dkg-storage` — triple persistence
+
+### Retrying an interrupted WM pull-from
+
+If a pull-from stops after archiving a completed SWM assertion and while clearing
+its active seal, repeat the same pull-from after the store is healthy. The retry
+can use the private recovery archive only after verifying the named asset's
+identity, completed share, current SWM head and operation, public digest, and
+public/private content against the archived seal. A conflicting draft still
+requires the explicit `onConflict: "replace"` option; recovery does not imply
+permission to replace a draft.
+
+The SWM-share retry advertised for `KA_PROMOTE_RECOVERY_REQUIRED` applies to an
+unfinished promote with its active seal intact. It cannot reconstruct a removed
+active seal after a completed share. In that interrupted-pull case, use pull-from
+again. Missing, corrupt, or superseded recovery evidence remains blocked; do not
+clear lifecycle metadata to bypass the guard. Ordinary create/write/discard
+operations do not receive this archive-based exception.

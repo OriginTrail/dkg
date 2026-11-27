@@ -1,0 +1,46 @@
+{
+  "$schema": "../schema/integration.schema.json",
+  "schemaVersion": "0.1.0",
+  "slug": "buzz-dkg",
+  "name": "Buzz DKG Integration",
+  "description": "Joins a Block Buzz channel (Nostr/NIP-29) and turns pinned decision threads into DKG Knowledge Assets across Working, Shared, and Verifiable Memory, with a PROV-O provenance chain back to the signed source events. It also answers in-channel with deterministic, no-model retrieval scoped to that room's Context Graph — claims cited, unsupported questions refused.",
+  "category": ["ingestion", "chat", "nostr", "provenance", "grounded-answering"],
+  "maintainer": {
+    "github": "@OriginTrail/core-developers",
+    "name": "OriginTrail Core Developers"
+  },
+  "repo": "https://github.com/OriginTrail/buzz-dkg-integration",
+  "commit": "806b4e78c5078ed9af8fd33d937743695c345608",
+  "license": "Apache-2.0",
+  "requiresDkgNodeVersion": ">=10.0.8",
+  "memoryLayers": ["WM", "SWM", "VM"],
+  "v10PrimitivesUsed": ["ContextGraph", "KnowledgeAsset", "Assertion", "UAL", "Curator"],
+  "publicInterfacesUsed": ["http-api"],
+  "targetAgents": ["generic-HTTP"],
+  "install": {
+    "kind": "manual",
+    "docsUrl": "https://github.com/OriginTrail/buzz-dkg-integration/blob/main/README.md",
+    "oneLiner": "Run the standalone daemon (Node >=22.13) against a Buzz relay and a DKG v10 edge node, then bind a channel to a Context Graph in bindings.json. Setup and env are in README.md ('Deploy against an existing relay + node'); design and trust boundaries in docs/DESIGN.md. Verifiable Memory publishing is disabled by default and must be explicitly enabled by the operator."
+  },
+  "security": {
+    "networkEgress": [
+      "Buzz relay (BDI_BUZZ_HTTP/BDI_BUZZ_WS): operator-configured Nostr NIP-29 relay, HTTP+WS. No telemetry."
+    ],
+    "writeAuthority": [
+      "POST /api/knowledge-assets (create draft)",
+      "POST /api/knowledge-assets/{name}/wm/write (Working Memory)",
+      "POST /api/knowledge-assets/{name}/wm/finalize",
+      "POST /api/knowledge-assets/{name}/swm/share (Shared Working Memory)",
+      "POST /api/knowledge-assets/{name}/vm/publish (Curator authority: publishes to Verifiable Memory and mints a UAL; disabled by default, gated behind human approval — see notes)"
+    ],
+    "credentialsHandled": [
+      "Buzz service Nostr secret key (BDI_SERVICE_KEY): the bot's member identity"
+    ],
+    "notes": "The daemon talks only to the operator-configured Buzz relay and the local DKG node. It performs Working Memory create/write/finalize and Shared Working Memory share on human signal (a pinned thread or an @-mention), posting a machine-readable receipt back into the channel. Verifiable Memory publish (vm/publish) is a Curator-authority operation and is triple-gated: publishMode is 'disabled' by default (refuses all publication), 'mainnet' requires the node to report chain base:8453 and stays under a rolling-24h publication budget, and each publish additionally requires a per-channel authorized promoter's approval reaction that is consumed exactly once (SQL UNIQUE) and validated against the receipt's KA + source-set digest (re-read from the shared graph at approval time). Trusted-component disclosure: inbound event authenticity is delegated to the relay — the daemon does not itself re-verify Nostr Schnorr signatures on received events (the relay verifies on write); it snapshots the full signed events (NIP-01 preimage + id + sig) into the KA so claims remain independently checkable by any downstream consumer. Reads for the grounded-answering path use POST /api/query scoped to the bound Context Graph only, with no fallback to any other graph; note this scoping guarantees no OTHER graph is read, not that only room-authored content is returned — every member of a bound channel is effectively a reader of that Context Graph. Identity binding across ecosystems is NIP-OA verification only. No postinstall/preinstall scripts."
+  },
+  "trustTier": "verified",
+  "designBrief": "https://github.com/OriginTrail/buzz-dkg-integration/blob/main/docs/DESIGN.md",
+  "demo": "https://github.com/OriginTrail/buzz-dkg-integration/blob/main/docs/acceptance-transcript.md",
+  "promotionPath": "A pinned Buzz decision thread is distilled into a single-root PROV-O DecisionCluster written to Working Memory (create + wm/write), finalized and shared to the room's bound Context Graph as Shared Working Memory (swm/share), with a machine-readable receipt posted back into the channel. On an authorized promoter's approval reaction — enforced by the §6 invariants (promoter allowlist, receipt-target check, KA + source-set-digest match, single consume, publishMode and chain gate) — the asset is published to Verifiable Memory (vm/publish): anchored on-chain on Base and assigned a UAL, with the UAL receipt landing back in the room. Every VM Knowledge Asset preserves an unbroken wasDerivedFrom chain to its signed Nostr source events (Schnorr-verifiable independently of the relay), and outputs are modeled with PROV-O plus a thin Nostr vocabulary so context oracles can consume them downstream. A live example produced by this integration: a signed Buzz decision thread was published to Verifiable Memory at UAL did:dkg:base:8453/0x633e5a7c5e612d9981538f60d824cc03be97e2ab/2201 (tx 0x6daf3e0bad8cba13f7508f69c5550750a30294e997bf5e7fdffe9a24170dbb38, block 49145748) in the FIFA World Cup 2026 Context Graph, with full spend and lifecycle evidence in docs/gates/GATE_D3_REPORT.md and README.md.",
+  "fitNotes": "Advances the LLM-Wiki / autoresearch direction by turning the conclusions of a room of humans and AI agents into cited, ownable Knowledge Assets and answering from them in place, grounded only in the room's Context Graph — with unsupported questions refused rather than hallucinated. The capture-and-receipt floor runs even when no agent is present; the DKG v10 node's MCP surface plus Buzz's buzz-acp (ACP-to-MCP) harness let any agent in the room read and write the same graph directly. The pattern generalizes beyond team chat: any room on the open social protocol can bind to a Context Graph the same way."
+}

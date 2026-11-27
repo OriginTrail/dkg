@@ -1,18 +1,96 @@
+import { StoreDispatchPolicy, normalizeNonAckLanePolicy, type NonAckLanePolicy } from './store-dispatch-policy.js';
+import { traceShareStoreCall } from './share-store-timing.js';
+import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';
 import { performance } from 'node:perf_hooks';
-import { getMetrics } from '@origintrail-official/dkg-core';
-import type { StorePressureSnapshot, StoreWorkPriority } from './triple-store.js';
+import { availableParallelism } from 'node:os';
+import {
+  backpressureRegistry,
+  currentAsyncAdmissionDiagnosticContext,
+  getMetrics,
+  ObservableScheduler,
+  type SchedulerPressureOutcome,
+  type SchedulerPressureTicket,
+  type AsyncAdmissionDiagnosticContext,
+} from '@origintrail-official/dkg-core';
+import {
+  isStoreWorkPriority,
+  STORE_WORK_PRIORITIES,
+  type StorePressureSnapshot,
+  type StoreWorkPriority,
+  type TripleStore,
+} from './triple-store.js';
+import {
+  STORE_OPERATION_OUTCOME_TAG,
+  isStoreOperation,
+  type StoreOperation,
+  type StoreOperationOutcomeTagged,
+} from './store-operation-outcome.js';
+import {
+  createRateLimitedStoreTimeoutDiagnosticReporter,
+  activeStoreAdmissionsSnapshot,
+  type StoreSchedulerPriority,
+  type StoreSchedulerTimeoutDiagnostic,
+} from './store-scheduler-timeout-diagnostics.js';
+import { StoreSchedulerStats, metricOperation, registerStoreSchedulerStats } from './store-scheduler-stats.js';
+
+const defaultStoreWorkPriority = new AsyncLocalStorage<StoreWorkPriority>();
+
+/**
+ * Run `fn` with a default admission lane for store work that names none. Explicit per-call priorities still
+ * win. Long background walks use this so every store call they make stays out of the normal lane without
+ * threading a priority through each helper.
+ */
+export function withDefaultStoreWorkPriority<T>(priority: StoreWorkPriority, fn: () => T): T {
+  return defaultStoreWorkPriority.run(priority, fn);
+}
+
+/** The ambient default lane in effect here, if a caller set one. */
+export function activeDefaultStoreWorkPriority(): StoreWorkPriority | undefined {
+  return defaultStoreWorkPriority.getStore();
+}
+
+/**
+ * Run `fn` with no ambient default lane, whatever its caller scoped. Work `fn` starts, however long it outlives
+ * the call, resolves its lane as if no caller had set one. A wake that starts a long-lived worker from inside a
+ * caller's scope runs through it, so the worker inherits no lane from whoever happened to trigger it.
+ */
+export function withoutDefaultStoreWorkPriority<T>(fn: () => T): T {
+  return defaultStoreWorkPriority.exit(fn);
+}
+
+/**
+ * How many operations of one shared lane `store` admits at once, or undefined when the store does not say.
+ * Without `priority` it answers for the lane that unprioritised work started here runs in. A caller that fans
+ * out reads uses it as its width: a wider fan-out only queues the surplus behind its own siblings, where each
+ * read waits against the queue deadline.
+ */
+export function storeLaneInflightLimit(
+  store: Pick<TripleStore, 'getPressureSnapshot'>,
+  priority: StoreWorkPriority = activeDefaultStoreWorkPriority() ?? 'normal',
+): number | undefined {
+  const snapshot = store.getPressureSnapshot?.();
+  const limit = priority === 'background'
+    ? snapshot?.backgroundInflightLimit
+    : priority === 'normal' ? snapshot?.normalInflightLimit : undefined;
+  return Number.isSafeInteger(limit) && (limit as number) > 0 ? limit : undefined;
+}
 
 export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
   ackInflight: number;
+  healthInflight: number;
   normalInflight: number;
   backgroundInflight: number;
   ackQueued: number;
+  healthQueued: number;
   normalQueued: number;
   backgroundQueued: number;
   maxConcurrent: number;
   ackReservedSlots: number;
+  normalReservedSlots: number;
+  healthReservedSlots: number;
   backgroundReservedSlots: number;
   ackQueueLimit: number;
+  healthQueueLimit: number;
   normalQueueLimit: number;
   backgroundQueueLimit: number;
   queueWaitTimeoutMs: number;
@@ -20,30 +98,97 @@ export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
 
 export type StoreSchedulerBusyReason = 'queue_full' | 'queue_wait_timeout';
 
-/**
- * A retry-safe overload rejection emitted only while work is still queued.
- * Callers may retry because the operation closure has not started.
- */
-export class StoreSchedulerBusyError extends Error {
+export interface StoreSchedulerOperationMetadata {
+  /** Canonical public store operation; separate from the observability label. */
+  storeOperation: StoreOperation;
+}
+
+export interface StoreSchedulerBusyErrorOptions extends ErrorOptions {
+  storeOperation?: StoreOperation;
+}
+
+/** A retry-safe overload rejection: emitted only while the work is queued, before its closure starts. */
+export class StoreSchedulerBusyError extends Error implements StoreOperationOutcomeTagged {
   readonly code = 'STORE_SCHEDULER_BUSY' as const;
   readonly retryable = true as const;
+  readonly outcome = 'not_started' as const;
+  readonly storeOperationOutcomeTag = STORE_OPERATION_OUTCOME_TAG;
+  readonly storeOperation?: StoreOperation;
 
   constructor(
     readonly reason: StoreSchedulerBusyReason,
-    readonly priority: StoreWorkPriority,
+    readonly priority: StoreSchedulerPriority,
     readonly operation: string,
+    options?: StoreSchedulerBusyErrorOptions,
   ) {
-    super(`Store scheduler ${reason.replaceAll('_', ' ')} (${priority}: ${operation || 'unknown'})`);
+    // Error.message reaches public HTTP responses. Cross-request active work
+    // belongs only in the structured diagnostic, never in this message.
+    super(`Store scheduler ${reason.replaceAll('_', ' ')} (${priority}: ${operation || 'unknown'})`, options);
     this.name = 'StoreSchedulerBusyError';
+    this.storeOperation = options?.storeOperation;
   }
+}
+
+export interface StoreSchedulerBusyErrorLike extends StoreOperationOutcomeTagged {
+  readonly code: 'STORE_SCHEDULER_BUSY';
+  /** Optional because copying an Error can omit its non-enumerable message. */
+  readonly message?: string;
+  readonly retryable: true;
+  readonly outcome: 'not_started';
+  readonly reason: StoreSchedulerBusyReason;
+  readonly priority: StoreSchedulerPriority;
+  readonly operation: string;
+}
+
+/** Canonical cross-package guard for retry-safe scheduler admission errors. */
+export function isStoreSchedulerBusyError(
+  error: unknown,
+): error is StoreSchedulerBusyErrorLike {
+  if (!error || typeof error !== 'object') return false;
+  const shaped = error as Partial<StoreSchedulerBusyErrorLike>;
+  return shaped.code === 'STORE_SCHEDULER_BUSY'
+    && (shaped.message === undefined || typeof shaped.message === 'string')
+    && shaped.retryable === true
+    && shaped.outcome === 'not_started'
+    && shaped.storeOperationOutcomeTag === STORE_OPERATION_OUTCOME_TAG
+    && (shaped.reason === 'queue_full' || shaped.reason === 'queue_wait_timeout')
+    && (shaped.priority === 'control' || isStoreWorkPriority(shaped.priority))
+    && typeof shaped.operation === 'string'
+    && (shaped.storeOperation === undefined || isStoreOperation(shaped.storeOperation));
 }
 
 export type StorePriorityQueueLimits = Record<StoreWorkPriority, number>;
 
+export interface StorePrioritySchedulerOptions {
+  maxConcurrent?: number;
+  ackReservedSlots?: number;
+  healthReservedSlots?: number;
+  normalReservedSlots?: number;
+  backgroundReservedSlots?: number;
+  queueLimits?: number | Partial<StorePriorityQueueLimits>;
+  queueWaitTimeoutMs?: number;
+  now?: () => number;
+  /** Observability only. Failures here cannot alter admission outcomes. */
+  timeoutDiagnosticSink?: (diagnostic: StoreSchedulerTimeoutDiagnostic) => void | Promise<void>;
+  /**
+   * Makes this a queue-control instance (store-control-path.ts) registered under this id. It runs every call in
+   * one fixed lane (`normal` inside, whatever priority or ambient lane the caller names) that it reports as
+   * `control`: in busy errors, metric attributes, its single pressure lane and its stats, and it samples no
+   * shared ACK or sync depth.
+   */
+  controlId?: string;
+}
+
 interface QueueEntry<T> {
   priority: StoreWorkPriority;
+  /** The lane reported for this entry: its priority, or `control` on a control instance. */
+  lane: StoreSchedulerPriority;
   operation: string;
+  storeOperation?: StoreOperation;
   queuedAt: number;
+  admission?: AsyncAdmissionDiagnosticContext;
+  timing?: ReturnType<typeof traceShareStoreCall>;
+  pressureTicket: SchedulerPressureTicket;
   work: () => Promise<T>;
   resolve: (value: T) => void;
   reject: (reason?: unknown) => void;
@@ -52,8 +197,24 @@ interface QueueEntry<T> {
   waitTimer?: ReturnType<typeof setTimeout>;
 }
 
-const DEFAULT_MAX_CONCURRENT = 8;
+interface LegacyStorePrioritySchedulerArguments {
+  argumentCount: number;
+  ackReservedSlots?: number;
+  now?: () => number;
+  backgroundReservedSlots?: number;
+  queueLimits?: number | Partial<StorePriorityQueueLimits>;
+  queueWaitTimeoutMs?: number;
+  healthReservedSlots?: number;
+}
+
+// Four was the incident-tested stable ceiling on an 8 GiB host. With one ACK
+// reserve and one health reserve this admits at most two ordinary/background
+// operations by default, while still allowing operators to tune explicitly.
+const DEFAULT_MAX_CONCURRENT = 4;
 const DEFAULT_ACK_RESERVED_SLOTS = 1;
+const MIN_ACK_SAFE_MAX_CONCURRENT = DEFAULT_ACK_RESERVED_SLOTS + 1;
+const DEFAULT_HEALTH_RESERVED_SLOTS = 1;
+const DEFAULT_NORMAL_RESERVED_SLOTS = 1;
 const DEFAULT_BACKGROUND_RESERVED_SLOTS = 1;
 export const DEFAULT_STORE_QUEUE_LIMIT = 64;
 export const DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS = 10_000;
@@ -72,10 +233,36 @@ function parseNonNegativeIntegerEnv(name: string, fallback: number): number {
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
+function resolveMaxConcurrentFromEnv(): number {
+  const configured = parsePositiveIntegerEnv(
+    'DKG_STORE_MAX_CONCURRENT',
+    DEFAULT_MAX_CONCURRENT,
+  );
+  // External HTTP stores can be limited by request latency before CPU capacity.
+  // Operators may qualify a larger budget without surrendering ACK/health
+  // reservations. Keep the existing CPU ceiling unless explicitly opted out.
+  if (process.env.DKG_STORE_CONCURRENCY_POLICY?.trim() === 'configured' && Number.isSafeInteger(configured)) {
+    return configured;
+  }
+  // One admitted SPARQL request can use several Oxigraph/Rayon worker threads. Letting an operator's stale
+  // tuning admit more store jobs than the host has logical CPUs multiplies runnable work and can starve the
+  // reserved ACK lane even while the JS scheduler reports empty queues. Keep explicit constructor options
+  // available to tests/embedded callers, but make the process-level environment setting a hardware-aware
+  // ceiling.
+  // A one-slot automatic ceiling would normalize the default ACK reservation to zero. Keep one ordinary slot
+  // plus the default reserved ACK slot even on a single-vCPU runtime. An explicitly lower process setting is
+  // still honored because it remains the first operand of Math.min().
+  return Math.min(
+    configured,
+    Math.max(MIN_ACK_SAFE_MAX_CONCURRENT, availableParallelism()),
+  );
+}
+
 function resolveQueueLimitsFromEnv(): StorePriorityQueueLimits {
   const common = parsePositiveIntegerEnv('DKG_STORE_QUEUE_LIMIT', DEFAULT_STORE_QUEUE_LIMIT);
   return {
     ack: parsePositiveIntegerEnv('DKG_STORE_ACK_QUEUE_LIMIT', common),
+    health: parsePositiveIntegerEnv('DKG_STORE_HEALTH_QUEUE_LIMIT', common),
     normal: parsePositiveIntegerEnv('DKG_STORE_NORMAL_QUEUE_LIMIT', common),
     background: parsePositiveIntegerEnv('DKG_STORE_BACKGROUND_QUEUE_LIMIT', common),
   };
@@ -88,10 +275,11 @@ function normalizeQueueLimits(
     const limit = Number.isInteger(configured) && configured > 0
       ? configured
       : DEFAULT_STORE_QUEUE_LIMIT;
-    return { ack: limit, normal: limit, background: limit };
+    return { ack: limit, health: limit, normal: limit, background: limit };
   }
   return {
     ack: normalizeQueueLimit(configured.ack),
+    health: normalizeQueueLimit(configured.health),
     normal: normalizeQueueLimit(configured.normal),
     background: normalizeQueueLimit(configured.background),
   };
@@ -103,63 +291,191 @@ function normalizeQueueLimit(value: number | undefined): number {
     : DEFAULT_STORE_QUEUE_LIMIT;
 }
 
-function metricOperation(operation: string): string {
-  const trimmed = operation.trim();
-  if (!trimmed) return 'unknown';
-  return trimmed.replace(/[^\w:./-]/g, '_').slice(0, 80) || 'unknown';
+function normalizeStorePrioritySchedulerOptions(
+  optionsOrMaxConcurrent: StorePrioritySchedulerOptions | number | undefined,
+  legacy: LegacyStorePrioritySchedulerArguments,
+): StorePrioritySchedulerOptions {
+  const legacyCall = typeof optionsOrMaxConcurrent === 'number' || legacy.argumentCount > 1;
+  if (!legacyCall) return optionsOrMaxConcurrent ?? {};
+
+  return {
+    maxConcurrent: typeof optionsOrMaxConcurrent === 'number'
+      ? optionsOrMaxConcurrent
+      : undefined,
+    ackReservedSlots: legacy.ackReservedSlots,
+    healthReservedSlots: legacy.healthReservedSlots,
+    now: legacy.now,
+    backgroundReservedSlots: legacy.backgroundReservedSlots,
+    queueLimits: legacy.queueLimits,
+    queueWaitTimeoutMs: legacy.queueWaitTimeoutMs,
+  };
 }
 
-const PRIORITY_ORDER = [
-  'ack',
-  'normal',
-  'background',
-] as const satisfies readonly StoreWorkPriority[];
+export function storeWorkPriorityRank(priority: StoreWorkPriority): number {
+  return STORE_WORK_PRIORITIES.indexOf(priority);
+}
 
-export class StorePriorityScheduler {
+export class StorePriorityScheduler extends ObservableScheduler {
   private readonly queues: Record<StoreWorkPriority, Array<QueueEntry<unknown>>> = {
     ack: [],
+    health: [],
     normal: [],
     background: [],
   };
 
   private ackInflight = 0;
+  private healthInflight = 0;
   private normalInflight = 0;
   private backgroundInflight = 0;
+  private readonly maxConcurrent: number;
+  private readonly ackReservedSlots: number;
+  private readonly healthReservedSlots: number;
+  private readonly queueWaitTimeoutMs: number;
+  private readonly now: () => number;
+  private readonly reportTimeout?: ReturnType<typeof createRateLimitedStoreTimeoutDiagnosticReporter>;
   private readonly queueLimits: StorePriorityQueueLimits;
-  private lastStartedPriority: StoreWorkPriority | undefined;
+  private readonly nonAckLanePolicy: NonAckLanePolicy;
+  private readonly shareSingleOrdinarySlot: boolean;
+  private readonly controlId?: string;
+  private readonly dispatchPolicy = new StoreDispatchPolicy();
+  private readonly activeAdmissions = new Map<QueueEntry<unknown>, number>();
+  // Wait and rejection figures for the periodic line. The lanes come from `queues`:
+  // STORE_WORK_PRIORITIES can still be uninitialised when the singleton below is built.
+  readonly stats: StoreSchedulerStats;
 
+  constructor(options?: StorePrioritySchedulerOptions);
+  /** @deprecated Use the named options object. Retained for package compatibility. */
   constructor(
-    private readonly maxConcurrent = parsePositiveIntegerEnv('DKG_STORE_MAX_CONCURRENT', DEFAULT_MAX_CONCURRENT),
-    private readonly ackReservedSlots = parsePositiveIntegerEnv(
-      'DKG_STORE_ACK_RESERVED_SLOTS',
-      DEFAULT_ACK_RESERVED_SLOTS,
-    ),
-    private readonly now = () => performance.now(),
-    private readonly backgroundReservedSlots = parseNonNegativeIntegerEnv(
-      'DKG_STORE_BACKGROUND_RESERVED_SLOTS',
-      DEFAULT_BACKGROUND_RESERVED_SLOTS,
-    ),
-    queueLimits: number | Partial<StorePriorityQueueLimits> = resolveQueueLimitsFromEnv(),
-    private readonly queueWaitTimeoutMs = parsePositiveIntegerEnv(
-      'DKG_STORE_QUEUE_WAIT_TIMEOUT_MS',
-      DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS,
-    ),
+    maxConcurrent?: number,
+    ackReservedSlots?: number,
+    now?: () => number,
+    backgroundReservedSlots?: number,
+    queueLimits?: number | Partial<StorePriorityQueueLimits>,
+    queueWaitTimeoutMs?: number,
+    healthReservedSlots?: number,
+  );
+  constructor(
+    optionsOrMaxConcurrent: StorePrioritySchedulerOptions | number = {},
+    legacyAckReservedSlots?: number,
+    legacyNow?: () => number,
+    legacyBackgroundReservedSlots?: number,
+    legacyQueueLimits?: number | Partial<StorePriorityQueueLimits>,
+    legacyQueueWaitTimeoutMs?: number,
+    legacyHealthReservedSlots?: number,
   ) {
-    this.queueLimits = normalizeQueueLimits(queueLimits);
+    const options = normalizeStorePrioritySchedulerOptions(optionsOrMaxConcurrent, {
+      argumentCount: arguments.length,
+      ackReservedSlots: legacyAckReservedSlots,
+      now: legacyNow,
+      backgroundReservedSlots: legacyBackgroundReservedSlots,
+      queueLimits: legacyQueueLimits,
+      queueWaitTimeoutMs: legacyQueueWaitTimeoutMs,
+      healthReservedSlots: legacyHealthReservedSlots,
+    });
+    const resolvedNow = options.now ?? (() => performance.now());
+    const resolvedQueueWaitTimeoutMs = options.queueWaitTimeoutMs
+      ?? parsePositiveIntegerEnv(
+        'DKG_STORE_QUEUE_WAIT_TIMEOUT_MS',
+        DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS,
+      );
+    super({
+      scheduler: options.controlId ?? 'store',
+      now: resolvedNow,
+      thresholds: {
+        degradedQueueAgeMs: Math.max(1, Math.floor(resolvedQueueWaitTimeoutMs / 2)),
+        stalledActiveAgeMs: 30_000,
+      },
+    });
+    this.controlId = options.controlId;
+    this.stats = new StoreSchedulerStats(this.controlId === undefined ? Object.keys(this.queues) : ['control']);
+    this.maxConcurrent = options.maxConcurrent ?? resolveMaxConcurrentFromEnv();
+    const requestedAckReservedSlots = options.ackReservedSlots
+      ?? parsePositiveIntegerEnv('DKG_STORE_ACK_RESERVED_SLOTS', DEFAULT_ACK_RESERVED_SLOTS);
+    this.ackReservedSlots = Math.min(
+      requestedAckReservedSlots,
+      Math.max(0, this.maxConcurrent - 1),
+    );
+    const requestedHealthReservedSlots = options.healthReservedSlots
+      ?? parseNonNegativeIntegerEnv(
+        'DKG_STORE_HEALTH_RESERVED_SLOTS',
+        DEFAULT_HEALTH_RESERVED_SLOTS,
+      );
+    this.healthReservedSlots = Math.min(
+      requestedHealthReservedSlots,
+      Math.max(0, this.maxConcurrent - this.ackReservedSlots - 1),
+    );
+    const requestedNormalFloor = options.normalReservedSlots
+      ?? parseNonNegativeIntegerEnv('DKG_STORE_NORMAL_RESERVED_SLOTS', DEFAULT_NORMAL_RESERVED_SLOTS);
+    const requestedBackgroundFloor = options.backgroundReservedSlots
+      ?? parseNonNegativeIntegerEnv(
+        'DKG_STORE_BACKGROUND_RESERVED_SLOTS',
+        DEFAULT_BACKGROUND_RESERVED_SLOTS,
+      );
+    this.nonAckLanePolicy = normalizeNonAckLanePolicy(
+      Math.max(1, this.maxConcurrent - this.ackReservedSlots - this.healthReservedSlots),
+      requestedNormalFloor,
+      requestedBackgroundFloor,
+    );
+    // A physical background reserve would exclude normal work from the sole
+    // ordinary slot. Preserve requested background progress by sharing turns.
+    this.shareSingleOrdinarySlot = this.nonAckLanePolicy.totalLimit === 1
+      && requestedBackgroundFloor > 0;
+    this.queueWaitTimeoutMs = resolvedQueueWaitTimeoutMs;
+    this.now = resolvedNow;
+    this.reportTimeout = options.timeoutDiagnosticSink
+      ? createRateLimitedStoreTimeoutDiagnosticReporter({ emit: options.timeoutDiagnosticSink })
+      : undefined;
+    this.queueLimits = normalizeQueueLimits(options.queueLimits ?? resolveQueueLimitsFromEnv());
+    if (this.controlId !== undefined) {
+      // One lane with real limits, and totals taken from it, instead of four empty shared lanes.
+      const control = { queueLimit: this.queueLimits.normal, inflightLimit: this.maxConcurrent };
+      this.updatePressureCapacity({ ...control, lanes: { control } });
+      return;
+    }
+    const nonAckLimit = Math.max(1, this.maxConcurrent - this.ackReservedSlots);
+    this.updatePressureCapacity({
+      queueLimit: Object.values(this.queueLimits).reduce((sum, value) => sum + value, 0),
+      inflightLimit: this.maxConcurrent,
+      lanes: {
+        ack: {
+          queueLimit: this.queueLimits.ack,
+          inflightLimit: this.maxConcurrent,
+        },
+        health: {
+          queueLimit: this.queueLimits.health,
+          inflightLimit: nonAckLimit,
+        },
+        normal: {
+          queueLimit: this.queueLimits.normal,
+          inflightLimit: this.nonAckLanePolicy.totalLimit,
+        },
+        background: {
+          queueLimit: this.queueLimits.background,
+          inflightLimit: this.nonAckLanePolicy.backgroundLimit,
+        },
+      },
+    });
   }
 
   get snapshot(): StorePrioritySchedulerSnapshot {
     return {
       ackInflight: this.ackInflight,
+      healthInflight: this.healthInflight,
       normalInflight: this.normalInflight,
       backgroundInflight: this.backgroundInflight,
       ackQueued: this.queues.ack.length,
+      healthQueued: this.queues.health.length,
       normalQueued: this.queues.normal.length,
       backgroundQueued: this.queues.background.length,
       maxConcurrent: this.maxConcurrent,
-      ackReservedSlots: this.effectiveAckReserve(),
-      backgroundReservedSlots: this.effectiveBackgroundReserve(),
+      ackReservedSlots: this.ackReservedSlots,
+      healthReservedSlots: this.healthReservedSlots,
+      normalReservedSlots: this.nonAckLanePolicy.normalFloor,
+      backgroundReservedSlots: this.nonAckLanePolicy.backgroundFloor,
+      normalInflightLimit: this.nonAckLanePolicy.totalLimit,
+      backgroundInflightLimit: this.nonAckLanePolicy.backgroundLimit,
       ackQueueLimit: this.queueLimits.ack,
+      healthQueueLimit: this.queueLimits.health,
       normalQueueLimit: this.queueLimits.normal,
       backgroundQueueLimit: this.queueLimits.background,
       queueWaitTimeoutMs: this.queueWaitTimeoutMs,
@@ -171,23 +487,49 @@ export class StorePriorityScheduler {
     operation: string,
     work: () => Promise<T>,
     signal?: AbortSignal,
+    metadata?: StoreSchedulerOperationMetadata,
   ): Promise<T> {
-    const normalizedPriority = priority ?? 'normal';
+    const normalizedPriority = this.controlId === undefined
+      ? priority ?? defaultStoreWorkPriority.getStore() ?? 'normal'
+      : 'normal';
+    const lane: StoreSchedulerPriority = this.controlId === undefined ? normalizedPriority : 'control';
+    const busy = this.normalInflight + this.ackInflight + this.healthInflight + this.backgroundInflight > 0;
+    const timing = traceShareStoreCall(operation, metadata?.storeOperation, lane, this.controlId,
+      busy ? () => this.getBackpressureSnapshot() : undefined);
     if (signal?.aborted) {
+      timing?.finish('aborted');
       const reason = signal.reason;
       throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
     }
     if (this.queues[normalizedPriority].length >= this.queueLimits[normalizedPriority]) {
-      const error = new StoreSchedulerBusyError('queue_full', normalizedPriority, operation);
+      timing?.finish('queue_full');
+      const error = new StoreSchedulerBusyError(
+        'queue_full',
+        lane,
+        operation,
+        metadata,
+      );
+      this.pressureReject(
+        { lane, operation },
+        error.reason,
+      );
       this.observeRejection(error);
       throw error;
     }
     return new Promise<T>((resolve, reject) => {
+      const pressureTicket = this.pressureEnqueue({
+        lane,
+        operation,
+      });
       const entry: QueueEntry<T> = {
         priority: normalizedPriority,
+        lane,
         operation,
+        storeOperation: metadata?.storeOperation,
         queuedAt: this.now(),
-        work,
+        admission: currentAsyncAdmissionDiagnosticContext(),
+        pressureTicket, timing,
+        work: AsyncResource.bind(timing ? () => timing.run(work) : work),
         resolve,
         reject,
         signal,
@@ -195,6 +537,9 @@ export class StorePriorityScheduler {
       const onAbort = () => {
         if (this.removeQueued(entry as QueueEntry<unknown>)) {
           this.cleanupQueuedEntry(entry as QueueEntry<unknown>);
+          timing?.finish('aborted');
+          this.pressureCancelQueued(entry.pressureTicket, 'aborted');
+          this.stats.recordQueueWait(entry.lane, this.now() - entry.queuedAt);
           const reason = signal?.reason;
           reject(reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')));
           this.observeDepths();
@@ -209,10 +554,18 @@ export class StorePriorityScheduler {
         this.cleanupQueuedEntry(entry as QueueEntry<unknown>);
         const error = new StoreSchedulerBusyError(
           'queue_wait_timeout',
-          normalizedPriority,
+          lane,
           operation,
+          entry.storeOperation === undefined ? undefined : { storeOperation: entry.storeOperation },
         );
-        this.observeRejection(error);
+        this.reportTimeout?.(
+          { priority: lane, operation, ...(entry.admission ? { admission: entry.admission } : {}) },
+          () => this.getBackpressureSnapshot(),
+          () => activeStoreAdmissionsSnapshot(this.activeAdmissions, this.now()),
+        );
+        timing?.finish('queue_wait_timeout');
+        this.pressureRejectQueued(entry.pressureTicket, error.reason);
+        this.observeRejection(error, this.now() - entry.queuedAt);
         reject(error);
         this.observeDepths();
         this.drain();
@@ -233,74 +586,53 @@ export class StorePriorityScheduler {
   }
 
   private nextRunnable(): QueueEntry<unknown> | undefined {
-    const totalInflight = this.ackInflight + this.normalInflight + this.backgroundInflight;
-    if (totalInflight >= this.maxConcurrent) return undefined;
-
-    const owedFloor = this.owedFloorPriority();
-    if (owedFloor && this.canStart(owedFloor)) {
-      return this.queues[owedFloor].shift();
-    }
-
-    for (const priority of PRIORITY_ORDER) {
-      const queue = this.queues[priority];
-      if (queue.length === 0) continue;
-      if (!this.canStart(priority)) continue;
-      return queue.shift();
+    const candidates = this.dispatchPolicy.candidates({
+      maxConcurrent: this.maxConcurrent, lanePolicy: this.nonAckLanePolicy,
+      shareSingleOrdinarySlot: this.shareSingleOrdinarySlot,
+      normalInflight: this.normalInflight, backgroundInflight: this.backgroundInflight,
+      normalQueued: this.queues.normal.length, backgroundQueued: this.queues.background.length,
+    });
+    for (const priority of candidates) {
+      if (this.queues[priority].length > 0 && this.hasCapacityFor(priority)) {
+        return this.queues[priority].shift();
+      }
     }
     return undefined;
   }
 
-  private canStart(priority: StoreWorkPriority): boolean {
-    const totalInflight = this.ackInflight + this.normalInflight + this.backgroundInflight;
+  private hasCapacityFor(priority: StoreWorkPriority): boolean {
+    const totalInflight = this.ackInflight + this.healthInflight + this.normalInflight + this.backgroundInflight;
     if (totalInflight >= this.maxConcurrent) return false;
     if (priority === 'ack') return true;
 
-    const nonAckLimit = this.nonAckLimit();
-    const nonAckInflight = this.normalInflight + this.backgroundInflight;
-    return nonAckInflight < nonAckLimit;
-  }
+    const nonAckLimit = Math.max(1, this.maxConcurrent - this.ackReservedSlots);
+    const nonAckInflight = this.healthInflight + this.normalInflight + this.backgroundInflight;
+    if (nonAckInflight >= nonAckLimit) return false;
+    if (priority === 'health') return true;
 
-  private owedFloorPriority(): Exclude<StoreWorkPriority, 'ack'> | undefined {
-    const backgroundReserve = this.effectiveBackgroundReserve();
-    const backgroundFloorOwed =
-      backgroundReserve > 0 &&
-      this.queues.background.length > 0 &&
-      this.backgroundInflight < backgroundReserve;
-    // Restore the background reserve before the normal floor when both are owed.
-    if (backgroundFloorOwed) return 'background';
-
-    const normalFloorOwed =
-      this.queues.normal.length > 0 &&
-      this.normalInflight === 0;
-    if (!normalFloorOwed) return undefined;
-
-    if (this.maxConcurrent > 1) return 'normal';
-
-    // A single-slot scheduler cannot preserve ACK capacity and a normal lane
-    // simultaneously. Alternate after an ACK so both lanes still progress.
-    if (this.lastStartedPriority === 'ack') return 'normal';
-
-    return undefined;
-  }
-
-  private effectiveAckReserve(): number {
-    return Math.min(this.ackReservedSlots, Math.max(0, this.maxConcurrent - 1));
-  }
-
-  private nonAckLimit(): number {
-    return Math.max(1, this.maxConcurrent - this.effectiveAckReserve());
-  }
-
-  private effectiveBackgroundReserve(): number {
-    return Math.min(this.backgroundReservedSlots, Math.max(0, this.nonAckLimit() - 1));
+    const lanePolicy = this.nonAckLanePolicy;
+    const ordinaryInflight = this.normalInflight + this.backgroundInflight;
+    if (ordinaryInflight >= lanePolicy.totalLimit) return false;
+    if (priority === 'background' && this.backgroundInflight >= lanePolicy.backgroundLimit) {
+      return false;
+    }
+    if (priority === 'background' || this.queues.background.length === 0) return true;
+    return this.normalInflight < lanePolicy.normalLimitWhileBackgroundQueued;
   }
 
   private start(entry: QueueEntry<unknown>): void {
+    this.dispatchPolicy.started(entry.priority, this.shareSingleOrdinarySlot && this.queues.background.length > 0);
     this.cleanupQueuedEntry(entry);
     this.increment(entry.priority);
-    this.lastStartedPriority = entry.priority;
     const startedAt = this.now();
+    if (entry.admission) this.activeAdmissions.set(entry, startedAt);
+    this.pressureStart(entry.pressureTicket);
     const waitMs = Math.max(0, startedAt - entry.queuedAt);
+    const attributes = {
+      priority: entry.lane,
+      operation: metricOperation(entry.operation),
+    };
+    getMetrics().storeSchedulerActive.add(1, attributes);
     this.observeQueueWait(entry, waitMs);
     this.observeDepths();
 
@@ -311,16 +643,23 @@ export class StorePriorityScheduler {
       result = Promise.reject(err);
     }
 
+    let pressureOutcome: SchedulerPressureOutcome = 'completed';
     result
       .then((value) => {
+        entry.timing?.finish('ok');
         this.observeDuration(entry, startedAt, 'ok');
         entry.resolve(value);
       })
       .catch((err) => {
+        pressureOutcome = 'failed';
+        entry.timing?.finish('error');
         this.observeDuration(entry, startedAt, 'error');
         entry.reject(err);
       })
       .finally(() => {
+        this.activeAdmissions.delete(entry);
+        getMetrics().storeSchedulerActive.add(-1, attributes);
+        this.pressureFinish(entry.pressureTicket, pressureOutcome);
         this.decrement(entry.priority);
         this.observeDepths();
         this.drain();
@@ -348,17 +687,24 @@ export class StorePriorityScheduler {
 
   private increment(priority: StoreWorkPriority): void {
     if (priority === 'ack') this.ackInflight += 1;
+    else if (priority === 'health') this.healthInflight += 1;
     else if (priority === 'normal') this.normalInflight += 1;
     else this.backgroundInflight += 1;
   }
 
   private decrement(priority: StoreWorkPriority): void {
     if (priority === 'ack') this.ackInflight = Math.max(0, this.ackInflight - 1);
+    else if (priority === 'health') this.healthInflight = Math.max(0, this.healthInflight - 1);
     else if (priority === 'normal') this.normalInflight = Math.max(0, this.normalInflight - 1);
     else this.backgroundInflight = Math.max(0, this.backgroundInflight - 1);
   }
 
   private observeQueueWait(entry: QueueEntry<unknown>, waitMs: number): void {
+    getMetrics().storeSchedulerQueueWaitMs.record(waitMs, {
+      priority: entry.lane,
+      operation: metricOperation(entry.operation),
+    });
+    this.stats.recordQueueWait(entry.lane, waitMs);
     if (entry.priority !== 'ack') return;
     getMetrics().storageAckQueueWaitMs.record(waitMs, {
       operation: metricOperation(entry.operation),
@@ -366,21 +712,29 @@ export class StorePriorityScheduler {
   }
 
   private observeDuration(entry: QueueEntry<unknown>, startedAt: number, outcome: 'ok' | 'error'): void {
+    const durationMs = Math.max(0, this.now() - startedAt);
+    getMetrics().storeSchedulerOperationDurationMs.record(durationMs, {
+      priority: entry.lane,
+      operation: metricOperation(entry.operation),
+      outcome,
+    });
     if (entry.priority !== 'ack') return;
-    getMetrics().storageAckStoreOpDurationMs.record(Math.max(0, this.now() - startedAt), {
+    getMetrics().storageAckStoreOpDurationMs.record(durationMs, {
       operation: metricOperation(entry.operation),
       outcome,
     });
   }
 
-  private observeRejection(error: StoreSchedulerBusyError): void {
+  private observeRejection(error: StoreSchedulerBusyError, waitMs?: number): void {
     getMetrics().storeSchedulerRejectionsTotal.add(1, {
       priority: error.priority,
       reason: error.reason,
+      operation_family: this.stats.recordRejection(error.priority, error.operation, error.reason, waitMs),
     });
   }
 
   private observeDepths(): void {
+    if (this.controlId !== undefined) return;
     const snapshot = this.snapshot;
     getMetrics().storageAckPriorityQueueDepth.record(snapshot.ackQueued);
     getMetrics().storageAckInflight.record(snapshot.ackInflight);
@@ -388,7 +742,14 @@ export class StorePriorityScheduler {
   }
 }
 
-export const externalStorePriorityScheduler = new StorePriorityScheduler();
+export const storeTimeoutDiagnosticSink = (diagnostic: StoreSchedulerTimeoutDiagnostic): void =>
+  console.warn('[store scheduler] queue wait timeout', diagnostic);
+
+export const externalStorePriorityScheduler = new StorePriorityScheduler({
+  timeoutDiagnosticSink: storeTimeoutDiagnosticSink,
+});
+backpressureRegistry.register(externalStorePriorityScheduler);
+registerStoreSchedulerStats(externalStorePriorityScheduler);
 
 export function getExternalStorePrioritySchedulerSnapshot(): StorePrioritySchedulerSnapshot {
   return externalStorePriorityScheduler.snapshot;

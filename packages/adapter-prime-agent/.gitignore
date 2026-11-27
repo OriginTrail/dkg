@@ -1,0 +1,4 @@
+# Python artifacts (hermes-plugin + pytests)
+__pycache__/
+*.py[cod]
+.pytest_cache/

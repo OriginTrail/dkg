@@ -1,6 +1,7 @@
 export const MAX_UINT72 = (1n << 72n) - 1n;
 export const MAX_UINT72_DECIMAL = MAX_UINT72.toString();
 
+/** Maximum untrusted inline N-Quads payload accepted by a StorageACK handler (4 MiB). */
 export const STORAGE_ACK_MAX_STAGING_BYTES = 4 * 1024 * 1024;
 
 export type Uint72DecimalParseResult =

@@ -66,6 +66,7 @@ describe('FileWorkspacePublicSnapshotStore', () => {
       );
 
       await expect(publicSnapshotStore.getSnapshot(SNAPSHOT_DIGEST)).resolves.toEqual(legacyQuads);
+      await expect(publicSnapshotStore.getSnapshotPage(SNAPSHOT_DIGEST, 0, 1)).resolves.toEqual(legacyQuads);
     } finally {
       await rm(snapshotDir, { recursive: true, force: true });
     }

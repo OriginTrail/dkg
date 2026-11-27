@@ -176,6 +176,10 @@ describe('LiftJob failure-code policy — exhaustive [P-14]', () => {
       'accepted', 'claimed', 'validated', 'broadcast', 'included',
     ];
 
+    // Collected, not thrown per-code: a throwing assertion inside the sweep stops it, and a
+    // guard that silently stops covering 16 of 22 codes is worse than a noisy one.
+    const violations: string[] = [];
+
     for (const code of LIFT_JOB_FAILURE_CODES) {
       const policy = getLiftJobFailurePolicy(code);
       const buildBase = (state: LiftJobActiveState) => {
@@ -197,22 +201,47 @@ describe('LiftJob failure-code policy — exhaustive [P-14]', () => {
 
       let acceptedAny = false;
       for (const state of ACTIVE_STATES) {
+        // Only the factory call belongs in the try. Previously the sanity assertions were
+        // inside it, so an AssertionError from one of them was caught and re-matched against
+        // the state-rejection regex: a genuine `phase` mismatch surfaced as the baffling
+        // "expected 'expected \'broadcast\' to be \'valida…' to match /Invalid LiftJob
+        // failure state/", and the throw aborted the sweep at that code — leaving the
+        // remaining 16 of 22 codes silently unverified. Violations are now collected so
+        // EVERY code is always swept, and reported together at the end.
+        let out: ReturnType<typeof createLiftJobFailureMetadata> | undefined;
+        let thrown: unknown;
         try {
-          const out = createLiftJobFailureMetadata(buildBase(state));
+          out = createLiftJobFailureMetadata(buildBase(state));
+        } catch (e) {
+          thrown = e;
+        }
+
+        if (out) {
           acceptedAny = true;
           // sanity: when accepted, it returns a fully-formed metadata
-          expect(out.code).toBe(code);
-          expect(out.phase).toBe(policy.phase);
-          expect(out.mode).toBe(policy.mode);
-          expect(out.retryable).toBe(policy.retryable);
-          expect(out.resolution).toBe(policy.resolution);
-          expect(out.failedFromState).toBe(state);
-        } catch (e) {
-          expect((e as Error).message).toMatch(/Invalid LiftJob failure state for code/);
+          const expected = {
+            code, phase: policy.phase, mode: policy.mode,
+            retryable: policy.retryable, resolution: policy.resolution, failedFromState: state,
+          };
+          const actual = {
+            code: out.code, phase: out.phase, mode: out.mode,
+            retryable: out.retryable, resolution: out.resolution, failedFromState: out.failedFromState,
+          };
+          for (const key of Object.keys(expected) as Array<keyof typeof expected>) {
+            if (actual[key] !== expected[key]) {
+              violations.push(`${code} from ${state}: ${key}=${String(actual[key])}, expected ${String(expected[key])}`);
+            }
+          }
+        } else {
+          const message = thrown instanceof Error ? thrown.message : String(thrown);
+          if (!/Invalid LiftJob failure state for code/.test(message)) {
+            violations.push(`${code} from ${state}: rejected with an unexpected error: ${message}`);
+          }
         }
       }
-      expect(acceptedAny, `code ${code} must be accepted by SOME active state`).toBe(true);
+      if (!acceptedAny) violations.push(`${code} must be accepted by SOME active state`);
     }
+    expect(violations, `policy/metadata violations:\n${violations.join('\n')}`).toEqual([]);
   });
 
   it('rejects terminal states (finalized / failed) for every code', () => {
@@ -344,13 +373,15 @@ describe('LiftJob failure-code policy — exhaustive [P-14]', () => {
     }
   });
 
-  it('insufficient_funds and tx_reverted are terminal-fail (no retry, no recovery)', () => {
-    // These are spec-§6 hard-fail codes: the publisher must NOT retry them
-    // because the underlying cost / contract reason will not change on retry.
+  it('tx_reverted is terminal-fail; insufficient_funds re-runs from the start (#3591)', () => {
+    // A revert's contract reason will not change on retry. A refusal for funds proves the
+    // transaction never took effect: the job is sound and re-runs on a wallet that can pay.
     const fundsP = getLiftJobFailurePolicy('insufficient_funds');
-    expect(fundsP.mode).toBe('terminal');
-    expect(fundsP.retryable).toBe(false);
-    expect(fundsP.resolution).toBe('fail_job');
+    expect(fundsP.mode).toBe('retryable');
+    expect(fundsP.retryable).toBe(true);
+    expect(fundsP.resolution).toBe('reset_to_accepted');
+    expect(fundsP.autoRetry).toBe(true);
+    expect(fundsP.provenIneffective).toBe(true);
 
     const revertP = getLiftJobFailurePolicy('tx_reverted');
     expect(revertP.mode).toBe('terminal');

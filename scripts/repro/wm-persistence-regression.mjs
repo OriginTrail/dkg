@@ -10,7 +10,7 @@
  * cycles the daemon (clean SIGTERM via /api/shutdown OR hard SIGKILL on the
  * daemon PID), and diffs the counts to see what was lost.
  *
- * Strict isolation contract (see REPRO.md):
+ * Strict isolation contract (see docs/archive/internal/bugs/wm-persistence-regression-repro.md):
  *   - Runs against DKG_HOME / DKG_API_PORT only. Hard-refuses to talk to the
  *     default 9200 port so the kill cycle can never nuke the other agent's
  *     daemon on ~/.dkg-dev:9200.
@@ -63,7 +63,7 @@
  *                                 The V10 daemon has no context-graph delete
  *                                 endpoint; each run picks a fresh CG id, and
  *                                 the operator wipes state via `rm -rf
- *                                 $DKG_HOME/store.nq ...` (see REPRO.md).
+ *                                 $DKG_HOME/store.nq ...` (see the reproduction guide).
  *
  * Usage examples:
  *   node scripts/repro/wm-persistence-regression.mjs           # single small run
@@ -123,7 +123,7 @@ if (PORT === 9200) {
   console.error(
     `\n[FATAL] DKG_API_PORT=${PORT} matches the default port used by the other agent's daemon ` +
     `(~/.dkg-dev). This script does kill -9 cycles and must never run against that daemon. ` +
-    `Set DKG_API_PORT (or pass --port) to something else — REPRO.md proposes 54293.\n`,
+    `Set DKG_API_PORT (or pass --port) to something else — the reproduction guide proposes 54293.\n`,
   );
   process.exit(2);
 }
@@ -170,7 +170,7 @@ for (const forbidden of FORBIDDEN_HOMES) {
     console.error(
       `[FATAL] DKG_HOME resolves to ${HOME_ABS}, which is inside or equal to ` +
       `a real DKG node home (${forbidden}). The script does kill -9 cycles and ` +
-      `MUST run against a dedicated throwaway home — see REPRO.md.`,
+      `MUST run against a dedicated throwaway home — see docs/archive/internal/bugs/wm-persistence-regression-repro.md.`,
     );
     process.exit(2);
   }

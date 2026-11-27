@@ -25,17 +25,23 @@ const state = vi.hoisted(() => ({
     retry: vi.fn(),
   },
   openTab: vi.fn(),
+  activeTabId: 'dashboard',
   setActiveProject: vi.fn(),
 }));
 
 vi.mock('../src/ui/hooks/usePcaAlerts.js', () => ({ usePcaAlerts: () => state.alerts }));
 vi.mock('../src/ui/hooks/useNotificationsFeed.js', () => ({ useNotificationsFeed: () => state.feed }));
-vi.mock('../src/ui/stores/tabs.js', () => ({ useTabsStore: () => ({ openTab: state.openTab }) }));
+vi.mock('../src/ui/stores/tabs.js', () => ({
+  useTabsStore: Object.assign(() => ({ openTab: state.openTab }), {
+    getState: () => ({ activeTabId: state.activeTabId, openTab: (...a: unknown[]) => state.openTab(...a) }),
+  }),
+}));
 vi.mock('../src/ui/stores/projects.js', () => ({
   useProjectsStore: (sel: (s: unknown) => unknown) => sel({ setActiveProject: state.setActiveProject }),
 }));
 
 const { NotificationsBell } = await import('../src/ui/components/Shell/NotificationsBell.js');
+const { useLayoutStore } = await import('../src/ui/stores/layout.js');
 
 async function render(node: React.ReactElement) {
   const container = document.createElement('div');
@@ -51,7 +57,9 @@ beforeEach(() => {
   state.alerts = [];
   state.feed.unread = 0;
   state.openTab = vi.fn();
+  state.activeTabId = 'dashboard';
   state.setActiveProject = vi.fn();
+  useLayoutStore.setState({ rightExpanded: false, narrowPanel: null });
 });
 afterEach(() => { document.body.innerHTML = ''; });
 
@@ -83,6 +91,21 @@ describe('NotificationsBell — PCA alerts', () => {
     expect(manage).toBeTruthy();
     await act(async () => { manage.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     expect(state.openTab).toHaveBeenCalledWith({ id: 'conviction:7', label: 'PCA #7', closable: true });
+    await unmount();
+  });
+
+  it('shows the PCA page when it is already open behind the expanded agents panel', async () => {
+    state.alerts = [PCA_ALERT];
+    state.activeTabId = 'conviction:7';
+    useLayoutStore.setState({ rightExpanded: true });
+    const { container, unmount } = await render(React.createElement(NotificationsBell));
+    await act(async () => {
+      container.querySelector('.v10-header-icon-btn')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const manage = Array.from(container.querySelectorAll('button')).find((b) => /Manage PCA #7/.test(b.textContent ?? ''))!;
+    await act(async () => { manage.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(state.openTab).toHaveBeenCalledWith({ id: 'conviction:7', label: 'PCA #7', closable: true });
+    expect(useLayoutStore.getState().rightExpanded).toBe(false);
     await unmount();
   });
 

@@ -1,0 +1,7 @@
+@prefix ex: <https://example.org/dkg-tutorial/> .
+@prefix schema: <https://schema.org/> .
+ex:atlas schema:name "Atlas" ;
+    ex:usesDatabase ex:oxigraph ;
+    schema:citation ex:source .
+ex:oxigraph schema:name "Oxigraph" .
+ex:source schema:name "Atlas architecture note (tutorial fixture)" .

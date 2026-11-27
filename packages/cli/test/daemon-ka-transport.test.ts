@@ -5,11 +5,27 @@
 // call, so a route regression would not be caught by the helper unit test alone.
 // Driven in-process via handleKnowledgeAssetsRoutes with a stub agent — no
 // daemon / storage / native deps.
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
+import {
+  StoreOperationTimeoutError,
+  StoreSchedulerBusyError,
+} from '@origintrail-official/dkg-storage';
+import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
+
+import { withDurableShareOwner } from './_helpers/durable-share-owner.js';
+import { daemonState } from '../src/daemon/state.js';
+import type { OxigraphStore } from '@origintrail-official/dkg-storage';
+const shareStores: OxigraphStore[] = [];
+afterEach(async () => {
+  daemonState.promoteWorkerAvailable = false;
+  await Promise.all(shareStores.splice(0).map(store => store.close()));
+});
 
 function fakeRes() {
   const res: any = { statusCode: 0, body: '', headers: {} };
@@ -31,7 +47,20 @@ function runKaCtx(
   const req: any = { method, url: rawPath };
   if (body !== undefined) req.__dkgPrebufferedBody = Buffer.from(JSON.stringify(body));
   const url = new URL(`http://127.0.0.1${rawPath}`);
-  const ctx = { req, res, agent, path: url.pathname, url, ...ctxOverrides } as unknown as RequestContext;
+  const tokenAgentAddress = ctxOverrides.requestToken
+    ? agent.resolveAgentByToken?.(ctxOverrides.requestToken)
+    : undefined;
+  const ctx = {
+    req,
+    res,
+    agent,
+    path: url.pathname,
+    url,
+    authentication: tokenAgentAddress
+      ? requestAuthentication({ kind: 'agent', agentAddress: tokenAgentAddress })
+      : requestAuthentication({ kind: 'anonymous' }),
+    ...ctxOverrides,
+  } as unknown as RequestContext;
   return { res, done: handleKnowledgeAssetsRoutes(ctx) };
 }
 
@@ -40,7 +69,10 @@ function runMemoryCtx(method: string, rawPath: string, agent: any, body?: unknow
   const req: any = { method, url: rawPath };
   if (body !== undefined) req.__dkgPrebufferedBody = Buffer.from(JSON.stringify(body));
   const url = new URL(`http://127.0.0.1${rawPath}`);
-  const ctx = { req, res, agent, path: url.pathname, url } as unknown as RequestContext;
+  const ctx = {
+    req, res, agent, path: url.pathname, url,
+    authentication: requestAuthentication({ kind: 'anonymous' }),
+  } as unknown as RequestContext;
   return { res, done: handleMemoryRoutes(ctx) };
 }
 
@@ -58,7 +90,43 @@ const ACCEPT_PROBE = {
   callerAuthorized: true,
 };
 function publishAgent(extra: Record<string, unknown>) {
-  return { probeContextGraphWritePreflight: async () => ACCEPT_PROBE, ...extra };
+  return withDurableShareOwner({ probeContextGraphWritePreflight: async () => ACCEPT_PROBE, ...extra }, shareStores);
+}
+
+const STORE_FAILURE_CASES = [
+  {
+    label: 'store timeout',
+    makeError: (operation: string) => new StoreOperationTimeoutError({
+      backend: 'oxigraph-server',
+      operation,
+      timeoutMs: 30_000,
+    }),
+    code: 'STORE_OPERATION_TIMEOUT',
+    outcome: 'indeterminate',
+  },
+  {
+    label: 'scheduler pressure',
+    makeError: (operation: string) => new StoreSchedulerBusyError(
+      'queue_wait_timeout',
+      'normal',
+      operation,
+    ),
+    code: 'STORE_SCHEDULER_BUSY',
+    outcome: 'not_started',
+  },
+] as const;
+
+function expectStoreUnavailableResponse(
+  res: ReturnType<typeof fakeRes>,
+  expected: { code: string; outcome: string; retryable?: boolean },
+): void {
+  expect(res.statusCode).toBe(503);
+  expect(res.headers['Retry-After']).toBe('1');
+  expect(JSON.parse(res.body)).toMatchObject({
+    code: expected.code,
+    retryable: expected.retryable ?? true,
+    outcome: expected.outcome,
+  });
 }
 function exhaustion() {
   const e: any = new Error(
@@ -107,6 +175,100 @@ function batchRejectionAgent(extra: Record<string, unknown> = {}) {
 }
 
 describe('knowledge-assets publish routes — transport-status mapping (#1329)', () => {
+  it('uses the locked create disposition when sealing wins after the pre-read', async () => {
+    let historyCalls = 0;
+    const agent = publishAgent({
+      assertion: {
+        history: async () => (++historyCalls === 1 ? null : { status: 'wm-sealed' }),
+        create: async (_cg: string, _name: string, opts: any) => {
+          opts.onDisposition('sealed-noop');
+          return 'urn:test:sealed-assertion';
+        },
+      },
+    });
+    const { res, done } = runKaCtx('POST', '/api/knowledge-assets', agent, {
+      contextGraphId: 'cg-1', name: 'concurrently-sealed',
+    });
+
+    await done;
+    expect(res.statusCode).toBe(201);
+    expect(JSON.parse(res.body)).toMatchObject({
+      assertionUri: 'urn:test:sealed-assertion',
+      alreadyExists: true,
+      status: 'wm-sealed',
+    });
+    expect(historyCalls).toBe(2);
+  });
+
+  it('fails closed when a concurrent sealed no-op cannot be read back', async () => {
+    const agent = publishAgent({
+      assertion: {
+        history: async () => null,
+        create: async (_cg: string, _name: string, opts: any) => {
+          opts.onDisposition('sealed-noop');
+          return 'urn:test:sealed-assertion';
+        },
+      },
+    });
+    const { res, done } = runKaCtx('POST', '/api/knowledge-assets', agent, {
+      contextGraphId: 'cg-1', name: 'unreadable-concurrent-seal',
+    });
+
+    await done;
+    expect(res.statusCode).toBe(500);
+    expect(JSON.parse(res.body).error).toContain('was not readable as sealed');
+  });
+
+  it('maps create recovery and sealed-write guards to actionable conflicts', async () => {
+    const recoveryError = Object.assign(new Error('resume interrupted sharing'), {
+      code: 'KA_PROMOTE_RECOVERY_REQUIRED',
+    });
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const createAgent = publishAgent({
+        assertion: {
+          history: async () => null,
+          create: async () => { throw recoveryError; },
+        },
+      });
+      const create = runKaCtx('POST', '/api/knowledge-assets', createAgent, {
+        contextGraphId: 'cg-1', name: 'interrupted-share',
+      });
+      await create.done;
+      expect(create.res.statusCode).toBe(409);
+      expect(JSON.parse(create.res.body)).toMatchObject({
+        code: 'KA_PROMOTE_RECOVERY_REQUIRED',
+        retryAction: 'resume_existing_knowledge_asset',
+        retryKnowledgeAssetName: 'interrupted-share',
+      });
+      expect(stderr).toHaveBeenCalled();
+    } finally {
+      stderr.mockRestore();
+    }
+
+    const sealedError = Object.assign(new Error('already finalized'), {
+      code: 'KA_ASSERTION_ALREADY_FINALIZED',
+    });
+    const writeAgent = publishAgent({
+      assertion: {
+        history: async () => ({ status: 'wm-sealed' }),
+        write: async () => { throw sealedError; },
+      },
+    });
+    const write = runKaCtx(
+      'POST',
+      '/api/knowledge-assets/sealed/wm/write',
+      writeAgent,
+      {
+        contextGraphId: 'cg-1',
+        quads: [{ subject: 'http://s', predicate: 'http://p', object: '"o"' }],
+      },
+    );
+    await write.done;
+    expect(write.res.statusCode).toBe(409);
+    expect(JSON.parse(write.res.body).code).toBe('KA_ASSERTION_ALREADY_FINALIZED');
+  });
+
   it('does not serve KA batch-rejection endpoints from memory routes', async () => {
     const { res, done } = runMemoryCtx(
       'POST',
@@ -128,6 +290,185 @@ describe('knowledge-assets publish routes — transport-status mapping (#1329)',
       expect(res.statusCode).toBe(404);
       expect(JSON.parse(res.body).code).toBe('DIRECT_PUBLISH_ROUTE_REMOVED');
       expect(called).toBe(false);
+    });
+  });
+
+  describe.each(STORE_FAILURE_CASES)('$label route mapping', ({ makeError, code, outcome }) => {
+    it('maps the create catch boundary to the shared retryable 503 contract', async () => {
+      const agent = publishAgent({
+        assertion: {
+          history: async () => null,
+          create: async () => { throw makeError('create'); },
+        },
+      });
+      const { res, done } = runKaCtx(
+        'POST',
+        '/api/knowledge-assets',
+        agent,
+        { contextGraphId: 'cg-1', name: 'timeout-create' },
+      );
+
+      await done;
+      expectStoreUnavailableResponse(res, { code, outcome });
+    });
+
+    it('maps the WM mutation catch boundary to the shared retryable 503 contract', async () => {
+      const agent = publishAgent({
+        assertion: {
+          history: async () => ({ state: 'draft-open' }),
+          write: async () => { throw makeError('write'); },
+        },
+      });
+      const { res, done } = runKaCtx(
+        'POST',
+        '/api/knowledge-assets/timeout-write/wm/write',
+        agent,
+        {
+          contextGraphId: 'cg-1',
+          quads: [{ subject: 'http://s', predicate: 'http://p', object: '"o"' }],
+        },
+      );
+
+      await done;
+      expectStoreUnavailableResponse(res, { code, outcome });
+    });
+
+    it('maps the VM publish catch boundary to the shared retryable 503 contract', async () => {
+      const agent = publishAgent({
+        publishFromFinalizedAssertion: async () => { throw makeError('publish'); },
+      });
+      const { res, done } = runKaCtx(
+        'POST',
+        '/api/knowledge-assets/timeout-publish/vm/publish',
+        agent,
+        { contextGraphId: 'cg-1' },
+      );
+
+      await done;
+      expectStoreUnavailableResponse(res, { code, outcome });
+    });
+
+    it('preserves partial-create context when the optional SWM tail is unavailable', async () => {
+      const agent = publishAgent({
+        assertion: {
+          history: async () => null,
+          create: async () => {},
+          write: async () => {},
+          finalize: async () => ({
+            merkleRoot: new Uint8Array(32),
+            authorAddress: '0x0000000000000000000000000000000000000001',
+          }),
+          promote: async () => { throw makeError('promote'); },
+        },
+      });
+      const { res, done } = runKaCtx(
+        'POST',
+        '/api/knowledge-assets',
+        agent,
+        {
+          contextGraphId: 'cg-1',
+          name: 'partial-swm',
+          quads: [{ subject: 'http://s', predicate: 'http://p', object: '"o"' }],
+          alsoShareSwm: true,
+        },
+      );
+
+      await done;
+      expectStoreUnavailableResponse(res, { code, outcome, retryable: outcome !== 'indeterminate' });
+      if (outcome === 'indeterminate') expect(JSON.parse(res.body)).toMatchObject({ recoveryState: 'inspection-required', recoveryJobId: expect.any(String) });
+      expect(JSON.parse(res.body)).toMatchObject({
+        created: true,
+        name: 'partial-swm',
+        status: 'wm-sealed',
+        phase: 'swm-share',
+        retryAction: 'retry_same_knowledge_asset',
+        retryKnowledgeAssetName: 'partial-swm',
+      });
+    });
+
+    it('preserves partial-create context when the optional VM tail is unavailable', async () => {
+      const agent = publishAgent({
+        assertion: {
+          history: async () => null,
+          create: async () => {},
+          write: async () => {},
+          finalize: async () => ({
+            merkleRoot: new Uint8Array(32),
+            authorAddress: '0x0000000000000000000000000000000000000001',
+          }),
+        },
+        publishFromFinalizedAssertion: async () => { throw makeError('publish'); },
+      });
+      const { res, done } = runKaCtx(
+        'POST',
+        '/api/knowledge-assets',
+        agent,
+        {
+          contextGraphId: 'cg-1',
+          name: 'partial-vm',
+          quads: [{ subject: 'http://s', predicate: 'http://p', object: '"o"' }],
+          alsoPublishVm: true,
+        },
+      );
+
+      await done;
+      expectStoreUnavailableResponse(res, { code, outcome });
+      expect(JSON.parse(res.body)).toMatchObject({
+        created: true,
+        name: 'partial-vm',
+        status: 'wm-sealed',
+        phase: 'vm-publish',
+        retryAction: 'retry_same_knowledge_asset',
+        retryKnowledgeAssetName: 'partial-vm',
+      });
+    });
+  });
+
+  it('preserves partial-create context for a replay-safe SWM store timeout', async () => {
+    const timeout = new StoreOperationTimeoutError({
+      backend: 'oxigraph-server',
+      operation: 'replaceGraph',
+      timeoutMs: 30_000,
+      outcome: 'indeterminate',
+    });
+    const agent = publishAgent({
+      assertion: {
+        history: async () => null,
+        create: async () => {},
+        write: async () => {},
+        finalize: async () => ({
+          merkleRoot: new Uint8Array(32),
+          authorAddress: '0x0000000000000000000000000000000000000001',
+        }),
+        promote: async () => {
+          throw classifyExactSwmGraphReplaceFailure(timeout);
+        },
+      },
+    });
+    const { res, done } = runKaCtx(
+      'POST',
+      '/api/knowledge-assets',
+      agent,
+      {
+        contextGraphId: 'cg-1',
+        name: 'partial-swm-replay-safe',
+        quads: [{ subject: 'http://s', predicate: 'http://p', object: '"o"' }],
+        alsoShareSwm: true,
+      },
+    );
+
+    await done;
+    expectStoreUnavailableResponse(res, {
+      code: 'STORE_OPERATION_TIMEOUT',
+      outcome: 'indeterminate',
+    });
+    expect(JSON.parse(res.body)).toMatchObject({
+      created: true,
+      name: 'partial-swm-replay-safe',
+      status: 'wm-sealed',
+      phase: 'swm-share',
+      retryAction: 'retry_same_knowledge_asset',
+      retryKnowledgeAssetName: 'partial-swm-replay-safe',
     });
   });
 

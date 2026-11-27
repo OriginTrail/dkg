@@ -1,7 +1,43 @@
+export {
+  QueryResultTooLargeError,
+  isQueryResultTooLargeError,
+  type QueryResultTooLargeErrorLike,
+} from './query-result-size-error.js';
 export * from './query-engine.js';
 export * from './query-types.js';
+export {
+  QueryMaterializationBudget,
+  QUERY_CATALOG_LIMIT_NAME,
+  QUERY_CATALOG_MAX_RESPONSE_BYTES,
+  readWithinCatalogLimit,
+} from './query-store-read-context.js';
+export {
+  QUERY_MATERIALIZATION_TOO_LARGE,
+  QueryMaterializationTooLargeError,
+  isQueryMaterializationTooLargeError,
+  type QueryMaterializationTooLargeErrorLike,
+} from './query-materialization-error.js';
 export { DKGQueryEngine, resolveViewGraphs, type ViewResolution } from './dkg-query-engine.js';
+export {
+  SemanticsUnsupportedError, VIEW_NOT_READY_RETRY_AFTER_SECONDS, ViewNotReadyError,
+  type ViewReadGraphs,
+} from './view-dataset-plan.js';
+export {
+  VIEW_SEMANTICS_DELTA_KINDS, ViewSemanticsDeltaSampler,
+  type ViewSemanticsDeltaKind, type ViewSemanticsDeltaSamplerOptions, type ViewSemanticsDeltaShape, type ViewSemanticsDeltaSummary,
+} from './view-semantics-delta.js';
+export {
+  CALLER_SPARQL_REJECTED_CODE,
+  CallerSparqlRejectedError,
+  isCallerSparqlRejectedError,
+  type CallerSparqlRejectedErrorLike,
+} from './caller-sparql-error.js';
 export { QueryHandler, type QueryHandlerDeps } from './query-handler.js';
+export {
+  WITHHELD_GRAPH_QUERY_CODE,
+  WithheldGraphQueryError,
+  isWithheldGraphQueryError,
+} from './withheld-graph-scope.js';
 export {
   validateReadOnlySparql,
   detectSparqlQueryForm,
@@ -23,3 +59,5 @@ export {
   type SparqlForm,
   type EmptyQueryResultShape,
 } from './sparql-guard.js';
+
+export type { NamedGraphStatsBatchGate } from './named-graph-statistics.js';

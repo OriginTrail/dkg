@@ -34,7 +34,7 @@ describe('multiaddr peer targets', () => {
     expect(canonicalTargetPeerIdFromMultiaddr(addr)).toBe(TARGET_PEER_ID);
     expect(parseMultiaddrConnectTarget(addr)).toEqual({
       kind: 'direct',
-      multiaddress: addr,
+      address: addr,
       targetPeerId: TARGET_PEER_ID,
     });
   });
@@ -46,8 +46,8 @@ describe('multiaddr peer targets', () => {
 
     expect(parseMultiaddrConnectTarget(addr)).toEqual({
       kind: 'circuit',
-      multiaddress: addr,
-      relayMultiaddress: relay,
+      address: addr,
+      relayAddress: relay,
       targetPeerId: TARGET_PEER_ID,
     });
   });

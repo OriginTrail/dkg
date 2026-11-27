@@ -12,11 +12,21 @@
  */
 import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
-import { DKGAgent } from '../src/index.js';
+import { DKGAgent as RealDKGAgent } from '../src/index.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
+
+type DKGAgent = RealDKGAgent;
+const DKGAgent = {
+  create(config: Parameters<typeof RealDKGAgent.create>[0]) {
+    return RealDKGAgent.create({
+      rfc64CatalogActivation: { enabled: false },
+      ...config,
+    });
+  },
+};
 
 const agents: DKGAgent[] = [];
 
@@ -253,7 +263,7 @@ describe('Sub-graph publish + query (single agent)', () => {
     expect(decResult.bindings[0]['type']).toBe('"Decision"');
   }, 20_000);
 
-  it('publishFromSharedMemory targets sub-graph', async () => {
+  it('a promoted assertion publishes into its sub-graph', async () => {
     const agent = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'SWMSubBot',
@@ -269,11 +279,13 @@ describe('Sub-graph publish + query (single agent)', () => {
     await agent.registerContextGraph('sg-swm');
     await agent.createSubGraph('sg-swm', 'tasks');
 
-    // Share to sub-graph SWM
-    await agent.share('sg-swm', [
-      { subject: 'urn:task:1', predicate: 'http://ex.org/title', object: '"Implement sub-graphs"', graph: '' },
-      { subject: 'urn:task:1', predicate: 'http://ex.org/status', object: '"done"', graph: '' },
-    ], { localOnly: true, subGraphName: 'tasks' });
+    // Promote an assertion into sub-graph SWM
+    await agent.assertion.create('sg-swm', 'task-1', { subGraphName: 'tasks' });
+    await agent.assertion.write('sg-swm', 'task-1', [
+      { subject: 'urn:task:1', predicate: 'http://ex.org/title', object: '"Implement sub-graphs"' },
+      { subject: 'urn:task:1', predicate: 'http://ex.org/status', object: '"done"' },
+    ], { subGraphName: 'tasks' });
+    await agent.assertion.promote('sg-swm', 'task-1', { entities: 'all', subGraphName: 'tasks' });
 
     // Verify in sub-graph SWM
     const swmResult = await agent.query(
@@ -283,7 +295,7 @@ describe('Sub-graph publish + query (single agent)', () => {
     expect(swmResult.bindings).toHaveLength(1);
 
     // Publish from SWM to sub-graph
-    const result = await agent.publishFromSharedMemory('sg-swm', 'all', {
+    const result = await agent.publishFromFinalizedAssertion('sg-swm', 'task-1', {
       subGraphName: 'tasks',
     });
     expect(['confirmed', 'tentative']).toContain(result.status);
@@ -448,9 +460,11 @@ describe('Sub-graph across memory layers (single agent)', () => {
 
     // Write using JSON-LD (auto-converted to quads)
     await agent.assertion.write('sg-jsonld-input', 'ld-test', {
-      '@id': 'urn:entity:alice',
-      'http://schema.org/name': 'Alice',
-      'http://schema.org/jobTitle': 'Engineer',
+      public: {
+        '@id': 'urn:entity:alice',
+        'http://schema.org/name': 'Alice',
+        'http://schema.org/jobTitle': 'Engineer',
+      },
     }, { subGraphName: 'entities' });
 
     const quads = await agent.assertion.query('sg-jsonld-input', 'ld-test', { subGraphName: 'entities' });
@@ -549,7 +563,7 @@ describe('Sub-graph across memory layers (single agent)', () => {
     expect(swmCheck.bindings).toHaveLength(1);
 
     // Step 3: Publish from SWM to VM/code
-    const publishResult = await agent.publishFromSharedMemory('sg-pipeline', 'all', {
+    const publishResult = await agent.publishFromFinalizedAssertion('sg-pipeline', 'scan', {
       subGraphName: 'code',
     });
     expect(['confirmed', 'tentative']).toContain(publishResult.status);

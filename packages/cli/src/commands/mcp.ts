@@ -1,3 +1,4 @@
+import { MCP_CLIENT_IDS } from '../mcp-client-registry.js';
 import { Command } from 'commander';
 import { readFileSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -20,6 +21,7 @@ import {
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
+  resolveKnownNetworkConfigName,
   releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
@@ -135,6 +137,22 @@ mcpCmd
   });
 
 mcpCmd
+  .command('uninstall')
+  .description('Remove the DKG MCP registration from selected clients')
+  .option('--yes', 'Confirm removal without interactive prompts')
+  .option('--client <id>', `Client ID (${MCP_CLIENT_IDS.join(', ')}); optionally append :native or :windows-wsl`)
+  .option('--dry-run', 'Preview registrations to remove without writing files')
+  .action(async (opts) => {
+    const { mcpUninstallAction } = await import('../mcp-uninstall.js');
+    try {
+      await mcpUninstallAction(opts);
+    } catch (err: unknown) {
+      console.error(`\n[dkg mcp uninstall] ERROR: ${toErrorMessage(err)}\n`);
+      process.exitCode = 1;
+    }
+  });
+
+mcpCmd
   .command('setup')
   .description('Bundled init + daemon-start + MCP-client registration (idempotent, safe to re-run)')
   .option('--port <port>', 'Override daemon API port (default: 9200)')
@@ -187,6 +205,7 @@ mcpCmd
     try {
       await mcpSetupAction(opts, {
         loadNetworkConfig: openclawSetupExports.loadNetworkConfig,
+        resolveKnownNetworkConfigName,
         ensureDkgNodeConfig: coreExports.ensureDkgNodeConfig,
         startDaemon: openclawSetupExports.startDaemon,
         // Lazy + best-effort (parity with openclaw/hermes): dkg-agent is
@@ -195,8 +214,9 @@ mcpCmd
         // warning (mcpSetupAction wraps the call in try/catch) instead of
         // aborting setup.
         loadOpWallets: async (dir: string) => {
-          const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
-          return loadOpWallets(dir);
+          // No wallets.json when the node signs through an external signer.
+          const { loadLocalOpWalletsUnlessExternal } = await import('../local-op-wallets.js');
+          return loadLocalOpWalletsUnlessExternal(dir);
         },
         // Shared faucet orchestrator — the SAME one openclaw/hermes use.
         // Replaces the old bespoke `/api/status` reachability probe +

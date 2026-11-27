@@ -1,6 +1,7 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
 import { createStorageAckLifecycleObserver } from '../src/storage-ack-lifecycle-observer.js';
+import { replaceCatalogQuads } from '../src/catalog-persistence.js';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
   computeFlatKCMerkleLeafCountV10,
@@ -8,8 +9,9 @@ import {
 } from '../src/merkle.js';
 import {
   encodePublishIntent, decodePublishIntent, encodeStorageACK, decodeStorageACK, computePublishACKDigest,
-  isStorageACKDecline, STORAGE_ACK_DECLINE_CODES, computeCatalogRoot, Logger,
+  isStorageACKDecline, STORAGE_ACK_DECLINE_CODES, computeCatalogRoot, Logger, SparqlTermValidationError,
 } from '@origintrail-official/dkg-core';
+import { parseSimpleNQuads } from '../src/publish-handler.js';
 import { TypedEventBus, rebuildMetrics } from '@origintrail-official/dkg-core';
 import { GraphSetIndexStore, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
@@ -685,6 +687,87 @@ describe('StorageACKHandler', () => {
     await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(/unsafe|empty|iri/i);
   });
 
+  it.each([
+    ['a language tag with a character a tag may not hold', '"refused value"@en_GB'],
+    ['a blank-node label with a character a label may not hold', '_:node!refused'],
+  ])('refuses inline staging quads holding %s before persisting or signing', async (_label, object) => {
+    const nquadsStr = `<urn:entity:1> <urn:p> ${object} <did:dkg:context-graph:42> .`;
+    const stagingBytes = new TextEncoder().encode(nquadsStr);
+    const parsed = parseSimpleNQuads(nquadsStr);
+    const store = new OxigraphStore();
+    const signMessage = vi.spyOn(coreWallet, 'signMessage');
+    try {
+      const handler = new StorageACKHandler(store as any, {
+        nodeRole: 'core',
+        nodeIdentityId: coreIdentityId,
+        signerWallet: coreWallet,
+        contextGraphSharedMemoryUri: (cgId: string) => `did:dkg:context-graph:${cgId}/_shared_memory`,
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
+        isCgCurated: async () => true,
+      }, new TypedEventBus() as any);
+      const intent = encodePublishIntent({
+        merkleRoot: computeFlatKCRoot(parsed, []),
+        contextGraphId,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: stagingBytes.length,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: ['urn:entity:1'],
+        epochs: 1,
+        tokenAmountStr: '1000',
+        merkleLeafCount: computeFlatKCMerkleLeafCountV10(parsed, []),
+        stagingQuads: stagingBytes,
+      });
+
+      await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(SparqlTermValidationError);
+      expect(signMessage).not.toHaveBeenCalled();
+      expect(await store.countQuads()).toBe(0);
+    } finally {
+      signMessage.mockRestore();
+    }
+  });
+
+  it.each([
+    ['a trust-level row', '<urn:entity:1> <http://dkg.io/ontology/trustLevel> "3"^^<http://www.w3.org/2001/XMLSchema#integer> <did:dkg:context-graph:42> .', 'urn:entity:1'],
+    ['a subject in a reserved namespace', '<urn:dkg:file:staged> <urn:p> "v" <did:dkg:context-graph:42> .', 'urn:dkg:file:staged'],
+  ])('refuses inline staging quads carrying %s before persisting or signing', async (_label, nquadsStr, rootEntity) => {
+    const stagingBytes = new TextEncoder().encode(nquadsStr);
+    const parsed = parseSimpleNQuads(nquadsStr);
+    const store = new OxigraphStore();
+    const signMessage = vi.spyOn(coreWallet, 'signMessage');
+    try {
+      const handler = new StorageACKHandler(store as any, {
+        nodeRole: 'core',
+        nodeIdentityId: coreIdentityId,
+        signerWallet: coreWallet,
+        contextGraphSharedMemoryUri: (cgId: string) => `did:dkg:context-graph:${cgId}/_shared_memory`,
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
+        isCgCurated: async () => true,
+      }, new TypedEventBus() as any);
+      const intent = encodePublishIntent({
+        merkleRoot: computeFlatKCRoot(parsed, []),
+        contextGraphId,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: stagingBytes.length,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: [rootEntity],
+        epochs: 1,
+        tokenAmountStr: '1000',
+        merkleLeafCount: computeFlatKCMerkleLeafCountV10(parsed, []),
+        stagingQuads: stagingBytes,
+      });
+
+      await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(/trustLevel|reserved namespace/);
+      expect(signMessage).not.toHaveBeenCalled();
+      expect(await store.countQuads()).toBe(0);
+    } finally {
+      signMessage.mockRestore();
+    }
+  });
+
   it('declines (SIGNER_NOT_REGISTERED) when the signer is no longer confirmed registered', async () => {
     // PR #557: this used to throw, which the publisher saw as a libp2p
     // stream reset; now the handler returns a typed decline so the
@@ -934,6 +1017,18 @@ describe('StorageACKHandler', () => {
       expect(recovered.toLowerCase()).toBe(coreWallet.address.toLowerCase());
     });
 
+    it('accepts zero assertion leaves because curated sampling uses the catalog tree', async () => {
+      const handler = await createHandler([]);
+      const response = await handler.handler(
+        curatedIntent({ merkleLeafCount: 0 }),
+        fakePeerId,
+      );
+      const ack = decodeStorageACK(response);
+
+      expect(isStorageACKDecline(ack)).toBe(false);
+      expect(ethers.hexlify(ack.merkleRoot)).toBe(ethers.hexlify(claimedRoot));
+    });
+
     it('DECLINEs CATALOG_ROOT_MISMATCH when the rebuilt root != the claimed catalogRoot', async () => {
       const handler = await createHandler([]);
       const wrongRoot = ethers.getBytes(ethers.keccak256(new TextEncoder().encode('wrong-catalog-root')));
@@ -1083,16 +1178,16 @@ describe('StorageACKHandler', () => {
       expect(unrelated).toMatchObject({ type: 'boolean', value: true });
     });
 
-    it('falls back to per-subject deleteByPattern when update() is unavailable', async () => {
+    it('falls back to per-subject no-count delete when update() is unavailable', async () => {
       const base = new OxigraphStore();
-      let deleteByPatternCalls = 0;
+      let deleteWithoutCountCalls = 0;
       const store = new Proxy(base as unknown as TripleStore, {
         get(target, prop, receiver) {
           if (prop === 'update') return undefined;
-          if (prop === 'deleteByPattern') {
-            return async (...args: Parameters<TripleStore['deleteByPattern']>) => {
-              deleteByPatternCalls += 1;
-              return target.deleteByPattern.call(target, ...args);
+          if (prop === 'deleteByPatternWithoutCount') {
+            return async (...args: Parameters<NonNullable<TripleStore['deleteByPatternWithoutCount']>>) => {
+              deleteWithoutCountCalls += 1;
+              return target.deleteByPatternWithoutCount!.call(target, ...args);
             };
           }
           const value = Reflect.get(target, prop, receiver);
@@ -1104,19 +1199,19 @@ describe('StorageACKHandler', () => {
       const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
 
       expect(isStorageACKDecline(decoded)).toBe(false);
-      expect(deleteByPatternCalls).toBe(1);
+      expect(deleteWithoutCountCalls).toBe(1);
     });
 
     it('falls back through a decorator whose inner store does not support update()', async () => {
       const base = new OxigraphStore();
-      let deleteByPatternCalls = 0;
+      let deleteWithoutCountCalls = 0;
       const innerWithoutUpdate = new Proxy(base as unknown as TripleStore, {
         get(target, prop, receiver) {
           if (prop === 'update') return undefined;
-          if (prop === 'deleteByPattern') {
-            return async (...args: Parameters<TripleStore['deleteByPattern']>) => {
-              deleteByPatternCalls += 1;
-              return target.deleteByPattern.call(target, ...args);
+          if (prop === 'deleteByPatternWithoutCount') {
+            return async (...args: Parameters<NonNullable<TripleStore['deleteByPatternWithoutCount']>>) => {
+              deleteWithoutCountCalls += 1;
+              return target.deleteByPatternWithoutCount!.call(target, ...args);
             };
           }
           const value = Reflect.get(target, prop, receiver);
@@ -1130,19 +1225,42 @@ describe('StorageACKHandler', () => {
       const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
 
       expect(isStorageACKDecline(decoded)).toBe(false);
-      expect(deleteByPatternCalls).toBe(1);
+      expect(deleteWithoutCountCalls).toBe(1);
       await expect(base.countQuads(`${cgDid}/_catalog`)).resolves.toBe(catalogTriples.length);
     });
 
-    it('skips targeted update and deletes by pattern for a blank-node catalog subject', async () => {
+    it('declines a blank-node catalog subject before anything is persisted', async () => {
+      // A curated catalog must be the Context Graph DID's catalog partition, so
+      // a blank-node subject never reaches `<cg>/_catalog` through the handler.
       const blankCatalogTriples = [{
         subject: '_:catalog',
         predicate: 'urn:test:catalog-predicate',
         object: '"blank-subject"',
       }];
-      const blankCatalogNquads = '_:catalog <urn:test:catalog-predicate> "blank-subject" .';
-      const blankCatalogBytes = new TextEncoder().encode(blankCatalogNquads);
+      const blankCatalogBytes = new TextEncoder().encode(
+        '_:catalog <urn:test:catalog-predicate> "blank-subject" .',
+      );
       const blankCatalogRoot = computeCatalogRoot(blankCatalogTriples);
+      const store = new OxigraphStore();
+      const handler = curatedHandlerWithStore(store);
+
+      const decoded = decodeStorageACK(await handler.handler(curatedIntent({
+        stagingQuads: blankCatalogBytes,
+        publicByteSize: blankCatalogBytes.length,
+        catalogRoot: blankCatalogRoot.root,
+        catalogLeafCount: blankCatalogRoot.leafCount,
+      }), fakePeerId));
+
+      expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH);
+      await expect(store.countQuads(`${cgDid}/_catalog`)).resolves.toBe(0);
+    });
+
+    it('catalog persistence skips targeted update and deletes by pattern for a blank-node subject', async () => {
+      const blankCatalogTriples = [{
+        subject: '_:catalog',
+        predicate: 'urn:test:catalog-predicate',
+        object: '"blank-subject"',
+      }];
       const base = new OxigraphStore();
       let updateCalls = 0;
       const deletedPatterns: Array<Partial<Quad>> = [];
@@ -1154,31 +1272,27 @@ describe('StorageACKHandler', () => {
               return target.update!.call(target, ...args);
             };
           }
-          if (prop === 'deleteByPattern') {
-            return async (...args: Parameters<TripleStore['deleteByPattern']>) => {
+          if (prop === 'deleteByPatternWithoutCount') {
+            return async (...args: Parameters<NonNullable<TripleStore['deleteByPatternWithoutCount']>>) => {
               deletedPatterns.push(args[0]);
               // This regression targets the ACK routing policy. Blank-node
               // labels are operation-local, so the spy records the requested
-              // legacy delete without asking the embedded backend to resolve
+              // no-count delete without asking the embedded backend to resolve
               // that label in a separate operation.
-              if (args[0].subject?.startsWith('_:')) return 0;
-              return target.deleteByPattern.call(target, ...args);
+              if (args[0].subject?.startsWith('_:')) return;
+              return target.deleteByPatternWithoutCount!.call(target, ...args);
             };
           }
           const value = Reflect.get(target, prop, receiver);
           return typeof value === 'function' ? value.bind(target) : value;
         },
       });
-      const handler = curatedHandlerWithStore(store);
+      await replaceCatalogQuads(
+        store,
+        `${cgDid}/_catalog`,
+        blankCatalogTriples.map((triple) => ({ ...triple, graph: '' })),
+      );
 
-      const decoded = decodeStorageACK(await handler.handler(curatedIntent({
-        stagingQuads: blankCatalogBytes,
-        publicByteSize: blankCatalogBytes.length,
-        catalogRoot: blankCatalogRoot.root,
-        catalogLeafCount: blankCatalogRoot.leafCount,
-      }), fakePeerId));
-
-      expect(isStorageACKDecline(decoded)).toBe(false);
       expect(updateCalls).toBe(0);
       expect(deletedPatterns).toEqual([{
         graph: `${cgDid}/_catalog`,

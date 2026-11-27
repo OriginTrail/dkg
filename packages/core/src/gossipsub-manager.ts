@@ -8,7 +8,7 @@ export type GossipMessageHandler = (
   topic: string,
   data: Uint8Array,
   from: string,
-) => void;
+) => void | Promise<void>;
 
 export interface GossipSubManagerOptions {
   networkId?: string;
@@ -57,14 +57,38 @@ export class GossipSubManager {
       const handlers = this.topicHandlers.get(topic);
       if (handlers) {
         for (const handler of handlers) {
-          try {
-            handler(topic, data, from);
-          } catch (err) {
-            console.error(`[GossipSub] handler error on topic "${topic}":`, err instanceof Error ? err.message : err);
-          }
+          this.dispatchHandler(handler, topic, data, from);
         }
       }
     });
+  }
+
+  /**
+   * Invoke in registration order, then deliberately detach async completion.
+   * Gossip delivery never waits for handler work and shutdown does not drain
+   * it; synchronous throws and detached rejections are contained here.
+   */
+  private dispatchHandler(
+    handler: GossipMessageHandler,
+    topic: string,
+    data: Uint8Array,
+    from: string,
+  ): void {
+    try {
+      const completion = handler(topic, data, from);
+      void Promise.resolve(completion).catch((error: unknown) => {
+        this.logHandlerError(topic, error);
+      });
+    } catch (error) {
+      this.logHandlerError(topic, error);
+    }
+  }
+
+  private logHandlerError(topic: string, error: unknown): void {
+    console.error(
+      `[GossipSub] handler error on topic "${topic}":`,
+      error instanceof Error ? error.message : error,
+    );
   }
 
   subscribe(topic: string): void {
@@ -76,9 +100,15 @@ export class GossipSubManager {
     this.topicHandlers.delete(topic);
   }
 
-  async publish(topic: string, data: Uint8Array): Promise<void> {
+  /**
+   * Resolves with the peers the message was sent to, empty when nobody got it,
+   * or undefined when the pubsub implementation does not say. Being sent a
+   * message does not mean a peer acts on it: a receiver drops gossip from a peer
+   * it has not admitted, and gossip has no acknowledgement.
+   */
+  async publish(topic: string, data: Uint8Array): Promise<string[] | undefined> {
     const wireTopic = this.toWireTopic(topic);
-    await withRetry(
+    const result = await withRetry(
       () => this.node.libp2p.services.pubsub.publish(wireTopic, data),
       {
         maxAttempts: 3,
@@ -88,6 +118,7 @@ export class GossipSubManager {
         },
       },
     );
+    return result?.recipients?.map((peer) => peer.toString());
   }
 
   onMessage(topic: string, handler: GossipMessageHandler): void {

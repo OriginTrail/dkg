@@ -1,7 +1,12 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import type { Stream } from '@libp2p/interface';
 import { multiaddr } from '@multiformats/multiaddr';
 import { DKGNode } from '../src/node.js';
 import { LibP2PNetwork } from '../src/network/libp2p-network.js';
+
+const CONNECT_TARGET = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+const CONFIGURED_RELAY = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+const CONFIGURED_CIRCUIT = `${CONFIGURED_RELAY}/p2p-circuit/p2p/${CONNECT_TARGET}`;
 
 /**
  * RFC 07 §5 — `LibP2PNetwork` is a thin facade over `DKGNode.libp2p`.
@@ -49,6 +54,19 @@ describe('LibP2PNetwork', () => {
     await net.stop();
     await net.stop();
     expect(net.isStarted).toBe(false);
+  });
+
+  it('connects through the recovery transport capability using a peer-bound private hint', async () => {
+    const a = spawn();
+    const b = spawn();
+    const network = new LibP2PNetwork(a);
+    await network.start();
+    await b.start();
+
+    await expect(network.tryConnectRecoveryStage(b.peerId, {
+      kind: 'hint', address: b.multiaddrs[0]!, timeoutMs: 5_000,
+    })).resolves.toBe(true);
+    expect(network.getConnections(b.peerId)).toHaveLength(1);
   });
 
   it('handle + dialProtocol round-trips a stream', async () => {
@@ -121,8 +139,11 @@ describe('LibP2PNetwork', () => {
     // if the previous step worked, this dial succeeds without an explicit
     // multiaddr.
     const protocol = '/test/known-addrs/1.0.0';
-    await b.libp2p.handle(protocol, (stream) => {
-      void stream.close();
+    // Await the close so a rejection (e.g. the connection closing under
+    // teardown) reaches libp2p's handler error path instead of escaping
+    // as an unhandled rejection.
+    await b.libp2p.handle(protocol, async (stream) => {
+      await stream.close();
     });
     const stream = await netA.dialProtocol(b.peerId, protocol);
     expect(stream).toBeDefined();
@@ -137,6 +158,55 @@ describe('LibP2PNetwork', () => {
     await b.start();
 
     await expect(netA.addKnownAddresses(b.peerId, [])).resolves.toBeUndefined();
+  });
+
+  it('connectPeer forwards the configured relay snapshot and caller options', async () => {
+    const dialed: string[] = [];
+    const merged: Array<{ peerId: string; addresses: string[] }> = [];
+    const logs: string[] = [];
+    let connected = false;
+    let relaySnapshotReads = 0;
+    const facadeNode = {
+      libp2p: {
+        getConnections: () => connected
+          ? [{ remotePeer: { toString: () => CONNECT_TARGET } }]
+          : [],
+        dial: async (target: { toString(): string }) => {
+          const address = target.toString();
+          dialed.push(address);
+          if (address === CONFIGURED_CIRCUIT) connected = true;
+        },
+        peerStore: {
+          merge: async (
+            peerId: { toString(): string },
+            update: { multiaddrs: Array<{ toString(): string }> },
+          ) => {
+            merged.push({
+              peerId: peerId.toString(),
+              addresses: update.multiaddrs.map((address) => address.toString()),
+            });
+          },
+        },
+      },
+      getConfiguredRelayTargets: () => {
+        relaySnapshotReads += 1;
+        return [{
+          peerId: CONFIGURED_RELAY.split('/').at(-1)!,
+          addresses: [CONFIGURED_RELAY],
+        }];
+      },
+    } as unknown as DKGNode;
+    const network = new LibP2PNetwork(facadeNode);
+
+    await network.connectPeer(CONNECT_TARGET, [], { log: (message) => logs.push(message) });
+
+    expect(relaySnapshotReads).toBe(1);
+    expect(dialed).toEqual([CONFIGURED_RELAY, CONFIGURED_CIRCUIT]);
+    expect(merged).toEqual([{ peerId: CONNECT_TARGET, addresses: [CONFIGURED_CIRCUIT] }]);
+    expect(logs).toEqual([
+      `Preconnecting relay: ${CONFIGURED_RELAY}`,
+      `Dialing circuit: ${CONFIGURED_CIRCUIT}`,
+    ]);
   });
 
   it('handle aborts the stream when an async handler rejects (Codex PR #494)', async () => {
@@ -193,6 +263,88 @@ describe('LibP2PNetwork', () => {
     // With the fix, abort propagates immediately.
     expect(drainMs).toBeLessThan(5000);
   }, 10000);
+
+  type InboundHandler = (stream: Stream) => Promise<void>;
+  type RegisterInbound = (
+    net: LibP2PNetwork,
+    node: DKGNode,
+    protocol: string,
+    handler: InboundHandler,
+  ) => Promise<void>;
+  it.each<[string, RegisterInbound]>([
+    [
+      'the LibP2PNetwork.handle wrapper',
+      (net, _node, protocol, handler) => net.handle(protocol, handler),
+    ],
+    [
+      "libp2p's Connection.onIncomingStream",
+      (_net, node, protocol, handler) =>
+        node.libp2p.handle(protocol, handler, { runOnLimitedConnection: true }),
+    ],
+  ])('aborting an inbound stream while its connection closes leaks no rejection (via %s)', async (_via, register) => {
+    // Regression guard for "StreamStateError: Cannot write to a stream that
+    // is closing", which Vitest caught as an unhandled rejection after every
+    // core test had passed. A failed inbound handler gets its stream aborted
+    // (by our wrapper's catch, or by libp2p's Connection.onIncomingStream,
+    // the path CI hit), and abort() writes a yamux RST frame. If the
+    // connection underneath is already closing (node shutdown, connection
+    // pruning), that write throws. @libp2p/yamux 8.0.1 declared sendReset()
+    // async, so the throw became a rejected promise that abort()'s try/catch
+    // never saw and nothing awaited. patches/@libp2p__yamux@8.0.1.patch
+    // backports the upstream fix (8.0.2+ makes sendReset() synchronous).
+    //
+    // Deterministic reproduction: park B's handler, start closing B's side
+    // of the connection, and let the handler fail once the connection
+    // reports 'closing': the muxer is closed and the TCP close is in flight.
+    const a = spawn();
+    const b = spawn();
+    const netA = new LibP2PNetwork(a);
+    const netB = new LibP2PNetwork(b);
+    await netA.start();
+    await netB.start();
+    await netA.addKnownAddresses(b.peerId, b.multiaddrs);
+
+    const protocol = '/test/abort-while-closing/1.0.0';
+    let handlerEntered!: (stream: Stream) => void;
+    const entered = new Promise<Stream>((resolve) => { handlerEntered = resolve; });
+    let releaseHandler!: () => void;
+    const released = new Promise<void>((resolve) => { releaseHandler = resolve; });
+    await register(netB, b, protocol, async (stream) => {
+      handlerEntered(stream);
+      await released;
+      throw new Error('handler failed while its connection was closing');
+    });
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      // A never closes its write side, so B's stream is still open when the
+      // handler fails and abort() really sends the RST.
+      await netA.dialProtocol(b.peerId, protocol);
+      const inbound = await entered;
+
+      const [connection] = netB.getConnections(a.peerId);
+      const closing = connection.close();
+      // The status flips to 'closing' a few microtasks in (once the muxer has
+      // closed) and holds until the socket's 'close' event, so polling on
+      // microtasks cannot step past the window.
+      for (let turn = 0; connection.status === 'open' && turn < 1_000; turn++) {
+        await Promise.resolve();
+      }
+      expect(connection.status).toBe('closing');
+      expect(inbound.status).toBe('open');
+
+      releaseHandler();
+      await closing;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(inbound.status).toBe('aborted');
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  }, 15000);
 
   it('unhandle removes a previously-registered protocol', async () => {
     const a = spawn();

@@ -20,7 +20,6 @@ import {
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
   deriveCuratorDidFromCgId,
   MemoryLayer,
-  computeACKDigest,
   encodePublishRequest,
   encodeKAUpdateRequest,
   encodeGossipEnvelope,
@@ -113,8 +112,7 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
-  type LiftRequest, type LiftRequestAuthorSeal,
+  type CollectedACK,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
@@ -132,6 +130,7 @@ import {
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 
 import { ProfileManager } from './profile-manager.js';
+import { verifyApprovalSigningInput } from './verify-approval-signing.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck } from './messaging.js';
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
@@ -227,8 +226,8 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
-import { reconcileContextGraph, ReconcileCoalescer, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
+import { FinalizationHandler } from './finalization-handler.js';
+import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
@@ -313,7 +312,6 @@ import {
   type LocalSwmSenderKeySendState,
   type LocalSwmSenderKeyReceiveState,
   type PendingSenderKeyEntry,
-  type RandomSamplingStartResult,
   type ACKSignerResolution,
   type SyncRequestEnvelope,
   type CclPublishedResultEntry,
@@ -345,9 +343,6 @@ import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
-  partitionPublishAsyncQuads,
-  signWithPrivateKey,
-  preSignedAttestationToLiftSeal,
   normalizeAgentDid,
   joinDelegationScope,
   normalizeSyncPhase,
@@ -532,7 +527,7 @@ export class EndorseVerifyMethods extends DKGAgentBase {
       ?? this.config.chainConfig?.operationalKeys?.[0];
     if (!signerKey) throw new Error('No signer key available for verify');
 
-    const digest = computeACKDigest(contextGraphIdOnChain, merkleRoot);
+    const { signingDomain, digest } = await verifyApprovalSigningInput(this.chain, contextGraphIdOnChain, opts.batchId, merkleRoot);
     const prefixedHash = ethers.hashMessage(digest);
     const signingKey = new ethers.SigningKey(signerKey);
     const proposerSig = signingKey.sign(prefixedHash);
@@ -610,10 +605,8 @@ export class EndorseVerifyMethods extends DKGAgentBase {
       //   2. Public CGs: fall back to the gossip-eligible member set
       //      (live topic subscribers), which still narrows the broadcast
       //      versus "every connected libp2p peer".
-      // Downstream `probeShardingTableMembership` continues to filter
-      // approvals by sharding-table membership before they count toward
-      // quorum, so this only changes WHO RECEIVES the proposal, not
-      // who can vote.
+      // `resolveEligibleApprover` below decides which approvals count, so
+      // this only changes WHO RECEIVES the proposal, not who can vote.
       getParticipantPeers: async (contextGraphId: string) => {
         try {
           const enumeration = await this.getOrCreateCGMemberEnumerator().enumerate(contextGraphId);
@@ -633,6 +626,12 @@ export class EndorseVerifyMethods extends DKGAgentBase {
           return [];
         }
       },
+      // Count only approvals step 6 keeps: a sharding-table identity other than the proposer's own vote.
+      resolveEligibleApprover: async (approverAddress: string) => {
+        const id = await this.resolveVerifyApprovalIdentityId(approverAddress);
+        if (id <= 0n || (proposerEligible && id === this.identityId)) return null;
+        return (await probeShardingTableMembership(id)) ? id : null;
+      },
       log: (msg: string) => this.log.info(ctx, msg),
     });
 
@@ -640,7 +639,7 @@ export class EndorseVerifyMethods extends DKGAgentBase {
 
     const result = await collector.collect({
       contextGraphId: opts.contextGraphId,
-      contextGraphIdOnChain,
+      contextGraphIdOnChain, signingDomain,
       verifiableMemoryId: (() => {
         try { return BigInt(opts.verifiableMemoryId); }
         catch { throw new Error(`verifiableMemoryId must be a numeric string, got: "${opts.verifiableMemoryId}"`); }
@@ -755,13 +754,8 @@ export class EndorseVerifyMethods extends DKGAgentBase {
   }
 
   async resolveVerifyApprovalIdentityId(this: DKGAgent, approverAddress: string): Promise<bigint> {
-    // Post-SPEC_CG_MEMORY_MODEL: identity resolution is whatever the
-    // chain adapter exposes via `getIdentityIdForAddress`. The legacy
-    // candidate-set probe against per-CG `participantIdentityId`
-    // triples was a pre-LU2 affordance and has been removed (Codex
-    // PR #595 round-5: stop using legacy roster as a verify filter).
-    // Modern responders that want to be counted MUST stamp their
-    // identityId in the VerifyApproval payload.
+    // Post-SPEC_CG_MEMORY_MODEL: the identity is whatever the chain adapter's
+    // `getIdentityIdForAddress` returns for the address an approval recovers to.
     if (typeof (this.chain as any).getIdentityIdForAddress !== 'function') {
       return 0n;
     }

@@ -1,12 +1,28 @@
 /**
- * The daemon log-sink fan-out — the trust boundary where a log record is
- * written FULL-FIDELITY to the local dashboard DB but only a REDACTED copy is
- * forwarded to remote shippers (syslog / OTLP). Extracted from `lifecycle.ts`
- * so this privacy-critical path is unit-testable (review: "remote log redaction
- * wiring is not verified"): a regression that pushed the raw `entry` to a remote
- * shipper, or skipped redaction, would leak secrets off-node.
+ * The daemon log sink — the trust boundary where a REDACTED log record is
+ * forwarded to the selected remote shipper (syslog or OTLP). Info/warn/error
+ * already reach daemon.log through the stdout/stderr tee; this sink queues the
+ * otherwise-silent debug level to that file too. Duplicating routine records
+ * into SQLite made high-volume sync/query logging block the event loop, so only
+ * low-volume warning/error diagnostics remain in SQLite.
  */
-import type { LogRecord } from '@origintrail-official/dkg-core';
+import {
+  type CanonicalLogRecord,
+  type LogLevel,
+  type LogRecord,
+} from '@origintrail-official/dkg-core';
+import {
+  isDebugLogRecord,
+  type DebugLogRecord,
+} from './daemon-log-file-writer.js';
+
+type PersistedDiagnosticLogLevel = Extract<LogLevel, 'warn' | 'error'>;
+
+function shouldPersistDiagnostic(
+  level: LogLevel,
+): level is PersistedDiagnosticLogLevel {
+  return level === 'warn' || level === 'error';
+}
 
 /** Minimal shape of a remote log shipper (LogPushWorker / OtlpLogWorker). */
 export interface RemoteLogShipper {
@@ -14,52 +30,55 @@ export interface RemoteLogShipper {
 }
 
 export interface DaemonLogSinkDeps {
-  /** Persist the FULL (un-redacted) record to the local dashboard DB. */
-  insertLog: (rec: {
+  /** Queue an unredacted debug record for the local file-backed daemon log. */
+  writeLocalDebug: (record: DebugLogRecord) => void;
+  /** Persist a FULL (un-redacted) warning/error record to the local DB. */
+  insertDiagnosticLog: (rec: {
     ts: number;
-    level: string;
+    level: PersistedDiagnosticLogLevel;
     operation_name?: string | null;
     operation_id?: string | null;
     module: string;
     message: string;
   }) => void;
   /** Redactor applied to the copy that leaves the node. */
-  redact: (record: LogRecord) => LogRecord;
-  /**
-   * The CURRENT set of active remote shippers, evaluated per record so the sink
-   * reflects runtime start/stop without re-wiring. `null`/`undefined` entries
-   * (a disabled exporter) are skipped.
-   */
-  remoteShippers: () => Array<RemoteLogShipper | null | undefined>;
+  redact: (record: CanonicalLogRecord) => CanonicalLogRecord;
+  /** The currently selected shipper, evaluated per record for runtime toggles. */
+  remoteShipper: () => RemoteLogShipper | null | undefined;
   /** Clock, injectable for tests. Defaults to Date.now. */
   now?: () => number;
 }
 
 /**
- * Build the `Logger.setSink` callback. Always stores the original locally
- * (errors swallowed — a DB write must never break the node); forwards exactly
- * ONE redacted copy to each active remote shipper, and nothing remote when none
- * are active.
+ * Build the `Logger.setSink` callback. Forwards one redacted copy to the
+ * selected shipper and does no redaction work when export is disabled.
  */
-export function createDaemonLogSink(deps: DaemonLogSinkDeps): (entry: LogRecord) => void {
+export function createDaemonLogSink(deps: DaemonLogSinkDeps): (entry: CanonicalLogRecord) => void {
   const now = deps.now ?? Date.now;
-  return (entry: LogRecord): void => {
-    try {
-      deps.insertLog({
-        ts: now(),
-        level: entry.level,
-        operation_name: entry.operationName,
-        operation_id: entry.operationId,
-        module: entry.module,
-        message: entry.message,
-      });
-    } catch {
-      /* DB write must never break the node */
+  return (entry: CanonicalLogRecord): void => {
+    if (isDebugLogRecord(entry)) {
+      try {
+        deps.writeLocalDebug(entry);
+      } catch {
+        /* Local file logging must never break remote export. */
+      }
     }
-    const shippers = deps.remoteShippers().filter((s): s is RemoteLogShipper => !!s);
-    if (shippers.length === 0) return;
-    // Fan out a single redacted copy to every active remote shipper.
-    const safe = deps.redact(entry);
-    for (const shipper of shippers) shipper.push(safe);
+    if (shouldPersistDiagnostic(entry.level)) {
+      try {
+        deps.insertDiagnosticLog({
+          ts: now(),
+          level: entry.level,
+          operation_name: entry.operationName,
+          operation_id: entry.operationId,
+          module: entry.module,
+          message: entry.message,
+        });
+      } catch {
+        /* Diagnostic persistence must never break logging or remote export. */
+      }
+    }
+    const shipper = deps.remoteShipper();
+    if (!shipper) return;
+    shipper.push(deps.redact(entry));
   };
 }

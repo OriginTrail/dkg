@@ -6,6 +6,7 @@ import { PayloadTooLargeError, type RelayStats } from '@origintrail-official/dkg
 import type { DashboardDB } from './db.js';
 import { type ChatMemoryManager } from './chat-memory.js';
 import type { MetricsCollector } from './metrics-collector.js';
+import { MIME } from './static-content-types.js';
 
 /**
  * Live relay-stats provider — wraps `DKGNode.getRelayStats()`. Returns
@@ -17,28 +18,16 @@ import type { MetricsCollector } from './metrics-collector.js';
  */
 export type RelayStatsProvider = () => RelayStats | null;
 
-const MIME: Record<string, string> = {
-  '.html': 'text/html',
-  '.js': 'application/javascript',
-  '.css': 'text/css',
-  '.json': 'application/json',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.ico': 'image/x-icon',
-  '.woff2': 'font/woff2',
-  '.woff': 'font/woff',
-};
-
 /**
  * Per-request CORS origin — stored on the ServerResponse to avoid
  * global state races in concurrent async handlers and long-lived SSE streams.
  */
 
-const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+export const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
-const PERIOD_UNITS: Record<string, number> = { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };
+export const PERIOD_UNITS: Record<string, number> = { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };
 
-function parsePeriodMs(input: string): number {
+export function parsePeriodMs(input: string): number {
   const num = parseInt(input, 10);
   if (!isNaN(num) && num > 0 && /^\d+$/.test(input)) return num;
   const match = input.match(/^(\d+)\s*([mhdw])$/i);
@@ -50,7 +39,7 @@ function parsePeriodMs(input: string): number {
   return 86_400_000;
 }
 
-function autoBucketMs(periodMs: number): number {
+export function autoBucketMs(periodMs: number): number {
   if (periodMs <= 15 * 60_000) return 60_000;          // <=15min  → 1-min buckets
   if (periodMs <= 60 * 60_000) return 5 * 60_000;      // <=1h     → 5-min buckets
   if (periodMs <= 6 * 3_600_000) return 15 * 60_000;   // <=6h     → 15-min buckets
@@ -59,14 +48,14 @@ function autoBucketMs(periodMs: number): number {
   return 86_400_000;                                     // >7d      → daily buckets
 }
 
-function normalizeSessionId(raw: unknown): string | null {
+export function normalizeSessionId(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
   const value = raw.trim();
   if (!value) return null;
   return SESSION_ID_PATTERN.test(value) ? value : null;
 }
 
-function normalizeTurnId(raw: unknown): string | null {
+export function normalizeTurnId(raw: unknown): string | null {
   return normalizeSessionId(raw);
 }
 
@@ -83,6 +72,10 @@ export interface TelemetrySettingsCallbacks {
 /**
  * Handles all /api/metrics, /api/operations, /api/node-log, /api/query-history,
  * /api/saved-queries, and /ui routes. Returns true if the request was handled.
+ *
+ * `authToken` is embedded in the served dashboard shell as-is; the caller
+ * decides whether this request may receive it. Node-wide settings changes and
+ * node log reads require `callerCanAdministerNode`, which defaults to false.
  */
 export async function handleNodeUIRequest(
   req: IncomingMessage,
@@ -105,6 +98,8 @@ export async function handleNodeUIRequest(
    * consumer without the daemon duplicating route knowledge. (#1066 Item 1)
    */
   markMetricsConsumer?: () => void,
+  /** Whether the caller holds node-level admin scope. */
+  callerCanAdministerNode = false,
 ): Promise<boolean> {
   (res as any).__corsOrigin = corsOrigin ?? null;
   const path = url.pathname;
@@ -308,6 +303,7 @@ export async function handleNodeUIRequest(
   // --- Logs (compatibility endpoint) ---
 
   if (req.method === 'GET' && path === '/api/logs') {
+    if (!callerCanAdministerNode) return nodeAdminRequired(res, 'GET /api/logs', 'read node logs');
     const q = url.searchParams.get('q') ?? undefined;
     const operationId = url.searchParams.get('operationId') ?? undefined;
     const level = url.searchParams.get('level') ?? undefined;
@@ -323,6 +319,7 @@ export async function handleNodeUIRequest(
   // --- Node log (daemon.log file) ---
 
   if (req.method === 'GET' && path === '/api/node-log') {
+    if (!callerCanAdministerNode) return nodeAdminRequired(res, 'GET /api/node-log', 'read node logs');
     const logFilePath = join(db.dataDir, 'daemon.log');
     const rawLines = parseInt(url.searchParams.get('lines') ?? '500', 10);
     const tailLines = Number.isFinite(rawLines) && rawLines > 0 ? Math.min(rawLines, 5000) : 500;
@@ -399,6 +396,7 @@ export async function handleNodeUIRequest(
   }
 
   if (req.method === 'PUT' && path === '/api/settings/retention') {
+    if (!callerCanAdministerNode) return nodeAdminRequired(res, 'PUT /api/settings/retention', 'change node settings');
     const body = await readBody(req);
     const payload = JSON.parse(body ?? '{}') as { retentionDays?: number };
     const days = payload.retentionDays;
@@ -418,6 +416,7 @@ export async function handleNodeUIRequest(
   }
 
   if (req.method === 'PUT' && path === '/api/settings/telemetry') {
+    if (!callerCanAdministerNode) return nodeAdminRequired(res, 'PUT /api/settings/telemetry', 'change node settings');
     if (!telemetrySettings) return json(res, 501, { error: 'Telemetry not available' });
     const body = await readBody(req);
     const payload = JSON.parse(body ?? '{}') as { enabled?: boolean };
@@ -441,6 +440,7 @@ export async function handleNodeUIRequest(
   }
 
   if (req.method === 'PUT' && path === '/api/settings/llm' && llmSettings) {
+    if (!callerCanAdministerNode) return nodeAdminRequired(res, 'PUT /api/settings/llm', 'change node settings');
     const body = await readBody(req);
     const payload = JSON.parse(body ?? '{}') as {
       apiKey?: unknown;
@@ -688,7 +688,7 @@ export async function handleNodeUIRequest(
   return false;
 }
 
-async function serveStatic(res: ServerResponse, staticDir: string, urlPath: string, authToken?: string): Promise<true> {
+export async function serveStatic(res: ServerResponse, staticDir: string, urlPath: string, authToken?: string): Promise<true> {
   let filePath = urlPath === '/ui' || urlPath === '/ui/'
     ? join(staticDir, 'index.html')
     : join(staticDir, urlPath.slice('/ui/'.length));
@@ -773,7 +773,13 @@ async function serveStatic(res: ServerResponse, staticDir: string, urlPath: stri
   return true;
 }
 
-function json(res: ServerResponse, status: number, data: unknown): true {
+export function nodeAdminRequired(res: ServerResponse, route: string, action: string): true {
+  return json(res, 403, {
+    error: `${route} requires a node-level admin token; agent-scoped tokens cannot ${action}.`,
+  });
+}
+
+export function json(res: ServerResponse, status: number, data: unknown): true {
   const origin = (res as any).__corsOrigin as string | null ?? null;
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (origin) {
@@ -785,7 +791,7 @@ function json(res: ServerResponse, status: number, data: unknown): true {
   return true;
 }
 
-function readBody(req: IncomingMessage, maxBytes?: number): Promise<string> {
+export function readBody(req: IncomingMessage, maxBytes?: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let totalBytes = 0;

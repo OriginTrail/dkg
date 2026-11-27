@@ -65,7 +65,15 @@ export const UpdateIntentSchema = new Type('UpdateIntent')
   /** When true, `stagingQuads` is opaque ciphertext (curated CG); peer skips plaintext recompute. */
   .add(new Field('isEncryptedPayload', 16, 'bool'))
   /** ACK protocol version negotiated for this update (absent/0/1 → v1). */
-  .add(new Field('ackProtocolVersion', 17, 'uint32'));
+  .add(new Field('ackProtocolVersion', 17, 'uint32'))
+  // Rootless KA scope. The assertion version MUST equal
+  // preUpdateMerkleRootCount + 1 for a state-changing update.
+  .add(new Field('contentScopeVersion', 18, 'uint32'))
+  .add(new Field('kaUal', 19, 'string'))
+  .add(new Field('assertionVersion', 20, 'string'))
+  .add(new Field('publicTripleCount', 21, 'uint32'))
+  .add(new Field('privateMerkleRoot', 22, 'bytes'))
+  .add(new Field('privateTripleCount', 23, 'uint32'));
 
 type Long = { low: number; high: number; unsigned: boolean };
 
@@ -115,6 +123,18 @@ export interface UpdateIntentMsg {
   isEncryptedPayload?: boolean;
   /** ACK protocol version negotiated for this update (absent/0/1 → v1). */
   ackProtocolVersion?: number;
+  /** Rootless KA graph-scope discriminator. New writers emit exactly 2. */
+  contentScopeVersion?: number;
+  /** Canonical deterministic UAL for the updated KA. */
+  kaUal?: string;
+  /** One-based post-update assertion/Merkle-root index. */
+  assertionVersion?: string;
+  /** Number of public RDF triples in the replacement assertion. */
+  publicTripleCount?: number;
+  /** Optional single KA-level private commitment. */
+  privateMerkleRoot?: Uint8Array;
+  /** Number of private RDF triples committed by privateMerkleRoot. */
+  privateTripleCount?: number;
 }
 
 export function encodeUpdateIntent(msg: UpdateIntentMsg): Uint8Array {

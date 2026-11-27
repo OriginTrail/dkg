@@ -137,4 +137,21 @@ describe('ACK metrics — result:ack only after validation', () => {
     expect(counts['ack'] ?? 0).toBe(0);
     expect(counts['rejected'] ?? 0).toBeGreaterThanOrEqual(1);
   });
+
+  it('counts one protocol_unsupported outcome for every non-negotiating peer', async () => {
+    installMeter();
+    const dials = new Map<string, number>();
+    const deps = makeDeps(async () => true);
+    deps.sendP2P = async (peerId) => {
+      dials.set(peerId, (dials.get(peerId) ?? 0) + 1);
+      throw new Error('Protocol selection failed - could not negotiate storage ACK protocol');
+    };
+
+    await expect(new ACKCollector(deps).collect(collectParams)).rejects.toBeTruthy();
+    const counts = await ackPeerCounts();
+    expect(dials.size).toBe(4);
+    expect([...dials.values()]).toEqual([1, 1, 1, 1]);
+    expect(counts['protocol_unsupported'] ?? 0).toBe(4);
+    expect(counts['transport_error'] ?? 0).toBe(0);
+  });
 });

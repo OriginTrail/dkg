@@ -73,6 +73,36 @@ describe('DKGAgent network identity config', () => {
     }
   });
 
+  it('forwards the transport isolation inputs to the node config', async () => {
+    // Dropping either field at this hop silently empties the static
+    // other-network list or ignores the operator kill switch.
+    const otherNetworkRelays = [
+      '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M',
+    ];
+    const relayPeers = ['/ip4/10.0.0.1/tcp/9090/p2p/12D3KooWFWm8sg6dkitmdBd5Uxaqp3CDRL27mFcM7vEHK92Xapyy'];
+    const isolated = await DKGAgent.create({
+      name: 'NetworkIdentityConfigOtherNetworkRelays',
+      store: new OxigraphStore(),
+      relayPeers,
+      otherNetworkRelays,
+    });
+    const killSwitch = await DKGAgent.create({
+      name: 'NetworkIdentityConfigIsolationOff',
+      store: new OxigraphStore(),
+      networkPeerIsolation: false,
+    });
+
+    try {
+      expect((isolated.node as any).config.otherNetworkRelays).toEqual(otherNetworkRelays);
+      expect((isolated.node as any).config.relayPeers).toEqual(relayPeers);
+      expect((isolated.node as any).config.networkPeerIsolation).toBeUndefined();
+      expect((killSwitch.node as any).config.networkPeerIsolation).toBe(false);
+    } finally {
+      await isolated.stop().catch(() => {});
+      await killSwitch.stop().catch(() => {});
+    }
+  });
+
   it('rejects networkIdentity values that diverge from the selected genesis', async () => {
     const defaultNetworkId = await computeNetworkId(DEFAULT_GENESIS_ID);
 

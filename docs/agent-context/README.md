@@ -20,9 +20,8 @@ Task packs:
 - [Publish and Query](task-packs/publish-query.md)
 - [Operate and Troubleshoot](task-packs/operate-troubleshoot.md)
 
-Generated projections:
+Reference:
 
-- `llms.txt`
-- `llms-full.txt`
+- [Knowledge Asset Publish Lifecycle Language](publish-lifecycle-language.md)
 
-These projections are curated from the current V10 corpus only. Do not use archive docs as source context.
+Use only documents marked current for operational context. Historical and archive documents are retained for reference, not as current instructions.

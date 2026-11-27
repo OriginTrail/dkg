@@ -7,6 +7,10 @@ import {
   type SyncRowListMemo,
 } from '../src/sync/responder/graph-plan.js';
 import {
+  SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+  SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
+} from '../src/sync/responder/snapshot-cache.js';
+import {
   SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
   SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT,
   SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
@@ -15,6 +19,7 @@ import {
   SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT,
   SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
   resolveSyncResponderSnapshotBudgetOptions,
+  resolveSyncResponderSnapshotPolicy,
 } from '../src/sync/responder/sync-handler.js';
 import {
   createSyncResponderSnapshotBudget,
@@ -51,24 +56,278 @@ describe('sync responder snapshot budget defaults', () => {
     expect(SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT).toBe(384 * 1024 * 1024);
     expect(SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT).toBe(250_000);
     expect(SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT).toBe(128 * 1024 * 1024);
+    expect(resolveSyncResponderSnapshotBudgetOptions(undefined, {})).toEqual({
+      maxRows: SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT,
+      maxBytesEstimate: SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
+      maxSnapshotRows: SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT,
+      maxSnapshotBytesEstimate: SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
+    });
+  });
+
+  it('keeps hard build caps below the retained per-snapshot caps', () => {
+    // The documented ordering ("hard build caps are intentionally lower than
+    // the retained-cache defaults") is what guarantees a snapshot that passes
+    // the build check is always admissible, rather than being built and then
+    // rejected by budget.admit(). If a future bump inverts this, that failure
+    // mode returns silently — so pin it.
+    expect(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS).toBe(200_000);
+    expect(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE).toBe(96 * 1024 * 1024);
+    expect(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS)
+      .toBeLessThan(SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT);
+    expect(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE)
+      .toBeLessThan(SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT);
+  });
+
+  it('resolves memo build limits to the build caps under default budgets', () => {
+    // snapshotLoadLimits is min(BUILD_CAP, configured). Under production
+    // defaults the build cap must be the binding one, or the raise is inert.
+    const memo = createResponderSyncRowListMemo(120_000, 64, {
+      phase: 'durable_meta',
+      budget: createSyncResponderSnapshotBudget(
+        resolveSyncResponderSnapshotBudgetOptions(undefined, {}),
+      ),
+    });
+    expect(memo.snapshotLoadLimits?.maxRows).toBe(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS);
+    expect(memo.snapshotLoadLimits?.maxBytesEstimate)
+      .toBe(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE);
+  });
+
+  it('keeps a 64,001-row durable-meta graph on the memoized snapshot lane', async () => {
+    const contextGraphId = 'snapshot-cap-regression';
+    const rawRowCount = 64_001;
+    const querySources: string[] = [];
+    const store = {
+      query: vi.fn(async (_sparql: string, options?: { source?: string }) => {
+        const source = options?.source ?? 'unknown';
+        querySources.push(source);
+        if (source === 'sync.responder.readDurableMetaGraphSnapshot') {
+          return {
+            type: 'bindings' as const,
+            bindings: Array.from({ length: rawRowCount }, (_, index) => ({
+              s: `did:dkg:activity:${contextGraphId}:${index}`,
+              p: `${DKG_NS}status`,
+              o: '"confirmed"',
+            })),
+          };
+        }
+        if (source === 'sync.responder.readDurableMetaRowsPage') {
+          throw new Error('store-paged durable-meta fallback must not run');
+        }
+        throw new Error(`unexpected durable-meta query source: ${source}`);
+      }),
+    } as unknown as OxigraphStore;
+    const memo = createResponderSyncRowListMemo(120_000, 64, {
+      phase: 'durable_meta',
+      budget: createSyncResponderSnapshotBudget(
+        resolveSyncResponderSnapshotBudgetOptions(undefined, {}),
+      ),
+    });
+    const readPage = (offset: number) => readDurableMetaPage({
+      store,
+      contextGraphId,
+      registeredSubGraphNames: [],
+      offset,
+      limit: 500,
+      rowListMemo: memo,
+      rowListCacheKey: 'durable-meta:64k-regression',
+    });
+
+    await expect(readPage(0)).resolves.toHaveLength(500);
+    await expect(readPage(500)).resolves.toHaveLength(500);
+    expect(querySources).toEqual(['sync.responder.readDurableMetaGraphSnapshot']);
   });
 
   it('allows operators to override every responder snapshot budget limit', () => {
-    expect(resolveSyncResponderSnapshotBudgetOptions({
+    expect(resolveSyncResponderSnapshotBudgetOptions(undefined, {
       DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT: '101',
       DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT: '202',
-      DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT: '303',
-      DKG_SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT: '404',
+      DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT: '99',
+      DKG_SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT: '199',
     })).toEqual({
       maxRows: 101,
       maxBytesEstimate: 202,
-      maxSnapshotRows: 303,
-      maxSnapshotBytesEstimate: 404,
+      maxSnapshotRows: 99,
+      maxSnapshotBytesEstimate: 199,
     });
+  });
+
+  it('resolves config per leaf and lets valid environment leaves override it', () => {
+    expect(resolveSyncResponderSnapshotBudgetOptions({
+      global: { rows: 500, bytesEstimate: 600 },
+      local: { rows: 300, bytesEstimate: 400 },
+    }, {
+      DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT: '450',
+      DKG_SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT: '350',
+    })).toEqual({
+      maxRows: 450,
+      maxBytesEstimate: 600,
+      maxSnapshotRows: 300,
+      maxSnapshotBytesEstimate: 350,
+    });
+  });
+
+  it('warns for invalid env leaves, falls through to config, and clamps local to global', () => {
+    const warnings: string[] = [];
+    const resolved = resolveSyncResponderSnapshotPolicy({
+      global: { rows: 100, bytesEstimate: 200 },
+      local: { rows: 150, bytesEstimate: 250 },
+    }, {
+      DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT: 'invalid',
+      DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT: '',
+    }, (message) => warnings.push(message));
+    expect(resolved).toEqual({
+      budget: {
+        maxRows: 100,
+        maxBytesEstimate: 200,
+        maxSnapshotRows: 100,
+        maxSnapshotBytesEstimate: 200,
+      },
+      localRowsClamped: true,
+      localBytesEstimateClamped: true,
+    });
+    expect(warnings).toHaveLength(3);
+    expect(warnings[0]).toContain('DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT');
   });
 });
 
 describe('sync responder snapshot cache and budget', () => {
+  it('reloads a new session after an older snapshot load is already in flight', async () => {
+    const memo = createResponderSyncRowListMemo(10_000);
+    const oldLoad = deferred<readonly {
+      s: string;
+      p: string;
+      o: string;
+      g: string;
+    }[]>();
+    let freshLoads = 0;
+
+    const oldSession = memo.get('durable-meta:peer:cg', () => oldLoad.promise, {
+      refresh: true,
+      refreshGeneration: 'session-before-approval',
+    });
+    const freshSession = memo.get('durable-meta:peer:cg', async () => {
+      freshLoads++;
+      return [{
+        s: 'urn:memo:fresh',
+        p: `${DKG_NS}label`,
+        o: '"fresh-after-approval"',
+        g: 'urn:memo:graph',
+      }];
+    }, {
+      refresh: true,
+      refreshGeneration: 'session-after-approval',
+    });
+
+    // The new session must wait for the old store read rather than coalescing
+    // onto it, and must perform its own read afterwards.
+    await Promise.resolve();
+    expect(freshLoads).toBe(0);
+    oldLoad.resolve([{
+      s: 'urn:memo:stale',
+      p: `${DKG_NS}label`,
+      o: '"stale-before-approval"',
+      g: 'urn:memo:graph',
+    }]);
+
+    await expect(oldSession).resolves.toMatchObject([
+      { o: '"stale-before-approval"' },
+    ]);
+    await expect(freshSession).resolves.toMatchObject([
+      { o: '"fresh-after-approval"' },
+    ]);
+    expect(freshLoads).toBe(1);
+
+    await expect(memo.get(
+      'durable-meta:peer:cg',
+      async () => { throw new Error('cached snapshot should be reused'); },
+    )).resolves.toMatchObject([{ o: '"fresh-after-approval"' }]);
+  });
+
+  it('does not reuse an older generation when a refresh load fails', async () => {
+    const memo = createResponderSyncRowListMemo(10_000);
+    const stale = [{
+      s: 'urn:memo:stale',
+      p: `${DKG_NS}label`,
+      o: '"stale-before-approval"',
+      g: 'urn:memo:graph',
+    }];
+    const fresh = [{
+      s: 'urn:memo:fresh',
+      p: `${DKG_NS}label`,
+      o: '"fresh-after-retry"',
+      g: 'urn:memo:graph',
+    }];
+
+    await expect(memo.get('durable-meta:peer:cg', async () => stale, {
+      refresh: true,
+      refreshGeneration: 'session-before-approval',
+    })).resolves.toBe(stale);
+    await expect(memo.get('durable-meta:peer:cg', async () => {
+      throw new Error('transient store failure');
+    }, {
+      refresh: true,
+      refreshGeneration: 'session-after-approval',
+    })).rejects.toThrow('transient store failure');
+
+    // prepareResponderSession already installed this token, so the transport
+    // retry arrives with refresh=false. It must miss the stale generation.
+    await expect(memo.get('durable-meta:peer:cg', async () => fresh, {
+      refreshGeneration: 'session-after-approval',
+    })).resolves.toBe(fresh);
+  });
+
+  it('does not reuse an older generation when the refresh waiter aborts', async () => {
+    const memo = createResponderSyncRowListMemo(10_000);
+    const oldLoad = deferred<readonly {
+      s: string;
+      p: string;
+      o: string;
+      g: string;
+    }[]>();
+    const controller = new AbortController();
+    let retryLoads = 0;
+
+    const oldSession = memo.get('durable-meta:peer:cg', () => oldLoad.promise, {
+      refresh: true,
+      refreshGeneration: 'session-before-approval',
+    });
+    const abortedRefresh = memo.get('durable-meta:peer:cg', async () => {
+      throw new Error('aborted refresh must not start its store load');
+    }, {
+      refresh: true,
+      refreshGeneration: 'session-after-approval',
+      signal: controller.signal,
+    });
+    controller.abort(new Error('request timed out'));
+    await expect(abortedRefresh).rejects.toThrow('request timed out');
+    // Retry while the old generation is STILL loading. Because the token was
+    // already installed, this arrives with refresh=false; generation mismatch
+    // must nevertheless wait for and supersede the old in-flight snapshot.
+    const retry = memo.get('durable-meta:peer:cg', async () => {
+      retryLoads += 1;
+      return [{
+      s: 'urn:memo:fresh',
+      p: `${DKG_NS}label`,
+      o: '"fresh-after-retry"',
+      g: 'urn:memo:graph',
+      }];
+    }, {
+      refreshGeneration: 'session-after-approval',
+    });
+    await Promise.resolve();
+    expect(retryLoads).toBe(0);
+
+    oldLoad.resolve([{
+      s: 'urn:memo:stale',
+      p: `${DKG_NS}label`,
+      o: '"stale-before-approval"',
+      g: 'urn:memo:graph',
+    }]);
+    await expect(oldSession).resolves.toHaveLength(1);
+    await expect(retry).resolves.toMatchObject([{ o: '"fresh-after-retry"' }]);
+    expect(retryLoads).toBe(1);
+  });
+
   it('keeps active durable row snapshots alive while pages are still being read', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
@@ -124,6 +383,31 @@ describe('sync responder snapshot cache and budget', () => {
       'Durable data sync session snapshot expired before page completion',
     );
     expect(loads).toBe(1);
+  });
+
+  it('rebuilds an expired snapshot when the same session safely retries offset zero', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const memo = createResponderSyncRowListMemo(10);
+    let loads = 0;
+    const loadRows = async () => [{
+      s: 'urn:memo:row',
+      p: `${DKG_NS}label`,
+      o: `"snapshot-${++loads}"`,
+      g: 'urn:memo:graph',
+    }];
+
+    await expect(memo.get('durable', loadRows, {
+      refreshGeneration: 'same-session',
+    })).resolves.toMatchObject([{ o: '"snapshot-1"' }]);
+
+    vi.setSystemTime(11);
+    await expect(memo.get('durable', loadRows, {
+      refreshGeneration: 'same-session',
+      refreshExpired: true,
+    })).resolves.toMatchObject([{ o: '"snapshot-2"' }]);
+    expect(loads).toBe(2);
   });
 
   it('does not retain empty durable row snapshots against the active cap', async () => {
@@ -381,6 +665,51 @@ describe('sync responder snapshot cache and budget', () => {
     expect(loads).toBe(1);
   });
 
+  it('keeps an active store-bounded fallback alive past its original rejection TTL', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const budget = createSyncResponderSnapshotBudget({
+      maxRows: 10,
+      maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+      maxSnapshotRows: 1,
+      maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+    });
+    const memo = createResponderSyncRowListMemo(10, 10, {
+      phase: 'durable_data',
+      budget,
+    });
+    let loads = 0;
+    const loadRows = async () => {
+      loads += 1;
+      return [0, 1].map((index) => ({
+        s: `urn:sliding-rejection:${index}`,
+        p: `${DKG_NS}label`,
+        o: `"sliding-rejection-${index}"`,
+        g: 'urn:sliding-rejection:graph',
+      }));
+    };
+
+    await expect(memo.get('long-session', loadRows)).rejects.toMatchObject({
+      name: 'SyncRowSnapshotBudgetError',
+      reason: 'snapshot_rows',
+    });
+
+    // A later store-bounded page touches the rejection just before its
+    // original expiry. The same immutable session must still take the typed
+    // fallback after that original boundary instead of becoming `null`.
+    vi.setSystemTime(9);
+    await expect(
+      memo.get('long-session', loadRows, { requireExisting: true }),
+    ).rejects.toMatchObject({ reason: 'snapshot_rows' });
+
+    vi.setSystemTime(18);
+    await expect(
+      memo.get('long-session', loadRows, { requireExisting: true }),
+    ).rejects.toMatchObject({ reason: 'snapshot_rows' });
+    expect(loads).toBe(1);
+  });
+
   it('does not resume a superseded snapshot after a refresh exceeds the budget', async () => {
     const budget = createSyncResponderSnapshotBudget({
       maxRows: 4,
@@ -576,7 +905,7 @@ describe('sync responder snapshot cache and budget', () => {
     expect(budget.stats()).toMatchObject({ snapshots: 0, rows: 0, bytesEstimate: 0 });
   });
 
-  it('extracts a cached page without iterating or copying the complete snapshot', async () => {
+  it('extracts a cached page with only a bounded subject-boundary lookahead', async () => {
     const source = Array.from({ length: 2_000 }, (_, index) => ({
       s: `urn:row:${index}`,
       p: `${DKG_NS}label`,
@@ -586,23 +915,25 @@ describe('sync responder snapshot cache and budget', () => {
     const pageStart = 1_000;
     const pageEnd = 1_500; // offset 1000 + limit 500
     let wholeSnapshotIterations = 0;
-    let outOfPageIndexReads = 0;
+    // Durable meta is subject-atomic (#1788): the reader peeks the single row at
+    // the page boundary to detect whether a subject straddles it. That is a
+    // bounded one-subject-horizon lookahead, NOT a full-array copy. Reading any
+    // index BEFORE the page (an indexed clone / `rows.slice()` of the whole
+    // array) or iterating the whole snapshot remains a HARD failure, so a
+    // full-scan regression still fails this test.
+    let boundaryLookAheadReads = 0;
     const snapshot = new Proxy(source, {
       get(target, property, receiver) {
         if (property === Symbol.iterator) {
           wholeSnapshotIterations += 1;
           throw new Error('complete snapshot must not be iterated while extracting one page');
         }
-        // A correct slice(offset, offset+limit) reads only in-page element
-        // indices (plus non-index props like `length`). Reading any index
-        // outside the page is a full-array copy (e.g. `rows.slice()` then slice
-        // again, or an indexed clone), which the iterator guard alone misses.
         if (typeof property === 'string' && /^\d+$/.test(property)) {
           const index = Number(property);
-          if (index < pageStart || index >= pageEnd) {
-            outOfPageIndexReads += 1;
-            throw new Error(`page extraction must not read out-of-page index ${index}`);
+          if (index < pageStart) {
+            throw new Error(`page extraction must not read pre-page index ${index} (full-array copy)`);
           }
+          if (index >= pageEnd) boundaryLookAheadReads += 1;
         }
         return Reflect.get(target, property, receiver);
       },
@@ -622,9 +953,13 @@ describe('sync responder snapshot cache and budget', () => {
       rowListCacheKey: 'cached-page',
     });
 
+    // Every source subject is distinct, so the boundary subject does not
+    // straddle: the page stays exactly one limit wide and the reader peeks the
+    // boundary row exactly once, never extending.
     expect(page).toHaveLength(500);
     expect(page[0]?.s).toBe('urn:row:1000');
+    expect(page[499]?.s).toBe('urn:row:1499');
     expect(wholeSnapshotIterations).toBe(0);
-    expect(outOfPageIndexReads).toBe(0);
+    expect(boundaryLookAheadReads).toBe(1);
   });
 });

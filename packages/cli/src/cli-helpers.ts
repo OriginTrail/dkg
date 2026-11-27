@@ -1,3 +1,4 @@
+import type { ParsedRdf, SimpleQuad } from './rdf-parser.js';
 import { Command } from 'commander';
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -14,12 +15,11 @@ import {
   requestFaucetFunding,
   resolveDkgConfigHome,
   toErrorMessage,
-  hasErrorCode,
 } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath,
-  readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
+  readApiPort, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
   activeSlot, swapSlot,
@@ -29,6 +29,7 @@ import {
 } from './config.js';
 import { resolveDaemonEntryPoint } from './daemon-entrypoint.js';
 import { ApiClient } from './api-client.js';
+import { isTerminalCatchupJobState } from './catchup-status.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from './cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from './store-wizard.js';
 import { runConfiguredSourceWorker } from './source-worker-runner.js';
@@ -50,6 +51,7 @@ import {
 } from './daemon/supervisor-liveness.js';
 import { migrateToBlueGreen, noteEdgeLegacyReleases } from './migration.js';
 import { ensureRollbackNodeUiBundle } from './rollback-node-ui.js';
+import { stopDaemonIfRunning } from './update/stop-daemon.js';
 
 function isDaemonUnreachable(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -147,39 +149,43 @@ function loadStructuredFile(filePath: string): any {
   return yaml.load(content);
 }
 
-async function loadQuadsFromInput(
+async function loadRdfFromInput(
   opts: ActionOpts,
   defaultGraph: string,
-): Promise<Array<{ subject: string; predicate: string; object: string; graph: string }>> {
+): Promise<ParsedRdf> {
   const rdfParser = await import('./rdf-parser.js');
 
   if (opts.file) {
     const { readFile } = await import('node:fs/promises');
+    const { pathToFileURL } = await import('node:url');
     const raw = await readFile(opts.file, 'utf-8');
     const format = opts.format ?? rdfParser.detectFormat(opts.file);
-    const quads = await rdfParser.parseRdf(raw, format, defaultGraph);
-    console.log(`Parsed ${quads.length} quad(s) from ${opts.file} (${format})`);
-    return quads;
+    const input = await rdfParser.parseRdfInput(raw, format, defaultGraph, pathToFileURL(opts.file).href);
+    console.log(`Parsed ${input.quads.length} quad(s) from ${opts.file} (${format})`);
+    return input;
   }
 
   if (opts.triples) {
-    const parsed = JSON.parse(opts.triples);
-    return parsed.map((q: Record<string, string>) => ({ ...q, graph: q.graph || defaultGraph }));
+    return rdfParser.parseRdfInput(opts.triples, 'json', defaultGraph);
   }
 
   if (opts.subject && opts.predicate && opts.object) {
-    return [{
+    return { sourceKind: 'legacy-quads', quads: [{
       subject: opts.subject,
       predicate: opts.predicate,
       object: opts.object.startsWith('"') || opts.object.startsWith('http') || opts.object.startsWith('did:')
         ? opts.object
         : `"${opts.object}"`,
       graph: defaultGraph,
-    }];
+    }] };
   }
 
   console.error(`Provide --file (${rdfParser.supportedExtensions().join(', ')}), --triples, or --subject/--predicate/--object`);
   process.exit(1);
+}
+
+async function loadQuadsFromInput(opts: ActionOpts, defaultGraph: string): Promise<SimpleQuad[]> {
+  return (await loadRdfFromInput(opts, defaultGraph)).quads;
 }
 
 function probeHostForApiHost(apiHost: string | undefined): string {
@@ -200,17 +206,28 @@ type CatchupStatusCommandOptions = { watch?: boolean; interval?: string | number
 
 function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus']>>) {
   console.log(`Context Graph: ${status.contextGraphId}`);
+  if (status.resolvedContextGraphId) {
+    console.log(`Resolved To:   ${status.resolvedContextGraphId}`);
+  }
   console.log(`Job:           ${status.jobId}`);
-  console.log(`Status:        ${status.status}`);
+  console.log(`Job Status:    ${status.jobStatus}`);
+  if (status.graphSync) {
+    console.log(`Graph Sync:    ${status.graphSync.state} (${status.graphSync.mechanism})`);
+  }
   console.log(`Shared Memory: ${status.includeWorkspace ? 'enabled' : 'disabled'}`);
   console.log(`Queued:        ${new Date(status.queuedAt).toISOString()}`);
   if (status.startedAt) console.log(`Started:       ${new Date(status.startedAt).toISOString()}`);
   if (status.finishedAt) console.log(`Finished:      ${new Date(status.finishedAt).toISOString()}`);
   if (status.result) {
     const totalConnectedPeers = status.result.totalPeers ?? status.result.connectedPeers;
+    const notAttempted = status.result.peersNotAttempted ?? 0;
     console.log(
-      `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${totalConnectedPeers}), data ${status.result.dataSynced}, shared memory ${status.result.sharedMemorySynced}`,
+      `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${totalConnectedPeers}`
+      + `${notAttempted > 0 ? `, ${notAttempted} not needed` : ''}), data ${status.result.dataSynced}, shared memory ${status.result.sharedMemorySynced}`,
     );
+    if (status.result.deferredBackpressure > 0) {
+      console.log(`Deferred:      ${status.result.deferredBackpressure} phase(s) by local scheduler backpressure`);
+    }
     if (status.result.diagnostics) {
       console.log(
         `Diagnostics:   no-protocol ${status.result.diagnostics.noProtocolPeers}, durable fetched meta/data ${status.result.diagnostics.durable.fetchedMetaTriples}/${status.result.diagnostics.durable.fetchedDataTriples}, inserted meta/data ${status.result.diagnostics.durable.insertedMetaTriples}/${status.result.diagnostics.durable.insertedDataTriples}`,
@@ -225,6 +242,9 @@ function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus'
   }
   if (status.error) {
     console.log(`Error:         ${status.error}`);
+  }
+  if (status.identity && status.identity.message !== status.error) {
+    console.log(`Identity:      ${status.identity.message}`);
   }
   if (
     status.result &&
@@ -242,7 +262,6 @@ async function runCatchupStatusCommand(contextGraph: string, opts: CatchupStatus
   const client = await ApiClient.connect();
   const watch = !!opts.watch;
   const intervalSeconds = Math.max(1, Number(opts.interval ?? 2));
-  const terminalStates = new Set(['done', 'failed', 'denied', 'unreachable']);
 
   do {
     const status = await client.catchupStatus(contextGraph);
@@ -251,7 +270,7 @@ async function runCatchupStatusCommand(contextGraph: string, opts: CatchupStatus
       console.log(`Watching catch-up status every ${intervalSeconds}s\n`);
     }
     printCatchupStatus(status);
-    if (!watch || terminalStates.has(status.status)) {
+    if (!watch || isTerminalCatchupJobState(status.jobStatus)) {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, intervalSeconds * 1000));
@@ -354,22 +373,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
 
-/** Returns true if daemon was stopped (or not running). False if it couldn't be stopped. */
-async function stopDaemonIfRunning(): Promise<boolean> {
-  const pid = await readPid();
-  if (!pid || !isProcessRunning(pid)) return true;
-  console.log('Stopping daemon...');
-  try { process.kill(pid, 'SIGTERM'); } catch (err) {
-    if (!hasErrorCode(err, 'ESRCH')) throw err;
-  }
-  for (let i = 0; i < 20; i++) {
-    await sleep(500);
-    if (!isProcessRunning(pid)) return true;
-  }
-  console.error('Daemon is still running after SIGTERM. Stop it manually before restarting.');
-  return false;
-}
-
 export {
   isDaemonUnreachable,
   VERIFY_COLLECTION_TIMEOUT_MIN_MS,
@@ -382,6 +385,7 @@ export {
   parseOptionalVerifyTimeoutOption,
   loadStructuredFile,
   loadQuadsFromInput,
+  loadRdfFromInput,
   resolveDaemonEntryPoint,
   probeHostForApiHost,
   selectedDkgHomeForEnv,

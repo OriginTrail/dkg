@@ -16,7 +16,7 @@
  *
  *   State: `none` | `preferred{ url, source: 'read' | 'write', primaryProbeDueAt }`
  *     - `source` distinguishes a preference proven by a READ from one proven by a
- *       nonce-critical POPULATE. A read-established backend may lag the signer's
+ *       nonce-critical POPULATE or accepted BROADCAST. A read-established backend may lag the signer's
  *       pending-nonce state, so a `nonceWrite` (populate) MUST NOT start there —
  *       it re-derives nonce from canonical (primary-first = authoritative) until a
  *       populate proves the backend.
@@ -26,15 +26,19 @@
  *     - `transparentRead` — a TIP-sensitive read (current head / latest block):
  *       canonical order AND no state mutation (a lagging preferred would make the
  *       tip non-monotonic; and it must not clear a preference the heavy paths rely on).
- *     - `nonceWrite`      — `populateAndSign`: prefer ONLY a WRITE-proven backend.
- *     - `write`           — `broadcast` / `getReceipt`: nonce-free, prefer the
+ *     - `nonceWrite`      — `prepareTransaction`: prefer ONLY a WRITE-proven backend.
+ *     - `write`           — accepted broadcast: nonce-free, prefer the
  *       last-good backend; BUT if the primary takes over a write as a fallback
  *       (the preferred backend failed the write op), the preferred backend's nonce
  *       view is now stale, so downgrade `source` write→read.
+ *     - `receiptRead`     — receipt polling: preserve write-backend ordering,
+ *       but a successful read never proves that endpoint's pending nonce.
  *
  * All methods are synchronous, so concurrent ops on one instance can only observe
  * a slightly stale order, never torn state.
  */
+
+import type { EndpointReadRefusals, ReadAttempt } from './endpoint-read-refusals.js';
 
 /** Minimal endpoint shape the ordering needs — keyed on `rpcUrl` (survives a live
  *  provider-pool rebind, unlike a positional index). */
@@ -42,7 +46,9 @@ export interface StickyEndpoint {
   rpcUrl: string;
 }
 
-export type StickinessIntent = 'stickyRead' | 'transparentRead' | 'nonceWrite' | 'write';
+export type ReadStickinessIntent = 'stickyRead' | 'transparentRead' | 'receiptRead';
+export type WriteStickinessIntent = 'nonceWrite' | 'write';
+export type StickinessIntent = ReadStickinessIntent | WriteStickinessIntent;
 
 type StickyState =
   | { kind: 'none' }
@@ -62,7 +68,7 @@ export interface StickinessConfig {
 }
 
 /**
- * ONE bound attempt in a failover pass: the endpoint to try, plus its outcome
+ * ONE bound write attempt in a failover pass: the endpoint to try, plus its outcome
  * recorders with the endpoint, its position (triedFirst = index 0), and the
  * (canonical, intent) pair ALL captured at creation. A loop iterates the entries
  * {@link EndpointStickiness.attempts} returns and, on the entry it actually ran,
@@ -91,24 +97,72 @@ export class EndpointStickiness {
 
   /**
    * Build the preferred-first list of BOUND {@link StickyAttempt}s for `intent`
-   * over `canonical`. `order()` runs EXACTLY once here (it may re-arm the TTL
-   * re-probe — it must not run twice per loop entry); each entry captures its own
+   * over `canonical`. `order()` runs EXACTLY once here; each entry captures its own
    * endpoint + position (triedFirst = index 0) + the SAME (canonical, intent), so
    * a loop records via the nullary `recordSuccess()`/`recordFailure()` on the entry
    * it ran and cannot drift the endpoint, index, canonical, or intent apart.
    *
-   * This is the SOLE public API for DRIVING a failover pass — `order`,
+   * Together with readAttempts this is the public API for DRIVING a failover pass — `order`,
    * `recordSuccess`, and `recordFailure` are `private` below precisely so the
    * mismatched hand-threaded path these entries prevent is not merely discouraged
    * but unavailable. (`hasPreference` stays public as a read-only introspection
    * helper; it can't cause drift.)
    */
-  attempts<T extends StickyEndpoint>(canonical: T[], intent: StickinessIntent): StickyAttempt<T>[] {
+  attempts<T extends StickyEndpoint>(canonical: T[], intent: WriteStickinessIntent): StickyAttempt<T>[] {
     return this.order(canonical, intent).map((endpoint, i) => ({
       endpoint,
       recordSuccess: () => this.recordSuccess(endpoint, canonical, intent, i === 0),
       recordFailure: () => this.recordFailure(endpoint, intent),
     }));
+  }
+
+  /**
+   * Own the complete read plan before binding any outcome recorders. Ordinary
+   * attempts retain their position in the stickiness order. When that order's
+   * first endpoint refused this read, other endpoints explicitly substitute for
+   * it and update refusal memory alone: a skipped preference was not disproven.
+   * Refusers stay in the pass, last; if all refused, the ordinary order remains.
+   */
+  readAttempts<T extends StickyEndpoint>(
+    canonical: T[], intent: ReadStickinessIntent,
+    read: { label: string; memory: EndpointReadRefusals },
+  ): ReadAttempt<T>[] {
+    const remember = intent !== 'transparentRead' && this.cfg.isEnabled();
+    const ordered = this.order(canonical, intent);
+    let plan = ordered.map((endpoint, index) => ({ endpoint, index, kind: 'ordinary' as 'ordinary' | 'substitute' }));
+    if (remember) {
+      const { refusing, servedInstead } = read.memory.constraints(read.label, ordered.map(e => e.rpcUrl));
+      if (refusing.size > 0 && refusing.size < ordered.length) {
+        const refused = plan.filter(attempt => refusing.has(attempt.endpoint.rpcUrl));
+        const others = plan.filter(attempt => !refusing.has(attempt.endpoint.rpcUrl));
+        if (refusing.has(ordered[0].rpcUrl)) {
+          const first = others.find(attempt => attempt.endpoint.rpcUrl === servedInstead);
+          const substitutes = first ? [first, ...others.filter(attempt => attempt !== first)] : others;
+          plan = [...substitutes.map(attempt => ({ ...attempt, kind: 'substitute' as const })), ...refused];
+        } else plan = [...others, ...refused];
+      }
+    }
+    return plan.map(({ endpoint, index, kind }) => ({
+      endpoint, kind,
+      recordStart: () => this.recordReadStart(endpoint, canonical, intent),
+      recordSuccess: () => {
+        if (remember) read.memory.recordSuccess(read.label, endpoint.rpcUrl, kind);
+        if (kind === 'ordinary') this.recordSuccess(endpoint, canonical, intent, index === 0);
+      },
+      recordFailure: error => {
+        if (remember) read.memory.recordFailure(read.label, endpoint.rpcUrl, error, kind);
+        if (kind === 'ordinary') this.recordFailure(endpoint, intent);
+      },
+    }));
+  }
+
+  /** Consume a due re-probe only at the actual primary transport boundary. */
+  private recordReadStart<T extends StickyEndpoint>(endpoint: T, canonical: T[], intent: ReadStickinessIntent): void {
+    if (intent !== 'stickyRead' || !this.cfg.isEnabled() || this.state.kind !== 'preferred') return;
+    if (endpoint.rpcUrl !== canonical[0]?.rpcUrl || this.state.url === endpoint.rpcUrl) return;
+    if (this.cfg.now() >= this.state.primaryProbeDueAt) {
+      this.state = { ...this.state, primaryProbeDueAt: this.cfg.now() + this.cfg.ttlMs };
+    }
   }
 
   /**
@@ -119,7 +173,7 @@ export class EndpointStickiness {
    * still visits every endpoint exactly once). A `transparentRead` always uses
    * canonical; a `nonceWrite` uses canonical unless the preference is WRITE-proven.
    * When the re-probe deadline has passed this op probes the primary first AND
-   * re-arms the deadline `+ttlMs` (at most one primary re-stall per TTL).
+   * leaves re-arming to the actual primary transport boundary.
    */
   private order<T extends StickyEndpoint>(canonical: T[], intent: StickinessIntent): T[] {
     if (intent === 'transparentRead' || !this.cfg.isEnabled() || this.state.kind !== 'preferred') {
@@ -146,9 +200,7 @@ export class EndpointStickiness {
     // re-probe CLEARS the preference on primary recovery (or the backend fails, see
     // recordFailure).
     if (intent === 'stickyRead' && this.cfg.now() >= pref.primaryProbeDueAt) {
-      // Re-probe the configured primary this op; schedule the next re-probe one TTL
-      // out so we don't re-stall on it again until then.
-      this.state = { ...pref, primaryProbeDueAt: this.cfg.now() + this.cfg.ttlMs };
+      // A due re-probe is only a plan until the primary is actually attempted.
       return canonical;
     }
     const reordered = canonical.slice();
@@ -170,8 +222,10 @@ export class EndpointStickiness {
    *     reaching the primary as a fallback doesn't advance the nonce, and
    *     downgrading could break a legitimate read-your-write allowance re-read).
    *   - a backend succeeded → establish (arm the deadline + fire `onEstablished`)
-   *     or silently re-point; `source` = 'write' for a populate, else 'read'. A
-   *     later populate on the SAME preferred upgrades 'read'→'write'.
+   *     or silently re-point; `source` = 'write' for a populate or accepted
+   *     broadcast, else 'read'. Either write on the SAME preferred upgrades
+   *     'read'→'write'. Exact broadcast acceptance proves that endpoint's pending
+   *     nonce advanced, so the next populate must stay on it.
    */
   private recordSuccess<T extends StickyEndpoint>(
     endpoint: T,
@@ -181,12 +235,12 @@ export class EndpointStickiness {
   ): void {
     if (intent === 'transparentRead' || !this.cfg.isEnabled()) return;
     const primaryUrl = canonical[0]?.rpcUrl;
-    const isPopulate = intent === 'nonceWrite';
-    const isWriteOp = intent === 'nonceWrite' || intent === 'write';
+    const provesWrite = intent === 'nonceWrite' || intent === 'write';
+    const mayInvalidateWrite = intent === 'write' || intent === 'receiptRead';
     if (endpoint.rpcUrl === primaryUrl) {
       if (triedFirst) {
         this.state = { kind: 'none' };
-      } else if (isWriteOp && this.state.kind === 'preferred' && this.state.source === 'write') {
+      } else if (mayInvalidateWrite && this.state.kind === 'preferred' && this.state.source === 'write') {
         this.state = { ...this.state, source: 'read' };
       }
       return;
@@ -195,7 +249,7 @@ export class EndpointStickiness {
       this.state = {
         kind: 'preferred',
         url: endpoint.rpcUrl,
-        source: isPopulate ? 'write' : 'read',
+        source: provesWrite ? 'write' : 'read',
         primaryProbeDueAt: this.cfg.now() + this.cfg.ttlMs,
       };
       this.cfg.onEstablished?.(endpoint.rpcUrl);
@@ -210,9 +264,9 @@ export class EndpointStickiness {
       const primaryProbeDueAt = this.cfg.now() >= this.state.primaryProbeDueAt
         ? this.cfg.now() + this.cfg.ttlMs
         : this.state.primaryProbeDueAt;
-      this.state = { ...this.state, url: endpoint.rpcUrl, source: isPopulate ? 'write' : 'read', primaryProbeDueAt };
-    } else if (isPopulate && this.state.source !== 'write') {
-      // Same preferred backend, now PROVEN nonce-safe by a populate → upgrade.
+      this.state = { ...this.state, url: endpoint.rpcUrl, source: provesWrite ? 'write' : 'read', primaryProbeDueAt };
+    } else if (provesWrite && this.state.source !== 'write') {
+      // Same preferred backend, now PROVEN nonce-safe by a populate or accepted broadcast → upgrade.
       // Never DOWNGRADE on a read (a read hitting the write-proven backend doesn't
       // un-prove its nonce view).
       this.state = { ...this.state, source: 'write' };

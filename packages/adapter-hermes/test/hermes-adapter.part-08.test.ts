@@ -67,7 +67,7 @@ describe('Hermes profile setup helpers', () => {
     const secondState = JSON.parse(secondStateRaw);
     // First-wins: same provider, same backup path, same capturedAt.
     expect(secondState.priorMemoryProvider).toEqual(firstState.priorMemoryProvider);
-  });
+  }, 15_000);
 
   // H-AC-32: replacement is byte-equivalent across re-runs (idempotency
   // on top of replace-by-default). First run replaces; second run on

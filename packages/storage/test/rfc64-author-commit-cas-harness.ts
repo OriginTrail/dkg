@@ -1,0 +1,143 @@
+import type {
+  Quad,
+  Rfc64AuthorCommitCasLegacyInputV1,
+  Rfc64AuthorCommitCasSemanticInputV1,
+  TripleStore,
+} from '../src/index.js';
+
+export const PROJECTION_GRAPH = 'did:dkg:context-graph:rfc64/_shared_memory';
+export const SEAL_GRAPH = 'urn:test:rfc64:seals';
+export const HEAD_GRAPH = 'urn:test:rfc64:heads';
+export const STATE_GRAPH = 'urn:test:rfc64:state';
+export const OTHER_GRAPH = 'urn:test:rfc64:unrelated';
+export const AUTHOR = 'urn:test:rfc64:author:alice';
+export const SEAL = 'urn:test:rfc64:seal:alice';
+export const MUTATION = 'urn:test:rfc64:mutation:subgraph';
+export const CG_MUTATION = 'urn:test:rfc64:mutation:context-graph';
+export const APPLIED_SET = 'urn:test:rfc64:applied-set';
+export const INVALIDATED_SEAL = 'urn:test:rfc64:seal:stale';
+export const P_VALUE = 'urn:test:rfc64:value';
+export const P_HEAD = 'urn:test:rfc64:current-head';
+export const P_GENERATION = 'urn:test:rfc64:generation';
+export const P_APPLIED = 'urn:test:rfc64:applied';
+export const OLD_HEAD = 'urn:test:rfc64:catalog:old';
+export const NEW_HEAD = 'urn:test:rfc64:catalog:new';
+
+export function quad(subject: string, predicate: string, object: string, graph: string): Quad {
+  return { subject, predicate, object, graph };
+}
+
+export function authorCommitInput(
+  overrides: Partial<Rfc64AuthorCommitCasSemanticInputV1> = {},
+): Rfc64AuthorCommitCasSemanticInputV1 {
+  return {
+    sharedProjectionGraph: PROJECTION_GRAPH,
+    sharedProjectionQuads: [
+      quad('urn:test:rfc64:new:1', P_VALUE, '"new-1"', PROJECTION_GRAPH),
+      quad('urn:test:rfc64:new:2', P_VALUE, '"new-2"', PROJECTION_GRAPH),
+    ],
+    authorSealGraph: SEAL_GRAPH,
+    authorSealSubject: SEAL,
+    authorSealQuads: [quad(SEAL, P_VALUE, '"new-seal"', SEAL_GRAPH)],
+    currentHead: {
+      graphUri: HEAD_GRAPH,
+      subject: AUTHOR,
+      predicate: P_HEAD,
+      expectedObject: OLD_HEAD,
+      expectedQuads: [quad(AUTHOR, P_HEAD, OLD_HEAD, HEAD_GRAPH)],
+      quads: [quad(AUTHOR, P_HEAD, NEW_HEAD, HEAD_GRAPH)],
+    },
+    subgraphMutationGeneration: {
+      graphUri: STATE_GRAPH,
+      subject: MUTATION,
+      predicate: P_GENERATION,
+      expectedObject: '"1"',
+      expectedQuads: [quad(MUTATION, P_GENERATION, '"1"', STATE_GRAPH)],
+      quads: [quad(MUTATION, P_GENERATION, '"2"', STATE_GRAPH)],
+    },
+    contextGraphMutationGeneration: {
+      graphUri: STATE_GRAPH,
+      subject: CG_MUTATION,
+      predicate: P_GENERATION,
+      expectedObject: '"10"',
+      expectedQuads: [quad(CG_MUTATION, P_GENERATION, '"10"', STATE_GRAPH)],
+      quads: [quad(CG_MUTATION, P_GENERATION, '"11"', STATE_GRAPH)],
+    },
+    appliedSet: {
+      graphUri: STATE_GRAPH,
+      subject: APPLIED_SET,
+      predicate: P_APPLIED,
+      expectedObject: OLD_HEAD,
+      expectedQuads: [quad(APPLIED_SET, P_APPLIED, OLD_HEAD, STATE_GRAPH)],
+      quads: [quad(APPLIED_SET, P_APPLIED, NEW_HEAD, STATE_GRAPH)],
+    },
+    ...overrides,
+  };
+}
+
+export function legacyAuthorCommitInput(): Rfc64AuthorCommitCasLegacyInputV1 {
+  const current = authorCommitInput();
+  const kaStateSubject = 'urn:test:rfc64:ka-state';
+  return {
+    sharedProjectionGraph: current.sharedProjectionGraph,
+    sharedProjectionQuads: current.sharedProjectionQuads,
+    authorSealGraph: current.authorSealGraph,
+    authorSealSubject: current.authorSealSubject,
+    authorSealQuads: current.authorSealQuads,
+    currentHeadGraph: current.currentHead.graphUri,
+    currentHeadSubject: current.currentHead.subject,
+    currentHeadPredicate: current.currentHead.predicate,
+    expectedCurrentHeadObject: current.currentHead.expectedObject,
+    nextCurrentHeadObject: current.currentHead.quads[0]!.object,
+    kaStateDigest: {
+      graphUri: STATE_GRAPH,
+      subject: kaStateSubject,
+      predicate: P_VALUE,
+      expectedObject: '"old-ka-state"',
+      quads: [quad(kaStateSubject, P_VALUE, '"new-ka-state"', STATE_GRAPH)],
+    },
+    subgraphMutationGeneration: current.subgraphMutationGeneration,
+    contextGraphMutationGeneration: current.contextGraphMutationGeneration,
+    appliedSet: current.appliedSet,
+    sealInvalidations: [{
+      graphUri: SEAL_GRAPH,
+      subject: INVALIDATED_SEAL,
+      quads: [],
+    }],
+  };
+}
+
+export async function seedOldState(store: TripleStore): Promise<void> {
+  await store.insert([
+    quad('urn:test:rfc64:old', P_VALUE, '"old"', PROJECTION_GRAPH),
+    quad(SEAL, P_VALUE, '"old-seal"', SEAL_GRAPH),
+    quad(AUTHOR, P_HEAD, OLD_HEAD, HEAD_GRAPH),
+    quad(MUTATION, P_GENERATION, '"1"', STATE_GRAPH),
+    quad(CG_MUTATION, P_GENERATION, '"10"', STATE_GRAPH),
+    quad(APPLIED_SET, P_APPLIED, OLD_HEAD, STATE_GRAPH),
+    quad('urn:test:rfc64:keep', P_VALUE, '"keep"', OTHER_GRAPH),
+  ]);
+}
+
+export async function objectFor(
+  store: TripleStore,
+  graph: string,
+  subject: string,
+  predicate: string,
+): Promise<string | undefined> {
+  const result = await store.query(
+    `SELECT ?o WHERE { GRAPH <${graph}> { <${subject}> <${predicate}> ?o } }`,
+  );
+  if (result.type !== 'bindings') throw new Error('expected bindings result');
+  return result.bindings[0]?.o;
+}
+
+export function overrideStore(base: TripleStore, overrides: Partial<TripleStore>): TripleStore {
+  return new Proxy(base, {
+    get(target, prop) {
+      if (prop in overrides) return (overrides as Record<string | symbol, unknown>)[prop];
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as TripleStore;
+}

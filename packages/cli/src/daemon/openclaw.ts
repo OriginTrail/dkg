@@ -8,7 +8,6 @@
 // `pendingOpenClawUiAttachJobs` is module-private working memory
 // and is intentionally not exported.
 
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join, resolve } from 'node:path';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
@@ -19,6 +18,8 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 
+import { buildOpenClawChannelHeaders } from './openclaw-channel-headers.js';
+export { buildOpenClawChannelHeaders, isOpenClawLoopbackUrl } from './openclaw-channel-headers.js';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   contextGraphAssertionUri,
@@ -48,6 +49,22 @@ import {
   getStoredLocalAgentIntegrations,
   getLocalAgentIntegration,
 } from './local-agents.js';
+
+export {
+  pipeLocalAgentSseStream,
+  pipeOpenClawStream,
+  writeLocalAgentSseChunk,
+  writeOpenClawStreamChunk,
+  type LocalAgentSseReader,
+  type LocalAgentSseRequest,
+  type LocalAgentSseResponse,
+  type LocalAgentSseFrame,
+  type LocalAgentSseFrameAction,
+  type LocalAgentSseStreamResult,
+  type OpenClawStreamReader,
+  type OpenClawStreamRequest,
+  type OpenClawStreamResponse,
+} from './local-agent-sse.js';
 
 const daemonRequire = createRequire(import.meta.url);
 const execFileAsync = promisify(execFile);
@@ -316,7 +333,7 @@ export async function probeOpenClawChannelHealth(
 
     try {
       const healthRes = await fetch(target.healthUrl, {
-        headers: buildOpenClawChannelHeaders(target, bridgeAuthToken, { Accept: 'application/json' }),
+        headers: buildOpenClawChannelHeaders(target, bridgeAuthToken, target.healthUrl, { Accept: 'application/json' }),
         signal: AbortSignal.timeout(timeoutMs),
       });
       const body = await healthRes.text().catch(() => '');
@@ -495,15 +512,6 @@ export function shouldTryNextOpenClawTarget(status: number): boolean {
   return status === 404 || status === 405 || status === 501 || status === 503;
 }
 
-export function buildOpenClawChannelHeaders(
-  target: OpenClawChannelTarget,
-  bridgeAuthToken: string | undefined,
-  baseHeaders: Record<string, string> = {},
-): Record<string, string> {
-  if (target.name !== "bridge" || !bridgeAuthToken) return baseHeaders;
-  return { ...baseHeaders, "x-dkg-bridge-token": bridgeAuthToken };
-}
-
 export async function ensureOpenClawBridgeAvailable(
   target: OpenClawChannelTarget,
   bridgeAuthToken: string | undefined,
@@ -536,7 +544,7 @@ export async function ensureOpenClawBridgeAvailable(
 
   try {
     const healthRes = await fetch(target.healthUrl, {
-      headers: buildOpenClawChannelHeaders(target, bridgeAuthToken, {
+      headers: buildOpenClawChannelHeaders(target, bridgeAuthToken, target.healthUrl, {
         Accept: "application/json",
       }),
       signal: AbortSignal.timeout(3_000),
@@ -561,78 +569,6 @@ export async function ensureOpenClawBridgeAvailable(
         : err.message,
       offline: true,
     };
-  }
-}
-
-export type OpenClawStreamRequest = Pick<IncomingMessage, "on">;
-export type OpenClawStreamResponse = Pick<
-  ServerResponse,
-  "on" | "off" | "writeHead" | "write" | "end" | "writableEnded"
->;
-export type OpenClawStreamReader = {
-  read: () => Promise<{ done: boolean; value?: Uint8Array }>;
-  cancel: () => Promise<unknown>;
-  releaseLock: () => void;
-};
-
-export async function writeOpenClawStreamChunk(
-  res: OpenClawStreamResponse,
-  chunk: Uint8Array,
-): Promise<void> {
-  if (res.write(chunk)) return;
-  await new Promise<void>((resolve, reject) => {
-    const cleanup = () => {
-      res.off("drain", onDrain);
-      res.off("close", onClose);
-      res.off("error", onError);
-    };
-    const onDrain = () => {
-      cleanup();
-      resolve();
-    };
-    const onClose = () => {
-      cleanup();
-      resolve();
-    };
-    const onError = (err: unknown) => {
-      cleanup();
-      reject(err);
-    };
-    res.on("drain", onDrain);
-    res.on("close", onClose);
-    res.on("error", onError);
-  });
-}
-
-export async function pipeOpenClawStream(
-  req: OpenClawStreamRequest,
-  res: OpenClawStreamResponse,
-  reader: OpenClawStreamReader,
-): Promise<void> {
-  let clientGone = false;
-  const cancelUpstream = () => {
-    if (clientGone) return;
-    clientGone = true;
-    void reader.cancel().catch(() => {});
-  };
-
-  req.on("aborted", cancelUpstream);
-  res.on("close", () => {
-    if (!res.writableEnded) cancelUpstream();
-  });
-  res.on("error", cancelUpstream);
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done || clientGone) break;
-      if (value !== undefined) {
-        await writeOpenClawStreamChunk(res, value);
-        if (clientGone) break;
-      }
-    }
-  } finally {
-    reader.releaseLock();
   }
 }
 
@@ -1586,4 +1522,3 @@ export function buildOpenClawAttachmentImportContextEntries(
     };
   });
 }
-

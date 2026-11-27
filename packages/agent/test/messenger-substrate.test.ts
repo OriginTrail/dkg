@@ -6,7 +6,6 @@ import {
   encodeReliableEnvelope,
   RELIABLE_ENVELOPE_VERSION,
   RESPONSE_GONE_MARKER,
-  type LegacyProtocolOutboxStore,
   type ProtocolRouter,
   type StreamHandler,
 } from '@origintrail-official/dkg-core';
@@ -58,7 +57,12 @@ const FIXED_MSG_ID = '00000000-0000-4000-8000-000000000001';
 
 interface RouterDouble {
   send: ReturnType<typeof recorder<[string, string, Uint8Array, ...unknown[]], Promise<Uint8Array>>>;
-  register: ReturnType<typeof recorder<[string, StreamHandler], void>>;
+  register: ReturnType<
+    typeof recorder<
+      [string, StreamHandler, { maxReadBytes: number }?],
+      void
+    >
+  >;
   /** Inbound stream handler captured from `register` for tests that invoke it. */
   inboundHandler?: StreamHandler;
 }
@@ -71,7 +75,11 @@ function makeRouter(
       ...args: [string, string, Uint8Array, ...unknown[]]
     ) => Promise<Uint8Array>,
   );
-  const register = recorder((_protocol: string, handler: StreamHandler): void => {
+  const register = recorder((
+    _protocol: string,
+    handler: StreamHandler,
+    _options?: { maxReadBytes: number },
+  ): void => {
     router.inboundHandler = handler;
   });
   const router: RouterDouble = { send, register };
@@ -102,9 +110,9 @@ function makeSubstrate(overrides: {
 }
 
 describe('Messenger.sendReliable (happy path semantics)', () => {
-  it('accepts a legacy custom outbox store with pendingFor but no hasPendingFor', async () => {
+  it('rejects a custom store missing boolean peer presence before accepting reliable sends', () => {
     const backing = new InMemoryProtocolOutboxStore({ backoffs: [10], maxAgeMs: 60_000 });
-    const legacyStore: LegacyProtocolOutboxStore = {
+    const legacyStore = {
       enqueue: backing.enqueue.bind(backing),
       markDelivered: backing.markDelivered.bind(backing),
       hasEntry: backing.hasEntry.bind(backing),
@@ -114,23 +122,22 @@ describe('Messenger.sendReliable (happy path semantics)', () => {
       size: backing.size.bind(backing),
       list: backing.list.bind(backing),
       getEntry: backing.getEntry.bind(backing),
+      readDuePage: backing.readDuePage.bind(backing),
+      listMetadata: backing.listMetadata.bind(backing),
+      dropExpiredMetadata: backing.dropExpiredMetadata.bind(backing),
+      recordRetryFailure: backing.recordRetryFailure.bind(backing),
+      queueStats: backing.queueStats.bind(backing),
     };
     const router = makeRouter(async () => new Uint8Array([0x42]));
-    const messenger = new Messenger({
+    expect(() => new Messenger({
       router: router as unknown as ProtocolRouter,
       idempotencyStore: new InMemoryMessageIdempotencyStore(),
+      // @ts-expect-error Messenger requires the complete bounded store contract.
       outboxStore: legacyStore,
       backoffs: [10],
       maxAgeMs: 60_000,
-    });
-
-    const result = await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
-      messageId: FIXED_MSG_ID,
-    });
-
-    expect(result.delivered).toBe(true);
-    expect(router.send.calls).toHaveLength(1);
-    expect(legacyStore.pendingFor(PEER_A)).toEqual([]);
+    })).toThrow('hasPendingFor');
+    expect(router.send.calls).toHaveLength(0);
   });
 
   it('envelope-wraps the payload before calling router.send', async () => {
@@ -178,6 +185,28 @@ describe('Messenger.sendReliable (happy path semantics)', () => {
     expect(check.seen && Array.from(check.cachedResponse ?? [])).toEqual([0x42]);
   });
 
+  it('queues a protocol-invalid response and validates it again before retry completion', async () => {
+    let valid = false;
+    const router = makeRouter(async () => valid ? new Uint8Array([0x42]) : new Uint8Array());
+    const { messenger, idempotencyStore, outboxStore, clock } = makeSubstrate({ router });
+    messenger.setResponseAcceptanceValidator(PROTO, (response) => response.byteLength > 0);
+
+    const first = await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
+      messageId: FIXED_MSG_ID,
+    });
+
+    expect(first).toMatchObject({ delivered: false, queued: true });
+    expect(outboxStore.size()).toBe(1);
+    expect(idempotencyStore.check(PEER_A, PROTO, FIXED_MSG_ID, 'out').seen).toBe(false);
+
+    valid = true;
+    await messenger.processOutboxTick(clock() + 100);
+
+    expect(router.send.calls).toHaveLength(2);
+    expect(outboxStore.size()).toBe(0);
+    expect(idempotencyStore.check(PEER_A, PROTO, FIXED_MSG_ID, 'out').seen).toBe(true);
+  });
+
   it('generates a UUID when no messageId is supplied', async () => {
     const { messenger } = makeSubstrate();
     const result = await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]));
@@ -186,6 +215,59 @@ describe('Messenger.sendReliable (happy path semantics)', () => {
 });
 
 describe('Messenger.sendRequestOwned', () => {
+  it('can decline post-failure discovery for a one-shot caller-owned read', async () => {
+    const router = makeRouter(async () => { throw new Error('no valid addresses for peer'); });
+    const resolvePeer = recorder(async (_peer: string, _options: { signal: AbortSignal }) => {});
+    const { messenger, outboxStore } = makeSubstrate({ router, resolvePeer });
+    await expect(messenger.sendRequestOwned(PEER_A, PROTO, new Uint8Array([1]), {
+      recoverPeerAfterFailure: false,
+    })).rejects.toThrow('no valid addresses for peer');
+    expect(resolvePeer.calls).toHaveLength(0);
+    expect(outboxStore.size()).toBe(0);
+  });
+
+  it('does not send a request whose caller has already ended', async () => {
+    const { messenger, router, outboxStore } = makeSubstrate();
+    await expect(messenger.sendRequestOwned(PEER_A, PROTO, new Uint8Array([1]), {
+      signal: AbortSignal.abort(new Error('caller ended')),
+    })).rejects.toThrow('caller ended');
+    expect(router.send.calls).toHaveLength(0);
+    expect(outboxStore.size()).toBe(0);
+  });
+
+  it('propagates the caller signal and response bound to the transport without queueing', async () => {
+    const controller = new AbortController();
+    const router = makeRouter(async (_peer, _protocol, _payload, options) => {
+      const signal = (options as { signal?: AbortSignal })?.signal;
+      if (!signal) return new Uint8Array([1]);
+      return new Promise<Uint8Array>((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    });
+    const { messenger, outboxStore } = makeSubstrate({ router });
+    const sent = messenger.sendRequestOwned(PEER_A, PROTO, new Uint8Array([1]), {
+      signal: controller.signal, timeoutMs: 500, maxReadBytes: 1024,
+    });
+    controller.abort(new Error('caller ended'));
+    await expect(sent).rejects.toThrow('caller ended');
+    expect(router.send.calls[0][3]).toMatchObject({ signal: controller.signal, timeoutMs: 500, maxReadBytes: 1024 });
+    expect(outboxStore.size()).toBe(0);
+  });
+
+  it('does not cache or return a response that arrives after cancellation', async () => {
+    const controller = new AbortController();
+    const router = makeRouter(async () => {
+      controller.abort(new Error('caller ended'));
+      return new Uint8Array([1]);
+    });
+    const { messenger, idempotencyStore, outboxStore } = makeSubstrate({ router });
+    await expect(messenger.sendRequestOwned(PEER_A, PROTO, new Uint8Array([1]), {
+      messageId: FIXED_MSG_ID, signal: controller.signal,
+    })).rejects.toThrow('caller ended');
+    expect(idempotencyStore.check(PEER_A, PROTO, FIXED_MSG_ID, 'out').seen).toBe(false);
+    expect(outboxStore.size()).toBe(0);
+  });
+
   it('keeps reliable framing but does not persist recoverable failures', async () => {
     const router = makeRouter(async () => {
       throw new Error('no valid addresses for peer');
@@ -401,12 +483,26 @@ describe('Messenger.sendReliable (failure / outbox)', () => {
     const second = await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
       messageId: FIXED_MSG_ID,
     });
-    expect(second.queued).toBe(true);
+    expect(second).toMatchObject({ delivered: false, queued: true });
     expect(second.attempts).toBe(2);
   });
 });
 
 describe('Messenger.register (receiver-side idempotency)', () => {
+  it('forwards a reliable-envelope wire cap to the protocol router', () => {
+    const { messenger, router } = makeSubstrate();
+
+    messenger.register(PROTO, async () => new Uint8Array([0xaa]), {
+      maxWireBytes: 80 * 1024,
+    });
+
+    expect(router.register.calls.at(-1)).toEqual([
+      PROTO,
+      expect.any(Function),
+      { maxReadBytes: 80 * 1024 },
+    ]);
+  });
+
   it('decodes the envelope and invokes the handler with the inner payload', async () => {
     const { messenger, router } = makeSubstrate();
     const handler = recorder(async (req: Uint8Array, _peer: string) => {
@@ -533,6 +629,45 @@ describe('Messenger.processOutboxTick (retry loop semantics)', () => {
 
     await messenger.processOutboxTick(clock() + 100);
     expect(outboxStore.size()).toBe(0);
+  });
+
+  it('keeps a delivered retry queued until its response handler succeeds', async () => {
+    const payload = new Uint8Array([0x11, 0x22]);
+    const response = new Uint8Array([0x42]);
+    let wireAvailable = false;
+    let reconcileAvailable = false;
+    const router = makeRouter(async () => {
+      if (!wireAvailable) throw new Error('no valid addresses for peer');
+      return response;
+    });
+    const { messenger, outboxStore, idempotencyStore, clock } = makeSubstrate({ router });
+    const handled: Array<{ request: number[]; response: number[] }> = [];
+    messenger.setOutboxResponseHandler(PROTO, async (result) => {
+      handled.push({
+        request: Array.from(result.requestPayload),
+        response: Array.from(result.response),
+      });
+      if (!reconcileAvailable) throw new Error('state store unavailable');
+    });
+
+    await messenger.sendReliable(PEER_A, PROTO, payload, {
+      messageId: FIXED_MSG_ID,
+    });
+    expect(outboxStore.size()).toBe(1);
+
+    wireAvailable = true;
+    await messenger.processOutboxTick(clock() + 100);
+    expect(outboxStore.size()).toBe(1);
+    expect(idempotencyStore.check(PEER_A, PROTO, FIXED_MSG_ID, 'out').seen).toBe(false);
+
+    reconcileAvailable = true;
+    await messenger.processOutboxTick(clock() + 200);
+    expect(outboxStore.size()).toBe(0);
+    expect(idempotencyStore.check(PEER_A, PROTO, FIXED_MSG_ID, 'out').seen).toBe(true);
+    expect(handled).toEqual([
+      { request: [0x11, 0x22], response: [0x42] },
+      { request: [0x11, 0x22], response: [0x42] },
+    ]);
   });
 
   it('honours the stale-snapshot guard (rc.9 #538) — markDelivered in between aborts the retry', async () => {
@@ -830,7 +965,7 @@ describe('Messenger.getSloStats (SLO histogram)', () => {
       // Caller still sees a successful response with the sentinel
       // bytes — only the metric is adjusted.
       expect(result.delivered).toBe(true);
-      expect(Array.from(result.response ?? [])).toEqual([0x01]);
+      expect(result).toMatchObject({ delivered: true, response: new Uint8Array([0x01]) });
 
       const stats = messenger.getSloStats();
       // No SLO entry at all because nothing successfully delivered
@@ -1001,7 +1136,7 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
       const result = await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
         messageId: FIXED_MSG_ID,
       });
-      expect(result.queued).toBe(true);
+      expect(result).toMatchObject({ delivered: false, queued: true });
       advance(1000);
     }
 
@@ -1027,7 +1162,7 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
       const result = await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
         messageId: FIXED_MSG_ID,
       });
-      expect(result.queued).toBe(true);
+      expect(result).toMatchObject({ delivered: false, queued: true });
       advance(1000);
     }
 
@@ -1183,5 +1318,46 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
     await messenger.processOutboxTick(20_000_000_000_000);
 
     expect(resolvePeer.calls).toHaveLength(1);
+  });
+
+  it('does not schedule peer recovery when a concurrent delivery removes the retry row', async () => {
+    let markSendStarted!: () => void;
+    let rejectSend!: (error: Error) => void;
+    const sendStarted = new Promise<void>(resolve => { markSendStarted = resolve; });
+    const router = makeRouter(async () => {
+      markSendStarted();
+      return new Promise<Uint8Array>((_resolve, reject) => { rejectSend = reject; });
+    });
+    const outboxStore = new InMemoryProtocolOutboxStore({ backoffs: [10] });
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      outboxStore.enqueue(
+        PEER_A,
+        PROTO,
+        FIXED_MSG_ID,
+        new Uint8Array([1]),
+        'no valid addresses for peer',
+        0,
+      );
+    }
+    const resolvePeer = recorder(
+      async (_peerId: string, _opts: { signal: AbortSignal }): Promise<void> => undefined,
+    );
+    const messenger = new Messenger({
+      router: router as unknown as ProtocolRouter,
+      idempotencyStore: new InMemoryMessageIdempotencyStore(),
+      outboxStore,
+      backoffs: [10],
+      clock: () => 10,
+      resolvePeer,
+    });
+
+    const retry = messenger.processOutboxTick(10);
+    await sendStarted;
+    expect(outboxStore.markDelivered(PEER_A, PROTO, FIXED_MSG_ID)).toBe(true);
+    rejectSend(new Error('no valid addresses for peer'));
+    await retry;
+
+    expect(outboxStore.size()).toBe(0);
+    expect(resolvePeer.calls).toEqual([]);
   });
 });

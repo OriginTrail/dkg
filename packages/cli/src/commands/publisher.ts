@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path';
 import { readFile, writeFile, unlink, appendFile } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { resolveRpcUrls } from '@origintrail-official/dkg-chain';
+import type { AsyncLiftRetryOutcome } from '@origintrail-official/dkg-publisher';
 import {
   dkgAuthTokenPath,
   FAUCET_WALLETS_PER_REQUEST,
@@ -30,8 +31,12 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
+import { assertNoDaemonForOfflineRead, assertNoDaemonForOfflineWrite } from '../offline-publisher-guard.js';
+import { parseJobListPagingOptions, readJobList, type JobListPage } from '../job-list-paging.js';
+import { normalizeContextGraphIdOrUri } from '../context-graph-identifiers.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { addFinalizedPublishOptions, parseFinalizedPublishOptions } from './finalized-publish-command-options.js';
+import { printAsyncJobFailure, printClearJobFailure } from './async-job-failure.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
@@ -173,7 +178,12 @@ publisherCmd
   .action(async (opts: ActionOpts) => {
     try {
       const config = await loadConfig();
+      // Spread first so the keys this command does NOT manage survive — notably
+      // the GH#2270 retry knobs (autoRetryEnabled, retryJitterRatio,
+      // retryBackoffBaseMs/MaxMs), which a wholesale replace would erase on the
+      // next `dkg publisher enable`. Mirrors `publisher disable` below.
       config.publisher = {
+        ...(config.publisher ?? {}),
         enabled: true,
         pollIntervalMs: parsePositiveMsOption(String(opts.pollInterval ?? '12000'), '--poll-interval'),
         errorBackoffMs: parsePositiveMsOption(String(opts.errorBackoff ?? '5000'), '--error-backoff'),
@@ -222,7 +232,7 @@ addFinalizedPublishOptions(publisherCmd
       console.log(`  Name:       ${name}`);
       console.log(`  Status:     ${result.status}`);
     } catch (err) {
-      console.error(toErrorMessage(err));
+      printAsyncJobFailure(err, 'publish');
       process.exit(1);
     }
   });
@@ -231,6 +241,10 @@ publisherCmd
   .command('jobs')
   .description('List async publisher jobs')
   .option('--status <value>', 'Filter by status')
+  .option('--context-graph <id>', 'Context graph to list (required for agent tokens)')
+  .option('--cursor <cursor>', 'Print one page, the one after this cursor (the "nextCursor" of an earlier page)')
+  .option('--page-size <n>', 'Print one page of this many jobs (1-1000, 100 by default); with --all, jobs per request')
+  .option('--all', 'Page through to the end and print every job, in acceptance order')
   .action(async (opts: ActionOpts) => {
     try {
       const status = opts.status ? String(opts.status) : undefined;
@@ -239,23 +253,39 @@ publisherCmd
         process.exit(1);
       }
 
-      let jobs: any[];
+      const contextGraphId = opts.contextGraph ? String(opts.contextGraph) : undefined;
+      const paging = parseJobListPagingOptions(opts);
+      let result: JobListPage<any>;
       try {
         const client = await ApiClient.connect();
-        const result = await client.publisherJobs(status);
-        jobs = result.jobs;
+        result = await readJobList(
+          paging,
+          () => client.publisherJobs(status, contextGraphId),
+          (cursor, pageSize) => client.publisherJobs(status, contextGraphId, { cursor, pageSize }),
+        );
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
+        await assertNoDaemonForOfflineRead('jobs');
         const config = await loadConfig();
         const { createPublisherInspector } = await import('../publisher-runner.js');
-        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config, readOnly: true });
         try {
-          jobs = await inspector.publisher.list(status ? { status: status as any } : undefined);
+          const filter = {
+            ...(status ? { status: status as any } : {}),
+            ...(contextGraphId ? { contextGraphId: normalizeContextGraphIdOrUri(contextGraphId) } : {}),
+          };
+          result = await readJobList(
+            paging,
+            async () => ({ jobs: await inspector.publisher.list(filter) }),
+            (cursor, pageSize) => inspector.publisher.listPage({ ...filter, cursor, limit: pageSize }),
+          );
         } finally {
           await inspector.stop();
         }
       }
-      console.log(JSON.stringify(jobs.map(formatPublisherJobOutput), null, 2));
+      // One page also names where the next one starts; the complete list and `--all` stay the bare array they always were.
+      const jobs = result.jobs.map(formatPublisherJobOutput);
+      console.log(JSON.stringify(result.complete === undefined ? jobs : { jobs, nextCursor: result.nextCursor, complete: result.complete }, null, 2));
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -271,18 +301,23 @@ publisherCmd
       let result: any;
       try {
         const client = await ApiClient.connect();
+        // GH#2942 - the daemon derives `retryState` (why the job is not moving) beside the job;
+        // printing only the job dropped exactly the part an operator needs for a held one. It is
+        // a top-level key, so the job's own fields are untouched. The offline inspector below has
+        // no runtime wiring to derive it from, and says nothing rather than something misleading.
         if (opts.payload) {
           const resp = await client.publisherJobPayload(jobId);
-          result = { ...resp.job, payload: resp.payload };
+          result = { ...resp.job, payload: resp.payload, retryState: resp.retryState };
         } else {
           const resp = await client.publisherJob(jobId);
-          result = resp.job;
+          result = { ...resp.job, retryState: resp.retryState };
         }
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
+        await assertNoDaemonForOfflineRead('job');
         const config = await loadConfig();
         const { createPublisherInspector } = await import('../publisher-runner.js');
-        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config, readOnly: true });
         try {
           const job = await inspector.publisher.getStatus(jobId);
           if (!job) {
@@ -321,9 +356,10 @@ publisherCmd
         stats = await client.publisherStats();
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
+        await assertNoDaemonForOfflineRead('stats');
         const config = await loadConfig();
         const { createPublisherInspector } = await import('../publisher-runner.js');
-        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config, readOnly: true });
         try {
           stats = await inspector.publisher.getStats();
         } finally {
@@ -347,6 +383,7 @@ publisherCmd
         await client.publisherCancel(jobId);
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
+        await assertNoDaemonForOfflineWrite('cancel');
         const config = await loadConfig();
         const { createPublisherInspector } = await import('../publisher-runner.js');
         const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
@@ -374,25 +411,50 @@ publisherCmd
         console.error(`Invalid retry status: ${status}. Only "failed" is supported.`);
         process.exit(1);
       }
-      let count: number;
+      // GH#2270 — the full disposition of the pass. `retried` keeps its old sentence so
+      // existing operator habits (and scripts scraping it) still read; the other two say
+      // why the remaining failed jobs were left alone, which the old output hid entirely.
+      let outcome: AsyncLiftRetryOutcome;
       try {
         const client = await ApiClient.connect();
-        const result = await client.publisherRetry(status);
-        count = result.retried;
+        outcome = await client.publisherRetry(status);
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
+        await assertNoDaemonForOfflineWrite('retry');
         const config = await loadConfig();
         const { createPublisherInspector } = await import('../publisher-runner.js');
         const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
         try {
-          count = await inspector.publisher.retry({ status: 'failed' });
+          outcome = await inspector.publisher.retryDetailed({ status: 'failed' });
         } finally {
           await inspector.stop();
         }
       }
-      console.log(`Retried ${count} publisher job(s).`);
+      console.log(`Retried ${outcome.retried} publisher job(s).`);
+      console.log(
+        `Left failed: ${outcome.blockedPendingRecovery} awaiting chain proof `
+          + `(a transaction may exist), ${outcome.skipped} with nothing to retry `
+          + '(terminal failure or retry budget spent).',
+      );
     } catch (err) {
       console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+publisherCmd
+  .command('clear-job <job-id>')
+  .description('Remove one finished publisher job through the running daemon')
+  .option('--allow-pending-transaction', 'Abandon tracking of a pending transaction; check its outcome on chain first (does not cancel it)')
+  .action(async (jobId: string, opts: { allowPendingTransaction?: boolean }) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.publisherClearJob(jobId, {
+        allowPendingTransaction: opts.allowPendingTransaction === true,
+      });
+      console.log(`Publisher job ${result.jobId}: ${result.outcome}`);
+    } catch (err) {
+      printClearJobFailure(err);
       process.exit(1);
     }
   });
@@ -413,6 +475,7 @@ publisherCmd
         count = result.cleared;
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
+        await assertNoDaemonForOfflineWrite('clear');
         const config = await loadConfig();
         const { createPublisherInspector } = await import('../publisher-runner.js');
         const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });

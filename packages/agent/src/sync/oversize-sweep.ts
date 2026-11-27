@@ -35,7 +35,10 @@ import {
   DKG_RDF_LITERAL_SAFE_MUTF8_BYTES,
   rdfLiteralTermMutf8ByteLength,
 } from '@origintrail-official/dkg-core';
-import type { Quad } from '@origintrail-official/dkg-storage';
+import {
+  deleteByPatternWithoutCount,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 import type { OversizeDrop } from './oversize-filter.js';
 
 const SWEEP_MARKER = '.oversize-sweep-v1.done';
@@ -117,7 +120,7 @@ export async function runOversizeSweep(options: OversizeSweepOptions): Promise<O
         }
       }
       for (const offender of offenders) {
-        await store.deleteByPattern({
+        await deleteByPatternWithoutCount(store, {
           graph,
           subject: offender.quad.subject,
           predicate: offender.quad.predicate,

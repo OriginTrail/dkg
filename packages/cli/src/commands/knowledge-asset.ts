@@ -1,3 +1,4 @@
+import { parseExactPullSource } from '@origintrail-official/dkg-publisher';
 import { Command } from 'commander';
 import { toErrorMessage } from '@origintrail-official/dkg-core';
 import {
@@ -7,17 +8,18 @@ import {
   type KnowledgeAssetPublishResponse,
   type KnowledgeAssetShareJobState,
   type KnowledgeAssetShareResponse,
-  type KnowledgeAssetWritableQuad,
   type PreSignedAuthorAttestationPayload,
 } from '../api-client.js';
 import {
   formatQuadObject,
-  loadQuadsFromInput,
+  loadRdfFromInput,
   loadStructuredFile,
   type ActionOpts,
 } from '../cli-helpers.js';
 import { parseOptionalPositiveInteger } from '../cli-option-parsers.js';
+import { parseJobListPagingOptions, readJobList } from '../job-list-paging.js';
 import { addFinalizedPublishOptions, parseFinalizedPublishOptions } from './finalized-publish-command-options.js';
+import { printAsyncJobFailure, printClearJobFailure } from './async-job-failure.js';
 
 const SHARE_JOB_STATES: readonly KnowledgeAssetShareJobState[] = [
   'queued',
@@ -53,20 +55,8 @@ function hasQuadInput(opts: ActionOpts): boolean {
   );
 }
 
-async function loadWritableQuads(opts: ActionOpts): Promise<KnowledgeAssetWritableQuad[]> {
-  const quads = await loadQuadsFromInput(
-    {
-      ...opts,
-      file: inputFilePath(opts),
-    },
-    '',
-  );
-  return quads.map((quad) => ({
-    subject: quad.subject,
-    predicate: quad.predicate,
-    object: quad.object,
-    graph: quad.graph ?? '',
-  }));
+async function loadWritableInput(opts: ActionOpts) {
+  return loadRdfFromInput({ ...opts, file: inputFilePath(opts) }, '');
 }
 
 function parsePreSignedAuthorAttestation(raw: unknown): PreSignedAuthorAttestationPayload | undefined {
@@ -102,11 +92,6 @@ function parseFinalizeAuthorOptions(opts: ActionOpts): {
     ...(preSignedAuthorAttestation ? { preSignedAuthorAttestation } : {}),
     ...(schemeVersion !== undefined ? { schemeVersion } : {}),
   };
-}
-
-function parseShareEntities(opts: ActionOpts): string[] | undefined {
-  if (!opts.entity || opts.entity.length === 0) return undefined;
-  return opts.entity.map(String);
 }
 
 function parseShareJobStates(raw: unknown): KnowledgeAssetShareJobState[] | undefined {
@@ -164,6 +149,15 @@ function publishNextCommand(name: string, contextGraphId: string, opts: ActionOp
   return `dkg ka publish-async ${name} --context-graph-id ${contextGraphId}${subGraphName(opts) ? ` --sub-graph-name ${subGraphName(opts)}` : ''}`;
 }
 
+/** A committed share whose recovery job still owes its catalog handoff: name the job and how to follow it. */
+function printPendingCatalogHandoff(result: Pick<KnowledgeAssetShareResponse, 'catalogHandoff'>): void {
+  const handoff = result.catalogHandoff;
+  if (handoff?.state !== 'pending') return;
+  console.log(`  Catalog:        handoff pending (${handoff.reason})`);
+  console.log(`  Recovery job:   ${handoff.recoveryJobId}`);
+  console.log(`  Follow:         dkg ka share-job ${handoff.recoveryJobId}`);
+}
+
 function assertSharePromotedContent(result: KnowledgeAssetShareResponse, name: string, contextGraphId: string): void {
   assertNoLifecycleErrors(result, `Knowledge asset share completed partially for "${name}" in ${contextGraphId}`);
   if (result.swmShared !== true) {
@@ -182,7 +176,11 @@ function assertOneShotShareComplete(result: KnowledgeAssetCreateResponse, name: 
   }
 }
 
-function assertPublishComplete(result: KnowledgeAssetPublishResponse, name: string, contextGraphId: string): void {
+function assertPublishComplete(result: KnowledgeAssetPublishResponse, name: string, contextGraphId: string): asserts result is Extract<KnowledgeAssetPublishResponse, { catalogObligationPending?: false }> {
+  if (result.catalogObligationPending === true) {
+    console.log(JSON.stringify(result, null, 2));
+    throw new Error('Publication is confirmed but catalog observation is pending. Retain this response and retry its observation; do not republish');
+  }
   assertNoLifecycleErrors(result, `Knowledge asset VM publish completed partially for "${name}" in ${contextGraphId}`);
   if (result.error) {
     throw new Error(`Knowledge asset VM publish completed partially for "${name}" in ${contextGraphId}: ${result.error}`);
@@ -223,11 +221,14 @@ function formatLifecycleDetail(value: unknown): string {
   }
 }
 
-async function runAction(action: () => Promise<void>): Promise<void> {
+async function runAction(
+  action: () => Promise<void>,
+  printFailure: (err: unknown) => void = (err) => console.error(toErrorMessage(err)),
+): Promise<void> {
   try {
     await action();
   } catch (err) {
-    console.error(toErrorMessage(err));
+    printFailure(err);
     process.exit(1);
   }
 }
@@ -248,7 +249,14 @@ export function registerKnowledgeAssetCommand(program: Command): void {
   ))))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
       const contextGraphId = requiredContextGraphId(opts);
-      const quads = hasQuadInput(opts) ? await loadWritableQuads(opts) : undefined;
+      const input = hasQuadInput(opts) ? await loadWritableInput(opts) : undefined;
+      const quads = input?.quads;
+      if (opts.finalize !== false && input?.sourceKind === 'jsonld' && quads?.some((quad) => quad.graph !== '')) {
+        throw new Error(
+          'JSON-LD named graphs cannot be finalized yet. Use ka create --no-finalize to keep them in Working Memory, '
+          + 'or rewrite the document into the default graph before finalizing or sharing.',
+        );
+      }
       if (opts.share === true && (!quads || quads.length === 0 || opts.finalize === false)) {
         throw new Error('--share requires non-empty payload quads and finalize enabled');
       }
@@ -272,6 +280,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       if (result.assertionUri) console.log(`  Assertion URI:  ${result.assertionUri}`);
       if (result.merkleRoot) console.log(`  Merkle root:    ${result.merkleRoot}`);
       if (result.shareOperationId) console.log(`  Share op:       ${result.shareOperationId}`);
+      printPendingCatalogHandoff(result);
       if (opts.share === true && result.promotedCount === 0) {
         console.log('  Note:           No new triples promoted; the KA may already be shared.');
       }
@@ -284,7 +293,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
   )))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
       const contextGraphId = requiredContextGraphId(opts);
-      const quads = await loadWritableQuads(opts);
+      const { quads } = await loadWritableInput(opts);
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetWrite(contextGraphId, name, quads, {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
@@ -346,15 +355,15 @@ export function registerKnowledgeAssetCommand(program: Command): void {
   addFinalizeAuthorOptions(addSubGraphOption(addContextGraphOption(
     kaCmd
       .command('finalize <name>')
-      .description('Finalize/seal a Knowledge Asset from WM, or from SWM with --layer swm')
-      .option('--layer <layer>', 'Layer to finalize: wm or swm (default: wm)'),
+      .description('Finalize/seal a Knowledge Asset from WM')
+      .option('--layer <layer>', 'Deprecated compatibility option: wm (swm is read-only)'),
   )))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
+      const authorOptions = parseFinalizeAuthorOptions(opts);
       const layer = opts.layer === undefined ? undefined : String(opts.layer);
       if (layer !== undefined && layer !== 'wm' && layer !== 'swm') {
         throw new Error('--layer must be wm or swm');
       }
-      const authorOptions = parseFinalizeAuthorOptions(opts);
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetFinalize(requiredContextGraphId(opts), name, {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
@@ -371,18 +380,14 @@ export function registerKnowledgeAssetCommand(program: Command): void {
     kaCmd
       .command('share <name>')
       .description('Share a finalized Knowledge Asset from WM to SWM')
-      .option('--entity <uri...>', 'Share only specific root entities (defaults to all)')
-      .option('--await-curator-ack', 'Require curator acknowledgement')
-      .option('--skip-seal', 'Share without sealing; not publishable until finalized/sealed later'),
+      .option('--await-curator-ack', 'Require curator acknowledgement'),
   ))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
       const contextGraphId = requiredContextGraphId(opts);
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetShare(contextGraphId, name, {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
-        ...(parseShareEntities(opts) ? { entities: parseShareEntities(opts) } : {}),
         ...(opts.awaitCuratorAck === true ? { awaitCuratorAck: true } : {}),
-        ...(opts.skipSeal === true ? { skipSeal: true } : {}),
       });
       assertSharePromotedContent(result, name, contextGraphId);
       console.log('Knowledge asset shared to SWM:');
@@ -393,25 +398,24 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       if (result.sealed !== undefined) console.log(`  Sealed:         ${result.sealed}`);
       if (result.publishReady !== undefined) console.log(`  Publish ready:  ${result.publishReady}`);
       if (result.shareOperationId) console.log(`  Share op:       ${result.shareOperationId}`);
+      printPendingCatalogHandoff(result);
       if (result.publishReady === true) console.log(`  Next:           ${publishNextCommand(name, contextGraphId, opts)}`);
     }));
 
   addSubGraphOption(addContextGraphOption(
     kaCmd
       .command('share-async <name>')
-      .description('Enqueue an async WM-to-SWM share job for a Knowledge Asset')
-      .option('--entity <uri...>', 'Share only specific root entities (defaults to all)'),
+      .description('Enqueue an async WM-to-SWM share job for a Knowledge Asset'),
   ))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetShareAsync(requiredContextGraphId(opts), name, {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
-        ...(parseShareEntities(opts) ? { entities: parseShareEntities(opts) } : {}),
       });
       console.log('Knowledge asset share job accepted:');
       console.log(`  Job ID:  ${result.jobId}`);
       console.log(`  State:   ${result.state}`);
-    }));
+    }, (err) => printAsyncJobFailure(err, 'share')));
 
   addContextGraphOption(
     kaCmd
@@ -419,27 +423,39 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       .description('List async SWM share jobs')
       .option('--state <state>', `Comma-separated state filter (${SHARE_JOB_STATES.join('|')})`)
       .option('--limit <n>', 'Maximum jobs to return (1-1000)')
+      .option('--cursor <cursor>', 'Print one page, the one after this cursor (the "Next cursor" of an earlier page)')
+      .option('--page-size <n>', 'Print one page of this many jobs (1-1000, 100 by default); with --all, jobs per request')
+      .option('--all', 'Page through to the end and print every job, in enqueue order')
       .option('--json', 'Print JSON'),
   )
     .action(async (opts: ActionOpts) => runAction(async () => {
+      const paging = parseJobListPagingOptions(opts);
       const limit = parseOptionalPositiveInteger(opts.limit, '--limit');
       const states = parseShareJobStates(opts.state);
       const client = await ApiClient.connect();
-      const result = await client.knowledgeAssetShareJobs({
+      const filter = {
         ...(opts.contextGraphId || opts.contextGraph ? { contextGraphId: requiredContextGraphId(opts) } : {}),
         ...(states ? { state: states } : {}),
-        ...(limit !== undefined ? { limit } : {}),
-      });
+      };
+      const result = await readJobList(
+        paging,
+        () => client.knowledgeAssetShareJobs({ ...filter, ...(limit !== undefined ? { limit } : {}) }),
+        (cursor, pageSize) => client.knowledgeAssetShareJobs({ ...filter, cursor, pageSize }),
+      );
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));
         return;
       }
-      if (result.jobs.length === 0) {
+      // A single page (the only answer with `complete`) can be empty while more follow, so it prints its footer instead.
+      if (result.jobs.length === 0 && result.complete === undefined) {
         console.log('No Knowledge Asset share jobs found.');
         return;
       }
       for (const job of result.jobs) {
         console.log(`${job.jobId}\t${job.state}\t${job.contextGraphId}\t${job.assertionName}`);
+      }
+      if (result.complete !== undefined) {
+        console.log(result.nextCursor ? `Next cursor: ${result.nextCursor}` : 'No further jobs when this page was read.');
       }
     }));
 
@@ -455,12 +471,21 @@ export function registerKnowledgeAssetCommand(program: Command): void {
 
   kaCmd
     .command('cancel-share-job <job-id>')
-    .description('Cancel a queued or retrying async SWM share job')
+    .description('Cancel a queued async SWM share job')
     .action(async (jobId: string) => runAction(async () => {
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetCancelShareJob(jobId);
       console.log(`Cancelled share job ${result.jobId}; state=${result.state}`);
     }));
+
+  kaCmd
+    .command('clear-share-job <job-id>')
+    .description('Remove one finished SWM share job through the running daemon')
+    .action(async (jobId: string) => runAction(async () => {
+      const client = await ApiClient.connect();
+      const result = await client.knowledgeAssetClearShareJob(jobId);
+      console.log(`Share job ${result.jobId}: ${result.outcome}`);
+    }, printClearJobFailure));
 
   kaCmd
     .command('recover-share-job <job-id>')
@@ -521,7 +546,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       console.log(`  Status:     ${result.status}`);
       if (result.shareOperationId) console.log(`  Share op:   ${result.shareOperationId}`);
       if (result.intentKey) console.log(`  Intent key: ${result.intentKey}`);
-    }));
+    }, (err) => printAsyncJobFailure(err, 'publish', opts)));
 
   addSubGraphOption(addContextGraphOption(
     kaCmd
@@ -529,6 +554,9 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       .description('Seed a fresh WM draft from SWM or VM state')
       .requiredOption('--layer <layer>', 'Source layer: swm or vm')
       .option('--on-conflict <mode>', 'Draft conflict mode: reject or replace (default: reject)')
+      .option('--recover-exact-ual <ual>', 'Verify the existing draft against this pinned KA; never writes')
+      .option('--recover-exact-root <root>', 'Merkle root retained with the pinned source before the original pull')
+      .option('--recover-exact-version <version>', 'Assertion version for exact recovery (requires --recover-exact-ual)')
       .option('--json', 'Print JSON'),
   ))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
@@ -538,8 +566,16 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       if (onConflict !== undefined && onConflict !== 'reject' && onConflict !== 'replace') {
         throw new Error('--on-conflict must be reject or replace');
       }
+      let recoverExact;
+      try {
+        recoverExact = parseExactPullSource(opts.recoverExactUal !== undefined || opts.recoverExactVersion !== undefined || opts.recoverExactRoot !== undefined
+          ? { kaUal: opts.recoverExactUal, assertionVersion: opts.recoverExactVersion, merkleRoot: opts.recoverExactRoot } : undefined, onConflict);
+      } catch {
+        throw new Error('Exact recovery requires --recover-exact-ual, --recover-exact-version and --recover-exact-root and reject conflict mode');
+      }
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetPullFrom(requiredContextGraphId(opts), name, layer, {
+        ...(recoverExact ? { recoverExact } : {}),
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
         ...(onConflict ? { onConflict } : {}),
       });

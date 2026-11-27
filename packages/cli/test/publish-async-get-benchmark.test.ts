@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -42,6 +43,10 @@ type EsbenchConfigForTest = {
   ) => Record<string, FocusedBenchmarkRecord[]>;
   publishAsyncGetPages: Array<[string, string]>;
   publishAsyncGetSuite: string;
+  createBenchmarkToolchain: (env: Record<string, string>) => {
+    include: string[];
+    executors?: unknown[];
+  };
 };
 
 type EsbenchSuiteForTest = {
@@ -338,7 +343,7 @@ describe('publish async get benchmark', () => {
       filterResultByCase,
       publishAsyncGetPages,
       publishAsyncGetSuite,
-    } = await import('../../../esbench.config.mjs') as EsbenchConfigForTest;
+    } = await import('../../../bench/esbench.config.mjs') as EsbenchConfigForTest;
     const caseName = 'asynchronous VM publish request and finalization';
     const result = {
       [publishAsyncGetSuite]: [
@@ -378,11 +383,93 @@ describe('publish async get benchmark', () => {
     expect(record.scenes[1]).toEqual({ [caseName]: { time: [3] } });
   });
 
+  it('keeps suite isolation for normal runs and profiles the workload in-process', async () => {
+    const { createBenchmarkToolchain } = await import('../../../bench/esbench.config.mjs') as EsbenchConfigForTest;
+    const {
+      createProfileEnvironment,
+      runCommand,
+    } = await import('../../../bench/support/profile-process.mjs');
+    const isolated = createBenchmarkToolchain({});
+    const profileEnv = createProfileEnvironment({ PATH: '/mock-bin' }, {
+      reportJsonPath: '/tmp/profile.esbench.json',
+      reportHtmlPath: '/tmp/profile.esbench.html',
+    });
+    const spawns: Array<{
+      command: string;
+      args: readonly string[];
+      options: { cwd: string; env: Record<string, string>; stdio: string };
+    }> = [];
+    const spawnProcess = (
+      command: string,
+      args: readonly string[],
+      options: { cwd: string; env: Record<string, string>; stdio: string },
+    ) => {
+      spawns.push({ command, args, options });
+      const child = new EventEmitter();
+      queueMicrotask(() => child.emit('exit', 0, null));
+      return child;
+    };
+    const profileExitCode = runCommand('/node', ['esbench'], {
+      cwd: '/repo',
+      env: profileEnv,
+      label: 'profiler run',
+      spawnProcess,
+    });
+    const analysisExitCode = runCommand('/node', ['analyze.ts'], {
+      cwd: '/repo',
+      env: profileEnv,
+      label: 'method analysis',
+      spawnProcess,
+    });
+
+    expect(isolated.executors).toHaveLength(1);
+    await expect(profileExitCode).resolves.toBe(0);
+    await expect(analysisExitCode).resolves.toBe(0);
+    expect(spawns).toHaveLength(2);
+    expect(spawns[0]).toMatchObject({
+      command: '/node',
+      args: ['esbench'],
+      options: {
+        cwd: '/repo',
+        stdio: 'inherit',
+      },
+    });
+    expect(spawns[1]).toMatchObject({
+      command: '/node',
+      args: ['analyze.ts'],
+      options: {
+        cwd: '/repo',
+        stdio: 'inherit',
+      },
+    });
+    expect(spawns[0].options.env).toMatchObject({
+      DKG_ESBENCH_IN_PROCESS: '1',
+      ESBENCH_RESULT: '/tmp/profile.esbench.json',
+      ESBENCH_HTML_FILE: '/tmp/profile.esbench.html',
+    });
+    expect(createBenchmarkToolchain(spawns[0].options.env).executors).toBeUndefined();
+
+    const reportedErrors: unknown[] = [];
+    const signalledExitCode = runCommand('/node', ['analyze.ts'], {
+      cwd: '/repo',
+      env: profileEnv,
+      label: 'method analysis',
+      spawnProcess() {
+        const child = new EventEmitter();
+        queueMicrotask(() => child.emit('exit', null, 'SIGTERM'));
+        return child;
+      },
+      reportError: (error: unknown) => reportedErrors.push(error),
+    });
+    await expect(signalledExitCode).resolves.toBe(1);
+    expect(reportedErrors).toEqual(['[bench:profile] method analysis exited from signal SIGTERM']);
+  });
+
   it('links the combined ESBench report and focused HTML pages together', async () => {
     const {
       addLinkedReportNavigation,
       publishAsyncGetPages,
-    } = await import('../../../esbench.config.mjs') as EsbenchConfigForTest;
+    } = await import('../../../bench/esbench.config.mjs') as EsbenchConfigForTest;
     const targets: Array<[string, string]> = [
       ['Combined report', 'bench/results/latest.html'],
       ...publishAsyncGetPages,
@@ -510,7 +597,7 @@ describe('publish async get benchmark', () => {
 
     expect(benchHtml).toContain('ESBENCH_HTML=1');
     expect(benchHtml).toContain('ESBENCH_PUBLISH_ASYNC_GET_HTML=1');
-    expect(benchHtml).toContain('esbench --config esbench.config.mjs');
+    expect(benchHtml).toContain('esbench --config bench/esbench.config.mjs');
     expect(benchAnalysis).toBe('node --experimental-strip-types bench/analyze-publish-async-get.ts');
     expect(benchProfile).toBe('node bench/profile-publish-async-get.mjs');
   });

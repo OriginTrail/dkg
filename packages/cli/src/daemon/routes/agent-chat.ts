@@ -11,39 +11,33 @@
 //
 // See `packages/cli/scripts/split-handle-request.mjs` for the
 // extraction driver.
-
-import {
-  createServer,
-  type IncomingMessage,
-  type ServerResponse,
-} from "node:http";
-import { createHash, randomUUID } from "node:crypto";
-import {
-  appendFile,
-  chmod,
-  copyFile,
-  mkdir,
-  readFile,
-  rename,
-  rm,
-  stat,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
-import { execSync, exec, execFile } from "node:child_process";
+import { type ServerResponse } from "node:http";
+import { exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { join, dirname, resolve } from 'node:path';
-import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSync as fsWriteFileSync, unlinkSync } from 'node:fs';
+import { resolve } from 'node:path';
 // Namespace import: our Phase-8 install-context builder (~line 290) calls
 // `osModule.homedir()`, and the later agent-identity probe (~line 6851)
 // uses `osModule.hostname()` + `osModule.userInfo()`. v10-rc's new
 // OpenClaw config helper (~line 2535) uses a bare `homedir()` — aliased
 // below so both sites coexist without a duplicate-module import.
 import * as osModule from 'node:os';
-const { homedir } = osModule;
-import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { ethers } from 'ethers';
+import { handleEncryptionEnrollment } from './encryption-enrollment.js';
+import { isRootlessUpdateError, type RootlessUpdateErrorCode } from '@origintrail-official/dkg-agent';
+import { createOperationContext } from '@origintrail-official/dkg-core';
+import { resolveChainConfig } from '../../config.js';
+import { canAdministerNode } from '../../auth.js';
+import { resolveNameToPeerId, jsonResponse, oversizedRdfLiteralResponseBody, SMALL_BODY_BYTES, readBody } from '../http-utils.js';
+import { requireNodeAdmin } from '../node-admin-guard.js';
+import { authorizeAgentScopedAuthorClaim } from './shared-assertion-helpers.js';
+import { classifyAgentConnectError } from './agent-connect-error.js';
+import type { RequestContext } from './context.js';
+import { actorFromRequestContext } from './context.js';
+import { handleAgentsListRoute } from './agents-list.js';
+import type { UpdateOptions } from '@origintrail-official/dkg-publisher';
+import { buildSloPayload } from './agent-chat-slo.js';
+
+export const { homedir } = osModule;
 
 // Lazy resolver used by the manifest-install flow: find the
 // @origintrail-official/dkg-mcp package via Node's own resolution
@@ -51,283 +45,23 @@ import { ethers } from 'ethers';
 // point at a valid MCP server install regardless of whether it's
 // running from a monorepo checkout, an npm-global `dkg`, or a
 // `pnpm dlx` tarball.
-const daemonRequire = createRequire(import.meta.url);
+export const daemonRequire = createRequire(import.meta.url);
 
-const execAsync = promisify(exec);
-const execFileAsync = promisify(execFile);
-import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
-import {
-  DashboardDB,
-  MetricsCollector,
-  OperationTracker,
-  handleNodeUIRequest,
-  ChatMemoryManager,
-  LogPushWorker,
-  LlmClient,
-  type MetricsSource,
-} from "@origintrail-official/dkg-node-ui";
-import {
-  loadConfig,
-  saveConfig,
-  loadNetworkConfig,
-  resolveChainConfig,
-  dkgDir,
-  writePid,
-  removePid,
-  writeApiPort,
-  removeApiPort,
-  logPath,
-  ensureDkgDir,
-  TELEMETRY_ENDPOINTS,
-  type DkgConfig,
-  type AutoUpdateConfig,
-  type LocalAgentIntegrationCapabilities,
-  type LocalAgentIntegrationConfig,
-  type LocalAgentIntegrationManifest,
-  type LocalAgentIntegrationRuntime,
-  type LocalAgentIntegrationStatus,
-  type LocalAgentIntegrationTransport,
-  resolveContextGraphs,
-  resolveNetworkDefaultContextGraphs,
-  resolveSharedMemoryTtlMs,
-  repoDir,
-  releasesDir,
-  activeSlot,
-  inactiveSlot,
-  swapSlot,
-  gitCommandEnv,
-  gitCommandArgs,
-  isStandaloneInstall,
-  slotEntryPoint,
-  CLI_NPM_PACKAGE,
-} from '../../config.js';
-import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
-import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
-import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
-import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
-import {
-  expectedBundledMarkItDownBuildMetadata,
-  readCliPackageVersion,
-  type BundledMarkItDownMetadata,
-} from "../../extraction/markitdown-bundle-metadata.js";
-import {
-  checksumPathFor as markItDownChecksumPath,
-  hasVerifiedBundledBinary as hasVerifiedBundledMarkItDownBinary,
-  metadataPathFor as markItDownMetadataPath,
-} from '../../../scripts/markitdown-bundle-validation.mjs';
-import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from '../../extraction-status.js';
-import { FileStore } from '../../file-store.js';
-import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
-import { parseBoundary, parseMultipart, MultipartParseError } from '../../http/multipart.js';
-// Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
-// Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
-// reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
-// format stays identical between curator/joiner/CLI paths.
-import {
-  publishManifest as publishManifestImpl,
-  assembleStandardTemplates,
-} from '@origintrail-official/dkg-mcp/manifest/publish';
-import { fetchManifest as fetchManifestImpl } from '@origintrail-official/dkg-mcp/manifest/fetch';
-import {
-  planInstall as planInstallImpl,
-  writeInstall as writeInstallImpl,
-  buildReviewMarkdown as buildReviewMarkdownImpl,
-  type InstallContext,
-} from '@origintrail-official/dkg-mcp/manifest/install';
-import { DkgClient } from '@origintrail-official/dkg-mcp/client';
+export const execAsync = promisify(exec);
+export const execFileAsync = promisify(execFile);
+import { validateUpdateQuadFields } from "../knowledge-asset-quad-validation.js";
 
-// Daemon sub-module imports — every public symbol from sibling
-// modules is pulled in here because the legacy monolithic file used
-// them all without explicit imports. Unused ones are tolerated by
-// the project's tsconfig (`noUnusedLocals` is off).
-import {
-  daemonState,
-  DEBUG_SYNC_TRACE,
-  resolveAutoUpdateEnabled,
-  type CorsAllowlist,
-} from '../state.js';
-import {
-  type CatchupJobState,
-  type CatchupJob,
-  type CatchupTracker,
-  toCatchupStatusResponse,
-} from '../types.js';
-import {
-  type MarkItDownTarget,
-  manifestRepoRoot,
-  type McpDkgAssets,
-  resolveMcpDkgAssets,
-  readMcpDkgVersion,
-  parseSemver,
-  cmpSemverForRange,
-  versionSatisfiesRange,
-  manifestNetworkLabel,
-  formatDaemonAuthority,
-  manifestSelfClient,
-  manifestPublisherUri,
-  type SupportedTool,
-  nicknameToSlug,
-  buildManifestInstallContext,
-  _autoUpdateIo,
-  loadMarkItDownTargets,
-  getNodeVersion,
-  getCurrentCommitShort,
-  loadSkillTemplate,
-  buildSkillMd,
-  skillEtag,
-  DAEMON_EXIT_CODE_RESTART,
-  parseRequiredSignatures,
-  normalizeDetectedContentType,
-  currentBundledMarkItDownAssetName,
-  bindingValue,
-  carryForwardBundledMarkItDownBinary,
-} from '../manifest.js';
-import {
-  resolveNameToPeerId,
-  jsonResponse,
-  oversizedRdfLiteralResponseBody,
-  safeDecodeURIComponent,
-  safeParseJson,
-  validateOptionalSubGraphName,
-  validateRequiredContextGraphId,
-  validateEntities,
-  validateConditions,
-  MAX_BODY_BYTES,
-  SMALL_BODY_BYTES,
-  MAX_UPLOAD_BYTES,
-  type ImportFileExtractionPayload,
-  buildImportFileResponse,
-  unregisteredSubGraphError,
-  readBody,
-  readBodyBuffer,
-  buildCorsAllowlist,
-  resolveCorsOrigin,
-  corsHeaders,
-  HttpRateLimiter,
-  isLoopbackClientIp,
-  isLoopbackRateLimitExemptPath,
-  shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
-  shortId,
-  sleep,
-  deriveBlockExplorerUrl,
-} from '../http-utils.js';
-import {
-  normalizeRepo,
-  isValidRepoSpec,
-  repoToFetchUrl,
-  githubRepoForApi,
-  resolveRemoteCommitSha,
-  type PendingUpdateState,
-  type CommitCheckStatus,
-  readPendingUpdateState,
-  clearPendingUpdateState,
-  writePendingUpdateState,
-  type NpmVersionResult,
-  resolveLatestNpmVersion,
-  compareSemver,
-  getCurrentCliVersion,
-  type NpmVersionStatus,
-  checkForNpmVersionUpdate,
-  type UpdateStatus,
-  acquireUpdateLock,
-  releaseUpdateLock,
-  performNpmUpdate,
-} from '../auto-update.js';
-import { isValidRef, parseTagName } from '../../auto-update-ref.js';
-import {
-  OPENCLAW_UI_CONNECT_TIMEOUT_MS,
-  OPENCLAW_UI_CONNECT_POLL_MS,
-  OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
-  type PendingOpenClawUiAttachJob,
-  isOpenClawBridgeHealthCacheValid,
-  type OpenClawChannelTarget,
-  trimTrailingSlashes,
-  buildOpenClawGatewayBase,
-  loadBridgeAuthToken,
-  getOpenClawChannelTargets,
-  type OpenClawBridgeHealthState,
-  type OpenClawGatewayHealthState,
-  type OpenClawChannelHealthReport,
-  transportPatchFromOpenClawTarget,
-  probeOpenClawChannelHealth,
-  runOpenClawUiSetup,
-  localOpenclawConfigPath,
-  isOpenClawMemorySlotElected,
-  restartOpenClawGateway,
-  waitForOpenClawChatReady,
-  type OpenClawUiAttachDeps,
-  formatOpenClawUiAttachFailure,
-  scheduleOpenClawUiAttachJob,
-  cancelPendingLocalAgentAttachJob,
-  isOpenClawUiAttachCancelled,
-  shouldTryNextOpenClawTarget,
-  buildOpenClawChannelHeaders,
-  ensureOpenClawBridgeAvailable,
-  type OpenClawStreamRequest,
-  type OpenClawStreamResponse,
-  type OpenClawStreamReader,
-  writeOpenClawStreamChunk,
-  pipeOpenClawStream,
-  isValidOpenClawPersistTurnPayload,
-  type OpenClawAttachmentRef,
-  normalizeOpenClawAttachmentRef,
-  normalizeOpenClawAttachmentRefs,
-  type OpenClawChatContextEntry,
-  normalizeOpenClawChatContextEntry,
-  normalizeOpenClawChatContextEntries,
-  hasOpenClawChatTurnContent,
-  unescapeOpenClawAttachmentLiteralBody,
-  stripOpenClawAttachmentLiteral,
-  parseOpenClawAttachmentTripleCount,
-  isOpenClawAttachmentAssertionUriForContextGraph,
-  extractionRecordMatchesOpenClawAttachmentRef,
-  verifyOpenClawAttachmentRefsProvenance,
-} from '../openclaw.js';
-import {
-  type LocalAgentIntegrationDefinition,
-  type LocalAgentIntegrationRecord,
-  LOCAL_AGENT_INTEGRATION_DEFINITIONS,
-  isPlainRecord,
-  normalizeIntegrationId,
-  normalizeLocalAgentTransport,
-  normalizeLocalAgentCapabilities,
-  normalizeLocalAgentManifest,
-  normalizeLocalAgentRuntime,
-  isLocalAgentExplicitlyUserDisabled,
-  isExplicitLocalAgentDisconnectPatch,
-  normalizeExplicitLocalAgentDisconnectBody,
-  mergeLocalAgentIntegrationConfig,
-  getStoredLocalAgentIntegrations,
-  computeLocalAgentIntegrationStatus,
-  buildLocalAgentIntegrationRecord,
-  listLocalAgentIntegrations,
-  getLocalAgentIntegration,
-  pruneLegacyOpenClawConfig,
-  extractLocalAgentIntegrationPatch,
-  connectLocalAgentIntegration,
-  updateLocalAgentIntegration,
-  hasConfiguredLocalAgentChat,
-  hasStoredLocalAgentTransportConfig,
-  connectLocalAgentIntegrationFromUi,
-  type ReverseLocalAgentSetupDeps,
-  reverseLocalAgentSetupForUi,
-  refreshLocalAgentIntegrationFromUi,
-} from '../local-agents.js';
+export const ROOTLESS_UPDATE_HTTP_STATUS = {
+  ROOTLESS_UPDATE_INVALID_KA_ID: 422,
+  ROOTLESS_KA_NOT_MATERIALIZED: 422,
+  ROOTLESS_UPDATE_TARGET_CORRUPT: 422,
+  ROOTLESS_UPDATE_TARGET_NOT_CONFIRMED: 422,
+} as const satisfies Record<RootlessUpdateErrorCode, number>;
 
-import { authorizeAgentScopedAuthorClaim } from './shared-assertion-helpers.js';
-import { classifyAgentConnectError } from './agent-connect-error.js';
-import type { RequestContext } from './context.js';
-import type { PublishOptions } from '@origintrail-official/dkg-publisher';
-
-function parsePrecomputedUpdateAttestation(
+export function parsePrecomputedUpdateAttestation(
   raw: unknown,
   res: ServerResponse,
-): PublishOptions['precomputedUpdateAttestation'] | undefined {
+): UpdateOptions['precomputedUpdateAttestation'] | undefined {
   if (raw === undefined) return undefined;
   if (raw === null || typeof raw !== 'object') {
     jsonResponse(res, 400, {
@@ -429,21 +163,29 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     apiPortRef,
     url,
     path,
-    requestToken,
-    requestAgentAddress,
   } = ctx;
+  const actor = actorFromRequestContext(ctx);
+  if (await handleEncryptionEnrollment(ctx)) return;
+  const {
+    authentication,
+    authenticatedAgentAddress,
+    effectiveAgentAddress: requestAgentAddress,
+  } = actor;
 
 
-  // POST /api/agent/register — register a new agent on this node
+  // POST /api/agent/register — register a new agent on this node. Node-admin
+  // only: registration mints a new API token (and, for custodial agents, a
+  // node-held key), which is an operator decision.
   if (req.method === "POST" && path === "/api/agent/register") {
+    if (!requireNodeAdmin(authentication, res, 'POST /api/agent/register', 'register agents')) return;
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = JSON.parse(body);
-    const { name, publicKey, framework } = parsed;
+    const { name, publicKey, framework, address } = parsed;
     if (!name || typeof name !== "string") {
       return jsonResponse(res, 400, { error: 'Missing required field "name"' });
     }
     try {
-      const record = await agent.registerAgent(name, { publicKey, framework });
+      const record = await agent.registerAgent(name, { publicKey, framework, address });
       validTokens.add(record.authToken);
       const response: Record<string, unknown> = {
         agentAddress: record.agentAddress,
@@ -469,14 +211,13 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   // routes (e.g. memory.ts, query.ts) already use for caller-vs-target
   // gating.
   function authorizeKeyManagementOnAddress(targetAddress: string): { ok: true } | { ok: false; status: number; body: Record<string, unknown> } {
-    const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
-    if (!tokenAgentAddress) return { ok: true };
-    if (tokenAgentAddress.toLowerCase() === targetAddress.toLowerCase()) return { ok: true };
+    if (!authenticatedAgentAddress) return { ok: true };
+    if (authenticatedAgentAddress.toLowerCase() === targetAddress.toLowerCase()) return { ok: true };
     return {
       ok: false,
       status: 403,
       body: {
-        error: `Agent token for ${tokenAgentAddress} cannot manage encryption keys for ${targetAddress}. ` +
+        error: `Agent token for ${authenticatedAgentAddress} cannot manage encryption keys for ${targetAddress}. ` +
           'Use a node-level admin token (~/.dkg/auth.token) to manage other agents on this node.',
       },
     };
@@ -589,8 +330,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   // agent's; gating to admin avoids a non-default-agent token tricking
   // the daemon into republishing on demand for spam.
   if (req.method === "POST" && path === "/api/agent/publish-profile") {
-    const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
-    if (tokenAgentAddress) {
+    if (!canAdministerNode(authentication)) {
       return jsonResponse(res, 403, {
         error: 'POST /api/agent/publish-profile requires a node-level admin token; agent-scoped tokens cannot trigger a profile republish.',
       });
@@ -605,8 +345,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
 
   // GET /api/agent/identity — current agent identity for the requesting token
   if (req.method === "GET" && path === "/api/agent/identity") {
-    const token = extractBearerToken(req.headers.authorization);
-    const agentAddress = agent.resolveAgentAddress(token);
+    const agentAddress = requestAgentAddress;
     const localAgents = agent.listLocalAgents();
     const current = localAgents.find((a) => a.agentAddress === agentAddress);
     return jsonResponse(res, 200, {
@@ -620,54 +359,10 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   }
 
   // GET /api/agents — enriched with live connection health
-  // Optional query params: ?framework=X &skill_type=X
+  // Optional query params: ?framework=X &skill_type=X &connectionStatus=X
+  //                        &local=true|false &limit=N &cursor=X   (GH#310)
   if (req.method === "GET" && path === "/api/agents") {
-    const frameworkFilter = url.searchParams.get("framework") || undefined;
-    const skillTypeFilter = url.searchParams.get("skill_type") || undefined;
-    const agents = await agent.findAgents({
-      ...(frameworkFilter ? { framework: frameworkFilter } : {}),
-    });
-    // If skill_type filter is requested, find agents offering that skill and intersect
-    let filteredAgents = agents;
-    if (skillTypeFilter) {
-      const offerings = await agent.findSkills({ skillType: skillTypeFilter });
-      const agentUris = new Set(offerings.map((o: any) => o.agentUri));
-      filteredAgents = agents.filter((a: any) => agentUris.has(a.agentUri));
-    }
-    const allConns = agent.node.libp2p.getConnections();
-    const connByPeer = new Map<
-      string,
-      { transport: string; direction: string; sinceMs: number }
-    >();
-    for (const c of allConns) {
-      const pid = c.remotePeer.toString();
-      if (!connByPeer.has(pid)) {
-        connByPeer.set(pid, {
-          transport: c.remoteAddr?.toString().includes("/p2p-circuit")
-            ? "relayed"
-            : "direct",
-          direction: c.direction,
-          sinceMs: c.timeline?.open ? Date.now() - c.timeline.open : 0,
-        });
-      }
-    }
-    const myPeerId = agent.peerId;
-    const healthMap = agent.getPeerHealth();
-    const enriched = filteredAgents.map((a: any) => {
-      const isSelf = a.peerId === myPeerId;
-      const conn = connByPeer.get(a.peerId);
-      const health = healthMap.get(a.peerId);
-      return {
-        ...a,
-        connectionStatus: isSelf ? "self" : conn ? "connected" : "disconnected",
-        connectionTransport: conn?.transport ?? null,
-        connectionDirection: conn?.direction ?? null,
-        connectedSinceMs: conn?.sinceMs ?? null,
-        lastSeen: isSelf ? Date.now() : (health?.lastSeen ?? null),
-        latencyMs: health?.latencyMs ?? null,
-      };
-    });
-    return jsonResponse(res, 200, { agents: enriched });
+    return handleAgentsListRoute(ctx);
   }
 
   // GET /api/peer-info?peerId=<id>
@@ -953,11 +648,15 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     return jsonResponse(res, 200, { connected: true });
   }
 
-  // POST /api/update  { kaId, contextGraphId, quads, privateQuads?, precomputedUpdateAttestation? }
+  // POST /api/update  { kaId, contextGraphId, quads?, privateQuads?, precomputedUpdateAttestation? }
   if (req.method === "POST" && path === "/api/update") {
     const body = await readBody(req);
     const parsed = JSON.parse(body);
-    const { kaId, quads, privateQuads } = parsed;
+    const { kaId } = parsed;
+    const invalidQuads = validateUpdateQuadFields(parsed);
+    if (invalidQuads) return jsonResponse(res, 400, invalidQuads);
+    const quads = Array.isArray(parsed.quads) ? parsed.quads : [];
+    const privateQuads = Array.isArray(parsed.privateQuads) ? parsed.privateQuads : [];
     const contextGraphId = parsed.contextGraphId;
     const precomputedUpdateAttestation = parsePrecomputedUpdateAttestation(
       parsed.precomputedUpdateAttestation,
@@ -966,18 +665,17 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     if (parsed.precomputedUpdateAttestation !== undefined && !precomputedUpdateAttestation) {
       return;
     }
-    const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
     if (!authorizeAgentScopedAuthorClaim(
       res,
-      tokenAgentAddress,
+      authenticatedAgentAddress,
       precomputedUpdateAttestation?.authorAddress,
       "precomputedUpdateAttestation.authorAddress",
     )) {
       return;
     }
-    if (!kaId || !contextGraphId || !quads?.length) {
+    if (!kaId || !contextGraphId || (quads.length === 0 && privateQuads.length === 0)) {
       return jsonResponse(res, 400, {
-        error: 'Missing "kaId", "contextGraphId", or "quads"',
+        error: 'Missing "kaId", "contextGraphId", or update content in "quads"/"privateQuads"',
       });
     }
     let kcIdBigInt: bigint;
@@ -1058,8 +756,26 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
       // those to 422 (Unprocessable Entity) so the API surfaces a proper 4xx
       // instead of letting it bubble to the generic 500 handler.
       const message = err instanceof Error ? err.message : String(err);
-      if ((err as any)?.code === "OVERSIZED_RDF_LITERAL") {
+      const errorCode = typeof err === 'object' && err !== null
+        ? Reflect.get(err, 'code')
+        : undefined;
+      if (errorCode === "OVERSIZED_RDF_LITERAL") {
         return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(err));
+      }
+      if (errorCode === "KA_NAMED_GRAPH_SHARE_UNSUPPORTED") {
+        return jsonResponse(res, 400, { error: message });
+      }
+      if (errorCode === "KA_UPDATE_AUTHOR_NOT_OWNER") {
+        return jsonResponse(res, 403, { error: message, code: "KA_UPDATE_AUTHOR_NOT_OWNER" });
+      }
+      if (errorCode === "LEGACY_KA_READ_ONLY") {
+        return jsonResponse(res, 409, { error: message, code: "LEGACY_KA_READ_ONLY" });
+      }
+      if (isRootlessUpdateError(err)) {
+        return jsonResponse(res, ROOTLESS_UPDATE_HTTP_STATUS[err.code], {
+          error: message,
+          code: err.code,
+        });
       }
       if (message.includes('precomputedUpdateAttestation')) {
         return jsonResponse(res, 422, { error: message });
@@ -1069,131 +785,4 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   }
 }
 
-/**
- * Build the `/api/slo` response payload. Extracted out of the inline
- * route block so the public wire shape is testable in isolation
- * (rc.9 PR-A / Codex PR #570 R10) — production route + regression
- * test share the exact same code path, so a future drift in any
- * field name / nesting can't slip past CI.
- *
- * Cold-start safety: when `sharedMemoryHandler` has never been
- * instantiated (no SWM share has ever been received), the agent's
- * `getSwmHandlerStats()` returns its pristine snapshot rather than
- * throwing — `buildSloPayload` is safe to call against a fresh
- * daemon.
- */
-export function buildSloPayload(agent: {
-  getMessengerSloStats: () => Record<string, unknown>;
-  getSwmGossipStats: () => {
-    publishFailures: Record<string, number>;
-    publishFailuresOverflow: number;
-    publishFailuresTruncated: boolean;
-  };
-  getSwmHandlerStats: () => {
-    redundantApplies: Record<string, number>;
-    redundantAppliesLowerBound: boolean;
-    redundantAppliesOverflow: number;
-    redundantAppliesTruncated: boolean;
-  };
-  /**
-   * rc.9 PR-C addition. Optional on the interface so a hypothetical
-   * test double that only exercises the gossip + receiver sides
-   * doesn't have to stub it. Implementations that omit it simply
-   * leave `swm.substrateFanout` off the response — soak scripts
-   * check for its presence before referencing fields.
-   */
-  getSwmSubstrateFanoutStats?: () => {
-    delivered: Record<string, number>;
-    rejected: Record<string, number>;
-    /**
-     * rc.9 PR-D (codex follow-up from PR-G #G1): transient
-     * receiver-side rejections. Optional on the interface for
-     * back-compat with pre-PR-D test doubles.
-     */
-    retryable?: Record<string, number>;
-    queued: Record<string, number>;
-    inFlight: Record<string, number>;
-    failed: Record<string, number>;
-    overflow: {
-      delivered: number;
-      rejected: number;
-      retryable?: number;
-      queued: number;
-      inFlight: number;
-      failed: number;
-    };
-    truncated: boolean;
-  };
-  /**
-   * rc.9 PR-D addition. Optional for the same reason
-   * getSwmSubstrateFanoutStats is — test doubles don't need to
-   * stub a tracker they aren't exercising.
-   */
-  getSwmAckQuorumStats?: () => {
-    tracked: number;
-    completed: number;
-    watchdogFired: number;
-    deadlineExpired: number;
-    pending: number;
-  };
-}): {
-  protocols: Record<string, unknown>;
-  gossip: {
-    publishFailures: Record<string, number>;
-    publishFailuresOverflow: number;
-    publishFailuresTruncated: boolean;
-  };
-  swm: {
-    redundantApplies: Record<string, number>;
-    redundantAppliesLowerBound: boolean;
-    redundantAppliesOverflow: number;
-    redundantAppliesTruncated: boolean;
-    /**
-     * rc.9 PR-C: substrate fan-out per-outcome counters. Present
-     * iff the agent exposes `getSwmSubstrateFanoutStats()` (every
-     * production agent does; opt-out is for test doubles).
-     */
-    substrateFanout?: {
-      delivered: Record<string, number>;
-      rejected: Record<string, number>;
-      retryable?: Record<string, number>;
-      queued: Record<string, number>;
-      inFlight: Record<string, number>;
-      failed: Record<string, number>;
-      overflow: {
-        delivered: number;
-        rejected: number;
-        retryable?: number;
-        queued: number;
-        inFlight: number;
-        failed: number;
-      };
-      truncated: boolean;
-    };
-    /**
-     * rc.9 PR-D: ack-quorum overlay counters. Same opt-out
-     * mechanic as `substrateFanout` — present iff the agent
-     * exposes `getSwmAckQuorumStats()`.
-     */
-    shareAckQuorum?: {
-      tracked: number;
-      completed: number;
-      watchdogFired: number;
-      deadlineExpired: number;
-      pending: number;
-    };
-  };
-} {
-  const swmHandler = agent.getSwmHandlerStats();
-  const substrateFanout = agent.getSwmSubstrateFanoutStats?.();
-  const shareAckQuorum = agent.getSwmAckQuorumStats?.();
-  return {
-    protocols: agent.getMessengerSloStats(),
-    gossip: agent.getSwmGossipStats(),
-    swm: {
-      ...swmHandler,
-      ...(substrateFanout !== undefined ? { substrateFanout } : {}),
-      ...(shareAckQuorum !== undefined ? { shareAckQuorum } : {}),
-    },
-  };
-}
+export { buildSloPayload } from './agent-chat-slo.js';

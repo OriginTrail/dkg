@@ -1,8 +1,25 @@
+import { EventEmitter } from 'node:events';
 import { describe, expect, it } from 'vitest';
 import type { ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import { handleEpcisRoutes } from '../src/daemon/routes/epcis.js';
-import type { RequestContext } from '../src/daemon/routes/context.js';
+import { createRequestActor, type RequestContext, type RequestContextInputFields } from '../src/daemon/routes/context.js';
+import { resolveRfc64PublicCatalogActivation, resolveRfc64PublicCatalogActivationChainIdentityV1 } from '../src/config.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
+
+function expectCapturedEvent(content: unknown): void {
+  expect(content).toEqual({ private: expect.any(Array) });
+  expect(content).toMatchObject({ private: [expect.objectContaining({
+    'https://gs1.github.io/EPCIS/epcisBody': [expect.objectContaining({
+      'https://gs1.github.io/EPCIS/eventList': [expect.objectContaining({
+        '@id': 'urn:uuid:fixture-obj-1',
+        '@type': expect.arrayContaining(['https://gs1.github.io/EPCIS/ObjectEvent']),
+        'http://dkg.io/ontology/epcisEventType': [{ '@id': 'https://gs1.github.io/EPCIS/ObjectEvent' }],
+      })],
+    })],
+  })] });
+  expect(JSON.stringify(content)).not.toContain('"@context"');
+}
 
 const VALID_OBJECT_EVENT_DOC = {
   '@context': {
@@ -35,7 +52,7 @@ const VALID_OBJECT_EVENT_DOC = {
 };
 
 function createResponse() {
-  const response = {
+  const response = Object.assign(new EventEmitter(), {
     statusCode: 0,
     headers: undefined as Record<string, string> | undefined,
     body: '',
@@ -50,7 +67,7 @@ function createResponse() {
       this.writableEnded = true;
       return this;
     },
-  };
+  });
   return response;
 }
 
@@ -106,7 +123,7 @@ function readyPublisherState(): RequestContext['publisherState'] {
 
 function createContext(overrides: Partial<RequestContext> = {}): RequestContext {
   const url = new URL('http://127.0.0.1/api/epcis/capture');
-  const context: RequestContext = {
+  const context: Omit<RequestContextInputFields, 'actor'> = {
     req: createRequest(),
     res: createResponse() as unknown as ServerResponse,
     agent: {
@@ -115,6 +132,7 @@ function createContext(overrides: Partial<RequestContext> = {}): RequestContext 
       },
     } as unknown as RequestContext['agent'],
     publisherControl: {} as RequestContext['publisherControl'],
+    rfc64PublicCatalog: resolveRfc64PublicCatalogActivation({}, resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430')),
     publisherState: unavailablePublisherState('publisher_startup_failed'),
     config: {
       epcis: { contextGraphId: 'epcis-test' },
@@ -139,9 +157,11 @@ function createContext(overrides: Partial<RequestContext> = {}): RequestContext 
     validTokens: new Set(),
     apiHost: '127.0.0.1',
     apiPortRef: { value: 0 },
+    routePlugins: [],
+    admission: {} as RequestContext['admission'],
     url,
     path: url.pathname,
-    requestToken: undefined,
+    authentication: requestAuthentication({ kind: 'anonymous' }),
     requestAgentAddress: '0x0',
     ...overrides,
   };
@@ -150,7 +170,8 @@ function createContext(overrides: Partial<RequestContext> = {}): RequestContext 
       ? unavailablePublisherState('publisher_startup_failed')
       : unavailablePublisherState('publisher_disabled');
   }
-  return context;
+  // This fixture supplies authentication directly instead of dispatching HTTP.
+  return { ...context, actor: overrides.actor ?? createRequestActor(context.authentication, () => context.requestAgentAddress) } as RequestContext;
 }
 
 function responseBody(ctx: RequestContext): Record<string, unknown> {
@@ -215,6 +236,44 @@ describe('EPCIS async capture publisher readiness', () => {
     });
   });
 
+  it('stamps the AUTHENTICATED submitter as the admission owner, and the client cannot forge it', async () => {
+    // 3825614158 — an EPCIS capture reaches the same async publisher queue as the daemon's
+    // knowledge-assets route, and this PR made admission ownership the sole authorization for the
+    // by-id force-clear. Without this stamp the agent's own publish path treats an authenticated
+    // capture as an internal producer and assigns it to the node's default agent: the submitting
+    // agent loses the only manual exit for a held job, and the node owner gains a destructive
+    // capability over a job it never enqueued.
+    const SUBMITTER = '0x00000000000000000000000000000000000000a7';
+    const FORGED = '0x00000000000000000000000000000000000000ff';
+    const published: Array<{ opts: any }> = [];
+    const ctx = createContext({
+      req: createRequest({
+        epcisDocument: VALID_OBJECT_EVENT_DOC,
+        // The client tries to name a different owner in its own publish options.
+        publishOptions: { admittedByAgentAddress: FORGED },
+      }),
+      requestAgentAddress: SUBMITTER,
+      agent: {
+        publishAsync: async (_cg: string, _content: unknown, opts: unknown) => {
+          published.push({ opts });
+          return { captureID: 'capture-owner-1' };
+        },
+      } as unknown as RequestContext['agent'],
+      publisherState: readyPublisherState(),
+    });
+
+    await handleEpcisRoutes(ctx);
+
+    expect(ctx.res.statusCode).toBe(202);
+    // The authenticated identity is what lands. The client's value never arrives at all:
+    // `handleCaptureAsync` builds publisher opts from a strict allow-list, so the row below is
+    // an end-to-end check that a request body cannot choose the owner — NOT proof that the
+    // spread ordering defends it. Reversing that ordering leaves this row green (measured), so
+    // the ordering is defence in depth only, and the allow-list is the guard.
+    expect(published[0]?.opts?.admittedByAgentAddress).toBe(SUBMITTER);
+    expect(published[0]?.opts?.admittedByAgentAddress).not.toBe(FORGED);
+  });
+
   it('accepts capture and publishes bare documents as private content without route public wrapping', async () => {
     const published: Array<{ contextGraphId: string; content: unknown; opts: unknown }> = [];
     const ctx = createContext({
@@ -239,11 +298,14 @@ describe('EPCIS async capture publisher readiness', () => {
       status: 'accepted',
       eventCount: 1,
     });
+    expectCapturedEvent(published[0]?.content);
     expect(published).toEqual([
       {
         contextGraphId: 'epcis-test',
-        content: { private: VALID_OBJECT_EVENT_DOC },
-        opts: { accessPolicy: 'allowList', allowedPeers: ['peer-a'] },
+        content: { private: expect.any(Array) },
+        // 3825614158 — the authenticated submitter is stamped as the admission owner on every
+        // capture, beside the client's publish options.
+        opts: { accessPolicy: 'allowList', allowedPeers: ['peer-a'], admittedByAgentAddress: '0x0' },
       },
     ]);
   });
@@ -268,11 +330,12 @@ describe('EPCIS async capture publisher readiness', () => {
     await handleEpcisRoutes(ctx);
 
     expect(ctx.res.statusCode).toBe(202);
+    expectCapturedEvent(published[0]?.content);
     expect(published).toEqual([
       {
         contextGraphId: 'per-request-cg',
-        content: { private: VALID_OBJECT_EVENT_DOC },
-        opts: { subGraphName: 'research' },
+        content: { private: expect.any(Array) },
+        opts: { subGraphName: 'research', admittedByAgentAddress: '0x0' },
       },
     ]);
   });
@@ -389,6 +452,9 @@ describe('EPCIS events query route — per-request CG + sub-graph', () => {
   function captureSparql(): { agent: RequestContext['agent']; calls: Array<{ sparql: string; opts: unknown }> } {
     const calls: Array<{ sparql: string; opts: unknown }> = [];
     const agent = {
+      resolveContextGraphReadAuthority: async () => ({
+        outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'forbidden',
+      }),
       query: async (sparql: string, opts: unknown) => {
         calls.push({ sparql, opts });
         return { bindings: [] };
@@ -513,5 +579,32 @@ describe('EPCIS events query route — per-request CG + sub-graph', () => {
 
     expect(ctx.res.statusCode).toBe(400);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('EPCIS capture status', () => {
+  it('answers a failed capture with a short reason, also when the stored one is long', async () => {
+    const stored = `send failed at https://rpc.example/v2/SECRET-API-KEY: ${'refused; '.repeat(80)}`;
+    const url = new URL('http://127.0.0.1/api/epcis/capture/capture-1');
+    const ctx = createContext({
+      req: createGetRequest(url.pathname),
+      url,
+      path: url.pathname,
+      publisherControl: {
+        getStatus: async () => ({
+          status: 'failed',
+          timestamps: { acceptedAt: 1_000 },
+          failure: { code: 'rpc_unavailable', message: stored },
+        }),
+      } as unknown as RequestContext['publisherControl'],
+    });
+
+    await handleEpcisRoutes(ctx);
+
+    expect(ctx.res.statusCode).toBe(200);
+    const body = responseBody(ctx);
+    expect(body).toMatchObject({ captureID: 'capture-1', state: 'failed', finalizedAt: null });
+    expect(String(body['error'])).toMatch(/^send failed at rpc\.example: refused; .*…$/);
+    expect(String(body['error']).length).toBeLessThanOrEqual(512);
   });
 });

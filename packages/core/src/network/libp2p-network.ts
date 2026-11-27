@@ -12,13 +12,22 @@
 import type { Stream, Connection } from '@libp2p/interface';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { multiaddr } from '@multiformats/multiaddr';
-import type { Network, NodeIdentity, Address, DialOpts, ProtocolHandler } from './network.js';
+import type {
+  PeerConnectionNetwork,
+  NodeIdentity,
+  Address,
+  DialOpts,
+  PeerConnectOpts,
+  PeerRecoveryStageOpts,
+  ProtocolHandler,
+} from './network.js';
+import { connectLibp2pPeer, tryConnectLibp2pRecoveryStage } from './libp2p-peer-connect.js';
 import type { DKGNode } from '../node.js';
 
 const DEFAULT_DIAL_TIMEOUT_MS = 10_000;
 const DEFAULT_FIND_PEER_TIMEOUT_MS = 5_000;
 
-export class LibP2PNetwork implements Network {
+export class LibP2PNetwork implements PeerConnectionNetwork {
   private readonly node: DKGNode;
 
   constructor(node: DKGNode) {
@@ -70,6 +79,21 @@ export class LibP2PNetwork implements Network {
       signal,
       runOnLimitedConnection: true,
     });
+  }
+
+  async connectPeer(
+    peerId: NodeIdentity,
+    resolvedAddresses: readonly Address[],
+    opts?: PeerConnectOpts,
+  ): Promise<void> {
+    await connectLibp2pPeer(this.node.libp2p, peerId, resolvedAddresses, {
+      ...opts,
+      configuredRelayTargets: this.node.getConfiguredRelayTargets(),
+    });
+  }
+
+  async tryConnectRecoveryStage(peerId: NodeIdentity, stage: PeerRecoveryStageOpts): Promise<boolean> {
+    return tryConnectLibp2pRecoveryStage(this.node.libp2p, peerId, stage);
   }
 
   async handle(protocolId: string, handler: ProtocolHandler): Promise<void> {

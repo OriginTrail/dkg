@@ -54,11 +54,18 @@ Any drift fails the PR with an explicit remediation message.
 > `hardhat-abi-exporter`. Use `npx hardhat compile` (no `--config`) when you
 > need to regenerate `abi/*.json`.
 
-If you change a `.sol` file, regenerate and commit ABIs in the same change:
+`@origintrail-official/dkg-chain` ships its own byte-for-byte copy of the ABIs
+it loads under `packages/chain/abi/` and reads that copy first, because this
+package is private and npm consumers cannot fall back to it.
+`scripts/sync-chain-abis.mjs` refreshes the copy, and
+`packages/chain/test/vendored-abi-sync.unit.test.ts` fails while it lags.
+
+If you change a `.sol` file, regenerate and commit both sets of ABIs in the same change:
 
 ```bash
 cd packages/evm-module && npx hardhat compile && cd -
-git add packages/evm-module/abi/
+node scripts/sync-chain-abis.mjs
+git add packages/evm-module/abi/ packages/chain/abi/
 ```
 
 ## Static analysis
@@ -68,7 +75,7 @@ Three layered scanners run as informational checks in CI (`tornado-static-analys
 | Tool | Purpose | Install |
 |---|---|---|
 | **Slither** | Mature Solidity static analyzer (Trail of Bits). Detects reentrancy, uninitialized storage, dangerous delegatecall, etc. | `pip install slither-analyzer` (Python). Requires `solc` 0.8.20 — install via [`solc-select`](https://github.com/crytic/solc-select) or rely on hardhat's bundled compiler. |
-| **Aderyn** | Cyfrin's Rust-based analyzer, complementary detector set. | Already a devDep (`@cyfrin/aderyn`). `pnpm install` fetches the platform binary. |
+| **Aderyn** | Cyfrin's Rust-based analyzer, complementary detector set. | Install the pinned release from [Cyfrin upstream source](https://github.com/Cyfrin/aderyn/tree/a288420403cb1ae5f38ce606c3a6d4e605b9c81d) using the Cargo command in the CI lane. Add the installed binary to `PATH` for local use. |
 | **solhint** | Solidity linter — style + a lightweight security ruleset. | Already a devDep (`solhint`). |
 
 ### Running locally

@@ -232,6 +232,14 @@ describe('MarkdownMessage rendering', () => {
     expect(container.querySelector('.v10-md-pre-fallback, .v10-md-pre-rendered')).toBeTruthy();
     // Copy button is part of the CodeBlock.
     expect(container.querySelector('.v10-md-copy')).toBeTruthy();
+    // Wait for the dynamic import's mock factory before the next test resets
+    // the module cache and import counter. Otherwise a late resolution can be
+    // misattributed to the following no-shiki test under full-suite load.
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(shikiImportCount).toBe(1);
+      });
+    });
     await unmount();
   });
 

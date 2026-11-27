@@ -54,13 +54,14 @@ describe('parsePagination', () => {
     expect(() => parsePagination(new URLSearchParams('limit=   '))).toThrow(PaginationError);
   });
   it('PaginationError carries a descriptive message and field name', () => {
+    let err: unknown;
     try {
       parsePagination(new URLSearchParams('limit=-1'));
-      expect.fail('should have thrown');
-    } catch (err) {
-      expect(err).toBeInstanceOf(PaginationError);
-      expect((err as PaginationError).field).toBe('limit');
-      expect((err as Error).message).toMatch(/limit/);
+    } catch (caught) {
+      err = caught;
     }
+    expect(err).toBeInstanceOf(PaginationError);
+    expect((err as PaginationError).field).toBe('limit');
+    expect((err as Error).message).toMatch(/limit/);
   });
 });

@@ -18,7 +18,7 @@ dkg mcp setup                                # one-shot: init + start + fund + r
 1. Initializes `~/.dkg/config.json` if absent (skipped silently when present)
 2. Starts the DKG daemon as a background process (skipped if already running)
 3. Funds the node's generated admin and operational wallets via the testnet faucet (skip with `--no-fund`)
-4. Detects each MCP-aware client by its config file and writes the canonical entry. **You confirm per detected client interactively** (`Register DKG MCP with <client>? [Y/n]`) unless `--yes` is passed; non-TTY invocations (CI, piped stdin) auto-confirm so scripts don't hang. The detection set is seven clients: **Cursor** (`~/.cursor/mcp.json`), **Claude Code** (`~/.claude.json`), **Claude Desktop** (per-platform — `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows, `$XDG_CONFIG_HOME/Claude/claude_desktop_config.json` (or `~/.config/Claude/...` when XDG_CONFIG_HOME is unset) on Linux), **Windsurf** (`~/.codeium/windsurf/mcp_config.json`), **VSCode + GitHub Copilot Chat** (per-platform Code user-settings dir + `mcp.json` — note this client uses the `servers.dkg` shape, not `mcpServers.dkg`), **Cline** (deep-nested under VSCode's per-extension globalStorage at `Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json`), and **Codex CLI** (`~/.codex/config.toml` — TOML format, table key `mcp_servers.dkg`). The clients receive the same canonical entry, serialized into each client's native format
+4. Detects each MCP-aware client by its config file and writes the canonical entry. **You confirm per detected client interactively** (`Register DKG MCP with <client>? [Y/n]`) unless `--yes` is passed; non-TTY invocations (CI, piped stdin) auto-confirm so scripts don't hang. The detection set is seven clients: **Cursor** (`~/.cursor/mcp.json`), **Claude Code** (`~/.claude.json`), **Claude Desktop** (per-platform — `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows, `$XDG_CONFIG_HOME/Claude/claude_desktop_config.json` (or `~/.config/Claude/...` when XDG_CONFIG_HOME is unset) on Linux), **Windsurf** (`~/.codeium/windsurf/mcp_config.json`), **VSCode + GitHub Copilot Chat** (per-platform Code user-settings dir + `mcp.json` — note this client uses the `servers.dkg` shape, not `mcpServers.dkg`), **Cline** (deep-nested under VSCode's per-extension globalStorage at `Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json`), and **Codex CLI** (`~/.codex/config.toml` — TOML format, table key `mcp_servers.dkg`). Native clients receive the canonical entry below, serialized into each client's native format. When setup runs inside WSL, Windows-side clients receive a `wsl.exe` wrapper that enters the current distribution and Linux user before launching that same CLI.
 5. Verifies the daemon is healthy
 
 Every step short-circuits when its work is already done, so re-running on a set-up box is safe. Step-skip flags: `--no-start`, `--no-fund`, `--no-verify`, `--dry-run` (preview only), `--force` (refresh every detected client config regardless of state), `--yes` (auto-confirm per-client registrations; default false — TTY mode prompts interactively, non-TTY auto-confirms; pass `--yes` in scripts for the safer scripted-environment posture). First-init overrides: `--port <n>`, `--name <s>`, `--network <name>` (`mainnet-gnosis` default \| `mainnet-base` \| `testnet`; persisted as `config.networkConfig`; applies to a FRESH node only — an existing node keeps its current network, switch with `dkg init --network`). The bundled flow re-uses the same primitives `dkg openclaw setup` does, so the two verbs stay byte-aligned on network defaults, daemon-readiness probes, faucet retry/back-off, and manual-curl fallback.
@@ -113,7 +113,7 @@ The MCP server resolves config from two places, in priority order:
 1. **`.dkg/config.yaml`** — walked upwards from the working directory (the spec-canonical workspace config; see `dkgv10-spec / 22_AGENT_ONBOARDING §2.1`)
 2. **environment variables** — `DKG_API`, `DKG_TOKEN`, `DKG_PROJECT`, `DKG_AGENT_URI`
 
-Env values win over the file; tool-call arguments (`projectId`, `view`, …) win over both.
+Values in the file win over the environment variables, which only fill what the file leaves unset; tool-call arguments (`projectId`, `view`, …) win over both. A node home's `config.json` (from `DKG_HOME`, or the local node home when there is no workspace file) works the other way: non-empty environment variables win over it. [Connection settings and precedence](../../docs/integrations/mcp.md#connection-settings-and-precedence) is the full reference for these rules.
 
 #### Minimal `.dkg/config.yaml`
 
@@ -138,7 +138,13 @@ autoShare: true
 
 `.dkg/` is gitignored repo-wide so this file stays local to each operator. The `tokenFile` path is resolved relative to the YAML; default of `~/.dkg/auth.token` matches what `dkg start` writes on first boot.
 
-## Tool surface (29 tools)
+### Manual client authentication
+
+When neither `DKG_HOME` nor a workspace `.dkg/config.yaml` is present, the MCP server resolves the default local node home and its token. Explicit workspace/home configuration keeps precedence. Prefer the entry from `dkg mcp setup --print-only` for GUI clients. A `missing-token` status or 401 hint means the client needs `DKG_HOME` or `DKG_TOKEN`; `token-configured` does not prove the daemon accepted the credential. An explicit API endpoint different from the discovered local node uses only explicit credentials and graph selection (`DKG_TOKEN`, `DKG_PROJECT`, or tool arguments), without importing the local token or graph defaults.
+
+CLI `status --daemon` and `join --daemon` resolve the selected endpoint before loading automatic credentials. For a remote daemon, supply `--token`, `DKG_TOKEN`, or an explicit `--token-file` for join. The legacy implicit token-file fallback is restricted to a token-only home at its recorded local port (9200 when unrecorded); configured homes use normal configuration resolution. `join` takes `--token`, `DKG_TOKEN` or an explicit `--token-file` first, then a workspace or `DKG_HOME` binding, then automatically discovered credentials. The generated `.dkg/config.yaml` records the file its token was read from; after a literal token it records the `--token-file` value or its default `~/.dkg/auth.token`, because a literal token is never written.
+
+## Tool surface (33 tools)
 
 All tools are available the moment `dkg mcp setup` registers the MCP with your client. They group into seven categories tracking how a session typically uses memory: check health, discover the graph, set it up, drive the knowledge-asset lifecycle (create → write → finalize → share → publish), recall from it, query it, and message other agents.
 
@@ -166,6 +172,7 @@ All tools are available the moment `dkg mcp setup` registers the MCP with your c
 | Tool | What it does |
 |---|---|
 | `dkg_context_graph_create` | Create a context graph (called "projects" in the DKG node UI). The `id` slug is auto-derived from `name` when omitted. Idempotent — pre-existing CGs are returned unchanged. |
+| `dkg_context_graph_register` | Register an existing context graph on-chain. Supports policy overrides and PCA-backed registration by the PCA owner or a wallet registered to that exact PCA. An eligible PCA uses a quota-backed registration-deposit waiver. |
 | `dkg_subscribe` | Subscribe to a context graph so its data syncs locally from peers. Defaults to also syncing Shared Working Memory; pass `includeSharedMemory: false` to skip SWM. |
 | `dkg_sub_graph_create` | Create a named sub-graph inside a context graph (e.g. `code`, `tasks`, `meta`). Idempotent — pre-existing sub-graphs are silently reused. |
 
@@ -178,7 +185,7 @@ The lifecycle tool family that lets agents stage memory, seal it, share it, publ
 | `dkg_knowledge_asset_create` | 1 | Create an empty Working Memory assertion graph (knowledge asset). Idempotent — duplicate names land as `alreadyExists: true`. Name validation matches the daemon's `validateAssertionName`: any IRI-safe name up to 256 chars (no `/`, no whitespace, no `` <>"{}|^`\ `` characters), and not a reserved B3 KA id — NOT restricted to a lowercase-hyphen slug. |
 | `dkg_knowledge_asset_write` | 2 | Append RDF quads into an existing WM assertion. Set-merge — duplicates collapse. To replace, call `dkg_knowledge_asset_discard` first or mint a unique name. |
 | `dkg_knowledge_asset_finalize` | 3 | **Seal** the WM draft (the "git commit"): compute the merkleRoot over the whole assertion, build + sign an EIP-712 AuthorAttestation, stamp the seal. Returns `merkleRoot`, `authorAddress`, `schemeVersion`, `chainId`, `kav10Address`, `eip712Digest`. Seals the entire draft — no subset parameter. |
-| `dkg_knowledge_asset_share` | 4 | Share a WM assertion (or specific root entities) from private WM to Shared Working Memory so teammates see it (formerly "promote"). Omit `entities` for a full share, which auto-seals best-effort; a subset share is SWM-only and not publishable to VM as a subset. |
+| `dkg_knowledge_asset_share` | 4 | Atomically seal and share the complete KA triple set from private WM to Shared Working Memory. Root-entity subsets and unsealed shares are unsupported. |
 | `dkg_knowledge_asset_publish` | 5 | **Mint / update on chain** (the sealed assertion → Verifiable Memory). Takes no selector (the seal commits the whole assertion). Returns the **UAL** + `kaId` + `txHash` — see "The canonical round-trip" below. |
 | `dkg_knowledge_asset_pull_from` | edit-loop | Seed a fresh WM draft from the current SWM or VM state (the "git checkout"). Body `{ layer: "swm" \| "vm", onConflict?: "reject" \| "replace" }`; `409 WM_DRAFT_CONFLICT` on a dirty draft unless `replace`. |
 | `dkg_knowledge_asset_discard` | rollback | Discard a WM assertion without sharing it. Idempotent — no-op on a missing assertion. Use before re-writing an assertion whose name you want to keep stable. |
@@ -202,6 +209,19 @@ The canonical per-KA sealed publish is `dkg_knowledge_asset_publish` (step 5 of 
 | `dkg_memory_search` | Trust-weighted free-text recall across WM/SWM/VM in the agent-context graph (and an optional project graph). Higher-trust layers (VM > SWM > WM) collapse lower-trust hits for the same entity URI. Each hit surfaces `contextGraphId`, `layer`, and `trustWeight`. Use this for "ask my memory anything" recall. |
 | `dkg_query` | Execute SPARQL SELECT / ASK / CONSTRUCT against a context graph. Known prefixes are auto-prepended. Scope with `view`: `"working-memory"` (default), `"shared-working-memory"`, or `"verifiable-memory"`. Set `includeSharedMemory: true` alongside `view: "working-memory"` to query WM ∪ SWM in one call. |
 
+### Query catalog
+
+These tools use the same versioned query-catalog contract as the DKG CLI and
+Node UI. Runtime parameters are rendered according to their declared RDF-term
+type; callers never interpolate raw strings into SPARQL.
+
+| Tool | What it does |
+|---|---|
+| `dkg_query_catalog_context_graphs` | Inspect accessible Context Graphs and return only graphs that actually contain saved catalog entries. Read-only. |
+| `dkg_query_catalog_list` | List saved queries with stable selectors, declared parameters, execution views, and sub-graph scopes. Read-only. |
+| `dkg_query_catalog_run` | Execute one saved query by selector, slug, or exact name. Parameter values are validated and safely rendered before the canonical `/api/query` call. Read-only. |
+| `dkg_query_catalog_save` | Save an immutable parameterized query revision through the guarded profile-catalog route. Exact retries are idempotent; changed definitions create new revisions. Mutates local DKG state and should only be called on an explicit user request. |
+
 ### Messaging (agent-to-agent)
 
 | Tool | What it does |
@@ -217,7 +237,7 @@ Lifted from the repo-root README's [DKG V10 as agent memory quickstart](../../RE
 2. `dkg_knowledge_asset_write` with one or more quads (additive set-merge).
 3. `dkg_memory_search` with a keyword from the write — the just-written triple comes back from the WM layer with `trustWeight` set.
 4. *(optional)* `dkg_knowledge_asset_finalize` to **seal** the draft (the EIP-712 "git commit" — note: this is the rc.17 *seal* verb, distinct from the on-chain mint in step 6).
-5. *(optional)* `dkg_knowledge_asset_share` to advance the lifecycle to SWM and gossip to peers (a full share auto-seals best-effort, so step 4 can be skipped for the common case).
+5. *(optional)* `dkg_knowledge_asset_share` to atomically seal, advance the complete KA to SWM, and gossip it to peers (step 4 can be skipped when the default authorship options are sufficient).
 6. *(optional)* `dkg_knowledge_asset_publish` to **mint on chain** (costs TRAC + gas, clears SWM). The response carries the asset's **UAL** (`did:dkg:<chainId>/<addr>/<number>`) plus `kaId` and `txHash` — store the UAL to reference the asset later.
 
 For ad-hoc filtering or non-text-search queries, `dkg_query` is the lower-level SPARQL surface. To put fresh quads on chain, author them as a named knowledge asset and publish through the lifecycle (`create → write → finalize → share → publish`).
@@ -279,22 +299,25 @@ Per-turn state is kept in `~/.cache/dkg-mcp/sessions/*.json`; safe to delete at 
 - **"No project specified"** → set `contextGraph: <id>` in `.dkg/config.yaml`, or pass `projectId` on each tool call, or export `DKG_PROJECT`.
 - **HTTP 401 from MCP tools** → token mismatch. `dkg auth show` returns the expected value; confirm it matches `~/.dkg/auth.token`. On CI / containers / proxied environments where `dkg init` can't run, the env-var fallbacks are `DKG_API` (daemon URL, default `http://localhost:9200`), `DKG_TOKEN` (bearer), `DKG_PROJECT` (default context graph), `DKG_AGENT_URI` (operator agent URI). A stale exported `DKG_PROJECT` from a prior session can silently mis-route writes — unset it if you switch projects.
 - **HTTP 404 on `/api/context-graph/list`** → you're on an older daemon; the client automatically falls back to the legacy endpoint.
+- **`TimeoutError` from a tool on a slow node** → reads wait 30 s (the context-graph and sub-graph lists 60 s) and writes 240 s. Raise them with `DKG_API_READ_TIMEOUT_MS` / `DKG_API_LONG_TIMEOUT_MS` (milliseconds) in the MCP client's `env` block; see [Client request timeouts](../../docs/references/cli.md#client-request-timeouts).
 - **`tools/list` is missing tools after `dkg mcp setup`** → the client's MCP config still points at a prior install. Re-run `dkg mcp setup --force` to refresh stale entries.
 - **Daemon unreachable** → `dkg status`; if it errors, `dkg logs` and `cat ~/.dkg/daemon.log`. Stale pid → `cat ~/.dkg/daemon.pid` and kill it, then `dkg start` again.
 - **Port 9200 already in use** → another node is running. `dkg stop` once, or override via `dkg init` and pick a different API port.
 - **WSL2: daemon dies when the terminal closes** → wrap in `tmux` or install as a systemd user service. See the [WSL2 section in JOIN_TESTNET.md](../../docs/archive/internal/setup/JOIN_TESTNET.md) for the systemd unit file.
-- **WSL2: Windows-side MCP clients (Claude Desktop, Cursor, VSCode + Copilot, Cline, Windsurf)** → run `dkg mcp setup` from **PowerShell**, not from inside WSL. Setup invoked from WSL detects the Windows-side configs and writes entries into them, but the registered `command` is the Linux-side `node` binary path; Win32 clients can't spawn Linux executables, so the entries fail at MCP startup. For **Linux-side** clients (Linux Cursor, Linux Claude Code), run setup from inside WSL as normal. End-to-end Windows-side support from a WSL invocation is tracked separately (will use a `wsl.exe`-wrapper command form once shipped).
+- **WSL2: Windows-side MCP clients (Claude Desktop, Cursor, VSCode + Copilot, Cline, Windsurf)** → run `dkg mcp setup` inside the distribution that owns the node. Windows entries use an absolute `wsl.exe`, pin `WSL_DISTRO_NAME` and the current Linux user, and pass the resolved Linux `DKG_HOME` explicitly through `/usr/bin/env`. Linux-side entries keep the direct Node command. Re-running setup refreshes old Linux-path Windows entries and recognizes the wrapper on subsequent runs. `--print-only` still emits the native entry for manual use; automatic client discovery chooses the wrapper. If Windows is installed outside `C:\Windows`, set `SystemRoot` to its absolute Windows directory before setup. A physical config shared by both Linux and Windows clients must be split because it cannot hold both launch commands. See Microsoft's [WSL command reference](https://learn.microsoft.com/en-us/windows/wsl/basic-commands).
+- **WSL launch smoke test (contributors)** → after setup, run `node scripts/test-mcp-wsl-launch.mjs /mnt/c/Users/<user>/.cursor/mcp.json 'C:\Program Files\nodejs\node.exe'` from the repository inside real WSL. Set `DKG_PROJECT` in that Windows client entry, rerun setup to persist its `WSLENV` forwarding, and supply the installed Windows Node executable. The smoke starts a real Windows Node client that applies the saved `env`, launches the registered `wsl.exe`, and requires a production MCP initialize/tools-list exchange plus the exact project in server diagnostics. JSONC and both `mcpServers`/`servers` config containers are supported. The mandatory Windows CI fixture runs this same contributor command. Unit tests cover persisted entries, classifier stability and literal env/argument handling; this smoke is the separate platform check.
 
 ## Package layout
 
 | File | Purpose |
 |---|---|
-| `src/index.ts` | Stdio MCP server entrypoint. Boots `McpServer` and registers the 29 tools. |
+| `src/index.ts` | Stdio MCP server entrypoint. Boots `McpServer` and registers the 33 tools. |
 | `src/tools.ts` | Read tools (`dkg_list_context_graphs`, `dkg_sub_graph_list`, `dkg_query`, `dkg_get_entity`, `dkg_get_entity_sources`, `dkg_list_activity`, `dkg_get_agent`). |
+| `src/tools/query-catalog.ts` | Versioned query-catalog list/run/save MCP facade shared with the CLI and Node UI contract. |
 | `src/tools/assertions.ts` | Knowledge-asset lifecycle (`dkg_knowledge_asset_*` × 13: create/write/finalize/share/publish/pull_from/discard/query/history/import_file + import_artifact_resolve/read_markdown + semantic_enrichment_write). |
 | `src/tools/health.ts` | `dkg_status`, `dkg_peer_info`, `dkg_wallet_balances`. |
 | `src/tools/memory-search.ts` | `dkg_memory_search` with WM/SWM/VM fan-out and trust-weighted ranking. |
-| `src/tools/setup.ts` | `dkg_context_graph_create`, `dkg_subscribe`, `dkg_sub_graph_create`. |
+| `src/tools/setup.ts` | `dkg_context_graph_create`, `dkg_context_graph_register`, `dkg_subscribe`, `dkg_sub_graph_create`. |
 | `src/tools/chat.ts` | `dkg_send_message`, `dkg_check_inbox`. |
 | `src/client.ts` | `DkgClient` HTTP wrapper. Re-exported as `@origintrail-official/dkg-mcp/client`. |
 | `src/manifest/{publish,fetch,install}.ts` | Project manifest publish/install pipeline. Re-exported as `@origintrail-official/dkg-mcp/manifest/*` and consumed by the umbrella CLI's daemon routes. |
@@ -303,4 +326,12 @@ Per-turn state is kept in `~/.cache/dkg-mcp/sessions/*.json`; safe to delete at 
 
 ## Historical recovery
 
-Ten V9-era and coding-project tools were dropped from the V10 surface during consolidation. The annotated git tag `pre-v10-tool-drop` preserves them — recover any individual handler with `git show pre-v10-tool-drop:packages/mcp-dkg/src/tools/<file>`. Design rationale and reintroduction-pointers for each drop are in [`agent-docs/dkg-v10-mcp-consolidation/v9-design-archive.md`](../../agent-docs/dkg-v10-mcp-consolidation/v9-design-archive.md).
+Ten V9-era and coding-project tools were dropped from the V10 surface during consolidation. The annotated git tag `pre-v10-tool-drop` preserves them — recover any individual handler with `git show pre-v10-tool-drop:packages/mcp-dkg/src/tools/<file>`.
+
+### Large tool responses
+
+The stdio server limits each serialized JSON-RPC response to 8 MiB, below the MCP SDK client's default 10 MiB receive buffer. JSON escaping can make an artifact response larger than its original file. An oversized result returns an error without closing the session: narrow/paginate a query, or retrieve large artifacts through the daemon HTTP API. Markdown reads return the whole file; `maxBytes` is an acceptance cap, so lowering it returns HTTP 413 rather than a smaller result. For partial artifact retrieval outside MCP, use the daemon `/api/knowledge-assets/import-artifact/read` endpoint with `offset` and `maxBytes`. The daemon's 5 MiB artifact-read maximum is a source-byte limit, not a guarantee that the fully formatted result fits over MCP.
+
+### Relocated Claude Desktop data on Windows
+
+Setup also detects `%LOCALAPPDATA%\Claude-Data\claude_*\claude_desktop_config.json`, including Windows-side profiles from WSL. With several existing configs, it selects the most recently modified one; check the displayed path with `--dry-run`. Uninstall inspects all supported profiles to remove older DKG registrations too. For a custom location, use Claude Desktop **Settings → Developer → Edit Config** and the entry from `dkg mcp setup --print-only`; preserve `env.DKG_HOME` and restart the client.

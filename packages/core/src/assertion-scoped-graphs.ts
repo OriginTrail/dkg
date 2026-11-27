@@ -15,6 +15,17 @@ export function assertionScopedGraphUri(wmGraphUri: string, graph: string | unde
     : `${wmGraphUri}${ASSERTION_NAMED_GRAPH_PREFIX}${encodeAssertionNamedGraph(sourceGraph)}`;
 }
 
+/** Exact parent inverse of a named child produced by assertionScopedGraphUri. */
+export function assertionScopedGraphParentUri(scopedGraphUri: string): string | undefined {
+  const boundary = scopedGraphUri.lastIndexOf(ASSERTION_NAMED_GRAPH_PREFIX);
+  if (boundary < 0) return undefined;
+  const encoded = scopedGraphUri.slice(boundary + ASSERTION_NAMED_GRAPH_PREFIX.length);
+  if (encoded.length === 0 || encodeAssertionNamedGraph(decodeAssertionNamedGraph(encoded)) !== encoded) {
+    return undefined;
+  }
+  return scopedGraphUri.slice(0, boundary);
+}
+
 export function assertionOriginalGraph(wmGraphUri: string, scopedGraphUri: string): string {
   const prefix = `${wmGraphUri}${ASSERTION_NAMED_GRAPH_PREFIX}`;
   if (!scopedGraphUri.startsWith(prefix)) return '';

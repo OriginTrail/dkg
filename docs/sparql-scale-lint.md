@@ -1,0 +1,118 @@
+# SPARQL scalability lint
+
+`scripts/sparql-scale-lint.mjs` + `.github/workflows/sparql-scale-lint.yml`
+block PRs that **add** SPARQL queries matching shapes that have melted
+production nodes before. It is a ratchet: pre-existing findings are
+grandfathered and reported as notices; only newly added (or edited) offending
+queries fail the check.
+
+## Why
+
+Every rule encodes a real incident class:
+
+| Rule | Shape | Incident lineage |
+|------|-------|------------------|
+| `R1 unscoped-all-var-scan` | `?s ?p ?o` with no bound term outside any `GRAPH <iri>` scope | whole-store scans on hot paths |
+| `R2 graph-var-scan` | an all-variable triple inside `GRAPH ?g` | the #1597 `listGraphs` sync storm (`SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }` = every graph × every triple) |
+| `R3 offset-pagination` | `OFFSET n` (n > 0 or interpolated) | O(offset) re-scan per page → O(n²) full walks, plus torn reads on mutable data (sync responder) |
+| `R4 bucket-graph-scan` | all-variable scan over a graph family that grows with fleet usage (`…/_shared_memory`, `…/_meta`, data graph, `_catalog`) without an unsorted top-level `LIMIT` | the #1609 unbounded SWM-slice `CONSTRUCT` |
+
+What deliberately does **not** trigger:
+
+- plain `ASK { ?s ?p ?o }` with no `FILTER` (first-match short-circuit);
+- all-variable triples inside `FILTER [NOT] EXISTS` / `MINUS` — per-binding
+  existence probes (the **fixed** #1597 `listGraphs` form lives here);
+- a **top-level** `LIMIT` without `ORDER BY` (bounded materialization) for
+  R1/R2 — a `LIMIT` inside a subquery neither exempts outer scans nor (fail-
+  closed) its own group's all-variable scan; pragma the latter if intentional;
+- `GRAPH ?g` bound in the same group by finite concrete `VALUES` rows; `UNDEF`,
+  interpolated/unknown values, and bindings scoped inside another group do not
+  exempt the graph scan;
+- whole-graph reads of exact per-KA graphs (bounded by one assertion) —
+  R4 keys on the *unbounded* graph families only;
+- `CONSTRUCT`/`INSERT`/`DELETE` **templates** (output, not scan patterns);
+- test/e2e/bench files.
+
+Scanned extensions: `.ts .tsx .mts .cts .js .jsx .mjs .cjs` — UI components
+build SPARQL too (a live example existed in `node-ui` when the gate landed).
+
+## When the check fails
+
+Restructure the query — exact graph scope, bind at least one term, keyset
+(`FILTER(?key > lastKey) ORDER BY ?key LIMIT n`) instead of `OFFSET`, or add a
+`LIMIT`. If the query is provably bounded (fixed-size graph, startup-only
+migration, devnet tooling), acknowledge it **in code** with a justification:
+
+```ts
+// sparql-scan-allow: R4 -- catalog floor is capped at 64 triples per CG
+const rows = await store.query(`SELECT ?s WHERE { GRAPH <${catalogGraph}> { ?s ?p ?o } }`);
+```
+
+or as a SPARQL comment inside the query itself:
+
+```sparql
+# sparql-scan-allow: R3 -- startup-only migration, store is idle
+```
+
+The rule id must match and the justification must be non-empty. The pragma is
+deliberately a diffable code change: allowing a scan is a reviewed decision.
+
+## Mechanics
+
+- Findings are fingerprinted by `(rule, normalized query text)` — whitespace-
+  and interpolation-insensitive, so moving or reindenting an existing query
+  does not re-flag it, while editing the query re-evaluates it. The baseline
+  is a **multiset**: duplicating a grandfathered query adds one more scan and
+  blocks as a new finding, even though the copy's text is identical.
+- The scanner self-tests against 37 fixtures (including the exact #1597
+  bad/fixed pair) plus a diff-gate integration test on a throwaway git repo
+  (duplicate-copy blocking, rename/reindent grandfathering, new-shape blocking,
+  TSX scanning, and spawned-CLI proofs that CI returns nonzero and audit modes
+  self-test first)
+  before every CI scan; a broken scanner fails loudly instead of passing
+  silently.
+- Source extraction uses the TypeScript compiler API (already a root
+  devDependency), so template and ordinary string literals are both covered;
+  only the SPARQL-shape analysis is heuristic.
+- Local usage:
+  - `node scripts/sparql-scale-lint.mjs --diff origin/main HEAD` — what CI runs
+  - `node scripts/sparql-scale-lint.mjs --all` — full-tree debt audit
+  - `node scripts/sparql-scale-lint.mjs --files <paths…>` — spot-check
+  - `node scripts/sparql-scale-lint.mjs --self-test`
+
+## Making it required
+
+The workflow alone reports; blocking needs the check in `main`'s required
+list (it already runs on `merge_group`, so the merge queue will not stall).
+`main` is protected by a **ruleset** (`protect-main`), not classic branch
+protection, and ruleset updates are a full-object PUT — fetch, append the
+check, and write back:
+
+```sh
+gh api repos/OriginTrail/dkg/rulesets/14325863 > /tmp/ruleset.json
+python3 - <<'EOF'
+import json
+rs = json.load(open('/tmp/ruleset.json'))
+payload = {k: rs[k] for k in ('name', 'target', 'enforcement', 'conditions', 'rules') if k in rs}
+if 'bypass_actors' in rs: payload['bypass_actors'] = rs['bypass_actors']
+for rule in payload['rules']:
+    if rule['type'] == 'required_status_checks':
+        checks = rule['parameters']['required_status_checks']
+        if not any(c['context'] == 'SPARQL scalability lint' for c in checks):
+            checks.append({'context': 'SPARQL scalability lint', 'integration_id': 15368})
+json.dump(payload, open('/tmp/ruleset-update.json', 'w'))
+EOF
+gh api -X PUT repos/OriginTrail/dkg/rulesets/14325863 --input /tmp/ruleset-update.json
+```
+
+Flip it only AFTER this workflow is merged to `main`: a required check that
+exists on no PR's merge commit shows as "Expected" forever and blocks
+everything.
+
+## Current debt baseline
+
+At the time this gate landed, the hardened full-tree audit reported 68
+grandfathered findings (21 R1, 19 R2, 14 R3, 14 R4) — including the sync responder's
+documented OFFSET fallback and several adapter-level store primitives. They
+stay visible as notices on any PR that touches those files; burn them down
+opportunistically (each either restructures or earns a pragma).

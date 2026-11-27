@@ -1,11 +1,16 @@
+import { TEST_SNAPSHOT_STORAGE } from '../../../scripts/testing/snapshot-storage.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
 import { FileWorkspacePublicSnapshotStore, serializeWorkspacePublicSnapshotQuads, TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
+import { withLegacyRawLiftTestSeeder } from '../../publisher/test/_helpers/legacy-raw-lift.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import type {
+  SyncPageFetchOptions,
+  SyncPageResult,
+} from '../src/sync/requester/page-fetch.js';
 import { DKGAgent } from '../src/index.js';
 
 const CONTEXT_GRAPH = 'swm-snapshot-sync';
@@ -29,8 +34,8 @@ describe('SWM snapshot catch-up sync', () => {
     const nodeBDataDir = await tempDataDir();
     const nodeA = await createAgent(nodeADataDir, 'SnapshotSyncA');
     const nodeB = await createAgent(nodeBDataDir, 'SnapshotSyncB');
-    const sourceSnapshots = new FileWorkspacePublicSnapshotStore(join(nodeADataDir, 'swm-public-snapshots'));
-    const targetSnapshots = new FileWorkspacePublicSnapshotStore(join(nodeBDataDir, 'swm-public-snapshots'));
+    const sourceSnapshots = new FileWorkspacePublicSnapshotStore(join(nodeADataDir, 'swm-public-snapshots'), undefined, TEST_SNAPSHOT_STORAGE);
+    const targetSnapshots = new FileWorkspacePublicSnapshotStore(join(nodeBDataDir, 'swm-public-snapshots'), undefined, TEST_SNAPSHOT_STORAGE);
 
     const write = await nodeA.publisher.writeToWorkspace(CONTEXT_GRAPH, [
       { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Synced Snapshot"', graph: '' },
@@ -58,8 +63,13 @@ describe('SWM snapshot catch-up sync', () => {
       expect(legacyPayloads.bindings).toHaveLength(0);
     }
 
-    const asyncPublisher = new TripleStoreAsyncLiftPublisher(nodeB.store, { publicSnapshotStore: targetSnapshots });
-    const jobId = await asyncPublisher.lift({
+    const asyncPublisher = withLegacyRawLiftTestSeeder(new TripleStoreAsyncLiftPublisher(nodeB.store, {
+      publicSnapshotStore: targetSnapshots,
+    }), nodeB.store, {
+      now: () => Date.now(),
+      idGenerator: () => 'swm-snapshot-legacy-job',
+    });
+    const jobId = await asyncPublisher.seedLegacyRawLift({
       swmId: 'swm-main',
       shareOperationId: write.shareOperationId,
       roots: [ENTITY],
@@ -96,7 +106,7 @@ describe('SWM snapshot catch-up sync', () => {
     const nodeBDataDir = await tempDataDir();
     const nodeA = await createAgent(nodeADataDir, 'SnapshotSyncMissingA');
     const nodeB = await createAgent(nodeBDataDir, 'SnapshotSyncMissingB');
-    const sourceSnapshots = new FileWorkspacePublicSnapshotStore(join(nodeADataDir, 'swm-public-snapshots'));
+    const sourceSnapshots = new FileWorkspacePublicSnapshotStore(join(nodeADataDir, 'swm-public-snapshots'), undefined, TEST_SNAPSHOT_STORAGE);
 
     await nodeA.publisher.writeToWorkspace(CONTEXT_GRAPH, [
       { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Missing Snapshot"', graph: '' },
@@ -105,15 +115,24 @@ describe('SWM snapshot catch-up sync', () => {
     installSharedMemorySyncMock(nodeB, nodeA, sourceSnapshots, { omitSnapshots: true });
 
     const detailed = await (nodeB as unknown as {
-      syncSharedMemoryFromPeerDetailed(peerId: string, contextGraphIds: string[]): Promise<{ failedPeers: number; failedPhases: number; insertedTriples: number }>;
+      syncSharedMemoryFromPeerDetailed(peerId: string, contextGraphIds: string[]): Promise<{
+        failedPeers: number;
+        failedPhases: number;
+        completedPhases: number;
+        insertedDataTriples: number;
+        insertedMetaTriples: number;
+        insertedTriples: number;
+      }>;
     }).syncSharedMemoryFromPeerDetailed(REMOTE_PEER, [CONTEXT_GRAPH]);
-    // The peer is reachable and responds; only its snapshot phase fails the
-    // digest/count check. That is a phase failure (failedPhases), not a peer
-    // reachability failure (failedPeers) — but it still suppresses the
-    // success-stamp/backoff via the lifecycle success-gate.
+    // The peer is reachable and its verified data phase can be retained, but
+    // the immutable snapshot is incomplete. Keep the snapshot phase failed so
+    // lifecycle readiness retries, while never making its metadata visible.
     expect(detailed.failedPeers).toBe(0);
     expect(detailed.failedPhases).toBe(1);
-    expect(detailed.insertedTriples).toBe(0);
+    expect(detailed.completedPhases).toBe(1);
+    expect(detailed.insertedDataTriples).toBe(1);
+    expect(detailed.insertedMetaTriples).toBe(0);
+    expect(detailed.insertedTriples).toBe(1);
 
     const metaGraph = contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH);
     // RFC ka-metadata-trim Phase 2: the snapshot pointer is the digest row
@@ -144,8 +163,13 @@ describe('SWM snapshot catch-up sync', () => {
     const agent = await DKGAgent.create({
       name,
       dataDir,
+      sharedMemoryPublicSnapshotStorage: TEST_SNAPSHOT_STORAGE,
       listenHost: '127.0.0.1',
+      rfc64CatalogActivation: { enabled: false },
     });
+    (agent as unknown as {
+      resolveRfc64CatalogReceiverAuthorityV1: () => { legacySyncAllowed: boolean };
+    }).resolveRfc64CatalogReceiverAuthorityV1 = () => ({ legacySyncAllowed: true });
     agents.push(agent);
     return agent;
   }
@@ -167,9 +191,10 @@ function installSharedMemorySyncMock(
       phase: 'data' | 'meta' | 'snapshot',
       graphUri: string,
       deadline: number,
-      snapshotRef?: string,
+      options?: SyncPageFetchOptions,
     ) => Promise<SyncPageResult>;
-  }).fetchSyncPages = async (_ctx, _remotePeerId, contextGraphId, _includeSharedMemory, phase, graphUri, _deadline, snapshotRef) => {
+  }).fetchSyncPages = async (_ctx, _remotePeerId, contextGraphId, _includeSharedMemory, phase, graphUri, _deadline, fetchOptions = {}) => {
+    const { snapshotRef } = fetchOptions;
     let quads: Quad[] = [];
     if (phase === 'snapshot') {
       quads = options.omitSnapshots || !snapshotRef

@@ -1,43 +1,140 @@
-import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
+import { advertisesSyncProtocol, createOperationContext, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
+import type { PeerCapabilityRegistry } from '../../p2p/peer-capability.js';
+import { peerCapabilitySink, type SyncOnConnectInput } from './sync-on-connect-compat.js';
+export type { SyncOnConnectContext, LegacySyncOnConnectContext, SyncOnConnectInput } from './sync-on-connect-compat.js';
+import {
+  classifyDurableProgress,
+} from '../durable-progress.js';
+import {
+  classifySharedMemoryFreshness,
+  type SharedMemoryFreshnessSummary,
+  type SelectedSharedMemorySyncResult,
+} from '../shared-memory-freshness.js';
+import {
+  SyncBackpressureBusyError,
+  type SyncBackpressureBusyReason,
+} from '../backpressure.js';
 
-interface SyncProgressSummary {
+type SyncProgressSummary = SharedMemoryFreshnessSummary & {
   insertedTriples: number;
-  insertedDataTriples?: number;
-  insertedMetaTriples?: number;
-  metaOnlyResponses?: number;
-  completedPhases?: number;
-  checkpointAdvances?: number;
-  timedOutPhases?: number;
-  failedPeers?: number;
-  failedPhases?: number;
-  deniedPhases?: number;
-  backoffWorthyFailures?: number;
-}
+};
 
 type SyncFromPeerResult = number | SyncProgressSummary;
 
-export interface SyncOnConnectPeerOutcome {
-  fresh: boolean;
-  progress?: boolean;
+type DurableSyncFromPeerResult = number | (SyncProgressSummary & {
+  readonly complete?: boolean;
+});
+
+export interface AdmittedSelectedSharedMemoryWorkItem {
+  readonly contextGraphIds: readonly string[];
+  /** Execute exactly the scope captured by admission. */
+  readonly syncFromPeer: () => Promise<SelectedSharedMemorySyncResult>;
 }
 
-interface SyncOnConnectContext {
+interface SelectedSharedMemorySyncLane {
+  /** Admit one cohesive, frozen unit of selected-lane work. */
+  admitWork: (
+    remotePeerId: string,
+  ) => AdmittedSelectedSharedMemoryWorkItem | null | Promise<AdmittedSelectedSharedMemoryWorkItem | null>;
+}
+
+export interface OrdinarySharedMemoryWorkItem {
+  readonly contextGraphIds: readonly string[];
+  /** Execute exactly the immutable ordinary scope exposed to orchestration. */
+  readonly syncFromPeer: () => Promise<SyncFromPeerResult>;
+}
+
+export interface OrdinarySharedMemorySyncLane {
+  resolveWork: (
+    remotePeerId: string,
+  ) => OrdinarySharedMemoryWorkItem | Promise<OrdinarySharedMemoryWorkItem>;
+}
+
+export type SyncOnConnectPeerOutcome =
+  | {
+      reconcilerDisposition: 'clear';
+      fresh: boolean;
+      progress: boolean;
+    }
+  | {
+      reconcilerDisposition: 'retry' | 'defer';
+      fresh: false;
+      progress: boolean;
+    };
+
+export type ReleasePeerSyncLease = () => void;
+
+/** Atomic ownership of one peer's sync lane. */
+export interface PeerSyncLease {
+  tryAcquirePeer(peerId: string): ReleasePeerSyncLease | null;
+}
+
+/** Standalone lease owner for focused workflow tests. */
+export class InMemoryPeerSyncLease implements PeerSyncLease {
+  readonly #activePeers = new Set<string>();
+
+  constructor(initialPeers: Iterable<string> = []) {
+    for (const peerId of initialPeers) this.#activePeers.add(peerId);
+  }
+
+  tryAcquirePeer(peerId: string): ReleasePeerSyncLease | null {
+    return acquireSetPeerSyncLease(this.#activePeers, peerId);
+  }
+
+  isHeld(peerId: string): boolean { return this.#activePeers.has(peerId); }
+  get activeCount(): number { return this.#activePeers.size; }
+  clear(): void { this.#activePeers.clear(); }
+}
+
+function acquireSetPeerSyncLease(peers: Set<string>, peerId: string): ReleasePeerSyncLease | null {
+  if (peers.has(peerId)) return null;
+  peers.add(peerId);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    peers.delete(peerId);
+  };
+}
+
+interface CompatiblePeerSyncContext {
+  /** Omitted by legacy callers whose invocation runs until it settles. */
+  signal?: AbortSignal;
+  syncingPeers: PeerSyncLease | Set<string>;
+}
+
+interface SessionPeerSyncContext {
+  signal: AbortSignal;
+  syncingPeers: PeerSyncLease;
+}
+
+/** Normalize ownership once at the published helper boundary. */
+function admitPeerSyncContext(context: CompatiblePeerSyncContext): SessionPeerSyncContext {
+  const peers = context.syncingPeers;
+  return {
+    signal: context.signal ?? new AbortController().signal,
+    syncingPeers: 'tryAcquirePeer' in peers
+      ? peers
+      : { tryAcquirePeer: peerId => acquireSetPeerSyncLease(peers, peerId) },
+  };
+}
+
+export interface SyncOnConnectBaseContext extends CompatiblePeerSyncContext {
   remotePeer: string;
-  syncingPeers: Set<string>;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
-  knownCorePeerIds: Set<string>;
-  knownCorePeerIdsV2?: Set<string>;
   getSyncContextGraphs: () => string[];
-  getSharedMemorySyncContextGraphs?: (remotePeerId: string) => string[] | Promise<string[]>;
-  syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<SyncFromPeerResult>;
+  /** Exact durable scope for this automatic run; explicit catch-up bypasses it. */
+  getDurableSyncContextGraphs?: () => string[];
+  /** Absent when this run has no ordinary shared-memory phase. */
+  ordinarySharedMemoryLane?: OrdinarySharedMemorySyncLane;
+  syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<DurableSyncFromPeerResult>;
   refreshMetaSyncedFlags: (contextGraphIds: Iterable<string>) => Promise<void>;
   discoverContextGraphsFromStore: () => Promise<number>;
-  syncSharedMemoryFromPeer: (peerId: string, contextGraphIds: string[]) => Promise<SyncFromPeerResult>;
   syncSharedMemoryOnConnect?: boolean;
   logInfo: (ctx: OperationContext, message: string) => void;
   /**
    * Optional. Called when the peer is reachable but does not currently
-   * advertise PROTOCOL_SYNC. The orchestrator (`DKGAgent`) uses this to
+   * advertise either sync id. The orchestrator (`DKGAgent`) uses this to
    * remember the peer so it can retry later — either when libp2p's
    * `peer:update` event reports a new protocol list, or when the periodic
    * sync reconciler ticks. See packages/agent/src/dkg-agent.ts.
@@ -55,10 +152,35 @@ interface SyncOnConnectContext {
    * marking the peer as cleanly fresh for reconnect suppression; `progress`
    * controls whether the periodic reconciler may write its long cooldown.
    */
-  onPeerSynced?: (peerId: string, outcome?: SyncOnConnectPeerOutcome) => void;
+  onSyncAccounting?: (peerId: string, outcome: SyncOnConnectPeerOutcome) => void;
 }
 
-export type SyncOnConnectOutcome = 'synced' | 'skipped-no-sync' | 'already-syncing';
+export type PeerCapabilitySink = Pick<PeerCapabilityRegistry, 'observe'>;
+
+/** The canonical workflow receives one registry-backed capability owner. */
+export interface RegistrySyncOnConnectContext extends SyncOnConnectBaseContext {
+  peerCapabilities: PeerCapabilitySink;
+}
+
+/** Every continuation inside an admitted session has an explicit lifetime and lease owner. */
+export type SessionSyncOnConnectContext = RegistrySyncOnConnectContext & SessionPeerSyncContext;
+
+/**
+ * Narrow RFC-64 retry boundary. Unlike {@link SyncOnConnectInput}, this
+ * shape cannot express durable, discovery, or ordinary shared-memory work, so
+ * a selected retry cannot fall through when the broad on-connect workflow is
+ * changed later.
+ */
+interface SelectedSharedMemoryRetryContext extends CompatiblePeerSyncContext {
+  remotePeer: string;
+  getPeerProtocols: (peerId: string) => Promise<string[]>;
+  selectedSharedMemoryLane: SelectedSharedMemorySyncLane;
+  logInfo: (ctx: OperationContext, message: string) => void;
+  onPeerSkippedNoSync?: (peerId: string, protocols: string[]) => void;
+  onSyncAccounting?: (peerId: string, outcome: SyncOnConnectPeerOutcome) => void;
+}
+
+export type SyncOnConnectOutcome = 'synced' | 'skipped-no-sync' | 'already-syncing' | 'deferred-backpressure';
 
 export class SyncOnConnectPostSyncError extends Error {
   readonly originalError: unknown;
@@ -73,76 +195,227 @@ export class SyncOnConnectPostSyncError extends Error {
   }
 }
 
-function insertedTriples(result: SyncFromPeerResult): number {
-  return typeof result === 'number' ? result : result.insertedTriples;
+/**
+ * Typed control flow for local admission pressure. This marker is translated
+ * to `deferred-backpressure` by the attempt boundary before generic
+ * post-sync errors are constructed, so accounting never has to inspect an
+ * arbitrary `Error.cause` chain.
+ */
+export class SyncOnConnectBackpressureError extends Error {
+  readonly reason: SyncBackpressureBusyReason;
+
+  constructor(error: SyncBackpressureBusyError) {
+    // Keep the cause: `getSyncBackpressureBusyError()` is documented as THE
+    // admission-pressure detector and is still live in ordered-sync,
+    // attempt-telemetry and lifecycle. Dropping it would degrade
+    // `syncOperationRejectionReason` to 'aborted_before_start' for any
+    // consumer that becomes reachable.
+    super(error.message, { cause: error });
+    this.name = 'SyncOnConnectBackpressureError';
+    this.reason = error.reason;
+  }
 }
 
-function madeSyncProgress(result: SyncFromPeerResult): boolean {
-  if (typeof result === 'number') return true;
-  const phaseProgress = !metadataOnlySync(result) && (
-    (result.completedPhases ?? 0) > 0 ||
-    (result.checkpointAdvances ?? 0) > 0
-  );
-  return insertedDataTriplesForProgress(result) > 0
-    || phaseProgress;
+interface SyncResultAccounting {
+  insertedTriples: number;
+  madeProgress: boolean;
+  backoffWorthyFailure: boolean;
+  /**
+   * The peer never answered at least one Context Graph's round
+   * (`failedPeers`), as opposed to a round that failed after a response.
+   * Only this — combined with zero progress — may stop the on-connect
+   * fanout early; per-CG failures are isolated inside the sync itself.
+   */
+  peerUnreachable: boolean;
+  denied: boolean;
+  failed: boolean;
+  deferredByBackpressure: boolean;
+  metadataOnly: boolean;
+  cleanNonMetadataResponse: boolean;
 }
 
-function hadBackoffWorthyFailure(result: SyncFromPeerResult): boolean {
-  if (typeof result === 'number') return false;
-  return (
-    (result.backoffWorthyFailures ?? 0) > 0 ||
-    (result.failedPeers ?? 0) > 0 ||
-    (result.timedOutPhases ?? 0) > 0
-  );
+function classifySyncResult(
+  result: SyncFromPeerResult,
+  phase: 'durable' | 'shared',
+  complete?: boolean,
+): SyncResultAccounting {
+  if (typeof result === 'number') {
+    return {
+      insertedTriples: result,
+      madeProgress: true,
+      backoffWorthyFailure: false,
+      peerUnreachable: false,
+      denied: false,
+      failed: false,
+      deferredByBackpressure: false,
+      metadataOnly: false,
+      cleanNonMetadataResponse: true,
+    };
+  }
+
+  const progress = phase === 'shared'
+    ? classifySharedMemoryFreshness(result, { complete })
+    : classifyDurableProgress(result, { complete });
+  // `failedPeers` is folded across every Context Graph in this lane. It says
+  // at least one round never got a response; it does not mean the peer failed
+  // to answer every round. Preserve any response evidence from sibling CGs so
+  // one unreachable/poisoned CG cannot suppress discovery and SWM fanout from
+  // a peer that demonstrably answered elsewhere.
+  const peerRespondedInLane = progress.madeReconnectProgress
+    || progress.denied
+    || progress.phaseFailed
+    || progress.integrityRejected
+    || progress.timedOut
+    || progress.hasMetadataEvidence
+    || progress.hasVerifiedPrivateOnlyResponse;
+  return {
+    insertedTriples: result.insertedTriples,
+    madeProgress: progress.madeReconnectProgress,
+    backoffWorthyFailure: progress.backoffWorthyFailure,
+    peerUnreachable: progress.transportFailed && !peerRespondedInLane,
+    denied: progress.denied,
+    failed: progress.phaseFailed || progress.integrityRejected,
+    deferredByBackpressure: progress.deferredByBackpressure,
+    metadataOnly: progress.metadataOnly,
+    cleanNonMetadataResponse: progress.cleanNonMetadataResponse,
+  };
 }
 
-function hadDeniedPhase(result: SyncFromPeerResult): boolean {
-  if (typeof result === 'number') return false;
-  return (result.deniedPhases ?? 0) > 0;
+/**
+ * Retry exactly the selected RFC-64 SWM lane and nothing else. The peer-job
+ * runner owns selected-before-ordinary ordering, while explicit catalog
+ * resumptions use this dedicated entry point so disabling broad sync does not
+ * disable selected recovery.
+ */
+export async function runSelectedSharedMemoryRetry(
+  context: SelectedSharedMemoryRetryContext,
+): Promise<SyncOnConnectOutcome> {
+  return runSessionSelectedSharedMemoryRetry(context, admitPeerSyncContext(context));
 }
 
-function hadFailedPhase(result: SyncFromPeerResult): boolean {
-  if (typeof result === 'number') return false;
-  return (result.failedPhases ?? 0) > 0;
-}
-
-function cleanDetailedSync(result: SyncFromPeerResult): boolean {
-  if (typeof result === 'number') return true;
-  return (
-    (result.failedPeers ?? 0) === 0 &&
-    (result.failedPhases ?? 0) === 0 &&
-    (result.timedOutPhases ?? 0) === 0 &&
-    (result.deniedPhases ?? 0) === 0 &&
-    !metadataOnlySync(result)
-  );
-}
-
-function insertedDataTriplesForProgress(result: SyncProgressSummary): number {
-  if (result.insertedDataTriples !== undefined) return result.insertedDataTriples;
-  return metadataOnlySync(result) ? 0 : result.insertedTriples;
-}
-
-function metadataOnlySync(result: SyncProgressSummary): boolean {
-  const insertedDataTriples = result.insertedDataTriples ?? 0;
-  return insertedDataTriples === 0 && (
-    (result.metaOnlyResponses ?? 0) > 0 ||
-    ((result.insertedMetaTriples ?? 0) > 0 && result.insertedTriples > 0)
-  );
-}
-
-export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<SyncOnConnectOutcome> {
+async function runSessionSelectedSharedMemoryRetry(
+  context: SelectedSharedMemoryRetryContext,
+  { signal, syncingPeers }: SessionPeerSyncContext,
+): Promise<SyncOnConnectOutcome> {
   const {
     remotePeer,
-    syncingPeers,
     getPeerProtocols,
-    knownCorePeerIds,
-    knownCorePeerIdsV2 = new Set<string>(),
+    selectedSharedMemoryLane,
+    logInfo,
+  } = context;
+  const ctx = createOperationContext('sync');
+  const shortPeer = remotePeer.slice(-8);
+
+  signal.throwIfAborted();
+  const releasePeerLease = syncingPeers.tryAcquirePeer(remotePeer);
+  if (releasePeerLease === null) return 'already-syncing';
+
+  const runNonTransportStep = async <T>(step: () => Promise<T>): Promise<T> => {
+    try {
+      signal.throwIfAborted();
+      const result = await step();
+      signal.throwIfAborted();
+      return result;
+    } catch (err) {
+      if (err instanceof SyncBackpressureBusyError) {
+        throw new SyncOnConnectBackpressureError(err);
+      }
+      throw new SyncOnConnectPostSyncError(remotePeer, err, { backoffEligible: false });
+    }
+  };
+
+  try {
+    const protocols = await getPeerProtocols(remotePeer);
+    signal.throwIfAborted();
+    if (!advertisesSyncProtocol(protocols)) {
+      logInfo(
+        ctx,
+        `Peer ${shortPeer} does not support sync protocol (protocols: ${protocols.join(', ')})`,
+      );
+      context.onPeerSkippedNoSync?.(remotePeer, protocols);
+      return 'skipped-no-sync';
+    }
+
+    const admittedWork = await runNonTransportStep(() => Promise.resolve(
+      selectedSharedMemoryLane.admitWork(remotePeer),
+    ));
+    if (admittedWork === null || admittedWork.contextGraphIds.length === 0) return 'synced';
+
+    logInfo(
+      ctx,
+      `Retrying ${admittedWork.contextGraphIds.length} selected shared-memory Context Graph(s) from ${shortPeer}`,
+    );
+    const selected = await admittedWork.syncFromPeer();
+    signal.throwIfAborted();
+    const accounting = classifySyncResult(
+      selected.shared,
+      'shared',
+      selected.scopeComplete,
+    );
+    logInfo(
+      ctx,
+      `Synced ${accounting.insertedTriples} selected shared memory triples from peer ${shortPeer}`,
+    );
+
+    if (accounting.deferredByBackpressure) {
+      if (accounting.madeProgress) {
+        context.onSyncAccounting?.(remotePeer, {
+          reconcilerDisposition: 'defer',
+          fresh: false,
+          progress: true,
+        });
+      }
+      return 'deferred-backpressure';
+    }
+
+    // Selected completion clears this attempt's backoff, but never stamps the
+    // whole peer fresh: durable and unrelated CG work were intentionally not
+    // run. Explicit incomplete/no-progress remains silent so reconciler
+    // accounting grows its bounded retry backoff.
+    const selectedRetryResolved = selected.scopeComplete
+      && !accounting.backoffWorthyFailure
+      && !accounting.failed
+      && !accounting.denied;
+    if (accounting.madeProgress || accounting.denied || selectedRetryResolved) {
+      context.onSyncAccounting?.(remotePeer, {
+        reconcilerDisposition: selectedRetryResolved || accounting.denied ? 'clear' : 'retry',
+        fresh: false,
+        progress: accounting.madeProgress,
+      });
+    }
+    return 'synced';
+  } finally {
+    releasePeerLease();
+  }
+}
+
+export async function runRegistrySyncOnConnect(
+  context: RegistrySyncOnConnectContext,
+): Promise<SyncOnConnectOutcome> {
+  return runSessionSyncOnConnect(context, admitPeerSyncContext(context), context.peerCapabilities);
+}
+
+/** Public compatibility entry point; legacy capability translation is isolated. */
+export async function runSyncOnConnect(
+  context: SyncOnConnectInput,
+): Promise<SyncOnConnectOutcome> {
+  return runSessionSyncOnConnect(context, admitPeerSyncContext(context), peerCapabilitySink(context));
+}
+
+async function runSessionSyncOnConnect(
+  context: SyncOnConnectBaseContext,
+  { signal, syncingPeers }: SessionPeerSyncContext,
+  peerCapabilities: PeerCapabilitySink,
+): Promise<SyncOnConnectOutcome> {
+  const {
+    remotePeer,
+    getPeerProtocols,
     getSyncContextGraphs,
-    getSharedMemorySyncContextGraphs,
+    getDurableSyncContextGraphs,
+    ordinarySharedMemoryLane,
     syncFromPeer,
     refreshMetaSyncedFlags,
     discoverContextGraphsFromStore,
-    syncSharedMemoryFromPeer,
     syncSharedMemoryOnConnect = true,
     logInfo,
   } = context;
@@ -150,87 +423,154 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
   const ctx = createOperationContext('sync');
   const shortPeer = remotePeer.slice(-8);
 
-  if (syncingPeers.has(remotePeer)) return 'already-syncing';
-  syncingPeers.add(remotePeer);
+  signal.throwIfAborted();
+  const releasePeerLease = syncingPeers.tryAcquirePeer(remotePeer);
+  if (releasePeerLease === null) return 'already-syncing';
 
   let durableSyncCompleted = false;
   let madeProgress = false;
   let sawDeniedPhase = false;
   let sawFailedPhase = false;
   let sawBackoffWorthyFailure = false;
+  let sawBackpressureDeferral = false;
   let sawDurableMetadataOnlyDetailedSync = false;
+  let sawExplicitIncompleteDurableResult = false;
   let cleanDurableDetailedRound = false;
-  const recordSyncAccounting = (result: SyncFromPeerResult, phase: 'durable' | 'shared'): void => {
-    madeProgress = madeProgress || madeSyncProgress(result);
-    sawDeniedPhase = sawDeniedPhase || hadDeniedPhase(result);
-    sawFailedPhase = sawFailedPhase || hadFailedPhase(result);
-    sawBackoffWorthyFailure = sawBackoffWorthyFailure || hadBackoffWorthyFailure(result);
+  const recordSyncAccounting = (
+    result: DurableSyncFromPeerResult,
+    phase: 'durable' | 'shared',
+  ): SyncResultAccounting => {
+    const complete = phase === 'durable'
+      && typeof result !== 'number'
+      && 'complete' in result
+      && typeof result.complete === 'boolean'
+        ? result.complete
+        : undefined;
+    const accounting = classifySyncResult(result, phase, complete);
+    madeProgress = madeProgress || accounting.madeProgress;
+    sawDeniedPhase = sawDeniedPhase || accounting.denied;
+    sawFailedPhase = sawFailedPhase || accounting.failed;
+    sawBackoffWorthyFailure = sawBackoffWorthyFailure || accounting.backoffWorthyFailure;
+    sawBackpressureDeferral = sawBackpressureDeferral || accounting.deferredByBackpressure;
     if (phase === 'durable') {
-      sawDurableMetadataOnlyDetailedSync = sawDurableMetadataOnlyDetailedSync || (typeof result !== 'number' && metadataOnlySync(result));
-      cleanDurableDetailedRound = cleanDurableDetailedRound || cleanDetailedSync(result);
+      sawDurableMetadataOnlyDetailedSync = sawDurableMetadataOnlyDetailedSync || accounting.metadataOnly;
+      sawExplicitIncompleteDurableResult = sawExplicitIncompleteDurableResult || complete === false;
+      // Safely committed prefixes are useful progress, but an explicit
+      // incomplete durable result must not refresh the peer's successful-sync
+      // timestamp and suppress the next recovery attempt. Legacy counter-only
+      // results keep their existing behaviour when no completion verdict is
+      // available.
+      cleanDurableDetailedRound = cleanDurableDetailedRound || (
+        complete !== false && accounting.cleanNonMetadataResponse
+      );
     }
+    return accounting;
   };
   const finishSyncAccounting = (): SyncOnConnectOutcome => {
-    const cleanDurableRound = cleanDurableDetailedRound && !sawDurableMetadataOnlyDetailedSync;
-    const clearsPeerBackoff = madeProgress || (!sawBackoffWorthyFailure && (cleanDurableRound || sawDeniedPhase));
-    if (clearsPeerBackoff) {
-      context.onPeerSynced?.(remotePeer, {
-        fresh: !sawBackoffWorthyFailure && !sawDeniedPhase && !sawFailedPhase && cleanDurableRound,
-        progress: madeProgress,
-      });
+    const cleanDurableRound = cleanDurableDetailedRound
+      && !sawDurableMetadataOnlyDetailedSync
+      && !sawExplicitIncompleteDurableResult;
+    if (sawBackpressureDeferral) {
+      if (madeProgress) {
+        context.onSyncAccounting?.(remotePeer, {
+          reconcilerDisposition: 'defer',
+          fresh: false,
+          progress: true,
+        });
+      }
+      return 'deferred-backpressure';
+    }
+    const retryRequired = sawBackoffWorthyFailure
+      || (sawFailedPhase && !madeProgress);
+    const recordsPeerAccounting = madeProgress || retryRequired || cleanDurableRound || sawDeniedPhase;
+    if (recordsPeerAccounting) {
+      context.onSyncAccounting?.(
+        remotePeer,
+        retryRequired
+          ? {
+              reconcilerDisposition: 'retry',
+              fresh: false,
+              progress: madeProgress,
+            }
+          : {
+              reconcilerDisposition: 'clear',
+              fresh: !sawDeniedPhase && !sawFailedPhase && cleanDurableRound,
+              progress: madeProgress,
+            },
+      );
     }
     return 'synced';
   };
   const runNonTransportStep = async <T>(step: () => Promise<T>): Promise<T> => {
     try {
-      return await step();
+      signal.throwIfAborted();
+      const result = await step();
+      signal.throwIfAborted();
+      return result;
     } catch (err) {
+      if (err instanceof SyncBackpressureBusyError) {
+        throw new SyncOnConnectBackpressureError(err);
+      }
       throw new SyncOnConnectPostSyncError(remotePeer, err, { backoffEligible: false });
     }
   };
 
   try {
     const protocols = await getPeerProtocols(remotePeer);
+    signal.throwIfAborted();
 
-    if (protocols.includes(PROTOCOL_STORAGE_ACK)) {
-      knownCorePeerIds.add(remotePeer);
-    } else if (protocols.length > 0) {
-      // #1093: only de-classify on a POPULATED protocol list. An empty
-      // list means identify hasn't completed yet (the dominant race on
-      // inbound connections) — evicting a previously-confirmed core here
-      // would re-poison the ACK candidate pool that
-      // `DKGAgent.getACKCandidatePeers` builds for the publisher.
-      knownCorePeerIds.delete(remotePeer);
-    }
-    if (protocols.includes(PROTOCOL_STORAGE_ACK_V2)) {
-      knownCorePeerIdsV2.add(remotePeer);
-    } else if (protocols.length > 0) {
-      knownCorePeerIdsV2.delete(remotePeer);
-    }
+    peerCapabilities.observe(remotePeer, { source: 'identify-snapshot', protocols });
 
-    const hasSync = protocols.includes(PROTOCOL_SYNC);
+    const hasSync = advertisesSyncProtocol(protocols);
     if (!hasSync) {
       logInfo(ctx, `Peer ${shortPeer} does not support sync protocol (protocols: ${protocols.join(', ')})`);
       context.onPeerSkippedNoSync?.(remotePeer, protocols);
       return 'skipped-no-sync';
     }
 
-    logInfo(ctx, `Syncing from peer ${shortPeer}...`);
-    const knownCgsBefore = new Set(getSyncContextGraphs() ?? []);
-    const synced = await syncFromPeer(remotePeer);
-    recordSyncAccounting(synced, 'durable');
-    logInfo(ctx, `Synced ${insertedTriples(synced)} data triples from peer ${shortPeer}`);
-    if (hadBackoffWorthyFailure(synced)) {
-      logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after durable sync hit backoff-worthy pressure`);
-      return finishSyncAccounting();
-    }
-
-    const syncScope = new Set<string>([
+    const durableContextGraphIds = getDurableSyncContextGraphs?.() ?? [
       SYSTEM_CONTEXT_GRAPHS.AGENTS,
       SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
       ...(getSyncContextGraphs() ?? []),
-    ]);
-    await runNonTransportStep(() => refreshMetaSyncedFlags(syncScope));
+    ];
+    logInfo(ctx, `Syncing from peer ${shortPeer}...`);
+    const knownCgsBefore = new Set(getSyncContextGraphs() ?? []);
+    if (durableContextGraphIds.length > 0) {
+      const synced = getDurableSyncContextGraphs
+        ? await syncFromPeer(remotePeer, durableContextGraphIds)
+        : await syncFromPeer(remotePeer);
+      signal.throwIfAborted();
+      const syncedAccounting = recordSyncAccounting(synced, 'durable');
+      logInfo(ctx, `Synced ${syncedAccounting.insertedTriples} data triples from peer ${shortPeer}`);
+      if (syncedAccounting.deferredByBackpressure) {
+        logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after local admission deferral`);
+        return finishSyncAccounting();
+      }
+      // A backoff-worthy per-CG failure must NOT stop the remaining lanes: the
+      // failure is already recorded (the peer will not be stamped fresh), and
+      // stopping here starves CG discovery and shared-memory sync of a peer
+      // that is demonstrably reachable — the small-CG-behind-a-poison-transfer
+      // starvation this accounting exists to prevent. Only a peer that never
+      // answered any round and produced no progress stops the fanout, because
+      // every later lane would just re-dial the same dead peer.
+      if (syncedAccounting.peerUnreachable && !syncedAccounting.madeProgress) {
+        logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer}: durable sync could not reach the peer`);
+        return finishSyncAccounting();
+      }
+      if (syncedAccounting.backoffWorthyFailure) {
+        logInfo(ctx, `Durable sync from peer ${shortPeer} hit backoff-worthy pressure; continuing remaining sync-on-connect lanes`);
+      }
+    } else {
+      // An empty automatic scope is a completed no-op. Stamp the peer fresh so
+      // the reconciler does not repeatedly wake an Edge that selected no CGs.
+      cleanDurableDetailedRound = true;
+      logInfo(ctx, `Skipping automatic durable sync from ${shortPeer}: no Context Graphs are eligible`);
+    }
+
+    const syncScope = new Set<string>(durableContextGraphIds);
+    if (syncScope.size > 0) {
+      await runNonTransportStep(() => refreshMetaSyncedFlags(syncScope));
+    }
 
     await runNonTransportStep(() => discoverContextGraphsFromStore());
 
@@ -239,29 +579,62 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     if (newlyDiscovered.length > 0) {
       logInfo(ctx, `Discovered ${newlyDiscovered.length} new CG(s) — syncing durable data from ${shortPeer}`);
       const discoverSynced = await syncFromPeer(remotePeer, newlyDiscovered);
-      recordSyncAccounting(discoverSynced, 'durable');
-      logInfo(ctx, `Synced ${insertedTriples(discoverSynced)} durable triples for newly discovered CG(s) from ${shortPeer}`);
-      if (hadBackoffWorthyFailure(discoverSynced)) {
-        logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after discovered-CG durable sync hit backoff-worthy pressure`);
+      signal.throwIfAborted();
+      const discoverAccounting = recordSyncAccounting(discoverSynced, 'durable');
+      logInfo(ctx, `Synced ${discoverAccounting.insertedTriples} durable triples for newly discovered CG(s) from ${shortPeer}`);
+      if (discoverAccounting.deferredByBackpressure) {
+        logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after discovered-CG admission deferral`);
+        return finishSyncAccounting();
+      }
+      // Same policy as the primary durable leg: per-CG pressure continues,
+      // only an unanswered round with no progress stops the fanout.
+      if (discoverAccounting.peerUnreachable && !discoverAccounting.madeProgress) {
+        logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer}: discovered-CG durable sync could not reach the peer`);
         return finishSyncAccounting();
       }
       await runNonTransportStep(() => refreshMetaSyncedFlags(newlyDiscovered));
     }
 
     durableSyncCompleted = true;
-    const wsContextGraphIds = getSharedMemorySyncContextGraphs
-      ? await runNonTransportStep(() => Promise.resolve(getSharedMemorySyncContextGraphs(remotePeer)))
-      : getSyncContextGraphs() ?? [];
-    if (syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
-      const wsSynced = await syncSharedMemoryFromPeer(remotePeer, wsContextGraphIds);
-      recordSyncAccounting(wsSynced, 'shared');
-      logInfo(ctx, `Synced ${insertedTriples(wsSynced)} shared memory triples from peer ${shortPeer}`);
-    } else if (!syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
-      logInfo(ctx, `Skipping shared memory sync from peer ${shortPeer} (syncSharedMemoryOnConnect=false)`);
+    if (syncSharedMemoryOnConnect && ordinarySharedMemoryLane !== undefined) {
+      const ordinarySharedMemoryWork = await runNonTransportStep(() => Promise.resolve(
+        ordinarySharedMemoryLane.resolveWork(remotePeer),
+      ));
+      const wsContextGraphIds = ordinarySharedMemoryWork.contextGraphIds;
+      if (wsContextGraphIds.length === 0) return finishSyncAccounting();
+      const wsSynced = await ordinarySharedMemoryWork.syncFromPeer();
+      signal.throwIfAborted();
+      const sharedAccounting = recordSyncAccounting(wsSynced, 'shared');
+      logInfo(ctx, `Synced ${sharedAccounting.insertedTriples} shared memory triples from peer ${shortPeer}`);
+      if (sharedAccounting.deferredByBackpressure) {
+        logInfo(ctx, `Shared-memory sync from peer ${shortPeer} deferred by local admission pressure`);
+      }
     }
 
     return finishSyncAccounting();
   } catch (err) {
+    if (err instanceof SyncOnConnectBackpressureError) {
+      throw err;
+    }
+    // Local admission pressure is not a peer failure.
+    //
+    // This conversion is required BY this change, not a pre-existing bug it
+    // fixes. Before it, `executeSyncOnConnectAttempt`'s catch called
+    // `getSyncBackpressureBusyError()` first, and `SyncOnConnectPostSyncError`
+    // sets `{ cause }` — so a bare busy escaping post-durable was found at
+    // depth 1 in the cause chain and already yielded `deferred-backpressure`
+    // with no accounting. Removing that cause walk is what would make the
+    // `backoffEligible: true` wrap below reachable for local pressure, so the
+    // marker has to be raised here instead.
+    //
+    // Note the invariant this relies on: the attempt boundary now matches only
+    // DIRECT instances. Any future site that wraps a busy error (an
+    // `AggregateError`, a new `{ cause }` rethrow in the shared-memory lane)
+    // falls through to `backoffEligible: true` and grows peer backoff for local
+    // pressure. A busy error must reach this boundary bare.
+    if (err instanceof SyncBackpressureBusyError) {
+      throw new SyncOnConnectBackpressureError(err);
+    }
     if (err instanceof SyncOnConnectPostSyncError) {
       throw err;
     }
@@ -270,6 +643,6 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     }
     throw err;
   } finally {
-    syncingPeers.delete(remotePeer);
+    releasePeerLease();
   }
 }

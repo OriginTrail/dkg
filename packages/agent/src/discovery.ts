@@ -1,6 +1,24 @@
 import type { QueryEngine, QueryResult } from '@origintrail-official/dkg-query';
-import { DKG_ONTOLOGY, escapeSparqlLiteral, assertSafeIri, sparqlIri } from '@origintrail-official/dkg-core';
+import {
+  DKG_ONTOLOGY,
+  escapeSparqlLiteral,
+  assertSafeIri,
+  normalizeAgentDid,
+  sparqlIri,
+} from '@origintrail-official/dkg-core';
+import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 import { AGENT_REGISTRY_CONTEXT_GRAPH } from './profile.js';
+import { AGENT_DATED_PEER_PREDICATE, parseAgentDatedPeer } from './agent-profile-updates.js';
+import { AGENT_PROFILE_STALE_THRESHOLD_MS } from './dkg-agent-constants.js';
+import {
+  MAX_AGENT_PEER_PAGE_SIZE,
+  usableLastSeenMs,
+  validateAgentPeerPage,
+  validateAgentPeerPageRequest,
+  type AgentPeerDiscovery,
+  type AgentPeerPage,
+  type AgentPeerPageRequest,
+} from './agent-peer-discovery.js';
 
 const SKILL = 'https://dkg.origintrail.io/skill#';
 const DKG = 'https://dkg.network/ontology#';
@@ -30,6 +48,98 @@ export interface DiscoveredAgent {
   lastSeen?: string;
 }
 
+/**
+ * Stable identity used by keyset pagination and identity-level conflict handling.
+ *
+ * Only the canonical agent URI participates. Mutable profile fields are deliberately excluded,
+ * so changing a name, peer binding, framework, or future optional field cannot move an agent
+ * across an in-progress page walk. EVM-address DIDs are case-normalized to the same canonical
+ * shape emitted by the profile writer.
+ */
+export function discoveredAgentIdentityKey(
+  agent: Pick<DiscoveredAgent, 'agentUri'>,
+): string {
+  return normalizeAgentDid(agent.agentUri);
+}
+
+function defineDiscoveredAgentRowFields<
+  const Fields extends readonly (keyof DiscoveredAgent)[],
+>(
+  fields: Fields,
+  ..._missing: [Exclude<keyof DiscoveredAgent, Fields[number]>] extends [never]
+    ? []
+    : ['Missing DiscoveredAgent row fields', Exclude<keyof DiscoveredAgent, Fields[number]>]
+): Fields {
+  return fields;
+}
+
+/**
+ * The one ordered projection used by exact-row deduplication and pagination.
+ * Adding a public DiscoveredAgent field makes this declaration fail to compile until the field is
+ * included, so the serialized key cannot silently lag behind the model.
+ */
+const DISCOVERED_AGENT_ROW_FIELDS = defineDiscoveredAgentRowFields([
+  'agentUri',
+  'name',
+  'peerId',
+  'framework',
+  'nodeRole',
+  'relayAddress',
+  'agentAddress',
+  'multiaddrs',
+  'lastSeen',
+] as const);
+
+function normalizeDiscoveredAgentRow(agent: DiscoveredAgent): DiscoveredAgent {
+  return {
+    ...agent,
+    agentUri: discoveredAgentIdentityKey(agent),
+    ...(agent.multiaddrs ? { multiaddrs: [...agent.multiaddrs].sort() } : {}),
+  };
+}
+
+export function discoveredAgentRowKey(agent: DiscoveredAgent): string {
+  const normalized = normalizeDiscoveredAgentRow(agent);
+  return JSON.stringify(
+    DISCOVERED_AGENT_ROW_FIELDS.map((field) => normalized[field] ?? null),
+  );
+}
+
+export interface DiscoveredAgentIdentityRows {
+  identity: string;
+  rows: DiscoveredAgent[];
+}
+
+/**
+ * Group exact-distinct public bindings behind their stable canonical identity.
+ *
+ * The registry does not currently expose provenance that can prove which of two peer bindings is
+ * authoritative. Discarding either binding would therefore invent a winner. Keep every distinct
+ * binding together in one deterministic group; consumers can retain every conflicting row instead
+ * of inventing an authoritative winner.
+ */
+export function groupDiscoveredAgentIdentityRows(
+  agents: readonly DiscoveredAgent[],
+): DiscoveredAgentIdentityRows[] {
+  const rowsByIdentity = new Map<string, Map<string, DiscoveredAgent>>();
+  for (const agent of agents) {
+    const identity = discoveredAgentIdentityKey(agent);
+    const normalized = normalizeDiscoveredAgentRow(agent);
+    let rows = rowsByIdentity.get(identity);
+    if (!rows) {
+      rows = new Map<string, DiscoveredAgent>();
+      rowsByIdentity.set(identity, rows);
+    }
+    rows.set(discoveredAgentRowKey(normalized), normalized);
+  }
+  return [...rowsByIdentity].map(([identity, rows]) => ({
+    identity,
+    rows: [...rows]
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([, row]) => row),
+  }));
+}
+
 export interface DiscoveredOffering {
   agentUri: string;
   agentName: string;
@@ -52,23 +162,43 @@ export interface SkillSearchOptions {
  * Discovers agents and skill offerings by querying the local Agent Registry
  * context graph. All queries are strictly local (Spec §1.6 Store Isolation).
  */
-export class DiscoveryClient {
+export class DiscoveryClient implements AgentPeerDiscovery {
   private readonly engine: QueryEngine;
 
   constructor(engine: QueryEngine) {
     this.engine = engine;
   }
 
-  async findAgents(options: { framework?: string; limit?: number } = {}): Promise<DiscoveredAgent[]> {
+  /** Bounded routing hints only. Snapshot callers authenticate the live peer
+   * and its chain registration before trusting anything from this directory. */
+  async findSnapshotCorePeerIds(signal: AbortSignal): Promise<string[]> {
+    const result = await this.engine.query(`
+      SELECT DISTINCT ?peerId WHERE {
+        ?agent a <${DKG}Agent> ;
+               <${DKG}nodeRole> "core" ;
+               <${DKG}peerId> ?peerId .
+      } ORDER BY ?peerId LIMIT 128
+    `, { contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH, signal });
+    signal.throwIfAborted();
+    return result.bindings.slice(0, 128).map(row => stripQuotes(row['peerId']));
+  }
+
+  async findAgents(options: {
+    framework?: string;
+    agentAddress?: string;
+    limit?: number;
+    signal?: AbortSignal;
+  } = {}): Promise<DiscoveredAgent[]> {
     let filter = '';
     if (options.framework) {
       filter += `\n      ?agent <${SKILL}framework> "${escapeSparqlLiteral(options.framework)}" .`;
     }
-
-    const limitClause = options.limit ? `LIMIT ${options.limit}` : '';
+    if (options.agentAddress) {
+      filter += `\n      ?agent <${DKG}agentAddress> "${escapeSparqlLiteral(options.agentAddress)}" .`;
+    }
 
     const sparql = `
-      SELECT ?agent ?name ?peerId ?framework ?nodeRole ?relayAddress ?agentAddress WHERE {
+      SELECT DISTINCT ?agent ?name ?peerId ?framework ?nodeRole ?relayAddress ?agentAddress WHERE {
         ?agent a <${DKG}Agent> ;
                <${SCHEMA}name> ?name ;
                <${DKG}peerId> ?peerId .${filter}
@@ -77,12 +207,15 @@ export class DiscoveryClient {
         OPTIONAL { ?agent <${DKG}relayAddress> ?relayAddress }
         OPTIONAL { ?agent <${DKG}agentAddress> ?agentAddress }
       }
-      ${limitClause}
     `;
 
-    const result = await this.engine.query(sparql, { contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH });
+    const result = await this.engine.query(sparql, {
+      contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH,
+      signal: options.signal,
+      source: 'discovery.findAgents',
+    });
 
-    return result.bindings.map((row) => ({
+    const discovered = result.bindings.map((row) => ({
       agentUri: row['agent'],
       name: stripQuotes(row['name']),
       peerId: stripQuotes(row['peerId']),
@@ -91,6 +224,146 @@ export class DiscoveryClient {
       relayAddress: row['relayAddress'] ? stripQuotes(row['relayAddress']) : undefined,
       agentAddress: row['agentAddress'] ? stripQuotes(row['agentAddress']) : undefined,
     }));
+
+    // DISTINCT is the primary query-boundary guarantee. Keep an explicit
+    // typed-row fence as well because different RDF term encodings can
+    // normalize to the same public string values after `stripQuotes`.
+    const seen = new Set<string>();
+    const unique = discovered.filter((agent) => {
+      const key = discoveredAgentRowKey(agent);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    // RDF-distinct bindings may normalize to one public row. Applying LIMIT in SPARQL would let
+    // those encodings consume the caller-visible slots and hide later unique agents permanently.
+    return options.limit === undefined ? unique : unique.slice(0, options.limit);
+  }
+
+  /**
+   * @deprecated Use findAgentPeerPageByAddress for bounded page consumption.
+   * Preserves the existing optional-limit array API for explicit legacy callers;
+   * bounded recovery never calls this facade or accumulates this full result.
+   */
+  async findAgentPeerIdsByAddress(
+    agentAddress: string,
+    options: { afterPeerId?: string; limit?: number; signal?: AbortSignal } = {},
+  ): Promise<string[]> {
+    const requestedLimit = options.limit === undefined ? undefined : Math.max(1, Math.floor(options.limit));
+    if (requestedLimit !== undefined && !Number.isSafeInteger(requestedLimit)) {
+      throw new RangeError('Peer lookup limit must be finite');
+    }
+    const signal = options.signal;
+    let afterPeerId = options.afterPeerId || undefined;
+    const peerIds: string[] = [];
+    do {
+      const page = await this.findAgentPeerPageByAddress(agentAddress, {
+        limit: Math.min(MAX_AGENT_PEER_PAGE_SIZE, requestedLimit === undefined ? MAX_AGENT_PEER_PAGE_SIZE : requestedLimit - peerIds.length),
+        afterPeerId,
+        signal,
+      });
+      peerIds.push(...page.peerIds);
+      afterPeerId = page.nextAfterPeerId ?? undefined;
+    } while (afterPeerId !== undefined && (requestedLimit === undefined || peerIds.length < requestedLimit));
+    return peerIds;
+  }
+
+  /**
+   * Deterministic, duplicate-free wallet-to-peer lookup for bounded recovery.
+   * Rich profile rows are deliberately not selected here: OPTIONAL profile
+   * properties can multiply rows before LIMIT and permanently hide a peer.
+   */
+  async findAgentPeerPageByAddress(
+    agentAddress: string,
+    options: AgentPeerPageRequest,
+  ): Promise<AgentPeerPage> {
+    options = Object.freeze({ ...options });
+    validateAgentPeerPageRequest(options);
+    const addressMatch = agentAddressMatch(agentAddress);
+    const afterFilter = options.afterPeerId
+      ? `FILTER(STR(?storedPeerId) > "${escapeSparqlLiteral(options.afterPeerId)}")`
+      : '';
+    const result = await this.engine.query(`
+      SELECT DISTINCT (STR(?storedPeerId) AS ?peerId) WHERE {
+        ?agent a <${DKG}Agent> ;
+               <${DKG}peerId> ?storedPeerId .
+        ${addressMatch}
+        FILTER(STRLEN(STR(?storedPeerId)) > 0)
+        ${afterFilter}
+      }
+      ORDER BY ASC(STR(?peerId))
+      LIMIT ${options.limit + 1}
+    `, {
+      contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH,
+      signal: options.signal,
+    });
+
+    options.signal?.throwIfAborted();
+    if (result.bindings.length > options.limit + 1) {
+      throw new Error('Peer registry query exceeded its row limit');
+    }
+    const peerIds = result.bindings.slice(0, options.limit)
+      .map((row) => stripQuotes(row['peerId'] ?? ''));
+    return validateAgentPeerPage({
+      peerIds,
+      nextAfterPeerId: result.bindings.length > options.limit ? peerIds[peerIds.length - 1] : null,
+    }, options);
+  }
+
+  /**
+   * The peers to try for a wallet now, newest first, by the date its profile
+   * holds for each peer, or else the profile's own `dkg:lastSeen`. A peer whose
+   * newest date is older than `staleAfterMs` is left out, so a wallet with no
+   * current peer has none, unless `isLive` says it is alive whatever its profile
+   * says. A profile with no usable date says nothing about its age: its peers
+   * stay, after the dated ones. {@link findAgentPeerPageByAddress} pages every
+   * listed peer in a fixed order.
+   */
+  async findCurrentAgentPeerIds(
+    agentAddress: string,
+    options: { limit: number; staleAfterMs?: number; nowMs?: number; signal?: AbortSignal; isLive?: (peerId: string) => boolean },
+  ): Promise<string[]> {
+    const nowMs = options.nowMs ?? Date.now();
+    const staleAfterMs = options.staleAfterMs ?? AGENT_PROFILE_STALE_THRESHOLD_MS;
+    const addressMatch = agentAddressMatch(agentAddress);
+    const queryOptions = { contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH, signal: options.signal };
+    const profileRows = await this.engine.query(`
+      SELECT DISTINCT (STR(?storedPeerId) AS ?peerId) (STR(?storedLastSeen) AS ?lastSeen) WHERE {
+        ?agent a <${DKG}Agent> ;
+               <${DKG}peerId> ?storedPeerId .
+        ${addressMatch}
+        FILTER(STRLEN(STR(?storedPeerId)) > 0)
+        OPTIONAL { ?agent <${DKG}lastSeen> ?storedLastSeen }
+      }
+      ORDER BY DESC(?lastSeen)
+      LIMIT ${MAX_AGENT_PEER_PAGE_SIZE}
+    `, queryOptions);
+    options.signal?.throwIfAborted();
+    const dateRows = await this.engine.query(`
+      SELECT DISTINCT (STR(?storedDate) AS ?datedPeer) WHERE {
+        ?agent <${AGENT_DATED_PEER_PREDICATE}> ?storedDate .
+        ${addressMatch}
+      }
+      LIMIT ${MAX_AGENT_PEER_PAGE_SIZE}
+    `, queryOptions);
+    options.signal?.throwIfAborted();
+    const dated = new Map<string, number>();
+    for (const row of dateRows.bindings) {
+      const parsed = parseAgentDatedPeer(row['datedPeer'] ?? '', nowMs);
+      if (parsed !== undefined) dated.set(parsed.peerId, Math.max(parsed.seen.ms, dated.get(parsed.peerId) ?? UNDATED));
+    }
+    const newestByPeer = new Map<string, number>();
+    for (const row of profileRows.bindings) {
+      const peerId = stripQuotes(row['peerId'] ?? '');
+      if (peerId.length === 0) continue;
+      const lastSeenMs = dated.get(peerId) ?? usableLastSeenMs(stripQuotes(row['lastSeen'] ?? ''), nowMs) ?? UNDATED;
+      if (lastSeenMs >= (newestByPeer.get(peerId) ?? UNDATED)) newestByPeer.set(peerId, lastSeenMs);
+    }
+    return [...newestByPeer]
+      .filter(([peerId, lastSeenMs]) => lastSeenMs === UNDATED || nowMs - lastSeenMs <= staleAfterMs || options.isLive?.(peerId) === true)
+      .sort(([leftPeer, left], [rightPeer, right]) => right - left || (leftPeer < rightPeer ? -1 : 1))
+      .slice(0, options.limit)
+      .map(([peerId]) => peerId);
   }
 
   async findSkillOfferings(options: SkillSearchOptions = {}): Promise<DiscoveredOffering[]> {
@@ -144,7 +417,10 @@ export class DiscoveryClient {
     }));
   }
 
-  async findAgentByPeerId(peerId: string): Promise<DiscoveredAgent | null> {
+  async findAgentByPeerId(
+    peerId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<DiscoveredAgent | null> {
     // Two-query path keeps the existing single-row SELECT semantics
     // for scalar columns (name, framework, nodeRole, relayAddress,
     // lastSeen) while a separate query gathers all `dkg:multiaddr`
@@ -174,7 +450,10 @@ export class DiscoveryClient {
       LIMIT 1
     `;
 
-    const scalarResult = await this.engine.query(scalar, { contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH });
+    const scalarResult = await this.engine.query(scalar, {
+      contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH,
+      signal: options.signal,
+    });
     if (scalarResult.bindings.length === 0) return null;
 
     const row = scalarResult.bindings[0];
@@ -202,7 +481,10 @@ export class DiscoveryClient {
         ${sparqlIri(safeAgentIri)} <${DKG}multiaddr> ?multiaddr .
       }
     `;
-    const multiResult = await this.engine.query(multiSparql, { contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH });
+    const multiResult = await this.engine.query(multiSparql, {
+      contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH,
+      signal: options.signal,
+    });
     const multiaddrs = multiResult.bindings
       .map((r) => (r['multiaddr'] ? stripQuotes(r['multiaddr']) : ''))
       .filter((s) => s.length > 0);
@@ -227,9 +509,16 @@ export class DiscoveryClient {
   }
 }
 
+/** Sorts after every dated peer: a profile without a usable `dkg:lastSeen`. */
+const UNDATED = Number.NEGATIVE_INFINITY;
+
+function agentAddressMatch(agentAddress: string): string {
+  return /^0x[0-9a-fA-F]{40}$/.test(agentAddress)
+    ? `?agent <${DKG}agentAddress> ?storedAgentAddress .
+        FILTER(LCASE(STR(?storedAgentAddress)) = "${escapeSparqlLiteral(agentAddress.toLowerCase())}")`
+    : `?agent <${DKG}agentAddress> "${escapeSparqlLiteral(agentAddress)}" .`;
+}
+
 function stripQuotes(s: string): string {
-  if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1);
-  const match = s.match(/^"(.*)"(\^\^.*|@.*)?$/);
-  if (match) return match[1];
-  return s;
+  return rdfLiteralBody(s, { plainQuoted: true }) ?? s;
 }

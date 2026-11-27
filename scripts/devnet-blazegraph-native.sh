@@ -36,21 +36,16 @@ is_up() { curl -sf --max-time 4 "$(status_url)" >/dev/null 2>&1; }
 
 seed_namespace() {
   local ns="$1"
-  # Properties XML — loadFromXML requires EXACTLY this SYSTEM DOCTYPE (it is matched
-  # literally, NOT fetched; the dead java.sun.com URL is fine). quads=true is
-  # mandatory: the DKG uses named graphs. Idempotent: 409 EXISTS is success.
+  # Properties XML comes from the shared contract module (this script's old
+  # inline copy had drifted: canonical wins, adding statementIdentifiers=false
+  # and textIndex=false). Idempotent: 409 EXISTS is success.
   local xml
   xml=$(mktemp)
-  cat > "$xml" <<EOF
-<?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<!DOCTYPE properties SYSTEM "http://java.sun.com/dtd/properties.dtd">
-<properties>
-<entry key="com.bigdata.rdf.sail.namespace">$ns</entry>
-<entry key="com.bigdata.rdf.store.AbstractTripleStore.quads">true</entry>
-<entry key="com.bigdata.rdf.sail.truthMaintenance">false</entry>
-<entry key="com.bigdata.rdf.store.AbstractTripleStore.axiomsClass">com.bigdata.rdf.axioms.NoAxioms</entry>
-</properties>
-EOF
+  if ! node "$REPO_ROOT/packages/cli/blazegraph-image-metadata.cjs" --namespace-xml "$ns" > "$xml"; then
+    rm -f "$xml"
+    log "namespace $ns: FATAL could not render namespace properties XML"
+    return 1
+  fi
   local code
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$(ns_url)" -H "Content-Type: application/xml" --data-binary "@$xml")
   rm -f "$xml"

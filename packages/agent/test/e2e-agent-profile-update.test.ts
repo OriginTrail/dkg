@@ -1,0 +1,68 @@
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * A wallet that moves to a new node, over real libp2p: the second run of the same
+ * agent wallet comes first in another node's phonebook once a sync brings its
+ * profile, ahead of the first run's peer, which no profile removes and which age
+ * leaves out.
+ */
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ethers } from 'ethers';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { agentFromPrivateKey, DKGAgent, type AgentKeyRecord } from '../src/index.js';
+
+interface AgentInternals {
+  localAgents: Map<string, AgentKeyRecord>;
+  defaultAgentAddress?: string;
+}
+
+async function startAgent(name: string, privateKey?: string, syncSystemContextGraphsOnConnect = false): Promise<DKGAgent> {
+  const agent = await DKGAgent.create({
+    name,
+    listenPort: 0,
+    skills: [],
+    chainAdapter: new MockChainAdapter(),
+    syncSystemContextGraphsOnConnect,
+  });
+  if (privateKey !== undefined) {
+    const record = agentFromPrivateKey(privateKey, name);
+    const internals = agent as unknown as AgentInternals;
+    internals.localAgents.set(record.agentAddress, record);
+    internals.defaultAgentAddress = record.agentAddress;
+  }
+  await agent.start();
+  return agent;
+}
+
+describe('an agent wallet that moves to a new node', () => {
+  const agents: DKGAgent[] = [];
+  afterEach(async () => {
+    await Promise.all(agents.splice(0).map((agent) => agent.stop().catch(() => undefined)));
+  });
+
+  it('is listed at the new peer first, once a sync brings the new run\'s profile', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const observer = await startAgent('Observer', ethers.Wallet.createRandom().privateKey, true);
+    agents.push(observer);
+
+    const firstRun = await startAgent('FirstRun', wallet.privateKey);
+    agents.push(firstRun);
+    await firstRun.connectTo(observer.multiaddrs[0]!);
+    const peersOfWallet = () => observer.discovery.findCurrentAgentPeerIds(wallet.address, { limit: 8 });
+    await vi.waitFor(async () => {
+      await firstRun.publishProfile();
+      expect(await peersOfWallet()).toEqual([firstRun.peerId]);
+    }, { timeout: 20_000, interval: 500 });
+
+    const firstPeerId = firstRun.peerId;
+    await firstRun.stop();
+
+    const secondRun = await startAgent('SecondRun', wallet.privateKey);
+    agents.push(secondRun);
+    await secondRun.publishProfile();
+    await secondRun.connectTo(observer.multiaddrs[0]!);
+    await vi.waitFor(async () => {
+      expect(await peersOfWallet()).toEqual([secondRun.peerId, firstPeerId]);
+    }, { timeout: 30_000, interval: 500 });
+  }, 60_000);
+});

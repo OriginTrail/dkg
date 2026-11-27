@@ -67,6 +67,20 @@ describe("DkgNodePlugin", () => {
     });
 
 
+    it('dkg_query forwards `semantics`, and refuses other values before the daemon', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1', context_graph_id: 'my-cg', view: 'verifiable-memory', semantics: 'merged',
+      });
+      expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string)).toMatchObject({ view: 'verifiable-memory', semantics: 'merged' });
+      const refused = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1', context_graph_id: 'my-cg', view: 'verifiable-memory', semantics: 'joined',
+      });
+      expect(JSON.parse(refused.content[0].text).error).toBe('"semantics" must be one of: merged, per-asset.');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+
     it('dkg_subscribe rejects a stringified include_shared_memory (same rationale as dkg_query)', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
       const result = await byName.get('dkg_subscribe')!.execute('tc', {
@@ -83,7 +97,7 @@ describe("DkgNodePlugin", () => {
       // rc.17 (CONTRACT §2 promote→share, §1 Stage5) + #1116: a FULL share now
       // SEALS BY DEFAULT and is publish-ready via the per-KA
       // dkg_knowledge_asset_publish. The share description must steer the agent
-      // to it and explain the subset-is-not-publishable rule (§5).
+      // to it and make the atomic scope explicit.
       const plugin = new DkgNodePlugin();
       const tools: OpenClawTool[] = [];
       plugin.register({
@@ -95,10 +109,8 @@ describe("DkgNodePlugin", () => {
       });
       const share = tools.find((t) => t.name === 'dkg_knowledge_asset_share')!;
       expect(share.description).toContain('dkg_knowledge_asset_publish');
-      // #1116: a full share now SEALS BY DEFAULT (was "auto-seal best-effort").
-      expect(share.description).toMatch(/seals by default/i);
-      // §5 subset-vs-full language must be present.
-      expect(share.description).toMatch(/NOT publishable to Verifiable Memory/i);
+      expect(share.description).toMatch(/atomically seal and share the complete Knowledge Asset/i);
+      expect(share.description).toMatch(/Root-entity subsets and unsealed shares are not supported/i);
     });
 
 

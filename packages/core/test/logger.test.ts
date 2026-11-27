@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import {
   Logger,
   createOperationContext,
+  formatLogRecord,
   type LogSink,
   type OperationContext,
 } from '../src/logger.js';
@@ -156,6 +157,35 @@ describe('Logger', () => {
 
     const levels = entries.map(e => e.level);
     expect(levels).toEqual(['debug', 'info', 'warn', 'error']);
+  });
+});
+
+describe('formatLogRecord', () => {
+  it('preserves console and daemon-debug representations through options', () => {
+    const record = {
+      level: 'debug',
+      operationName: 'system',
+      operationId: 'op-1',
+      sourceOperationId: 'source-1',
+      module: 'FormatterTest',
+      message: 'details',
+    } as const;
+    const timestamp = new Date('2026-08-26T12:34:56.000Z');
+
+    expect(formatLogRecord(record, {
+      timestamp,
+      timestampStyle: 'iso-bracketed',
+      includeLevel: true,
+      trailingNewline: true,
+    })).toBe(
+      '[2026-08-26T12:34:56.000Z] system op-1 [from:source-1] ' +
+      '[FormatterTest] details [DEBUG]\n',
+    );
+
+    const local = formatLogRecord({ ...record, level: 'info' }, { timestamp });
+    expect(local).toContain('system op-1 [from:source-1] [FormatterTest] details');
+    expect(local).not.toContain('[INFO]');
+    expect(local.endsWith('\n')).toBe(false);
   });
 });
 

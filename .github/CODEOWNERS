@@ -1,6 +1,6 @@
 # CODEOWNERS — required reviewer routing for security-sensitive paths.
 #
-# Branch protection on `main` / `v10-rc` should have "Require review from
+# Branch protection on `main` / `testnet-canary` should have "Require review from
 # Code Owners" enabled (admin task — see
 # docs/security/SUPPLY_CHAIN_HARDENING.md §C). With that toggle on, any
 # PR that touches a path listed below requires an approving review from
@@ -63,3 +63,9 @@ packages/cli/scripts/                     @branarakic @Jurij89 @zsculac
 # the first time around.
 docs/security/                            @branarakic @Jurij89 @zsculac
 SECURITY.md                               @branarakic @Jurij89 @zsculac
+
+# ----------------------------------------------------------------------
+# Node UI design system: the rules, tokens and shared components.
+packages/node-ui/DESIGN.md                @anabevc
+packages/node-ui/src/ui/styles/00-theme.css @anabevc
+packages/node-ui/src/ui/components/ds/    @anabevc

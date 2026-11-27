@@ -16,7 +16,7 @@ export type SyncMemoryBoundary =
   | 'responder_snapshot_before_load'
   | 'responder_snapshot_after_load';
 
-export type SyncRequesterPhaseOutcome = 'completed' | 'timed_out' | 'error';
+export type SyncRequesterPhaseOutcome = 'completed' | 'timed_out' | 'error' | 'local_yield';
 
 export interface RequesterPhaseTelemetry {
   recordPage(): void;

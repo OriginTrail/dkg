@@ -1,7 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { peerIdFromString } from '@libp2p/peer-id';
+import { generateKeyPair } from '@libp2p/crypto/keys';
+import { peerIdFromPrivateKey, peerIdFromString } from '@libp2p/peer-id';
 import { parseMultiaddrConnectTarget } from '../src/p2p/multiaddr-peer-target.js';
-import { connectToMultiaddr, primeCatchupConnections } from '../src/p2p/peer-connect.js';
+import {
+  connectToMultiaddr,
+  ensurePeerConnected,
+  primeCatchupConnections,
+} from '../src/p2p/peer-connect.js';
+import { waitForPeerProtocol } from '../src/p2p/protocol-readiness.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -59,7 +65,7 @@ describe('connectToMultiaddr', () => {
 
     expect(dial.calls).toHaveLength(2);
     expect(dial.calls[0]?.[0]?.toString()).toBe(relayAddress);
-    expect(dial.calls[1]?.[0]?.toString()).toBe(targetPeerId);
+    expect(dial.calls[1]?.[0]?.toString()).toBe(multiaddress);
     expect(merge.calls).toHaveLength(1);
     expect(merge.calls[0]?.[0]?.toString()).toBe(targetPeerId);
     expect(merge.calls[0]?.[1].multiaddrs.map((addr) => addr.toString())).toEqual([multiaddress]);
@@ -82,7 +88,9 @@ describe('connectToMultiaddr', () => {
 
     expect(dial.calls).toHaveLength(2);
     expect(dial.calls[0]?.[0]?.toString()).toBe(`/ip4/178.104.54.178/tcp/9090/p2p/${relayPeerId}`);
-    expect(dial.calls[1]?.[0]?.toString()).toBe(targetPeerId);
+    expect(dial.calls[1]?.[0]?.toString()).toBe(
+      parseMultiaddrConnectTarget(multiaddress).address,
+    );
     expect(merge.calls).toHaveLength(1);
     expect(merge.calls[0]?.[0]?.toString()).toBe(targetPeerId);
     expect(merge.calls[0]?.[1].multiaddrs.map((addr) => addr.toString())).toEqual([multiaddress]);
@@ -98,6 +106,47 @@ describe('connectToMultiaddr', () => {
       dial,
       peerStore: { merge },
     }, parseMultiaddrConnectTarget(multiaddress))).rejects.toThrow('Circuit target peer 12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6 not observed before timeout');
+  });
+
+  it('forwards one cancellation signal to both real circuit dial stages', async () => {
+    const controller = new AbortController();
+    const relayPeerId = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const targetPeerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const circuitAddress = `/ip4/178.104.54.178/tcp/9090/p2p/${relayPeerId}/p2p-circuit/p2p/${targetPeerId}`;
+    const dial = recorder(async () => undefined);
+
+    await connectToMultiaddr({
+      getConnections: () => [{ remotePeer: { toString: () => targetPeerId } }],
+      dial,
+      peerStore: { merge: async () => undefined },
+    }, parseMultiaddrConnectTarget(circuitAddress), undefined, {
+      signal: controller.signal,
+    });
+
+    expect(dial.calls).toHaveLength(2);
+    const observedSignals = dial.calls.map(([, options]) => options?.signal);
+    expect(observedSignals[0]).toBe(observedSignals[1]);
+    expect(observedSignals[0]).not.toBe(controller.signal);
+    controller.abort();
+    expect(observedSignals[0]?.aborted).toBe(true);
+  });
+
+  it('aborts promptly while waiting to confirm an explicit circuit', async () => {
+    const controller = new AbortController();
+    const targetPeerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const circuitAddress = `/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M/p2p-circuit/p2p/${targetPeerId}`;
+    const dial = recorder(async () => undefined);
+    const connection = connectToMultiaddr({
+      getConnections: () => [],
+      dial,
+      peerStore: { merge: async () => undefined },
+    }, parseMultiaddrConnectTarget(circuitAddress), undefined, {
+      signal: controller.signal,
+    });
+
+    while (dial.calls.length < 2) await new Promise((resolve) => setTimeout(resolve, 1));
+    controller.abort();
+    await expect(connection).rejects.toMatchObject({ name: 'AbortError' });
   });
 });
 
@@ -126,5 +175,142 @@ describe('primeCatchupConnections', () => {
     expect(merge.calls).toHaveLength(2);
     expect(dial.calls).toHaveLength(2);
     expect(admissionCalls).toEqual([foreignPeer, eligiblePeer]);
+  });
+
+  it('caps new dials, Cores first in discovery order, without counting skipped peers', async () => {
+    const relayAddress = '/ip4/203.0.113.7/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const ids = await Promise.all(Array.from({ length: 6 }, async () => (
+      peerIdFromPrivateKey(await generateKeyPair('Ed25519')).toString()
+    )));
+    // Discovery order below runs against peer-id order within each role
+    // (coreB before coreA, edgeA before edgeB), so the two orders differ.
+    const [coreA, coreB, edgeB, edgeA, edgeC, connected] = ids.sort() as [
+      string, string, string, string, string, string,
+    ];
+    const dial = recorder(async (peer: { toString(): string }) => { void peer; });
+    const merge = recorder(async () => undefined);
+    const agents = [
+      { peerId: edgeA, relayAddress, nodeRole: 'edge' },
+      { peerId: 'self-peer', relayAddress, nodeRole: 'core' },
+      { peerId: connected, relayAddress, nodeRole: 'core' },
+      { peerId: edgeB, relayAddress, nodeRole: 'edge' },
+      { peerId: coreB, relayAddress, nodeRole: 'core' },
+      { peerId: edgeC, nodeRole: 'edge' },
+      { peerId: coreA, relayAddress, nodeRole: 'core' },
+    ];
+
+    await primeCatchupConnections({
+      getConnections: () => [{ remotePeer: { toString: () => connected } }],
+      dial,
+      peerStore: { merge },
+    }, { findAgents: async () => agents } as any, 'self-peer', undefined, { maxDials: 3 });
+
+    expect(dial.calls.map(([peer]) => peer.toString())).toEqual([coreB, coreA, edgeA]);
+
+    // Omitted cap: today's unbounded walk in discovery order.
+    const unbounded = recorder(async (peer: { toString(): string }) => { void peer; });
+    await primeCatchupConnections({
+      getConnections: () => [{ remotePeer: { toString: () => connected } }],
+      dial: unbounded,
+      peerStore: { merge },
+    }, { findAgents: async () => agents } as any, 'self-peer');
+    expect(unbounded.calls.map(([peer]) => peer.toString())).toEqual([edgeA, edgeB, coreB, coreA]);
+  });
+});
+
+describe('abortable recovery connection helpers', () => {
+  it('forwards cancellation to the canonical resolver connection boundary', async () => {
+    const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const controller = new AbortController();
+    let observedSignal: AbortSignal | undefined;
+    const connectStarted = Promise.withResolvers<void>();
+    const connect = (_peer: string, options?: { signal?: AbortSignal }) => {
+      observedSignal = options?.signal;
+      connectStarted.resolve();
+      return new Promise<never>((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('connect aborted', 'AbortError'));
+        }, { once: true });
+      });
+    };
+
+    const connection = ensurePeerConnected({ connect } as any, peerId, {
+      signal: controller.signal,
+    });
+
+    await connectStarted.promise;
+    controller.abort();
+    await expect(connection).rejects.toMatchObject({ name: 'AbortError' });
+    expect(observedSignal).toBe(controller.signal);
+  });
+
+  it('keeps non-abort recovery connection failures non-fatal', async () => {
+    const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    await expect(ensurePeerConnected({
+      connect: async () => { throw new Error('unreachable'); },
+    } as any, peerId)).resolves.toBeUndefined();
+  });
+
+  it('deliberately discards the resolver outcome for best-effort callers', async () => {
+    const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const outcome = { status: 'connected' as const, resolvedAddresses: [] };
+    const connect = recorder(async () => outcome);
+
+    await expect(ensurePeerConnected({
+      connect,
+    } as any, peerId)).resolves.toBeUndefined();
+    expect(connect.calls).toEqual([[peerId, {}]]);
+  });
+
+  it('interrupts the real protocol-readiness delay', async () => {
+    const controller = new AbortController();
+    let reads = 0;
+    const readiness = waitForPeerProtocol(
+      {
+        get: async () => {
+          reads += 1;
+          return { protocols: [] };
+        },
+      },
+      { toString: () => '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6' },
+      '/dkg/test/sync',
+      3,
+      10_000,
+      controller.signal,
+    );
+
+    await Promise.resolve();
+    controller.abort();
+    await expect(readiness).rejects.toMatchObject({ name: 'AbortError' });
+    expect(reads).toBe(1);
+  });
+
+  it('owns the abort check and the peer-ID parse ahead of any store read', async () => {
+    const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const get = recorder(async (_peer: unknown) => ({ protocols: ['/dkg/test/sync'] }));
+    const wait = (peer: { toString(): string }, signal?: AbortSignal) =>
+      waitForPeerProtocol({ get }, peer, '/dkg/test/sync', 3, 0, signal);
+
+    for (const peer of [{ toString: () => 'not-a-peer-id' }, { toString: () => peerId }]) {
+      await expect(wait(peer, AbortSignal.abort())).rejects.toMatchObject({ name: 'AbortError' });
+    }
+    await expect(wait({ toString: () => 'not-a-peer-id' })).resolves.toBe(false);
+    expect(get.calls).toEqual([]);
+
+    await expect(wait({ toString: () => peerId })).resolves.toBe(true);
+    expect(get.calls).toHaveLength(1);
+    expect(peerIdFromString(peerId).equals(get.calls[0]?.[0] as never)).toBe(true);
+  });
+
+  it('resolves when the peer advertises any protocol of a list', async () => {
+    const peer = { toString: () => '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6' };
+    const get = recorder(async (_peer: unknown) => ({ protocols: ['/dkg/test/sync-pooled'] }));
+
+    await expect(waitForPeerProtocol({ get }, peer, ['/dkg/test/sync', '/dkg/test/sync-pooled'], 3, 0))
+      .resolves.toBe(true);
+    expect(get.calls).toHaveLength(1);
+    await expect(waitForPeerProtocol({ get }, peer, ['/dkg/test/sync', '/dkg/test/other'], 3, 0))
+      .resolves.toBe(false);
+    expect(get.calls).toHaveLength(4);
   });
 });

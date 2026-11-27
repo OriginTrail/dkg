@@ -1,23 +1,32 @@
+import type { SendReliableOpts, RequestOwnedSendOpts } from './messenger-send-options.js';
+export type { SendReliableOpts, RequestOwnedSendOpts } from './messenger-send-options.js';
 import { randomUUID } from 'node:crypto';
 import {
-  encodeReliableEnvelope,
+  encodeReliableEnvelope, resolveWithinAbort,
   decodeReliableEnvelope,
   RELIABLE_ENVELOPE_VERSION,
   RESPONSE_GONE_MARKER,
   isRecoverableSendError,
-  ProtocolOutbox,
-  type CompatibleProtocolOutboxStore,
+  BoundedProtocolOutbox,
+  type BoundedProtocolOutboxStore,
   type MessageIdempotencyStore,
   type ProtocolOutboxEntry,
+  type ProtocolOutboxMetadata,
+  type ProtocolOutboxPayloadInspection,
   type ProtocolRouter,
+  type SendOptions,
 } from '@origintrail-official/dkg-core';
 import {
   OutboxDrainer,
-  type OutboxDrainerOptions,
 } from './outbox-drainer.js';
+import type {
+  MessengerOutboxDrainOptions,
+  MessengerOutboxStats,
+} from './outbox-drain-types.js';
 export {
   DEFAULT_OUTBOX_DRAIN_BATCH_SIZE,
   DEFAULT_OUTBOX_DRAIN_CONCURRENCY,
+  DEFAULT_OUTBOX_DRAIN_MAX_PAYLOAD_BYTES,
   type OutboxDrainerOptions,
 } from './outbox-drainer.js';
 
@@ -103,13 +112,22 @@ const DHT_WALK_TRIGGER_ERRORS = [
   'all multiaddr dials failed',
 ];
 
-function shouldTriggerDhtWalk(errMsg: string): boolean {
+export function shouldTriggerDhtWalk(errMsg: string): boolean {
   const lower = errMsg.toLowerCase();
   return DHT_WALK_TRIGGER_ERRORS.some((needle) => lower.includes(needle));
 }
 
+class MessengerResponseRejectedError extends Error {
+  constructor(protocolId: string, reason: string) {
+    super(`[Messenger] invalid response on ${protocolId}: ${reason}`);
+    this.name = 'MessengerResponseRejectedError';
+  }
+}
+
 function isRecoverableMessengerSendError(err: unknown, errMsg: string): boolean {
-  return isRecoverableSendError(err) || shouldTriggerDhtWalk(errMsg);
+  return err instanceof MessengerResponseRejectedError ||
+    isRecoverableSendError(err) ||
+    shouldTriggerDhtWalk(errMsg);
 }
 
 export interface MessengerDeps {
@@ -125,10 +143,10 @@ export interface MessengerDeps {
   /**
    * Substrate sender-side outbox store. Same optionality rules as
    * `idempotencyStore`. The Messenger wraps the store with a
-   * `ProtocolOutbox` internally (which owns the backoff ladder +
+   * `BoundedProtocolOutbox` internally (which owns the backoff ladder +
    * inflight guard).
    */
-  outboxStore?: CompatibleProtocolOutboxStore;
+  outboxStore?: BoundedProtocolOutboxStore;
   /**
    * Override the default backoff ladder (5s → 2h, mirrors rc.8 chat
    * outbox). Caller can pass a tighter / looser ladder per Messenger
@@ -171,34 +189,11 @@ export interface MessengerDeps {
    * Periodic retry scheduler bounds. Defaults and validation are owned by
    * `OutboxDrainer` (`batchSize: 100`, `concurrency: 4`).
    */
-  outboxDrain?: OutboxDrainerOptions;
+  outboxDrain?: MessengerOutboxDrainOptions;
 }
 
-export interface SendOpts {
-  timeoutMs?: number;
-  signal?: AbortSignal;
-}
-
-export interface SendReliableOpts {
-  /**
-   * Caller-supplied message id. Used by the receiver-side idempotency
-   * cache to dedupe duplicate deliveries and by the sender-side
-   * "did-I-already-deliver-this" cache. If omitted, the Messenger
-   * generates a UUID v4 — but callers that have their own correlation
-   * id (e.g. chat `messageId`, query `requestId`) should pass it so
-   * retries replayed across daemon restarts stay keyed consistently.
-   */
-  messageId?: string;
-  timeoutMs?: number;
-  /**
-   * Max age (ms) before an outbox entry for this `(peer, protocol,
-   * messageId)` is considered stale and dropped. Defaults to the
-   * Messenger's instance-level `maxAgeMs` (24h). Override for callers
-   * that want shorter expiry (e.g. ephemeral chat) or longer
-   * (e.g. join-approval).
-   */
-  maxAgeMs?: number;
-}
+/** Router options exposed by Messenger's legacy pass-through send. */
+export type SendOpts = Pick<SendOptions, 'timeoutMs' | 'payloadReuse' | 'signal'>;
 
 /**
  * Result of `Messenger.sendReliable`. Three terminal shapes:
@@ -279,6 +274,27 @@ export type ReliableHandler = (
   peerId: string,
 ) => Promise<Uint8Array>;
 
+export interface OutboxResponseContext {
+  peerId: string;
+  protocolId: string;
+  messageId: string;
+  requestPayload: Uint8Array;
+  response: Uint8Array;
+}
+
+export type OutboxResponseHandler = (
+  context: OutboxResponseContext,
+) => Promise<void> | void;
+
+/** Per-protocol inbound limits for reliable messenger registrations. */
+export interface MessengerRegisterOptions {
+  /**
+   * Maximum encoded `ReliableEnvelope` bytes accepted from the wire.
+   * This limit is enforced by `ProtocolRouter` before envelope decoding.
+   */
+  maxWireBytes?: number;
+}
+
 /**
  * The Universal Messenger substrate.
  *
@@ -350,10 +366,11 @@ export const DEFAULT_SLO_WINDOW_SAMPLES = 1000;
 export class Messenger {
   private readonly router: ProtocolRouter;
   private readonly idempotencyStore?: MessageIdempotencyStore;
-  private readonly outbox?: ProtocolOutbox;
+  private readonly outbox?: BoundedProtocolOutbox;
+  private readonly outboxPayloadInspection?: ProtocolOutboxPayloadInspection;
   private readonly clock: () => number;
   private readonly resolvePeer?: (peerId: string, opts: { signal: AbortSignal }) => Promise<void>;
-  private readonly outboxDrainer?: OutboxDrainer<ProtocolOutboxEntry>;
+  private readonly outboxDrainer?: OutboxDrainer;
 
   /**
    * Application handlers registered via `register`. Stored separately
@@ -430,22 +447,43 @@ export class Messenger {
    * be pure (no side effects) and cheap (microseconds).
    */
   private readonly deliveredResponseClassifiers = new Map<string, (response: Uint8Array) => boolean>();
+  /**
+   * Per-protocol wire-response validators. Unlike delivered-response
+   * classifiers (metrics only), rejection here keeps the exact envelope in
+   * the durable outbox. This is needed for protocols where a remote handler
+   * abort can surface as clean EOF rather than a stream-reset error.
+   */
+  private readonly responseAcceptanceValidators = new Map<
+    string,
+    (response: Uint8Array) => boolean
+  >();
+  /**
+   * Per-protocol completion hooks for responses that arrive on a durable
+   * outbox retry after the original caller has already returned. Hooks run
+   * before sender idempotency is recorded and before the outbox row is
+   * removed; throwing therefore keeps the exact request queued for retry.
+   */
+  private readonly outboxResponseHandlers = new Map<
+    string,
+    OutboxResponseHandler
+  >();
 
   constructor(deps: MessengerDeps & { sloWindowSamples?: number }) {
     this.router = deps.router;
     this.idempotencyStore = deps.idempotencyStore;
     if (deps.outboxStore) {
-      this.outbox = new ProtocolOutbox(deps.outboxStore, {
+      this.outbox = new BoundedProtocolOutbox(deps.outboxStore, {
         backoffs: deps.backoffs,
         maxAgeMs: deps.maxAgeMs,
       });
+      this.outboxPayloadInspection = this.outbox.payloadInspection();
     }
     this.clock = deps.clock ?? (() => Date.now());
     this.sloWindowSamples = deps.sloWindowSamples ?? DEFAULT_SLO_WINDOW_SAMPLES;
     this.resolvePeer = deps.resolvePeer;
     if (this.outbox) {
       this.outboxDrainer = new OutboxDrainer(
-        (now, limit) => this.outbox!.duePage(now, limit),
+        (now, budget) => this.outbox!.readDuePage(now, budget),
         (entry) => this.retryOutboxEntry(entry),
         deps.outboxDrain,
       );
@@ -469,6 +507,39 @@ export class Messenger {
     classifier: (response: Uint8Array) => boolean,
   ): void {
     this.deliveredResponseClassifiers.set(protocolId, classifier);
+  }
+
+  /**
+   * Require an application-valid response before sender idempotency is
+   * recorded or an outbox row is removed. A rejected response is treated as
+   * recoverable so the identical ReliableEnvelope is retried after backoff.
+   */
+  setResponseAcceptanceValidator(
+    protocolId: string,
+    validator: (response: Uint8Array) => boolean,
+  ): void {
+    this.responseAcceptanceValidators.set(protocolId, validator);
+  }
+
+  setOutboxResponseHandler(
+    protocolId: string,
+    handler: OutboxResponseHandler,
+  ): void {
+    this.outboxResponseHandlers.set(protocolId, handler);
+  }
+
+  private assertResponseAccepted(protocolId: string, response: Uint8Array): void {
+    const validator = this.responseAcceptanceValidators.get(protocolId);
+    if (!validator) return;
+    try {
+      if (validator(response)) return;
+    } catch (error) {
+      throw new MessengerResponseRejectedError(
+        protocolId,
+        `validator threw: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    throw new MessengerResponseRejectedError(protocolId, 'validator returned false');
   }
 
   private shouldCountResponseAsDelivered(protocolId: string, response: Uint8Array): boolean {
@@ -619,7 +690,7 @@ export class Messenger {
     peerId: string,
     protocolId: string,
     payload: Uint8Array,
-    opts: SendReliableOpts = {},
+    opts: RequestOwnedSendOpts = {},
   ): Promise<ThrowingReliableSendResult> {
     return this.sendFramed(peerId, protocolId, payload, opts, 'request-owned');
   }
@@ -628,7 +699,7 @@ export class Messenger {
     peerId: string,
     protocolId: string,
     payload: Uint8Array,
-    opts: SendReliableOpts,
+    opts: RequestOwnedSendOpts,
     failurePolicy: 'durable-outbox',
   ): Promise<ReliableSendResult>;
 
@@ -636,7 +707,7 @@ export class Messenger {
     peerId: string,
     protocolId: string,
     payload: Uint8Array,
-    opts: SendReliableOpts,
+    opts: RequestOwnedSendOpts,
     failurePolicy: 'request-owned',
   ): Promise<ThrowingReliableSendResult>;
 
@@ -644,10 +715,12 @@ export class Messenger {
     peerId: string,
     protocolId: string,
     payload: Uint8Array,
-    opts: SendReliableOpts,
+    opts: RequestOwnedSendOpts,
     failurePolicy: FramedFailurePolicy,
   ): Promise<ReliableSendResult> {
     this.requireSubstrate('sendReliable');
+    const requestOptions = failurePolicy === 'request-owned' ? opts : undefined;
+    requestOptions?.signal?.throwIfAborted();
 
     const messageId = opts.messageId ?? randomUUID();
     const idem = this.idempotencyStore!;
@@ -726,14 +799,22 @@ export class Messenger {
         peerId,
         protocolId,
         envelope,
-        opts.timeoutMs,
+        requestOptions?.signal || requestOptions?.maxReadBytes !== undefined
+          ? { timeoutMs: opts.timeoutMs, signal: requestOptions.signal, maxReadBytes: requestOptions.maxReadBytes }
+          : opts.timeoutMs,
       );
+      requestOptions?.signal?.throwIfAborted();
+      this.assertResponseAccepted(protocolId, response);
       idem.record(peerId, protocolId, messageId, 'out', response);
       outbox.markDelivered(peerId, protocolId, messageId);
       this.noteDeliveredForSlo(protocolId, peerId, messageId, response);
       this.clearDhtWalkRateLimitIfDrained(peerId);
       return { delivered: true, response, attempts: 1, messageId };
     } catch (err) {
+      if (requestOptions?.signal?.aborted) {
+        this.firstAttemptAt.delete(sloK);
+        throw requestOptions.signal.reason;
+      }
       const errMsg = err instanceof Error ? err.message : String(err);
       // Non-recoverable: rethrow. The caller sees the real error;
       // the outbox stays out of it because retrying an encoding
@@ -743,7 +824,8 @@ export class Messenger {
         throw err;
       }
       if (failurePolicy === 'request-owned') {
-        await this.handleRequestOwnedRecoverableFailure(peerId, errMsg, sloK);
+        if (requestOptions?.recoverPeerAfterFailure === false) this.firstAttemptAt.delete(sloK);
+        else await this.handleRequestOwnedRecoverableFailure(peerId, errMsg, sloK, requestOptions?.signal);
         throw err;
       }
       return this.handleDurableRecoverableFailure({
@@ -785,12 +867,18 @@ export class Messenger {
    * Throws `MessengerNotConfiguredError` if `idempotencyStore` was
    * omitted at construction.
    */
-  register(protocolId: string, handler: ReliableHandler): void {
+  register(
+    protocolId: string,
+    handler: ReliableHandler,
+    options?: MessengerRegisterOptions,
+  ): void {
     this.requireSubstrate('register');
     const idem = this.idempotencyStore!;
     this.handlers.set(protocolId, handler);
 
-    this.router.register(protocolId, async (data, peerIdObj) => {
+    const reliableHandler = async (data: Uint8Array, peerIdObj: {
+      toString(): string;
+    }): Promise<Uint8Array> => {
       const peerKey = peerIdObj.toString();
 
       let envelope: { messageId: string; payload: Uint8Array };
@@ -838,7 +926,46 @@ export class Messenger {
       } finally {
         this.inboundInFlight.delete(inFlightKey);
       }
-    });
+    };
+
+    if (options?.maxWireBytes === undefined) {
+      this.router.register(protocolId, reliableHandler);
+    } else {
+      this.router.register(protocolId, reliableHandler, {
+        maxReadBytes: options.maxWireBytes,
+      });
+    }
+  }
+
+  /** Remove a handler registered through Messenger from both owned tables. */
+  unregister(protocolId: string): void {
+    this.handlers.delete(protocolId);
+    this.router.unregister(protocolId);
+  }
+
+  /** Register a protocol family atomically and return its disposal handle. */
+  registerGroup(
+    entries: readonly { protocolId: string; handler: ReliableHandler; options?: MessengerRegisterOptions }[],
+  ): () => void {
+    const ids = new Set<string>();
+    for (const { protocolId } of entries) {
+      if (ids.has(protocolId) || this.handlers.has(protocolId)) {
+        throw new Error(`Messenger protocol already registered: ${protocolId}`);
+      }
+      ids.add(protocolId);
+    }
+    const dispose = (): void => {
+      for (const { protocolId, handler } of entries) {
+        if (this.handlers.get(protocolId) === handler) this.unregister(protocolId);
+      }
+    };
+    try {
+      for (const { protocolId, handler, options } of entries) this.register(protocolId, handler, options);
+    } catch (error) {
+      dispose();
+      throw error;
+    }
+    return dispose;
   }
 
   /**
@@ -894,6 +1021,18 @@ export class Messenger {
         entry.protocol,
         entry.payload,
       );
+      this.assertResponseAccepted(entry.protocol, response);
+      const responseHandler = this.outboxResponseHandlers.get(entry.protocol);
+      if (responseHandler) {
+        const requestPayload = decodeReliableEnvelope(entry.payload).payload;
+        await responseHandler({
+          peerId: entry.peer,
+          protocolId: entry.protocol,
+          messageId: entry.messageId,
+          requestPayload,
+          response,
+        });
+      }
       this.idempotencyStore!.record(
         entry.peer,
         entry.protocol,
@@ -906,15 +1045,14 @@ export class Messenger {
       this.clearDhtWalkRateLimitIfDrained(entry.peer);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      const updated = outbox.enqueueFailure(
+      const updated = outbox.recordRetryFailure(
         entry.peer,
         entry.protocol,
         entry.messageId,
-        entry.payload,
         errMsg,
         this.clock(),
       );
-      if (isRecoverableMessengerSendError(err, errMsg)) {
+      if (updated && isRecoverableMessengerSendError(err, errMsg)) {
         this.scheduleOutboxPeerRecovery(entry.peer, updated.attempts, errMsg);
       }
       // A non-recoverable retry remains visible for operator intervention, but
@@ -929,11 +1067,12 @@ export class Messenger {
   private async handleRequestOwnedRecoverableFailure(
     peerId: string,
     errMsg: string,
-    sloK: string,
+    sloK: string, signal?: AbortSignal,
   ): Promise<void> {
     this.firstAttemptAt.delete(sloK);
     if (!shouldTriggerDhtWalk(errMsg)) return;
-    await this.resolvePeerOnce(peerId, 'after a request-owned address failure');
+    await resolveWithinAbort(() => this.resolvePeerOnce(peerId, 'after a request-owned address failure'), signal);
+    signal?.throwIfAborted();
   }
 
   /** Durable failures enqueue first, then optionally schedule threshold recovery. */
@@ -1040,7 +1179,7 @@ export class Messenger {
     lastError: string;
   }> {
     if (!this.outbox) return [];
-    const dropped = this.outbox.dropExpired(now);
+    const dropped = this.outbox.dropExpiredMetadata(now);
     // rc.9 PR-12: clean firstAttemptAt for expired entries so the
     // SLO bookkeeping map doesn't grow unbounded on permanently
     // unreachable peers.
@@ -1065,14 +1204,21 @@ export class Messenger {
     return this.outbox?.size() ?? 0;
   }
 
-  /**
-   * Snapshot of every entry currently in the outbox. Used by the
-   * `/api/chat/outbox` route + the MCP `dkg_outbox_status` tool so
-   * operators can see what's pending after a long recipient outage.
-   * Empty array when no outbox is wired.
-   */
-  listOutbox(): ProtocolOutboxEntry[] {
-    return this.outbox?.list() ?? [];
+  /** Explicit legacy payload inspection; operational diagnostics use listOutboxMetadata. */
+  listOutbox(): ProtocolOutboxEntry[] | undefined {
+    return this.outboxPayloadInspection?.list();
+  }
+
+  /** Metadata-only diagnostics never load queued envelopes. */
+  listOutboxMetadata(peerId?: string): ProtocolOutboxMetadata[] {
+    return this.outbox?.listMetadata(peerId) ?? [];
+  }
+
+  /** Fixed-cardinality queue/admission gauges and skip counters for /api/slo. */
+  getOutboxStats(): MessengerOutboxStats | undefined {
+    const stats = this.outboxDrainer?.getStats();
+    if (!stats || !this.outbox) return undefined;
+    return { ...stats, ...this.outbox.queueStats(this.clock(), stats.maxPayloadBytes) };
   }
 
   /**
@@ -1082,7 +1228,7 @@ export class Messenger {
    * when no outbox is wired or no such entry exists.
    */
   getOutboxEntry(peerId: string, protocolId: string, messageId: string): ProtocolOutboxEntry | undefined {
-    return this.outbox?.getEntry(peerId, protocolId, messageId);
+    return this.outboxPayloadInspection?.getEntry(peerId, protocolId, messageId);
   }
 
   private requireSubstrate(method: string): void {

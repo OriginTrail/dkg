@@ -1,8 +1,14 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
-import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// This package is `"type": "module"`. Vitest's transform happens to supply
+// `__dirname`, so the fixture tests below do run — but relying on that is a
+// latent trap for anyone executing this file outside vitest. Resolve it from
+// import.meta.url instead so the fixture paths do not depend on the runner.
+const testDir = dirname(fileURLToPath(import.meta.url));
 
 import {
   resolveRegistryConfig,
@@ -17,31 +23,15 @@ import { installMcp } from '../src/integrations/install-mcp.js';
 import { normalizeRepoUrl } from '../src/integrations/verify-npm-provenance.js';
 import type { IntegrationEntry } from '../src/integrations/schema.js';
 import type { ProvenanceCheckResult } from '../src/integrations/verify-npm-provenance.js';
+import {
+  argsLessMcpEntry,
+  baseIntegrationEntry,
+} from './_helpers/integration-entry-fixtures.js';
+import { createLocalRegistryStub } from './_helpers/local-registry-stub.js';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
-const baseEntry: IntegrationEntry = {
-  slug: 'dkg-hello-world',
-  name: 'DKG Hello World',
-  description: 'Test fixture',
-  maintainer: { github: '@OriginTrail/core-developers' },
-  repo: 'https://github.com/OriginTrail/dkg-hello-world',
-  commit: '0000000000000000000000000000000000000000',
-  license: 'Apache-2.0',
-  memoryLayers: ['WM'],
-  v10PrimitivesUsed: ['ContextGraph', 'Assertion'],
-  publicInterfacesUsed: ['http-api'],
-  install: {
-    kind: 'cli',
-    package: '@origintrail/dkg-hello-world',
-    version: '0.1.0',
-    binary: 'dkg-hello-world',
-    envRequired: ['DKG_API_URL', 'DKG_AUTH_TOKEN'],
-    usageHint: 'dkg-hello-world greet "first post"\ndkg-hello-world list',
-  },
-  security: {},
-  trustTier: 'featured',
-};
+const baseEntry: IntegrationEntry = baseIntegrationEntry;
 
 const mcpEntry: IntegrationEntry = {
   ...baseEntry,
@@ -209,42 +199,21 @@ describe('isGithubHost', () => {
 // is fixture DATA on a real wire; `seenAuth` records the Authorization header
 // the server REALLY received (the token-leak contract is proven on the
 // receiving end, not by inspecting an intercepted call).
-const registryRoutes = new Map<string, { status: number; body: string }>();
-const seenAuth: Array<string | null> = [];
-let registryServer: HttpServer;
-let registryBase = '';
+const registry = createLocalRegistryStub();
+const registryRoutes = registry.routes;
+const seenAuth = registry.seenAuthorizationHeaders;
 
-beforeAll(async () => {
-  registryServer = createHttpServer((req, res) => {
-    seenAuth.push(req.headers.authorization ?? null);
-    const route = registryRoutes.get(req.url ?? '');
-    if (!route) {
-      res.writeHead(500);
-      res.end('unconfigured route');
-      return;
-    }
-    res.writeHead(route.status, { 'Content-Type': 'application/json' });
-    res.end(route.body);
-  });
-  await new Promise<void>((resolve) => registryServer.listen(0, '127.0.0.1', resolve));
-  const addr = registryServer.address();
-  if (!addr || typeof addr === 'string') throw new Error('no addr');
-  registryBase = `http://127.0.0.1:${addr.port}`;
-});
-
-afterAll(async () => {
-  await new Promise<void>((resolve) => registryServer.close(() => resolve()));
-});
+beforeAll(() => registry.start());
+afterAll(() => registry.close());
 
 beforeEach(() => {
-  registryRoutes.clear();
-  seenAuth.length = 0;
+  registry.reset();
 });
 
 function localRegistryCfg(extraEnv: Record<string, string> = {}) {
   return resolveRegistryConfig({
-    DKG_REGISTRY_INDEX_URL: `${registryBase}/index`,
-    DKG_REGISTRY_RAW_BASE: `${registryBase}/raw`,
+    DKG_REGISTRY_INDEX_URL: `${registry.baseUrl}/index`,
+    DKG_REGISTRY_RAW_BASE: `${registry.baseUrl}/raw`,
     ...extraEnv,
   });
 }
@@ -610,5 +579,158 @@ describe('installMcp', () => {
     expect(res.mcpJson).not.toContain('MARKER-SHOULD-NEVER-APPEAR');
     expect(logs.join('\n')).not.toContain('MARKER-SHOULD-NEVER-APPEAR');
     expect(res.token).toBeUndefined();
+  });
+});
+
+// ── Registry ↔ CLI contract ───────────────────────────────────────────────
+//
+// The CLI's validator is a hand-written re-implementation of the registry's
+// published JSON Schema. It drifted STRICTER than the schema in three places
+// and silently dropped every affected entry as "unreadable" — in `dkg
+// integration` and in the node dashboard sidebar, which share this parser.
+//
+// These tests own that seam. The per-kind cases are derived from the schema's
+// $defs (minimal shapes the registry can merge); the vendored cases are
+// verbatim copies of live entries. The first set is what catches drift.
+
+describe('registry ↔ CLI contract', () => {
+  const contractBase = {
+    schemaVersion: '0.1.0',
+    slug: 'contract-fixture',
+    name: 'Contract Fixture',
+    description: 'x'.repeat(25),
+    category: ['test'],
+    maintainer: { github: '@OriginTrail/core-developers' },
+    repo: 'https://github.com/OriginTrail/dkg',
+    commit: 'a'.repeat(40),
+    license: 'Apache-2.0',
+    memoryLayers: ['WM'],
+    v10PrimitivesUsed: ['UAL'],
+    publicInterfacesUsed: ['http-api'],
+    security: { networkEgress: [], writeAuthority: [] },
+    trustTier: 'community',
+  };
+
+  // One minimal, registry-VALID shape per $defs entry in the published schema.
+  // Every one of these must parse, or the registry can merge something the CLI
+  // cannot read.
+  const schemaValidInstalls: Array<[string, Record<string, unknown>]> = [
+    ['cli', { kind: 'cli', package: 'p', version: '1.0.0', binary: 'b' }],
+    ['mcp (args present)', { kind: 'mcp', command: 'npx', args: ['-y', 'p'], supportedClients: ['cursor'] }],
+    // args is OPTIONAL in the schema; installMcp normalises a missing value to [].
+    ['mcp (args absent)', { kind: 'mcp', command: 'npx', supportedClients: ['cursor'] }],
+    ['service (npm-global)', { kind: 'service', runtime: 'npm-global', npmGlobal: { package: 'p', version: '1.0.0', binary: 'b' } }],
+    // The schema requires ONLY kind + runtime for a service; every payload
+    // object is optional. These minimal rows are the ones that actually pin
+    // the compatibility boundary — a validator that started demanding
+    // `npmGlobal` or `docker` would still pass the populated rows above and
+    // reject entries the registry considers valid, which is precisely the
+    // stricter-than-schema drift this PR exists to remove.
+    ['service (npm-global, minimal)', { kind: 'service', runtime: 'npm-global' }],
+    ['service (docker, minimal)', { kind: 'service', runtime: 'docker' }],
+    ['service (docker)', { kind: 'service', runtime: 'docker', docker: { image: 'i', version: '1' } }],
+    // 'binary' is in the schema's runtime enum.
+    ['service (binary)', { kind: 'service', runtime: 'binary' }],
+    ['agent-plugin', { kind: 'agent-plugin', framework: 'openclaw', package: 'p', version: '1.0.0' }],
+    // manual requires docsUrl and FORBIDS anything but oneLiner beyond it.
+    ['manual (docsUrl only)', { kind: 'manual', docsUrl: 'https://example.com/README.md' }],
+    ['manual (+ oneLiner)', { kind: 'manual', docsUrl: 'https://example.com/README.md', oneLiner: 'run it' }],
+  ];
+
+  it.each(schemaValidInstalls)('accepts a schema-valid %s entry', (_label, install) => {
+    expect(isIntegrationEntry({ ...contractBase, install })).toBe(true);
+  });
+
+  it('still rejects shapes the schema would also reject', () => {
+    const invalid: Array<Record<string, unknown>> = [
+      { kind: 'manual' }, // docsUrl is required
+      { kind: 'mcp' }, // command is required
+      { kind: 'cli', package: 'p' }, // version + binary required
+      { kind: 'service' }, // runtime required
+      { kind: 'service', runtime: 'kubernetes' }, // not in the enum
+      { kind: 'not-a-kind' },
+      // Payload objects are optional, but the schema marks THEIR fields
+      // required when present — and these drive a global npm install, so a
+      // non-string package must not reach the installer as `[object Object]`.
+      {
+        kind: 'service',
+        runtime: 'npm-global',
+        npmGlobal: { package: { name: '@acme/svc' }, version: '1.0.0' },
+      },
+      { kind: 'service', runtime: 'npm-global', npmGlobal: { package: '@acme/svc' } },
+      { kind: 'service', runtime: 'npm-global', npmGlobal: 'not-an-object' },
+      { kind: 'service', runtime: 'docker', docker: { image: 'i' } }, // version required
+      { kind: 'service', runtime: 'binary', binary: {} }, // url required
+      { kind: 'service', runtime: 'npm-global', portsOpened: ['8080'] },
+    ];
+    for (const install of invalid) {
+      expect(isIntegrationEntry({ ...contractBase, install })).toBe(false);
+    }
+  });
+
+  it('parses every vendored live registry entry', async () => {
+    const { readdir, readFile } = await import('node:fs/promises');
+    const dir = join(testDir, 'fixtures', 'registry');
+    const files = (await readdir(dir)).filter(
+      (f) => f.endsWith('.json') && f !== 'integration.schema.json',
+    );
+    expect(files.length).toBeGreaterThan(0);
+    for (const f of files) {
+      const entry = JSON.parse(await readFile(join(dir, f), 'utf8'));
+      expect(isIntegrationEntry(entry), `${f} must be readable by the CLI`).toBe(true);
+    }
+  });
+
+  it('covers every install kind the published schema defines', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const schema = JSON.parse(
+      await readFile(join(testDir, 'fixtures', 'registry', 'integration.schema.json'), 'utf8'),
+    );
+    const schemaKinds = Object.values(schema.$defs as Record<string, { properties: { kind: { const: string } } }>)
+      .map((d) => d.properties.kind.const)
+      .sort();
+    const covered = [...new Set(schemaValidInstalls.map(([, i]) => i.kind as string))].sort();
+    // If the registry adds an install kind, this fails until the CLI handles it.
+    expect(covered).toEqual(schemaKinds);
+  });
+});
+
+describe('installMcp with an args-less entry', () => {
+  // `args` is optional in the registry schema, and legitimately so: a server
+  // launched by a binary already on PATH needs none, while an npx-style
+  // launcher carries the package there. The installer must emit a well-formed
+  // block rather than dropping the key (JSON.stringify discards `undefined`)
+  // or refusing the entry — judging whether a given command needs args is the
+  // entry author's call, not the installer's.
+  it('emits args: [] rather than omitting the key', async () => {
+    const res = await installMcp({
+      entry: argsLessMcpEntry,
+      apiUrl: 'http://127.0.0.1:9200',
+      logger: () => {},
+    });
+    const parsed = JSON.parse(res.mcpJson) as {
+      mcpServers: Record<string, { command: string; args: unknown }>;
+    };
+    const block = parsed.mcpServers[argsLessMcpEntry.slug]!;
+    expect(block.command).toBe('my-mcp-server');
+    expect(block.args).toEqual([]);
+    expect(res.mcpJson).toContain('"args"');
+  });
+
+  it('preserves declared args when present', async () => {
+    const withArgs: IntegrationEntry = {
+      ...argsLessMcpEntry,
+      slug: 'with-args',
+      install: { kind: 'mcp', command: 'npx', args: ['-y', 'pkg@1.0.0'] },
+    };
+    const res = await installMcp({
+      entry: withArgs,
+      apiUrl: 'http://127.0.0.1:9200',
+      logger: () => {},
+    });
+    const parsed = JSON.parse(res.mcpJson) as {
+      mcpServers: Record<string, { args: string[] }>;
+    };
+    expect(parsed.mcpServers['with-args']!.args).toEqual(['-y', 'pkg@1.0.0']);
   });
 });

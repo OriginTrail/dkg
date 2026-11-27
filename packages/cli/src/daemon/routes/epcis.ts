@@ -1,3 +1,4 @@
+import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 // daemon/routes/epcis.ts
 //
 // Route handlers for EPCIS events + capture.
@@ -58,7 +59,7 @@ const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
+import { findReservedSubjectPrefix, isSkolemizedUri, jobFailureReason } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
   MetricsCollector,
@@ -211,7 +212,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
@@ -319,7 +319,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import { actorFromRequestContext, type RequestContext } from './context.js';
 
 type ResolveOk<T> = { ok: true; value: T };
 type ResolveErr = { ok: false; status: number; body: object };
@@ -419,7 +419,6 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
     apiPortRef,
     url,
     path,
-    requestToken,
     requestAgentAddress,
   } = ctx;
 
@@ -434,6 +433,8 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
     const sg = resolveSubGraphName(searchParams.get('subGraphName'));
     if (!sg.ok) return jsonResponse(res, sg.status, sg.body);
 
+    if (!(await requireContextGraphReadAuthority(ctx, cg.value))) return;
+    const callerAgentAddress = actorFromRequestContext(ctx).authenticatedAgentAddress;
     const epcisQueryEngine = {
       query: (
         sparql: string,
@@ -443,7 +444,7 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
           graphSuffix?: '_shared_memory';
           includePrivate?: boolean;
         },
-      ) => agent.query(sparql, opts),
+      ) => agent.query(sparql, { ...opts, callerAgentAddress }),
     };
     try {
       const result = await handleEventsQuery(searchParams, {
@@ -482,7 +483,7 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
         ? new Date(job.timestamps.finalizedAt).toISOString()
         : null,
       error: job.status === "failed"
-        ? job.failure?.message ?? "Async capture failed"
+        ? jobFailureReason(job.failure?.message ?? "Async capture failed")
         : null,
     });
   }
@@ -533,7 +534,21 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
         return agent.publishAsync(
           contextGraphId,
           content as Record<string, unknown>,
-          opts,
+          {
+            ...opts,
+            /**
+             * An EPCIS capture is externally authenticated, so the job it enqueues belongs to
+             * the agent that submitted it. Without this the publish path treats the capture as
+             * an internal producer and assigns it to the node's default agent, which both
+             * denies the submitter the by-id force clear — the only manual exit for a held job
+             * — and hands that destructive capability to an agent that never submitted it.
+             *
+             * `handleCaptureAsync` builds these opts from a strict allow-list, so a request
+             * body cannot carry this field; spreading first is defence in depth if that
+             * allow-list ever widens. Authorization only — never an author-selection input.
+             */
+            admittedByAgentAddress: requestAgentAddress,
+          },
         );
       },
     };

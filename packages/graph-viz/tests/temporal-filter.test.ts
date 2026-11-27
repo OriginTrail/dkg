@@ -310,3 +310,31 @@ describe('TemporalFilter', () => {
     });
   });
 });
+
+
+describe('TemporalFilter undated and malformed values', () => {
+  it('controls undated temporal visibility', () => {
+    const model = new GraphModel();
+    addDatedNode(model, 'urn:dated', '2025-01-01');
+    addUndatedNode(model, 'urn:undated');
+    const filter = new TemporalFilter();
+    filter.scan(model);
+    expect(filter.showUndated).toBe(true);
+    filter.showUndated = false;
+    expect(filter.getVisibleNodeIds(model.nodes.keys())).toEqual(new Set(['urn:dated']));
+    expect(filter.getNodeDate('missing')).toBeNull();
+    expect(filter.getNodeDate('urn:dated')).toEqual(new Date('2025-01-01'));
+  });
+  it('ignores invalid and empty date values while finding the earliest valid namespace variant', () => {
+    const model = new GraphModel();
+    addDatedNode(model, 'urn:a', 'invalid');
+    addDatedNode(model, 'urn:b', '2025-03-01');
+    model.getNode('urn:a')!.properties.set('http://schema.org/dateCreated', []);
+    model.getNode('urn:b')!.properties.set('http://schema.org/dateCreated', [{ value: '2025-01-01' }]);
+    const filter = new TemporalFilter();
+    filter.scan(model);
+    expect(filter.getNodeDate('urn:a')).toBeNull();
+    expect(filter.getNodeDate('urn:b')).toEqual(new Date('2025-01-01'));
+    expect(filter.datedNodeCount).toBe(1);
+  });
+});

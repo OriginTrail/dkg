@@ -14,11 +14,11 @@ let ctx: HardhatContext;
 
 describe('EVMChainAdapter integration', () => {
   beforeAll(async () => {
-    ctx = await spawnHardhatEnv(8545);
+    ctx = await spawnHardhatEnv();
   }, 60_000);
 
-  afterAll(() => {
-    killHardhat(ctx);
+  afterAll(async () => {
+    await killHardhat(ctx);
   });
 
   it('should connect and resolve V10 contracts from Hub', async () => {
@@ -51,6 +51,56 @@ describe('EVMChainAdapter integration', () => {
     expect(typeof bn).toBe('number');
     expect(bn).toBeGreaterThanOrEqual(0);
   }, 15_000);
+
+  it('removes one participant agent from a live private context graph', async () => {
+    const adapter = new EVMChainAdapter(
+      makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER),
+    );
+    const retained = new Wallet(HARDHAT_KEYS.EXTRA1).address;
+    const removed = new Wallet(HARDHAT_KEYS.EXTRA2).address;
+    const created = await adapter.createOnChainContextGraph({
+      accessPolicy: 1,
+      publishPolicy: 0,
+      participantAgents: [retained, removed],
+    });
+
+    expect(await adapter.getContextGraphParticipantAgents(created.contextGraphId))
+      .toEqual(expect.arrayContaining([retained, removed]));
+    const result = await adapter.removeContextGraphParticipantAgent(
+      created.contextGraphId,
+      removed,
+    );
+
+    expect(result.success).toBe(true);
+    expect(await adapter.getContextGraphParticipantAgents(created.contextGraphId))
+      .toEqual([retained]);
+  }, 60_000);
+
+  it('answers live authority from a real getContextGraph read, and proves a nonexistent id', async () => {
+    const adapter = new EVMChainAdapter(
+      makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER),
+    );
+    const member = new Wallet(HARDHAT_KEYS.EXTRA1).address;
+    const created = await adapter.createOnChainContextGraph({
+      accessPolicy: 1,
+      publishPolicy: 0,
+      participantAgents: [member],
+    });
+
+    // A real tuple off a real node, and the same facts the three point reads give.
+    const authority = await adapter.getContextGraphLiveAuthority(created.contextGraphId);
+    expect(authority).toEqual({
+      active: await adapter.isContextGraphActiveOnChain(created.contextGraphId),
+      accessPolicy: await adapter.getContextGraphAccessPolicy(created.contextGraphId),
+      participantAgents: await adapter.getContextGraphParticipantAgents(created.contextGraphId),
+    });
+    expect(authority).toEqual({ active: true, accessPolicy: 1, participantAgents: [member] });
+
+    // The nonexistent-id proof against the error ethers REALLY raises for
+    // `ERC721NonexistentToken`, not a hand-built object: `null`, not a rejection.
+    await expect(adapter.getContextGraphLiveAuthority(created.contextGraphId + 1_000_000n))
+      .resolves.toBeNull();
+  }, 60_000);
 
   it('verifyPublisherOwnsRange resolves KnowledgeAssetsStorage after init', async () => {
     const adapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER));

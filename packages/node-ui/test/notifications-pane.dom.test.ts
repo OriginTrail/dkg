@@ -34,7 +34,7 @@ vi.mock('../src/ui/stores/projects.js', () => ({
   useProjectsStore: (sel: (s: any) => unknown) => sel({ setActiveProject: vi.fn() }),
 }));
 vi.mock('../src/ui/stores/tabs.js', () => ({
-  useTabsStore: () => ({ openTab: vi.fn() }),
+  useTabsStore: Object.assign(() => ({ openTab: vi.fn() }), { getState: () => ({ activeTabId: 'dashboard', openTab: vi.fn() }) }),
 }));
 
 // Imported AFTER the mocks are declared (hoisting keeps the mocks first).
@@ -116,6 +116,12 @@ describe('NotificationsPane — interaction + a11y (happy-dom)', () => {
       yesBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(deny).toHaveBeenCalledTimes(1);
+  });
+
+  it('a join request from a separator-only agent name renders a "?" avatar instead of crashing', () => {
+    render(makeFeed({ joinRequests: [joinItem({ agentName: '_' })] }));
+    expect(container.querySelector('.v10-notif-agent')?.textContent).toBe('?');
+    expect(container.textContent).toContain('wants to join');
   });
 
   it('Escape inside the Deny-confirm cancels the confirm (does not reject)', () => {
@@ -316,6 +322,24 @@ describe('NotificationsPane — interaction + a11y (happy-dom)', () => {
     render(makeFeed({ unread: 1, activity: [mine] }));
     expect(container.textContent).toContain('You added 3 assertions');
     expect(container.querySelector('.v10-notif-by-self')).toBeTruthy();
+  });
+
+  it('approved and activity rows open their graph, while rejected rows cannot navigate', () => {
+    const open = vi.fn();
+    const feed = makeFeed({ activity: [
+      { kind: 'join_approved', id: 20, cgId: 'cg:approved', contextGraphName: 'Approved', ts: 1, read: false },
+      { kind: 'join_rejected', id: 21, cgId: 'cg:rejected', contextGraphName: 'Rejected', ts: 2, read: false },
+      { kind: 'digest', id: 'digest', cgId: 'cg:activity', contextGraphName: 'Activity', event: 'created', count: 1, ts: 3, read: false },
+    ] });
+    act(() => root.render(React.createElement(NotificationsPane, { feed, onOpenContextGraph: open })));
+    const navigable = [...container.querySelectorAll<HTMLElement>('[role="button"], button')]
+      .filter((element) => /Approved|Activity/.test(element.textContent ?? '') && element.getAttribute('aria-disabled') !== 'true');
+    act(() => { for (const element of navigable) element.click(); });
+    expect(open.mock.calls.map(([graph]) => graph)).toEqual(expect.arrayContaining(['cg:approved', 'cg:activity']));
+    const rejected = container.querySelector<HTMLElement>('[aria-disabled="true"]');
+    expect(rejected).not.toBeNull();
+    act(() => rejected!.click());
+    expect(open).not.toHaveBeenCalledWith('cg:rejected');
   });
 });
 

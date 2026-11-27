@@ -204,7 +204,8 @@ import {
   resolveAutoUpdateGitRef,
   resolveAutoUpdateGitRefPlan,
 } from '../src/daemon.js';
-import { createUpdateHoldoffGate } from '../src/daemon/auto-update-jitter.js';
+import { createVolatileHoldoffDeadline } from '../src/daemon/auto-update-holdoff-deadline.js';
+import { createUpdateHoldoffGate } from '../src/daemon/auto-update-holdoff-gate.js';
 import { createNpmUpdateRunCheck, createGitUpdateRunCheck } from '../src/daemon/auto-update-runner.js';
 import type { LastUpdateCheck } from '../src/daemon/state.js';
 
@@ -1290,6 +1291,34 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     expect(result.status).toBe('error');
   });
 
+  it('preserves own dist-tag values for canonical downstream classification', async () => {
+    const { fetchNpmDistTags } = await import('../src/update/npm-registry.js');
+    fetchImpl = async () => ({
+      ok: true,
+      json: async () => ({
+        'dist-tags': { latest: 9_100_000, beta: '9.0.0-beta.4' },
+      }),
+    });
+
+    await expect(fetchNpmDistTags({ fetch: fetchImpl as any })).resolves.toEqual({
+      status: 'ok',
+      tags: { latest: 9_100_000, beta: '9.0.0-beta.4' },
+    });
+  });
+
+  it('rejects a malformed dist-tags container at the registry gateway', async () => {
+    const { fetchNpmDistTags } = await import('../src/update/npm-registry.js');
+    fetchImpl = async () => ({
+      ok: true,
+      json: async () => ({ 'dist-tags': ['9.1.0'] }),
+    });
+
+    await expect(fetchNpmDistTags({ fetch: fetchImpl as any })).resolves.toEqual({
+      status: 'error',
+      failure: { kind: 'invalid-response' },
+    });
+  });
+
   it('returns up-to-date when current version matches latest', async () => {
     const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
     fetchImpl = async () => makeRegistryResponse({
@@ -1333,6 +1362,16 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     expect(result.channel).toBe('testnet');
   });
 
+  it.each(['constructor', '__proto__'])(
+    'channel pin reports no-target for inherited Object property %s',
+    async (channel) => {
+      const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+      fetchImpl = async () => makeRegistryResponse({ latest: '9.5.0' });
+      const result = await checkForNpmVersionUpdate(() => {}, true, channel);
+      expect(result).toEqual({ status: 'no-target', channel });
+    },
+  );
+
   it('channel pin reports no-target when allowPrerelease=false rejects a prerelease tag', async () => {
     const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
     fetchImpl = async () => makeRegistryResponse({ testnet: '9.6.0-rc.1' });
@@ -1375,11 +1414,158 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     expect(result.version).toBe('10.0.0');
   });
 
+  it('preserves the exported legacy resolver arguments and stable-only result shape', async () => {
+    const { resolveLatestNpmVersion } = await import('../src/daemon.js');
+    fetchImpl = async () => makeRegistryResponse({
+      latest: '10.1.0-rc.1',
+      mainnet: '10.0.0',
+    });
+    const log = vi.fn();
+
+    await expect(resolveLatestNpmVersion(log, false, 'mainnet')).resolves.toEqual({
+      version: '10.0.0',
+    });
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('preserves the exported legacy resolver error shape and logging', async () => {
+    const { resolveLatestNpmVersion } = await import('../src/daemon.js');
+    fetchImpl = async () => ({ ok: false, status: 503 });
+    const log = vi.fn();
+
+    await expect(resolveLatestNpmVersion(log, false, 'mainnet')).resolves.toEqual({
+      version: null,
+      error: true,
+    });
+    expect(log).toHaveBeenCalledWith(
+      'Auto-update (npm): registry returned 503 for @origintrail-official/dkg',
+    );
+  });
+
+  it.each([
+    {
+      outcome: 'resolved pinned channel',
+      allowPrerelease: false,
+      channel: 'mainnet',
+      response: makeRegistryResponse({ mainnet: '9.1.0' }),
+      legacy: { version: '9.1.0' },
+      checked: { status: 'available', version: '9.1.0' },
+      logs: [],
+    },
+    {
+      outcome: 'missing pinned channel',
+      allowPrerelease: false,
+      channel: 'mainnet',
+      response: makeRegistryResponse({ latest: '9.1.0' }),
+      legacy: { version: null, error: false },
+      checked: { status: 'no-target', channel: 'mainnet' },
+      logs: ['Auto-update (npm): channel "mainnet" has no published version, skipping'],
+    },
+    {
+      outcome: 'invalid pinned channel',
+      allowPrerelease: false,
+      channel: 'mainnet',
+      response: makeRegistryResponse({ mainnet: 'not-semver' }),
+      legacy: { version: null, error: false },
+      checked: { status: 'no-target', channel: 'mainnet' },
+      logs: ['Auto-update (npm): channel "mainnet" → "not-semver" is not a valid semver, skipping'],
+    },
+    {
+      outcome: 'prerelease pinned channel under stable-only policy',
+      allowPrerelease: false,
+      channel: 'mainnet',
+      response: makeRegistryResponse({ mainnet: '9.1.0-rc.1' }),
+      legacy: { version: null, error: false },
+      checked: { status: 'no-target', channel: 'mainnet' },
+      logs: ['Auto-update (npm): channel "mainnet" points at a pre-release and allowPrerelease=false, skipping'],
+    },
+    {
+      outcome: 'unacceptable default latest under stable-only policy',
+      allowPrerelease: false,
+      channel: undefined,
+      response: makeRegistryResponse({ latest: '9.1.0-rc.1' }),
+      legacy: { version: null, error: false },
+      checked: { status: 'up-to-date' },
+      logs: ['Auto-update (npm): latest dist-tag is absent, invalid, or a pre-release while allowPrerelease=false, skipping'],
+    },
+    {
+      outcome: 'no valid default candidates',
+      allowPrerelease: true,
+      channel: undefined,
+      response: makeRegistryResponse({ latest: 'not-semver' }),
+      legacy: { version: null, error: false },
+      checked: { status: 'up-to-date' },
+      logs: [],
+    },
+    {
+      outcome: 'registry HTTP failure',
+      allowPrerelease: false,
+      channel: 'mainnet',
+      response: { ok: false, status: 503 },
+      legacy: { version: null, error: true },
+      checked: { status: 'error' },
+      logs: ['Auto-update (npm): registry returned 503 for @origintrail-official/dkg'],
+    },
+    {
+      outcome: 'malformed registry payload',
+      allowPrerelease: false,
+      channel: 'mainnet',
+      response: {
+        ok: true,
+        status: 200,
+        json: async () => ({ 'dist-tags': [] }),
+      },
+      legacy: { version: null, error: true },
+      checked: { status: 'error' },
+      logs: ['Auto-update (npm): registry returned malformed dist-tags for @origintrail-official/dkg'],
+    },
+  ])('maps and reports $outcome consistently through both public entry points', async ({
+    allowPrerelease,
+    channel,
+    response,
+    legacy,
+    checked,
+    logs,
+  }) => {
+    const { checkForNpmVersionUpdate, resolveLatestNpmVersion } = await import('../src/daemon.js');
+    fetchImpl = async () => response as any;
+    const legacyLog = vi.fn();
+    const checkLog = vi.fn();
+
+    await expect(resolveLatestNpmVersion(legacyLog, allowPrerelease, channel))
+      .resolves.toEqual(legacy);
+    await expect(checkForNpmVersionUpdate(checkLog, allowPrerelease, channel))
+      .resolves.toEqual(checked);
+    expect(legacyLog.mock.calls.map(([message]) => message)).toEqual(logs);
+    expect(checkLog.mock.calls.map(([message]) => message)).toEqual(logs);
+  });
+
   it('default path does NOT attempt an update to a non-semver latest', async () => {
     const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
     fetchImpl = async () => makeRegistryResponse({ latest: 'garbage' });
     const result = await checkForNpmVersionUpdate(() => {}, true);
     expect(result.status).toBe('up-to-date'); // not 'available' on garbage
+  });
+
+  it('default path: a garbage `latest` must NOT mask a valid `beta` candidate', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchImpl = async () => makeRegistryResponse({ latest: 'garbage', beta: '9.0.0-beta.4' });
+    const result = await checkForNpmVersionUpdate(() => {}, true);
+    // current is 9.0.0-beta.3 → the valid beta.4 must be selected, not dropped.
+    expect(result.status).toBe('available');
+    expect(result.version).toBe('9.0.0-beta.4');
+  });
+
+  it('channel mainnet: a STABLE +build target is "available" over the current rc (not falsely up-to-date)', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    readFileImpl = async (p: any) => {
+      if (String(p).endsWith('.current-version')) return '10.0.0-rc.19';
+      throw new Error('ENOENT');
+    };
+    fetchImpl = async () => makeRegistryResponse({ mainnet: '10.0.0+mainnet-build.1' });
+    const result = await checkForNpmVersionUpdate(() => {}, false, 'mainnet');
+    expect(result.status).toBe('available');
+    expect(result.version).toBe('10.0.0+mainnet-build.1');
   });
 });
 
@@ -1398,7 +1584,7 @@ describe('deriveUpdateCheckState (runCheck → /api/status mapping)', () => {
 
   it('up-to-date → upToDate:true, clears channelTargetMissing AND clears stale latestVersion', async () => {
     const { deriveUpdateCheckState } = await import('../src/daemon.js');
-    expect(deriveUpdateCheckState({ status: 'up-to-date', version: 'should-be-ignored' }))
+    expect(deriveUpdateCheckState({ status: 'up-to-date' }))
       .toEqual({ upToDate: true, channelTargetMissing: false, latestVersion: '' });
   });
 
@@ -1434,6 +1620,17 @@ describe('performNpmUpdate', () => {
     expect(writeFileCalls.some(c =>
       String(c[0]).includes('.current-version') && c[1] === '9.0.0-beta.4-dev.100.abc1234'
     )).toBe(true);
+  });
+
+  it('refuses slot activation when the runtime cannot provide node:sqlite', async () => {
+    (_autoUpdateIo as any).runtime = { version: 'v22.12.0' };
+    const logCalls: string[] = [];
+    const result = await performNpmUpdate('9.0.0-beta.4-dev.100.abc1234', (message) => {
+      logCalls.push(message);
+    });
+    expect(result).toBe('failed');
+    expect(swapSlotCalls).toEqual([]);
+    expect(logCalls.join('\n')).toContain('node:sqlite');
   });
 
   it('returns failed when npm install throws', async () => {
@@ -1824,6 +2021,14 @@ describe('compareSemver', () => {
     expect(compareSemver('9.0.0+build.1', '9.0.0+build.2')).toBe(0);
   });
 
+  it('treats HYPHENATED build metadata as stable, not prerelease (PR #1295 regression)', () => {
+    // The hyphen lives in +build metadata → 10.0.0+mainnet-build.1 is a STABLE
+    // 10.0.0 and must outrank 10.0.0-rc.19, not read as "not newer".
+    expect(compareSemver('10.0.0+mainnet-build.1', '10.0.0-rc.19')).toBeGreaterThan(0);
+    expect(compareSemver('10.0.0-rc.19', '10.0.0+mainnet-build.1')).toBeLessThan(0);
+    expect(compareSemver('10.0.0+mainnet-build.1', '10.0.0')).toBe(0);
+  });
+
   it('handles dev suffix with numeric comparison', () => {
     expect(compareSemver('9.0.0-beta.4-dev.200', '9.0.0-beta.4-dev.100')).toBeGreaterThan(0);
   });
@@ -2032,6 +2237,39 @@ describe('autoupdater hardening', () => {
     expect(cliProjectRmCall?.[1]).toMatchObject({ force: true });
   });
 
+  it('cleans stale workspace copies before installing into the inactive slot', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    const events: string[] = [];
+    execImpl = async (cmd) => {
+      if (cmd.includes('pnpm install')) events.push('install');
+      return { stdout: '', stderr: '' };
+    };
+    await performUpdate(AU, () => {}, {
+      dependencies: {
+        cleanStaleWorkspacePackages: async (slot) => {
+          expect(slot).toMatch(/\/releases\/b$/);
+          events.push('clean');
+        },
+      },
+    });
+    expect(events).toEqual(['clean', 'install']);
+  });
+
+  it('does not install or activate when stale workspace cleanup fails', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    expect(await performUpdate(AU, () => {}, {
+      dependencies: {
+        cleanStaleWorkspacePackages: async () => {
+          throw new Error('quarantine failed');
+        },
+      },
+    })).toBe(false);
+    expect(execCalls.some(({ cmd }) => cmd.includes('pnpm install'))).toBe(false);
+    expect(swapSlotCalls).toEqual([]);
+  });
+
   it('orphan-process sweep is scoped to the slot dir (no host-wide pkill -f)', async () => {
     readFileImpl = async () => 'aaa111';
     makeFetchOk('bbb222');
@@ -2065,6 +2303,21 @@ describe('autoupdater hardening', () => {
       expect(call.env?.DKG_AU_SLOT).toMatch(/\/releases\/[ab]$/);
       expect(call.env?.DKG_AU_UID).toMatch(/^\d+$/);
     }
+  });
+
+  it('aborts before build or swap when stale identity cleanup and its fallback fail', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    _autoUpdateIo.rm = (async (path: unknown) => {
+      if (String(path).endsWith('/packages/cli/build-info.json')) throw new Error('EACCES: stale identity');
+    }) as any;
+    execFileImpl = async (file, args) => {
+      if (file === 'git' && args[0] === 'clean') throw new Error('fallback refused');
+      return { stdout: '', stderr: '' };
+    };
+    expect(await performUpdate(AU, () => {})).toBe(false);
+    expect(execCalls.some(({ cmd }) => cmd.includes('pnpm install') || cmd.includes('pnpm build'))).toBe(false);
+    expect(swapSlotCalls).toEqual([]);
   });
 
   it('aborts the update if pre-build clean fails (no swap of a potentially dirty slot)', async () => {
@@ -2121,23 +2374,23 @@ describe('resolveCurrentNpmTarget (post-hold-off revalidation)', () => {
     const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
     currentVersion('9.0.0');
     fetchImpl = async () => makeRegistryResponse({ latest: '9.1.0' });
-    expect(await resolveCurrentNpmTarget(() => {}, false)).toBe('9.1.0');
+    expect(await resolveCurrentNpmTarget(() => {}, false)).toEqual({ status: 'available', target: '9.1.0' });
   });
 
-  it('returns null when the target was withdrawn / rolled back during the hold-off (now up-to-date)', async () => {
+  it('returns none when the target was withdrawn / rolled back during the hold-off (now up-to-date)', async () => {
     const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
     currentVersion('9.0.0');
     // 9.1.0 pulled; latest rolled back to what the node already runs.
     fetchImpl = async () => makeRegistryResponse({ latest: '9.0.0' });
-    expect(await resolveCurrentNpmTarget(() => {}, false)).toBeNull();
+    expect(await resolveCurrentNpmTarget(() => {}, false)).toEqual({ status: 'none' });
   });
 
-  it('returns null when a pinned channel no longer has an acceptable target', async () => {
+  it('returns none when a pinned channel no longer has an acceptable target', async () => {
     const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
     currentVersion('9.0.0');
     // The 'mainnet' dist-tag is absent -> no-target -> nothing to apply.
     fetchImpl = async () => makeRegistryResponse({ latest: '9.1.0' });
-    expect(await resolveCurrentNpmTarget(() => {}, false, 'mainnet')).toBeNull();
+    expect(await resolveCurrentNpmTarget(() => {}, false, 'mainnet')).toEqual({ status: 'none' });
   });
 });
 
@@ -2157,14 +2410,14 @@ describe('resolveCurrentGitTarget (post-hold-off revalidation)', () => {
     const { resolveCurrentGitTarget } = await import('../src/daemon/auto-update-runner.js');
     readFileImpl = async () => 'aaa1111'; // current commit
     remoteSha('bbb2222');
-    expect(await resolveCurrentGitTarget(gitAu, () => {})).toBe('bbb2222');
+    expect(await resolveCurrentGitTarget(gitAu, () => {})).toEqual({ status: 'available', target: 'bbb2222' });
   });
 
-  it('returns null when the ref moved back to the running commit during the hold-off', async () => {
+  it('returns none when the ref moved back to the running commit during the hold-off', async () => {
     const { resolveCurrentGitTarget } = await import('../src/daemon/auto-update-runner.js');
     readFileImpl = async () => 'aaa1111';
     remoteSha('aaa1111'); // remote == current -> up-to-date -> nothing to apply
-    expect(await resolveCurrentGitTarget(gitAu, () => {})).toBeNull();
+    expect(await resolveCurrentGitTarget(gitAu, () => {})).toEqual({ status: 'none' });
   });
 });
 
@@ -2176,9 +2429,13 @@ function freshLastCheck(): LastUpdateCheck {
   return { upToDate: false, checkedAt: 0, latestCommit: '', latestVersion: '', channelTargetMissing: false };
 }
 function noJitterGate(log: (m: string) => void) {
-  return createUpdateHoldoffGate({ jitterMs: 0, isShuttingDown: () => false, setUpdating: () => {}, log });
+  return createUpdateHoldoffGate({
+    deadline: createVolatileHoldoffDeadline({ jitterMs: 0 }),
+    isShuttingDown: () => false,
+    setUpdating: () => {},
+    log,
+  });
 }
-
 describe('createNpmUpdateRunCheck (end-to-end polling wiring)', () => {
   function currentVersion(v: string) {
     readFileImpl = async (path: any) => {
@@ -2206,9 +2463,9 @@ describe('createNpmUpdateRunCheck (end-to-end polling wiring)', () => {
     const lastUpdateCheck = freshLastCheck();
     const onRestart = vi.fn(async () => {});
     const runCheck = createNpmUpdateRunCheck({
-      gate: noJitterGate((m) => logs.push(m)),
       log: (m) => logs.push(m),
-      lastUpdateCheck, allowPrerelease: false, nodeRole: 'core', onRestart,
+      lastUpdateCheck, allowPrerelease: false,
+      autoApply: { gate: noJitterGate((m) => logs.push(m)), nodeRole: 'core', onRestart },
     });
 
     await runCheck();
@@ -2223,8 +2480,8 @@ describe('createNpmUpdateRunCheck (end-to-end polling wiring)', () => {
     currentVersion('9.0.0');
     registrySequence({ latest: '9.1.0' }); // available on both detect and revalidate
     const runCheck = createNpmUpdateRunCheck({
-      gate: noJitterGate(() => {}), log: () => {},
-      lastUpdateCheck: freshLastCheck(), allowPrerelease: false, nodeRole: 'core', onRestart: async () => {},
+      log: () => {}, lastUpdateCheck: freshLastCheck(), allowPrerelease: false,
+      autoApply: { gate: noJitterGate(() => {}), nodeRole: 'core', onRestart: async () => {} },
     });
 
     // The installer may error under the shallow IO mocks; we only assert it was ENTERED.
@@ -2237,8 +2494,7 @@ describe('createNpmUpdateRunCheck (end-to-end polling wiring)', () => {
     registrySequence({ latest: '9.1.0' });
     const lastUpdateCheck = freshLastCheck();
     const runCheck = createNpmUpdateRunCheck({
-      gate: null, log: () => {},
-      lastUpdateCheck, allowPrerelease: false, nodeRole: 'core', onRestart: async () => {},
+      log: () => {}, lastUpdateCheck, allowPrerelease: false, autoApply: null,
     });
 
     await runCheck();

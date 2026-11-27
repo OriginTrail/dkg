@@ -1,7 +1,15 @@
 import { ethers } from 'ethers';
 import { chmod, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { randomBytes, scryptSync, createCipheriv, createDecipheriv } from 'node:crypto';
+import {
+  NODE_KEY_PASSPHRASE_ENV,
+  NODE_KEY_SECRET_FILE,
+  nodeKeySecret,
+  openNodeKey,
+  readNodeKeySecret,
+  sealNodeKey,
+  type NodeKeystore,
+} from '@origintrail-official/dkg-core';
 
 export interface WalletEntry {
   address: string;
@@ -24,26 +32,16 @@ const DEFAULT_WALLET_COUNT = 3;
 // factor against host-FS compromise. `address` stays plaintext so every
 // address-only reader (faucet, openclaw setup, status) keeps working, and
 // `loadOpWallets` still returns decrypted keys in memory for the chain config.
-const WALLET_SECRET_FILE = 'wallets.key';
-const PASSPHRASE_ENV = 'DKG_WALLETS_PASSPHRASE';
+// The scheme is core's node key store, which the node's other keys use too.
 // Test-only escape hatch: skip the legacy-plaintext→encrypted migration on load.
 // Set by harnesses/tooling that read the raw `privateKey` field out of
 // wallets.json directly and cannot decrypt (e.g. the devnet staking script).
 const NO_MIGRATE_ENV = 'DKG_WALLETS_NO_MIGRATE';
 
-interface EncryptedKeystore {
-  v: number;
-  alg: 'aes-256-gcm';
-  kdf: 'raw' | 'scrypt';
-  iv: string;
-  ct: string;
-  tag: string;
-}
-
 interface StoredWalletEntry {
   address: string;
   privateKey?: string;
-  keystore?: EncryptedKeystore;
+  keystore?: NodeKeystore;
 }
 
 /**
@@ -80,24 +78,47 @@ export async function loadOpWallets(
       // files load with no secret and are opportunistically re-encrypted below.
       const hasEncrypted = existingWallets.some(isEncryptedEntry)
         || (adminStored ? isEncryptedEntry(adminStored) : false);
-      const secret = hasEncrypted ? await loadWalletSecret(dataDir) : undefined;
+      const secret = hasEncrypted ? await readNodeKeySecret(dataDir) : undefined;
       if (hasEncrypted && !secret) {
         throw new Error(
-          `wallets.json holds encrypted wallet keystores but ${WALLET_SECRET_FILE} is missing — cannot decrypt. ` +
-            `Restore ${WALLET_SECRET_FILE} (or set ${PASSPHRASE_ENV} if it was passphrase-protected) from backup.`,
+          `wallets.json holds encrypted wallet keystores but ${NODE_KEY_SECRET_FILE} is missing — cannot decrypt. ` +
+            `Restore ${NODE_KEY_SECRET_FILE} (or set ${NODE_KEY_PASSPHRASE_ENV} if it was passphrase-protected) from backup.`,
         );
       }
 
       let sawLegacyPlaintext = false;
       const resolve = (stored: StoredWalletEntry, path: string): WalletEntry => {
         if (isEncryptedEntry(stored)) {
-          const privateKey = decryptKey(stored.keystore!, secret!);
+          const privateKey = openNodeKey(stored.keystore!, secret!);
           return validateWalletEntry({ address: stored.address, privateKey }, path);
         }
         // Legacy plaintext entry — accepted (back-compat), and flagged for
         // opportunistic migration to an encrypted keystore below.
+        // GH#1432 — an entry with NEITHER `keystore` nor `privateKey` lands
+        // here too (isEncryptedEntry only tests `keystore`), and the old
+        // cast handed `undefined` straight to ethers. Only count it as legacy
+        // plaintext once we know a key is actually present; anything present
+        // but malformed goes to validateWalletEntry, which lets ethers judge it
+        // and reports the entry path.
+        if (stored.privateKey === undefined || stored.privateKey === null || stored.privateKey === '') {
+          // PR #2332 review — do NOT promise provisioning: `loadOpWallets`
+          // never replenishes an entry, so removing one just leaves fewer
+          // wallets (or no admin wallet). Keep it factual and role-neutral —
+          // an earlier version selected guidance by comparing the display path
+          // to the literal 'adminWallet', which would silently pick the wrong
+          // branch if that locator were ever reformatted.
+          throw new Error(
+            `Wallet entry at ${path} in wallets.json has no key: it carries neither an ` +
+              `encrypted \`keystore\` nor a plaintext \`privateKey\`. Restore the key from backup; ` +
+              `removing the entry is NOT repaired on load — the node simply starts with that ` +
+              `wallet absent.`,
+          );
+        }
         sawLegacyPlaintext = true;
-        return validateWalletEntry({ address: stored.address, privateKey: stored.privateKey as string }, path);
+        // A present-but-malformed key falls through to validateWalletEntry, which
+        // reports the specific defect (wrong type / wrong length) rather than the
+        // generic "no key" above.
+        return validateWalletEntry({ address: stored.address, privateKey: stored.privateKey }, path);
       };
 
       const wallets = existingWallets.map((w, index) => resolve(w, `wallets[${index}]`));
@@ -154,11 +175,11 @@ export function generateWallets(count: number): OpWalletsConfig {
 
 async function saveOpWallets(dataDir: string, config: OpWalletsConfig): Promise<void> {
   await mkdir(dataDir, { recursive: true });
-  const secret = await loadOrCreateWalletSecret(dataDir);
-  const passphrase = process.env[PASSPHRASE_ENV];
+  const secret = await nodeKeySecret(dataDir);
+  const passphrase = process.env[NODE_KEY_PASSPHRASE_ENV];
   const encEntry = (w: WalletEntry): StoredWalletEntry => ({
     address: w.address,
-    keystore: encryptKey(w.privateKey, secret, passphrase),
+    keystore: sealNodeKey(w.privateKey, secret, passphrase),
   });
   const stored: { adminWallet?: StoredWalletEntry; wallets: StoredWalletEntry[] } = {
     ...(config.adminWallet ? { adminWallet: encEntry(config.adminWallet) } : {}),
@@ -174,8 +195,61 @@ function createWalletEntry(): WalletEntry {
   return { address: wallet.address, privateKey: wallet.privateKey };
 }
 
-function validateWalletEntry(entry: WalletEntry, path: string): WalletEntry {
-  const derived = new ethers.Wallet(entry.privateKey);
+/**
+ * Describe a rejected key WITHOUT revealing it, and WITHOUT reimplementing
+ * ethers' grammar.
+ *
+ * PR #2332 review — an earlier version classified prefix/hex/length locally to
+ * explain WHY a key was refused. That recreated a dependency-owned parser: it
+ * already had to be widened once when ethers turned out to accept bare hex, and
+ * it then misdiagnosed an uppercase `0X` prefix (which ethers rejects, but whose
+ * payload is perfectly in range) as an out-of-range scalar. `ethers.Wallet`
+ * owns validity; this reports only what is knowable locally and safe to print.
+ */
+function describeRejectedKey(value: unknown): string {
+  if (value === undefined || value === null) return 'is missing';
+  if (typeof value !== 'string') return `is a ${typeof value}, not a string`;
+  if (value.length === 0) return 'is empty';
+  return 'is not a key ethers accepts (expected 64 hex characters, optionally 0x-prefixed)';
+}
+
+/**
+ * `address` is UNTRUSTED until it parses. A malformed wallets.json can carry
+ * key material in that field, and this message goes to console and daemon logs
+ * — so print it only once it is a well-formed public address (PR #2332 review).
+ */
+function safeAddressForDiagnostic(address: unknown): string {
+  return typeof address === 'string' && /^0x[0-9a-fA-F]{40}$/.test(address)
+    ? address
+    : '(missing or malformed)';
+}
+
+/**
+ * A wallets.json entry as PARSED, before validation. `privateKey` is `unknown`
+ * because the file is untrusted input: declaring it a `string` forced callers
+ * into an `as string` cast and split validation across two places.
+ */
+interface CandidateWalletEntry {
+  address: string;
+  privateKey: unknown;
+}
+
+function validateWalletEntry(entry: CandidateWalletEntry, path: string): WalletEntry {
+  // GH#1432 — `new ethers.Wallet(...)` throws INVALID_ARGUMENT with the value
+  // redacted, naming neither the file nor the offending entry, so `dkg wallet`
+  // died with a message an operator could not act on. Let ethers decide what is
+  // valid, and add the context its error lacks. Neither the key nor an
+  // unvalidated address is ever echoed.
+  let derived: ethers.Wallet;
+  try {
+    derived = new ethers.Wallet(entry.privateKey as string);
+  } catch {
+    throw new Error(
+      `Invalid operational wallet key at ${path} in wallets.json: privateKey ` +
+        `${describeRejectedKey(entry.privateKey)}. Address on the entry: ` +
+        `${safeAddressForDiagnostic(entry.address)}.`,
+    );
+  }
   if (derived.address.toLowerCase() !== entry.address.toLowerCase()) {
     throw new Error(
       `Address mismatch in wallets.json ${path}: expected ${derived.address} but got ${entry.address}`,
@@ -188,75 +262,4 @@ function validateWalletEntry(entry: WalletEntry, path: string): WalletEntry {
 
 function isEncryptedEntry(entry: StoredWalletEntry): boolean {
   return !!entry && typeof entry === 'object' && !!entry.keystore;
-}
-
-/** Derive the 32-byte AES key: the raw machine-local secret, optionally
- *  strengthened with a scrypt pass over an operator passphrase. */
-function deriveAtRestKey(secret: Buffer, kdf: 'raw' | 'scrypt', passphrase?: string): Buffer {
-  if (kdf === 'scrypt') {
-    if (!passphrase) {
-      throw new Error(`${PASSPHRASE_ENV} is required to derive the wallet key for a passphrase-protected keystore`);
-    }
-    return scryptSync(passphrase, secret, 32, { N: 16384, r: 8, p: 1 });
-  }
-  return secret;
-}
-
-function encryptKey(privateKey: string, secret: Buffer, passphrase?: string): EncryptedKeystore {
-  const kdf: 'raw' | 'scrypt' = passphrase ? 'scrypt' : 'raw';
-  const key = deriveAtRestKey(secret, kdf, passphrase);
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', key, iv);
-  const ct = Buffer.concat([cipher.update(privateKey, 'utf8'), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return {
-    v: 1,
-    alg: 'aes-256-gcm',
-    kdf,
-    iv: iv.toString('base64'),
-    ct: ct.toString('base64'),
-    tag: tag.toString('base64'),
-  };
-}
-
-function decryptKey(keystore: EncryptedKeystore, secret: Buffer): string {
-  const passphrase = process.env[PASSPHRASE_ENV];
-  if (keystore.kdf === 'scrypt' && !passphrase) {
-    throw new Error(
-      `wallet keystore was encrypted with ${PASSPHRASE_ENV} which is not currently set — refusing to decrypt`,
-    );
-  }
-  const key = deriveAtRestKey(secret, keystore.kdf, passphrase);
-  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(keystore.iv, 'base64'));
-  decipher.setAuthTag(Buffer.from(keystore.tag, 'base64'));
-  const pt = Buffer.concat([decipher.update(Buffer.from(keystore.ct, 'base64')), decipher.final()]);
-  return pt.toString('utf8');
-}
-
-/** Read the machine-local wallet secret, or undefined if it doesn't exist. */
-async function loadWalletSecret(dataDir: string): Promise<Buffer | undefined> {
-  try {
-    const raw = await readFile(join(dataDir, WALLET_SECRET_FILE), 'utf-8');
-    const buf = Buffer.from(raw.trim(), 'base64');
-    if (buf.length !== 32) {
-      throw new Error(`${WALLET_SECRET_FILE} is malformed (expected a 32-byte base64 secret)`);
-    }
-    return buf;
-  } catch (err: any) {
-    if (err.code === 'ENOENT') return undefined;
-    throw err;
-  }
-}
-
-/** Read or create the machine-local wallet secret (32 random bytes, mode 0600).
- *  The secret is independent of any wallet key, so it never leaks a private key. */
-async function loadOrCreateWalletSecret(dataDir: string): Promise<Buffer> {
-  const existing = await loadWalletSecret(dataDir);
-  if (existing) return existing;
-  await mkdir(dataDir, { recursive: true });
-  const secret = randomBytes(32);
-  const secretPath = join(dataDir, WALLET_SECRET_FILE);
-  await writeFile(secretPath, secret.toString('base64') + '\n', { mode: 0o600 });
-  await chmod(secretPath, 0o600);
-  return secret;
 }

@@ -8,7 +8,7 @@
  * triples and IRIs. The `dkg okf` CLI command is a thin wrapper over this.
  *
  * See `CONTEXT.md` for the language/relationships/flagged-ambiguities and
- * `docs/adr/0005-okf-rdf-mapping.md` for the locked OKF→RDF mapping.
+ * `docs/adr/0009-okf-rdf-mapping.md` for the locked OKF→RDF mapping.
  */
 
 export type {

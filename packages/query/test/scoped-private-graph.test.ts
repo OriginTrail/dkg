@@ -8,6 +8,10 @@ import {
   contextGraphSharedMemoryUri,
   contextGraphSubGraphPrivateUri,
   contextGraphSubGraphUri,
+  createGraphKnowledgeAssetScope,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  knowledgeAssetLayerGraphUri,
+  MemoryLayer,
 } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine, ScopedQueryViolationError } from '../src/dkg-query-engine.js';
 
@@ -49,6 +53,19 @@ const SWM_GRAPH = contextGraphSharedMemoryUri(CG);
 const SWM_META_GRAPH = contextGraphSharedMemoryMetaUri(CG);
 const SUB_SWM_GRAPH = contextGraphSharedMemoryUri(CG, SUB);
 const SUB_SWM_META_GRAPH = contextGraphSharedMemoryMetaUri(CG, SUB);
+
+const ROOTLESS_UAL = 'did:dkg:base:8453/0x70997970c51812dc3a010c7d01b50e0d17dc79c8/41';
+const ROOTLESS_SCOPE = createGraphKnowledgeAssetScope(ROOTLESS_UAL, 1);
+const ROOTLESS_VM_GRAPH = knowledgeAssetLayerGraphUri(
+  CG,
+  MemoryLayer.VerifiableMemory,
+  ROOTLESS_SCOPE,
+);
+const ROOTLESS_PRIVATE_GRAPH =
+  `${PRIVATE_GRAPH}/${ROOTLESS_SCOPE.agentAddress}/${ROOTLESS_SCOPE.kaNumber}`
+  + `/assertions/${ROOTLESS_SCOPE.assertionVersion}`;
+const ROOTLESS_PRIVATE_DRAFT_GRAPH =
+  `${PRIVATE_GRAPH}/_working_memory/${ROOTLESS_SCOPE.agentAddress}:draft-name`;
 
 const EVENT_TYPE = 'https://gs1.github.io/EPCIS/ObjectEvent';
 const PUBLIC_EVENT = 'urn:uuid:public-event-1';
@@ -125,6 +142,16 @@ describe('DKGQueryEngine — `_private` graph scope guard (#789 follow-up: EPCIS
       // Non-finalized (SWM) events for the `finalized=false` routes.
       q(SWM_EVENT, RDF_TYPE, `<${EVENT_TYPE}>`, SWM_GRAPH),
       q(SUB_SWM_EVENT, RDF_TYPE, `<${EVENT_TYPE}>`, SUB_SWM_GRAPH),
+      // Rootless V2 metadata admits only the immutable assertion-versioned
+      // private graph. A sibling mutable private WM draft must stay fenced.
+      q(ROOTLESS_UAL, 'http://dkg.io/ontology/contentScopeVersion', `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<http://www.w3.org/2001/XMLSchema#integer>`, META_GRAPH),
+      q(ROOTLESS_UAL, 'http://dkg.io/ontology/kaUal', `<${ROOTLESS_UAL}>`, META_GRAPH),
+      q(ROOTLESS_UAL, 'http://dkg.io/ontology/assertionVersion', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', META_GRAPH),
+      q(ROOTLESS_UAL, 'http://dkg.io/ontology/assertionGraph', `<${ROOTLESS_VM_GRAPH}>`, META_GRAPH),
+      q(ROOTLESS_UAL, 'http://dkg.io/ontology/privateTripleCount', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', META_GRAPH),
+      q(ROOTLESS_UAL, 'http://dkg.io/ontology/status', '"confirmed"', META_GRAPH),
+      q('urn:uuid:rootless-private', 'http://example.org/secret', '"v2-final"', ROOTLESS_PRIVATE_GRAPH),
+      q('urn:uuid:rootless-draft', 'http://example.org/secret', '"must-not-leak"', ROOTLESS_PRIVATE_DRAFT_GRAPH),
       // Another CG's private partition — must NEVER be reachable from CG.
       q('urn:uuid:foreign', 'http://example.org/secret', '"leak"', OTHER_PRIVATE_GRAPH),
     ]);
@@ -152,6 +179,46 @@ describe('DKGQueryEngine — `_private` graph scope guard (#789 follow-up: EPCIS
     const subjects = result.bindings.map((b) => b['s']);
     expect(subjects).toContain(PRIVATE_EVENT);
     expect(result.bindings.some((b) => b['o'] === '"classified"')).toBe(true);
+  });
+
+  it('admits a finalized rootless V2 private assertion graph from canonical current metadata', async () => {
+    const query = `SELECT ?s ?o WHERE {
+      GRAPH <${ROOTLESS_PRIVATE_GRAPH}> { ?s <http://example.org/secret> ?o }
+    }`;
+    await expect(
+      engine.query(query, { contextGraphId: CG }),
+    ).rejects.toThrowError(ScopedQueryViolationError);
+
+    const result = await engine.query(query, {
+      contextGraphId: CG,
+      includePrivate: true,
+    });
+    expect(result.bindings).toEqual([
+      { s: 'urn:uuid:rootless-private', o: '"v2-final"' },
+    ]);
+  });
+
+  it('keeps mutable rootless private WM drafts fenced even with includePrivate', async () => {
+    const query = `SELECT ?s ?o WHERE {
+      GRAPH <${ROOTLESS_PRIVATE_DRAFT_GRAPH}> { ?s <http://example.org/secret> ?o }
+    }`;
+    await expect(
+      engine.query(query, { contextGraphId: CG, includePrivate: true }),
+    ).rejects.toThrowError(ScopedQueryViolationError);
+  });
+
+  it('constrains GRAPH variables to legacy private plus finalized V2 graphs, never drafts', async () => {
+    const query = `SELECT ?g ?s ?o WHERE {
+      GRAPH ?g { ?s <http://example.org/secret> ?o }
+    }`;
+    const result = await engine.query(query, {
+      contextGraphId: CG,
+      includePrivate: true,
+    });
+    const rows = result.bindings.map((row) => `${row['g']}|${row['o']}`);
+    expect(rows).toContain(`${PRIVATE_GRAPH}|"classified"`);
+    expect(rows).toContain(`${ROOTLESS_PRIVATE_GRAPH}|"v2-final"`);
+    expect(rows.some((row) => row.includes('must-not-leak'))).toBe(false);
   });
 
   it('reproduces the full EPCIS-shaped query (public UNION private + meta OPTIONAL)', async () => {

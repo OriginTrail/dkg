@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { NoChainAdapter } from '@origintrail-official/dkg-chain';
+import { ethers } from 'ethers';
+import { NoChainAdapter, RpcEndpointsExhaustedError } from '@origintrail-official/dkg-chain';
 import {
   TRUST_LEVEL_PREDICATE,
   TrustLevel,
@@ -9,7 +10,6 @@ import {
   generateEd25519Keypair,
   DKG_ENTITY,
   DKG_ROOT_ENTITY_LEGACY,
-  assertionLifecycleUri,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
@@ -238,249 +238,6 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     ]);
   });
 
-  it('migrates a finalized skipSeal payload from the legacy bucket into its canonical named graph', async () => {
-    const { publisher, store } = await makeRealPublisher();
-    const querySources: Array<string | undefined> = [];
-    const realQuery = store.query.bind(store);
-    store.query = async (sparql, options) => {
-      querySources.push(options?.source);
-      return realQuery(sparql, options);
-    };
-    const root = 'urn:test:root:skip-seal';
-    const child = `${root}/.well-known/genid/child`;
-    const checksummedAuthor = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
-    const canonicalGraph = `${SWM_GRAPH}/${checksummedAuthor.toLowerCase()}/7`;
-    const lifecycle = assertionLifecycleUri(CONTEXT_GRAPH, checksummedAuthor, 'skip-seal');
-    await store.insert([
-      q(root, 'http://schema.org/name', '"legacy"', SWM_GRAPH),
-      q(child, 'http://schema.org/value', '"child"', SWM_GRAPH),
-      {
-        subject: lifecycle,
-        predicate: 'http://dkg.io/ontology/assertionGraph',
-        object: SWM_GRAPH,
-        graph: `${CONTEXT_GRAPH_URI}/_meta`,
-      },
-    ]);
-    const ensured = await publisher.ensureFinalizedLifecycleSwmPlacement(
-      {
-        lifecycle: {
-          contextGraphId: CONTEXT_GRAPH,
-          assertionName: 'skip-seal',
-          assertionLifecycleAgentAddress: checksummedAuthor,
-        },
-        sealAuthorScope: { agentAddress: checksummedAuthor, kaNumber: 7n },
-        rootEntities: [root],
-      },
-      createOperationContext('test'),
-    );
-
-    expect(ensured.sourceEmpty).toBe(false);
-    expect(ensured.migratedLegacyQuadCount).toBe(2);
-    expect(ensured.targetGraph).toBe(canonicalGraph);
-    expect(ensured).not.toHaveProperty('quads');
-    expect(querySources.some((source) => source?.endsWith('.result'))).toBe(false);
-    const legacyRoot = await store.query(
-      `ASK { GRAPH <${SWM_GRAPH}> { <${root}> ?p ?o } }`,
-    );
-    const legacyChild = await store.query(
-      `ASK { GRAPH <${SWM_GRAPH}> { <${child}> ?p ?o } }`,
-    );
-    expect(legacyRoot).toMatchObject({ type: 'boolean', value: true });
-    expect(legacyChild).toMatchObject({ type: 'boolean', value: true });
-    expect(await store.deleteByPattern({ graph: canonicalGraph, subject: root })).toBe(1);
-    expect(await store.deleteByPattern({ graph: canonicalGraph, subject: child })).toBe(1);
-    const pointer = await store.query(
-      `SELECT ?g WHERE { GRAPH <${CONTEXT_GRAPH_URI}/_meta> { ` +
-      `<${lifecycle}> <http://dkg.io/ontology/assertionGraph> ?g } }`,
-    );
-    expect(pointer.type).toBe('bindings');
-    expect(pointer.type === 'bindings' ? pointer.bindings[0]?.['g'] : undefined).toBe(canonicalGraph);
-  });
-
-  it('preserves a same-root legacy copy so a sibling can migrate after the first lifecycle publishes', async () => {
-    const { publisher, store, publishSpy } = await makePublisher(
-      new NoChainAdapter(),
-      'confirmed',
-    );
-    const root = 'urn:test:root:legacy-siblings';
-    const firstAuthor = '0x1111111111111111111111111111111111111111';
-    const secondAuthor = '0x2222222222222222222222222222222222222222';
-    const firstGraph = `${SWM_GRAPH}/${firstAuthor}/7`;
-    const secondGraph = `${SWM_GRAPH}/${secondAuthor}/9`;
-    await store.insert([q(root, 'http://schema.org/name', '"shared legacy root"', SWM_GRAPH)]);
-
-    const first = await publisher.ensureFinalizedLifecycleSwmPlacement(
-      {
-        lifecycle: {
-          contextGraphId: CONTEXT_GRAPH,
-          assertionName: 'legacy-sibling-a',
-          assertionLifecycleAgentAddress: firstAuthor,
-        },
-        sealAuthorScope: { agentAddress: firstAuthor, kaNumber: 7n },
-        rootEntities: [root],
-      },
-      createOperationContext('test'),
-    );
-    await publisher.publishFromSharedMemory(
-      CONTEXT_GRAPH,
-      { rootEntities: [root] },
-      {
-        sharedMemoryScope: {
-          kind: 'named-lifecycle',
-          identity: { agentAddress: firstAuthor, kaNumber: 7n },
-        },
-      },
-    );
-    const second = await publisher.ensureFinalizedLifecycleSwmPlacement(
-      {
-        lifecycle: {
-          contextGraphId: CONTEXT_GRAPH,
-          assertionName: 'legacy-sibling-b',
-          assertionLifecycleAgentAddress: secondAuthor,
-        },
-        sealAuthorScope: { agentAddress: secondAuthor, kaNumber: 9n },
-        rootEntities: [root],
-      },
-      createOperationContext('test'),
-    );
-    await publisher.publishFromSharedMemory(
-      CONTEXT_GRAPH,
-      { rootEntities: [root] },
-      {
-        sharedMemoryScope: {
-          kind: 'named-lifecycle',
-          identity: { agentAddress: secondAuthor, kaNumber: 9n },
-        },
-      },
-    );
-
-    const legacy = await store.query(`ASK { GRAPH <${SWM_GRAPH}> { <${root}> ?p ?o } }`);
-    const firstNamed = await store.query(`ASK { GRAPH <${firstGraph}> { <${root}> ?p ?o } }`);
-    const secondNamed = await store.query(`ASK { GRAPH <${secondGraph}> { <${root}> ?p ?o } }`);
-    expect(first).toMatchObject({ sourceEmpty: false, migratedLegacyQuadCount: 1 });
-    expect(second).toMatchObject({ sourceEmpty: false, migratedLegacyQuadCount: 1 });
-    expect(legacy).toMatchObject({ type: 'boolean', value: true });
-    expect(firstNamed).toMatchObject({ type: 'boolean', value: false });
-    expect(secondNamed).toMatchObject({ type: 'boolean', value: false });
-    expect(publishSpy.calls).toHaveLength(2);
-    for (const [input] of publishSpy.calls) {
-      expect(input.quads).toEqual([
-        { subject: root, predicate: 'http://schema.org/name', object: '"shared legacy root"', graph: '' },
-      ]);
-    }
-  });
-
-  it('repairs the lifecycle pointer when a retry finds only the canonical copy', async () => {
-    const { publisher, store } = await makeRealPublisher();
-    const root = 'urn:test:root:skip-seal-retry';
-    const checksummedAuthor = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
-    const canonicalGraph = `${SWM_GRAPH}/${checksummedAuthor.toLowerCase()}/8`;
-    const lifecycle = assertionLifecycleUri(CONTEXT_GRAPH, checksummedAuthor, 'skip-seal-retry');
-    await store.insert([
-      q(root, 'http://schema.org/name', '"canonical"', canonicalGraph),
-      {
-        subject: lifecycle,
-        predicate: 'http://dkg.io/ontology/assertionGraph',
-        object: SWM_GRAPH,
-        graph: `${CONTEXT_GRAPH_URI}/_meta`,
-      },
-    ]);
-
-    const ensured = await publisher.ensureFinalizedLifecycleSwmPlacement(
-      {
-        lifecycle: {
-          contextGraphId: CONTEXT_GRAPH,
-          assertionName: 'skip-seal-retry',
-          assertionLifecycleAgentAddress: checksummedAuthor,
-        },
-        sealAuthorScope: { agentAddress: checksummedAuthor, kaNumber: 8n },
-        rootEntities: [root],
-      },
-      createOperationContext('test'),
-    );
-
-    expect(ensured.sourceEmpty).toBe(false);
-    expect(ensured.migratedLegacyQuadCount).toBe(0);
-    expect(ensured.targetGraph).toBe(canonicalGraph);
-    const canonical = await store.query(`ASK { GRAPH <${canonicalGraph}> { <${root}> ?p ?o } }`);
-    expect(canonical).toMatchObject({ type: 'boolean', value: true });
-    const pointer = await store.query(
-      `SELECT ?g WHERE { GRAPH <${CONTEXT_GRAPH_URI}/_meta> { ` +
-      `<${lifecycle}> <http://dkg.io/ontology/assertionGraph> ?g } }`,
-    );
-    expect(pointer.type).toBe('bindings');
-    expect(pointer.type === 'bindings' ? pointer.bindings[0]?.['g'] : undefined).toBe(canonicalGraph);
-  });
-
-  it('returns an explicit source-empty result without repairing lifecycle metadata', async () => {
-    const { publisher, store } = await makeRealPublisher();
-    const root = 'urn:test:root:source-empty';
-    const author = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
-    const canonicalGraph = `${SWM_GRAPH}/${author.toLowerCase()}/10`;
-    const lifecycle = assertionLifecycleUri(CONTEXT_GRAPH, author, 'source-empty');
-    await store.insert([{
-      subject: lifecycle,
-      predicate: 'http://dkg.io/ontology/assertionGraph',
-      object: SWM_GRAPH,
-      graph: `${CONTEXT_GRAPH_URI}/_meta`,
-    }]);
-
-    const ensured = await publisher.ensureFinalizedLifecycleSwmPlacement(
-      {
-        lifecycle: {
-          contextGraphId: CONTEXT_GRAPH,
-          assertionName: 'source-empty',
-          assertionLifecycleAgentAddress: author,
-        },
-        sealAuthorScope: { agentAddress: author, kaNumber: 10n },
-        rootEntities: [root],
-      },
-      createOperationContext('test'),
-    );
-
-    expect(ensured).toEqual({
-      sourceEmpty: true,
-      migratedLegacyQuadCount: 0,
-      targetGraph: canonicalGraph,
-    });
-    const pointer = await store.query(
-      `SELECT ?g WHERE { GRAPH <${CONTEXT_GRAPH_URI}/_meta> { ` +
-      `<${lifecycle}> <http://dkg.io/ontology/assertionGraph> ?g } }`,
-    );
-    expect(pointer.type === 'bindings' ? pointer.bindings[0]?.['g'] : undefined).toBe(SWM_GRAPH);
-  });
-
-  it('converges a checksum-cased alias without issuing a graphless delete', async () => {
-    const { publisher, store } = await makeRealPublisher();
-    const root = 'urn:test:root:checksum-alias';
-    const checksummedAuthor = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
-    const aliasGraph = `${SWM_GRAPH}/${checksummedAuthor}/9`;
-    const canonicalGraph = `${SWM_GRAPH}/${checksummedAuthor.toLowerCase()}/9`;
-    await store.insert([
-      q(root, 'http://schema.org/name', '"legacy alias"', aliasGraph),
-    ]);
-
-    const ensured = await publisher.ensureFinalizedLifecycleSwmPlacement(
-      {
-        lifecycle: {
-          contextGraphId: CONTEXT_GRAPH,
-          assertionName: 'checksum-alias',
-          assertionLifecycleAgentAddress: checksummedAuthor,
-        },
-        sealAuthorScope: { agentAddress: checksummedAuthor, kaNumber: 9n },
-        rootEntities: [root],
-      },
-      createOperationContext('test'),
-    );
-
-    expect(ensured.sourceEmpty).toBe(false);
-    expect(ensured.migratedLegacyQuadCount).toBe(0);
-    expect(ensured.targetGraph).toBe(canonicalGraph);
-    const alias = await store.query(`ASK { GRAPH <${aliasGraph}> { <${root}> ?p ?o } }`);
-    const canonical = await store.query(`ASK { GRAPH <${canonicalGraph}> { <${root}> ?p ?o } }`);
-    expect(alias).toMatchObject({ type: 'boolean', value: false });
-    expect(canonical).toMatchObject({ type: 'boolean', value: true });
-  });
 
   it('confirmed exact cleanup removes stale ownership when the local KA was the last share', async () => {
     const { publisher, store } = await makePublisher(new NoChainAdapter(), 'confirmed');
@@ -631,6 +388,175 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
         ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
       ]),
     );
+  });
+
+  it('uses one finalized creation pair without issuing separate name or policy reads', async () => {
+    const chain = privatePolicyChain();
+    let nameReads = 0;
+    let policyReads = 0;
+    chain.getContextGraphFinalizedCreation = async () => ({
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH)),
+      accessPolicy: 1,
+    });
+    chain.getContextGraphNameHash = async () => {
+      nameReads += 1;
+      throw new Error('separate name read must not run');
+    };
+    chain.getContextGraphAccessPolicy = async () => {
+      policyReads += 1;
+      throw new Error('separate policy read must not run');
+    };
+    const { publisher, store } = await makePublisher(chain);
+    await store.insert([
+      onChainIdQuad('1'),
+      q('urn:test:root:one'),
+      ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH, SWM_GRAPH),
+    ]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
+      rootEntities: ['urn:test:root:one', CONTEXT_GRAPH_URI],
+    }, {
+      onChainContextGraphId: '1',
+      trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+    })).resolves.toMatchObject({ status: 'tentative' });
+    expect({ nameReads, policyReads }).toEqual({ nameReads: 0, policyReads: 0 });
+  });
+
+  it('does not splice live point reads onto a failed finalized creation proof', async () => {
+    const chain = privatePolicyChain({
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH)),
+    });
+    let nameReads = 0;
+    let policyReads = 0;
+    chain.getContextGraphFinalizedCreation = async () => {
+      throw new Error('lineage changed');
+    };
+    chain.getContextGraphNameHash = async () => {
+      nameReads += 1;
+      return ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH));
+    };
+    chain.getContextGraphAccessPolicy = async () => {
+      policyReads += 1;
+      return 1;
+    };
+    const { publisher, store } = await makeRealPublisher(chain);
+    await store.insert([onChainIdQuad('1')]);
+
+    await expect(publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      publishContextGraphId: '1',
+      quads: [
+        q('urn:test:root:one', 'http://schema.org/name', '"value"', ''),
+        ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
+      ],
+      trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+    })).rejects.toThrow(/trustedNonManifestCatalogTriples is only allowed/);
+    expect({ nameReads, policyReads }).toEqual({ nameReads: 0, policyReads: 0 });
+  });
+
+  it.each(['finalized-proof', 'name-binding', 'access-policy'] as const)(
+    'distinguishes a transient %s read from denial on the same private binding', async (site) => {
+      const nameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH));
+      const unavailable = new RpcEndpointsExhaustedError('catalog proof read failed', { rpcUrls: [] });
+      const chain = privatePolicyChain({ nameHash });
+      let fail = false;
+      let nameReads = 0;
+      let policyReads = 0;
+      chain.getContextGraphFinalizedCreation = async () => {
+        if (site !== 'finalized-proof') return undefined;
+        if (fail) throw unavailable;
+        return { nameHash, accessPolicy: 1 };
+      };
+      chain.getContextGraphNameHash = async () => {
+        nameReads += 1;
+        if (fail && site === 'name-binding') throw unavailable;
+        return nameHash;
+      };
+      chain.getContextGraphAccessPolicy = async () => {
+        policyReads += 1;
+        if (fail && site === 'access-policy') throw unavailable;
+        return 1;
+      };
+      const { publisher, store, publishSpy } = await makePublisher(chain);
+      // Deliberately omit local on-chain metadata: an explicit matching binding is sufficient.
+      await store.insert([q('urn:test:root:one'), ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH, SWM_GRAPH)]);
+      const publish = () => publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
+        rootEntities: ['urn:test:root:one', CONTEXT_GRAPH_URI],
+      }, {
+        onChainContextGraphId: '1',
+        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+      });
+      await expect(publish()).resolves.toMatchObject({ status: 'tentative' });
+      expect(publishSpy.calls).toHaveLength(1);
+      fail = true;
+      await expect(publish()).rejects.toMatchObject({
+        code: 'CATALOG_FLOOR_AUTHORITY_UNAVAILABLE', site, cause: unavailable,
+      });
+      expect(publishSpy.calls).toHaveLength(1);
+      // Failure of an atomic proof must never splice in latest-state point reads.
+      if (site === 'finalized-proof') expect({ nameReads, policyReads }).toEqual({ nameReads: 0, policyReads: 0 });
+    },
+  );
+
+  it.each(['public', 'wrong-slot', 'unknown-permanent'] as const)(
+    'does not turn %s catalog refusal into transient authority unavailability', async (reason) => {
+      const chain = privatePolicyChain();
+      chain.getContextGraphFinalizedCreation = async () => {
+        if (reason === 'unknown-permanent') throw new Error('unsupported proof implementation');
+        return {
+          nameHash: ethers.keccak256(ethers.toUtf8Bytes(reason === 'wrong-slot' ? 'another-context' : CONTEXT_GRAPH)),
+          accessPolicy: reason === 'public' ? 0 : 1,
+        };
+      };
+      let fallbackReads = 0;
+      chain.getContextGraphNameHash = async () => {
+        fallbackReads += 1;
+        return ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH));
+      };
+      chain.getContextGraphAccessPolicy = async () => { fallbackReads += 1; return 1; };
+      const { publisher, store, publishSpy } = await makePublisher(chain);
+      await store.insert([q('urn:test:root:one'), ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH, SWM_GRAPH)]);
+      const refused = publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
+        rootEntities: ['urn:test:root:one', CONTEXT_GRAPH_URI],
+      }, {
+        onChainContextGraphId: '1',
+        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+      });
+      await expect(refused).rejects.toThrow(/trustedNonManifestCatalogTriples is only allowed/);
+      await expect(refused).rejects.not.toHaveProperty('code', 'CATALOG_FLOOR_AUTHORITY_UNAVAILABLE');
+      expect(publishSpy.calls).toHaveLength(0);
+      expect(fallbackReads).toBe(0);
+    },
+  );
+
+  it('keeps the live point-read fallback when the owner fast pair is unavailable', async () => {
+    const expectedNameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH));
+    const chain = privatePolicyChain({ nameHash: expectedNameHash });
+    let nameReads = 0;
+    let policyReads = 0;
+    chain.getContextGraphFinalizedCreation = async () => undefined;
+    chain.getContextGraphNameHash = async () => {
+      nameReads += 1;
+      return expectedNameHash;
+    };
+    chain.getContextGraphAccessPolicy = async () => {
+      policyReads += 1;
+      return 1;
+    };
+    const { publisher, store } = await makePublisher(chain);
+    await store.insert([
+      onChainIdQuad('1'),
+      q('urn:test:root:one'),
+      ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH, SWM_GRAPH),
+    ]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
+      rootEntities: ['urn:test:root:one', CONTEXT_GRAPH_URI],
+    }, {
+      onChainContextGraphId: '1',
+      trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+    })).resolves.toMatchObject({ status: 'tentative' });
+    expect({ nameReads, policyReads }).toEqual({ nameReads: 1, policyReads: 1 });
   });
 
   it('rejects trusted generated catalog floor for public direct publishes', async () => {
@@ -818,24 +744,97 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
   });
 });
 
-describe('SharedMemoryHandler lifecycle UAL derivation', () => {
-  it('does not block SWM apply when the log-only asset UAL resolver stalls', async () => {
-    const store = new OxigraphStore();
-    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
-      assetUalForKaIdentity: () => new Promise<string>(() => {}),
+describe('publishFromSharedMemory VM registration guard', () => {
+  // The guard runs only on a real chain; mock and `none` chains skip it.
+  function registrationGuardChain() {
+    const chain = new NoChainAdapter() as any;
+    Object.defineProperty(chain, 'chainId', { value: 'evm:31337' });
+    return chain;
+  }
+
+  it('accepts a graph whose on-chain binding is only in its own _meta', async () => {
+    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    await store.insert([
+      q('urn:test:root:one'),
+      {
+        subject: CONTEXT_GRAPH_URI,
+        predicate: ON_CHAIN_ID_PREDICATE,
+        object: '"7"',
+        graph: `${CONTEXT_GRAPH_URI}/_meta`,
+      },
+    ]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all')).resolves.toMatchObject({
+      status: 'tentative',
     });
+    expect(publishSpy.calls).toHaveLength(1);
+  });
+
+  it('rejects a graph with neither a registration status nor an on-chain binding', async () => {
+    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    await store.insert([q('urn:test:root:one')]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all')).rejects.toMatchObject({
+      code: 'CG_NOT_REGISTERED',
+    });
+    expect(publishSpy.calls).toHaveLength(0);
+  });
+
+  // An edge learns a public graph's id from the ContextGraphCreated event and
+  // syncs no `ontology` graph, so its store can hold only the local bootstrap's
+  // `unregistered` marker while the agent resolves the id from chain.
+  it('accepts the on-chain id the caller resolved when the store has no binding', async () => {
+    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    await store.insert([
+      q('urn:test:root:one'),
+      {
+        subject: CONTEXT_GRAPH_URI,
+        predicate: 'https://dkg.network/ontology#registrationStatus',
+        object: '"unregistered"',
+        graph: `${CONTEXT_GRAPH_URI}/_meta`,
+      },
+    ]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+      onChainContextGraphId: '7',
+    })).resolves.toMatchObject({ status: 'tentative' });
+    expect(publishSpy.calls).toHaveLength(1);
+    expect(publishSpy.calls[0][0].publishContextGraphId).toBe('7');
+  });
+
+  it('still rejects when the resolved on-chain id is blank', async () => {
+    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    await store.insert([q('urn:test:root:one')]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+      onChainContextGraphId: '  ',
+    })).rejects.toMatchObject({ code: 'CG_NOT_REGISTERED' });
+    expect(publishSpy.calls).toHaveLength(0);
+  });
+});
+
+describe('SharedMemoryHandler lifecycle UAL derivation', () => {
+  it('uses the authoritative v2 UAL without waiting for the legacy resolver', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
     const checksummedAuthor = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
+    const kaUal = `did:dkg:base:8453/${checksummedAuthor.toLowerCase()}/7`;
     const msg = encodeWorkspacePublishRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(
         `<urn:test:root:one> <http://schema.org/name> "value" <${CONTEXT_GRAPH_URI}> .`,
       ),
-      manifest: [{ rootEntity: 'urn:test:root:one', privateTripleCount: 0 }],
+      manifest: [],
       publisherPeerId: '12D3KooWPeer',
       shareOperationId: 'op-lifecycle-timeout',
       timestampMs: Date.now(),
       agentAddress: checksummedAuthor,
       kaNumber: '7',
+      contentScopeVersion: 2,
+      kaUal,
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
     });
 
     const outcome = await Promise.race([

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
-import { writeFile, mkdir, rm } from 'node:fs/promises';
+import { writeFile, mkdir, rm, readFile, stat } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -9,7 +10,9 @@ import {
   extractBearerToken,
   httpAuthGuard,
   loadTokens,
+  loadApiClientToken,
 } from '../src/auth.js';
+import { DkgHomeFiles } from '../src/config.js';
 
 // ---------------------------------------------------------------------------
 // Unit tests for pure functions
@@ -109,6 +112,29 @@ describe('loadTokens', () => {
     expect(tokens.has('config-token')).toBe(true);
     expect(tokens.size).toBe(2);
   });
+
+  it('selects the first file credential in the bound home without rewriting the file', async () => {
+    const files = new DkgHomeFiles();
+    const contents = '# header\n\n first-token \nsecond-token\nfirst-token\n';
+    await writeFile(files.tokenPath, contents);
+    process.env.DKG_HOME = join(tempDir, 'other-home');
+    expect(await loadApiClientToken(files)).toBe('first-token');
+    expect(await readFile(files.tokenPath, 'utf8')).toBe(contents);
+    expect(existsSync(new DkgHomeFiles().tokenPath)).toBe(false);
+  });
+
+  it('generates a private client token file and reuses that credential', async () => {
+    const files = new DkgHomeFiles();
+    const token = await loadApiClientToken(files);
+    expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(await loadApiClientToken(files)).toBe(token);
+    if (process.platform !== 'win32') expect((await stat(files.tokenPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it('does not generate a daemon token file when config credentials already exist', async () => {
+    expect([...await loadTokens({ tokens: ['config-token'] })]).toEqual(['config-token']);
+    expect(existsSync(new DkgHomeFiles().tokenPath)).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -175,6 +201,28 @@ describe('httpAuthGuard', () => {
     expect(res.status).toBe(401);
   });
 
+  it("lets through only the marketplace gateway's exact routes, which check access keys themselves", async () => {
+    expect((await fetch(`${baseUrl}/api/marketplace/v1/chat/completions`, { method: 'POST', body: '{}' })).status).toBe(200);
+    expect((await fetch(`${baseUrl}/api/marketplace/v1/models`)).status).toBe(200);
+    for (const [path, method] of [
+      ['/api/marketplace/v1/chat/completions', 'GET'],
+      ['/api/marketplace/v1/models', 'POST'],
+      ['/api/marketplace/v1/chat/completions/x', 'POST'],
+      ['/api/marketplace/v1/embeddings', 'POST'],
+      ['/api/marketplace/plan', 'GET'],
+      ['/api/marketplace/keys', 'GET'],
+    ]) {
+      expect((await fetch(`${baseUrl}${path}`, { method })).status, `${method} ${path}`).toBe(401);
+    }
+  });
+
+  it('refuses a gateway access key on every other route', async () => {
+    const key = { Authorization: `Bearer dkgmk_${'ab'.repeat(24)}` };
+    for (const path of ['/api/marketplace/plan', '/api/marketplace/keys', '/api/marketplace/subscriptions', '/api/pca', '/api/agents']) {
+      expect((await fetch(`${baseUrl}${path}`, { headers: key })).status, path).toBe(401);
+    }
+  });
+
   it('rejects POST /api/status — public allowlist must be method-aware (GET only)', async () => {
     // Public allowlist is read-only — non-GET on these paths must still go through auth, else plugins bypass via POST/PUT/DELETE.
     const res = await fetch(`${baseUrl}/api/status`, { method: 'POST' });
@@ -230,6 +278,12 @@ describe('httpAuthGuard', () => {
     expect(res.status).toBe(401);
     const body = await res.json();
     expect(body.error).toContain('Unauthorized');
+  });
+
+  it('rejects /api/info without token', async () => {
+    const res = await fetch(`${baseUrl}/api/info`);
+    expect(res.status).toBe(401);
+    expect(res.headers.get('www-authenticate')).toBe('Bearer realm="dkg-node"');
   });
 
   it('rejects Hermes provider persistence without token', async () => {

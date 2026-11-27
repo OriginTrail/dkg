@@ -16,18 +16,14 @@
  * shape: anything that leaves the HTTP listener dead while the process
  * remains alive. Defense-in-depth.
  *
- * # Why TCP-connect rather than HTTP
+ * # HTTP response liveness
  *
- * The cheapest possible "is the server alive" check is a plain TCP connect.
- *   - No HTTP request body to parse.
- *   - No auth token to load (saves us from threading config / loadTokens
- *     into the supervisor).
- *   - No 404/405/etc to special-case (any response = alive).
- *   - Cancellable cleanly via socket.destroy().
- *
- * If the TCP connection refuses or times out, the worker either died
- * silently (listener gone) or is in the wedged-event-loop state we're
- * trying to detect. Either way, SIGKILL + respawn is the right response.
+ * The kernel can complete a TCP handshake while the worker's JavaScript
+ * event loop is stuck. Require an HTTP response to a cheap, unknown API
+ * HEAD route. Any status (including 401/404/503) proves request handling
+ * progressed, without credentials or a database/chain health dependency.
+ * A single absolute deadline bounds connecting and receiving the status
+ * line, and the socket is destroyed on every outcome.
  *
  * # Env gate
  *
@@ -41,57 +37,25 @@
  * probe. Defaults to on so production benefits; tests opt out.
  */
 
-import { connect, type Socket } from 'node:net';
+import { randomUUID } from 'node:crypto';
+import { probeWorkerLiveness, livenessElapsedMs, LIVENESS_PROBE_TIMEOUT_MS, type LivenessProbeResult } from './liveness-probe.js';
+export { probeWorkerAlive, probeWorkerLiveness, LIVENESS_PROBE_TIMEOUT_MS } from './liveness-probe.js';
+import { SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS } from './shutdown.js';
+
+export const DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS = 30_000;
 
 /** Default tick — 30s. Picked to be longer than typical request handling but short enough that a 5-failure quorum triggers within ~2.5 min. */
 export const LIVENESS_PROBE_INTERVAL_MS = 30_000;
 
-/** Default per-probe TCP-connect timeout — 5s. Production daemons handle most requests in <100ms; 5s is many SDs above the long-tail. */
-export const LIVENESS_PROBE_TIMEOUT_MS = 5_000;
-
 /** Default trigger threshold — 5 consecutive failures. With 30s tick → ~2.5 min unresponsive before SIGKILL. */
 export const LIVENESS_CONSECUTIVE_FAILURES_TO_KILL = 5;
 
-/**
- * One-shot probe: connect to `host:port`, return `true` on success, `false`
- * on refusal / timeout / any error. Never throws.
- *
- * The socket is force-destroyed on every outcome (success or failure) to
- * avoid leaking file descriptors when the supervisor probes the worker
- * thousands of times over a long uptime.
- */
-export async function probeWorkerAlive(
-  port: number,
-  host = '127.0.0.1',
-  timeoutMs = LIVENESS_PROBE_TIMEOUT_MS,
-): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
-    let settled = false;
-    const settle = (alive: boolean, socket: Socket | null) => {
-      if (settled) return;
-      settled = true;
-      try {
-        socket?.destroy();
-      } catch {
-        /* socket may already be destroyed; ignore */
-      }
-      resolve(alive);
-    };
-    let socket: Socket;
-    try {
-      socket = connect({ port, host });
-    } catch (err) {
-      // Synchronous throw from `connect` is unusual (it's normally async)
-      // but possible on invalid port. Treat as not-alive.
-      void err;
-      resolve(false);
-      return;
-    }
-    socket.setTimeout(timeoutMs);
-    socket.once('connect', () => settle(true, socket));
-    socket.once('timeout', () => settle(false, socket));
-    socket.once('error', () => settle(false, socket));
-  });
+/** Derive watchdog grace from the already-validated worker hard timeout. */
+export function resolveLivenessShutdownGraceMs(hardTimeoutMs: number): number {
+  return Math.max(
+    DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS,
+    hardTimeoutMs + SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS + LIVENESS_PROBE_TIMEOUT_MS,
+  );
 }
 
 /**
@@ -117,17 +81,13 @@ export interface LivenessWatcherOpts {
   /** Host to probe. Defaults to IPv4 loopback for the common apiHost case. */
   host?: string;
   /** Called whenever the threshold trips. Wired by the supervisor to `child.kill('SIGKILL')`. */
-  onUnresponsive: () => void;
-  /**
-   * Called once per failure increment (not per healthy probe) for log/telemetry.
-   * Receives the running consecutive-failure count after the increment.
-   */
-  onFailure?: (consecutive: number) => void;
+  onUnresponsive: (summary: LivenessRestartSummary) => void;
+  onObservation?: (observation: LivenessObservation) => void;
   intervalMs?: number;
   timeoutMs?: number;
   consecutiveFailuresToKill?: number;
-  /** Injectable probe — tests pass a stub. Defaults to `probeWorkerAlive`. */
-  probe?: (port: number, host?: string, timeoutMs?: number) => Promise<boolean>;
+  /** Injectable probe — tests pass a stub. Defaults to `probeWorkerLiveness`. */
+  probe?: typeof probeWorkerLiveness;
   /**
    * Optional graceful-shutdown detector. Called on every failed probe BEFORE
    * the consecutive-failure counter is incremented. If it returns truthy, the
@@ -152,113 +112,108 @@ export interface LivenessWatcherOpts {
   /**
    * Maximum time to wait after the worker enters graceful shutdown before
    * the watcher resumes counting failures toward `consecutiveFailuresToKill`.
-   * Default is 2× `SHUTDOWN_HARD_TIMEOUT_MS` (30s) — comfortably longer than
-   * the daemon's own self-force-exit deadline so a healthy graceful shutdown
-   * finishes inside the window; only a wedged teardown reaches the SIGKILL
-   * path. Set to a negative value to disable the bounded fallback (legacy
-   * "disarm forever" behavior).
+   * Default remains 30s. The CLI supervisor supplies a value derived from the
+   * worker's resolved hard timeout so an operator override cannot be
+   * preempted. Set to a negative value to disable the bounded fallback
+   * (legacy "disarm forever" behavior).
    */
   shutdownGraceMs?: number;
 }
 
-/**
- * Start a periodic liveness watcher. Returns a `stop()` handle that the
- * supervisor's `child.exit` handler must call to cancel the interval —
- * otherwise the watcher keeps probing into the void after the worker
- * exits cleanly, eventually generating spurious SIGKILL attempts.
- *
- * The watcher self-throttles: if a probe is already in flight when the
- * tick fires, the second tick is dropped (we don't pile up probes when
- * the worker is slow but not dead).
- */
+export interface LivenessObservation {
+  generation: string;
+  probe: LivenessProbeResult;
+  consecutiveFailures: number;
+  shutdownGrace: {
+    state: 'not_observed' | 'within_grace' | 'expired' | 'unbounded' | 'detector_error';
+    elapsedMs: number;
+    budgetMs: number;
+  };
+}
+
+export interface LivenessRestartSummary {
+  generation: string;
+  threshold: number;
+  recent: LivenessObservation[];
+}
+
+export const LIVENESS_HISTORY_LIMIT = 8;
+
+/** One watcher belongs to one child; stop also retires its in-flight HTTP request. */
 export function startLivenessWatcher(opts: LivenessWatcherOpts): { stop(): void } {
   const intervalMs = opts.intervalMs ?? LIVENESS_PROBE_INTERVAL_MS;
   const timeoutMs = opts.timeoutMs ?? LIVENESS_PROBE_TIMEOUT_MS;
   const threshold = opts.consecutiveFailuresToKill ?? LIVENESS_CONSECUTIVE_FAILURES_TO_KILL;
-  const probe = opts.probe ?? probeWorkerAlive;
+  const probe = opts.probe ?? probeWorkerLiveness;
   const host = opts.host ?? '127.0.0.1';
-  // Default to 2× the worker's own hard-shutdown deadline; if the worker's
-  // self-force-exit fires first the watcher never needs to kill anyway.
-  const shutdownGraceMs = opts.shutdownGraceMs ?? 2 * 15_000;
-
+  const shutdownGraceMs = opts.shutdownGraceMs ?? DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS;
+  const generation = randomUUID();
+  const recent: LivenessObservation[] = [];
+  const abort = new AbortController();
   let consecutiveFailures = 0;
   let probing = false;
   let stopped = false;
-  // Codex #664: track WHEN graceful shutdown was first observed so we can
-  // re-arm the SIGKILL path after `shutdownGraceMs` expires. `null` means
-  // we are not in graceful-shutdown mode yet.
   let shutdownObservedAt: number | null = null;
 
+  const stop = () => {
+    stopped = true;
+    clearInterval(timer);
+    abort.abort();
+  };
   const tick = async () => {
     if (stopped || probing) return;
     probing = true;
     try {
-      const alive = await probe(opts.port, host, timeoutMs);
+      const result = await probe(opts.port, host, timeoutMs, abort.signal);
       if (stopped) return;
-      if (alive) {
+      const grace: LivenessObservation['shutdownGrace'] = {
+        state: 'not_observed', elapsedMs: 0, budgetMs: shutdownGraceMs,
+      };
+      let suppressed = false;
+      if (result.outcome === 'http_response') {
         consecutiveFailures = 0;
-        // A successful probe AFTER shutdown was observed means the worker
-        // re-bound the listener (extremely unlikely on the shutdown path)
-        // or the file-based detector lied. Re-arm the watcher.
         shutdownObservedAt = null;
-        return;
-      }
-      // Probe failed. Before counting toward the SIGKILL threshold, check
-      // graceful-shutdown state. We DO NOT permanently disarm here — see
-      // Codex #664#discussion_r3302432762: a watcher that stays disarmed
-      // for the whole shutdown tail can never recover the process if a
-      // later await hangs (DB close, network shutdown, …).
-      if (opts.isShuttingDown) {
+      } else {
         let inShutdown = false;
         try {
-          inShutdown = !!(await opts.isShuttingDown());
+          inShutdown = !!(await opts.isShuttingDown?.());
         } catch {
-          /* shutdown detector errors shouldn't unconditionally arm the SIGKILL path; treat as "still alive" and keep counting failures. */
+          grace.state = 'detector_error';
         }
+        // Child exit may occur while an asynchronous detector is pending.
+        if (stopped) return;
         if (inShutdown) {
           if (shutdownObservedAt === null) {
-            shutdownObservedAt = Date.now();
+            shutdownObservedAt = performance.now();
             consecutiveFailures = 0;
           }
-          const elapsedMs = Date.now() - shutdownObservedAt;
-          // Within the grace window OR the operator opted out of the
-          // bounded fallback (`shutdownGraceMs < 0`): suppress failure
-          // counting so the worker's own graceful teardown can complete
-          // without supervisor interference.
-          if (shutdownGraceMs < 0 || elapsedMs < shutdownGraceMs) {
-            consecutiveFailures = 0;
-            return;
-          }
-          // Grace window exceeded: fall through and count this as a real
-          // failure so a wedged teardown still gets SIGKILLed + respawned.
+          // Policy uses the raw monotonic duration, independent of telemetry precision/caps.
+          const elapsedMs = performance.now() - shutdownObservedAt;
+          suppressed = shutdownGraceMs < 0 || elapsedMs < shutdownGraceMs;
+          grace.elapsedMs = livenessElapsedMs(shutdownObservedAt);
+          grace.state = shutdownGraceMs < 0 ? 'unbounded' : suppressed ? 'within_grace' : 'expired';
         } else {
           shutdownObservedAt = null;
         }
+        consecutiveFailures = suppressed ? 0 : consecutiveFailures + 1;
       }
-      consecutiveFailures += 1;
-      opts.onFailure?.(consecutiveFailures);
+      const observation: LivenessObservation = {
+        generation, probe: result, consecutiveFailures, shutdownGrace: grace,
+      };
+      recent.push(observation);
+      if (recent.length > LIVENESS_HISTORY_LIMIT) recent.shift();
+      // Logging callbacks cannot disarm the watchdog or mutate retained history.
+      try { opts.onObservation?.(structuredClone(observation)); } catch { /* best effort */ }
+      if (stopped) return;
       if (consecutiveFailures >= threshold) {
-        consecutiveFailures = 0;
-        opts.onUnresponsive();
+        stop();
+        opts.onUnresponsive({ generation, threshold, recent: structuredClone(recent) });
       }
     } finally {
       probing = false;
     }
   };
-
-  const timer = setInterval(() => {
-    void tick();
-  }, intervalMs);
-
-  // Allow the parent process to exit cleanly even if a probe interval is
-  // still scheduled. The supervisor's lifecycle should always reach stop(),
-  // but this is a safety net.
-  if (timer.unref) timer.unref();
-
-  return {
-    stop() {
-      stopped = true;
-      clearInterval(timer);
-    },
-  };
+  const timer = setInterval(() => { void tick(); }, intervalMs);
+  timer.unref?.();
+  return { stop };
 }

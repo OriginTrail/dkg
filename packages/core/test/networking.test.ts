@@ -1,10 +1,22 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { DKGNode } from '../src/node.js';
 import { ProtocolRouter, DEFAULT_MAX_READ_BYTES } from '../src/protocol-router.js';
 import { GossipSubManager } from '../src/gossipsub-manager.js';
 import { DKGEvent, TypedEventBus } from '../src/event-bus.js';
 import { PeerDiscoveryManager } from '../src/discovery.js';
 import { multiaddr } from '@multiformats/multiaddr';
+import { peerIdFromString } from '@libp2p/peer-id';
+import { readdirSync, readFileSync } from 'node:fs';
+import {
+  DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER,
+  DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER_MAINNET,
+  gossipMaxTopicBytesPerPeer,
+  contextGraphAppTopic,
+  contextGraphFinalizationTopic,
+  contextGraphSharedMemoryTopic,
+  contextGraphUpdateTopic,
+  wireTopicForNetwork,
+} from '../src/constants.js';
 
 async function connectNodes(a: DKGNode, b: DKGNode): Promise<void> {
   const bAddr = b.multiaddrs[0];
@@ -55,6 +67,41 @@ describe('DKGNode', () => {
     const peers = node1.libp2p.getPeers().map((p) => p.toString());
     expect(peers).toContain(node2.peerId);
   }, 10000);
+
+  it('advertises a protocol registered after peers have already identified', async () => {
+    const node1 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
+    const node2 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
+    nodes.push(node1, node2);
+    await node1.start();
+    await node2.start();
+    // Install the listener before dialing. Otherwise a slow initial Identify
+    // exchange could include lateProtocol and make this test pass without Push.
+    const initialIdentify = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        node1.libp2p.removeEventListener('peer:identify', onIdentify);
+        reject(new Error('Initial peer identification timed out'));
+      }, 6_000);
+      const onIdentify = (event: CustomEvent<{ peerId: { toString(): string } }>) => {
+        if (event.detail.peerId.toString() !== node2.peerId) return;
+        clearTimeout(timeout);
+        node1.libp2p.removeEventListener('peer:identify', onIdentify);
+        resolve();
+      };
+      node1.libp2p.addEventListener('peer:identify', onIdentify);
+    });
+    await node1.libp2p.dial(multiaddr(node2.multiaddrs[0]));
+    await initialIdentify;
+
+    const remotePeer = peerIdFromString(node2.peerId);
+    const lateProtocol = '/test/late-sync-advertisement/1.0.0';
+    const initialProtocols = (await node1.libp2p.peerStore.get(remotePeer)).protocols;
+    expect(initialProtocols.length).toBeGreaterThan(0);
+    expect(initialProtocols).not.toContain(lateProtocol);
+    new ProtocolRouter(node2).register(lateProtocol, async () => new Uint8Array());
+    await vi.waitFor(async () => {
+      expect((await node1.libp2p.peerStore.get(remotePeer)).protocols).toContain(lateProtocol);
+    }, { timeout: 6_000, interval: 100 });
+  }, 10_000);
 
   it('getConnections returns ConnectionInfo with direct transport for local peers', async () => {
     const node1 = new DKGNode({
@@ -242,6 +289,167 @@ describe('GossipSubManager', () => {
     nodes.length = 0;
   });
 
+  it('says who a published message was sent to', async () => {
+    const node1 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'] });
+    const node2 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'] });
+    nodes.push(node1, node2);
+    await node1.start();
+    await node2.start();
+    const gossip1 = new GossipSubManager(node1, new TypedEventBus());
+    const gossip2 = new GossipSubManager(node2, new TypedEventBus());
+    const topic = 'dkg/context-graph/recipients/publish';
+    const data = new TextEncoder().encode('profile');
+    gossip1.subscribe(topic);
+    await expect(gossip1.publish(topic, data), 'nobody to send it to').resolves.toEqual([]);
+
+    gossip2.subscribe(topic);
+    await connectNodes(node1, node2);
+    await vi.waitFor(async () => {
+      await expect(gossip1.publish(topic, data)).resolves.toEqual([node2.peerId.toString()]);
+    }, { timeout: 10_000, interval: 250 });
+  }, 20_000);
+
+  it('leaves the topics it meshes on out of the mesh peer\'s peer-store record', async () => {
+    const node1 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'] });
+    const node2 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'] });
+    nodes.push(node1, node2);
+    await node1.start();
+    await node2.start();
+    const gossip1 = new GossipSubManager(node1, new TypedEventBus());
+    const gossip2 = new GossipSubManager(node2, new TypedEventBus());
+    const topics = Array.from({ length: 6 }, (_, i) => `dkg/context-graph/mesh-tags-${i}/finalization`);
+    for (const topic of topics) {
+      gossip1.subscribe(topic);
+      gossip2.subscribe(topic);
+    }
+    await connectNodes(node1, node2);
+    const data = new TextEncoder().encode('profile');
+    await vi.waitFor(async () => {
+      for (const topic of topics) {
+        expect(node1.libp2p.services.pubsub.getMeshPeers(topic)).toContain(node2.peerId);
+        // A message that reaches the peer also carries any GRAFT still waiting to go out.
+        await expect(gossip1.publish(topic, data)).resolves.toEqual([node2.peerId]);
+      }
+    }, { timeout: 10_000, interval: 250 });
+
+    // The read waits for writes to the record that are still pending.
+    const record = await node1.libp2p.peerStore.get(peerIdFromString(node2.peerId));
+    expect(record.protocols.length, 'the record of a connected peer').toBeGreaterThan(0);
+    expect([...record.tags.keys()].filter((tag) => topics.includes(tag))).toEqual([]);
+  }, 20_000);
+
+  it('does not say who got a message when the pubsub implementation does not', async () => {
+    const pubsub = {
+      addEventListener: () => {},
+      publish: async () => undefined,
+    };
+    const node = { libp2p: { services: { pubsub } } } as unknown as DKGNode;
+    await expect(new GossipSubManager(node, new TypedEventBus()).publish('topic', new Uint8Array()))
+      .resolves.toBeUndefined();
+  });
+
+  it('contains rejected async handlers at the gossip boundary', async () => {
+    let listener!: (event: {
+      detail: { topic: string; data: Uint8Array; from: string };
+    }) => void;
+    const pubsub = {
+      addEventListener: (_event: string, handler: typeof listener) => { listener = handler; },
+      subscribe: () => {},
+      unsubscribe: () => {},
+      publish: async () => {},
+      getTopics: () => [],
+    };
+    const node = { libp2p: { services: { pubsub } } } as unknown as DKGNode;
+    const manager = new GossipSubManager(node, new TypedEventBus());
+    const topic = 'dkg/context-graph/test/finalization';
+    let resolveLogged!: (args: unknown[]) => void;
+    const logged = new Promise<unknown[]>((resolve) => { resolveLogged = resolve; });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation((...args) => {
+      resolveLogged(args);
+    });
+    try {
+      manager.onMessage(topic, async () => {
+        throw new Error('store remains busy');
+      });
+      listener({
+        detail: { topic, data: new Uint8Array(), from: 'peer-a' },
+      });
+
+      await expect(logged).resolves.toEqual([
+        `[GossipSub] handler error on topic "${topic}":`,
+        'store remains busy',
+      ]);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('invokes in registration order without awaiting async completion', async () => {
+    let listener!: (event: {
+      detail: { topic: string; data: Uint8Array; from: string };
+    }) => void;
+    const pubsub = {
+      addEventListener: (_event: string, handler: typeof listener) => { listener = handler; },
+      subscribe: () => {},
+      unsubscribe: () => {},
+      publish: async () => {},
+      getTopics: () => [],
+    };
+    const node = { libp2p: { services: { pubsub } } } as unknown as DKGNode;
+    const manager = new GossipSubManager(node, new TypedEventBus());
+    const topic = 'dkg/context-graph/test/finalization';
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    const firstCompletion = new Promise<void>((resolve) => { releaseFirst = resolve; });
+
+    manager.onMessage(topic, async () => {
+      order.push('first-started');
+      await firstCompletion;
+      order.push('first-finished');
+    });
+    manager.onMessage(topic, () => {
+      order.push('second');
+    });
+
+    listener({
+      detail: { topic, data: new Uint8Array(), from: 'peer-a' },
+    });
+    expect(order).toEqual(['first-started', 'second']);
+
+    releaseFirst();
+    await firstCompletion;
+    await Promise.resolve();
+    expect(order).toEqual(['first-started', 'second', 'first-finished']);
+  });
+
+  it('ignores incidental truthy returns from synchronous handlers', async () => {
+    let listener!: (event: {
+      detail: { topic: string; data: Uint8Array; from: string };
+    }) => void;
+    const pubsub = {
+      addEventListener: (_event: string, handler: typeof listener) => { listener = handler; },
+      subscribe: () => {},
+      unsubscribe: () => {},
+      publish: async () => {},
+      getTopics: () => [],
+    };
+    const node = { libp2p: { services: { pubsub } } } as unknown as DKGNode;
+    const manager = new GossipSubManager(node, new TypedEventBus());
+    const topic = 'dkg/context-graph/test/finalization';
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      manager.onMessage(topic, () => 1);
+      listener({
+        detail: { topic, data: new Uint8Array(), from: 'peer-a' },
+      });
+      await Promise.resolve();
+
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it('publishes and receives messages', async () => {
     const node1 = new DKGNode({
       listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
@@ -362,5 +570,141 @@ describe('GossipSubManager', () => {
       { peerId: 'peer-a', topic: logicalTopic },
       { peerId: 'peer-b', topic: logicalTopic },
     ]);
+  });
+
+  describe('per-peer topic budget', () => {
+    // gossipsub charges each topic it records for a peer the topic's length plus
+    // 1024 bytes (GossipsubTopicEntryOverhead), and decodes at most 5,000
+    // subscriptions per RPC (decodeRpcLimits.maxSubscriptions). It exports neither.
+    const topicEntryOverhead = 1024;
+    const maxSubscriptionsPerRpc = 5_000;
+    const networkDir = new URL('../../../network/', import.meta.url);
+    const networks = readdirSync(networkDir)
+      .filter((file) => file.endsWith('.json'))
+      .map((file) => JSON.parse(readFileSync(new URL(file, networkDir), 'utf8')) as {
+        networkId: string;
+        chain: { chainId: string };
+      });
+    const namespaceLength = ({ networkId, chain }: (typeof networks)[number]) =>
+      wireTopicForNetwork(networkId, 'dkg/', chain.chainId).length;
+    const longestNetwork = networks.reduce((a, b) => (namespaceLength(b) > namespaceLength(a) ? b : a));
+    const graphTopics = (contextGraphId: string) => [
+      contextGraphFinalizationTopic(contextGraphId),
+      contextGraphAppTopic(contextGraphId),
+      contextGraphUpdateTopic(contextGraphId),
+      contextGraphSharedMemoryTopic(contextGraphId),
+    ];
+
+    async function startPair() {
+      const node1 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
+      const node2 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
+      nodes.push(node1, node2);
+      await node1.start();
+      await node2.start();
+      const options = { networkId: longestNetwork.networkId, chainId: longestNetwork.chain.chainId };
+      const gossip1 = new GossipSubManager(node1, new TypedEventBus(), options);
+      const gossip2 = new GossipSubManager(node2, new TypedEventBus(), options);
+      return { node1, node2, gossip1, gossip2 };
+    }
+
+    // Subscribes node 1 to fresh probe topics until node 2 records one. Node 1's
+    // gossip stream to node 2 is then open, and node 2 has handled every RPC that
+    // node 1 sent before that probe.
+    async function probeUntilRecorded(pair: Awaited<ReturnType<typeof startPair>>, label: string): Promise<void> {
+      const probes: string[] = [];
+      await vi.waitFor(() => {
+        if (probes.some((probe) => pair.gossip2.getSubscribers(probe).includes(pair.node1.peerId))) return;
+        const probe = contextGraphSharedMemoryTopic(`${label}-${probes.length}`.padEnd(256, 'p'));
+        probes.push(probe);
+        pair.gossip1.subscribe(probe);
+        throw new Error('node 2 has not recorded a probe yet');
+      }, { timeout: 10_000, interval: 250 });
+    }
+
+    it('holds 5,000 of the longest wire topics a bundled network uses', () => {
+      const longest = Math.max(...networks.flatMap(({ networkId, chain }) =>
+        graphTopics('c'.repeat(256)).map((topic) => wireTopicForNetwork(networkId, topic, chain.chainId).length)));
+      expect(longest, 'the length the constant\'s comment gives').toBe(375);
+      expect(maxSubscriptionsPerRpc * (longest + topicEntryOverhead)).toBeLessThanOrEqual(DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER);
+    });
+
+    it('gives the mainnet network configs the smaller cap', () => {
+      for (const name of ['mainnet-base', 'mainnet-gnosis', 'mainnet-neuroweb']) {
+        expect(gossipMaxTopicBytesPerPeer(name), name).toBe(DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER_MAINNET);
+      }
+      expect(gossipMaxTopicBytesPerPeer('testnet')).toBe(DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER);
+      expect(gossipMaxTopicBytesPerPeer(undefined)).toBe(DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER);
+      // Still twice what gossipsub's default holds: 1,499 of the longest wire topics, 374 context graphs.
+      expect(Math.floor(DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER_MAINNET / (375 + topicEntryOverhead))).toBe(1_499);
+    });
+
+    it('gives gossipsub the cap of the node\'s network config', async () => {
+      const identity = { networkId: longestNetwork.networkId, chainId: longestNetwork.chain.chainId };
+      const mainnet = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false,
+        networkIdentity: { ...identity, networkConfigName: 'mainnet-base' } });
+      const other = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false,
+        networkIdentity: { ...identity, networkConfigName: 'testnet' } });
+      nodes.push(mainnet, other);
+      await mainnet.start();
+      await other.start();
+      const cap = (node: DKGNode) => (node.libp2p.services.pubsub as unknown as { maxTopicBytesPerPeer: number }).maxTopicBytesPerPeer;
+      expect(cap(mainnet)).toBe(DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER_MAINNET);
+      expect(cap(other)).toBe(DKG_GOSSIP_MAX_TOPIC_BYTES_PER_PEER);
+    });
+
+    it('records every topic of a peer with more of them than gossipsub keeps by default', async () => {
+      const { node1, node2, gossip1, gossip2 } = await startPair();
+      // 300 context graphs with four topics each. The 1 MiB default records 881
+      // of these 1,200 topics and drops the rest.
+      const topics = Array.from({ length: 300 }, (_, i) => graphTopics(`0x${'ab'.repeat(20)}/graph-${i}`)).flat();
+      for (const topic of topics) gossip1.subscribe(topic);
+      await connectNodes(node1, node2);
+
+      await vi.waitFor(() => {
+        const missing = topics.filter((topic) => !gossip2.getSubscribers(topic).includes(node1.peerId));
+        expect(missing.length, 'topics node 2 does not record node 1 on').toBe(0);
+      }, { timeout: 10_000, interval: 250 });
+      // Flood publishing sends to every peer recorded on the topic.
+      const last = topics[topics.length - 1];
+      await expect(gossip2.publish(last, new TextEncoder().encode('last'))).resolves.toEqual([node1.peerId]);
+    }, 30_000);
+
+    it('hears none of the topics a peer announces in one RPC of more than 5,000', async () => {
+      const pair = await startPair();
+      // Node 1 announces all of its topics in one RPC when its stream opens, and
+      // node 2 drops an RPC with more subscriptions than it decodes. The 8 MiB cap
+      // holds at least that many topics; later subscriptions can go past it.
+      const topics = Array.from({ length: maxSubscriptionsPerRpc + 1 }, (_, i) => contextGraphUpdateTopic(`announced-${i}`));
+      for (const topic of topics) pair.gossip1.subscribe(topic);
+      await connectNodes(pair.node1, pair.node2);
+      await probeUntilRecorded(pair, 'after-announcement');
+
+      const recorded = topics.filter((topic) => pair.gossip2.getSubscribers(topic).includes(pair.node1.peerId));
+      expect(recorded.length, 'announced topics node 2 records').toBe(0);
+    }, 30_000);
+
+    it('still bounds the topics it records for one peer', async () => {
+      const pair = await startPair();
+      const { node1, gossip1, gossip2 } = pair;
+      await connectNodes(node1, pair.node2);
+      // From here on, each subscribe reaches node 2 as an RPC of its own.
+      await probeUntilRecorded(pair, 'stream-open');
+      // Each wire topic is 375 characters long, so the budget records 5,996 of
+      // them, the probes included.
+      const topics = Array.from({ length: 6_100 }, (_, i) => contextGraphSharedMemoryTopic(String(i).padStart(256, 'c')));
+      for (const topic of topics) gossip1.subscribe(topic);
+      // Node 2 handles the RPCs in order. Dropping the first topic frees one
+      // place, and the marker takes it once node 2 has handled every RPC before it.
+      gossip1.unsubscribe(topics[0]);
+      const marker = contextGraphSharedMemoryTopic('m'.repeat(256));
+      gossip1.subscribe(marker);
+      await vi.waitFor(() => {
+        expect(gossip2.getSubscribers(marker)).toContain(node1.peerId);
+      }, { timeout: 30_000, interval: 250 });
+
+      const recorded = [...topics, marker].filter((topic) => gossip2.getSubscribers(topic).includes(node1.peerId)).length;
+      expect(recorded).toBeGreaterThanOrEqual(maxSubscriptionsPerRpc);
+      expect(recorded).toBeLessThan(topics.length);
+    }, 60_000);
   });
 });

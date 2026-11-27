@@ -1,4 +1,14 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
+import {
+  assertSafeRdfTerm,
+  formatSparqlTerm,
+  isSafeIri,
+  SparqlTermValidationError,
+  unwrapIri,
+  type SparqlTermContext,
+  type SparqlTermKind,
+} from '@origintrail-official/dkg-core';
+import { isAbsoluteRfc3987IriV1, parseRdfLiteralLexicalTerm } from '@origintrail-official/dkg-rdf-utils';
 import type { KAManifestEntry } from './publisher.js';
 import { isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } from './skolemize.js';
 import {
@@ -6,10 +16,98 @@ import {
   trustedCatalogTripleKeySet,
   type TrustedCatalogTripleKeys,
 } from './catalog-trust.js';
+import { KNOWLEDGE_ASSET_SKOLEM_PREFIX } from './auto-partition.js';
 
 export interface ValidationResult {
   valid: boolean;
   errors: string[];
+}
+
+/**
+ * The rule the storage adapters write a term by: core's SPARQL grammar for its
+ * position, and every IRI it names, a literal's datatype included, an
+ * absolute RFC 3987 IRI. The `expected` text describes it for an error.
+ */
+const WRITABLE_QUAD_TERMS: Readonly<Record<'subject' | 'predicate' | 'object', {
+  readonly context: SparqlTermContext;
+  readonly expected: string;
+}>> = {
+  subject: { context: { position: 'subject', blankNodes: 'allow' }, expected: 'an absolute IRI or blank node' },
+  predicate: { context: { position: 'predicate' }, expected: 'an absolute IRI' },
+  object: {
+    context: { position: 'object', blankNodes: 'allow' },
+    expected: 'a well-formed literal, absolute IRI or blank node',
+  },
+};
+
+/** A term that is not writable, by where it is; the message never quotes it. */
+export interface MalformedQuadTerm {
+  readonly message: string;
+  readonly kind: SparqlTermKind;
+}
+
+/**
+ * Whether the stores write `term` in `context` as sent (see
+ * {@link WRITABLE_QUAD_TERMS}). A UTF-16 surrogate pair written as two `\u`
+ * escapes is accepted, as peers serialize astral characters that way.
+ */
+function isWritableTerm(term: string, context: SparqlTermContext): boolean {
+  try {
+    formatSparqlTerm(term, context);
+  } catch (error) {
+    if (error instanceof SparqlTermValidationError) return false;
+    throw error;
+  }
+  if (term.startsWith('_:')) return true;
+  if (!term.startsWith('"')) return isAbsoluteRfc3987IriV1(unwrapIri(term));
+  const suffix = parseRdfLiteralLexicalTerm(term)?.suffix;
+  return suffix?.kind !== 'datatype' || isAbsoluteRfc3987IriV1(suffix.datatype);
+}
+
+/**
+ * The first term of `quads`, or of `rootEntities`, that is not writable: a
+ * quad's subject, predicate or object that breaks {@link WRITABLE_QUAD_TERMS},
+ * or a root entity that is not an absolute IRI. Null when all are.
+ */
+export function findMalformedQuadTerm(
+  quads: readonly Quad[],
+  rootEntities: readonly string[] = [],
+): MalformedQuadTerm | null {
+  for (const [index, quad] of quads.entries()) {
+    for (const position of ['subject', 'predicate', 'object'] as const) {
+      const rule = WRITABLE_QUAD_TERMS[position];
+      if (!isWritableTerm(quad[position], rule.context)) {
+        return {
+          message: `Invalid RDF ${position} in quad ${index}: must be ${rule.expected}`,
+          kind: termKindOf(quad[position]),
+        };
+      }
+    }
+  }
+  const root = rootEntities.findIndex((entity) => !isWritableTerm(entity, { position: 'subject' }));
+  return root < 0 ? null : {
+    message: `Invalid root entity ${root}: must be an absolute IRI`,
+    kind: 'iri',
+  };
+}
+
+/**
+ * Throws a {@link SparqlTermValidationError} for the first term
+ * {@link findMalformedQuadTerm} finds, so a peer's message is refused before
+ * anything is written. Returns `quads` for inline use.
+ */
+export function assertWritableQuadTerms<Q extends Quad>(
+  quads: Q[],
+  rootEntities: readonly string[] = [],
+): Q[] {
+  const malformed = findMalformedQuadTerm(quads, rootEntities);
+  if (malformed) throw new SparqlTermValidationError(malformed.message, malformed.kind);
+  return quads;
+}
+
+function termKindOf(term: string): SparqlTermKind {
+  if (term.startsWith('"')) return 'literal';
+  return term.startsWith('_:') ? 'blank-node' : 'iri';
 }
 
 export interface ValidationOptions {
@@ -24,6 +122,127 @@ export interface ValidationOptions {
    * without a manifest root. This is not a generic metadata bypass.
    */
   trustedNonManifestCatalogTriples?: TrustedCatalogTripleKeys;
+}
+
+/**
+ * Validate one complete graph-scoped KA payload.
+ *
+ * Unlike {@link validatePublishRequest}, RDF subjects are ordinary KA data:
+ * they do not define storage ownership or membership. The control-plane
+ * identity is the UAL plus assertion version carried by the v2 envelope.
+ */
+export function validateKnowledgeAssetPublishRequest(
+  nquads: readonly Quad[],
+  expectedGraph: string,
+  publicTripleCount: number,
+  options: { allowCanonicalSkolemTerms?: boolean } = {},
+): ValidationResult {
+  const errors: string[] = [];
+
+  if (!Number.isSafeInteger(publicTripleCount) || publicTripleCount < 0) {
+    errors.push(
+      `Graph-scoped KA publicTripleCount must be a non-negative safe integer, got ${publicTripleCount}`,
+    );
+  } else if (nquads.length !== publicTripleCount) {
+    errors.push(
+      `Graph-scoped KA public triple count mismatch: envelope=${publicTripleCount}, parsed=${nquads.length}`,
+    );
+  }
+
+  if (!isSafeIri(expectedGraph)) {
+    errors.push(`Graph-scoped KA expected graph is not a safe IRI: ${expectedGraph}`);
+  }
+
+  for (const [index, quad] of nquads.entries()) {
+    if (quad.graph !== expectedGraph) {
+      errors.push(
+        `Graph-scoped KA quad ${index} graph "${quad.graph}" does not match expected graph "${expectedGraph}"`,
+      );
+    }
+    if (isBlankNode(quad.subject)) {
+      errors.push(
+        `Graph-scoped KA quad ${index} has blank-node subject "${quad.subject}"; ` +
+        'the sender must canonicalize blank nodes before transmission',
+      );
+    } else if (!isAbsoluteRfc3987IriV1(quad.subject)) {
+      errors.push(`Graph-scoped KA quad ${index} has an unsafe subject IRI`);
+    } else if (isForbiddenKnowledgeAssetSkolemTerm(quad.subject, options)) {
+      errors.push(`Graph-scoped KA quad ${index} uses the reserved KA skolem namespace in its subject`);
+    }
+    if (!isAbsoluteRfc3987IriV1(quad.predicate)) {
+      errors.push(`Graph-scoped KA quad ${index} has an unsafe predicate IRI`);
+    } else if (quad.predicate.toLowerCase().startsWith(KNOWLEDGE_ASSET_SKOLEM_PREFIX)) {
+      errors.push(`Graph-scoped KA quad ${index} uses the reserved KA skolem namespace in its predicate`);
+    }
+    if (isBlankNode(quad.object)) {
+      errors.push(
+        `Graph-scoped KA quad ${index} has blank-node object "${quad.object}"; ` +
+        'the sender must canonicalize blank nodes before transmission',
+      );
+    } else {
+      if (!isWritableGraphScopedObject(quad.object)) {
+        errors.push(`Graph-scoped KA quad ${index} has an unsafe RDF object`);
+      }
+      if (
+        !quad.object.startsWith('"')
+        && isForbiddenKnowledgeAssetSkolemTerm(quad.object, options)
+      ) {
+        errors.push(`Graph-scoped KA quad ${index} uses the reserved KA skolem namespace in its object`);
+      }
+    }
+    if (quad.graph.toLowerCase().startsWith(KNOWLEDGE_ASSET_SKOLEM_PREFIX)) {
+      errors.push(`Graph-scoped KA quad ${index} uses the reserved KA skolem namespace as its graph`);
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Validate a canonical graph-scoped KA at a trusted protocol boundary.
+ *
+ * Graph-scoped senders canonicalize Markdown and other RDF blank nodes before
+ * transmission, so exact public `urn:dkg:ka-skolem:c14nN` terms are standard
+ * wire data. User-authored input should continue to use the strict validator
+ * above; this named policy keeps receiver/update/ACK call sites consistent
+ * while still rejecting blank nodes and every private, forged, predicate, or
+ * graph use of the reserved namespace.
+ */
+export function validateCanonicalGraphScopedKnowledgeAssetPayload(
+  nquads: readonly Quad[],
+  expectedGraph: string,
+  publicTripleCount: number,
+): ValidationResult {
+  return validateKnowledgeAssetPublishRequest(
+    nquads,
+    expectedGraph,
+    publicTripleCount,
+    { allowCanonicalSkolemTerms: true },
+  );
+}
+
+/**
+ * A graph-scoped object other than a blank node: SPARQL-safe as rendered, and
+ * an absolute RFC 3987 IRI or a literal whose datatype is one.
+ */
+function isWritableGraphScopedObject(object: string): boolean {
+  try {
+    assertSafeRdfTerm(object.startsWith('"') ? object : `<${object}>`);
+  } catch {
+    return false;
+  }
+  return isWritableTerm(object, { position: 'object' });
+}
+
+function isForbiddenKnowledgeAssetSkolemTerm(
+  term: string,
+  options: { allowCanonicalSkolemTerms?: boolean },
+): boolean {
+  if (!term.toLowerCase().startsWith(KNOWLEDGE_ASSET_SKOLEM_PREFIX)) return false;
+  return !(
+    options.allowCanonicalSkolemTerms === true
+    && /^urn:dkg:ka-skolem:c14n[0-9]+$/.test(term)
+  );
 }
 
 /**
@@ -108,6 +327,10 @@ export function validatePublishRequest(
       );
     }
   }
+
+  // Rule 6: Every term is writable as sent, and every rootEntity is an absolute IRI.
+  const malformed = findMalformedQuadTerm(nquads, manifest.map((m) => m.rootEntity));
+  if (malformed) errors.push(`Rule 6: ${malformed.message}`);
 
   return { valid: errors.length === 0, errors };
 }

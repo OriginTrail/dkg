@@ -73,8 +73,17 @@ describe('SKILL.md file', () => {
     expect(skillContent).toContain('## 10. Common Workflows');
   });
 
-  it('contains dynamic placeholders for node info', () => {
-    expect(skillContent).toContain('(dynamic)');
+  it('contains substitution tokens for node info', () => {
+    // GH#1125 — the template used to carry literal `(dynamic)` text that
+    // `buildSkillMd` swapped out wholesale with one literal `String.replace`.
+    // That failed silently the moment the copy in manifest.ts drifted from the
+    // Markdown here, so the served doc shipped the placeholders verbatim. The
+    // template now carries named `{{token}}` values substituted individually;
+    // `skill-dynamic-substitution.test.ts` pins the rendered output.
+    expect(skillContent).not.toContain('(dynamic)');
+    expect(skillContent).toContain('{{nodeVersion}}');
+    expect(skillContent).toContain('{{baseUrl}}');
+    expect(skillContent).toContain('{{peerId}}');
     expect(skillContent).toContain('**Node version:**');
     expect(skillContent).toContain('**Base URL:**');
     expect(skillContent).toContain('**Peer ID:**');
@@ -201,11 +210,16 @@ describe('SKILL.md file', () => {
     // register/publishPolicy caveat, create-failure recovery semantics) — content we
     // deliberately added, where trimming would regress the accuracy we just fixed.
     //
-    // 950 lines stays a realistic ceiling: well below the documented Agent Skills
+    // Resident-author selection (GH#1786) raised the cap 950 → 1000. The added
+    // contract distinguishes selection from authorship and documents the
+    // synchronous/async non-custodial failure modes; omitting it would make the
+    // canonical skill inaccurate for the newly exposed API.
+    //
+    // 1000 lines stays a realistic ceiling: well below the documented Agent Skills
     // "should be concise" guidance for very large skills, while still catching
     // unbounded growth (e.g. an accidental dump of full OpenAPI schema in-line).
     const lines = skillContent.split('\n').length;
-    expect(lines).toBeLessThan(950);
+    expect(lines).toBeLessThan(1000);
   });
 });
 

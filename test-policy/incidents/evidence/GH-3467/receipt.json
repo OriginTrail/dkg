@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "GH-3467",
+  "method": "guard-mutation",
+  "sourceCommit": "c4ecf9459434b02f8e15cc5da17aec3b9a09f868",
+  "production": {
+    "file": "packages/agent/src/dkg-agent-rfc64-seed-fetch.ts",
+    "sha256": "01963938da778b71d8ebea38a8d604dfe266f2487d799a9b8f7667e8c6803847"
+  },
+  "test": {
+    "file": "packages/agent/test/rfc64-unregistered-seed-fetch-agent.test.ts",
+    "sha256": "a2ec0c94a45a9656dabe0d2dab5bbe7bb8167e06b286483f0fb13f093e61e215",
+    "fullName": "Rfc64SeedFetchMethods replica peer selection reserves window slots for non-core peers so a lone edge author is asked in the first window"
+  },
+  "mutation": {
+    "old": "export const RFC64_UNREGISTERED_AUTHORITY_RESERVED_NON_CORE_PEERS_V1 = 2;",
+    "new": "export const RFC64_UNREGISTERED_AUTHORITY_RESERVED_NON_CORE_PEERS_V1 = 0;"
+  },
+  "red": {
+    "file": "test-policy/incidents/evidence/GH-3467/red.json",
+    "sha256": "2fdbdcbe6be3abde3aa45a3c3651c203d4401341da140ac2a1654f2ebc2a09ef"
+  },
+  "green": {
+    "file": "test-policy/incidents/evidence/GH-3467/green.json",
+    "sha256": "135d07081d997c87bdc3233ce493fac39a9ec7abafbc9d0affc8037417a12b07"
+  }
+}

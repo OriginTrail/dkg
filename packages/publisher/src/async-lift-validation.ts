@@ -1,4 +1,9 @@
+import { LiftPayloadValidationError } from './lift-validation-error.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  createGraphKnowledgeAssetScope,
+} from '@origintrail-official/dkg-core';
 import type { LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import { normalizeLiftPublishInput } from './async-lift-publish-input.js';
 import type {
@@ -23,29 +28,76 @@ export function validateLiftPublishPayload(input: LiftValidationInput): Validate
   const { metadata } = normalizeLiftPublishInput(input, 'Lift validation');
   const authorityProofRef = metadata.authority.proofRef.trim();
   if (authorityProofRef.length === 0) {
-    throw new Error('Lift validation requires a non-empty authority proof reference');
+    throw new LiftPayloadValidationError('Lift validation requires a non-empty authority proof reference');
   }
 
   const priorVersion = normalizePriorVersion(input.request.priorVersion);
   validatePriorVersion(metadata.transitionType, priorVersion);
 
+  if (input.request.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    if (input.request.roots.length !== 0) {
+      throw new LiftPayloadValidationError('Graph-scoped Lift validation rejects root entities');
+    }
+    if (
+      input.request.kaUal === undefined
+      || input.request.assertionVersion === undefined
+      || input.request.publicTripleCount === undefined
+      || input.request.privateTripleCount === undefined
+    ) {
+      throw new LiftPayloadValidationError('Graph-scoped Lift validation requires a complete KA content envelope');
+    }
+    createGraphKnowledgeAssetScope(input.request.kaUal, input.request.assertionVersion);
+    if (
+      !Number.isSafeInteger(input.request.publicTripleCount)
+      || input.request.publicTripleCount < 0
+      || !Number.isSafeInteger(input.request.privateTripleCount)
+      || input.request.privateTripleCount < 0
+    ) {
+      throw new LiftPayloadValidationError('Graph-scoped Lift validation requires non-negative safe triple counts');
+    }
+    if (input.resolved.quads.length !== input.request.publicTripleCount) {
+      throw new LiftPayloadValidationError('Graph-scoped Lift validation public triple count mismatch');
+    }
+    if ((input.resolved.privateQuads?.length ?? 0) !== input.request.privateTripleCount) {
+      throw new LiftPayloadValidationError('Graph-scoped Lift validation private triple count mismatch');
+    }
+
+    const graphSwmQuadCount = input.resolved.quads.length + (input.resolved.privateQuads?.length ?? 0);
+    if (graphSwmQuadCount === 0) {
+      throw new LiftPayloadValidationError('Lift validation requires at least one resolved shared-memory quad');
+    }
+    return {
+      validation: {
+        canonicalRoots: [],
+        canonicalRootMap: {},
+        swmQuadCount: graphSwmQuadCount,
+        authorityProofRef,
+        transitionType: metadata.transitionType,
+        priorVersion,
+      },
+      resolved: input.resolved,
+    };
+  }
+
+  // Raw Lift jobs are migrated in the later mutation-cutover PR. Keep their
+  // existing root-scoped contract intact in this lifecycle PR so the stacked
+  // change remains independently deployable. Named KA jobs are already
+  // fail-closed at enqueue and can only enter through the graph-scoped branch.
   const requestedRoots = normalizeRoots(input.request.roots);
   if (requestedRoots.length === 0) {
-    throw new Error('Lift validation requires at least one valid root');
+    throw new LiftPayloadValidationError('Lift validation requires at least one valid root');
   }
-
   const swmQuadCount = input.resolved.quads.length + (input.resolved.privateQuads?.length ?? 0);
   if (swmQuadCount === 0) {
-    throw new Error('Lift validation requires at least one resolved shared-memory quad');
+    throw new LiftPayloadValidationError('Lift validation requires at least one resolved shared-memory quad');
   }
-
   assertSubjectsBelongToRoots(input.resolved.quads, requestedRoots);
   assertSubjectsBelongToRoots(input.resolved.privateQuads ?? [], requestedRoots);
-
-  const canonicalRootMap = Object.fromEntries(requestedRoots.map((root) => [root, canonicalRootIri(input.request, root)]));
+  const canonicalRootMap = Object.fromEntries(
+    requestedRoots.map((root) => [root, canonicalRootIri(input.request, root)]),
+  );
   assertNoCanonicalRootCollisions(canonicalRootMap);
   const canonicalRoots = requestedRoots.map((root) => canonicalRootMap[root] as string);
-
   const resolved: LiftResolvedPublishSlice = {
     ...input.resolved,
     quads: canonicalizeQuads(input.resolved.quads, canonicalRootMap),
@@ -53,7 +105,6 @@ export function validateLiftPublishPayload(input: LiftValidationInput): Validate
       ? canonicalizeQuads(input.resolved.privateQuads, canonicalRootMap)
       : undefined,
   };
-
   return {
     validation: {
       canonicalRoots,
@@ -65,15 +116,16 @@ export function validateLiftPublishPayload(input: LiftValidationInput): Validate
     },
     resolved,
   };
+
 }
 
 function validatePriorVersion(transitionType: LiftRequest['transitionType'], priorVersion?: string): void {
   if (transitionType === 'CREATE' && priorVersion) {
-    throw new Error('Lift validation rejects priorVersion for CREATE transitions');
+    throw new LiftPayloadValidationError('Lift validation rejects priorVersion for CREATE transitions');
   }
 
   if ((transitionType === 'MUTATE' || transitionType === 'REVOKE') && !priorVersion) {
-    throw new Error(`Lift validation requires priorVersion for ${transitionType} transitions`);
+    throw new LiftPayloadValidationError(`Lift validation requires priorVersion for ${transitionType} transitions`);
   }
 }
 
@@ -141,7 +193,7 @@ function assertSubjectsBelongToRoots(quads: readonly Quad[], roots: readonly str
     if (isRootOrSkolemDescendant(quad.subject, roots)) {
       continue;
     }
-    throw new Error(`Lift validation found subject outside requested roots: ${quad.subject}`);
+    throw new LiftPayloadValidationError(`Lift validation found subject outside requested roots: ${quad.subject}`);
   }
 }
 
@@ -154,7 +206,7 @@ function assertNoCanonicalRootCollisions(canonicalRootMap: Record<string, string
   for (const [sourceRoot, canonicalRoot] of Object.entries(canonicalRootMap)) {
     const existing = reverse.get(canonicalRoot);
     if (existing && existing !== sourceRoot) {
-      throw new Error(
+      throw new LiftPayloadValidationError(
         `Lift validation canonical root collision: ${sourceRoot} and ${existing} both map to ${canonicalRoot}`,
       );
     }

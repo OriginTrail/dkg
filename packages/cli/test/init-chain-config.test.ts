@@ -1,0 +1,97 @@
+import { describe, it, expect } from 'vitest';
+import { buildInitChainOverrides } from '../src/init-chain-config.js';
+import { resolveChainConfig } from '../src/config.js';
+
+const sameNetwork = { isNetworkSwitch: false };
+const defaults = { type: 'evm' as const, rpcUrl: 'https://network.invalid', rpcUrls: ['https://backup.invalid'], hubAddress: '0x1111111111111111111111111111111111111111', chainId: 'base:84532' };
+const answers = { ...defaults, rpcUrlsInput: defaults.rpcUrls.join(', ') };
+describe('init chain overrides (#1307)', () => {
+  it('inherits defaults on new installs and removes previously pinned defaults', () => {
+    expect(buildInitChainOverrides(answers, defaults, undefined, sameNetwork)).toBeUndefined();
+    expect(buildInitChainOverrides(answers, defaults, defaults, sameNetwork)).toBeUndefined();
+  });
+  it('persists an operator RPC without pinning the default hub and preserves advanced overrides', () => {
+    const chain = buildInitChainOverrides({ ...answers, rpcUrl: 'https://operator.invalid' }, defaults, { tokenAddress: 'custom-token' }, sameNetwork);
+    expect(chain).toEqual({ type: 'evm', rpcUrl: 'https://operator.invalid', tokenAddress: 'custom-token' });
+    expect(resolveChainConfig({ chain }, { chain: { ...defaults, hubAddress: 'rotated-hub' } })?.hubAddress).toBe('rotated-hub');
+  });
+  it('preserves explicit backup removal when the network supplies backups', () => {
+    expect(buildInitChainOverrides({ ...answers, rpcUrlsInput: 'none' }, defaults, undefined, sameNetwork)).toEqual({ type: 'evm', rpcUrls: [] });
+  });
+  it('preserves the exact RPC request budget across reinitialization and network switches', () => {
+    const rpcRequestBudget = {
+      maxRequestsPerSecond: 7,
+      foregroundReservePercent: 75,
+      burstRequests: 11,
+      maxQueueSize: 37,
+      startupJitterMs: 12_345,
+    };
+    const prior = { ...defaults, rpcRequestBudget };
+    expect(buildInitChainOverrides(answers, defaults, prior, sameNetwork))
+      .toEqual({ type: 'evm', rpcRequestBudget });
+    const nextNetwork = {
+      ...defaults,
+      rpcUrl: 'https://next.invalid',
+      hubAddress: 'next-hub',
+      chainId: 'base:8453',
+      rpcUrls: [],
+    };
+    expect(buildInitChainOverrides(
+      { ...nextNetwork, rpcUrlsInput: '' },
+      nextNetwork,
+      prior,
+      { isNetworkSwitch: true },
+    )).toEqual({ type: 'evm', rpcRequestBudget });
+  });
+  it('preserves chain.indexTickMs across reinitialization and network switches', () => {
+    const prior = { ...defaults, indexTickMs: 12_345 };
+    expect(buildInitChainOverrides(answers, defaults, prior, sameNetwork))
+      .toEqual({ type: 'evm', indexTickMs: 12_345 });
+    const nextNetwork = {
+      ...defaults,
+      rpcUrl: 'https://next.invalid',
+      hubAddress: 'next-hub',
+      chainId: 'base:8453',
+      rpcUrls: [],
+    };
+    expect(buildInitChainOverrides(
+      { ...nextNetwork, rpcUrlsInput: '' },
+      nextNetwork,
+      prior,
+      { isNetworkSwitch: true },
+    )).toEqual({ type: 'evm', indexTickMs: 12_345 });
+  });
+  it('preserves the external signer block across reinitialization and network switches', () => {
+    const signer = { type: 'remote' as const, socketPath: '/run/signer/signer.sock', authTokenFile: '/etc/dkg/signer.token' };
+    const prior = { ...defaults, signer };
+    expect(buildInitChainOverrides(answers, defaults, prior, sameNetwork)).toEqual({ type: 'evm', signer });
+    expect(buildInitChainOverrides(answers, defaults, prior, { isNetworkSwitch: true })).toEqual({ type: 'evm', signer });
+  });
+  it('preserves an explicit bounded authority read choice across network switches', () => {
+    const prior = { ...defaults, boundedAuthorityReads: true };
+    expect(buildInitChainOverrides(answers, defaults, prior, sameNetwork))
+      .toEqual({ type: 'evm', boundedAuthorityReads: true });
+    expect(buildInitChainOverrides(answers, defaults, prior, { isNetworkSwitch: true }))
+      .toEqual({ type: 'evm', boundedAuthorityReads: true });
+  });
+  it('writes full answers when no network defaults exist', () => {
+    expect(buildInitChainOverrides(answers, undefined, undefined, sameNetwork)).toEqual(defaults);
+  });
+  it('preserves backup ordering while inheriting undefined or empty defaults', () => {
+    const twoBackups = { ...defaults, rpcUrls: ['https://first.invalid', 'https://second.invalid'] };
+    expect(buildInitChainOverrides({ ...answers, rpcUrlsInput: [...twoBackups.rpcUrls].reverse().join(', ') }, twoBackups, undefined, sameNetwork))
+      .toEqual({ type: 'evm', rpcUrls: ['https://second.invalid', 'https://first.invalid'] });
+    expect(buildInitChainOverrides({ ...answers, rpcUrlsInput: '' }, defaults, defaults, sameNetwork)).toBeUndefined();
+    expect(buildInitChainOverrides({ ...answers, rpcUrlsInput: '' }, { ...defaults, rpcUrls: undefined }, defaults, sameNetwork)).toBeUndefined();
+  });
+  it('removes old prompted values when switching networks and preserves portable tuning', () => {
+    const nextNetwork = { ...defaults, rpcUrl: 'https://next.invalid', hubAddress: 'next-hub', chainId: 'base:8453', rpcUrls: [] };
+    expect(buildInitChainOverrides({ ...nextNetwork, rpcUrlsInput: '' }, nextNetwork, { ...defaults, cgRegistryScanPageSize: 500 }, { isNetworkSwitch: true }))
+      .toEqual({ type: 'evm', cgRegistryScanPageSize: 500 });
+  });
+  it('treats empty scalar answers as inheritance and persists each custom scalar', () => {
+    expect(buildInitChainOverrides({ rpcUrl: '', hubAddress: '', chainId: '', rpcUrlsInput: '' }, defaults, defaults, sameNetwork)).toBeUndefined();
+    expect(buildInitChainOverrides({ ...answers, hubAddress: 'operator-hub', chainId: 'operator:1' }, defaults, undefined, sameNetwork))
+      .toEqual({ type: 'evm', hubAddress: 'operator-hub', chainId: 'operator:1' });
+  });
+});

@@ -1,11 +1,14 @@
+import { preparedCacheFailureCause, createPreparedContentCache, resolvePreparedContentCacheConfig, type PreparedContentCacheConfig } from './prepared-content-cache.js';
 import {
   createOperationContext,
+  DEFAULT_MAX_READ_BYTES,
+  ExactBatchResponderRefusal,
   QuietRetryableHandlerError,
   withSpan,
   getMetrics,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { supportsBoundedExactGraphExport, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   serializeWorkspacePublicSnapshotQuads,
   type WorkspacePublicSnapshotStore,
@@ -14,22 +17,46 @@ import type { SyncRequestEnvelope } from '../auth/request-build.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../durable-session.js';
 import {
   createResponderGraphListMemo,
+  createResponderExactGraphPagePlanMemo,
+  createResponderPageOnlyExactDataSessionMemo,
+  createResponderExactDataSessionMemo,
+  createResponderFreshSwmDataGraphPlanMemo,
+  createResponderFreshSwmMetaPlanMemo,
   createResponderSyncRowListMemo,
   createResponderSubGraphRegistrationMemo,
   createResponderSwmAdmissionMemo,
+  DurableMetaPageFrameError,
   readCatalogPage,
-  readDurableDataPage,
+  readDurableDataPageWithLease,
   readDurableMetaPage,
   readSwmDataPage,
   readSwmMetaPage,
   serializeResponderRows,
   SyncRowSnapshotLimitError,
 } from './graph-plan.js';
+import { exactAssetFilterKey } from '../exact-assets.js';
+import { observeExactBatch } from '../exact-batch-observation.js';
 import {
   createSyncResponderSnapshotBudget,
   SyncRowSnapshotBudgetError,
   type SyncResponderSnapshotBudgetOptions,
 } from './snapshot-budget.js';
+import {
+  contextGraphPriority,
+  syncPriorityClass,
+  validateSyncResponderSnapshotLimitsConfig,
+  type SyncContextGraphPriorityConfig,
+  type SyncPriorityClass,
+  type SyncSchedulerLane,
+  type SyncResponderSnapshotLimitsConfig,
+} from '../policy.js';
+import {
+  PriorityAdmissionQueue,
+  type PriorityAdmission,
+} from '../priority-admission-queue.js';
+import { resolveSyncResponderRequestProfile } from './page-framing-policy.js';
+import { createBoundedExactAssetExportCache, type ExactAssetExportLease, type ExactAssetExportCache } from './exact-asset-export-cache.js';
+import { encodeResolvedExactSyncResponse } from '../wire-compression.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
 
@@ -41,7 +68,25 @@ type SyncSessionTokenEntry = {
 type PreparedResponderSession = {
   rowListCacheKey: string;
   refreshRowList: boolean;
+  refreshGeneration: string;
 };
+
+type PreparedResponderStage =
+  | { kind: 'respond'; bytes: Uint8Array }
+  | { kind: 'authorized'; authDurationMs: number };
+
+export interface ExperimentalExactBatchResponderResources {
+  readonly exportCache: ExactAssetExportCache;
+  readonly snapshotBudget: import('./snapshot-budget.js').SyncResponderSnapshotBudget;
+  /**
+   * Both admissions share the limiter of every other sync response. When it
+   * does not admit the stage (queue wait exceeded, queue full, displaced) they
+   * reject with Core's `ExactBatchResponderRefusal('BUSY')`, which Core answers
+   * with a refusal frame.
+   */
+  withPreAuthorizationAdmission<T>(peerId: string, signal: AbortSignal, work: () => Promise<T>): Promise<T>;
+  withAuthorizedResponseAdmission<T>(peerId: string, contextGraphId: string, signal: AbortSignal, work: () => Promise<T>): Promise<T>;
+}
 
 interface RegisterSyncHandlerParams {
   /**
@@ -63,6 +108,8 @@ interface RegisterSyncHandlerParams {
   sharedMemoryTtlMs: number;
   store: TripleStore;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  preparedContentCache?: PreparedContentCacheConfig;
+  dataDir?: string;
   peerId: string;
   parseSyncRequest: (data: Uint8Array) => SyncRequestEnvelope;
   authorizeSyncRequest: (
@@ -70,6 +117,10 @@ interface RegisterSyncHandlerParams {
     remotePeerId: string,
     options?: { signal?: AbortSignal },
   ) => Promise<boolean>;
+  /** Called for every shared-memory request this node authorized; the requester follows that graph. */
+  onSharedMemoryRequestAuthorized?: (contextGraphId: string, remotePeerId: string) => void;
+  /** Default absent. Experimental registrations reuse these exact owned resources. */
+  onExperimentalExactBatchResources?: (resources: ExperimentalExactBatchResponderResources) => void;
   /**
    * Injected policy predicate (#1233): return `true` to WITHHOLD the durable
    * `_meta` snapshot for `contextGraphId` — the responder then replies with an
@@ -81,16 +132,29 @@ interface RegisterSyncHandlerParams {
    * caller reads `process.env` fresh per call, keeping the switch runtime-hot.
    */
   shouldWithholdDurableMeta?: (contextGraphId: string) => boolean;
+  /** Awaited before the first page of a durable `_meta` snapshot is read (a Core refreshes a hosted graph's definition). Must not throw. */
+  beforeServingDurableMeta?: (contextGraphId: string, signal?: AbortSignal) => Promise<void>;
+  /**
+   * Return `true` while `contextGraphId` must not be served in any phase yet
+   * (production: `ontology` until the startup metadata relocation finishes).
+   * The request is then refused like a busy responder, which requesters retry
+   * later, rather than answered with an empty page they would read as the
+   * graph's end.
+   */
+  servingWithheld?: (contextGraphId: string) => boolean;
   logWarn: (ctx: OperationContext, message: string) => void;
+  /** One line per exact-batch stream request refused as busy. Omitted ⇒ `logDebug`. */
+  logInfo?: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
   /** Primarily injectable for deterministic tests; production uses the bounded defaults below. */
   snapshotBudget?: SyncResponderSnapshotBudgetOptions;
+  /** Local-only policy; consulted only after authorizeSyncRequest accepts the CG. */
+  contextGraphPriorities?: Readonly<SyncContextGraphPriorityConfig>;
 }
 
 const SYNC_RESPONDER_GLOBAL_CONCURRENCY = 3;
-const SYNC_RESPONDER_PER_PEER_CONCURRENCY = 1;
 const SYNC_RESPONDER_QUEUE_LIMIT = 64;
-const SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT = 4;
+export const SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT = 4;
 const SYNC_RESPONDER_MAX_QUEUE_WAIT_MS = 10_000;
 export const SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT = 128;
 export const SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT = 64;
@@ -116,37 +180,92 @@ function positiveIntegerEnv(
   env: Readonly<Record<string, string | undefined>>,
   name: string,
   fallback: number,
+  warn: (message: string) => void,
 ): number {
-  const parsed = Number(env[name]?.trim());
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+  const raw = env[name]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+  warn(`Ignoring invalid ${name}="${raw}"; expected a positive safe integer`);
+  return fallback;
 }
 
-/** Production snapshot limits, with explicit operator overrides in rows/bytes. */
-export function resolveSyncResponderSnapshotBudgetOptions(
+export interface ResolvedSyncResponderSnapshotPolicy {
+  budget: SyncResponderSnapshotBudgetOptions;
+  localRowsClamped: boolean;
+  localBytesEstimateClamped: boolean;
+}
+
+/** Resolve each leaf independently: environment, then config, then the compatibility default. */
+export function resolveSyncResponderSnapshotPolicy(
+  config?: SyncResponderSnapshotLimitsConfig,
   env: Readonly<Record<string, string | undefined>> = process.env,
-): SyncResponderSnapshotBudgetOptions {
-  return {
-    maxRows: positiveIntegerEnv(
-      env,
-      SNAPSHOT_BUDGET_ENV.maxRows,
-      SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT,
-    ),
-    maxBytesEstimate: positiveIntegerEnv(
-      env,
-      SNAPSHOT_BUDGET_ENV.maxBytesEstimate,
-      SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
-    ),
-    maxSnapshotRows: positiveIntegerEnv(
-      env,
-      SNAPSHOT_BUDGET_ENV.maxSnapshotRows,
-      SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT,
-    ),
-    maxSnapshotBytesEstimate: positiveIntegerEnv(
-      env,
-      SNAPSHOT_BUDGET_ENV.maxSnapshotBytesEstimate,
-      SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
-    ),
+  onWarning: (message: string) => void = () => {},
+): ResolvedSyncResponderSnapshotPolicy {
+  validateSyncResponderSnapshotLimitsConfig(config);
+  const warnings = new Set<string>();
+  const warnOnce = (message: string) => {
+    if (warnings.has(message)) return;
+    warnings.add(message);
+    onWarning(message);
   };
+  const maxRows = positiveIntegerEnv(
+    env,
+    SNAPSHOT_BUDGET_ENV.maxRows,
+    config?.global?.rows ?? SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT,
+    warnOnce,
+  );
+  const maxBytesEstimate = positiveIntegerEnv(
+    env,
+    SNAPSHOT_BUDGET_ENV.maxBytesEstimate,
+    config?.global?.bytesEstimate ?? SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
+    warnOnce,
+  );
+  const configuredMaxSnapshotRows = positiveIntegerEnv(
+    env,
+    SNAPSHOT_BUDGET_ENV.maxSnapshotRows,
+    config?.local?.rows ?? SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT,
+    warnOnce,
+  );
+  const configuredMaxSnapshotBytesEstimate = positiveIntegerEnv(
+    env,
+    SNAPSHOT_BUDGET_ENV.maxSnapshotBytesEstimate,
+    config?.local?.bytesEstimate ?? SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
+    warnOnce,
+  );
+  const maxSnapshotRows = Math.min(configuredMaxSnapshotRows, maxRows);
+  const maxSnapshotBytesEstimate = Math.min(configuredMaxSnapshotBytesEstimate, maxBytesEstimate);
+  const localRowsClamped = maxSnapshotRows !== configuredMaxSnapshotRows;
+  const localBytesEstimateClamped = maxSnapshotBytesEstimate !== configuredMaxSnapshotBytesEstimate;
+  if (localRowsClamped) {
+    warnOnce(
+      `Clamped syncResponderSnapshotLimits.local.rows from ${configuredMaxSnapshotRows} to global.rows ${maxRows}`,
+    );
+  }
+  if (localBytesEstimateClamped) {
+    warnOnce(
+      `Clamped syncResponderSnapshotLimits.local.bytesEstimate from ${configuredMaxSnapshotBytesEstimate} to global.bytesEstimate ${maxBytesEstimate}`,
+    );
+  }
+  return {
+    budget: {
+      maxRows,
+      maxBytesEstimate,
+      maxSnapshotRows,
+      maxSnapshotBytesEstimate,
+    },
+    localRowsClamped,
+    localBytesEstimateClamped,
+  };
+}
+
+/** Production snapshot limits, with explicit config and environment overrides in rows/bytes. */
+export function resolveSyncResponderSnapshotBudgetOptions(
+  config?: SyncResponderSnapshotLimitsConfig,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  onWarning?: (message: string) => void,
+): SyncResponderSnapshotBudgetOptions {
+  return resolveSyncResponderSnapshotPolicy(config, env, onWarning).budget;
 }
 
 class SyncResponderBusyError extends Error {
@@ -156,118 +275,146 @@ class SyncResponderBusyError extends Error {
   }
 }
 
-interface SyncResponderQueueEntry {
+type SyncResponderPlane = 'shared-memory' | 'durable';
+
+interface SyncResponderQueuePayload {
   peerId: string;
-  resolve: (release: () => void) => void;
-  reject: (error: Error) => void;
-  signal?: AbortSignal;
-  timer: ReturnType<typeof setTimeout>;
-  onAbort?: () => void;
+  plane: SyncResponderPlane;
+  contextGraphId?: string;
 }
 
+type SyncResponderScheduling = {
+  plane: SyncResponderPlane;
+  contextGraphId?: string;
+  lane: Extract<SyncSchedulerLane, 'pre_authorization' | 'responder'>;
+  priority: number;
+  priorityClass: SyncPriorityClass;
+};
+
 function createSyncResponderLimiter() {
-  let running = 0;
-  const runningByPeer = new Map<string, number>();
-  const queuedByPeer = new Map<string, number>();
-  const queue: SyncResponderQueueEntry[] = [];
+  const activePeerPlanes = new Set<string>();
+  const peerPlaneKey = (peerId: string, plane: SyncResponderPlane) => `${peerId}\0${plane}`;
+  const queue = new PriorityAdmissionQueue<SyncResponderQueuePayload>({
+    canRun: (entry) => (
+      activePeerPlanes.size < SYNC_RESPONDER_GLOBAL_CONCURRENCY
+      && !activePeerPlanes.has(peerPlaneKey(entry.payload.peerId, entry.payload.plane))
+    ),
+    onStart: (entry) => {
+      const { peerId, plane } = entry.payload;
+      const planeKey = peerPlaneKey(peerId, plane);
+      activePeerPlanes.add(planeKey);
+      return () => { activePeerPlanes.delete(planeKey); };
+    },
+  });
 
-  const canRun = (peerId: string): boolean =>
-    running < SYNC_RESPONDER_GLOBAL_CONCURRENCY &&
-    (runningByPeer.get(peerId) ?? 0) < SYNC_RESPONDER_PER_PEER_CONCURRENCY;
+  const schedulingOptions = (
+    peerId: string,
+    scheduling: SyncResponderScheduling,
+    signal?: AbortSignal,
+  ) => ({
+    payload: { peerId, plane: scheduling.plane, contextGraphId: scheduling.contextGraphId },
+    lane: scheduling.lane,
+    priority: scheduling.priority,
+    priorityClass: scheduling.priorityClass,
+    signal,
+    timeoutMs: SYNC_RESPONDER_MAX_QUEUE_WAIT_MS,
+    agingThresholdMs: SYNC_RESPONDER_MAX_QUEUE_WAIT_MS / 2,
+    createBusyError: (reason: 'global_queue_full' | 'owner_queue_full') => new SyncResponderBusyError(
+      reason === 'global_queue_full'
+        ? 'sync responder queue full'
+        : 'sync responder peer queue full',
+    ),
+    createDisplacedError: () => new SyncResponderBusyError(
+      'sync responder queued request displaced',
+    ),
+    createTimeoutError: () => new SyncResponderBusyError(
+      'sync responder queue wait exceeded',
+    ),
+  });
 
-  const releaseFor = (peerId: string): (() => void) => {
-    let released = false;
-    running += 1;
-    runningByPeer.set(peerId, (runningByPeer.get(peerId) ?? 0) + 1);
-    return () => {
-      if (released) return;
-      released = true;
-      running -= 1;
-      const peerRunning = (runningByPeer.get(peerId) ?? 1) - 1;
-      if (peerRunning <= 0) runningByPeer.delete(peerId);
-      else runningByPeer.set(peerId, peerRunning);
-      pump();
-    };
-  };
-
-  const incrementQueued = (peerId: string): void => {
-    queuedByPeer.set(peerId, (queuedByPeer.get(peerId) ?? 0) + 1);
-  };
-
-  const decrementQueued = (peerId: string): void => {
-    const count = (queuedByPeer.get(peerId) ?? 1) - 1;
-    if (count <= 0) queuedByPeer.delete(peerId);
-    else queuedByPeer.set(peerId, count);
-  };
-
-  const removeQueued = (entry: SyncResponderQueueEntry): boolean => {
-    const index = queue.indexOf(entry);
-    if (index < 0) return false;
-    queue.splice(index, 1);
-    decrementQueued(entry.peerId);
-    clearTimeout(entry.timer);
-    if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort);
-    return true;
-  };
-
-  const startQueued = (entry: SyncResponderQueueEntry): void => {
-    decrementQueued(entry.peerId);
-    clearTimeout(entry.timer);
-    if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort);
-    entry.resolve(releaseFor(entry.peerId));
-  };
-
-  const pump = (): void => {
-    for (let i = 0; i < queue.length && running < SYNC_RESPONDER_GLOBAL_CONCURRENCY;) {
-      const entry = queue[i];
-      if (!canRun(entry.peerId)) {
-        i += 1;
-        continue;
-      }
-      queue.splice(i, 1);
-      startQueued(entry);
-    }
-  };
-
-  const acquire = (peerId: string, signal?: AbortSignal): Promise<() => void> => {
-    throwIfAborted(signal);
-    if (canRun(peerId)) return Promise.resolve(releaseFor(peerId));
-    if (queue.length >= SYNC_RESPONDER_QUEUE_LIMIT) {
-      throw new SyncResponderBusyError('sync responder queue full');
-    }
-    if ((queuedByPeer.get(peerId) ?? 0) >= SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT) {
-      throw new SyncResponderBusyError('sync responder peer queue full');
-    }
-    return new Promise((resolve, reject) => {
-      const entry: SyncResponderQueueEntry = {
-        peerId,
-        resolve,
-        reject,
-        signal,
-        timer: setTimeout(() => {
-          if (removeQueued(entry)) reject(new SyncResponderBusyError('sync responder queue wait exceeded'));
-        }, SYNC_RESPONDER_MAX_QUEUE_WAIT_MS),
-      };
-      entry.onAbort = () => {
-        if (removeQueued(entry)) reject(asAbortError(signal?.reason));
-      };
-      incrementQueued(peerId);
-      queue.push(entry);
-      if (signal) {
-        signal.addEventListener('abort', entry.onAbort, { once: true });
-        if (signal.aborted) entry.onAbort();
-      }
-    });
-  };
+  const acquire = (
+    peerId: string,
+    scheduling: SyncResponderScheduling,
+    signal?: AbortSignal,
+    reserveForHandoff = false,
+  ): PriorityAdmission<SyncResponderQueuePayload> => queue.acquire({
+    ...schedulingOptions(peerId, scheduling, signal),
+    ownerKey: peerId,
+    queueLimit: SYNC_RESPONDER_QUEUE_LIMIT,
+    ownerQueueLimit: SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT,
+    reserveForHandoff,
+  });
 
   return {
-    async run<T>(peerId: string, signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> {
-      const release = await acquire(peerId, signal);
+    /** Responses running and requests waiting right now, for diagnostics only. */
+    pressure: (): { running: number; queued: number } => ({ running: activePeerPlanes.size, queued: queue.length }),
+
+    async run<T>(
+      peerId: string,
+      signal: AbortSignal | undefined,
+      scheduling: SyncResponderScheduling,
+      fn: () => Promise<T>,
+    ): Promise<T> {
+      const admission = acquire(peerId, scheduling, signal);
+      const release = await admission.release;
       try {
         throwIfAborted(signal);
         return await fn();
       } finally {
         release();
+      }
+    },
+
+    async runTwoStage<T, U>(
+      peerId: string,
+      signal: AbortSignal | undefined,
+      firstScheduling: SyncResponderScheduling,
+      first: () => Promise<T>,
+      transition: (value: T) => {
+        scheduling: SyncResponderScheduling;
+        work: () => Promise<U>;
+      } | undefined,
+    ): Promise<T | U> {
+      const firstAdmission = acquire(peerId, firstScheduling, signal, true);
+      const releaseFirst = await firstAdmission.release;
+      let value: T;
+      try {
+        throwIfAborted(signal);
+        value = await first();
+      } catch (error) {
+        releaseFirst();
+        throw error;
+      }
+
+      const next = transition(value);
+      if (!next) {
+        releaseFirst();
+        return value;
+      }
+
+      let secondAdmission: PriorityAdmission<SyncResponderQueuePayload>;
+      try {
+        // The first stage reserved one bounded global + per-peer queue slot.
+        // Consuming it here preserves the original arrival sequence without
+        // temporarily or persistently exceeding either queue cap.
+        if (!firstAdmission.handoff) {
+          throw new Error('sync responder handoff reservation missing');
+        }
+        secondAdmission = firstAdmission.handoff(
+          schedulingOptions(peerId, next.scheduling, signal),
+        );
+      } catch (error) {
+        releaseFirst();
+        throw error;
+      }
+      releaseFirst();
+
+      const releaseSecond = await secondAdmission.release;
+      try {
+        throwIfAborted(signal);
+        return await next.work();
+      } finally {
+        releaseSecond();
       }
     },
   };
@@ -293,7 +440,7 @@ function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined):
   });
 }
 
-export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
+export function registerSyncHandler(params: RegisterSyncHandlerParams): { closeAndDrain(): Promise<void> } {
   const {
     register,
     protocolSync,
@@ -305,9 +452,11 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     parseSyncRequest,
     authorizeSyncRequest,
     shouldWithholdDurableMeta,
+    servingWithheld,
     logWarn,
     logDebug,
     snapshotBudget,
+    contextGraphPriorities,
   } = params;
   const graphListMemo = createResponderGraphListMemo(store);
   const responderSnapshotBudget = createSyncResponderSnapshotBudget(snapshotBudget ?? {
@@ -331,10 +480,93 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
     { phase: 'shared_memory', budget: responderSnapshotBudget },
   );
+  const freshSwmDataGraphPlanMemo = createResponderFreshSwmDataGraphPlanMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
+  );
+  const freshSwmMetaPlanMemo = createResponderFreshSwmMetaPlanMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
+    // #1847 review: retained TTL meta session plans are control-plane state and
+    // must be charged to the same process-wide budget as retained snapshots —
+    // peers cannot stack uncharged plans, and global pressure evicts idle ones.
+    responderSnapshotBudget,
+  );
+  const durableDataExactSessionMemo = createResponderExactDataSessionMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
+  );
+  const pageOnlyExactDataSessionMemo = createResponderPageOnlyExactDataSessionMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
+    responderSnapshotBudget,
+  );
+  const preparedOptions = resolvePreparedContentCacheConfig(params.preparedContentCache, params.dataDir);
+  let cacheWarned = false;
+  const preparedContentCache = preparedOptions ? createPreparedContentCache(preparedOptions, (error, operation) => {
+    if (cacheWarned) return;
+    cacheWarned = true;
+    params.logWarn(createOperationContext('sync'), `Prepared content cache ${operation} failed (${preparedCacheFailureCause(error)}); using verified export`);
+  }) : undefined;
+  const exactAssetExportCache = createBoundedExactAssetExportCache({ store, budget: responderSnapshotBudget, preparedContentCache });
+  const swmDataExactGraphPlanMemo = createResponderExactGraphPagePlanMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
+  );
   const syncSessionTokens = new Map<string, SyncSessionTokenEntry>();
   const subGraphRegistrationMemo = createResponderSubGraphRegistrationMemo(store);
   const swmAdmissionMemo = createResponderSwmAdmissionMemo(store);
   const limiter = createSyncResponderLimiter();
+  // Preserve the original one-admission auth+serve path unless an operator
+  // actually configures a non-zero priority. An empty/all-zero map is a true
+  // compatibility no-op for responder scheduling.
+  const prioritySchedulingEnabled = Object.values(contextGraphPriorities ?? {})
+    .some((priority) => priority !== 0);
+  // A page request the limiter does not admit fails with a retryable reply its
+  // requester can read. The stream has no reply to put that in, and an abort
+  // reads as a broken connection, so the same condition becomes a BUSY refusal.
+  // It is counted and logged here, once, with nothing taken from the request.
+  const admitExactBatchStage = async <T>(
+    stage: 'pre-authorization' | 'response',
+    remotePeerId: string,
+    signal: AbortSignal,
+    scheduling: SyncResponderScheduling,
+    work: () => Promise<T>,
+  ): Promise<T> => {
+    try {
+      return await limiter.run(remotePeerId, signal, scheduling, work);
+    } catch (err) {
+      if (!(err instanceof SyncResponderBusyError)) throw err;
+      getMetrics().syncResponseTotal.add(1, { outcome: 'busy' });
+      observeExactBatch(() => {
+        const { running, queued } = limiter.pressure();
+        (params.logInfo ?? logDebug)(
+          createOperationContext('sync'),
+          `Exact batch responder busy stage=${stage} peer=${remotePeerId.slice(-8)} `
+            + `reason=${JSON.stringify(err.message)} running=${running} queued=${queued}`,
+        );
+      });
+      throw new ExactBatchResponderRefusal('BUSY', { cause: err });
+    }
+  };
+  // The opt-in batch profile uses two separately bounded stages. Unlike the
+  // legacy runTwoStage path, it does not claim a reserved FIFO handoff between
+  // authorization and response. No admission remains held across that gap.
+  // Exact-batch exports are VM data, so both stages occupy the durable plane.
+  // Advertising the export-only transport requires a pre-parse bounded reader.
+  // Unsupported stores retain their existing ordinary bounded page handler.
+  if (params.onExperimentalExactBatchResources && supportsBoundedExactGraphExport(store)) params.onExperimentalExactBatchResources({
+    exportCache: exactAssetExportCache,
+    snapshotBudget: responderSnapshotBudget,
+    withPreAuthorizationAdmission: (remotePeerId, signal, work) => admitExactBatchStage(
+      'pre-authorization', remotePeerId, signal,
+      { plane: 'durable', lane: 'pre_authorization', priority: 0, priorityClass: 'default' }, work),
+    withAuthorizedResponseAdmission: (remotePeerId, contextGraphId, signal, work) => {
+      const priority = prioritySchedulingEnabled ? contextGraphPriority(contextGraphPriorities, contextGraphId) : 0;
+      return admitExactBatchStage('response', remotePeerId, signal,
+        { plane: 'durable', contextGraphId, lane: 'responder', priority, priorityClass: syncPriorityClass(priority) }, work);
+    },
+  });
   let warnedPreDispatchCancellation = false;
 
   const pruneSyncSessionTokens = (now = Date.now()) => {
@@ -378,6 +610,10 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     return {
       rowListCacheKey: key,
       refreshRowList,
+      // Include the server-derived row-list scope so two remote peers choosing
+      // the same opaque token cannot make global prerequisite memos treat their
+      // otherwise-independent sessions as one generation.
+      refreshGeneration: `${key}\u0000${token}`,
     };
   };
 
@@ -393,11 +629,39 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     // recorded by its own .then/.catch (no double counting).
     try {
     const request = parseSyncRequest(data);
-    const offset = Math.max(0, Math.min(Number.isSafeInteger(Number(request.offset)) ? Number(request.offset) : 0, 1_000_000));
+    const exactExportLeases: ExactAssetExportLease[] = [];
+    // A durable rootless snapshot can legitimately contain millions of rows.
+    // Never clamp a valid cursor: doing so silently replays the row slice at
+    // the clamp boundary forever while the requester keeps advancing its local
+    // offset. That produces duplicates and makes an otherwise valid manifest
+    // fail integrity verification once the snapshot crosses the old 1M cap.
+    // Exact-graph paging already rejects offsets beyond the plan with an empty
+    // page, so accepting every non-negative safe integer remains bounded.
+    const requestedOffset = Number(request.offset);
+    const offset = Number.isSafeInteger(requestedOffset) && requestedOffset >= 0
+      ? requestedOffset
+      : 0;
     const limit = Math.max(1, Math.min(Number.isSafeInteger(Number(request.limit)) ? Number(request.limit) : syncPageSize, syncPageSize));
     const phase = request.phase ?? 'data';
     const isWorkspace = request.includeSharedMemory;
     const contextGraphId = request.contextGraphId;
+    const assetUals = request.assetUals;
+    const assetSelectionKey = assetUals === undefined
+      ? 'full'
+      : exactAssetFilterKey(assetUals);
+    const requestProfile = resolveSyncResponderRequestProfile({
+      legacyLimit: limit,
+      includeSharedMemory: isWorkspace,
+      phase,
+      pageMode: request.pageMode,
+      pageRowsHint: request.pageRowsHint,
+      assetUals,
+      responseEncoding: request.responseEncoding,
+    });
+    const pageFraming = requestProfile.framing;
+    const usesByteBudgetPage = pageFraming.usesByteBudgetPage;
+    const usesMetaByteBudget = phase === 'meta' && usesByteBudgetPage;
+    const durableMetaLimit = pageFraming.limit;
     if (!contextGraphId || typeof contextGraphId !== 'string') {
       // Count this early return too — it short-circuits before limiter.run, so
       // without this it would never reach the syncResponseTotal{ok}/{error}
@@ -419,9 +683,25 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       }
     }
     const nquads: string[] = [];
+    // A durable/SWM snapshot can span thousands of page requests. Emitting the
+    // same successful timing record for every page turned routine catch-up into
+    // millions of SQLite dashboard rows on mainnet. Keep the policy at one lazy
+    // logging boundary so every phase gets one representative diagnostic per
+    // session without constructing strings for skipped pages. Slow total
+    // responses are still logged below regardless of offset.
+    const logFirstPageDetail = (message: () => string): void => {
+      if (offset !== 0) return;
+      logDebug(createOperationContext('sync'), message());
+    };
 
-    return limiter.run(peerId, signal, async () => {
+    const prepareResponderStage = async (): Promise<PreparedResponderStage> => {
       throwIfAborted(signal);
+
+      // Checked per request, before every phase and before authorization, so
+      // no page of a withheld graph is read while the hold lasts.
+      if (servingWithheld?.(contextGraphId)) {
+        throw new SyncResponderBusyError(`sync responder busy: "${contextGraphId}" is not served yet`);
+      }
 
       // facet open-serve. The public `_catalog` subgraph (a DCAT
       // dataset record) is served to ANYONE, with NO allowlist auth, BEFORE the
@@ -430,8 +710,8 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       if (phase === 'catalog') {
         const rows = await raceAgainstAbort(readCatalogPage({ store, contextGraphId, offset, limit }), signal);
         const serialized = serializeResponderRows(rows);
-        logDebug(createOperationContext('sync'), `Sync responder catalog facet for "${contextGraphId}": rows=${rows.length}`);
-        return new TextEncoder().encode(serialized ?? '');
+        logFirstPageDetail(() => `Sync responder catalog facet for "${contextGraphId}": rows=${rows.length}`);
+        return { kind: 'respond', bytes: new TextEncoder().encode(serialized ?? '') };
       }
 
       const authStartedAt = Date.now();
@@ -440,8 +720,14 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       throwIfAborted(signal);
       if (!authorized) {
         logWarn(createOperationContext('sync'), `Denied sync request for "${contextGraphId}" from peer ${peerId} (phase=${phase})`);
-        return new TextEncoder().encode(syncDeniedResponse);
+        return { kind: 'respond', bytes: new TextEncoder().encode(syncDeniedResponse) };
       }
+      if (isWorkspace) params.onSharedMemoryRequestAuthorized?.(contextGraphId, peerId);
+      return { kind: 'authorized', authDurationMs };
+    };
+
+    const serveAuthorizedStage = async (authDurationMs: number): Promise<Uint8Array> => {
+      throwIfAborted(signal);
 
       if (store.queryCancellation === 'pre-dispatch' && !warnedPreDispatchCancellation) {
         warnedPreDispatchCancellation = true;
@@ -457,16 +743,19 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           if (!snapshotRef || !publicSnapshotStore) {
             return new TextEncoder().encode('');
           }
-          const snapshot = await raceAgainstAbort(publicSnapshotStore.getSnapshot(snapshotRef), signal);
-          if (!snapshot) {
-            return new TextEncoder().encode('');
-          }
-          const page = snapshot.slice(offset, offset + limit);
+          const page = publicSnapshotStore.getSnapshotPage
+            ? await raceAgainstAbort(
+              publicSnapshotStore.getSnapshotPage(snapshotRef, offset, limit, { signal }),
+              signal,
+            )
+            : (await raceAgainstAbort(publicSnapshotStore.getSnapshot(snapshotRef), signal))
+              ?.slice(offset, offset + limit);
+          if (!page) return new TextEncoder().encode('');
           if (page.length === 0) {
             return new TextEncoder().encode('');
           }
           nquads.push(serializeWorkspacePublicSnapshotQuads(page).trimEnd());
-          logDebug(createOperationContext('sync'), `Sync responder SWM snapshot for "${contextGraphId}" ref=${snapshotRef}: auth=${authDurationMs}ms quads=${page.length}`);
+          logFirstPageDetail(() => `Sync responder SWM snapshot for "${contextGraphId}" ref=${snapshotRef}: auth=${authDurationMs}ms quads=${page.length}`);
         } else if (phase === 'meta') {
           const queryStartedAt = Date.now();
           const session = prepareResponderSession(
@@ -477,26 +766,37 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           );
           const rows = await readSwmMetaPage({
             store,
-            graphList: await graphListMemo.get({ refresh: offset === 0, signal }),
+            graphMembership: await graphListMemo.get({
+              refresh: session?.refreshRowList ?? offset === 0,
+              refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
+              signal,
+            }),
             registeredSubGraphNames: await swmAdmissionMemo.get(
               contextGraphId,
-              { refresh: offset === 0, signal },
+              {
+                refresh: session?.refreshRowList ?? offset === 0,
+                refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
+                signal,
+              },
             ),
             contextGraphId,
             cutoffIso: cutoff,
             offset,
-            limit,
+            limit: durableMetaLimit,
             signal,
             rowListMemo: session ? swmRowsMemo : undefined,
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
+            refreshGeneration: session?.refreshGeneration,
+            freshMetaPlanMemo: freshSwmMetaPlanMemo,
+            releaseCacheOnShortPage: !usesByteBudgetPage,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
-          const serialized = serializeResponderRows(rows);
+          const serialized = pageFraming.serialize(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
-          logDebug(createOperationContext('sync'), `Sync responder SWM meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
+          logFirstPageDetail(() => `Sync responder SWM meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
         } else {
           const queryStartedAt = Date.now();
           const session = prepareResponderSession(
@@ -507,26 +807,38 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           );
           const rows = await readSwmDataPage({
             store,
-            graphList: await graphListMemo.get({ refresh: offset === 0, signal }),
+            graphMembership: await graphListMemo.get({
+              refresh: session?.refreshRowList ?? offset === 0,
+              refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
+              signal,
+            }),
             registeredSubGraphNames: await swmAdmissionMemo.get(
               contextGraphId,
-              { refresh: offset === 0, signal },
+              {
+                refresh: session?.refreshRowList ?? offset === 0,
+                refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
+                signal,
+              },
             ),
             contextGraphId,
             cutoffIso: cutoff,
             offset,
-            limit,
+            limit: pageFraming.limit,
             signal,
             rowListMemo: session ? swmRowsMemo : undefined,
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
+            refreshGeneration: session?.refreshGeneration,
+            freshGraphPlanMemo: freshSwmDataGraphPlanMemo,
+            exactGraphPlanMemo: swmDataExactGraphPlanMemo,
+            releaseCacheOnShortPage: !usesByteBudgetPage,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
-          const serialized = serializeResponderRows(rows);
+          const serialized = pageFraming.serialize(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
-          logDebug(createOperationContext('sync'), `Sync responder SWM data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
+          logFirstPageDetail(() => `Sync responder SWM data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
         }
 
         if (nquads.length === 0) return new TextEncoder().encode('');
@@ -549,10 +861,11 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             `Sync responder withholding durable meta for "${contextGraphId}" (serve-skip policy)`,
           );
         } else {
+          if (offset === 0 && assetUals === undefined) await params.beforeServingDurableMeta?.(contextGraphId, signal);
           const queryStartedAt = Date.now();
           const session = prepareResponderSession(
             'Durable meta',
-            `${peerId}:durable-meta:${contextGraphId}`,
+            `${peerId}:durable-meta:${contextGraphId}:${assetSelectionKey}`,
             request.syncSessionId,
             offset,
           );
@@ -561,58 +874,176 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             contextGraphId,
             registeredSubGraphNames: await subGraphRegistrationMemo.get(
               contextGraphId,
-              { refresh: offset === 0, signal },
+              {
+                refresh: session?.refreshRowList ?? offset === 0,
+                refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
+                signal,
+              },
             ),
             offset,
-            limit,
+            limit: durableMetaLimit,
             signal,
             rowListMemo: session ? durableMetaRowsMemo : undefined,
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
+            refreshGeneration: session?.refreshGeneration,
+            assetUals,
+            maxResponseBytes: pageFraming.maxPageBytes,
+            // NON-NEGOTIATED legacy requesters (no wire `pageMode`) must fail
+            // loud on an oversized `_meta` subject rather than receive a byte-fit
+            // SHORT page they would read as EOF — silent metadata loss + a #1788
+            // seal split. Negotiated (testnet-canary+) requesters keep the
+            // verified byte-fit behavior (empty=EOF pagination, so short≠EOF).
+            oversizedSubjectPolicy: usesMetaByteBudget ? 'byte-fit' : 'fail-loud',
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
-          const serialized = serializeResponderRows(rows);
+          // Byte-cap the durable-meta response (#1916) exactly like durable data:
+          // the subject-atomic extend can return a whole (or oversized) subject,
+          // so serialize within the frame budget rather than emitting unbounded
+          // N-Quads. The extend keeps every valid seal well under the budget, so
+          // this only ever truncates a pathological oversized subject.
+          //
+          // Pagination contract: durable meta uses byte-budget pagination where a
+          // SHORT page is NOT EOF — only an empty page is. The requester's
+          // short≠EOF handling is a requester-side default (page-fetch:
+          // syncPageSize=8192 > SYNC_PAGE_SIZE), and since #1923 it is ALSO
+          // negotiated on the wire via `pageMode` (usesMetaByteBudget). The
+          // subject-atomic byte-fit in readDurableMetaPage already bounds every
+          // page ≤ budget AND to whole subjects, so both the negotiated
+          // (byte-budget serializer) and the non-negotiated (plain serializer)
+          // branches are frame-safe and never split a subject; the gate here just
+          // honours the explicit contract.
+          const serialized = pageFraming.serialize(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
-          logDebug(createOperationContext('sync'), `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
+          logFirstPageDetail(() => `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
         }
       } else {
+        const durableDataPolicy = requestProfile.durableData;
         const queryStartedAt = Date.now();
         const session = prepareResponderSession(
           'Durable data',
-          `${peerId}:durable-data:${contextGraphId}:${sinceBatchId == null ? 'full' : sinceBatchId.toString()}`,
+          `${peerId}:durable-data:${contextGraphId}:${assetUals === undefined
+            ? (sinceBatchId == null ? 'full' : sinceBatchId.toString())
+            : assetSelectionKey}`,
           request.syncSessionId,
           offset,
         );
-        const rows = await readDurableDataPage({
+        const page = await readDurableDataPageWithLease({
           store,
-          graphList: await graphListMemo.get({ refresh: offset === 0, signal }),
+          graphMembership: await graphListMemo.get({
+            refresh: session?.refreshRowList ?? offset === 0,
+            refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
+            signal,
+          }),
           contextGraphId,
           sinceBatchId,
           offset,
-          limit,
+          limit: durableDataPolicy.limit,
           signal,
-          rowListMemo: session ? durableDataRowsMemo : undefined,
-          rowListCacheScope: session ? peerId : undefined,
+          rowListMemo: session && durableDataPolicy.cacheMode === 'session-snapshot'
+            ? durableDataRowsMemo
+            : undefined,
+          rowListCacheScope: session && durableDataPolicy.cacheMode === 'session-snapshot'
+            ? peerId
+            : undefined,
           refreshRowList: session?.refreshRowList,
+          refreshGeneration: session?.refreshGeneration,
+          exactDataSessionMemo: durableDataPolicy.cacheMode === 'page-only'
+            ? pageOnlyExactDataSessionMemo
+            : durableDataExactSessionMemo,
+          exactGraphPlanCacheKey: durableDataPolicy.cacheMode === 'page-only'
+            ? session?.refreshGeneration
+            : undefined,
+          maxPageBytes: durableDataPolicy.cacheMode === 'page-only'
+            ? durableDataPolicy.maxPageBytes
+            : undefined,
+          // A byte-bounded response may contain only a prefix of the row slice
+          // loaded above. Do not release the immutable session snapshot merely
+          // because that slice was short; the explicit empty request is EOF.
+          releaseCacheOnShortPage: !usesByteBudgetPage,
+          assetUals,
+          exactGraphReadMode: durableDataPolicy.exactGraphReadMode,
+          exactAssetExportCache: durableDataPolicy.usesExactAssetExport ? exactAssetExportCache : undefined,
         });
+        const rows = page.rows;
+        if (page.responseLease) exactExportLeases.push(page.responseLease);
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();
-        const serialized = serializeResponderRows(rows);
+        const serialized = pageFraming.serialize(rows);
         if (serialized) nquads.push(serialized);
         const serializeDurationMs = Date.now() - serializeStartedAt;
-        logDebug(createOperationContext('sync'), `Sync responder durable data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
+        logFirstPageDetail(() => `Sync responder durable data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
       }
 
       const totalDurationMs = Date.now() - handlerStartedAt;
       if (totalDurationMs > 100) {
         logDebug(createOperationContext('sync'), `Sync responder total for "${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): ${totalDurationMs}ms`);
       }
-      return new TextEncoder().encode(nquads.join('\n'));
-    }).then((res) => {
+      const bytes = await encodeResolvedExactSyncResponse(new TextEncoder().encode(nquads.join('\n')), { profile: requestProfile.compression, signal });
+      for (const lease of exactExportLeases) await lease.assertCurrent();
+      throwIfAborted(signal);
+      return bytes;
+    };
+
+    const plane: SyncResponderPlane = isWorkspace ? 'shared-memory' : 'durable';
+    const preAuthorizationScheduling: SyncResponderScheduling = {
+      plane,
+      lane: 'pre_authorization',
+      priority: 0,
+      priorityClass: 'default',
+    };
+    const response: Promise<Uint8Array> = prioritySchedulingEnabled
+      ? limiter.runTwoStage(
+          peerId,
+          signal,
+          preAuthorizationScheduling,
+          prepareResponderStage,
+          (prepared) => {
+            if (prepared.kind === 'respond') return undefined;
+            const priority = contextGraphPriority(contextGraphPriorities, contextGraphId);
+            return {
+              scheduling: {
+                plane,
+                contextGraphId,
+                lane: 'responder' as const,
+                priority,
+                priorityClass: syncPriorityClass(priority),
+              },
+              work: () => serveAuthorizedStage(prepared.authDurationMs),
+            };
+          },
+        ).then((result) => {
+          if (result instanceof Uint8Array) return result;
+          if (result.kind === 'respond') return result.bytes;
+          throw new Error('sync responder authorized stage did not produce response bytes');
+        })
+      : limiter.run(
+          peerId,
+          signal,
+          { plane, contextGraphId, lane: 'responder', priority: 0, priorityClass: 'default' },
+          async () => {
+            const prepared = await prepareResponderStage();
+            return prepared.kind === 'respond'
+              ? prepared.bytes
+              : serveAuthorizedStage(prepared.authDurationMs);
+          },
+        );
+
+    const guardSyncResponseBytes = (bytes: Uint8Array): Uint8Array => {
+      if (bytes.byteLength <= DEFAULT_MAX_READ_BYTES) return bytes;
+      const message = `Sync responder refused ${bytes.byteLength}-byte response for `
+        + `"${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): exceeds `
+        + `${DEFAULT_MAX_READ_BYTES}-byte transport frame cap; response must be paginated below the transport ceiling`;
+      logWarn(createOperationContext('sync'), message);
+      throw new Error(message);
+    };
+
+    return response.then((res) => {
+      const guarded = guardSyncResponseBytes(res);
       getMetrics().syncResponseTotal.add(1, { outcome: 'ok' });
-      return res;
+      return guarded;
     }).catch((err) => {
       if (err instanceof SyncResponderBusyError) {
         getMetrics().syncResponseTotal.add(1, { outcome: 'busy' });
@@ -642,8 +1073,25 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         );
         throw new QuietRetryableHandlerError(err.message);
       }
+      if (err instanceof DurableMetaPageFrameError) {
+        // Loud, non-retryable failure (#1788/#1916): an oversized `_meta` subject
+        // cannot be served frame-safe to a non-negotiated legacy requester, and
+        // byte-fitting it would be a silent short=EOF metadata loss. Retrying
+        // cannot help — surface it as a hard error so the round fails visibly
+        // rather than completing with partial metadata. Root fix: #1921.
+        getMetrics().syncResponseTotal.add(1, { outcome: 'error' });
+        span.setAttribute('dkg.sync_response_outcome', 'error');
+        logWarn(
+          createOperationContext('sync'),
+          `Sync responder cannot serve durable meta frame-safe to a non-negotiated (legacy) `
+          + `requester for "${contextGraphId}" from peer ${peerId}: ${err.message}`,
+        );
+        throw err;
+      }
       getMetrics().syncResponseTotal.add(1, { outcome: 'error' });
       throw err;
+    }).finally(() => {
+      for (const lease of exactExportLeases) lease.release();
     });
     } catch (preLimiterErr) {
       // Malformed/unparseable request or a pre-limiter validation/abort throw —
@@ -653,4 +1101,5 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       throw preLimiterErr;
     }
   }));
+  return { closeAndDrain: () => preparedContentCache?.closeAndDrain() ?? Promise.resolve() };
 }

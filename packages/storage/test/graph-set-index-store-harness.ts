@@ -55,6 +55,43 @@ export class CountingStore implements TripleStore {
   }
 }
 
+/** Controls hasGraph completion so concurrency tests describe races explicitly. */
+export class ControlledProbeStore extends CountingStore {
+  private gateProbes = false;
+  private readonly pendingProbeReleases: Array<() => void> = [];
+  private readonly probeArrivalWaiters: Array<() => void> = [];
+
+  enableProbeGates(): void {
+    this.gateProbes = true;
+  }
+
+  disableProbeGates(): void {
+    this.gateProbes = false;
+  }
+
+  async waitForProbe(): Promise<void> {
+    if (this.pendingProbeReleases.length > 0) return;
+    await new Promise<void>((resolve) => { this.probeArrivalWaiters.push(resolve); });
+  }
+
+  releaseProbe(): void {
+    const release = this.pendingProbeReleases.shift();
+    if (!release) throw new Error('No controlled hasGraph probe is pending');
+    release();
+  }
+
+  async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
+    const present = await super.hasGraph(graphUri, options);
+    if (this.gateProbes) {
+      await new Promise<void>((resolve) => {
+        this.pendingProbeReleases.push(resolve);
+        for (const notify of this.probeArrivalWaiters.splice(0)) notify();
+      });
+    }
+    return present;
+  }
+}
+
 export function emptyBindings(): QueryResult {
   return { type: 'bindings', bindings: [] };
 }

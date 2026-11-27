@@ -9,7 +9,8 @@
  * (`kill -9`) is the only recovery. This module provides:
  *
  *   1. A wall-clock deadline ({@link raceShutdownWithTimeout}) so a stuck
- *      graceful path always yields to a forced exit within {@link SHUTDOWN_HARD_TIMEOUT_MS}
+ *      graceful path always yields to a forced exit within the explicitly
+ *      resolved shutdown hard timeout
  *      (plus at most {@link SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS} for best-effort
  *      forced cleanup — see below).
  *   2. An exit-code convention ({@link SHUTDOWN_FORCED_OFFSET}) so the supervisor
@@ -24,19 +25,24 @@
  */
 
 import { DAEMON_EXIT_CODE_RESTART } from './manifest.js';
+import {
+  DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS,
+} from './shutdown-policy.js';
 
-/** Default deadline for graceful shutdown before we hard-exit. */
-export const SHUTDOWN_HARD_TIMEOUT_MS = 15_000;
+export {
+  DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS,
+  MIN_SHUTDOWN_HARD_TIMEOUT_MS,
+  MAX_SHUTDOWN_HARD_TIMEOUT_MS,
+} from './shutdown-policy.js';
 
 /**
- * Per-callsite budget for the best-effort forced-cleanup hook (state-file
- * unlinks, etc.) that runs after the hard timeout fires. Bounded separately
- * from {@link SHUTDOWN_HARD_TIMEOUT_MS} so a stalled filesystem op cannot
- * recreate the same zombie shape we're trying to prevent: if THIS deadlines
- * too, we abandon the work and exit. 1s is generous for `unlink()` calls and
- * still keeps total wall-clock < 16s in the worst case.
+ * Per-callsite budget for the best-effort forced-cleanup hook that runs after
+ * the hard timeout. Kept with the shutdown race that consumes it.
  */
 export const SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS = 1_000;
+
+/** Backward-compatible name for the unchanged fleet default. */
+export const SHUTDOWN_HARD_TIMEOUT_MS = DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS;
 
 /**
  * Forced-shutdown exit codes are derived from the shutdown callsites that

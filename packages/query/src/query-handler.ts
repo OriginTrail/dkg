@@ -1,15 +1,25 @@
 import type { PeerId } from '@origintrail-official/dkg-core';
-import { contextGraphDataUri, assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
-import { stripLiteralsAndComments } from './sparql-utils.js';
+import { assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
+import {
+  isStoreSchedulerBusyError,
+  quadsToNQuads,
+  type StoreSchedulerBusyErrorLike,
+} from '@origintrail-official/dkg-storage';
+import { isQueryResultTooLargeError } from './query-result-size-error.js';
+import { isQueryMaterializationTooLargeError } from './query-materialization-error.js';
+import { prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { validateReadOnlySparql } from './sparql-guard.js';
 import type { DKGQueryEngine } from './dkg-query-engine.js';
+import type { QueryOptions } from './query-engine.js';
 import type {
   QueryRequest,
   QueryResponse,
   QueryAccessConfig,
   ContextGraphQueryPolicy,
   LookupType,
-  QueryStatus,
+  NonBusyQueryStatus,
+  QueryBusyResponse,
+  QueryNonBusyResponse,
 } from './query-types.js';
 
 const DEFAULT_LIMIT = 100;
@@ -17,6 +27,12 @@ const MAX_LIMIT = 1000;
 const DEFAULT_TIMEOUT_MS = 5000;
 const MAX_TIMEOUT_MS = 30000;
 const MAX_RESULT_BYTES = 1_048_576; // 1 MB
+/**
+ * What a remote lookup may materialize, for SPARQL, entities by type and entity
+ * triples alike: the HTTP query route's result budget.
+ */
+export const REMOTE_SPARQL_MAX_RESULT_BYTES = 10 * 1024 * 1024;
+const STORE_BUSY_RETRY_AFTER_MS = 1_000;
 // PR #1107 review (🔴): cache isContextGraphPublic verdicts so repeated
 // remote queries against the same CG don't each burn an RPC round-trip on
 // the chain adapter. Short TTL keeps policy flips (public → private)
@@ -25,9 +41,22 @@ const MAX_RESULT_BYTES = 1_048_576; // 1 MB
 const PUBLIC_CG_CACHE_TTL_MS = 60_000;
 const PUBLIC_CG_CACHE_MAX_ENTRIES = 1000;
 
+/** What an access denial names. */
+interface AccessDenialSubject {
+  readonly kind: 'Context graph' | 'Knowledge asset';
+  readonly id: string;
+}
+
 interface RateBucket {
   count: number;
   resetAt: number;
+}
+
+class UalResolutionError extends Error {
+  constructor(readonly ual: string, cause: unknown) {
+    super(`Failed to resolve UAL: ${ual}`, { cause });
+    this.name = 'UalResolutionError';
+  }
 }
 
 /**
@@ -38,6 +67,8 @@ interface RateBucket {
  * engine, and enforces result size limits.
  */
 export interface QueryHandlerDeps {
+  /** Recheck local evidence policy before a read and before releasing its result. */
+  assertReadEvidence?: (contextGraphId?: string) => Promise<void>;
   /**
    * #1105: optional resolver consulted when a CG has NO explicit
    * `queryAccess.contextGraphs` entry and `defaultPolicy` is 'deny'.
@@ -49,6 +80,13 @@ export interface QueryHandlerDeps {
    * "not public" by the resolver (fail closed).
    */
   isContextGraphPublic?: (contextGraphId: string) => Promise<boolean>;
+  /**
+   * Return `true` while `contextGraphId` must not be served to peers yet
+   * (production: `ontology` until the agent's metadata relocation finishes).
+   * A lookup of it, or of a UAL that resolves into it, then gets an ERROR
+   * the requester can retry instead of results.
+   */
+  servingWithheld?: (contextGraphId: string) => boolean;
 }
 
 export class QueryHandler {
@@ -58,6 +96,7 @@ export class QueryHandler {
   private readonly defaultRatePerMinute: number;
   private readonly deps: QueryHandlerDeps;
   private readonly publicCgCache = new Map<string, { value: boolean; expiresAt: number }>();
+  private readonly internalLimitWarnings = createStoreInternalLimitWarnings();
 
   constructor(queryEngine: DKGQueryEngine, config: QueryAccessConfig, deps: QueryHandlerDeps = {}) {
     this.queryEngine = queryEngine;
@@ -95,6 +134,12 @@ export class QueryHandler {
 
     // Resolve context graph (ENTITY_BY_UAL doesn't need it upfront)
     const contextGraphId = request.contextGraphId;
+    // The id keys queryAccess entries and scopes the lookup, both of which
+    // convert it to a string, so a non-string such as `["ontology"]` would be
+    // read as `ontology` there while comparing unequal to it everywhere else.
+    if (contextGraphId !== undefined && contextGraphId !== null && typeof contextGraphId !== 'string') {
+      return errorResponse(opId, 'ERROR', 'Invalid request: contextGraphId must be a string');
+    }
     if (request.lookupType !== 'ENTITY_BY_UAL' && !contextGraphId) {
       return errorResponse(opId, 'ERROR', 'Invalid request: contextGraphId is required for this lookup type');
     }
@@ -113,11 +158,15 @@ export class QueryHandler {
 
     // Dispatch to lookup handler
     try {
+      // UAL resolution is unscoped until the engine resolves it. Refuse it
+      // conservatively when any imported graph needs unsupported acceptance.
+      const evidenceScope = request.lookupType === 'ENTITY_BY_UAL' ? undefined : contextGraphId;
+      await this.deps.assertReadEvidence?.(evidenceScope);
       const limit = Math.min(request.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
       const timeout = Math.min(request.timeout ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
       const contextGraphPolicy = this.contextGraphPolicy(contextGraphId);
 
-      let response: QueryResponse;
+      let response: QueryNonBusyResponse;
 
       switch (request.lookupType) {
         case 'ENTITY_BY_UAL':
@@ -142,8 +191,24 @@ export class QueryHandler {
           response = errorResponse(opId, 'UNSUPPORTED_LOOKUP', `Unknown lookup type: ${request.lookupType}`);
       }
 
+      await this.deps.assertReadEvidence?.(evidenceScope);
       return this.enforceResultSize(response);
     } catch (err) {
+      const busyError = storeSchedulerBusyCause(err);
+      if (busyError) return storeBusyResponse(opId, busyError);
+      const internalLimit = storeInternalLimitCause(err);
+      if (internalLimit) {
+        this.internalLimitWarnings.record(internalLimit);
+        return storeInternalLimitResponse(opId);
+      }
+      if (err instanceof UalResolutionError) {
+        return errorResponse(opId, 'ERROR', err.message);
+      }
+      const overBudget = resultOverBudget(err);
+      if (overBudget) {
+        return errorResponse(opId, 'ERROR',
+          `Query result exceeds byte limit (${overBudget.actualBytes} > ${overBudget.maxBytes})`);
+      }
       return errorResponse(opId, 'ERROR', 'Internal error processing query');
     }
   }
@@ -152,7 +217,7 @@ export class QueryHandler {
     lookupType: LookupType,
     contextGraphId: string | undefined,
     peerId: string,
-  ): Promise<QueryResponse | null> {
+  ): Promise<QueryNonBusyResponse | null> {
     const defaultPolicy = this.config.defaultPolicy ?? 'deny';
 
     // ENTITY_BY_UAL: the target CG is only known AFTER the UAL resolves, so
@@ -180,9 +245,17 @@ export class QueryHandler {
     lookupType: LookupType,
     contextGraphId: string,
     peerId: string,
-  ): Promise<QueryResponse | null> {
+    // What a denial names: the context graph by default, or what the
+    // requester actually asked for when the graph is a local detail.
+    subject: AccessDenialSubject = { kind: 'Context graph', id: contextGraphId },
+  ): Promise<QueryNonBusyResponse | null> {
+    // Before the access policy, which may read the chain.
+    if (this.deps.servingWithheld?.(contextGraphId)) {
+      return errorResponse('', 'ERROR', `${subject.kind} '${subject.id}' is not served yet; retry later`);
+    }
+    const named = `${subject.kind.toLowerCase()} '${subject.id}'`;
     const defaultPolicy = this.config.defaultPolicy ?? 'deny';
-    const cgConfig = this.config.contextGraphs?.[contextGraphId];
+    const cgConfig = this.contextGraphPolicy(contextGraphId);
     if (!cgConfig) {
       if (defaultPolicy === 'deny') {
         // #1105: a CG whose OWN access policy is provably public (live
@@ -192,7 +265,7 @@ export class QueryHandler {
         // per-CG queryAccess entries (handled below) still take
         // precedence, so operators can deny or allowlist a public CG.
         if (await this.resolvePublicContextGraph(contextGraphId)) return null;
-        return errorResponse('', 'ACCESS_DENIED', `Context graph '${contextGraphId}' is not queryable`);
+        return errorResponse('', 'ACCESS_DENIED', `${subject.kind} '${subject.id}' is not queryable`);
       }
       // defaultPolicy is 'public' — allow with default lookup types
       return null;
@@ -200,7 +273,7 @@ export class QueryHandler {
 
     // Check peer access
     if (cgConfig.policy === 'deny') {
-      return errorResponse('', 'ACCESS_DENIED', `Context graph '${contextGraphId}' is not queryable`);
+      return errorResponse('', 'ACCESS_DENIED', `${subject.kind} '${subject.id}' is not queryable`);
     }
     if (cgConfig.policy === 'allowList') {
       if (!cgConfig.allowedPeers?.includes(peerId)) {
@@ -211,13 +284,13 @@ export class QueryHandler {
     // Check lookup type
     if (cgConfig.allowedLookupTypes?.length) {
       if (!cgConfig.allowedLookupTypes.includes(lookupType)) {
-        return errorResponse('', 'UNSUPPORTED_LOOKUP', `Lookup type '${lookupType}' is not allowed for context graph '${contextGraphId}'`);
+        return errorResponse('', 'UNSUPPORTED_LOOKUP', `Lookup type '${lookupType}' is not allowed for ${named}`);
       }
     }
 
     // Check SPARQL specifically
     if (lookupType === 'SPARQL_QUERY' && !cgConfig.sparqlEnabled) {
-      return errorResponse('', 'UNSUPPORTED_LOOKUP', `SPARQL queries are not enabled for context graph '${contextGraphId}'`);
+      return errorResponse('', 'UNSUPPORTED_LOOKUP', `SPARQL queries are not enabled for ${named}`);
     }
 
     return null;
@@ -252,12 +325,20 @@ export class QueryHandler {
     return Object.values(cgConfigs).some(p => p.policy === 'public');
   }
 
+  /**
+   * The operator's `queryAccess.contextGraphs` entry for a CG, if it has one.
+   * The id comes from the requesting peer, so only OWN entries count: a plain
+   * `map[id]` lookup also returns Object.prototype members ("constructor",
+   * "__proto__", "toString", …), which read as an entry with no policy and
+   * skipped the default-deny branch.
+   */
   private contextGraphPolicy(contextGraphId: string | undefined): ContextGraphQueryPolicy | undefined {
-    if (!contextGraphId) return undefined;
-    return this.config.contextGraphs?.[contextGraphId];
+    const policies = this.config.contextGraphs;
+    if (!contextGraphId || !policies || !Object.hasOwn(policies, contextGraphId)) return undefined;
+    return policies[contextGraphId];
   }
 
-  private checkRateLimit(peerId: string): QueryResponse | null {
+  private checkRateLimit(peerId: string): QueryNonBusyResponse | null {
     const now = Date.now();
     let bucket = this.rateBuckets.get(peerId);
 
@@ -279,35 +360,46 @@ export class QueryHandler {
     return null;
   }
 
-  private async lookupByUAL(opId: string, ual: string, peerId: string): Promise<QueryResponse> {
+  private async lookupByUAL(opId: string, ual: string, peerId: string): Promise<QueryNonBusyResponse> {
     if (!ual) {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing ual');
     }
 
+    let resolved;
     try {
-      const resolved = await this.queryEngine.resolveKA(ual);
-      // PR #1107 review (🔴): enforce the RESOLVED context graph's access
-      // policy — config entry first (operator override), then the #1105
-      // on-chain public resolver. Pre-fix, UAL lookups bypassed per-CG
-      // evaluation entirely: they were denied for on-chain-public CGs on
-      // default configs, yet allowed THROUGH explicitly denied CGs whenever
-      // any other public CG existed on the node.
-      const denied = await this.checkContextGraphAccess('ENTITY_BY_UAL', resolved.contextGraphId, peerId);
-      if (denied) return { ...denied, operationId: opId };
-      const ntriples = resolved.quads
-        .map(q => `<${q.subject}> <${q.predicate}> ${formatObject(q.object)} .`)
-        .join('\n');
-
-      return {
-        operationId: opId,
-        status: 'OK',
-        ntriples,
-        truncated: false,
-        resultCount: resolved.quads.length,
-      };
-    } catch {
-      return errorResponse(opId, 'ERROR', `Failed to resolve UAL: ${ual}`);
+      resolved = this.queryEngine.resolveKnowledgeAsset
+        ? await this.queryEngine.resolveKnowledgeAsset(ual)
+        : await this.queryEngine.resolveKA(ual);
+    } catch (cause) {
+      throw new UalResolutionError(ual, cause);
     }
+
+    // PR #1107 review (🔴): enforce the RESOLVED context graph's access
+    // policy — config entry first (operator override), then the #1105
+    // on-chain public resolver. Pre-fix, UAL lookups bypassed per-CG
+    // evaluation entirely: they were denied for on-chain-public CGs on
+    // default configs, yet allowed THROUGH explicitly denied CGs whenever
+    // any other public CG existed on the node.
+    // A denial names the UAL the requester sent. The graph it resolved to is
+    // local detail the requester didn't name, and may be private.
+    const denied = await this.checkContextGraphAccess(
+      'ENTITY_BY_UAL',
+      resolved.contextGraphId,
+      peerId,
+      { kind: 'Knowledge asset', id: ual },
+    );
+    if (denied) return { ...denied, operationId: opId };
+    const ntriples = quadsToNQuads(
+      resolved.quads.map((quad) => ({ ...quad, graph: '' })),
+    );
+
+    return {
+      operationId: opId,
+      status: 'OK',
+      ntriples,
+      truncated: false,
+      resultCount: resolved.quads.length,
+    };
   }
 
   private async lookupByType(
@@ -315,16 +407,13 @@ export class QueryHandler {
     contextGraphId: string,
     rdfType: string,
     limit: number,
-  ): Promise<QueryResponse> {
+  ): Promise<QueryNonBusyResponse> {
     if (!rdfType) {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing rdfType');
     }
 
-    const dataGraph = assertSafeIri(contextGraphDataUri(contextGraphId));
-    // Per-KA VM read-both: published data lives in …/_verifiable_memory/{addr}/{number} + (legacy) root.
-    const sparql = `SELECT DISTINCT ?entity WHERE { GRAPH ?g { ?entity a <${assertSafeIri(rdfType)}> } FILTER(STRSTARTS(STR(?g), "${dataGraph}/_verifiable_memory/") || STR(?g) = "${dataGraph}") } LIMIT ${limit}`;
-
-    const result = await this.queryEngine.query(sparql);
+    const sparql = `SELECT DISTINCT ?entity WHERE { ?entity a <${assertSafeIri(rdfType)}> } LIMIT ${limit}`;
+    const result = await this.queryEngine.query(sparql, remoteLookupOptions(contextGraphId, 'verifiable-memory'));
     const entityUris = result.bindings.map(b => b['entity']);
 
     return {
@@ -340,15 +429,13 @@ export class QueryHandler {
     opId: string,
     contextGraphId: string,
     entityUri: string,
-  ): Promise<QueryResponse> {
+  ): Promise<QueryNonBusyResponse> {
     if (!entityUri) {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing entityUri');
     }
 
-    const dataGraph = assertSafeIri(contextGraphDataUri(contextGraphId));
-    // Per-KA VM read-both: published data lives in …/_verifiable_memory/{addr}/{number} + (legacy) root.
-    const sparql = `SELECT ?p ?o WHERE { GRAPH ?g { <${assertSafeIri(entityUri)}> ?p ?o } FILTER(STRSTARTS(STR(?g), "${dataGraph}/_verifiable_memory/") || STR(?g) = "${dataGraph}") }`;
-    const result = await this.queryEngine.query(sparql);
+    const sparql = `SELECT ?p ?o WHERE { <${assertSafeIri(entityUri)}> ?p ?o }`;
+    const result = await this.queryEngine.query(sparql, remoteLookupOptions(contextGraphId, 'verifiable-memory'));
 
     const ntriples = result.bindings
       .map(b => `<${entityUri}> <${b['p']}> ${formatObject(b['o'])} .`)
@@ -369,28 +456,30 @@ export class QueryHandler {
     sparql: string,
     limit: number,
     timeout: number,
-  ): Promise<QueryResponse> {
+  ): Promise<QueryNonBusyResponse> {
     if (!sparql) {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing sparql');
     }
 
-    // Strip string literals and comments so regexes don't false-positive
-    // on keywords inside quoted values or variable names like ?graph.
-    const stripped = stripLiteralsAndComments(sparql);
+    const prepared = prepareSparql(sparql);
+    if (prepared.status === 'malformed-uchar') {
+      return errorResponse(opId, 'ERROR', 'SPARQL rejected: malformed Unicode code-point escape');
+    }
+    const codeWords = prepared.wordTokens;
 
-    if (/\bSERVICE\b/i.test(stripped)) {
+    if (codeWords.has('SERVICE')) {
       return errorResponse(opId, 'ERROR', 'SERVICE clauses are not allowed in remote queries');
     }
 
-    if (/\bGRAPH(?:\s+|(?=[?$<]))/i.test(stripped)) {
+    if (codeWords.has('GRAPH')) {
       return errorResponse(opId, 'ERROR', 'Explicit GRAPH clauses are not allowed in remote queries — queries are automatically scoped to the target context graph');
     }
 
-    if (/\bFROM(?:\s+|(?=<))/i.test(stripped)) {
+    if (codeWords.has('FROM')) {
       return errorResponse(opId, 'ERROR', 'FROM/FROM NAMED clauses are not allowed in remote queries — queries are automatically scoped to the target context graph');
     }
 
-    const guard = validateReadOnlySparql(sparql);
+    const guard = validateReadOnlySparql(prepared);
     if (!guard.safe) {
       return errorResponse(opId, 'ERROR', `SPARQL rejected: ${guard.reason}`);
     }
@@ -401,30 +490,28 @@ export class QueryHandler {
     // bounds the *response* latency but does not cancel the underlying
     // SPARQL execution — the engine has no cancellation hook, so an
     // expensive remote query keeps consuming CPU/memory in the background
-    // until it completes naturally. Likewise `limit` below is applied as a
-    // post-materialization `.slice()`, so a high-cardinality query is fully
-    // materialized before being truncated. Genuinely enforcing either bound
-    // requires threading an `AbortSignal` + result cap through
-    // `QueryEngine.query()` → storage → the oxigraph worker. Injecting a
-    // `LIMIT` into the user query here is NOT a safe shortcut: for scoped
+    // until it completes naturally. The result budget bounds the bytes the
+    // engine materializes; `limit` below still slices the rows after that.
+    // Injecting a `LIMIT` into the user query here is NOT a safe shortcut: for scoped
     // queries it would push the statement into the multi-graph
     // solution-set-modifier rejection path (see #789), so it is
     // deliberately left to the engine-level follow-up.
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const result = await Promise.race([
-      this.queryEngine.query(sparql, { contextGraphId }),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('timeout')), timeout);
-      }),
-    ]).catch(err => {
-      if (err.message === 'timeout') {
-        return { _timeout: true } as any;
+    let result: Awaited<ReturnType<DKGQueryEngine['query']>>;
+    try {
+      result = await Promise.race([
+        this.queryEngine.query(sparql, remoteLookupOptions(contextGraphId)),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('timeout')), timeout);
+        }),
+      ]);
+    } catch (err) {
+      if ((err as { message?: unknown } | null)?.message === 'timeout') {
+        return errorResponse(opId, 'GAS_LIMIT_EXCEEDED', `Query exceeded time limit (${timeout}ms)`);
       }
       throw err;
-    }).finally(() => clearTimeout(timer!));
-
-    if (result._timeout) {
-      return errorResponse(opId, 'GAS_LIMIT_EXCEEDED', `Query exceeded time limit (${timeout}ms)`);
+    } finally {
+      clearTimeout(timer);
     }
 
     const bindings = result.bindings.slice(0, limit);
@@ -437,7 +524,7 @@ export class QueryHandler {
     };
   }
 
-  private enforceResultSize(response: QueryResponse): QueryResponse {
+  private enforceResultSize(response: QueryNonBusyResponse): QueryNonBusyResponse {
     const serialized = JSON.stringify(response);
     if (serialized.length <= MAX_RESULT_BYTES) return response;
 
@@ -450,13 +537,121 @@ export class QueryHandler {
   }
 }
 
-function errorResponse(opId: string, status: QueryStatus, error: string): QueryResponse {
+/** The engine options of a remote lookup: its scope, with the result budget every remote lookup gets. */
+function remoteLookupOptions(contextGraphId: string, view?: 'verifiable-memory'): QueryOptions {
+  return {
+    contextGraphId,
+    ...(view === undefined ? {} : { view }),
+    maxResponseBytes: REMOTE_SPARQL_MAX_RESULT_BYTES,
+    maxMaterializedBytes: REMOTE_SPARQL_MAX_RESULT_BYTES,
+  };
+}
+
+/** A result over the lookup's budget: one store response, or the request's materialized total. */
+function resultOverBudget(error: unknown): { maxBytes: number; actualBytes: number | bigint } | null {
+  if (!isQueryResultTooLargeError(error) && !isQueryMaterializationTooLargeError(error)) return null;
+  const { maxBytes, actualBytes } = error as { maxBytes?: unknown; actualBytes?: unknown };
+  return typeof maxBytes === 'number' && (typeof actualBytes === 'number' || typeof actualBytes === 'bigint')
+    ? { maxBytes, actualBytes } : null;
+}
+
+function errorResponse(
+  opId: string,
+  status: NonBusyQueryStatus,
+  error: string,
+): QueryNonBusyResponse {
   return {
     operationId: opId,
     status,
     truncated: false,
     resultCount: 0,
     error,
+  };
+}
+
+function storeSchedulerBusyCause(
+  error: unknown,
+): StoreSchedulerBusyErrorLike | null {
+  if (isStoreSchedulerBusyError(error)) return error;
+  if (error instanceof UalResolutionError && isStoreSchedulerBusyError(error.cause)) {
+    return error.cause;
+  }
+  return null;
+}
+
+function storeBusyResponse(
+  opId: string,
+  error: StoreSchedulerBusyErrorLike,
+): QueryBusyResponse {
+  return {
+    operationId: opId,
+    status: 'BUSY',
+    truncated: false,
+    resultCount: 0,
+    error: 'Node storage is temporarily busy. Retry later.',
+    code: 'STORE_BUSY',
+    retryable: true,
+    retryAfterMs: STORE_BUSY_RETRY_AFTER_MS,
+    reason: error.reason,
+  };
+}
+
+/**
+ * A node-side store limit: the node's own state passed one of its internal
+ * bounds. Recognized by its code, as the store error crosses package and
+ * worker boundaries.
+ */
+function isStoreInternalLimit(error: unknown): error is { code: 'STORE_INTERNAL_LIMIT'; limitName?: unknown } {
+  return typeof error === 'object' && error !== null
+    && (error as { code?: unknown }).code === 'STORE_INTERNAL_LIMIT';
+}
+
+function storeInternalLimitCause(error: unknown): { limitName?: unknown } | null {
+  if (isStoreInternalLimit(error)) return error;
+  if (error instanceof UalResolutionError && isStoreInternalLimit(error.cause)) return error.cause;
+  return null;
+}
+
+/** The retryable BUSY answer. A remote peer learns only that it is a node-side condition. */
+function storeInternalLimitResponse(opId: string): QueryBusyResponse {
+  return {
+    operationId: opId,
+    status: 'BUSY',
+    truncated: false,
+    resultCount: 0,
+    error: 'Node storage reached an internal limit. Retry later.',
+    code: 'STORE_INTERNAL_LIMIT',
+    retryable: true,
+    retryAfterMs: STORE_BUSY_RETRY_AFTER_MS,
+  };
+}
+
+const LIMIT_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+
+/**
+ * One warning per interval naming the limit; the next warning reports how many
+ * answers it held back.
+ */
+function createStoreInternalLimitWarnings(
+  now: () => number = () => performance.now(),
+  intervalMs = 60_000,
+): { record(error: { limitName?: unknown }): void } {
+  let warnedAt: number | undefined;
+  let heldBack = 0;
+  return {
+    record(error) {
+      const at = now();
+      if (warnedAt !== undefined && at - warnedAt >= 0 && at - warnedAt < intervalMs) {
+        heldBack += 1;
+        return;
+      }
+      const limit = typeof error.limitName === 'string' && LIMIT_NAME.test(error.limitName)
+        ? error.limitName : 'unknown';
+      console.warn(`[query-handler] Node-side store limit reached, answered BUSY STORE_INTERNAL_LIMIT: limit=${limit}`
+        + (heldBack > 0 ? ` (${heldBack} more since the last warning)` : ''));
+      warnedAt = at;
+      heldBack = 0;
+    },
   };
 }
 

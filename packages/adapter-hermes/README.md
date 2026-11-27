@@ -367,10 +367,9 @@ returns a `HermesSetupResult` with:
 
 `restoreHermesProfile({ profile, hermesHome, signal? })` returns
 `{ ok, path: 'surgical' | 'backup-file' | 'noop' | 'failed', restoredFrom?,
-restoredProvider?, restoreError? }`. See
-[`agent-docs/hermes-parity/setup-entrypoint-contract.md`](../../agent-docs/hermes-parity/setup-entrypoint-contract.md)
-for the full shape, including `dryRun: true` strict side-effect-freeness and
-the `AbortSignal` cancellation semantics.
+restoredProvider?, restoreError? }`. See the exported types and implementation in
+[`src/setup.ts`](src/setup.ts) for the full shape, including `dryRun: true`
+strict side-effect-freeness and the `AbortSignal` cancellation semantics.
 
 ### SIGINT-safe intent semantics
 

@@ -853,7 +853,7 @@ describe('StorageACKHandler inline verification', () => {
     });
 
     await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(
-      /numeric on-chain context graph id/,
+      /canonical positive uint256 context graph id/,
     );
   });
 
@@ -874,7 +874,7 @@ describe('StorageACKHandler inline verification', () => {
     });
 
     await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(
-      /positive on-chain context graph id/,
+      /canonical positive uint256 context graph id/,
     );
   });
 

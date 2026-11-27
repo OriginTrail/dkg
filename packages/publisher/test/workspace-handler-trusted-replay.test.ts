@@ -11,14 +11,15 @@ import {
   decodeWorkspacePublishRequest,
   encodeEncryptedWorkspacePayload,
   encodeGossipEnvelope,
-  encodeWorkspacePublishRequest,
   encryptWorkspacePayload,
   generateWorkspaceRecipientEncryptionKey,
   GOSSIP_ENVELOPE_VERSION,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
   type WorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
+import { RpcUsageTracker, withRpcUsageConsumer } from '@origintrail-official/dkg-chain';
 import { SharedMemoryHandler } from '../src/index.js';
+import { encodeRootlessWorkspaceRequest } from './_helpers/rootless-workspace.js';
 
 // Coverage for the `trustedReplay` option on
 // SharedMemoryHandler.handle() — the bypass that lets LU-6
@@ -63,13 +64,15 @@ const HOST_PEER_ID = '12D3KooWHostPeer';
 let store: OxigraphStore;
 let workspaceOwned: Map<string, Map<string, string>>;
 
-function workspaceMessage(name: string, operationId: string, cgId = CONTEXT_GRAPH_ID): Uint8Array {
-  return encodeWorkspacePublishRequest({
+function workspaceMessage(
+  name: string,
+  operationId: string,
+  cgId = CONTEXT_GRAPH_ID,
+  nquads = `<${ENTITY}> <http://schema.org/name> "${name}" <${contextGraphDataUri(cgId)}> .`,
+): Uint8Array {
+  return encodeRootlessWorkspaceRequest({
     contextGraphId: cgId,
-    nquads: new TextEncoder().encode(
-      `<${ENTITY}> <http://schema.org/name> "${name}" <${contextGraphDataUri(cgId)}> .`,
-    ),
-    manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
+    nquads: new TextEncoder().encode(nquads),
     publisherPeerId: PUBLISHER_PEER_ID,
     shareOperationId: operationId,
     timestampMs: Date.now(),
@@ -130,10 +133,14 @@ async function encryptForCg(
 function makeHandler(opts: {
   allowedAgentAddress: string;
   recipientKey?: WorkspaceRecipientEncryptionKey;
+  chainAgentGateOracle?: (contextGraphId: string) => Promise<string[] | null>;
 }): SharedMemoryHandler {
   return new SharedMemoryHandler(store, new TypedEventBus(), {
     sharedMemoryOwnedEntities: workspaceOwned,
     localAgentAddresses: () => [opts.allowedAgentAddress],
+    ...(opts.chainAgentGateOracle
+      ? { chainAgentGateOracle: opts.chainAgentGateOracle }
+      : {}),
     ...(opts.recipientKey
       ? { workspaceRecipientPrivateKeys: () => [opts.recipientKey!] }
       : {}),
@@ -169,7 +176,8 @@ async function insertPrivateAccessPolicy(): Promise<void> {
 
 async function expectStoredName(name: string): Promise<void> {
   const result = await store.query(
-    `SELECT ?o WHERE { GRAPH <${WORKSPACE_GRAPH}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
+    `SELECT ?o WHERE { GRAPH ?g { <${ENTITY}> <http://schema.org/name> ?o } ` +
+      `FILTER(STRSTARTS(STR(?g), "${WORKSPACE_GRAPH}/")) }`,
   );
   expect(result.type).toBe('bindings');
   if (result.type === 'bindings') {
@@ -180,7 +188,8 @@ async function expectStoredName(name: string): Promise<void> {
 
 async function expectWorkspaceEmpty(): Promise<void> {
   const result = await store.query(
-    `ASK { GRAPH <${WORKSPACE_GRAPH}> { <${ENTITY}> ?p ?o } }`,
+    `ASK { GRAPH ?g { <${ENTITY}> ?p ?o } ` +
+      `FILTER(STRSTARTS(STR(?g), "${WORKSPACE_GRAPH}/")) }`,
   );
   expect(result.type).toBe('boolean');
   if (result.type === 'boolean') {
@@ -223,6 +232,75 @@ describe('SharedMemoryHandler trustedReplay (LU-6 host-catchup)', () => {
       expect(outcome.publisherPeerId).toBe(PUBLISHER_PEER_ID);
     }
     await expectStoredName('Trusted Replay Valid');
+  });
+
+  it('attributes a chain-backed SWM apply gate to the workspace-apply caller', async () => {
+    const allowed = ethers.Wallet.createRandom();
+    const recipientKey = recipientKeyFor(allowed.address);
+    const tracker = new RpcUsageTracker(() => '31337');
+    const handler = makeHandler({
+      allowedAgentAddress: allowed.address,
+      recipientKey,
+      chainAgentGateOracle: async () => withRpcUsageConsumer(
+        'cgStorage.getContextGraph',
+        () => {
+          tracker.record('eth_call');
+          return [allowed.address];
+        },
+      ),
+    });
+    await insertPrivateAccessPolicy();
+
+    const raw = workspaceMessage('Attributed Apply', 'ws-attributed-apply');
+    const encrypted = await encryptForCg(allowed.address, raw, recipientKey);
+    const wire = await signWorkspaceMessage(allowed, encrypted);
+
+    const outcome = await handler.handle(wire, PUBLISHER_PEER_ID);
+
+    expect(outcome.applied).toBe(true);
+    expect(tracker.drainWindow().ethCallByConsumer).toEqual({
+      'cgStorage.getContextGraph:cgAuth.workspaceApply': 1,
+    });
+  });
+
+  it('replays canonical Markdown section entities during host catch-up', async () => {
+    const allowed = ethers.Wallet.createRandom();
+    const recipientKey = recipientKeyFor(allowed.address);
+    const handler = makeHandler({ allowedAgentAddress: allowed.address, recipientKey });
+    await insertPrivateAccessPolicy();
+    await insertAgentGate(DKG_ONTOLOGY.DKG_ALLOWED_AGENT, allowed.address);
+    await insertPeerGate(PUBLISHER_PEER_ID);
+
+    // A restarted member receives this durable host replay after the original
+    // Markdown blank node has already been canonicalized by the publisher.
+    // This is the same reserved section form used by live SWM delivery.
+    const section = 'urn:dkg:ka-skolem:c14n0';
+    const graph = contextGraphDataUri(CONTEXT_GRAPH_ID);
+    const raw = workspaceMessage(
+      'Markdown replay',
+      'ws-trusted-replay-markdown',
+      CONTEXT_GRAPH_ID,
+      [
+        `<${ENTITY}> <http://dkg.io/ontology/hasSection> <${section}> <${graph}> .`,
+        `<${section}> <http://schema.org/name> "Recovered section" <${graph}> .`,
+      ].join('\n'),
+    );
+    const encrypted = await encryptForCg(allowed.address, raw, recipientKey);
+    const wire = await signWorkspaceMessage(allowed, encrypted);
+
+    const outcome = await handler.handle(wire, HOST_PEER_ID, undefined, { trustedReplay: true });
+
+    expect(outcome.applied).toBe(true);
+    if (outcome.applied) expect(outcome.insertedTriples).toBe(2);
+    const result = await store.query(
+      `SELECT ?sectionName WHERE { GRAPH ?g { <${ENTITY}> <http://dkg.io/ontology/hasSection> ?section . ` +
+        `?section <http://schema.org/name> ?sectionName } ` +
+        `FILTER(STRSTARTS(STR(?g), "${WORKSPACE_GRAPH}/")) }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings).toEqual([{ sectionName: '"Recovered section"' }]);
+    }
   });
 
   it('rejects the same wire bytes without trustedReplay (publisher mismatch + allowlist)', async () => {
