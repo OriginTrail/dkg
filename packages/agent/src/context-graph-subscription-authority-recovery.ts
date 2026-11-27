@@ -11,7 +11,7 @@ import type { ContextGraphDormancyReason } from './context-graph-subscription-do
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
 import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
-import { recoverPersistedSubscriptionRow, type SubscriptionRecoveryRowPorts } from './context-graph-subscription-recover-row.js';
+import { recoverPersistedSubscriptionRow, type SubscriptionRecoverySchedulingPorts } from './context-graph-subscription-recover-row.js';
 import type { RollingSubscriptionChecks } from './context-graph-subscription-rolling-checks.js';
 
 const MAX_CONCURRENT_DEFERRED_ROW_LOADS = 4;
@@ -118,21 +118,23 @@ export interface DeferredContextGraphSubscriptionAuthorityRecoveryPorts {
   readonly store: ContextGraphSubscriptionStore;
   readonly dormancyById: ReadonlyMap<string, ContextGraphDormancyReason>;
   readonly coldCursor?: DeferredContextGraphSubscriptionAuthorityRecoveryCursor;
-  readonly row: SubscriptionRecoveryRowPorts;
+  readonly row: SubscriptionRecoverySchedulingPorts;
   getStatus(): ContextGraphSubscriptionRehydrationInternalStatus | null;
   warn(id: string, error: unknown): void;
 }
 
 /** Paced schedulers hold one row lease through activation and compensation. */
 async function recoverScheduledSubscriptionRow(
-  id: string, ports: SubscriptionRecoveryRowPorts, signal: AbortSignal,
+  id: string, ports: SubscriptionRecoverySchedulingPorts, signal: AbortSignal,
   options: Parameters<typeof recoverPersistedSubscriptionRow>[3],
 ): ReturnType<typeof recoverPersistedSubscriptionRow> {
   const owner = ports.recovery.claim(id, 0, signal);
   if (!owner) return { kind: 'again' };
   try {
     await owner.ready;
-    return await recoverPersistedSubscriptionRow(id, ports, owner, options);
+    return await recoverPersistedSubscriptionRow(id, ports, {
+      signal: owner.signal, isCurrent: () => owner.isCurrent() && ports.isCurrent(),
+    }, options);
   } finally { owner.release(); }
 }
 
@@ -201,7 +203,7 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
   // and commit one candidate at a time: distinct graphs cannot share a flight,
   // and collecting every result before activation would make a ready bound row
   // wait behind later cold rows for up to 120s each.
-  const rowPorts: SubscriptionRecoveryRowPorts = {
+  const rowPorts: SubscriptionRecoverySchedulingPorts = {
     ...ports.row,
     resolveAuthority: async (row, readSignal) => {
       const answer = await ports.row.resolveAuthority(row, readSignal);
@@ -270,7 +272,7 @@ export async function activateRollingSubscriptionPromotion(
 
 /** Rolling promotion owns candidate ordering and generation fences. */
 export interface RollingSubscriptionPromotionPorts {
-  readonly row: SubscriptionRecoveryRowPorts;
+  readonly row: SubscriptionRecoverySchedulingPorts;
   getStatus(): Pick<ContextGraphSubscriptionRehydrationInternalStatus, 'rehydrationEnabled' | 'activationCap'> | null;
   isCurrent(signal: AbortSignal): boolean;
   readonly contextGraphSubscriptionRollingChecks: RollingSubscriptionChecks;

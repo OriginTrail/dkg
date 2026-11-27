@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-export interface SubscriptionRecoveryLease {
+export interface SubscriptionRecoveryAttempt {
   readonly signal: AbortSignal;
+  isCurrent(): boolean;
+}
+
+export interface SubscriptionRecoveryLease extends SubscriptionRecoveryAttempt {
   /** A superseded activation must finish compensating before its successor starts. */
   readonly ready: Promise<void>;
-  isCurrent(): boolean;
   release(): void;
 }
 interface HeldRecovery {

@@ -8,14 +8,14 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { ContextGraphSub, ContextGraphSubscriptionRecord } from './dkg-agent-types.js';
 import { unavailableContextGraphReadAuthorityDecision, contextGraphReadAuthorityDependencyOf } from './context-graph-read-authority.js';
-import type { SubscriptionRecoveryRowPorts } from './context-graph-subscription-recover-row.js';
+import type { SubscriptionRecoverySchedulingPorts } from './context-graph-subscription-recover-row.js';
 import { activateRollingSubscriptionPromotion } from './context-graph-subscription-authority-recovery.js';
 import { requestStorageAckDemandActivation } from './storage-ack-demand-activation.js';
 import { storageAckRecentGraphsOf, STORAGE_ACK_RECENT_GRAPHS_FILE, type StorageAckRecentGraphs } from './storage-ack-recent-graphs.js';
 
 /** Compiler-checked integration of subscription recovery with the composed agent. */
 export class SubscriptionRecoveryMethods extends DKGAgentBase {
-  subscriptionRecoveryRowPorts(this: DKGAgent, isCurrent: () => boolean): SubscriptionRecoveryRowPorts | undefined {
+  subscriptionRecoveryRowPorts(this: DKGAgent, isCurrent: () => boolean): SubscriptionRecoverySchedulingPorts | undefined {
     const store = this.config.contextGraphSubscriptionStore;
     if (!store) return undefined;
     const touch = (): void => {
