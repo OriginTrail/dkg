@@ -8855,7 +8855,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       activate: (...args) => withOwnedRpcRequestContext({ requestClass: 'foreground', signal }, () => row.activate(...args)),
       track: run => { lifetime.track(run); },
       log: { info: message => this.log.info(ctx, message), warn: message => this.log.warn(ctx, message) },
-    }, { checkTimeoutMs: chainAuthorityReadBudgetsOf(this).coldResolutionTimeoutMs }));
+    }));
     const taken = retry.take(ids);
     if (taken.length === 0) return;
     this.log.info(

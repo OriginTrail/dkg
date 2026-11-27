@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS } from './dkg-agent-constants.js';
 
 /**
  * Ask again within seconds for a saved subscription row the startup pass left
@@ -72,7 +73,7 @@ export interface NameBindingRetryOptions {
   readonly maxConcurrent?: number;
   readonly maxRows?: number;
   /** One check's own deadline. */
-  readonly checkTimeoutMs: number;
+  readonly checkTimeoutMs?: number;
   readonly now?: () => number;
 }
 
@@ -93,7 +94,7 @@ export class PersistedSubscriptionNameBindingRetry {
   readonly #firstPauseMs: number;
   readonly #maxPauseMs: number;
   readonly #windowMs: number;
-  constructor(private readonly ports: NameBindingRetryPorts, options: NameBindingRetryOptions) {
+  constructor(private readonly ports: NameBindingRetryPorts, options: NameBindingRetryOptions = {}) {
     this.#now = options.now ?? Date.now;
     this.#firstPauseMs = options.firstPauseMs ?? NAME_BINDING_RETRY_FIRST_PAUSE_MS;
     this.#maxPauseMs = options.maxPauseMs ?? NAME_BINDING_RETRY_MAX_PAUSE_MS;
@@ -102,7 +103,7 @@ export class PersistedSubscriptionNameBindingRetry {
       signal: ports.signal, isCurrent: () => ports.isCurrent(), now: this.#now,
       maxRows: options.maxRows ?? NAME_BINDING_RETRY_MAX_ROWS,
       maxConcurrent: options.maxConcurrent ?? NAME_BINDING_RETRY_MAX_CONCURRENT,
-      checkTimeoutMs: options.checkTimeoutMs, track: run => ports.track(run),
+      checkTimeoutMs: options.checkTimeoutMs ?? CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS, track: run => ports.track(run),
       eligible: row => ports.dormancy(row.id) === 'authorityUnavailable',
       attempt: (row, lease) => this.#attempt(row, lease),
       retired: (row, expired) => {
@@ -157,12 +158,15 @@ export class PersistedSubscriptionNameBindingRetry {
       this.wake();
       return undefined;
     }
-    if (outcome.kind === 'retry') {
-      if (outcome.activationFailed && outcome.why !== held.last) {
+    if (outcome.kind === 'activation-failed' || outcome.kind === 'unavailable') {
+      const why = outcome.kind === 'activation-failed'
+        ? outcome.error instanceof Error ? outcome.error.message : String(outcome.error)
+        : `${outcome.authority.outcome} by ${outcome.authority.source} (${outcome.authority.reason})`;
+      if (outcome.kind === 'activation-failed' && why !== held.last) {
         this.ports.log.warn(`Could not activate persisted context-graph subscription "${row.id}" after its chain name binding `
-          + `answered: ${outcome.why}; asking again`);
+          + `answered: ${why}; asking again`);
       }
-      held.last = outcome.why; held.unanswered += 1;
+      held.last = why; held.unanswered += 1;
     }
     held.wakeable = !held.wokenCheck; held.wokenCheck = false;
     const pause = Math.min(this.#maxPauseMs, this.#firstPauseMs * 2 ** Math.min(Math.max(0, held.unanswered - 1), 16));

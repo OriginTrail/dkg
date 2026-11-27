@@ -203,7 +203,7 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
   };
   for (const { contextGraphId, revision, candidate } of candidates) {
     const outcome = await recoverUnavailableSubscriptionRow(contextGraphId, rowPorts, signal, { row: candidate, revision });
-    if (outcome.kind === 'retry' && outcome.activationFailed) ports.warn(contextGraphId, new Error(outcome.why));
+    if (outcome.kind === 'activation-failed') ports.warn(contextGraphId, outcome.error);
     if (!ports.row.isCurrent()) return;
   }
 

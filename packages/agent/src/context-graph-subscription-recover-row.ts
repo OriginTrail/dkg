@@ -7,7 +7,8 @@ import type { ContextGraphSub, ContextGraphSubscriptionRecord } from './dkg-agen
 
 export type SubscriptionRecoveryOutcome =
   | { kind: 'activated' }
-  | { kind: 'retry'; why: string; activationFailed?: true }
+  | { kind: 'unavailable'; authority: Exclude<ContextGraphReadAuthorityDecision, { outcome: 'allowed' }> }
+  | { kind: 'activation-failed'; error: unknown }
   | { kind: 'again' }
   | { kind: 'done' };
 
@@ -54,7 +55,7 @@ export async function recoverUnavailableSubscriptionRow(
   if (authority.outcome !== 'allowed') {
     const reason = contextGraphDormancyAfterAuthority(authority);
     if (reason === 'authorityUnavailable') {
-      return { kind: 'retry', why: `${authority.outcome} by ${authority.source} (${authority.reason})` };
+      return { kind: 'unavailable', authority };
     }
     ports.retire(id, reason);
     return { kind: 'done' };
@@ -64,7 +65,7 @@ export async function recoverUnavailableSubscriptionRow(
   } catch (error) {
     if (!current()) return { kind: 'done' };
     if (error instanceof SubscriptionActivationCapacityError) { ports.capped(id); return { kind: 'done' }; }
-    return { kind: 'retry', why: error instanceof Error ? error.message : String(error), activationFailed: true };
+    return { kind: 'activation-failed', error };
   }
   return { kind: 'activated' };
 }

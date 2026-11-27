@@ -1,3 +1,4 @@
+import { recoverDeferredContextGraphSubscriptionAuthorities as recoverRows } from '../src/context-graph-subscription-authority-recovery.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   NAME_BINDING_RETRY_WINDOW_MS,
@@ -131,6 +132,41 @@ function pending(listen = true) {
 describe('asking again for a row left dormant without its chain name binding', () => {
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.useRealTimers(); });
+
+  it('lets a cancellation-aware legacy lookup finish after 30 seconds within the recovery deadline', async () => {
+    let aborted = false;
+    const h = host([row('slow-legacy')], { answers: { 'slow-legacy': [signal => new Promise((resolve, reject) => {
+      const onAbort = () => { aborted = true; clearTimeout(timer); reject(signal.reason); };
+      const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve(ALLOWED(77n)); }, 30_000);
+      signal.addEventListener('abort', onAbort, { once: true });
+    })] } });
+    const retry = new PersistedSubscriptionNameBindingRetry(h.ports);
+    retry.take(['slow-legacy']);
+    await vi.advanceTimersByTimeAsync(20_001);
+    expect(aborted).toBe(false);
+    expect(h.activations).toEqual([]);
+    await vi.advanceTimersByTimeAsync(9_999);
+    await retry.whenIdle();
+    expect(h.checks).toEqual([{ id: 'slow-legacy', at: 0 }]);
+    expect(h.activations).toEqual([{ id: 'slow-legacy', onChainId: '77', at: 30_000 }]);
+    expect(aborted).toBe(false);
+  });
+
+  it('preserves the original activation error and cause through periodic recovery', async () => {
+    const saved = row('failed-activation', { onChainId: '7' }), h = host([saved]);
+    const error = new Error('disk write failed', { cause: new Error('device unavailable') });
+    h.ports.activate = async () => { throw error; };
+    const warn = vi.fn();
+    await recoverRows(h.controller.signal, {
+      store: { load: h.ports.load, loadAll: async () => [saved], save: async () => {}, delete: async () => {} },
+      dormancyById: h.dormancy, row: h.ports, warn,
+      getStatus: () => ({ rehydrationEnabled: true, systemExcluded: 0, activationCap: 64, persistedTotal: 1,
+        activated: 0, hostedActivated: 0, hostedActivatedIds: [], capDisabled: false, completedAt: 1, updatedAt: 1 }),
+    });
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0][1]).toBe(error);
+    expect(h.dormancy.get(saved.id)).toBe('authorityUnavailable');
+  });
 
   it('retries only the startup answer that says the name binding could not be read', () => {
     expect(isChainNameBindingUnavailable(NO_NAME_BINDING)).toBe(true);
