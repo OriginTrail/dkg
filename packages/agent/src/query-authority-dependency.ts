@@ -5,6 +5,7 @@ export async function readQueryAuthorityDependency<T>(
   signal: AbortSignal | undefined, dependency: () => Promise<T>,
 ): Promise<T> {
   signal?.throwIfAborted();
-  try { return await dependency(); }
-  finally { signal?.throwIfAborted(); }
+  const value = await dependency();
+  signal?.throwIfAborted();
+  return value;
 }

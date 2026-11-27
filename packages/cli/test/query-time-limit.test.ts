@@ -186,10 +186,12 @@ describe('/api/query answers for its time limit', () => {
     } finally { release({ bindings: [] }); await route; vi.useRealTimers(); }
   });
 
-  it('bounds the local-first registration-status read before reaching the query engine', async () => {
+  it.each([false, true])('preserves local-first registration-read termination evidence (confirmed=%s)', async confirmed => {
     vi.useFakeTimers();
     const registrationRead = vi.fn((_sparql: string, options?: QueryOptions) => new Promise((_resolve, reject) => {
-      options?.signal?.addEventListener('abort', () => reject(options.signal!.reason), { once: true });
+      options?.signal?.addEventListener('abort', () => reject(confirmed
+        ? new QueryWorkStoppedError('oxigraph-worker', 'stopped', options.signal!.reason)
+        : options.signal!.reason), { once: true });
     }));
     const queryEngine = { query: vi.fn() };
     const internal = {
@@ -211,7 +213,7 @@ describe('/api/query answers for its time limit', () => {
       await vi.advanceTimersByTimeAsync(1_000);
       expect(res.statusCode).toBe(504); // Assert before awaiting: a dropped signal must fail promptly.
       await route;
-      expect(JSON.parse(res.body)).toMatchObject({ code: 'QUERY_TIME_LIMIT_EXCEEDED', stopped: false });
+      expect(JSON.parse(res.body)).toMatchObject({ code: 'QUERY_TIME_LIMIT_EXCEEDED', stopped: confirmed });
       expect(registrationRead.mock.calls[0]![1]?.signal?.aborted).toBe(true);
       expect(queryEngine.query).not.toHaveBeenCalled();
     } finally { vi.useRealTimers(); }
