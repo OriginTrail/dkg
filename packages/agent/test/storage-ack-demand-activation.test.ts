@@ -78,6 +78,7 @@ function host(rows: ContextGraphSubscriptionRecord[], options: {
       dormancy.delete(row.id);
       activations.push({ id: row.id, onChainId, at: Date.now() });
     },
+    clear: id => { dormancy.delete(id); },
     retire: (id, reason) => {
       dormancy.set(id, reason);
       retired.push({ id, reason });
@@ -99,6 +100,40 @@ function row(id: string, extra: Partial<ContextGraphSubscriptionRecord> = {}): C
 describe('StorageACK demand activation', () => {
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.useRealTimers(); });
+
+  it('aborts an in-flight authority read at its deadline and releases the slot to another graph', async () => {
+    const h = host([row('stalled'), row('ready')]);
+    let cancelled = false;
+    h.ports.resolveAuthority = (binding, signal) => binding.contextGraphId === 'ready'
+      ? Promise.resolve(ALLOWED(2n))
+      : new Promise((_resolve, reject) => signal.addEventListener('abort', () => {
+          cancelled = true; reject(signal.reason);
+        }, { once: true }));
+    const demand = new StorageAckDemandActivations(h.ports, { maxConcurrent: 1, checkTimeoutMs: 50 });
+    demand.request('stalled', '1'); demand.request('ready', '2');
+    await vi.advanceTimersByTimeAsync(49);
+    expect(h.activations).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(cancelled).toBe(true);
+    expect(h.activations.map(a => a.id)).toEqual(['ready']);
+    h.controller.abort(); await demand.whenIdle();
+  });
+
+  it('settles shutdown while an authority check is still in flight', async () => {
+    const h = host([row('stalled')]);
+    let cancelled = false;
+    h.ports.resolveAuthority = (_binding, signal) => new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => { cancelled = true; reject(signal.reason); }, { once: true });
+    });
+    const demand = new StorageAckDemandActivations(h.ports);
+    demand.request('stalled', '1');
+    await vi.advanceTimersByTimeAsync(0);
+    h.controller.abort();
+    await demand.whenIdle();
+    expect(cancelled).toBe(true);
+    expect(h.activations).toHaveLength(0);
+    expect(demand.size).toBe(0);
+  });
 
   it('activates a row the cap left dormant at once, with the binding the request named', async () => {
     const h = host([row('new-graph')]);

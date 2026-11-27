@@ -29,29 +29,12 @@
  * the paced owners, as before.
  */
 
-import { createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
-import { withOwnedRpcRequestContext } from '@origintrail-official/dkg-chain';
-import type { AgentWorkLifetime } from './agent-work-lifetime.js';
-import {
-  activateRollingSubscriptionPromotion,
-  type RollingSubscriptionActivationPorts,
-} from './context-graph-subscription-authority-recovery.js';
-import {
-  unavailableContextGraphReadAuthorityDecision,
-  contextGraphReadAuthorityDependencyOf,
-  type ContextGraphReadAuthorityDecision,
-} from './context-graph-read-authority.js';
-import {
-  contextGraphDormancyAfterAuthority,
-  type ContextGraphDormancyReason,
-} from './context-graph-subscription-dormancy.js';
-import type {
-  ContextGraphSub,
-  ContextGraphSubscriptionRecord,
-  ContextGraphSubscriptionRehydrationInternalStatus,
-  ContextGraphSubscriptionStore,
-  DurableContextGraphSubscriptionBinding,
-} from './dkg-agent-types.js';
+import { runBoundedOperation, isBoundedOperationTimeoutError } from './bounded-operation.js';
+import { recoverPersistedSubscriptionRow } from './context-graph-subscription-recover-row.js';
+import { unavailableContextGraphReadAuthorityDecision, contextGraphReadAuthorityDependencyOf,
+  type ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
+import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
+import type { ContextGraphSub, ContextGraphSubscriptionRecord, DurableContextGraphSubscriptionBinding } from './dkg-agent-types.js';
 
 /** Checks (and activations) in flight at the same time. */
 export const STORAGE_ACK_DEMAND_MAX_CONCURRENT = 2;
@@ -93,6 +76,7 @@ export interface StorageAckDemandActivationPorts {
     onChainId: string,
     isCurrent: (subscription: ContextGraphSub) => boolean,
   ): Promise<void>;
+  clear(contextGraphId: string, revoked?: boolean): void;
   /** Record the dormancy a final answer leaves the row in. */
   retire(contextGraphId: string, reason: ContextGraphDormancyReason): void;
   track(run: Promise<unknown>): void;
@@ -128,18 +112,6 @@ type AttemptOutcome =
   /** The row or its state moved under the check. */
   | { kind: 'again' }
   | { kind: 'done' };
-
-function sameRow(
-  left: ContextGraphSubscriptionRecord,
-  right: ContextGraphSubscriptionRecord | null,
-): boolean {
-  return right !== null
-    && left.id === right.id
-    && left.onChainId === right.onChainId
-    && left.onChainHash === right.onChainHash
-    && left.subscribed === right.subscribed
-    && (left.coreHosted === true) === (right.coreHosted === true);
-}
 
 function pause(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.resolve();
@@ -323,183 +295,49 @@ export class StorageAckDemandActivations {
 
   async #attempt(demand: Demand, reason: DemandReason): Promise<AttemptOutcome> {
     const ports = this.#ports;
-    const id = demand.contextGraphId;
-    const row = await ports.load(id);
-    if (!this.#current()) return { kind: 'done' };
-    // No saved intent: the owners clear the row.
-    if (row === null || (!row.subscribed && row.coreHosted !== true)) return { kind: 'done' };
-    if (row.onChainId !== undefined && row.onChainId !== demand.onChainId) {
-      ports.log.debug(
-        `Persisted context-graph subscription "${id}" is bound to ${row.onChainId}, ` +
-        `not to ${demand.onChainId} as a StorageACK request names; it is left to paced activation`,
-      );
-      return { kind: 'done' };
-    }
-    const revision = ports.revision(id);
-    const binding: DurableContextGraphSubscriptionBinding = {
-      contextGraphId: row.id,
-      onChainId: row.onChainId ?? demand.onChainId,
-      ...(row.onChainHash === undefined ? {} : { onChainHash: row.onChainHash }),
-    };
-    const checkSignal = AbortSignal.any([ports.signal, AbortSignal.timeout(this.#checkTimeoutMs)]);
-    const authority = await ports.resolveAuthority(binding, checkSignal).catch((error: unknown) => (
-      unavailableContextGraphReadAuthorityDecision(
-        'legacy-local',
-        'unexpected-authority-error',
-        contextGraphReadAuthorityDependencyOf(error),
-      )
-    ));
-    if (!this.#current()) return { kind: 'done' };
-    // The answer belongs to the row as it was read; if it moved, decide again.
-    const fresh = await ports.load(id);
-    if (!this.#current()) return { kind: 'done' };
-    if (
-      ports.dormancy(id) !== reason
-      || ports.revision(id) !== revision
-      || !sameRow(row, fresh)
-    ) return { kind: 'again' };
-    const live = ports.subscription(id);
-    if (live?.subscribed === true || live?.coreHosted === true) return { kind: 'again' };
-    if (authority.outcome !== 'allowed') {
-      const next = contextGraphDormancyAfterAuthority(authority);
-      if (next === 'authorityUnavailable') {
-        return { kind: 'retry', why: `${authority.outcome} by ${authority.source} (${authority.reason})` };
-      }
-      ports.retire(id, next);
-      ports.log.info(
-        `Left persisted context-graph subscription "${id}" dormant for StorageACK requests: ` +
-        `${authority.outcome} by ${authority.source} (${authority.reason})`,
-      );
-      return { kind: 'done' };
-    }
-    const onChainId = authority.onChainId?.toString() ?? binding.onChainId!;
-    const isCurrentActivation = (subscription: ContextGraphSub): boolean => (
-      this.#current()
-      && ports.dormancy(id) === reason
-      && ports.revision(id) === revision
-      && ports.subscription(id) === subscription
-    );
-    try {
-      await ports.activate(fresh!, onChainId, isCurrentActivation);
-    } catch (error) {
-      if (!this.#current()) return { kind: 'done' };
-      // Another owner may be activating the same row; the next turn sees it.
-      return { kind: 'retry', why: error instanceof Error ? error.message : String(error) };
-    }
-    return { kind: 'activated', reason };
+    const onChainId = demand.onChainId;
+    const outcome = await recoverPersistedSubscriptionRow(demand.contextGraphId, {
+      ...ports,
+      isCurrent: () => this.#current() && demand.onChainId === onChainId,
+      resolveAuthority: async (row, signal) => {
+        try {
+          return await runBoundedOperation(checkSignal => ports.resolveAuthority({
+            contextGraphId: row.id, onChainId: row.onChainId,
+            ...(row.onChainHash === undefined ? {} : { onChainHash: row.onChainHash }),
+          }, checkSignal), { signal, timeoutMs: this.#checkTimeoutMs, label: 'StorageACK demand authority' });
+        } catch (error) {
+          if (signal.aborted || isBoundedOperationTimeoutError(error)) return undefined;
+          return unavailableContextGraphReadAuthorityDecision('legacy-local', 'unexpected-authority-error',
+            contextGraphReadAuthorityDependencyOf(error));
+        }
+      },
+      capped: () => {}, // Request-driven activation is deliberately exempt from the startup cap.
+      activate: (row, binding, _revision, current) => ports.activate(row, binding ?? onChainId,
+        subscription => current() && ports.subscription(row.id) === subscription),
+    }, ports.signal, { reason, verifiedOnChainId: onChainId });
+    return outcome.kind === 'activated' ? { kind: 'activated', reason } : outcome;
   }
-}
-
-interface DemandActivationAgent {
-  readonly config: {
-    readonly contextGraphSubscriptionStore?: Pick<ContextGraphSubscriptionStore, 'load' | 'loadAll'>;
-  };
-  readonly workLifetime: AgentWorkLifetime;
-  readonly coreHostRecordingsClosed: boolean;
-  contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationInternalStatus | null;
-  readonly contextGraphSubscriptionDormancyById: ReadonlyMap<string, ContextGraphDormancyReason>;
-  readonly contextGraphSubscriptionPersistRevisions: ReadonlyMap<string, number>;
-  readonly subscribedContextGraphs: ReadonlyMap<string, ContextGraphSub>;
-  readonly log: {
-    info(ctx: OperationContext, message: string): void;
-    warn(ctx: OperationContext, message: string): void;
-    debug(ctx: OperationContext, message: string): void;
-  };
-  resolveContextGraphSubscriptionBootstrapAuthority(
-    contextGraphId: string,
-    options: {
-      allowSubscriptionFallback?: boolean;
-      signal?: AbortSignal;
-      durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
-    },
-  ): Promise<ContextGraphReadAuthorityDecision>;
-  activatePersistedContextGraphSubscriptionRecord: RollingSubscriptionActivationPorts['activate'];
-  reconcileRfc64CatalogResponsibilityV1(contextGraphId: string): Promise<unknown>;
-  transitionContextGraphSubscriptionDormancy(
-    contextGraphId: string,
-    reason: ContextGraphDormancyReason | undefined,
-  ): void;
 }
 
 const owners = new WeakMap<object, { signal: AbortSignal; activations: StorageAckDemandActivations }>();
 
-function demandActivationPorts(agent: DemandActivationAgent, signal: AbortSignal): StorageAckDemandActivationPorts {
-  const ctx = createOperationContext('init');
-  const store = agent.config.contextGraphSubscriptionStore!;
-  // Requests come from an ACK handler: its deadline must not end the check.
-  const owned = <T>(fn: () => Promise<T>): Promise<T> => withOwnedRpcRequestContext(
-    { requestClass: 'foreground', admissionPriority: 'authority', signal },
-    fn,
-  );
-  return {
-    signal,
-    isCurrent: () => agent.workLifetime.signal === signal
-      && agent.contextGraphSubscriptionRehydrationStatus !== null
-      && !agent.coreHostRecordingsClosed,
-    dormancy: (id) => agent.contextGraphSubscriptionDormancyById.get(id),
-    revision: (id) => agent.contextGraphSubscriptionPersistRevisions.get(id) ?? 0,
-    subscription: (id) => agent.subscribedContextGraphs.get(id),
-    load: async (id) => (store.load
-      ? store.load(id)
-      : (await store.loadAll()).find((row) => row.id === id) ?? null),
-    resolveAuthority: (binding, checkSignal) => owned(() => (
-      agent.resolveContextGraphSubscriptionBootstrapAuthority(binding.contextGraphId, {
-        allowSubscriptionFallback: false,
-        signal: checkSignal,
-        durableSubscriptionBinding: binding,
-      })
-    )),
-    activate: (row, onChainId, isCurrent) => owned(() => activateRollingSubscriptionPromotion({
-      activate: agent.activatePersistedContextGraphSubscriptionRecord.bind(agent),
-      reconcile: agent.reconcileRfc64CatalogResponsibilityV1.bind(agent),
-    }, row, onChainId, isCurrent)),
-    retire: (id, reason) => {
-      agent.transitionContextGraphSubscriptionDormancy(id, reason);
-      const status = agent.contextGraphSubscriptionRehydrationStatus;
-      if (status !== null) agent.contextGraphSubscriptionRehydrationStatus = { ...status, updatedAt: Date.now() };
-    },
-    track: (run) => { agent.workLifetime.track(run); },
-    log: {
-      info: (message) => agent.log.info(ctx, message),
-      warn: (message) => agent.log.warn(ctx, message),
-      debug: (message) => agent.log.debug(ctx, message),
-    },
-  };
-}
-
-/**
- * Activate now the dormant saved row of `contextGraphId`, which a StorageACK
- * request for the on-chain graph `onChainId` found. The caller has checked
- * that the namespace names that graph on chain. False leaves the row to the
- * paced owners.
- */
+/** The caller supplies compiler-checked ports from the agent's protected boundary. */
 export function requestStorageAckDemandActivation(
-  agentObject: object,
-  contextGraphId: string,
-  onChainId: string,
+  ownerKey: object, ports: StorageAckDemandActivationPorts, contextGraphId: string, onChainId: string,
 ): boolean {
-  const agent = agentObject as DemandActivationAgent;
-  const lifetime = agent.workLifetime;
-  if (lifetime.closed || agent.config.contextGraphSubscriptionStore === undefined) return false;
+  if (ports.signal.aborted || !ports.isCurrent()) return false;
   let canonical: bigint;
-  try {
-    canonical = BigInt(onChainId);
-  } catch {
-    return false;
-  }
+  try { canonical = BigInt(onChainId); } catch { return false; }
   if (canonical <= 0n) return false;
-  let owner = owners.get(agentObject);
-  if (owner === undefined || owner.signal !== lifetime.signal) {
-    owner = {
-      signal: lifetime.signal,
-      activations: new StorageAckDemandActivations(demandActivationPorts(agent, lifetime.signal)),
-    };
-    owners.set(agentObject, owner);
+  let owner = owners.get(ownerKey);
+  if (owner === undefined || owner.signal !== ports.signal) {
+    owner = { signal: ports.signal, activations: new StorageAckDemandActivations(ports) };
+    owners.set(ownerKey, owner);
   }
   return owner.activations.request(contextGraphId, canonical.toString());
 }
 
 /** The agent's demand activations of this run, if any started (for tests and status). */
-export function peekStorageAckDemandActivations(agentObject: object): StorageAckDemandActivations | undefined {
-  return owners.get(agentObject)?.activations;
+export function peekStorageAckDemandActivations(ownerKey: object): StorageAckDemandActivations | undefined {
+  return owners.get(ownerKey)?.activations;
 }

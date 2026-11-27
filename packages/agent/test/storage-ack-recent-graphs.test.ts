@@ -23,6 +23,25 @@ async function tempPath(): Promise<string> {
 }
 
 describe('recently ACK-requested graphs', () => {
+  it('persists a note arriving between the last write-loop check and writer retirement', async () => {
+    let persisted = '';
+    let staged = '';
+    let writes = 0;
+    const list = new StorageAckRecentGraphs({ path: '/virtual/recent.json', now: () => 1000,
+      io: { readFile: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); },
+        mkdir: async () => {}, writeFile: async (_file, data) => { staged = data; writes++; },
+        rename: async () => {
+          persisted = staged;
+          if (writes === 1) queueMicrotask(() => queueMicrotask(() => queueMicrotask(() => list.note('second', '2'))));
+        },
+      },
+    });
+    list.note('first', '1');
+    await list.whenWritten();
+    expect(writes).toBe(2);
+    expect(JSON.parse(persisted).graphs.map((g: { contextGraphId: string }) => g.contextGraphId).sort()).toEqual(['first', 'second']);
+  });
+
   it('keeps a requested graph for the next start', async () => {
     const path = await tempPath();
     let now = 1_000_000;

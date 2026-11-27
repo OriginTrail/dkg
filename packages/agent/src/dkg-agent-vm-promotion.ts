@@ -35,8 +35,6 @@ import {
 } from './core-hosted-public-cg-record-decision.js';
 import { DEFAULT_SWM_TTL_MS } from './dkg-agent-constants.js';
 import { noteCoreHostedStorageAck } from './core-hosted-definition.js';
-import { requestStorageAckDemandActivation } from './storage-ack-demand-activation.js';
-import { noteStorageAckRequest } from './storage-ack-recent-graphs.js';
 import { readLatestMerkleRootAndPublisher } from './ka-latest-root-and-publisher.js';
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
 import { resolveVmReconcilerEnabled } from './sync/backpressure.js';
@@ -205,7 +203,7 @@ export class VmPromotionMethods extends DKGAgentBase {
         // While the definition is missing, a requester the owner tied to the graph is asked for it.
         noteCoreHostedStorageAck(this, localCgId, request.publisherPeerId);
         // A graph publishers write to now is brought back first after a restart.
-        noteStorageAckRequest(this, localCgId, request.contextGraphId);
+        this.storageAckRecentGraphs().note(localCgId, request.contextGraphId);
         return { ok: true };
       case 'curated':
         // A curated graph's plaintext never belongs in a core's VM; curated
@@ -232,8 +230,8 @@ export class VmPromotionMethods extends DKGAgentBase {
         const selfClearing = reason === 'authorityUnavailable' || reason === 'activationCap';
         if (selfClearing && now - since < STORAGE_ACK_DORMANT_TRANSIENT_MS) {
           // Activate the row now with the binding checked above; the paced owners stay the fallback.
-          noteStorageAckRequest(this, localCgId, request.contextGraphId);
-          if (!requestStorageAckDemandActivation(this, localCgId, request.contextGraphId)
+          this.storageAckRecentGraphs().note(localCgId, request.contextGraphId);
+          if (!this.requestStorageAckDemandActivation(localCgId, request.contextGraphId)
             && reason === 'activationCap') this.requestContextGraphSubscriptionPromotion(localCgId);
           return unavailable(`the graph subscription on this core is not active yet (${reason})`);
         }

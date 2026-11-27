@@ -18,7 +18,6 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { createOperationContext } from '@origintrail-official/dkg-core';
 
 export const STORAGE_ACK_RECENT_GRAPHS_FILE = 'storage-ack-recent-graphs.json';
 /** Most graphs the list keeps; the least recently requested one makes room. */
@@ -194,7 +193,10 @@ export class StorageAckRecentGraphs {
       return;
     }
     const writing = this.#writeLoop().finally(() => {
-      if (this.#writing === writing) this.#writing = undefined;
+      if (this.#writing !== writing) return;
+      this.#writing = undefined;
+      // A note can arrive after the loop's last check but before this retirement.
+      if (this.#writeAgain) this.#scheduleWrite();
     });
     this.#writing = writing;
   }
@@ -226,45 +228,11 @@ export class StorageAckRecentGraphs {
   }
 }
 
-interface RecentGraphsAgent {
-  readonly config: { readonly dataDir?: string };
-  readonly log: { warn(ctx: ReturnType<typeof createOperationContext>, message: string): void };
-}
-
 const lists = new WeakMap<object, StorageAckRecentGraphs>();
 
-/** The agent's list, kept in its data directory when it has one. */
-export function storageAckRecentGraphsOf(agentObject: object): StorageAckRecentGraphs {
-  let list = lists.get(agentObject);
-  if (list === undefined) {
-    const agent = agentObject as RecentGraphsAgent;
-    const dataDir = agent.config?.dataDir;
-    list = new StorageAckRecentGraphs({
-      ...(dataDir ? { path: join(dataDir, STORAGE_ACK_RECENT_GRAPHS_FILE) } : {}),
-      warn: (message) => agent.log?.warn(createOperationContext('system'), message),
-    });
-    lists.set(agentObject, list);
-  }
+/** Retain the list by agent identity; configuration is explicit and compiler-checked. */
+export function storageAckRecentGraphsOf(ownerKey: object, options: StorageAckRecentGraphsOptions): StorageAckRecentGraphs {
+  let list = lists.get(ownerKey);
+  if (list === undefined) { list = new StorageAckRecentGraphs(options); lists.set(ownerKey, list); }
   return list;
-}
-
-/** Note an ACK request for a graph. `onChainId` is the id the request named. */
-export function noteStorageAckRequest(agentObject: object, contextGraphId: string, onChainId: string): void {
-  let canonical: string;
-  try {
-    canonical = BigInt(onChainId).toString();
-  } catch {
-    return;
-  }
-  storageAckRecentGraphsOf(agentObject).note(contextGraphId, canonical);
-}
-
-/**
- * The saved rows to bring back first at start, as rank by local id (0 is the
- * most recently requested). Never rejects.
- */
-export async function recentStorageAckGraphRanks(agentObject: object): Promise<Map<string, number>> {
-  const list = storageAckRecentGraphsOf(agentObject);
-  await list.load();
-  return new Map(list.recent().map((entry, rank) => [entry.contextGraphId, rank]));
 }

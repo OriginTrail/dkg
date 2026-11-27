@@ -18,8 +18,10 @@ export interface SubscriptionRecoveryRowPorts {
   subscription(id: string): ContextGraphSub | undefined;
   load(id: string): Promise<ContextGraphSubscriptionRecord | null>;
   resolveAuthority(row: ContextGraphSubscriptionRecord, signal: AbortSignal): Promise<ContextGraphReadAuthorityDecision | undefined>;
-  clear(id: string): void;
-  retire(id: string, reason: ContextGraphDormancyReason): void;
+  clear(id: string, revoked?: boolean): void;
+  retire(id: string, reason: ContextGraphDormancyReason, authority?: Exclude<ContextGraphReadAuthorityDecision, { outcome: 'allowed' }>): void;
+  unavailable?(id: string, authority: Exclude<ContextGraphReadAuthorityDecision, { outcome: 'allowed' }>): void;
+  canActivate?(): boolean;
   capped(id: string): void;
   /** The activation owner atomically checks/reserves capacity before asynchronous preparation. */
   activate(row: ContextGraphSubscriptionRecord, onChainId: string | undefined, revision: number,
@@ -36,36 +38,43 @@ function sameRow(left: ContextGraphSubscriptionRecord, right: ContextGraphSubscr
 }
 
 /** One authority observation may commit only to the exact durable intent it checked. */
-export async function recoverUnavailableSubscriptionRow(
+export async function recoverPersistedSubscriptionRow(
   id: string, ports: SubscriptionRecoveryRowPorts, signal: AbortSignal,
-  snapshot?: { row: ContextGraphSubscriptionRecord | null; revision: number },
+  options: { snapshot?: { row: ContextGraphSubscriptionRecord | null; revision: number };
+    reason?: ContextGraphDormancyReason; verifiedOnChainId?: string } = {},
 ): Promise<SubscriptionRecoveryOutcome> {
-  const current = () => !signal.aborted && ports.isCurrent() && ports.dormancy(id) === 'authorityUnavailable';
+  const { snapshot, reason = 'authorityUnavailable', verifiedOnChainId } = options;
+  const current = () => !signal.aborted && ports.isCurrent() && ports.dormancy(id) === reason;
   if (!current()) return { kind: 'done' };
   const revision = snapshot?.revision ?? ports.revision(id);
   const row = snapshot ? snapshot.row : await ports.load(id);
   if (!current()) return { kind: 'done' };
-  if (!hasIntent(row)) { ports.clear(id); return { kind: 'done' }; }
-  const authority = await ports.resolveAuthority(row, signal);
+  if (!hasIntent(row)) { ports.clear(id, row !== null); return { kind: 'done' }; }
+  if (verifiedOnChainId !== undefined && row.onChainId !== undefined && row.onChainId !== verifiedOnChainId) return { kind: 'done' };
+  const bound = verifiedOnChainId === undefined || row.onChainId !== undefined ? row : { ...row, onChainId: verifiedOnChainId };
+  const authority = await ports.resolveAuthority(bound, signal);
   if (!current()) return { kind: 'done' };
   if (authority === undefined) return { kind: 'retry', why: 'authority check did not answer before its deadline' };
   const fresh = await ports.load(id);
   if (!current()) return { kind: 'done' };
-  if (!hasIntent(fresh)) { ports.clear(id); return { kind: 'done' }; }
+  if (!hasIntent(fresh)) { ports.clear(id, fresh !== null); return { kind: 'done' }; }
   if (ports.revision(id) !== revision || !sameRow(row, fresh)) return { kind: 'again' };
   // Another activation may own a provisional row. Its owner alone commits or rolls it back.
   const live = ports.subscription(id);
-  if (live?.subscribed || live?.coreHosted) return { kind: 'done' };
+  if (live?.subscribed || live?.coreHosted) return { kind: 'again' };
   if (authority.outcome !== 'allowed') {
     const reason = contextGraphDormancyAfterAuthority(authority);
     if (reason === 'authorityUnavailable') {
+      ports.unavailable?.(id, authority);
       return { kind: 'retry', why: `${authority.outcome} by ${authority.source} (${authority.reason})` };
     }
-    ports.retire(id, reason);
+    ports.retire(id, reason, authority);
     return { kind: 'done' };
   }
+  if (ports.canActivate && !ports.canActivate()) return { kind: 'again' };
+  const valid = () => current() && ports.revision(id) === revision;
   try {
-    await ports.activate(fresh, authority.onChainId?.toString() ?? fresh.onChainId, revision, current);
+    await ports.activate(fresh, authority.onChainId?.toString() ?? bound.onChainId, revision, valid);
   } catch (error) {
     if (!current()) return { kind: 'done' };
     if (error instanceof SubscriptionActivationCapacityError) { ports.capped(id); return { kind: 'done' }; }

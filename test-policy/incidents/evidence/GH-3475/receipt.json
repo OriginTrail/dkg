@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "GH-3475",
   "method": "guard-mutation",
-  "sourceCommit": "978fc50eddc62da94dd62539175a85c3792e343e",
+  "sourceCommit": "47cd9288ea9bce292a31aead0b1f631d4c451d88",
   "production": {
     "file": "packages/agent/src/dkg-agent-lifecycle.ts",
-    "sha256": "bcc1b6c8f94619f941b8b7c387b4e0fb5c282837a0648baf87228a617fc59ad7"
+    "sha256": "4542740f734129d39e0b4e27fdd7713248ed595027691ec6736082fe97641e6e"
   },
   "test": {
     "file": "packages/agent/test/peer-profile-follow-up-agent.test.ts",
@@ -18,10 +18,10 @@
   },
   "red": {
     "file": "test-policy/incidents/evidence/GH-3475/red.json",
-    "sha256": "0d213ce74bdf7465ec027e59214eae8d877503279cdb3668978c9d40b4786caa"
+    "sha256": "1b371f6c26626a729a73a9c87469d45f319a3477bd0d3574a093e139c864f940"
   },
   "green": {
     "file": "test-policy/incidents/evidence/GH-3475/green.json",
-    "sha256": "1ee88080651affbb0b9c2c4bf9d450b06d7b364d39ef21f78b15d2ccc9f1f062"
+    "sha256": "7a6df9f09492a61f4125975f7bb6ad3abeb1ba9ae3700d949253c5917cf9ecdb"
   }
 }

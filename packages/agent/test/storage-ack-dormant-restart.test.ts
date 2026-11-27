@@ -11,8 +11,8 @@ import type {
   ContextGraphSub,
   ContextGraphSubscriptionRecord,
 } from '../src/dkg-agent-types.js';
+import { StorageAckRecentGraphs, STORAGE_ACK_RECENT_GRAPHS_FILE } from '../src/storage-ack-recent-graphs.js';
 import { peekStorageAckDemandActivations } from '../src/storage-ack-demand-activation.js';
-import { storageAckRecentGraphsOf } from '../src/storage-ack-recent-graphs.js';
 
 /**
  * A core restarts with more than a thousand saved subscription rows, as a
@@ -79,11 +79,14 @@ afterEach(async () => {
 async function startCore(rows: Map<string, ContextGraphSubscriptionRecord>, options: {
   dataDir?: string;
   authorityBudgetMs?: number;
+  activationCap?: number;
+  ordinaryGraph?: string;
   /** Reads of hosted graphs other than the target take this long. */
   slowHostedReadsMs?: number;
 } = {}) {
   const chain = new MockChainAdapter('mock:31337', undefined, { initialContextGraphId: TARGET_ID });
   await chain.createOnChainContextGraph({ nameHash: TARGET_HASH, accessPolicy: 0, publishPolicy: 1 });
+  if (options.ordinaryGraph) await chain.createOnChainContextGraph({ nameHash: ethers.keccak256(ethers.toUtf8Bytes(options.ordinaryGraph)), accessPolicy: 0, publishPolicy: 1 });
   // The authority index is still walking: no name lookup answers.
   let endWalk!: () => void;
   const walk = new Promise<null>((resolve) => { endWalk = () => resolve(null); });
@@ -101,7 +104,7 @@ async function startCore(rows: Map<string, ContextGraphSubscriptionRecord>, opti
     ...(options.dataDir ? { dataDir: options.dataDir, store: new OxigraphStore() } : {}),
     rfc64CatalogActivation: { enabled: false },
     contextGraphSubscriptionRehydrationEnabled: true,
-    maxRehydratedContextGraphSubscriptions: 4,
+    maxRehydratedContextGraphSubscriptions: options.activationCap ?? 4,
     // 0 would mean no budget; 1 ms is spent at once, as on a busy core.
     contextGraphSubscriptionRehydrationAuthorityBudgetMs: options.authorityBudgetMs ?? 1,
     contextGraphSubscriptionStore: {
@@ -195,6 +198,25 @@ describe('first StorageACK for a dormant graph after a restart', { timeout: 60_0
     expect(core.state.isContextGraphSubscriptionCommitted(TARGET)).toBe(true);
   });
 
+  it('restores a recent non-hosted row without consuming the ordinary row cap slot', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-recent-member-cap-'));
+    dirs.push(dataDir);
+    const ordinary = 'ordinary-member';
+    const rows = new Map<string, ContextGraphSubscriptionRecord>([
+      [TARGET, { id: TARGET, onChainId: TARGET_ID.toString(), subscribed: true, synced: true, syncScoped: true }],
+      [ordinary, { id: ordinary, onChainId: (TARGET_ID + 1n).toString(), subscribed: true, synced: true, syncScoped: true }],
+    ]);
+    // Persist priority before this process starts; neither row has hosted status.
+    const recent = new StorageAckRecentGraphs({ path: join(dataDir, STORAGE_ACK_RECENT_GRAPHS_FILE) });
+    recent.note(TARGET, TARGET_ID.toString()); await recent.whenWritten();
+    const core = await startCore(rows, { dataDir, activationCap: 1, authorityBudgetMs: 0, ordinaryGraph: ordinary });
+    expect(core.state.isContextGraphSubscriptionCommitted(TARGET)).toBe(true);
+    expect(core.state.isContextGraphSubscriptionCommitted(ordinary)).toBe(true);
+    expect(core.state.subscribedContextGraphs.get(TARGET)?.coreHosted).not.toBe(true);
+    expect(core.state.subscribedContextGraphs.get(ordinary)?.coreHosted).not.toBe(true);
+    expect(core.state.contextGraphSubscriptionDormancyById.size).toBe(0);
+  });
+
   it('comes back first at the next restart, ahead of the hosted backlog and outside the cap', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-dormant-restart-'));
     dirs.push(dataDir);
@@ -205,7 +227,7 @@ describe('first StorageACK for a dormant graph after a restart', { timeout: 60_0
       expect.arrayContaining([expect.objectContaining({ ok: true })]),
     );
     await peekStorageAckDemandActivations(before.agent)?.whenIdle();
-    await storageAckRecentGraphsOf(before.agent).whenWritten();
+    await before.agent.storageAckRecentGraphs().whenWritten();
     await before.agent.stop().catch(() => undefined);
 
     // Same saved rows, same data directory; the hosted backlog is slow to read.
@@ -234,6 +256,6 @@ describe('first StorageACK for a dormant graph after a restart', { timeout: 60_0
       ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE,
     });
     await peekStorageAckDemandActivations(without.agent)?.whenIdle();
-    await storageAckRecentGraphsOf(without.agent).whenWritten();
+    await without.agent.storageAckRecentGraphs().whenWritten();
   });
 });

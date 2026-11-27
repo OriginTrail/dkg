@@ -41,7 +41,7 @@ import {
   type ContextGraphReadAuthorityDecision,
 } from './context-graph-read-authority.js';
 import { runBoundedOperation, isBoundedOperationTimeoutError } from './bounded-operation.js';
-import { recoverUnavailableSubscriptionRow, type SubscriptionRecoveryOutcome, type SubscriptionRecoveryRowPorts } from './context-graph-subscription-recover-row.js';
+import { recoverPersistedSubscriptionRow, type SubscriptionRecoveryOutcome, type SubscriptionRecoveryRowPorts } from './context-graph-subscription-recover-row.js';
 import type { ContextGraphSubscriptionRecord } from './dkg-agent-types.js';
 
 /** Pause after the first unanswered check, and the shortest a wake-up leaves. */
@@ -318,7 +318,7 @@ export class PersistedSubscriptionNameBindingRetry {
   }
 
   async #attempt(held: HeldRow): Promise<SubscriptionRecoveryOutcome> {
-    return recoverUnavailableSubscriptionRow(held.contextGraphId, {
+    return recoverPersistedSubscriptionRow(held.contextGraphId, {
       ...this.#ports,
       isCurrent: () => this.#current() && this.#rows.get(held.contextGraphId) === held && this.#remaining(held) > 0,
       resolveAuthority: row => this.#check(row, held),
