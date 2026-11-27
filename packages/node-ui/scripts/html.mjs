@@ -1,7 +1,7 @@
 // @ts-check
 // Reads an HTML mock-up once: its opening tags with their attributes, and the bodies of
-// its <style> blocks, each with where it is in the file. Comments are masked first, so
-// commented-out markup isn't read and every offset stays where it was. Both the
+// its <style> blocks, each with where it is in the file. Comments in markup are skipped,
+// so commented-out markup isn't read; `<!--` in raw text (a script, a style) is text. Both the
 // declaration reader (scripts/design-rules.mjs: style attributes and <style> blocks) and
 // the component rules (scripts/design-core.mjs) read HTML through this, and nothing else.
 // Attribute values are decoded as a browser decodes them (`ds&#45;btn` is ds-btn), with
@@ -21,9 +21,6 @@ import { decodeHTMLAttribute } from 'entities';
  */
 /** A <style> block's CSS and where it starts in the file. @typedef {{ css: string, start: number }} HtmlStyle */
 /** @typedef {{ tags: HtmlTag[], styles: HtmlStyle[] }} HtmlDocument */
-
-/** HTML without its comments, each replaced by spaces so every offset and line stays where it was. @param {string} html @returns {string} */
-export const maskHtmlComments = (html) => html.replace(/<!--[\s\S]*?-->/g, (c) => c.replace(/[^\n]/g, ' '));
 
 // One attribute: a name, then optionally `=` (with HTML's optional spaces) and a value in
 // double quotes, single quotes or none. Quoted values may hold any character, `>` too.
@@ -66,7 +63,7 @@ const RAW_TEXT = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe
  * @returns {HtmlDocument}
  */
 export function readHtml(html) {
-  const source = maskHtmlComments(html);
+  const source = html;
   /** @type {HtmlTag[]} */
   const tags = [];
   /** @type {HtmlStyle[]} */
@@ -74,10 +71,19 @@ export function readHtml(html) {
   // Elements whose body is text, not markup: a `<button>` written inside a textarea, a
   // script string or a CSS `content` value is text, so reading skips to the closing tag.
   // A <style> body is still read, as CSS.
+  // Comments are skipped as they're reached in markup, so `<!--` inside a script, a <style>
+  // body or a quoted attribute is text there, not the start of a comment.
   const tagAt = new RegExp(TAG.source, 'gi');
-  /** @type {RegExpExecArray | null} */
-  let m;
-  while ((m = tagAt.exec(source))) {
+  for (;;) {
+    const from = tagAt.lastIndex;
+    const m = tagAt.exec(source);
+    if (!m) break;
+    const comment = source.indexOf('<!--', from);
+    if (comment !== -1 && comment < m.index) {
+      const close = source.indexOf('-->', comment + 4);
+      tagAt.lastIndex = close === -1 ? source.length : close + 3;
+      continue;
+    }
     const index = m.index;
     const attrsAt = index + 1 + m[1].length;
     /** @type {Map<string, HtmlAttr>} */

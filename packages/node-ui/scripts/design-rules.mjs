@@ -7,7 +7,7 @@
 // runs tsc with checkJs over this file.
 import { CssReadError, cssDeclarations } from './css.mjs';
 import { literalWords, parseValue, varRefs } from './css-value.mjs';
-import { maskHtmlComments, readHtml } from './html.mjs';
+import { readHtml } from './html.mjs';
 import { styleDeclarations } from './jsx.mjs';
 
 /** @typedef {import('./jsx.mjs').Declaration} Declaration */
@@ -41,9 +41,6 @@ export const MOTION_FREE_MS = 0.5;
  * aren't here: a % corner is a circle and a % space is layout.
  */
 const OTHER_LENGTH = /^(-?\d*\.?\d+)(rem|em|pt|pc|in|cm|mm|q|vw|vh|vi|vb|vmin|vmax|[sld]v[whib]|cq[whib]|cqmin|cqmax|ch|ex|cap|ic|r?lh)$/i;
-
-export { maskHtmlComments };
-
 
 /** Most values one declaration is checked with, when its variables have several definitions. */
 const MAX_CANDIDATES = 16;

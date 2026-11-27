@@ -158,6 +158,17 @@ describe('design check', () => {
     expect(found('<!-- old\n-->\n<button>New</button>\n<div style="padding: 10px"></div>')).toEqual(['3 component', '4 spacing']);
   });
 
+  it('reads `<!--` in a script, a style or an attribute as text, not as a comment', () => {
+    const found = (html: string) => checkText(system, html, 'mock.html', { known: new Set(), mockup: true })
+      .filter((f: { offScale?: boolean }) => f.offScale)
+      .map((f: { line: number; kind: string }) => `${f.line} ${f.kind}`);
+    expect(found('<script>const marker = "<!--";</script>\n<button>Real</button>\n<!-- end -->')).toEqual(['2 component']);
+    expect(found('<style>.a::before { content: "<!--"; } .a { gap: 10px; } .a::after { content: "-->"; }</style>')).toEqual(['1 spacing']);
+    expect(found('<div title="<!--"></div>\n<div style="padding: 10px"></div>\n<p title="-->"></p>')).toEqual(['2 spacing']);
+    // A real comment after them is still skipped.
+    expect(found('<script>"<!--"</script>\n<!-- <button>Old</button> -->\n<div style="padding: 10px"></div>')).toEqual(['3 spacing']);
+  });
+
   it('fails an opaque colour off the system, and passes one on it', () => {
     const off = (prop: string, value: string) => checkDeclaration(system, prop, value, { known: new Set() })
       .filter((f: { kind: string }) => f.kind === 'colour').map((f: { offScale?: boolean }) => Boolean(f.offScale));
