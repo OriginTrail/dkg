@@ -24,6 +24,7 @@ import { z } from 'zod';
 import type { DkgClient } from '../client.js';
 import { DkgHttpError, DkgOutcomeUnknownError } from '../client.js';
 import type { DkgConfig } from '../config.js';
+import { describeCompletedShare } from '../knowledge-asset-share.js';
 import { EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION } from './context-graph-description.js';
 
 type ToolResult = {
@@ -542,10 +543,7 @@ export function registerAssertionTools(
             `${warning}`,
           );
         }
-        return ok(
-          `Shared complete knowledge asset '${name}' (project '${pid}') to SWM ` +
-          `(sealed:true, publish-ready).`,
-        );
+        return ok(describeCompletedShare(name, pid, result));
       } catch (e) {
         const unknown = outcomeUnknownResult(e, `Share of knowledge asset '${name}' (project '${pid}')`);
         if (unknown) return unknown;

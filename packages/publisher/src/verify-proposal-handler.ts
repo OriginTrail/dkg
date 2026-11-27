@@ -1,7 +1,8 @@
 import {
   decodeVerifyProposal,
   encodeVerifyApproval,
-  computeACKDigest,
+  computeVerifyApprovalDigest,
+  validateContextGraphId,
   Logger,
   createOperationContext,
   type VerifyProposalMsg,
@@ -17,14 +18,23 @@ export interface VerifyProposalHandlerDeps {
   agentAddress: string;
   getBatchMerkleRoot: (contextGraphId: string, batchId: bigint) => Promise<Uint8Array | null>;
   getContextGraphIdOnChain: (contextGraphId: string) => Promise<bigint | null>;
+  /** The chain id and the deployment's KnowledgeAssetsLifecycle address, which the approval digest binds. */
+  getSigningDomain: () => Promise<VerifyApprovalSigningDomain>;
+}
+
+/** What binds a verify approval to its network: see `computeVerifyApprovalDigest`. */
+export interface VerifyApprovalSigningDomain {
+  chainId: bigint;
+  contractAddress: string;
 }
 
 /**
  * Handles incoming VERIFY proposals from other agents.
  * When a proposal arrives, the handler:
- * 1. Validates the proposal hasn't expired
+ * 1. Validates the proposal's context graph id and that it hasn't expired
  * 2. Verifies the batch exists locally and merkle root matches
- * 3. Signs the verify digest: keccak256(contextGraphId, merkleRoot)
+ * 3. Signs the verify approval digest (`computeVerifyApprovalDigest`), bound
+ *    to the chain, the deployment, the context graph and the batch
  * 4. Returns a VerifyApproval with the signature
  */
 export class VerifyProposalHandler {
@@ -50,6 +60,13 @@ export class VerifyProposalHandler {
     } catch (err) {
       this.log.warn(ctx, `Invalid verify proposal from ${peerId}: ${err instanceof Error ? err.message : String(err)}`);
       throw new Error('invalid_proposal: failed to decode');
+    }
+
+    // Only a valid context graph id is looked up.
+    const contextGraphIdCheck = validateContextGraphId(proposal.contextGraphId);
+    if (!contextGraphIdCheck.valid) {
+      this.log.warn(ctx, `Invalid verify proposal from ${peerId}: ${contextGraphIdCheck.reason}`);
+      throw new Error('invalid_proposal: invalid context graph id');
     }
 
     // Check expiry
@@ -82,8 +99,15 @@ export class VerifyProposalHandler {
       throw new Error('context_graph_not_found');
     }
 
-    // Sign the verify digest
-    const digest = computeACKDigest(contextGraphIdOnChain, proposal.merkleRoot);
+    // Sign the verify approval digest
+    const domain = await this.deps.getSigningDomain();
+    const digest = computeVerifyApprovalDigest(
+      domain.chainId,
+      domain.contractAddress,
+      contextGraphIdOnChain,
+      batchId,
+      proposal.merkleRoot,
+    );
     const prefixedHash = ethers.hashMessage(digest);
     const signingKey = new ethers.SigningKey(this.deps.agentPrivateKey);
     const sig = signingKey.sign(prefixedHash);
