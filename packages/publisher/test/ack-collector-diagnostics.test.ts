@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ACKCollector } from '../src/ack-collector.js';
 import { computeFlatKCRootV10, computeFlatKCMerkleLeafCountV10 } from '../src/merkle.js';
 
@@ -16,10 +16,11 @@ describe('ACKCollector diagnostic settlement', () => {
   it.each(['publish', 'update'] as const)('reports discovered unattempted candidates on early %s quorum failure', async operation => {
     const events: unknown[] = [];
     let sends = 0;
+    const discover = vi.fn(() => ['candidate-a', 'candidate-b']);
     const collector = new ACKCollector({
       gossipPublish: async () => {},
       sendP2P: async () => { sends++; throw new Error('must not dial an impossible quorum'); },
-      getConnectedCorePeers: () => ['candidate-a', 'candidate-b'],
+      getConnectedCorePeers: discover,
     });
     const onDiagnostic = (event: unknown) => { events.push(event); };
     // An invalid digest address proves the candidate guard still wins first.
@@ -35,6 +36,7 @@ describe('ACKCollector diagnostic settlement', () => {
     await expect(attempt).rejects.toMatchObject({ collected: 0, required: 3, dialled: 2,
       peerOutcomes: [ { peerId: 'candidate-a', reason: 'pool_below_quorum' },
         { peerId: 'candidate-b', reason: 'pool_below_quorum' } ] });
+    expect(discover).toHaveBeenCalledWith(expect.any(String), 3);
     expect(sends).toBe(0);
     expect(events).toEqual([expect.objectContaining({ completedPeerAttempts: 0, perRoundPeakPeerRequests: 0,
       candidates: { total: 2, ack: 0, declined: 0, invalid: 0, unsupported: 0, transport: 0, pending: 2 } })]);

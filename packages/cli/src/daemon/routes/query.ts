@@ -346,6 +346,9 @@ import {
   createStoreQueryRequestLifecycle,
   type StoreQueryRequestLifecycle,
 } from '../store-query-lifecycle.js';
+import {
+  awaitApiQueryResult, requestQueryTimeLimitMs, respondQueryTimeLimitExceeded, startApiQueryTimeLimit, type ApiQueryTimeLimit,
+} from '../api-query-time-limit.js';
 
 
 // Keep these in sync with VerifyCollector's hard enforcement in
@@ -606,6 +609,9 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         });
       }
     }
+    // A request may lower the node's time limit (DKG_API_QUERY_TIME_LIMIT_MS), never raise it.
+    const timeLimitMs = requestQueryTimeLimitMs(parsed.timeoutMs);
+    if (!timeLimitMs.ok) return jsonResponse(res, 400, { error: timeLimitMs.error });
     const ctx = createOperationContext("query");
     tracker.start(ctx, {
       contextGraphId,
@@ -615,6 +621,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     // Declared outside the try so the catch can tell a caller abort apart from
     // a genuine server-side failure.
     let queryLifecycle: ApiQueryRequestLifecycle | undefined;
+    let timeLimit: ApiQueryTimeLimit | undefined;
     try {
       tracker.completePhase(ctx, "parse");
       tracker.startPhase(ctx, "execute");
@@ -673,10 +680,13 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       // way to the SPARQL adapter: if the HTTP caller times out or disconnects,
       // its queued/in-flight store request must not remain as orphan work.
       queryLifecycle = createApiQueryRequestLifecycle(req, res);
+      // The time limit stops the query's reads in the store, not only this wait;
+      // a disconnect before it stops them too.
+      if (timeLimitMs.limitMs !== null) timeLimit = startApiQueryTimeLimit(timeLimitMs.limitMs, queryLifecycle.signal);
 
       let result;
       try {
-        result = await agent.query(sparql, {
+        result = await awaitApiQueryResult(agent.query(sparql, {
           contextGraphId,
           chainEvidenceMode: parsed.chainEvidenceMode,
           graphSuffix,
@@ -690,7 +700,8 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
           assertionName,
           subGraphName,
           callerAgentAddress,
-          signal: queryLifecycle.signal,
+          signal: timeLimit?.signal ?? queryLifecycle.signal,
+          workDeadline: timeLimit?.deadlineAt,
           priority: queryLifecycle.priority,
           source: queryLifecycle.source,
           maxResponseBytes: API_QUERY_MAX_STORE_RESPONSE_BYTES,
@@ -705,9 +716,11 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
           // branch doesn't accept it; it's landing via the agent-side fixes.
           minTrust: minTrust as TrustLevel | undefined,
           operationCtx: ctx,
-        });
+        }), timeLimit, queryLifecycle.signal);
+        if (timeLimit?.expired()) throw new Error('Query completed after its monotonic deadline');
       } finally {
         queryLifecycle?.dispose();
+        timeLimit?.release();
       }
       const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, "execute");
@@ -727,9 +740,15 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         phases: { execute: execDur, serverTotal: Date.now() - serverT0 },
       });
     } catch (err: any) {
-      if (err?.code === API_QUERY_CALLER_DISCONNECTED) {
+      // A store that stopped the read wraps the caller's reason, so the lifecycle decides.
+      if (err?.code === API_QUERY_CALLER_DISCONNECTED || queryLifecycle?.signal.aborted) {
         tracker.cancel(ctx, err);
         if (!res.writableEnded) res.end();
+        return;
+      }
+      if (timeLimit?.expired()) {
+        tracker.fail(ctx, err);
+        respondQueryTimeLimitExceeded(res, timeLimit.limitMs, err);
         return;
       }
       if (isContextGraphReadAuthorityUnavailable(err)) {

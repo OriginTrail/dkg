@@ -432,6 +432,37 @@ describe(`view queries with semantics on ${endpoint ? 'Blazegraph' : 'Oxigraph'}
     expect(new DKGQueryEngine(store).viewSemanticsDeltaReport()).toEqual([]);
   });
 
+  it('detaches both semantic sample reads from an expired caller deadline', async () => {
+    fresh();
+    const started = performance.now(), caller = new AbortController();
+    let clock = started;
+    const time = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    readGraphs.withWriteLock = async (_graph, work) => { await gate; return work(); };
+    const sampleReads: Array<{ deadline: number | undefined; signal: AbortSignal | undefined }> = [];
+    const query = store.query.bind(store);
+    vi.spyOn(store, 'query').mockImplementation((sparql, options) => {
+      if (options?.source === VIEW_SEMANTICS_DELTA_SOURCE) sampleReads.push({ deadline: options.workDeadline, signal: options.signal });
+      return query(sparql, options);
+    });
+    const sampler = new ViewSemanticsDeltaSampler({ sampleRate: 1 });
+    const sampling = new DKGQueryEngine(store, { readGraphs, viewSemanticsDelta: sampler });
+    try {
+      await sampling.query(JOIN, { ...VM, signal: caller.signal, workDeadline: started + 1_000 });
+      caller.abort(); clock = started + 2_000; release();
+      await sampler.idle();
+      expect(sampleReads.length).toBeGreaterThanOrEqual(2);
+      for (const read of sampleReads) {
+        expect(read.deadline).toBeUndefined();
+        expect(read.signal).toBeDefined();
+        expect(read.signal).not.toBe(caller.signal);
+        expect(read.signal!.aborted).toBe(false);
+      }
+      expect(sampling.viewSemanticsDeltaReport([id])).toMatchObject([{ samples: 1, skipped: 0 }]);
+    } finally { release(); time.mockRestore(); }
+  });
+
   it('samples queries from a read graph that requests are not answered from yet', async () => {
     fresh();
     readGraphs.serving = false;

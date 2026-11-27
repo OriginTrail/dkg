@@ -7,6 +7,7 @@ import {
 import {
   tryUpdateWithTouchedGraphs,
   type Quad,
+  type QueryOptions,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 
@@ -40,12 +41,13 @@ export class LocalContextGraphRegistrationStatusStore {
     this.#markProjectionDirty = options.markProjectionDirty;
   }
 
-  async read(contextGraphId: string): Promise<LocalContextGraphRegistrationStatus | null> {
+  async read(contextGraphId: string, options?: Pick<QueryOptions, 'signal' | 'workDeadline'>): Promise<LocalContextGraphRegistrationStatus | null> {
+    options?.signal?.throwIfAborted();
     const graph = contextGraphMetaGraphUri(contextGraphId);
     const subject = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.#store.query(
       `SELECT ?status WHERE { GRAPH <${graph}> { <${subject}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } }`,
-      { source: 'agent.contextGraph.registrationStatus' },
+      { ...options, source: 'agent.contextGraph.registrationStatus' },
     );
     if (result.type !== 'bindings') return null;
     const statuses = new Set(result.bindings

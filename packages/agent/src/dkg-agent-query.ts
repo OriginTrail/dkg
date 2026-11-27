@@ -510,9 +510,9 @@ export class QueryMethods extends DKGAgentBase {
         view: opts.view,
         callerAgentAddress: callerAgentAddressStr,
         targetsSharedMemory,
-        signal: opts.signal,
+        signal: opts.signal, workDeadline: opts.workDeadline,
         resolveAuthority: (id, options) => this.resolveContextGraphReadAuthority(id, options),
-        isLocalFirstUnregistered: (id) => this.isLocalFirstUnregisteredContextGraph(id),
+        isLocalFirstUnregistered: (id, readOptions) => this.isLocalFirstUnregisteredContextGraph(id, readOptions),
         readCurrentBinding: (id) => this.subscribedContextGraphs.get(id),
       }), opts);
       if (scopedReadAuthority.outcome === 'unavailable') {
@@ -636,6 +636,7 @@ export class QueryMethods extends DKGAgentBase {
       draftAccess: resolveCallerDraftAccess({ defaultAgentAddress: this.defaultAgentAddress, peerId: this.peerId }, callerAgentAddressStr, opts.excludeWorkingMemoryPartitions === true),
       includePrivate: opts.includePrivate,
       signal: opts.signal,
+      workDeadline: opts.workDeadline,
       priority: opts.priority,
       source: opts.source,
       maxResponseBytes: opts.maxResponseBytes,

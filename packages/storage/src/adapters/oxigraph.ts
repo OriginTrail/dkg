@@ -22,10 +22,7 @@ import type {
   TripleStoreQueryOptions,
   UpdateOptions,
 } from '../triple-store.js';
-import {
-  formatCanonicalRdfTerm,
-  parseRdfLiteralTerm,
-} from '@origintrail-official/dkg-rdf-utils';
+import { parseTerm, toOxQuad, fromOxQuad, termToString } from './oxigraph-terms.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { buildAtomicSubjectAndInsertUpdate } from '../atomic-subject-insert.js';
@@ -111,6 +108,7 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
       ? Math.floor(options.flushDelayMs) : DEFAULT_FLUSH_DELAY_MS;
     if (persistPath) {
       this.hydrateSync(persistPath);
+      if (existsSync(persistPath)) this.persistedGeneration = this.dirtyGeneration;
     }
   }
 
@@ -176,11 +174,16 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
 
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private flushing = false;
+  private dirtyGeneration = 0;
+  private persistedGeneration = -1;
   private readonly flushDelayMs: number;
 
   /** The native store for a write. A read-only store refuses before anything changes. */
   private get writable(): OxStore {
     if (this.readOnly) throw new OxigraphStoreReadOnlyError(this.persistPath);
+    // A multi-step mutation may throw after changing data, before scheduling.
+    // Track at the write boundary so an explicit barrier still persists it.
+    this.dirtyGeneration += 1;
     return this.store;
   }
 
@@ -189,9 +192,7 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
     this.flushTimer = setTimeout(() => {
       this.flushTimer = null;
       // Background flush has no caller to receive errors; log them.
-      // Explicit `flush()`/`close()` callers DO `await` flushNow() and
-      // get the original throw, which is what we want for shutdown
-      // durability — see flushNow()'s docstring.
+      // Explicit flush()/close() await the barrier and receive the error.
       this.flushNow().catch((err) => {
         // eslint-disable-next-line no-console
         console.error(
@@ -229,7 +230,7 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
    * A read-only store never writes: what it loaded may be older than the file.
    */
   private async flushNow(): Promise<void> {
-    if (!this.persistPath || this.flushing || this.readOnly) return;
+    if (!this.persistPath || this.flushing || this.readOnly || this.persistedGeneration === this.dirtyGeneration) return;
     this.flushing = true;
     const dir = dirname(this.persistPath);
     const tmpPath = `${this.persistPath}.tmp`;
@@ -238,6 +239,7 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
       // Capture once before any awaited writes: concurrent mutations cannot mix
       // two graph/seal generations in this snapshot. The native API returns an
       // array; it avoids a complete-store string but still uses memory per quad.
+      const through = this.dirtyGeneration;
       const quads = this.store.match();
 
       // 1+2: write to tmp, fsync to commit bytes.
@@ -270,6 +272,8 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
       } catch {
         // Best-effort dir fsync — see comment above.
       }
+      this.persistedGeneration = through;
+      if (this.dirtyGeneration > through) this.scheduleFlush();
     } catch (err) {
       // Log here so we see the failure regardless of the caller — but
       // re-throw so explicit callers fail loudly. (Background callers
@@ -675,9 +679,8 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
    * this after the insert — otherwise only the 50ms debounced flush runs,
    * and it can be lost if the daemon dies in that window.
    *
-   * Cancels any pending debounced flush (we'll cover its work) and waits
-   * out any in-flight flushNow() before dumping the current snapshot, so
-   * triples inserted while the previous flush was running aren't dropped.
+   * Drains any in-flight snapshot and persists remaining dirty generations.
+   * A generation already persisted by any caller needs no additional snapshot.
    *
    * THROWS if the underlying write/fsync/rename fails (ENOSPC, EACCES,
    * EROFS, EXDEV, …). Callers that need a durable insert must treat the
@@ -694,6 +697,12 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
       await new Promise<void>((resolve) => setTimeout(resolve, 5));
     }
     await this.flushNow();
+  }
+
+  /** Persist writes begun so far, using the same generation owner as flush(). */
+  async persistBarrier(): Promise<void> {
+    if (this.persistPath && !this.readOnly && this.dirtyGeneration > 0
+        && this.persistedGeneration !== this.dirtyGeneration) await this.flush();
   }
 
   /**
@@ -726,58 +735,6 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
   const reason = signal.reason;
   throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
-}
-
-function parseTerm(term: string): oxigraph.NamedNode | oxigraph.Literal | oxigraph.BlankNode {
-  if (term.startsWith('"')) {
-    const literal = parseRdfLiteralTerm(term);
-    if (literal) {
-      // UNESCAPE the captured lexical form: query results (fromOxQuad →
-      // termToString) hand back N-Quads-ESCAPED literals, and store.load()
-      // (insert) UNescapes on parse — so a literal whose value contains
-      // `"`, `\`, LF, or CR is stored unescaped but arrives here escaped.
-      // Without this reversal, `oxigraph.literal(match[1])` builds a literal
-      // whose value is the ESCAPED form, which never matches the stored term,
-      // so deleteByPattern / delete silently affect ZERO quads. (Empirically
-      // reproduced; this is the OT-RFC-56 boot-sweep no-op blocker.)
-      if (literal.kind === 'language') return oxigraph.literal(literal.value, literal.language);
-      if (literal.kind === 'typed') {
-        return oxigraph.literal(literal.value, oxigraph.namedNode(literal.datatype));
-      }
-      return oxigraph.literal(literal.value);
-    }
-    return oxigraph.literal(term.slice(1, -1));
-  }
-  if (term.startsWith('_:')) return oxigraph.blankNode(term.slice(2));
-  return oxigraph.namedNode(term);
-}
-
-function toOxQuad(q: DKGQuad): oxigraph.Quad | null {
-  try {
-    const subject = parseTerm(q.subject) as oxigraph.NamedNode | oxigraph.BlankNode;
-    const predicate = oxigraph.namedNode(q.predicate);
-    const object = parseTerm(q.object);
-    const graph = q.graph
-      ? oxigraph.namedNode(q.graph)
-      : oxigraph.defaultGraph();
-    return oxigraph.quad(subject, predicate, object, graph);
-  } catch {
-    return null;
-  }
-}
-
-function fromOxQuad(oxq: OxQuad): DKGQuad {
-  return {
-    subject: termToString(oxq.subject),
-    predicate: oxq.predicate.value,
-    object: termToString(oxq.object),
-    graph:
-      oxq.graph.termType === 'DefaultGraph' ? '' : oxq.graph.value,
-  };
-}
-
-function termToString(t: OxTerm): string {
-  return formatCanonicalRdfTerm(t);
 }
 
 registerTripleStoreAdapter('oxigraph', async (opts) => new OxigraphStore(undefined, { readOnly: opts?.readOnly === true }));

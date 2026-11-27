@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { QueryOptions } from '@origintrail-official/dkg-storage';
+
 /**
  * Typed context-graph read-authority resolution.
  *
@@ -90,13 +92,14 @@ interface ScopedContextGraphQueryReadAuthorityInput {
   callerAgentAddress?: string;
   targetsSharedMemory: boolean;
   signal?: AbortSignal;
+  workDeadline?: number;
   resolveAuthority(contextGraphId: string, options: {
     callerAgentAddress?: string;
     allowSubscriptionFallback?: boolean;
     signal?: AbortSignal;
     authorityReadMode: 'finalized-index';
   }): Promise<ContextGraphReadAuthorityDecision>;
-  isLocalFirstUnregistered(contextGraphId: string): Promise<boolean>;
+  isLocalFirstUnregistered(contextGraphId: string, options?: Pick<QueryOptions, 'signal' | 'workDeadline'>): Promise<boolean>;
   readCurrentBinding(contextGraphId: string): { onChainId?: string; pendingMeta?: boolean } | undefined;
 }
 
@@ -117,7 +120,9 @@ export async function resolveScopedContextGraphQueryReadAuthority(
     && authority.outcome === 'denied'
     && authority.source === 'legacy-local'
     && authority.reason === 'no-read-authority'
-    && await input.isLocalFirstUnregistered(input.contextGraphId)
+    && await readQueryAuthorityDependency(input.signal, () => input.isLocalFirstUnregistered(input.contextGraphId, {
+      signal: input.signal, workDeadline: input.workDeadline,
+    }))
     && input.readCurrentBinding(input.contextGraphId)?.onChainId === undefined
     && input.readCurrentBinding(input.contextGraphId)?.pendingMeta !== true
   ) {

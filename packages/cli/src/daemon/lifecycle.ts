@@ -483,6 +483,7 @@ import {
 
 import { handleRequest } from './handle-request.js';
 import { configureApiQueryPriority } from './api-query-priority.js';
+import { configureApiQueryTimeLimit } from './api-query-time-limit.js';
 import { configureWritePreflightCoalescing } from './write-preflight-coalescing.js';
 import { startRetention, type RetentionHandle } from './retention-sweeps.js';
 import { resolveRetentionConfig } from '../retention-config.js';
@@ -1278,15 +1279,13 @@ async function runDaemonInnerWithStartupOwnership(
     emit: (level, message) => log(`[${level}] ${message}`),
   });
 
-  configureApiQueryPriority(process.env.DKG_API_QUERY_PRIORITY, {
-    info: log,
-    warn: log,
-  });
-  // The store control path's default and config setting depend on the configured backend (OT-RFC-73 P14). This
-  // runs before any store call can build the path; a later configuration would be refused with a warning.
-  configureStoreControlPath({ backend: config.store?.backend ?? 'oxigraph-worker', configured: config.store?.controlReservedSlots }, { warn: log });
-  logStoreControlPathGeometry({ info: log, warn: log });
-  const writePreflightCoalescing = configureWritePreflightCoalescing(process.env, { info: log, warn: log });
+  const policyLog = { info: log, warn: log };
+  configureApiQueryPriority(process.env.DKG_API_QUERY_PRIORITY, policyLog);
+  configureApiQueryTimeLimit(process.env.DKG_API_QUERY_TIME_LIMIT_MS, policyLog);
+  // Configure the backend's control path before any store call (OT-RFC-73 P14); later configuration is refused.
+  configureStoreControlPath({ backend: config.store?.backend ?? 'oxigraph-worker', configured: config.store?.controlReservedSlots }, policyLog);
+  logStoreControlPathGeometry(policyLog);
+  const writePreflightCoalescing = configureWritePreflightCoalescing(process.env, policyLog);
 
   const startupLogRotationMessage = startupLogRotation
     && describeDaemonLogRotation(startupLogRotation, 'during startup');

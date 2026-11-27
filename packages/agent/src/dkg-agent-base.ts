@@ -326,8 +326,6 @@ import {
   type CiphertextChunkCatchupRequest,
   type CiphertextChunkCatchupResponse,
 } from './swm/ciphertext-chunk-catchup.js';
-import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
-import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
 import { insertWithOversizeGuard } from './sync/oversize-filter.js';
@@ -335,12 +333,7 @@ import { storeAgentProfileQuads } from './agent-profile-updates.js';
 import { compactSyncedPrivateRosterGenerations } from './private-roster-version.js';
 import { OversizeTombstoneLog } from './sync/oversize-tombstones.js';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore, MemoryChangelogCursorStore } from './sync/checkpoint/state.js';
-import { runDurableSync } from './sync/requester/durable-sync.js';
-import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
-import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
-import { registerSyncHandler } from './sync/responder/sync-handler.js';
-import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   ensureWorkspaceEncryptionKey,
@@ -385,7 +378,6 @@ type JoinApprovalRetryEntry = {
 import { multiaddr } from '@multiformats/multiaddr';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
-import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
 import { buildManualCclFacts, resolveFactsFromSnapshot, type CclFactResolutionMode } from './ccl-fact-resolution.js';
 import {
   strip, stripLiteral, jsonLdToQuads,
@@ -1267,6 +1259,8 @@ export class DKGAgentBase {
   protected selectedVmReconcileBindingGeneration = 0;
   /** Bounded root bookkeeping for sibling cleanup only; never currentness authority. */
   protected readonly recentReconciledUals = new RecentUalSet();
+  /** This node's own just-confirmed publishes, `${onChainCgId}:${kaId}` → local graph (handleKARegisteredNudge). */
+  protected readonly ownConfirmedRegistrations = new RecentReconcileEvidenceMap<string>(256, 10 * 60_000);
   /** Bounded same-finalized-block leases; never durable across a stagnant head. */
   protected readonly vmReconcileFinalizedSlotEvidence =
     new RecentReconcileEvidenceMap<{
@@ -1505,6 +1499,8 @@ export class DKGAgentBase {
   /** Detached owner for post-readiness persisted-subscription authority recovery. */
   protected contextGraphSubscriptionAuthorityRecoveryRuntime?:
     CoalescingRecurringTask;
+  /** Rows the startup pass left dormant without their chain name binding, asked again once started. */
+  protected readonly contextGraphSubscriptionNameBindingRetryIds = new Set<string>();
   /** Detached owner that drains activation-cap subscriptions as slots become safe. */
   protected contextGraphSubscriptionRehydrationPromotionRuntime?:
     CoalescingRecurringTask;

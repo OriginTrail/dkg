@@ -183,6 +183,17 @@ export {
   type StoreOperationTimeoutErrorLike,
 } from './store-operation-timeout.js';
 export {
+  QUERY_WORK_STOPPED_CODE,
+  QUERY_WORK_TERMINATION_UNCONFIRMED_CODE,
+  QueryWorkTerminationUnconfirmedError,
+  classifyQueryWorkTermination,
+  QueryWorkStoppedError,
+  isQueryWorkStoppedError,
+  remainingWorkMs,
+  type QueryWorkLimitOptions,
+  type QueryWorkStopOutcome,
+} from './query-work-stop.js';
+export {
   STORE_OPERATION_OUTCOME_TAG,
   STORE_OPERATIONS,
   hasStoreOperationOutcome,

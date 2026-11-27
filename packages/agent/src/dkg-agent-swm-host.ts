@@ -15,7 +15,6 @@ import { readLatestMerkleRootAndPublisher } from './ka-latest-root-and-publisher
 import {
   isCanonicalAuthoritativeContextGraphId, localContextGraphIdMatchesCommittedNameHash,
 } from './context-graph-binding-state.js';
-import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
 import { normalizeContextGraphNameHash } from './context-graph-name-candidate.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { createSwmHostModeHandler } from './internal/gossip/host-mode-handler.js';
@@ -26,7 +25,7 @@ import { VmRecoveryPassAuthority, type VmRecoveryRegisteredPublicEvidence } from
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { performance } from 'node:perf_hooks';
 import {
-  DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
+  DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent, type KnowledgeAssetConfirmedEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
@@ -1030,8 +1029,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
   /** Automatic hosting cannot activate saved intent that admission left dormant. */
   automaticSwmHostModeAdmissionAllowed(this: DKGAgent, contextGraphId: string): boolean {
     const localId = this.swmHostModeLocalId(contextGraphId);
-    if (!this.contextGraphSubscriptionDormancyById.has(localId)
-      || isAdmittedContextGraphSubscription(this.subscribedContextGraphs.get(localId))) return true;
+    if (this.contextGraphSubscriptionActivations.canAdmitAutomaticHosting(localId)) return true;
     const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
     // Refusal of A cannot retire an operator handler or another slot's owner B.
     if (this.swmHostModeSubscribed.get(hostKey) !== SUBSCRIPTION_SOURCES.MANUAL
@@ -2892,8 +2890,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         }
       }
       const existing = this.subscribedContextGraphs.get(localCgId);
-      if (this.contextGraphSubscriptionDormancyById.has(localCgId)
-        && !isAdmittedContextGraphSubscription(existing)) return 'dormant';
+      if (!this.contextGraphSubscriptionActivations.canAdmitAutomaticHosting(localCgId)) return 'dormant';
       if (existing === undefined) return undefined;
       if (!existing.subscribed) return undefined;
       if (existing.onChainId === undefined) {
@@ -2909,12 +2906,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // a live-then-policy read on its first observation, and an already-recorded
     // row is left untouched whatever the chain says now. Every path that can
     // still RECORD a graph falls through to the fresh reads below.
+
+    const blockedBeforeRead = blocked();
+    if (blockedBeforeRead !== undefined) return blockedBeforeRead;
     if (isCoreHostedPublicCgRecorded(
       this.subscribedContextGraphs.get(localCgId),
       numericStr,
     )) return alreadyRecorded();
-    const blockedBeforeRead = blocked();
-    if (blockedBeforeRead !== undefined) return blockedBeforeRead;
 
     // Existence-gated read when the adapter exposes liveness; otherwise use
     // the ACK-backed compatibility path because signing a StorageACK proves
@@ -2927,9 +2925,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Re-checked after the await: a concurrent first ACK may have recorded it,
     // or rehydration may have activated the namespace's persisted row.
     const existing = this.subscribedContextGraphs.get(localCgId);
-    if (isCoreHostedPublicCgRecorded(existing, numericStr)) return alreadyRecorded();
+
     const blockedAfterRead = blocked();
     if (blockedAfterRead !== undefined) return blockedAfterRead;
+    if (isCoreHostedPublicCgRecorded(existing, numericStr)) return alreadyRecorded();
     if (existing?.onChainId !== undefined && existing.onChainId !== numericStr) {
       // A host-only row for another graph still owes that graph's copies in
       // this namespace. Rebind only once that graph is gone from the chain
@@ -3238,6 +3237,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
+   * Note one of this node's own publishes the moment its receipt is confirmed
+   * ({@link DKGEvent.KC_CONFIRMED}), so {@link handleKARegisteredNudge} does not
+   * start a reconcile pass for the copy the publish stores itself. Sub-graph
+   * publishes keep their pass.
+   */
+  rememberOwnConfirmedRegistration(this: DKGAgent, event: KnowledgeAssetConfirmedEvent): void {
+    if (event.subGraphName || typeof event.contextGraphId !== 'string') return;
+    if (typeof event.kaId !== 'bigint' || typeof event.onChainContextGraphId !== 'bigint') return;
+    if (event.kaId <= 0n || event.onChainContextGraphId <= 0n) return;
+    this.ownConfirmedRegistrations.set(`${event.onChainContextGraphId}:${event.kaId}`, event.contextGraphId);
+  }
+
+  /**
    * GH #1098 (Phase B) — body of the live `onKARegisteredToContextGraph` nudge,
    * extracted so the branch is directly testable. A
    * `KnowledgeAssetRegisteredToContextGraph` event carries only `{ kaId, cgId }`
@@ -3309,10 +3321,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Populate VM for CGs we member-subscribe to OR (Phase D) public CGs this
     // Core hosts — a hosted Core fills its own gaps too.
     if (!isLifecycleCurrent() || (!sub?.subscribed && !sub?.coreHosted)) return null;
-    this.log.info(ctx, `Phase B: KACG nudge cg=${onChainId} ka=${kaId} -> reconcile "${localCgId}"`);
+    // This node's own publish stores its confirmed copy in that graph itself.
+    // A pass now would only find it there (`chain-promote action=already`)
+    // after scanning the graph's new ordinals, on the store worker the next
+    // share or publish waits for. The periodic sweep reconciles the ordinal.
+    const ownRegistration = `${onChainId}:${kaId}`;
+    const ownPublish = this.ownConfirmedRegistrations.get(ownRegistration) === localCgId;
+    if (ownPublish) this.ownConfirmedRegistrations.delete(ownRegistration);
+    this.log.info(ctx, ownPublish
+      ? `Phase B: KACG nudge cg=${onChainId} ka=${kaId} -> own publish stored in "${localCgId}"; left to the periodic sweep`
+      : `Phase B: KACG nudge cg=${onChainId} ka=${kaId} -> reconcile "${localCgId}"`);
     if (this.vmReconcileScheduling && isLifecycleCurrent()) {
       signal?.throwIfAborted();
-      void this.vmReconcileScheduling.triggerLive(localCgId);
+      if (!ownPublish) void this.vmReconcileScheduling.triggerLive(localCgId);
       // Core-hosted rows are keyed by the SWM namespace of their ACK copies,
       // so one on-chain graph can have several; each promotes its own copies.
       for (const [otherCgId, other] of this.subscribedContextGraphs) {
@@ -4408,16 +4429,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
         throw err;
       }
       if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
-      let flushMs = 0;
-      if (result.reconciled > 0 || pendingWatermark !== undefined) {
-        const flushStartedAt = performance.now();
-        await this.store.flush?.({
-          priority: 'background',
-          source: 'agent.vmReconcile.materialization.flush',
-        });
-        flushMs = performance.now() - flushStartedAt;
-        if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
-      }
+      // The storage barrier owns dirty/persisted generations, including writes
+      // from earlier failed passes and completed background snapshots.
+      const flushStartedAt = performance.now();
+      await this.store.flush?.({ priority: 'background', source: 'agent.vmReconcile.materialization.flush' });
+      const flushMs = performance.now() - flushStartedAt;
+      if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
+      const materialized = result.materialized;
       let watermarkMs = 0;
       if (pendingWatermark !== undefined) {
         const watermarkStartedAt = performance.now();
@@ -4445,8 +4463,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
             + `scanMs=${Math.round(timings?.scanMs ?? 0)} recoverMs=${Math.round(timings?.recoverMs ?? 0)} `
             + `engineMs=${Math.round(timings?.totalMs ?? 0)} flushMs=${Math.round(flushMs)} `
             + `watermarkMs=${Math.round(watermarkMs)} totalMs=${Math.round(performance.now() - passStartedAt)} `
-            + `processed=${result.processed} reconciled=${result.reconciled} pending=${result.pending} `
-            + `continue=${result.shouldContinueImmediately ? 1 : 0}`,
+            + `processed=${result.processed} reconciled=${result.reconciled} materialized=${materialized} `
+            + `pending=${result.pending} continue=${result.shouldContinueImmediately ? 1 : 0}`,
         );
       });
       // A slice that met a refused read keeps the graph's ask-again window

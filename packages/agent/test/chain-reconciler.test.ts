@@ -86,6 +86,7 @@ describe('reconcileContextGraph — sweep', () => {
       head: 3,
       watermark: 3,
       reconciled: 0,
+      materialized: 0,
       pending: 0,
       processed: 0,
       hasMore: false,

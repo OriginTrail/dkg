@@ -385,10 +385,16 @@ export function stuckTransactionRecoveryFor(
   });
 }
 
-/** Canonical adapter receipt wait, including optional same-nonce recovery. */
+/**
+ * Canonical adapter receipt wait, including optional same-nonce recovery.
+ * `pollIntervalMs` defaults to the fixed {@link RPC_RECEIPT_POLL_INTERVAL_MS};
+ * the EVM adapter passes its block-time cadence (receipt-poll-cadence.ts).
+ */
 export function waitForRecoverableTransactionReceipt(
   options: Pick<WaitForReceiptWithDeadlineOptions<TransactionReceipt>,
-    'txHash' | 'receiptTimeoutMs' | 'getReceipt' | 'isReceiptEligible'> & { label: string },
+    'txHash' | 'receiptTimeoutMs' | 'getReceipt' | 'isReceiptEligible'>
+    & Partial<Pick<WaitForReceiptWithDeadlineOptions<TransactionReceipt>, 'pollIntervalMs'>>
+    & { label: string },
   recovery?: StuckTransactionRecovery,
 ): Promise<TransactionReceipt> {
   const { label, receiptTimeoutMs } = options;
@@ -399,7 +405,7 @@ export function waitForRecoverableTransactionReceipt(
       timeoutTxHash: () => recovery.latestTxHash(),
       onPending: (context) => recovery.onPending(context),
     } : {}),
-    pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
+    pollIntervalMs: options.pollIntervalMs ?? RPC_RECEIPT_POLL_INTERVAL_MS,
     assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
     formatTimeoutMessage: ({ txHash, lastError }) =>
       `${label} tx ${txHash} timed out waiting for a receipt after ${receiptTimeoutMs}ms` +

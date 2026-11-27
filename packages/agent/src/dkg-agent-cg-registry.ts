@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { QueryOptions } from '@origintrail-official/dkg-storage';
+
 /**
  * Context-graph registration / sub-graph subsystem extracted from dkg-agent.ts
  * as a mixin holder: on-chain registration + policy reads, stored
@@ -8,8 +10,6 @@
  * methods take `this: DKGAgent` so cross-calls resolve against the composed
  * class.
  */
-
-
 import { contextGraphBindingAbortReason, raceContextGraphBindingAgainstAbort } from './internal/context-graph-binding-abort.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type { ApprovedPrivateReplicaAuthority } from './approved-private-replica.js';
@@ -670,12 +670,12 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
    */
   async readLocalContextGraphRegistrationStatus(
     this: DKGAgent,
-    contextGraphId: string,
+    contextGraphId: string, options?: Pick<QueryOptions, 'signal' | 'workDeadline'>,
   ): Promise<'registered' | 'unregistered' | 'pending' | null> {
     return new LocalContextGraphRegistrationStatusStore({
       store: this.store,
       markProjectionDirty: (id) => this.contextGraphMetaProjection.markDirty(id),
-    }).read(contextGraphId);
+    }).read(contextGraphId, options);
   }
 
   /**
@@ -685,11 +685,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
    */
   async isLocalFirstUnregisteredContextGraph(
     this: DKGAgent,
-    contextGraphId: string,
+    contextGraphId: string, options?: Pick<QueryOptions, 'signal' | 'workDeadline'>,
   ): Promise<boolean> {
     return this.localContextGraphProvenance.hasLocalCreate(contextGraphId)
       && this.subscribedContextGraphs.get(contextGraphId)?.onChainId === undefined
-      && await this.readLocalContextGraphRegistrationStatus(contextGraphId) === 'unregistered';
+      && await this.readLocalContextGraphRegistrationStatus(contextGraphId, options) === 'unregistered';
   }
 
   /**

@@ -24,6 +24,40 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe('ManagedWorkRecoveryCoordinatorV1', () => {
+  it('certifies only completed recovery, not retention release or closing the adapter', () => {
+    const state = { recovering: false, generation: 0 };
+    let observe!: (phase: ManagedOxigraphRecoveryPhaseV1) => void;
+    const coordinator = createCoordinator({ now: () => Date.now(), capability: {
+      readState: () => state, requestRecovery: generation => ({ generation,
+        subscribe(callback) { observe = callback; callback('signalled'); return () => {}; },
+      }),
+    } });
+    const released = coordinator.begin(state);
+    coordinator.retain('query', Date.now() + 100, released)?.release();
+    expect(coordinator.hasEnded(released)).toBe(false);
+    const terminated = coordinator.begin(state);
+    coordinator.clientTimedOut('query', Date.now(), terminated);
+    state.generation = 1;
+    expect(coordinator.hasEnded(terminated)).toBe(false);
+    observe('terminated');
+    expect(coordinator.hasEnded(terminated)).toBe(true);
+    expect(coordinator.hasEnded(released)).toBe(false);
+    coordinator.close();
+    expect(coordinator.hasEnded(terminated)).toBe(false);
+  });
+
+  it('keeps legacy recovery pending until the dispatched generation has a ready replacement', () => {
+    const state = { recovering: false, generation: 1 };
+    const coordinator = createCoordinator({ now: () => Date.now(), capability: { readState: () => state } });
+    const token = coordinator.begin(state);
+    coordinator.retain('query', Date.now() + 100, token);
+    state.generation = 2; state.recovering = true;
+    expect(coordinator.hasEnded(token)).toBe(false);
+    state.recovering = false;
+    expect(coordinator.hasEnded(token)).toBe(true);
+    coordinator.close();
+  });
+
   it('releases confirmed work even when its observer disposer throws and closes for reuse', () => {
     const activity = vi.fn();
     let observe!: (phase: ManagedOxigraphRecoveryPhaseV1) => void;

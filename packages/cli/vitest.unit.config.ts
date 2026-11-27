@@ -125,6 +125,8 @@ export default defineConfig({
       'test/store-reachability.test.ts',
       'test/query-route-lifecycle.test.ts',
       'test/bounded-query.test.ts',
+      'test/query-time-limit.test.ts',
+
       'test/query-route-unheld-context-graph.test.ts',
       'test/entity-search.test.ts',
       'test/query-catalog-profile-route.test.ts',

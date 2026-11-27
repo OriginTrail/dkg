@@ -32,6 +32,7 @@ import { getManagedOxigraphRuntimeConstructionAuthorityV1 } from './managed-oxig
 import { guardReadGraphPartition } from './read-graph-partition-store.js';
 import { wrapReadGraphLayer } from './read-graph/read-graph-store.js';
 
+import type { QueryWorkLimitOptions } from './query-work-stop.js';
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 
 export interface Quad {
@@ -94,7 +95,7 @@ export interface StorePressureSnapshot {
   backgroundInflightLimit?: number;
 }
 
-export interface QueryOptions {
+export interface QueryOptions extends QueryWorkLimitOptions {
   /** Human-readable caller tag used by adapters for diagnostics/telemetry. */
   source?: string;
   /**

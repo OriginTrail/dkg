@@ -12,6 +12,7 @@
     "test/**/*.typecheck.ts",
     "test/_helpers/catchup-readiness-fixtures.ts",
     "test/context-graph-route-read-authority.test.ts",
+    "test/query-time-limit.test.ts",
     "test/genui-read-authority.test.ts",
     "test/memory-search-read-authority.test.ts",
     "test/knowledge-assets-local-curator-read.test.ts",
