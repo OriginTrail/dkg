@@ -1,25 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { ChainAdapter, OnChainPublishResult } from '@origintrail-official/dkg-chain';
+import { activeRpcRequestAbortSignal, withRpcRequestTimeout, type ChainAdapter, type OnChainPublishResult } from '@origintrail-official/dkg-chain';
 import type { FinalizedPublisherPlan } from './publisher-planning.js';
 
 /** Total budget for optional post-confirmation observations, including both reads. */
 export const PCA_DIAGNOSTIC_TIMEOUT_MS = 500;
 async function observeCandidate(chain: ChainAdapter, publisher: string) {
-  let expired = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const observation = (async () => {
-    const accountId = await chain.getConvictionAgentAccountId!(publisher);
-    if (expired || accountId <= 0n) return undefined;
-    const lockDurationEpochs = await chain.getConvictionAccountLockDurationEpochs?.(accountId);
-    return expired ? undefined : { accountId, lockDurationEpochs };
-  })();
   try {
-    return await Promise.race([observation, new Promise<undefined>(resolve => {
-      timer = setTimeout(() => { expired = true; resolve(undefined); }, PCA_DIAGNOSTIC_TIMEOUT_MS);
-      timer.unref?.();
-    })]);
+    return await withRpcRequestTimeout(PCA_DIAGNOSTIC_TIMEOUT_MS, 'PCA receipt observation', async () => {
+      const signal = activeRpcRequestAbortSignal();
+      const accountId = await chain.getConvictionAgentAccountId!(publisher);
+      if (signal?.aborted || accountId <= 0n) return undefined;
+      const lockDurationEpochs = await chain.getConvictionAccountLockDurationEpochs?.(accountId);
+      return signal?.aborted ? undefined : { accountId, lockDurationEpochs };
+    });
   } catch { return undefined; }
-  finally { clearTimeout(timer); }
 }
 
 /** Receipt evidence states whether PCA coverage was reported, not which other source paid. */
