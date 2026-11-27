@@ -23,6 +23,25 @@ async function tempPath(): Promise<string> {
 }
 
 describe('recently ACK-requested graphs', () => {
+  it.each(['request', 'saved file'] as const)('enforces the shared uint256 graph-ID boundary for a %s', async source => {
+    const path = await tempPath();
+    const now = 1000;
+    const maximum = (2n ** 256n - 1n).toString();
+    const ids = [maximum, (2n ** 256n).toString(), '9'.repeat(78), '0', '01', '0x1'];
+    const list = new StorageAckRecentGraphs({ path, now: () => now });
+    if (source === 'saved file') {
+      await writeFile(path, JSON.stringify({ version: 1, graphs: ids.map((onChainId, i) => ({
+        contextGraphId: `graph-${i}`, onChainId, at: now,
+      })) }));
+      await list.load();
+    } else {
+      await list.load();
+      ids.forEach((id, i) => list.note(`graph-${i}`, id));
+      await list.whenWritten();
+    }
+    expect(list.recent()).toEqual([{ contextGraphId: 'graph-0', onChainId: maximum, at: now }]);
+  });
+
   it('persists a note arriving between the last write-loop check and writer retirement', async () => {
     let persisted = '';
     let staged = '';

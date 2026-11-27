@@ -15,6 +15,7 @@
  * nothing but the ordering.
  */
 
+import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
 import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
@@ -66,10 +67,6 @@ const nodeIo: StorageAckRecentGraphsIo = {
   remove: (path) => rm(path, { force: true }),
 };
 
-function isCanonicalId(value: unknown): value is string {
-  return typeof value === 'string' && /^[1-9][0-9]{0,77}$/.test(value);
-}
-
 function parseEntries(text: string): StorageAckRecentGraph[] {
   const parsed = JSON.parse(text) as { version?: unknown; graphs?: unknown };
   if (parsed?.version !== FILE_VERSION || !Array.isArray(parsed.graphs)) return [];
@@ -79,7 +76,7 @@ function parseEntries(text: string): StorageAckRecentGraph[] {
       raw === null || typeof raw !== 'object'
       || typeof raw.contextGraphId !== 'string' || raw.contextGraphId.length === 0
       || raw.contextGraphId.length > 1024
-      || !isCanonicalId(raw.onChainId)
+      || !isCanonicalAuthoritativeContextGraphId(raw.onChainId)
       || typeof raw.at !== 'number' || !Number.isFinite(raw.at)
     ) continue;
     entries.push({ contextGraphId: raw.contextGraphId, onChainId: raw.onChainId, at: raw.at });
@@ -124,7 +121,7 @@ export class StorageAckRecentGraphs {
    * saved time older than an hour is written, so a busy graph costs no I/O.
    */
   note(contextGraphId: string, onChainId: string): void {
-    if (contextGraphId.length === 0 || !isCanonicalId(onChainId)) return;
+    if (contextGraphId.length === 0 || !isCanonicalAuthoritativeContextGraphId(onChainId)) return;
     const now = this.#now();
     const saved = this.#persisted.get(contextGraphId);
     const changed = saved === undefined
