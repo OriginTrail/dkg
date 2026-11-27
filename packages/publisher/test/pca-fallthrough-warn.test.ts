@@ -283,6 +283,36 @@ describe('DKGPublisher: bounded PCA receipt observations (#1411)', () => {
     expect(pcaFallthroughWarns(warn)).toEqual([]);
   }, 5_000);
 
+  it('shares one 500ms budget across a slow account lookup and a stalled lock lookup', async () => {
+    const wallet = new ethers.Wallet(TEST_KEY), chain = new PcaProbeChain(wallet);
+    const bus = new TypedEventBus(), published = vi.fn();
+    bus.on(DKGEvent.KC_PUBLISHED, published);
+    const publisher = await makePublisher(chain, wallet, bus);
+    let started!: () => void;
+    const observing = new Promise<void>(resolve => { started = resolve; });
+    vi.spyOn(chain, 'getConvictionAgentAccountId').mockImplementation(() => {
+      vi.useFakeTimers();
+      started();
+      return new Promise(resolve => setTimeout(() => resolve(1n), 450));
+    });
+    const lock = vi.spyOn(chain, 'getConvictionAccountLockDurationEpochs')
+      .mockImplementation(() => new Promise(() => {}));
+    let settled = false;
+    const result = publisher.publish({ contextGraphId: '1', quads: quads('shared-pca-budget'), publishEpochs: 5 })
+      .then(value => { settled = true; return value; });
+    try {
+      await observing;
+      await vi.advanceTimersByTimeAsync(450);
+      expect(lock).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(49);
+      expect(settled).toBe(false);
+      expect(published).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect((await result).status).toBe('confirmed');
+      expect(published).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); }
+  });
+
   it('does not infer wallet spending or failed PCA coverage from an escrow-compatible receipt', async () => {
     const wallet = new ethers.Wallet(TEST_KEY), chain = new PcaProbeChain(wallet);
     chain.pcaLockDurationEpochs = 24;
