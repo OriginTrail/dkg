@@ -94,9 +94,9 @@ function host(rows: ContextGraphSubscriptionRecord[], options: {
       dormancy.set(id, 'activationCap');
       capped.push(id);
     },
-    activate: async (r, onChainId, revision, isCurrent) => {
+    activate: async (r, onChainId, isCurrent) => {
       if (r.coreHosted !== true && !state.capHasRoom) throw new SubscriptionActivationCapacityError();
-      if (!isCurrent() || (revisions.get(r.id) ?? 0) !== revision) throw new Error('stale');
+      if (!isCurrent()) throw new Error('stale');
       subscriptions.set(r.id, { syncMode: 'always-on', subscribed: r.subscribed, synced: r.synced, onChainId });
       saved.set(r.id, { ...r, ...(onChainId === undefined ? {} : { onChainId }) });
       dormancy.delete(r.id);
@@ -392,12 +392,12 @@ describe('asking again for a row left dormant without its chain name binding', (
     const h = host([row('public-graph')], { answers: { 'public-graph': [ALLOWED(77n)] } });
     const activate = h.ports.activate;
     let failures = 2;
-    h.ports.activate = async (r, onChainId, revision, isCurrent) => {
+    h.ports.activate = async (r, onChainId, isCurrent) => {
       if (failures > 0) {
         failures -= 1;
         throw new Error('store write failed');
       }
-      return activate(r, onChainId, revision, isCurrent);
+      return activate(r, onChainId, isCurrent);
     };
     const retry = h.retry();
 

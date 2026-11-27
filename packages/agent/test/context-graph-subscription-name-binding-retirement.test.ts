@@ -45,7 +45,7 @@ describe('name-binding retry retirement during real activation preparation', () 
     expect(wire).not.toHaveBeenCalled(); expect(events).not.toHaveBeenCalled(); expect(save).not.toHaveBeenCalled();
     // A subsequent real activation reaches preparation: the cancelled reservation was released.
     reconcile.mockRejectedValueOnce(new Error('next preparation reached'));
-    await expect(agent.activateUnavailablePersistedContextGraphSubscription(row, '1', ports.revision(row.id), () => true))
+    await expect(agent.activateUnavailablePersistedContextGraphSubscription(row, '1', () => true))
       .rejects.toThrow('next preparation reached');
   });
 });

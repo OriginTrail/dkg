@@ -52,7 +52,7 @@ export function recoverDeferredContextGraphSubscriptionAuthorities(signal: Abort
       resolveAuthority: ports.resolveAuthority, clear: id => ports.clearStatus(id),
       retire: (id, reason) => { ports.transitionDormancy(id, reason); ports.touchStatus(); },
       capped: id => { ports.transitionDormancy(id, 'activationCap'); ports.capped(id); ports.touchStatus(); },
-      activate: (row, onChainId, revision) => ports.activate(row, onChainId, revision),
+      activate: (row, onChainId) => ports.activate(row, onChainId, ports.persistRevisions.get(row.id) ?? 0),
     },
   });
 }
