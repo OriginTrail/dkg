@@ -1,6 +1,7 @@
 import { normalizeProjectRows, type ProjectRow } from './project-row.js';
 export type { ProjectRow } from './project-row.js';
 import type { QueryArgs } from './query-args.js';
+import type { KnowledgeAssetShareResult } from './knowledge-asset-share.js';
 /**
  * Thin HTTP client for the DKG daemon. Mirrors the shape of
  * `scripts/lib/dkg-daemon.mjs` (so error messages / payload shapes stay
@@ -534,8 +535,7 @@ export class DkgClient {
   }
 
   // ── Query ──────────────────────────────────────────────────────
-  /**
-   * Memory-layer routing is controlled by `view` + `graphSuffix`:
+  /** Memory-layer routing is controlled by `view` + `graphSuffix`:
    *   view=undefined, graphSuffix=undefined  — WM (default, private)
    *   graphSuffix="_shared_memory"           — SWM
    *   graphSuffix="_shared_memory_meta"      — SWM metadata (UAL, owner, publisher)
@@ -559,6 +559,7 @@ export class DkgClient {
     if (args.includeContextGraphPartitions != null) body.includeContextGraphPartitions = args.includeContextGraphPartitions;
     if (args.includeSharedMemoryMeta != null) body.includeSharedMemoryMeta = args.includeSharedMemoryMeta;
     if (args.view != null) body.view = args.view;
+    if (args.semantics != null) body.semantics = args.semantics;
     if (args.verifiedGraph != null) body.verifiedGraph = args.verifiedGraph;
     if (args.assertionName) body.assertionName = args.assertionName;
     if (args.agentAddress) body.agentAddress = args.agentAddress;
@@ -1466,7 +1467,7 @@ export class DkgClient {
     entities?: string[] | 'all';
     /** @deprecated Unsealed Knowledge Asset shares are unsupported. */
     skipSeal?: boolean;
-  }): Promise<{ swmShared: boolean; promotedCount: number; sealed: boolean; publishReady: boolean }> {
+  }): Promise<KnowledgeAssetShareResult> {
     if (Array.isArray(args.entities)) {
       throw Object.assign(new Error('Knowledge Assets are shared atomically; root-entity selection is not supported'), {
         code: 'KA_ATOMIC_SHARE_REQUIRED',
@@ -1489,7 +1490,7 @@ export class DkgClient {
       contextGraphId: normalizeContextGraphId(args.contextGraphId),
     };
     if (args.subGraphName) body.subGraphName = args.subGraphName;
-    return this.request<{ swmShared: boolean; promotedCount: number; sealed: boolean; publishReady: boolean }>(
+    return this.request<KnowledgeAssetShareResult>(
       'POST',
       `/api/knowledge-assets/${encodeURIComponent(args.name)}/swm/share`,
       body,

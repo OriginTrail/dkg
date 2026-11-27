@@ -761,7 +761,7 @@ async function atomicallyReplaceCuratorMetaSnapshot(
           ? replaceCuratorMetaDefinitionSparql(contextGraphId, metaGraph, stagingGraph)
           : replaceCuratorMetaProjectionSparql(contextGraphId, metaGraph, stagingGraph),
         [metaGraph],
-        { source: 'agent.metaRefresh.replace' },
+        { source: 'agent.metaRefresh.replace', writtenGraphs: [metaGraph] },
       );
     } finally {
       invalidateTargetProjections();

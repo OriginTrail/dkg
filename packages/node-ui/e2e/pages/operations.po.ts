@@ -9,7 +9,7 @@ export class OperationsPage {
     this.root = page.locator('.v10-center-content');
   }
 
-  async switchTab(tab: 'All Operations' | 'Performance' | 'Logs' | 'Errors') {
+  async switchTab(tab: 'All operations' | 'Performance' | 'Logs' | 'Errors') {
     await this.root.locator('button').filter({ hasText: tab }).click();
   }
 
@@ -18,7 +18,7 @@ export class OperationsPage {
   }
 
   async getOperationRows() {
-    return this.root.locator('table tbody tr, .v10-ops-row').count();
+    return this.root.locator('table tbody tr').count();
   }
 
   async filterByType(type: string) {
@@ -40,19 +40,8 @@ export class OperationsPage {
   }
 
   async clickOperationRow(index: number) {
-    const rows = this.root.locator('table tbody tr, .v10-ops-row');
+    const rows = this.root.locator('table tbody tr');
     await rows.nth(index).click();
-  }
-
-  async isDetailDrawerVisible() {
-    return this.root.locator('.v10-ops-detail, .v10-ops-drawer').isVisible().catch(() => false);
-  }
-
-  async closeDetailDrawer() {
-    const closeBtn = this.root.locator('button').filter({ hasText: /×|Close/ });
-    if (await closeBtn.isVisible()) {
-      await closeBtn.click();
-    }
   }
 
   async hasChartArea() {

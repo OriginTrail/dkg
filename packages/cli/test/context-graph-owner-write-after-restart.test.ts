@@ -19,6 +19,7 @@ import './helpers/catchup-runner-worker-test-harness.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ServerResponse } from 'node:http';
 import { DKGAgent } from '@origintrail-official/dkg-agent';
+import { LocalContextGraphProvenance } from '../../agent/src/local-context-graph-provenance.js';
 import { DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import type { CatchupRunner } from '../src/catchup-runner.js';
@@ -162,6 +163,7 @@ describe('the first write of a restarted owner into its own registered public gr
       },
       // The agent's own write-preflight probe, over the owner's store.
       store,
+      localContextGraphProvenance: new LocalContextGraphProvenance(),
       probeContextGraphWritePreflight: DKGAgent.prototype.probeContextGraphWritePreflight,
       contextGraphExists: DKGAgent.prototype.contextGraphExists,
       contextGraphHasLocalContent: DKGAgent.prototype.contextGraphHasLocalContent,

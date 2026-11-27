@@ -22,7 +22,7 @@ test('a public subscriber is browseable without claiming agent membership', asyn
   const list = await (await listResponse).json();
   const graph = list.contextGraphs.find((cg: { id: string }) => cg.id === PRIMARY_CG);
   expect(graph).toMatchObject({ accessPolicy: 'public', subscribed: true, callerInvolved: false });
-  await leftPanel.expandSection('Public Graphs');
+  await leftPanel.expandSection('Public graphs');
   await leftPanel.clickProject(PRIMARY_CG);
   const role = page.locator('.v10-po-identity-pair').filter({ hasText: 'Your role:' }).locator('.v10-po-badge');
   await expect(role).toHaveText('Public subscriber');

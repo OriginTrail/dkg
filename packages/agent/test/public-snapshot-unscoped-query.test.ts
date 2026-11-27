@@ -1,4 +1,10 @@
-import { OxigraphStore, StoreResponseTooLargeError } from '@origintrail-official/dkg-storage';
+import {
+  DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES,
+  OxigraphStore,
+  STORE_GRAPH_CATALOG_LIMIT_NAME,
+  StoreResponseTooLargeError,
+} from '@origintrail-official/dkg-storage';
+import { QUERY_CATALOG_LIMIT_NAME, QUERY_CATALOG_MAX_RESPONSE_BYTES } from '@origintrail-official/dkg-query';
 import { contextGraphDataGraphUri, DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
@@ -56,11 +62,11 @@ describe('agent.query after a core-cache snapshot job marked a graph', () => {
   });
 });
 
-it.each(['cold', 'warm'] as const)('charges the complete inventory through real agent composition (%s catalog)', async cache => {
+it.each(['cold', 'warm'] as const)('charges an unscoped query for its result only, through real agent composition (%s catalog)', async cache => {
   const rawStore = new OxigraphStore();
   const agent = await startAgent(rawStore);
   const graph = 'did:dkg:context-graph:local-budget';
-  // Unrelated graphs must be charged even though the owner projection removes them.
+  // Graphs outside every context graph are node state: the owner read does not return them, so they cost nothing.
   await agent.store.insert(Array.from({ length: 1_000 }, (_, index) => ({
     subject: `urn:unrelated:${index}`, predicate: 'urn:unrelated', object: '"x"',
     graph: `urn:unrelated:${index}:${'g'.repeat(500)}`,
@@ -79,43 +85,48 @@ it.each(['cold', 'warm'] as const)('charges the complete inventory through real 
   }`);
   const content = await rawStore.query(query);
   const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
-  const inventoryBytes = bytes(inventory), policyBytes = bytes(policy), contentBytes = bytes(content);
-  const total = inventoryBytes + policyBytes + contentBytes;
-  const ceiling = 1024 * 1024;
-  expect(inventoryBytes).toBeGreaterThan(500_000);
+  const ownerSlice = inventory.filter(stored => stored.startsWith('did:dkg:context-graph:'));
+  const contentBytes = bytes(content);
+  expect(ownerSlice).toContain(graph);
+  expect(bytes(inventory) - bytes(ownerSlice)).toBeGreaterThan(500_000);
+  expect(bytes(policy)).toBeGreaterThan(0);
   expect(contentBytes).toBeGreaterThan(800_000);
-  expect(inventoryBytes + policyBytes).toBeLessThan(ceiling);
-  expect(contentBytes).toBeLessThan(ceiling);
-  expect(total).toBeGreaterThan(ceiling);
-  if (cache === 'warm') await agent.query(query, { maxResponseBytes: total });
-  for (const limit of [ceiling, total - 1]) {
-    const outcome = await agent.query(query, { maxResponseBytes: limit }).then(
-      () => ({ code: 'unexpected-success' }),
-      error => ({ code: error.code, maxBytes: error.maxBytes, actualBytes: error.actualBytes }),
-    );
-    expect(outcome).toEqual({ code: 'QUERY_RESULT_TOO_LARGE', maxBytes: limit, actualBytes: total });
-  }
-  await expect(agent.query(query, { maxResponseBytes: total })).resolves.toMatchObject({ bindings: content.type === 'bindings' ? content.bindings : [] });
+  // Admission reads the owner inventory and the access policy as node work: the budget is the result alone.
+  if (cache === 'warm') await agent.query(query, { maxResponseBytes: contentBytes });
+  await expect(agent.query(query, { maxResponseBytes: contentBytes - 1 }))
+    .rejects.toMatchObject({ code: 'QUERY_RESULT_TOO_LARGE', maxBytes: contentBytes - 1 });
+  await expect(agent.query(query, { maxResponseBytes: contentBytes }))
+    .resolves.toMatchObject({ bindings: content.type === 'bindings' ? content.bindings : [] });
 });
 
-it.each(['policy', 'inventory'] as const)('normalizes caller-capped %s admission errors at the agent boundary', async kind => {
+it.each(['policy', 'inventory'] as const)('answers an admission %s read over its node limit with STORE_INTERNAL_LIMIT', async kind => {
   const agent = await startAgent();
-  const error = new StoreResponseTooLargeError(64, 65);
+  const limit = kind === 'policy' ? QUERY_CATALOG_MAX_RESPONSE_BYTES : DEFAULT_STORE_GRAPH_CATALOG_MAX_BYTES;
+  const error = new StoreResponseTooLargeError(limit, limit + 1);
+  const seen: Array<number | undefined> = [];
   const query = agent.store.query.bind(agent.store);
   const querySpy = vi.spyOn(agent.store, 'query').mockImplementation((sparql, options) => {
-    if (kind === 'policy' && options?.source === 'agent.query.privateGraphAccessPolicy') {
-      expect(options.maxResponseBytes).toBe(64); throw error;
+    if (options?.source === 'agent.query.privateGraphAccessPolicy') {
+      seen.push(options.maxResponseBytes);
+      if (kind === 'policy') throw error;
     }
     return query(sparql, options);
   });
   const inventory = agent.store.readGraphInventory!.bind(agent.store);
   const inventorySpy = vi.spyOn(agent.store, 'readGraphInventory').mockImplementation((prefix, options) => {
-    if (kind === 'inventory' && options?.maxResponseBytes === 64) throw error;
+    if (prefix === 'did:dkg:context-graph:') {
+      seen.push(options?.maxResponseBytes);
+      if (kind === 'inventory') throw error;
+    }
     return inventory(prefix, options);
   });
   try {
-    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', { maxResponseBytes: 64 }))
-      .rejects.toMatchObject({ code: 'QUERY_RESULT_TOO_LARGE', maxBytes: 64, actualBytes: 65, cause: error });
-    if (kind === 'inventory') expect(inventorySpy).toHaveBeenCalledWith('did:dkg:context-graph:', expect.objectContaining({ maxResponseBytes: 64 }));
+    // The caller's 64 bytes bound neither read; each read's own limit is the node's.
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', { maxResponseBytes: 64 })).rejects.toMatchObject({
+      code: 'STORE_INTERNAL_LIMIT', limitBytes: limit,
+      limitName: kind === 'policy' ? QUERY_CATALOG_LIMIT_NAME : STORE_GRAPH_CATALOG_LIMIT_NAME,
+    });
+    expect(seen).not.toContain(64);
+    expect(seen).toContain(limit);
   } finally { querySpy.mockRestore(); inventorySpy.mockRestore(); }
 });

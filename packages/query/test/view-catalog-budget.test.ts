@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { BlazegraphStore, OxigraphStore, StoreResponseTooLargeError, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
-import { QUERY_CATALOG_MAX_RESPONSE_BYTES } from '../src/query-store-read-context.js';
+import { QUERY_CATALOG_LIMIT_NAME, QUERY_CATALOG_MAX_RESPONSE_BYTES } from '../src/query-store-read-context.js';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -72,8 +72,10 @@ it.each(['view', 'dynamic'] as const)('bounds streamed %s catalog bytes before d
       ? { contextGraphId: 'bounded', view: 'verifiable-memory' as const, verifiedGraph: 'a' }
       : { contextGraphId: 'bounded', includeContextGraphPartitions: true };
     const query = route === 'dynamic' ? 'SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }' : 'SELECT ?s WHERE { ?s ?p ?o }';
-    await expect(engine.query(query, { ...options, maxResponseBytes: 1024 }))
-      .rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE', maxBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES });
+    // The node's catalog bound, not the caller's 1 KiB: the read fails as the node's limit.
+    await expect(engine.query(query, { ...options, maxResponseBytes: 1024 })).rejects.toMatchObject({
+      code: 'STORE_INTERNAL_LIMIT', limitName: QUERY_CATALOG_LIMIT_NAME, limitBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES,
+    });
     const request = fetcher.mock.calls[0] as unknown as [unknown, RequestInit];
     const catalogQuery = String(request[1].body);
     expect(catalogQuery).toContain(route === 'dynamic' ? '?assertionGraph' : '?ctxGraph');

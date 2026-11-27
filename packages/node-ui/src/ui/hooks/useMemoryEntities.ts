@@ -105,11 +105,6 @@ function shortLabel(uri: string): string {
   return uri;
 }
 
-function shortPredicate(uri: string): string {
-  const s = shortLabel(uri);
-  return s.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ');
-}
-
 export function uriTail(uri: string): string {
   const hash = uri.lastIndexOf('#');
   const slash = uri.lastIndexOf('/');
@@ -161,6 +156,10 @@ function deriveEntityLabel(entity: MemoryEntity): string {
     const name = vals?.find(v => v.trim().length > 0);
     if (name) return name;
   }
+
+  // Unlabelled Programs often end in the same version token (e.g. :v1).
+  // Keep their complete identity visible instead of collapsing them to "Program v1".
+  if (entity.types.includes('https://origintrail.io/semantic-runtime/v1#Program')) return entity.uri;
 
   const defaultUriLabel = shortLabel(entity.uri);
   if (

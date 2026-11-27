@@ -5,93 +5,40 @@ import { PanelLeft } from './components/Shell/PanelLeft.js';
 import { PanelCenter } from './components/Shell/PanelCenter.js';
 import { PanelBottom } from './components/Shell/PanelBottom.js';
 import { PanelRight } from './components/Shell/PanelRight.js';
-import { useLayoutStore, maxBottomHeight } from './stores/layout.js';
-import { useAgentsStore } from './stores/agents.js';
+import { ContextGraphDialogs } from './components/Shell/ContextGraphDialogs.js';
+import { useLayoutStore, useShellPanels, maxBottomHeight } from './stores/layout.js';
 import { useTabsStore } from './stores/tabs.js';
-import { api, detectMockMode, isUsingMocks, subscribeMockMode } from './api-wrapper.js';
+import { chooseTab as openTab } from './lib/shellNavigation.js';
+import { detectMockMode, isUsingMocks, subscribeMockMode } from './api-wrapper.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from './lib/contextGraphPrimer.js';
 import { applyTheme } from './lib/applyTheme.js';
-import { useVisibilityPolling } from './hooks/useVisibilityPolling.js';
+import { useNodeStatusPolling } from './hooks/useNodeState.js';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.js';
 import { useShellRouting } from './hooks/useShellRouting.js';
 import { NodeUnavailableView } from './components/NodeUnavailableView.js';
 import { ApiTokenPrompt } from './components/ApiTokenPrompt.js';
+import { observabilityHref } from './lib/observabilityTab.js';
+import { tabIdToPath } from './lib/tab-routes.js';
 
-function useLiveStatus() {
-  const setNodeStatus = useAgentsStore((s) => s.setNodeStatus);
-  // Status was previously polled every 10s with a raw `setInterval`,
-  // even when the tab was hidden — burning ~6 requests/minute against
-  // the daemon for nothing. Route through the visibility-aware
-  // helper so a backgrounded tab stops polling entirely (BUG-007).
-  useVisibilityPolling(() => {
-    api.fetchStatus().then(setNodeStatus).catch(() => {});
-  }, 10_000);
-}
-
-function useDragResize(onDrag: (delta: number) => void) {
-  const handleRef = useRef<HTMLDivElement>(null);
+/**
+ * Drag a resize handle along one axis. Every handle can mount after the
+ * shell does (a collapsed bottom panel, side panels hidden on a narrow
+ * screen), so the node is tracked in state through a callback ref and the
+ * listener attaches whenever a handle appears.
+ */
+function useDragResize(onDrag: (delta: number) => void, axis: 'x' | 'y') {
   const cbRef = useRef(onDrag);
   cbRef.current = onDrag;
-
-  useEffect(() => {
-    const handle = handleRef.current;
-    if (!handle) return;
-
-    let startX = 0;
-
-    const onMouseMove = (e: MouseEvent) => {
-      const delta = e.clientX - startX;
-      startX = e.clientX;
-      cbRef.current(delta);
-    };
-
-    const onMouseUp = () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      handle.classList.remove('active');
-    };
-
-    const onMouseDown = (e: MouseEvent) => {
-      e.preventDefault();
-      startX = e.clientX;
-      document.addEventListener('mousemove', onMouseMove);
-      document.addEventListener('mouseup', onMouseUp);
-      document.body.style.cursor = 'col-resize';
-      document.body.style.userSelect = 'none';
-      handle.classList.add('active');
-    };
-
-    handle.addEventListener('mousedown', onMouseDown);
-    return () => handle.removeEventListener('mousedown', onMouseDown);
-  }, []);
-
-  return handleRef;
-}
-
-// Vertical twin of useDragResize for the bottom panel — tracks clientY
-// and uses a row-resize cursor. Kept as a separate hook (rather than
-// generalising useDragResize) to keep the horizontal path untouched.
-function useDragResizeV(onDrag: (delta: number) => void) {
-  const cbRef = useRef(onDrag);
-  cbRef.current = onDrag;
-  // The bottom handle only renders while the panel is expanded, and the
-  // panel defaults to collapsed — so a one-shot useEffect([]) keyed on a
-  // ref would bind to `null` on its only run and never re-bind when the
-  // handle later appears, leaving it inert. Track the node in state and
-  // key the effect on it so the listener (re)attaches whenever the
-  // handle mounts/unmounts (Codex).
   const [handle, setHandle] = useState<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!handle) return;
-
-    let startY = 0;
+    const pos = (e: MouseEvent) => (axis === 'x' ? e.clientX : e.clientY);
+    let start = 0;
 
     const onMouseMove = (e: MouseEvent) => {
-      const delta = e.clientY - startY;
-      startY = e.clientY;
+      const delta = pos(e) - start;
+      start = pos(e);
       cbRef.current(delta);
     };
 
@@ -105,10 +52,10 @@ function useDragResizeV(onDrag: (delta: number) => void) {
 
     const onMouseDown = (e: MouseEvent) => {
       e.preventDefault();
-      startY = e.clientY;
+      start = pos(e);
       document.addEventListener('mousemove', onMouseMove);
       document.addEventListener('mouseup', onMouseUp);
-      document.body.style.cursor = 'row-resize';
+      document.body.style.cursor = axis === 'x' ? 'col-resize' : 'row-resize';
       document.body.style.userSelect = 'none';
       handle.classList.add('active');
     };
@@ -116,33 +63,33 @@ function useDragResizeV(onDrag: (delta: number) => void) {
     handle.addEventListener('mousedown', onMouseDown);
     return () => {
       handle.removeEventListener('mousedown', onMouseDown);
-      // If the handle unmounts (panel collapsed) or the shell unmounts
-      // mid-drag, fully tear down: onMouseUp removes the document
-      // mousemove/mouseup listeners and resets the body cursor/
-      // user-select so the app can't get stuck in row-resize still
-      // firing setBottomHeight (Codex).
+      // A handle that unmounts mid-drag must not leave document listeners
+      // or the body cursor behind.
       onMouseUp();
     };
-  }, [handle]);
+  }, [handle, axis]);
 
-  // Stable callback ref: React invokes it with the node on mount and
-  // null on unmount, driving the effect above.
   return useCallback((node: HTMLDivElement | null) => setHandle(node), []);
 }
 
 function AppShell() {
-  useLiveStatus();
+  useNodeStatusPolling();
   useKeyboardShortcuts();
   useShellRouting();
-  const { leftCollapsed, rightCollapsed, bottomCollapsed, theme, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
-  const [, setVpTick] = useState(0);
-
+  const { bottomCollapsed, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
+  const { narrow, leftOpen, rightOpen } = useShellPanels();
+  const closeNarrowPanel = useLayoutStore((s) => s.closeNarrowPanel);
+  // Resizing past the breakpoint shows the page, not a floating panel. Navigation does the
+  // same in useShellRouting. The create and join dialogs belong to the shell
+  // (ContextGraphDialogs), so closing the panel keeps them.
+  const lastNarrow = useRef(narrow);
   useEffect(() => {
-    // BUG-004: see applyTheme for why both <html> AND <body> need the
-    // class. The helper lives in src/ui/lib/applyTheme so a unit test
-    // can pin the contract without mounting AppShell.
-    applyTheme(theme);
-  }, [theme]);
+    if (lastNarrow.current === narrow) return; // only a crossing, not the first render
+    lastNarrow.current = narrow;
+    // Shows the page: closes a floating panel, and an expanded one does not carry over.
+    useLayoutStore.getState().revealCentre();
+  }, [narrow, closeNarrowPanel]);
+  const [, setVpTick] = useState(0);
 
   // Re-render on viewport resize so the render-time clamp in PanelBottom
   // and the drag base both recompute against the new maxBottomHeight().
@@ -164,7 +111,7 @@ function AppShell() {
       window.dispatchEvent(new Event('resize'));
     });
     return () => window.cancelAnimationFrame(id);
-  }, [leftCollapsed, rightCollapsed]);
+  }, [leftOpen, rightOpen]);
 
   const onDragLeft = useCallback((delta: number) => {
     const w = useLayoutStore.getState().leftWidth;
@@ -190,36 +137,47 @@ function AppShell() {
     setBottomHeight(Math.min(eff - delta, maxBottomHeight()));
   }, [setBottomHeight]);
 
-  const leftHandle = useDragResize(onDragLeft);
-  const rightHandle = useDragResize(onDragRight);
-  const bottomHandle = useDragResizeV(onDragBottom);
+  const rightExpanded = useLayoutStore((s) => s.rightExpanded);
+  const expanded = rightExpanded && rightOpen && !narrow;
+
+  const leftHandle = useDragResize(onDragLeft, 'x');
+  const rightHandle = useDragResize(onDragRight, 'x');
+  const bottomHandle = useDragResize(onDragBottom, 'y');
 
   return (
     <div className="v10-app">
       <ApiTokenPrompt />
+      <nav aria-label="Skip link"><button type="button" className="ds-skip-link" onClick={() => document.getElementById(expanded ? 'agents-panel' : 'main-content')?.focus()}>Skip to content</button></nav>
       <Header />
+      <ContextGraphDialogs />
       <div className="v10-app-body">
-        {!leftCollapsed && (
+        {narrow && (leftOpen || rightOpen) && (
+          <button type="button" className="v10-panel-scrim" aria-label="Close panel" onClick={closeNarrowPanel} />
+        )}
+        {/* A closed side panel unmounts, so its polling and listeners stop. What
+            must outlive it lives in the shell: the context graph dialogs
+            (ContextGraphDialogs) and agent conversations (stores/agentConversations). */}
+        {leftOpen && (
           <>
-            <div className="v10-panel-left" style={{ width: leftWidth }}>
+            <div className="v10-panel-left" role="complementary" aria-label="Context graphs and node" style={{ width: leftWidth }}>
               <PanelLeft />
             </div>
             <div className="v10-resize-handle-h" ref={leftHandle} />
           </>
         )}
 
-        <div className="v10-center-region" style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+        <div className={expanded ? 'v10-center-region v10-center-region-hidden' : 'v10-center-region'}>
+          <div className="v10-center-main">
             <PanelCenter />
           </div>
           {!bottomCollapsed && <div className="v10-resize-handle-v" ref={bottomHandle} />}
           <PanelBottom />
         </div>
 
-        {!rightCollapsed && (
+        {rightOpen && (
           <>
-            <div className="v10-resize-handle-h" ref={rightHandle} />
-            <div className="v10-panel-right" style={{ width: rightWidth }}>
+            {!expanded && <div className="v10-resize-handle-h" ref={rightHandle} />}
+            <div id="agents-panel" tabIndex={-1} className={expanded ? 'v10-panel-right v10-panel-right-expanded' : 'v10-panel-right'} role="complementary" aria-label="Agents" style={expanded ? undefined : { width: rightWidth }}>
               <PanelRight />
             </div>
           </>
@@ -229,39 +187,44 @@ function AppShell() {
   );
 }
 
-const NetworkDebugPage = React.lazy(() =>
-  import('./pages/Network.js').then((m) => ({ default: m.NetworkPage }))
-);
+/** Old address: Network is a tab in Observability now. The address opens the tab. */
+function NetworkRoute() {
+  return <Navigate to={observabilityHref('network')} replace />;
+}
+
+/** Old address: Agent hub is the right panel. AppShell opens it once it has mounted. */
+function AgentHubRoute() {
+  return <Navigate to={tabIdToPath(useTabsStore.getState().activeTabId)} replace state={{ openAgents: true }} />;
+}
 
 const MarketplaceGalleryRoute = React.lazy(() =>
   import('./marketplace/GalleryView.js').then((m) => ({ default: m.MarketplaceGalleryView }))
 );
 
 function ContextGraphPrimerRoute() {
-  const openTab = useTabsStore((s) => s.openTab);
 
   useLayoutEffect(() => {
     openTab(CONTEXT_GRAPH_PRIMER_TAB);
   }, [openTab]);
 
-  return <Navigate to="/" replace />;
+  // Legacy address: the primer tab now lives at /primer.
+  return <Navigate to="/primer" replace />;
 }
 
 export function App() {
   const usingMocks = useSyncExternalStore(subscribeMockMode, isUsingMocks, isUsingMocks);
   useEffect(() => { void detectMockMode(); }, []);
+  // The one owner of the document's theme, for every route: the shell, the
+  // standalone pages and the unavailable view. BUG-004: see applyTheme for
+  // why both <html> AND <body> carry the class.
+  const theme = useLayoutStore((s) => s.theme);
+  useEffect(() => { applyTheme(theme); }, [theme]);
   if (usingMocks) return <NodeUnavailableView />;
 
   return (
     <Routes>
-      <Route path="/network" element={
-        <>
-          <ApiTokenPrompt />
-          <React.Suspense fallback={<div className="lazy-spinner">Loading...</div>}>
-            <NetworkDebugPage />
-          </React.Suspense>
-        </>
-      } />
+      <Route path="/network" element={<NetworkRoute />} />
+      <Route path="/agent-hub" element={<AgentHubRoute />} />
       <Route path="/context-graph-primer" element={<ContextGraphPrimerRoute />} />
       <Route path="/agent" element={<Navigate to="/" replace />} />
       <Route path="/explorer" element={<Navigate to="/" replace />} />

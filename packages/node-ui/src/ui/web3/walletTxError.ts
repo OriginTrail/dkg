@@ -117,7 +117,7 @@ export function describeWalletTxError(err: unknown, step: WalletTxStep): WalletT
     return {
       kind: 'rpc_timeout',
       recoverable: true,
-      message: 'The network didn’t confirm in time — the transaction may still be processing. Re-check before retrying.',
+      message: 'The network didn’t confirm in time, so the transaction may still be in progress. Check it again before retrying.',
     };
   }
 
@@ -175,7 +175,7 @@ export function describeWalletTxError(err: unknown, step: WalletTxStep): WalletT
     return {
       kind: 'rpc_timeout',
       recoverable: true,
-      message: 'The network didn’t confirm in time — the transaction may still be processing. Re-check before retrying.',
+      message: 'The network didn’t confirm in time, so the transaction may still be in progress. Check it again before retrying.',
     };
   }
 

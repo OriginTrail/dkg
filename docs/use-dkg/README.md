@@ -30,7 +30,9 @@ Use these routes when you want a node running, an agent connected, memory operat
 | Configure relays and peer reachability | [Relays and Peers](relays-and-peers.md) |
 | Bootstrap an edge's registry index from network relays or pinned cores | [Authority Index Snapshots](authority-index-snapshots.md) |
 | Choose and configure a store backend | [Storage Backends](storage-sparql-http.md) |
+| Answer view queries across assets with read graphs, or back out | [Read Graphs](read-graphs.md) |
 | Find where a node is slow: store and queue pressure | [Monitor Store and Queue Pressure](backpressure-observability.md) |
+| Act on the graph catalog warning and size its limit | [Graph Catalog Limit](graph-catalog-limit.md) |
 | Manually subscribe a host-mode node | [Host-Mode Manual Subscribe](host-mode-manual-subscribe.md) |
 | Update or roll back | [Updates and Rollback](updates-and-rollback.md) |
 | Migrate a git checkout to npm auto-update | [Migrate to npm](migrate-to-npm.md) |

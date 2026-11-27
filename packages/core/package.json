@@ -1,10 +1,15 @@
 {
   "name": "@origintrail-official/dkg-core",
-  "version": "10.1.1",
+  "version": "10.1.2",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
+    "./typescript-program-bundle": {
+      "types": "./dist/typescript-program-bundle.d.ts",
+      "import": "./dist/typescript-program-bundle.js",
+      "default": "./dist/typescript-program-bundle.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
@@ -56,7 +61,17 @@
       "default": "./dist/sync-wire-objects.js"
     },
     "./dist/*": "./dist/*",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./canonical-json": {
+      "types": "./dist/canonical-json.d.ts",
+      "import": "./dist/canonical-json.js",
+      "default": "./dist/canonical-json.js"
+    },
+    "./graph-computer-protocol": {
+      "types": "./dist/graph-computer-protocol.d.ts",
+      "import": "./dist/graph-computer-protocol.js",
+      "default": "./dist/graph-computer-protocol.js"
+    }
   },
   "scripts": {
     "build": "tsc && pnpm run test:types",
@@ -72,7 +87,7 @@
     "@libp2p/circuit-relay-v2": "4.2.17",
     "@libp2p/crypto": "5.2.0",
     "@libp2p/dcutr": "3.0.32",
-    "@libp2p/gossipsub": "16.1.1",
+    "@libp2p/gossipsub": "17.2.1",
     "@libp2p/identify": "4.1.18",
     "@libp2p/interface": "3.4.0",
     "@libp2p/kad-dht": "16.4.9",

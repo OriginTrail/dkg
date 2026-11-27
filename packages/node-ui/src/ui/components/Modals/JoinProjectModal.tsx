@@ -7,11 +7,12 @@ import {
 } from '../../api.js';
 import { refreshContextGraphInventoryAfterMutation } from '../../hooks/useContextGraphInventory.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
-import { useTabsStore } from '../../stores/tabs.js';
+import { chooseTab as openTab } from '../../lib/shellNavigation.js';
 import { useNodeEvents } from '../../hooks/useNodeEvents.js';
 import { normalizeAccessPolicy } from '../../lib/contextGraphSidebar.js';
 import { WireWorkspacePanel } from '../Workspace/WireWorkspacePanel.js';
 import { useModalDismiss } from './useModalDismiss.js';
+import { X } from 'lucide-react';
 
 interface JoinProjectModalProps {
   open: boolean;
@@ -173,7 +174,7 @@ async function warmInviteCuratorConnection(invite: ParsedInvite): Promise<void> 
   }
   if (invite.legacyMultiaddr) {
     console.warn(
-      '[DKG] This invite uses a legacy multiaddr (deprecated). Ask the curator to regenerate using the current Share Context Graph modal — V10 invites carry a peer id and resolve via DHT, so they survive relay rotations.',
+      '[DKG] This invite uses a legacy multiaddr (deprecated). Ask the curator to regenerate using the current Share context graph modal — V10 invites carry a peer id and resolve via DHT, so they survive relay rotations.',
     );
     await connectToPeerWithTimeout(invite.legacyMultiaddr).catch(() => {});
   }
@@ -192,7 +193,7 @@ export function validateInvite(
   // `forwardJoinRequest`). A discovered graph whose explicit access policy is
   // public uses `/api/subscribe` instead and deliberately needs no invite.
   if (!invite.curatorPeerId && !invite.legacyMultiaddr && !options.allowBareContextGraphId) {
-    return 'This invite is missing the curator peer id. Ask the curator to regenerate the invite from the Share Context Graph dialog.';
+    return 'This invite is missing the curator peer id. Ask the curator to regenerate the invite from the Share context graph dialog.';
   }
   if (invite.legacyMultiaddr) {
     if (!invite.legacyMultiaddr.startsWith('/')) return 'Invalid curator multiaddr';
@@ -244,7 +245,7 @@ export function formatJoinRequestError(err: unknown): string {
   if (err instanceof HttpError && err.status === 502) {
     const perPeer = readPerPeerErrors(err.body);
     if (perPeer.length === 0) {
-      return 'Request signed, but we couldn\'t deliver it to any reachable curator. ' +
+      return 'Request signed, but it couldn\'t reach any curator. ' +
         'Try again in a moment once your node has discovered more peers, or ask the curator for an updated invite.';
     }
     const reasons = perPeer.join('; ');
@@ -297,8 +298,8 @@ function hintForJoinRejectReasons(reasons: string, reachedAndRejected: boolean):
     // in practice almost always because the joiner's
     // `network/testnet.json` is still pointing at the pre-redeploy hub.
     if (/scope mismatch/i.test(reasons)) {
-      return 'This usually means your daemon\'s network config has a stale ContextGraphsHub address — ' +
-        'pull the latest release (or `git pull && pnpm install && pnpm run build:runtime`) and try again.';
+      return 'Your node is using an out-of-date network setting. Update to the latest release and try again. ' +
+        'If you installed from source code, pull the latest code and rebuild first.';
     }
     if (/unknown CG/i.test(reasons)) {
       return 'The curator doesn\'t recognise this context graph id — double-check the invite, ' +
@@ -313,7 +314,7 @@ function hintForJoinRejectReasons(reasons: string, reachedAndRejected: boolean):
   // online and the invite carries the right peer id".
   if (/not curator/i.test(reasons)) {
     return 'Your node reached other peers, but none of them curate this context graph. ' +
-      'Make sure the curator\'s daemon is online and the invite carries the right curator peer id.';
+      'Make sure the curator\'s node is online and the invite has the right curator peer ID.';
   }
   return null;
 }
@@ -334,7 +335,6 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
   const [wiredProjectName, setWiredProjectName] = useState<string>('');
 
   const { contextGraphs, setActiveProject } = useProjectsStore();
-  const { openTab } = useTabsStore();
 
   useEffect(() => {
     if (initialContextGraphId) setInviteCode(initialContextGraphId);
@@ -516,7 +516,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         role="presentation"
       >
         <div
-          className="v10-modal-box"
+          className="v10-modal-box ds-overlay"
           ref={wireDismiss.dialogRef}
           role="dialog"
           aria-modal="true"
@@ -524,13 +524,12 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         >
           <button
             type="button"
-            className="v10-modal-close"
+            className="v10-modal-close ds-btn ds-ghost ds-icon v10-modal-close-corner"
             onClick={handleWireDone}
             aria-label="Close wire workspace dialog"
             title="Close (Esc)"
-            style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
           >
-            ×
+            <X size={14} />
           </button>
           <div className="v10-modal-header">
             <div id="dkg-join-wire-title" className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
@@ -564,7 +563,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       role="presentation"
     >
       <div
-        className="v10-modal-box"
+        className="v10-modal-box ds-overlay"
         ref={inviteDismiss.dialogRef}
         role="dialog"
         aria-modal="true"
@@ -573,67 +572,53 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       >
         <button
           type="button"
-          className="v10-modal-close"
+          className="v10-modal-close ds-btn ds-ghost ds-icon v10-modal-close-corner"
           onClick={onClose}
           aria-label="Close join context graph dialog"
           title="Close (Esc)"
-          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
         >
-          ×
+          <X size={14} />
         </button>
         <div className="v10-modal-header">
-          <div id="dkg-join-cg-title" className="v10-modal-title">Join a Context Graph</div>
+          <div id="dkg-join-cg-title" className="v10-modal-title">Join a context graph</div>
           <div id="dkg-join-cg-subtitle" className="v10-modal-subtitle">
-            Enter a discovered public Context Graph ID to subscribe, or paste a curator invite for a private graph.
+            Enter a discovered public context graph ID to subscribe, or paste a curator invite for a private graph.
           </div>
         </div>
 
         <div className="v10-modal-body">
-          {error && <div className="v10-modal-error">{error}</div>}
+          {error && <div role="alert" className="v10-modal-error ds-card-nested">{error}</div>}
 
           {pending && (
-            <div style={{
-              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 'var(--font-size-label)',
-              background: 'rgba(59, 130, 246, 0.08)', border: '1px solid rgba(59, 130, 246, 0.25)',
-              color: 'var(--accent-primary, #3b82f6)',
-            }}>
+            <div className="v10-join-info">
               Join request sent. Waiting for the curator to approve — this modal will move forward automatically once they do.
             </div>
           )}
 
           {approved && (
-            <div style={{
-              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 'var(--font-size-label)',
-              background: 'rgba(34, 197, 94, 0.08)', border: '1px solid rgba(34, 197, 94, 0.25)',
-              color: 'var(--accent-green)',
-            }}>
+            <div className="v10-join-success">
               Approved! Loading context graph…
             </div>
           )}
 
           {rejected && (
-            <div style={{
-              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 'var(--font-size-label)',
-              background: 'rgba(245, 158, 11, 0.08)', border: '1px solid rgba(245, 158, 11, 0.25)',
-              color: 'var(--accent-warning, #f59e0b)',
-            }}>
+            <div className="v10-join-warning">
               The curator declined this join request.
             </div>
           )}
 
           <div className="v10-form-group">
-            <label className="v10-form-label" htmlFor="dkg-cg-invite">Context Graph ID or Invite Code</label>
+            <label className="v10-form-label" htmlFor="dkg-cg-invite">Context graph ID or invite code</label>
             <textarea
               id="dkg-cg-invite"
               name="dkg-cg-invite"
-              className="v10-form-textarea"
-              placeholder={"Public: paste a Context Graph ID\n\nPrivate: paste the curator invite\nmy-context-graph-abc123\n12D3KooW..."}
+              className="v10-form-textarea ds-input v10-join-input"
+              placeholder={"Public: paste a context graph ID\n\nPrivate: paste the curator invite\nmy-context-graph-abc123\n12D3KooW..."}
               value={inviteCode}
               onChange={(e) => setInviteCode(e.target.value)}
               autoFocus
               rows={3}
               disabled={sending || pending || approved}
-              style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-caption)' }}
               aria-label="Context graph invite code"
               autoComplete="off"
               spellCheck={false}
@@ -641,20 +626,17 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           </div>
 
           {intent.kind === 'publicSubscribe' && (
-            <label style={{
-              display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 'var(--font-size-label)',
-              color: 'var(--text-secondary)', cursor: sending ? 'default' : 'pointer',
-            }}>
+            <label className={sending ? 'v10-join-sync v10-join-sync-busy' : 'v10-join-sync'}>
               <input
                 type="checkbox"
                 checked={keepSynced}
                 onChange={(event) => setKeepSynced(event.target.checked)}
                 disabled={sending}
-                aria-label="Keep this Context Graph synchronized after restart"
+                aria-label="Keep this context graph synchronized after restart"
               />
               <span>
                 Keep synchronized after restart
-                <span style={{ display: 'block', color: 'var(--text-tertiary)', marginTop: 2 }}>
+                <span className="v10-join-note">
                   Off by default. This node otherwise syncs the graph only when you open it.
                 </span>
               </span>
@@ -663,16 +645,16 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         </div>
 
         <div className="v10-modal-footer">
-          <button className="v10-modal-btn" onClick={onClose}>{pending || approved ? 'Close' : 'Cancel'}</button>
+          <button className="v10-modal-btn ds-btn" onClick={onClose}>{pending || approved ? 'Close' : 'Cancel'}</button>
           <button
-            className="v10-modal-btn primary"
+            className="v10-modal-btn primary ds-btn ds-primary"
             onClick={handleRequestJoin}
             disabled={!inviteCode.trim() || sending || pending || approved}
           >
             {sending
               ? intent.sendingLabel
               : pending
-                ? 'Awaiting approval…'
+                ? 'Approval needed'
                 : approved
                   ? 'Approved'
                   : intent.idleLabel}

@@ -16,6 +16,7 @@ import {
   type SparqlHttpResponseErrorLike,
   type SparqlHttpSlowQueryEvent,
 } from '../src/index.js';
+import { SparqlTermValidationError } from '@origintrail-official/dkg-core';
 import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 let server: Server;
@@ -2402,23 +2403,22 @@ describe('SparqlHttpStore RDF term formatting', () => {
     }
   });
 
-  it('logs and counts a malformed IRI instead of silently stripping it', async () => {
+  it('refuses a malformed IRI before sending anything, and logs and counts it', async () => {
     const observed = observeInvalidSparqlTerms();
     try {
-      const bodies = await captureSparql((store) => store.insert([
-        { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"v"', graph: 'http://ex.org/g^x' },
-      ]));
-      // Observe mode: the pre-validation (stripped) update is still sent.
-      expect(bodies).toEqual([
-        'INSERT DATA {\n  GRAPH <http://ex.org/gx> {\n    <http://ex.org/s> <http://ex.org/p> "v" .\n  }\n}',
-      ]);
+      const bodies = await captureSparql(async (store) => {
+        await expect(store.insert([
+          { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"v"', graph: 'http://ex.org/g^x' },
+        ])).rejects.toThrow(SparqlTermValidationError);
+      });
+      expect(bodies).toEqual([]);
       expect(observed.counted).toEqual([{
         value: 1,
         adapter: 'sparql-http',
         operation: 'insert',
         position: 'graph',
         kind: 'iri',
-        enforcement: 'observe',
+        enforcement: 'reject',
       }]);
       expect(observed.warnings).toEqual([
         expect.stringContaining('sparql-http.insert: invalid iri in SPARQL graph position (17 chars, fingerprint '),
@@ -2429,47 +2429,40 @@ describe('SparqlHttpStore RDF term formatting', () => {
     }
   });
 
-  it('logs a blank-node pattern object, which a DELETE template cannot hold', async () => {
+  it('refuses a blank-node pattern object, which a DELETE template cannot hold', async () => {
     const observed = observeInvalidSparqlTerms();
     try {
-      const bodies = await captureSparql((store) => store.deleteByPatternWithoutCount({
-        graph: 'http://ex.org/g',
-        object: '_:b0',
-      }));
-      expect(bodies).toEqual([
-        'DELETE { GRAPH <http://ex.org/g> { ?s ?p _:b0 } } WHERE { GRAPH <http://ex.org/g> { ?s ?p _:b0 } }',
-      ]);
+      const bodies = await captureSparql(async (store) => {
+        await expect(store.deleteByPatternWithoutCount({ graph: 'http://ex.org/g', object: '_:b0' }))
+          .rejects.toThrow(SparqlTermValidationError);
+      });
+      expect(bodies).toEqual([]);
       expect(observed.counted).toEqual([expect.objectContaining({
         operation: 'deleteByPattern',
         position: 'object',
         kind: 'blank-node',
+        enforcement: 'reject',
       })]);
     } finally {
       observed.restore();
     }
   });
 
-  it('counts a subject prefix no IRI can start with and sends it as before', async () => {
+  it('refuses a subject prefix no IRI can start with, sending only the count query', async () => {
     const observed = observeInvalidSparqlTerms();
     try {
       const bodies = await captureSparql(async (store) => {
-        await store.deleteBySubjectPrefix('http://ex.org/g', 'urn:a\r\nb');
-        await store.deleteBySubjectPrefix('http://ex.org/g', 'urn:"q"');
+        await expect(store.deleteBySubjectPrefix('http://ex.org/g', 'urn:a\r\nb')).rejects.toThrow(SparqlTermValidationError);
+        await expect(store.deleteBySubjectPrefix('http://ex.org/g', 'urn:"q"')).rejects.toThrow(SparqlTermValidationError);
       });
-      // The line break stays raw, so a real endpoint still rejects the update
-      // rather than reporting that nothing matched.
-      expect(bodies[1]).toBe(
-        'DELETE { GRAPH <http://ex.org/g> { ?s ?p ?o } } '
-          + 'WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "urn:a\r\nb")) } }',
-      );
-      expect(bodies[4]).toContain('FILTER(STRSTARTS(STR(?s), "urn:\\"q\\""))');
+      expect(bodies).toEqual(Array(2).fill('SELECT (COUNT(*) AS ?c) WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }'));
       expect(observed.counted).toEqual(Array(2).fill({
         value: 1,
         adapter: 'sparql-http',
         operation: 'deleteBySubjectPrefix',
         position: 'subject-prefix',
         kind: 'iri',
-        enforcement: 'observe',
+        enforcement: 'reject',
       }));
     } finally {
       observed.restore();
@@ -2482,19 +2475,19 @@ describe('SparqlHttpStore RDF term formatting', () => {
       await captureSparql(async (store) => {
         await store.hasGraph('http://g{x}');
         await store.countQuads('http://g{x}');
-        await store.deleteBySubjectPrefix('http://g{x}', 'urn:ok/');
-        await store.dropGraph('http://g{x}');
+        await expect(store.deleteBySubjectPrefix('http://g{x}', 'urn:ok/')).rejects.toThrow(SparqlTermValidationError);
+        await expect(store.dropGraph('http://g{x}')).rejects.toThrow(SparqlTermValidationError);
       });
-      const graphPoint = (operation: string) => ({
-        value: 1, adapter: 'sparql-http', operation, position: 'graph', kind: 'iri', enforcement: 'observe',
+      // Queries keep observe mode; every update refuses the term.
+      const graphPoint = (operation: string, enforcement: string) => ({
+        value: 1, adapter: 'sparql-http', operation, position: 'graph', kind: 'iri', enforcement,
       });
       expect(observed.counted).toEqual([
-        graphPoint('hasGraph'),
-        graphPoint('countQuads'),
-        graphPoint('countQuads'),
-        graphPoint('deleteBySubjectPrefix'),
-        graphPoint('countQuads'),
-        graphPoint('dropGraph'),
+        graphPoint('hasGraph', 'observe'),
+        graphPoint('countQuads', 'observe'),
+        graphPoint('countQuads', 'observe'),
+        graphPoint('deleteBySubjectPrefix', 'reject'),
+        graphPoint('dropGraph', 'reject'),
       ]);
     } finally {
       observed.restore();

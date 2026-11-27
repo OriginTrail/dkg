@@ -1,28 +1,31 @@
 /* Sessions list */
-.v10-sessions-list { padding: 8px 0; }
+.v10-sessions-list { padding: var(--space-8) 0; }
 .v10-session-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  padding: 10px 14px;
+  padding: var(--pad-nested);
   border-bottom: 1px solid var(--border-subtle);
   text-align: left;
-  transition: background 0.1s;
+  transition: background var(--motion-fast);
 }
 .v10-session-item:hover { background: var(--bg-hover); }
 .v10-session-preview {
-  font-size: var(--font-size-label);
+  font-size: var(--fs-control);
   color: var(--text-secondary);
   flex: 1;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-right: 8px;
+  margin-right: var(--space-8);
 }
 .v10-session-count {
   font-family: var(--font-mono);
-  font-size: var(--font-size-meta);
+  font-size: var(--fs-micro);
   color: var(--text-tertiary);
   flex-shrink: 0;
 }
+
+/* ── Sessions tab ── */
+.v10-local-agent-copy.v10-local-agent-copy-gap { margin-bottom: var(--space-12); }

@@ -7,6 +7,10 @@ name: Oxigraph lifecycle on macOS
 on:
   pull_request:
     paths:
+      # Not packages/cli/vitest.unit.config.ts: it lists every CLI unit test, so it
+      # changes whenever one is added. This job runs named files with it, and
+      # scripts/lib/__tests__/native-workflow-includes.test.mjs fails any change
+      # that drops one of them from the config.
       - 'packages/cli/src/daemon/oxigraph-*.ts'
       - 'packages/cli/src/daemon/process-probe.ts'
       - 'packages/cli/src/daemon/oxigraph-store-launch.ts'
@@ -23,7 +27,6 @@ on:
       # Inputs that decide installation, build output and test discovery.
       - 'pnpm-lock.yaml'
       - 'packages/cli/package.json'
-      - 'packages/cli/vitest.unit.config.ts'
       - 'scripts/build-runtime-packages.mjs'
       - 'scripts/lib/runtime-build-plan.mjs'
       - 'scripts/lib/run-build-command.mjs'
@@ -40,7 +43,7 @@ concurrency:
 jobs:
   lifecycle:
     name: Oxigraph lifecycle (macOS)
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -53,6 +56,8 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Set up semantic runtime build tools
+        uses: ./.github/actions/setup-semantic-runtime
       - name: Build runtime packages
         run: node scripts/build-runtime-packages.mjs
       - name: Run the real-process Oxigraph lifecycle tests

@@ -24,7 +24,7 @@ import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import { fallbackAuthorResolver, type FallbackAuthor } from './fallback-author.js';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { GraphManager, deleteByPatternWithoutCount, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
@@ -36,7 +36,8 @@ import {
   resolvePublicationPricing,
 } from './publication-pricing.js';
 import { measureCanonicalPublicationPayload } from './publication-payload-measurement.js';
-import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
+import { skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
+import { rejectUserAuthoredProtocolMetadata } from './protocol-metadata.js';
 import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
 import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
@@ -60,7 +61,7 @@ import {
   trustedCatalogTripleKeySet,
 } from './catalog-trust.js';
 import { partitionCatalogQuads, catalogCommittedLeaves, computeCatalogRoot, contextGraphCatalogUri, contextGraphOnChainIdBindingQuery, isAgentRegistryContextGraph } from '@origintrail-official/dkg-core';
-import { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
+import { RESERVED_SUBJECT_PREFIXES, isReservedSubject } from './reserved-subjects.js';
 import { skolemize } from './skolemize.js';
 import {
   computeTripleHashV10 as computeTripleHash,
@@ -865,43 +866,6 @@ function sameBigIntLiteral(left: string | bigint | undefined, right: string | bi
   } catch {
     return false;
   }
-}
-
-// Round 14 Bug 41: case-insensitive check against `RESERVED_SUBJECT_PREFIXES`.
-// Per RFC 8141 §3.1, the URN scheme (`urn:`) and NID (`dkg`) are
-// case-insensitive for equivalence purposes — `URN:dkg:file:abc`,
-// `urn:DKG:file:abc`, and `urn:dkg:file:abc` are all the same resource.
-// The NSS portion is case-sensitive by default but our reserved
-// prefixes (`urn:dkg:file:`, `urn:dkg:extraction:`) are entirely
-// within the scheme+NID range, so lowercase-then-startsWith on the
-// full subject string is the correct comparison: it accepts all
-// case variants of the scheme/NID without over-matching into
-// NSS-level content.
-//
-// Earlier rounds used a byte-level `subject.startsWith(prefix)` check
-// at both the Bucket A write-boundary guard (Round 9 Bug 25) AND the
-// Round 4 promote-time filter (Round 12 Bug 35 SSOT). Both were
-// case-sensitive, so a malicious or accidentally-mixed-case subject
-// like `URN:dkg:file:keccak256:<hex>` bypassed both defenses. Codex
-// Bug 41 flagged this. The fix replaces both byte-level comparisons
-// with the shared case-insensitive helper from `reserved-subjects.ts`,
-// preserving the SSOT property established in Round 12.
-function rejectReservedSubjectPrefixes(quads: Quad[]): void {
-  for (const q of quads) {
-    if (isReservedSubject(q.subject)) {
-      // Find the specific prefix that matched (for the error message)
-      // — re-scan with the lowercased subject since the constants are
-      // lowercase. Byte-level comparison here is fine because by this
-      // point we've already confirmed a match exists.
-      throw new ReservedNamespaceError(q.subject, findReservedSubjectPrefix(q.subject)!);
-    }
-  }
-}
-
-function rejectUserAuthoredProtocolMetadata(quads: Quad[]): void {
-  rejectReservedSubjectPrefixes(quads);
-  assertNoUserAuthoredKnowledgeAssetSkolemTerms(quads);
-  assertNoUserAuthoredTrustLevelQuads(quads);
 }
 
 function normalizeAssertionInputGraph(

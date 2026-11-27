@@ -1,4 +1,5 @@
 import type { RequestContext } from './context.js';
+import { handleShareRetirement } from './share-job-retirement.js';
 import { handleShareReconciliation } from './share-reconciliation.js';
 import { decodePromoteJobId } from './shared-assertion-helpers.js';
 import { handleKaShareJobsList, handleKaShareJobStatus, handleKaShareJobCancel,
@@ -13,6 +14,11 @@ export async function handleShareJobCollection(ctx: RequestContext): Promise<boo
     // GET /api/knowledge-assets/swm/share-jobs — list
     if (method === "GET" && path === SHARE_JOBS_PREFIX) {
       await handleKaShareJobsList(ctx); return true;
+    }
+    if ((method === 'GET' || method === 'POST') && path !== `${SHARE_JOBS_PREFIX}/retire` && path.endsWith('/retire')) {
+      const jobId = decodePromoteJobId(path.slice(SHARE_JOBS_PREFIX.length + 1, -'/retire'.length), res);
+      if (jobId !== null) await handleShareRetirement(ctx, jobId);
+      return true;
     }
     // POST /api/knowledge-assets/swm/share-jobs/:jobId/recover — recover (#5)
     if (

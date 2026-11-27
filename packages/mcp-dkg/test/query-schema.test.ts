@@ -52,6 +52,16 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
       includeContextGraphPartitions: true, includeSharedMemoryMeta: true });
   });
 
+  it('passes semantics through the public tool schema, and refuses other values', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }', projectId: 'parent', view: 'verifiable-memory', semantics: 'merged',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(client.queryCalls.at(-1)).toMatchObject({ contextGraphId: 'parent', view: 'verifiable-memory', semantics: 'merged' });
+    await expect(server.call('dkg_query', { sparql: 'SELECT ?s WHERE { ?s ?p ?o }', projectId: 'parent', semantics: 'joined' }))
+      .rejects.toThrow();
+  });
+
   it('renders CONSTRUCT quads instead of dropping graph-shaped results', async () => {
     client = new FakeClient({
       query: async () => ({

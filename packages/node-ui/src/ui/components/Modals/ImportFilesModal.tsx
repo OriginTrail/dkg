@@ -1,6 +1,10 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { importFile, type ImportFileResult } from '../../api.js';
 import { useModalDismiss } from './useModalDismiss.js';
+import { Check, File, FileCode, FileImage, FileSpreadsheet, FileText, Minus, Network, X } from 'lucide-react';
+import { pressable } from '../../lib/pressable.js';
+import { formatNumber } from '../../lib/format.js';
+import { formatBytes } from '../../hooks.js';
 
 interface ImportFilesModalProps {
   open: boolean;
@@ -25,28 +29,20 @@ interface UploadResult {
 
 const SUPPORTED_EXTENSIONS = '.md, .docx, .pdf, .txt, .csv, .json, .ttl, .rdf, .owl, .py, .ts, .js, .tsx, .jsx, .java, .go, .rs, .c, .cpp, .html, .xml, .yaml, .yml';
 
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function fileIcon(name: string): string {
+function fileIcon(name: string): React.ReactNode {
   const ext = name.split('.').pop()?.toLowerCase() ?? '';
-  if (['md', 'txt'].includes(ext)) return '📝';
-  if (['pdf'].includes(ext)) return '📕';
-  if (['docx', 'doc'].includes(ext)) return '📄';
-  if (['csv', 'json', 'xml', 'yaml', 'yml'].includes(ext)) return '📊';
-  if (['ttl', 'rdf', 'owl'].includes(ext)) return '🔗';
-  if (['py', 'ts', 'js', 'tsx', 'jsx', 'java', 'go', 'rs', 'c', 'cpp'].includes(ext)) return '💻';
-  if (['png', 'jpg', 'jpeg', 'webp'].includes(ext)) return '🖼️';
-  return '📄';
+  if (['md', 'txt', 'pdf', 'docx', 'doc'].includes(ext)) return <FileText size={14} />;
+  if (['csv', 'json', 'xml', 'yaml', 'yml'].includes(ext)) return <FileSpreadsheet size={14} />;
+  if (['ttl', 'rdf', 'owl'].includes(ext)) return <Network size={14} />;
+  if (['py', 'ts', 'js', 'tsx', 'jsx', 'java', 'go', 'rs', 'c', 'cpp'].includes(ext)) return <FileCode size={14} />;
+  if (['png', 'jpg', 'jpeg', 'webp'].includes(ext)) return <FileImage size={14} />;
+  return <File size={14} />;
 }
 
 export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphName }: ImportFilesModalProps) {
   const [files, setFiles] = useState<QueuedFile[]>([]);
-  const [extractKnowledge, setExtractKnowledge] = useState(true);
-  const [storeOriginals, setStoreOriginals] = useState(true);
+  const [extractKnowledge] = useState(true);
+  const [storeOriginals] = useState(true);
   const [status, setStatus] = useState<UploadStatus>('idle');
   const [currentFile, setCurrentFile] = useState(0);
   const [results, setResults] = useState<UploadResult[]>([]);
@@ -155,8 +151,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
   return (
     <div className="v10-modal-overlay" onClick={onBackdropClick} role="presentation">
       <div
-        className="v10-modal-box"
-        style={{ maxWidth: 560 }}
+        className="v10-modal-box ds-overlay v10-import-box"
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
@@ -167,10 +162,9 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
             so an absolutely-positioned button would anchor to the overlay
             viewport instead of the modal; see #959 Codex review). */}
         <div
-          className="v10-modal-header"
-          style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}
+          className="v10-modal-header v10-modal-header-row"
         >
-          <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="v10-modal-heading">
             <div id="dkg-import-modal-title" className="v10-modal-title">Import to Working Memory</div>
             <div className="v10-modal-subtitle">
               {contextGraphName
@@ -181,25 +175,24 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
           </div>
           <button
             type="button"
-            className="v10-modal-close"
+            className="v10-modal-close ds-btn ds-ghost ds-icon"
             onClick={handleClose}
             disabled={status === 'uploading'}
             aria-label="Close import dialog"
             title="Close (Esc)"
-            style={{ flexShrink: 0, cursor: status === 'uploading' ? 'not-allowed' : 'pointer' }}
           >
-            ×
+            <X size={14} />
           </button>
         </div>
 
         <div className="v10-modal-body">
-          {error && <div className="v10-modal-error">{error}</div>}
+          {error && <div role="alert" className="v10-modal-error ds-card-nested">{error}</div>}
 
           {status === 'idle' && (
             <>
               <div
-                className={`v10-import-dropzone ${dragOver ? 'drag-over' : ''}`}
-                onClick={() => inputRef.current?.click()}
+                className={`v10-import-dropzone ds-card ${dragOver ? 'drag-over' : ''}`}
+                role="button" aria-label="Choose files to import" {...pressable(() => inputRef.current?.click())}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
@@ -207,46 +200,46 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
                 <div className="v10-import-dropzone-label">
                   Drag files here, or click to browse
                 </div>
-                <div className="v10-import-dropzone-hint" style={{ marginTop: 4 }}>
+                <div className="v10-import-dropzone-hint v10-import-hint-gap">
                   Your agent will extract structured knowledge and add it to working memory.
                 </div>
-                <div className="v10-import-dropzone-hint" style={{ marginTop: 8 }}>
+                <div className="v10-import-dropzone-hint v10-import-hint-wide">
                   Supported: {SUPPORTED_EXTENSIONS}
                 </div>
                 <input
                   ref={inputRef}
                   type="file"
                   multiple
-                  style={{ display: 'none' }}
+                  className="v10-import-file-input"
                   onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }}
                 />
               </div>
 
               {files.length > 0 && (
                 <>
-                  <div className="v10-import-file-list">
+                  <div className="v10-import-file-list ds-card-nested">
                     {files.map((f) => (
                       <div key={f.id} className="v10-import-file-item">
                         <span className="v10-import-file-icon">{fileIcon(f.file.name)}</span>
                         <span className="v10-import-file-name">{f.file.name}</span>
-                        <span className="v10-import-file-size">{formatSize(f.file.size)}</span>
-                        <button className="v10-import-file-remove" onClick={() => removeFile(f.id)} title="Remove">×</button>
+                        <span className="v10-import-file-size">{formatBytes(f.file.size)}</span>
+                        <button className="v10-import-file-remove" onClick={() => removeFile(f.id)} aria-label="Remove" title="Remove"><X size={14} /></button>
                       </div>
                     ))}
                   </div>
-                  <div style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-tertiary)', marginBottom: 12 }}>
-                    {files.length} file{files.length !== 1 ? 's' : ''} selected · {formatSize(files.reduce((s, f) => s + f.file.size, 0))} total
+                  <div className="v10-import-lead">
+                    {files.length} file{files.length !== 1 ? 's' : ''} selected · {formatBytes(files.reduce((s, f) => s + f.file.size, 0))} total
                   </div>
                 </>
               )}
 
               <div className="v10-form-divider" />
-              <div className="v10-form-label" style={{ marginBottom: 8 }}>Ingestion Options <span style={{ fontSize: 'var(--font-size-meta)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></div>
-              <label className="v10-import-option" style={{ opacity: 0.5, pointerEvents: 'none' }}>
+              <div className="v10-form-label v10-import-label">Import options <span className="v10-import-label-tag">(coming soon)</span></div>
+              <label className="v10-import-option v10-import-option-off">
                 <input type="checkbox" checked={storeOriginals} disabled readOnly />
                 Store original files as Knowledge Assets
               </label>
-              <label className="v10-import-option" style={{ opacity: 0.5, pointerEvents: 'none' }}>
+              <label className="v10-import-option v10-import-option-off">
                 <input type="checkbox" checked={extractKnowledge} disabled readOnly />
                 Let agent extract structured knowledge from content
               </label>
@@ -254,11 +247,11 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
           )}
 
           {status === 'uploading' && (
-            <div className="v10-import-progress">
-              <div style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-secondary)', fontWeight: 500 }}>
+            <div className="v10-import-progress ds-card-nested">
+              <div className="v10-import-status">
                 Importing files… ({currentFile + 1} of {files.length})
               </div>
-              <div style={{ fontSize: 'var(--font-size-caption)', color: 'var(--text-tertiary)', marginTop: 4 }}>
+              <div className="v10-import-status-note">
                 {files[currentFile]?.file.name ?? '…'}
               </div>
               <div className="v10-import-progress-bar">
@@ -285,8 +278,8 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
                   <>
                     {successCount > 0 && (
                       <>
-                        Successfully imported {successCount} file{successCount !== 1 ? 's' : ''}.
-                        {totalTriples > 0 && <> Extracted <strong>{totalTriples.toLocaleString()}</strong> triples into working memory.</>}
+                        Imported {successCount} file{successCount !== 1 ? 's' : ''}.
+                        {totalTriples > 0 && <> Extracted <strong>{formatNumber(totalTriples)}</strong> triples (facts) into Working Memory.</>}
                       </>
                     )}
                     {skippedCount > 0 && (
@@ -301,20 +294,20 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
                     {successCount} file{successCount !== 1 ? 's' : ''} imported
                     {skippedCount > 0 && <>, {skippedCount} stored without extraction</>}
                     , {errorCount} failed.
-                    {totalTriples > 0 && <> {totalTriples.toLocaleString()} triples extracted.</>}
+                    {totalTriples > 0 && <> {formatNumber(totalTriples)} triples extracted.</>}
                   </>
                 )}
               </div>
 
               {results.length > 0 && (
-                <div className="v10-import-file-list" style={{ marginTop: 12 }}>
+                <div className="v10-import-file-list ds-card-nested v10-import-list-gap">
                   {results.map((r, i) => (
                     <div key={i} className="v10-import-file-item">
                       <span className="v10-import-file-icon">
-                        {r.status === 'success' ? '✓' : r.status === 'skipped' ? '–' : '✗'}
+                        {r.status === 'success' ? <Check size={14} /> : r.status === 'skipped' ? <Minus size={14} /> : <X size={14} />}
                       </span>
                       <span className="v10-import-file-name">{r.fileName}</span>
-                      <span className="v10-import-file-size" style={r.status === 'error' ? { color: 'var(--text-danger)' } : undefined}>
+                      <span className={r.status === 'error' ? 'v10-import-file-size v10-import-file-size-error' : 'v10-import-file-size'}>
                         {r.status === 'success' && r.triplesWritten != null ? `${r.triplesWritten} triples` :
                          r.status === 'skipped' ? 'stored (no extraction)' :
                          r.error ?? 'failed'}
@@ -330,9 +323,9 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
         <div className="v10-modal-footer">
           {status === 'idle' && (
             <>
-              <button className="v10-modal-btn" onClick={handleClose}>Cancel</button>
+              <button className="v10-modal-btn ds-btn" onClick={handleClose}>Cancel</button>
               <button
-                className="v10-modal-btn primary"
+                className="v10-modal-btn primary ds-btn ds-primary"
                 onClick={handleImport}
                 disabled={files.length === 0}
               >
@@ -341,10 +334,10 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
             </>
           )}
           {status === 'uploading' && (
-            <button className="v10-modal-btn" disabled>Importing…</button>
+            <button className="v10-modal-btn ds-btn" disabled>Importing…</button>
           )}
           {(status === 'done' || status === 'error') && (
-            <button className="v10-modal-btn primary" onClick={handleClose}>Done</button>
+            <button className="v10-modal-btn primary ds-btn ds-primary" onClick={handleClose}>Done</button>
           )}
         </div>
       </div>

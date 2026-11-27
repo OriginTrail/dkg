@@ -580,8 +580,12 @@ describe('GET /api/agents (GH#310)', () => {
       fakeAgent({ findAgents, findSkills }),
       '?framework=OpenClaw&skill_type=ImageAnalysis',
     );
-    expect(findAgents).toHaveBeenCalledOnce();
-    expect(findSkills).toHaveBeenCalledOnce();
+    // Routing may await enrollment/auth checks before reaching discovery.
+    // Both discoveries must start while neither result has been released.
+    await vi.waitFor(() => {
+      expect(findAgents).toHaveBeenCalledOnce();
+      expect(findSkills).toHaveBeenCalledOnce();
+    });
 
     resolveAgents([row({ agentUri: 'did:dkg:agent/oc-image', peerId: 'peer-image' })]);
     resolveSkills([{

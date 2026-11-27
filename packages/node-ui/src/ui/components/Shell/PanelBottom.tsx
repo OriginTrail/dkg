@@ -2,8 +2,11 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useLayoutStore, maxBottomHeight } from '../../stores/layout.js';
 import { api } from '../../api-wrapper.js';
 import { formatTime, formatDuration, shortId } from '../../hooks.js';
+import { opTone } from '../../op-type-colors.js';
+import { pressable } from '../../lib/pressable.js';
+import { OperationStatusBadge } from '../OperationStatusBadge.js';
 
-const BOTTOM_TABS = ['Node Log', 'Transactions'] as const;
+const BOTTOM_TABS = ['Node log', 'Transactions'] as const;
 type BottomTab = typeof BOTTOM_TABS[number];
 
 // ── Icons ────────────────────────────────────────────────────────────────────
@@ -47,11 +50,11 @@ function classifyLine(line: string): 'error' | 'warn' | 'info' | 'debug' {
   return 'info';
 }
 
-const LEVEL_COLORS: Record<string, string> = {
-  error: 'var(--accent-red, #ef4444)',
-  warn:  'var(--accent-yellow, #f59e0b)',
-  info:  'var(--text-primary)',
-  debug: 'var(--text-tertiary)',
+const LEVEL_CLASS: Record<string, string> = {
+  error: 'v10-log-line v10-log-line-error',
+  warn:  'v10-log-line v10-log-line-warn',
+  info:  'v10-log-line v10-log-line-info',
+  debug: 'v10-log-line v10-log-line-debug',
 };
 
 function useAutoScroll(dep: unknown) {
@@ -73,7 +76,7 @@ function useAutoScroll(dep: unknown) {
   return scrollRef;
 }
 
-// ── Node Log ─────────────────────────────────────────────────────────────────
+// ── Node log ─────────────────────────────────────────────────────────────────
 
 function NodeLogContent() {
   const [lines, setLines] = useState<string[]>([]);
@@ -100,7 +103,7 @@ function NodeLogContent() {
           name="dkg-node-log-filter"
           type="text"
           placeholder="Filter logs..."
-          className="v10-log-filter"
+          className="v10-log-filter ds-input ds-sm"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           aria-label="Filter node log lines"
@@ -108,7 +111,7 @@ function NodeLogContent() {
         <select
           id="dkg-node-log-level"
           name="dkg-node-log-level"
-          className="v10-log-level-select"
+          className="v10-log-level-select ds-input ds-sm"
           value={level}
           onChange={e => setLevel(e.target.value as typeof level)}
           aria-label="Filter node log level"
@@ -122,10 +125,10 @@ function NodeLogContent() {
       </div>
       <div className="v10-log-output" ref={scrollRef}>
         {visible.map((line, i) => (
-          <div key={i} className="v10-log-line" style={{ color: LEVEL_COLORS[classifyLine(line)] }}>{line}</div>
+          <div key={i} className={LEVEL_CLASS[classifyLine(line)]}>{line}</div>
         ))}
         {visible.length === 0 && (
-          <div className="v10-log-line" style={{ color: 'var(--text-tertiary)' }}>No log output</div>
+          <div className="v10-log-line v10-log-line-muted">No log output</div>
         )}
       </div>
     </div>
@@ -142,14 +145,6 @@ function NodeLogContent() {
 
 const TX_OP_TYPES = new Set(['publish', 'publishFromSWM', 'update', 'ka-update', 'verify', 'reconstruct']);
 
-const TX_TYPE_COLORS: Record<string, string> = {
-  publish:        '#22c55e',
-  publishFromSWM: '#16a34a',
-  update:         '#14b8a6',
-  'ka-update':    '#0d9488',
-  verify:         '#8b5cf6',
-  reconstruct:    '#fb923c',
-};
 
 function TransactionsContent() {
   const [ops, setOps] = useState<any[]>([]);
@@ -176,23 +171,23 @@ function TransactionsContent() {
 
   if (ops.length === 0) {
     return (
-      <div style={{ padding: '20px 16px', color: 'var(--text-tertiary)', fontSize: 'var(--font-size-label)' }}>
+      <div className="v10-bottom-empty">
         No publish, update, or verify activity in the last 6 hours.
       </div>
     );
   }
 
   return (
-    <div className="v10-log-output" style={{ overflowY: 'auto', flex: 1 }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--font-size-caption)' }}>
+    <div className="v10-log-output v10-log-output-scroll">
+      <div className="ds-table-scroll"><table className="v10-bottom-table">
         <thead>
-          <tr style={{ borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', textAlign: 'left' }}>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Type</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>ID</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Status</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Duration</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Time</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Tx Hash</th>
+          <tr className="v10-bottom-head-row">
+            <th className="ds-table-head v10-bottom-th">Type</th>
+            <th className="ds-table-head v10-bottom-th">ID</th>
+            <th className="ds-table-head v10-bottom-th">Status</th>
+            <th className="ds-table-head v10-bottom-th">Duration</th>
+            <th className="ds-table-head v10-bottom-th">Time</th>
+            <th className="ds-table-head v10-bottom-th">Tx hash</th>
           </tr>
         </thead>
         <tbody>
@@ -203,29 +198,25 @@ function TransactionsContent() {
             return (
               <React.Fragment key={op.operation_id}>
                 <tr
-                  onClick={() => setExpanded(id => id === op.operation_id ? null : op.operation_id)}
-                  style={{ borderBottom: '1px solid var(--border-subtle)', cursor: 'pointer', background: isExp ? 'rgba(255,255,255,.03)' : undefined }}
+                  aria-expanded={isExp} {...pressable(() => setExpanded(id => id === op.operation_id ? null : op.operation_id))}
+                  className={isExp ? 'v10-bottom-op-row v10-bottom-op-row-open' : 'v10-bottom-op-row'}
                 >
-                  <td style={{ padding: '7px 12px', color: TX_TYPE_COLORS[op.operation_name] ?? 'var(--text-secondary)', fontWeight: 600 }}>
+                  <td className={`v10-bottom-td-op op-tone-${opTone(op.operation_name)}`}>
                     {op.operation_name}
                   </td>
-                  <td style={{ padding: '7px 12px', fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
+                  <td className="v10-bottom-td-mono">
                     {shortId(op.operation_id)}
                   </td>
-                  <td style={{ padding: '7px 12px' }}>
-                    <span style={{
-                      padding: '2px 6px', borderRadius: 4, fontSize: 'var(--font-size-meta)', fontWeight: 600,
-                      background: op.status === 'success' ? 'rgba(34,197,94,.15)' : op.status === 'error' ? 'rgba(239,68,68,.15)' : 'rgba(245,158,11,.15)',
-                      color: op.status === 'success' ? '#22c55e' : op.status === 'error' ? '#ef4444' : '#f59e0b',
-                    }}>{op.status}</span>
+                  <td className="v10-bottom-td">
+                    <OperationStatusBadge status={op.status} />
                   </td>
-                  <td style={{ padding: '7px 12px', color: 'var(--text-secondary)' }}>
+                  <td className="v10-bottom-td-muted">
                     {op.duration_ms != null ? formatDuration(op.duration_ms) : '—'}
                   </td>
-                  <td style={{ padding: '7px 12px', color: 'var(--text-secondary)' }}>
+                  <td className="v10-bottom-td-muted">
                     {op.started_at ? formatTime(op.started_at) : '—'}
                   </td>
-                  <td style={{ padding: '7px 12px', fontFamily: 'var(--font-mono)', color: 'var(--text-tertiary)', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  <td className="v10-bottom-td-id">
                     {txHash
                       ? `${txHash.slice(0, 10)}…`
                       // Only a SUCCESSFULLY-completed op with no chain phase is a
@@ -234,26 +225,23 @@ function TransactionsContent() {
                       // must NOT read as a successful local run — show "—" so the
                       // Status column stays the source of truth for those (Codex).
                       : op.status === 'success'
-                        ? <span style={{ fontFamily: 'var(--font-sans)', fontStyle: 'italic', color: 'var(--text-tertiary)' }}>local</span>
+                        ? <span className="v10-bottom-none">local</span>
                         : '—'}
                   </td>
                 </tr>
                 {isExp && (
-                  <tr style={{ background: 'rgba(0,0,0,.2)' }}>
-                    <td colSpan={6} style={{ padding: '8px 16px' }}>
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, fontSize: 'var(--font-size-caption)', color: 'var(--text-secondary)' }}>
-                        <span><b>ID:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{op.operation_id}</span></span>
-                        {txHash && <span><b>Tx:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{txHash}</span></span>}
-                        {op.peer_id && <span><b>Peer:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{shortId(op.peer_id)}</span></span>}
-                        {op.error_message && <span style={{ color: '#ef4444' }}><b>Error:</b> {op.error_message}</span>}
+                  <tr className="v10-bottom-detail-row">
+                    <td colSpan={6} className="v10-bottom-detail-cell">
+                      <div className="v10-bottom-detail">
+                        <span><b>ID:</b> <span className="v10-bottom-mono">{op.operation_id}</span></span>
+                        {txHash && <span><b>Tx:</b> <span className="v10-bottom-mono">{txHash}</span></span>}
+                        {op.peer_id && <span><b>Peer:</b> <span className="v10-bottom-mono">{shortId(op.peer_id)}</span></span>}
+                        {op.error_message && <span className="v10-bottom-detail-error"><b>Error:</b> {op.error_message}</span>}
                       </div>
                       {(op.phases ?? []).length > 0 && (
-                        <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        <div className="v10-bottom-phases">
                           {op.phases.map((p: any) => (
-                            <span key={p.phase} style={{
-                              padding: '2px 8px', borderRadius: 4, fontSize: 'var(--font-size-meta)', fontWeight: 600,
-                              background: 'rgba(255,255,255,.06)', color: 'var(--text-secondary)',
-                            }}>
+                            <span key={p.phase} className="v10-bottom-phase">
                               {p.phase} {p.duration_ms != null ? formatDuration(p.duration_ms) : ''}
                             </span>
                           ))}
@@ -266,7 +254,7 @@ function TransactionsContent() {
             );
           })}
         </tbody>
-      </table>
+      </table></div>
     </div>
   );
 }
@@ -279,7 +267,7 @@ export function PanelBottom() {
     bottomMaximised, toggleBottomMaximised,
     bottomHeight, setBottomHeight,
   } = useLayoutStore();
-  const [activeTab, setActiveTab] = useState<BottomTab>('Node Log');
+  const [activeTab, setActiveTab] = useState<BottomTab>('Node log');
 
   // Vertical drag-to-resize — same pattern as horizontal handles in App.tsx.
   const handleRef = useRef<HTMLDivElement>(null);
@@ -328,7 +316,7 @@ export function PanelBottom() {
 
   return (
     <div
-      className={`v10-panel-bottom ${bottomCollapsed ? 'collapsed' : ''} ${bottomMaximised ? 'maximised' : ''}`}
+      role="region" aria-label="Node log and transactions" className={`v10-panel-bottom ${bottomCollapsed ? 'collapsed' : ''} ${bottomMaximised ? 'maximised' : ''}`}
       style={!bottomCollapsed ? { height: panelHeight } : undefined}
     >
       {/* Resize handle — only visible when expanded and not maximised */}
@@ -340,23 +328,24 @@ export function PanelBottom() {
         {BOTTOM_TABS.map((tab) => (
           <button
             key={tab}
-            className={`v10-bottom-tab ${tab === activeTab ? 'active' : ''}`}
+            className={`v10-bottom-tab ds-tab ${tab === activeTab ? 'active' : ''}`}
             onClick={() => { setActiveTab(tab); if (bottomCollapsed) toggleBottom(); }}
           >
             {tab}
           </button>
         ))}
-        <div style={{ flex: 1 }} />
-        <button
-          className="v10-bottom-toggle"
-          onClick={toggleBottomMaximised}
-          title={bottomMaximised ? 'Restore' : 'Maximise'}
-          style={{ display: bottomCollapsed ? 'none' : undefined }}
-        >
-          {bottomMaximised ? RESTORE_ICON : MAXIMIZE_ICON}
-        </button>
-        <button className="v10-bottom-toggle" onClick={toggleBottom} title={bottomCollapsed ? 'Expand' : 'Collapse'}>
-          <span style={{ transform: bottomCollapsed ? 'rotate(180deg)' : 'none', display: 'flex', transition: 'transform 0.15s' }}>
+        <div className="v10-bottom-spacer" />
+        {!bottomCollapsed && (
+          <button
+            className="v10-bottom-toggle ds-btn ds-ghost ds-sm ds-icon"
+            onClick={toggleBottomMaximised}
+            title={bottomMaximised ? 'Restore' : 'Maximise'}
+          >
+            {bottomMaximised ? RESTORE_ICON : MAXIMIZE_ICON}
+          </button>
+        )}
+        <button className="v10-bottom-toggle ds-btn ds-ghost ds-sm ds-icon" onClick={toggleBottom} title={bottomCollapsed ? 'Expand' : 'Collapse'}>
+          <span className={bottomCollapsed ? 'v10-bottom-chevron v10-bottom-chevron-up' : 'v10-bottom-chevron'}>
             {CHEVRON_DOWN}
           </span>
         </button>
@@ -364,7 +353,7 @@ export function PanelBottom() {
 
       {!bottomCollapsed && (
         <div className="v10-bottom-content">
-          {activeTab === 'Node Log' && <NodeLogContent />}
+          {activeTab === 'Node log' && <NodeLogContent />}
           {activeTab === 'Transactions' && <TransactionsContent />}
         </div>
       )}

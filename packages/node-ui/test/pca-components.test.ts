@@ -87,7 +87,7 @@ describe('PCA display formatters', () => {
 });
 
 describe('HealthChip', () => {
-  const states: PcaHealthState[] = ['healthy', 'expiring', 'expired', 'insolvent', 'swept', 'cap-near'];
+  const states: PcaHealthState[] = ['healthy', 'expiring', 'expired', 'insolvent', 'cap-near'];
 
   it('renders a text label (never glyph-only) and an aria-hidden glyph for every state', async () => {
     for (const state of states) {
@@ -103,7 +103,7 @@ describe('HealthChip', () => {
       // Glyph is decorative.
       expect(container.querySelector('.v10-pca-health-glyph')?.getAttribute('aria-hidden')).toBe('true');
       // Tone class applied.
-      expect(chip.classList.contains(HEALTH_CHIP_META[state].toneClass)).toBe(true);
+      expect(chip.classList.contains(`ds-tone-${HEALTH_CHIP_META[state].tone}`)).toBe(true);
       await unmount();
     }
   });
@@ -116,19 +116,19 @@ describe('HealthChip', () => {
     await unmount();
   });
 
-  it('renders insolvent in the DANGER tone (badge-error), distinct from warn states (§6.4/G5)', () => {
-    expect(HEALTH_CHIP_META.insolvent.toneClass).toBe('badge-error');
+  it('renders insolvent in the DANGER tone (ds-tone-danger), distinct from warn states (§6.4/G5)', () => {
+    expect(HEALTH_CHIP_META.insolvent.tone).toBe('danger');
     // Expiring / cap-near stay warn-toned — insolvent must NOT collapse into them.
-    expect(HEALTH_CHIP_META.expiring.toneClass).toBe('badge-warn');
-    expect(HEALTH_CHIP_META['cap-near'].toneClass).toBe('badge-warn');
-    expect(HEALTH_CHIP_META.expired.toneClass).toBe('badge-error');
+    expect(HEALTH_CHIP_META.expiring.tone).toBe('warning');
+    expect(HEALTH_CHIP_META['cap-near'].tone).toBe('warning');
+    expect(HEALTH_CHIP_META.expired.tone).toBe('danger');
   });
 
-  it('renders the insolvent pill with honest danger copy — "Insolvent" + badge-error (#1349)', async () => {
+  it('renders the insolvent pill with honest danger copy — "Insolvent" + ds-tone-danger (#1349)', async () => {
     const { container, unmount } = await render(React.createElement(HealthChip, { state: 'insolvent' }));
     const chip = container.querySelector('.v10-pca-health-chip')!;
     expect(chip.getAttribute('data-health')).toBe('insolvent');
-    expect(chip.classList.contains('badge-error')).toBe(true);
+    expect(chip.classList.contains('ds-tone-danger')).toBe(true);
     expect(container.querySelector('.v10-pca-health-label')?.textContent).toBe('Insolvent');
     await unmount();
   });
@@ -158,8 +158,8 @@ describe('healthForSnapshot (single source of truth for S1/S3/S5)', () => {
     expect(healthForSnapshot({ ...base, expiresAtTimestamp: NOW }, NOW)).toBe('expired');
   });
 
-  it('swept outranks cap-near and expiring (when not expired)', () => {
-    expect(healthForSnapshot({ ...base, fullySwept: true, agentCount: 100 }, NOW)).toBe('swept');
+  it('a fully swept PCA reads as expired, ahead of cap-near and expiring', () => {
+    expect(healthForSnapshot({ ...base, fullySwept: true, agentCount: 100 }, NOW)).toBe('expired');
   });
 
   it('cap-near fires at the threshold and outranks expiring', () => {
@@ -215,7 +215,7 @@ describe('healthForSnapshot (single source of truth for S1/S3/S5)', () => {
     const zero = { topUpBuffer: '0', baseEpochAllowance: '0', remainingAllowance: '0', extendedRequested: true };
     // expired / swept win over insolvent
     expect(healthForSnapshot({ ...base, ...zero, expiresAtTimestamp: NOW - 1 }, NOW)).toBe('expired');
-    expect(healthForSnapshot({ ...base, ...zero, fullySwept: true }, NOW)).toBe('swept');
+    expect(healthForSnapshot({ ...base, ...zero, fullySwept: true }, NOW)).toBe('expired');
     // insolvent wins over cap-near and expiring
     expect(healthForSnapshot({ ...base, ...zero, agentCount: 100 }, NOW)).toBe('insolvent');
     expect(healthForSnapshot({ ...base, ...zero, expiresAtTimestamp: NOW + 100 }, NOW)).toBe('insolvent');
@@ -496,8 +496,8 @@ describe('EligibilityVerdictBanner', () => {
     expect(banner.getAttribute('aria-live')).toBe('assertive');
     // P2-interim — the amber copy must HEDGE (attempt + fails-below-fee), not assert
     // the direct-cost publish will go through.
-    expect(banner.textContent).toContain('attempt to pay the direct cost');
-    expect(banner.textContent).toContain('fails if that TRAC is below the fee');
+    expect(banner.textContent).toContain('will pay the full cost in TRAC');
+    expect(banner.textContent).toContain('If it doesn’t have enough TRAC, the publish fails.');
     expect(banner.textContent).not.toContain('it will pay the direct cost');
     expect(banner.textContent).toContain('no approved wallet');
     expect(banner.textContent).toContain('expired');
@@ -537,7 +537,7 @@ describe('EligibilityVerdictBanner', () => {
     expect(banner.classList.contains('v10-pca-verdict-danger')).toBe(true);
     expect(banner.getAttribute('role')).toBe('alert');
     expect(banner.getAttribute('aria-live')).toBe('assertive');
-    expect(banner.textContent).toContain('will FAIL');
+    expect(banner.textContent).toContain('will fail');
     // Q2 — source-agnostic lead (no TRAC OR no gas); the specific cause is in reasonText.
     expect(banner.textContent).toContain('no signing wallet can cover it');
     expect(banner.textContent).toContain('no approved wallet');
@@ -549,7 +549,7 @@ describe('EligibilityVerdictBanner', () => {
     const amber = await render(
       React.createElement(EligibilityVerdictBanner, { verdict: 'fallthrough', accountId: '2', discountBps: 3000 }),
     );
-    expect(amber.container.querySelector('.v10-pca-verdict-banner')?.textContent).toContain('forfeiting PCA #2’s 30% discount');
+    expect(amber.container.querySelector('.v10-pca-verdict-banner')?.textContent).toContain('you’d lose PCA #2’s 30% discount');
     await amber.unmount();
 
     const danger = await render(
@@ -560,7 +560,7 @@ describe('EligibilityVerdictBanner', () => {
 
     // No discount in context → no fabricated forfeit clause.
     const noDisc = await render(React.createElement(EligibilityVerdictBanner, { verdict: 'fallthrough' }));
-    expect(noDisc.container.querySelector('.v10-pca-verdict-banner')?.textContent).not.toContain('forfeiting');
+    expect(noDisc.container.querySelector('.v10-pca-verdict-banner')?.textContent).not.toContain('you’d lose');
     await noDisc.unmount();
   });
 

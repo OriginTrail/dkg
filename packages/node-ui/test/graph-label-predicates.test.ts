@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { MEMORY_LABEL_PREDICATES, memoryGraphLabels } from '../src/ui/lib/memoryLabels.js';
 import { buildLayerGraphOptions } from '../src/ui/views/project/helpers.js';
+import { graphPalette } from '../src/ui/graph-palette.js';
 
 describe('graph label predicates', () => {
   it('builds graph label options from the shared predicate list', () => {
@@ -16,7 +17,7 @@ describe('graph label predicates', () => {
   });
 
   it('uses the shared memory label predicate list for layer graphs', () => {
-    const options = buildLayerGraphOptions('wm');
+    const options = buildLayerGraphOptions('wm', graphPalette('dark'));
 
     expect(options.labels.predicates).toEqual([...MEMORY_LABEL_PREDICATES]);
     expect(options.labels.predicates).toContain('http://purl.org/dc/elements/1.1/title');

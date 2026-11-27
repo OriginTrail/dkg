@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
 
-// The dashboard receives the node's API token in the page only when it is
-// opened on the node host. Elsewhere it loads without one, and the operator
-// enters it in the prompt. Every API client reads the token through
+// The dashboard receives the node's API token in the page only when the node
+// has auth.dashboardAutoSignIn on and the page is opened on the node host.
+// Otherwise it loads without one, and the operator enters it in the prompt. Every API client reads the token through
 // `currentApiToken()`: the served token first, otherwise the entered one, kept
 // in sessionStorage when the browser allows and in memory for the page if not.
 // Uses the repo's happy-dom + react-dom/client createRoot idiom.
