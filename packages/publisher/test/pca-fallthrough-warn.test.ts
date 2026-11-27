@@ -3,6 +3,7 @@
  * registration escrow is consumed before the contract's PCA funding branch. */
 import { describe, it, expect, vi } from 'vitest';
 import { DKGPublisher } from '../src/dkg-publisher.js';
+import { warnPcaFallthrough } from '../src/pca-fallthrough.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TypedEventBus, DKGEvent, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import {
@@ -285,32 +286,34 @@ describe('DKGPublisher: bounded PCA receipt observations (#1411)', () => {
 
   it('shares one 500ms budget across a slow account lookup and a stalled lock lookup', async () => {
     const wallet = new ethers.Wallet(TEST_KEY), chain = new PcaProbeChain(wallet);
-    const bus = new TypedEventBus(), published = vi.fn();
-    bus.on(DKGEvent.KC_PUBLISHED, published);
-    const publisher = await makePublisher(chain, wallet, bus);
-    let started!: () => void;
-    const observing = new Promise<void>(resolve => { started = resolve; });
-    vi.spyOn(chain, 'getConvictionAgentAccountId').mockImplementation(() => {
-      vi.useFakeTimers();
-      started();
-      return new Promise(resolve => setTimeout(() => resolve(1n), 450));
-    });
+    const account = vi.spyOn(chain, 'getConvictionAgentAccountId')
+      .mockImplementation(() => new Promise(resolve => setTimeout(() => resolve(1n), 450)));
     const lock = vi.spyOn(chain, 'getConvictionAccountLockDurationEpochs')
       .mockImplementation(() => new Promise(() => {}));
+    const warn = vi.fn();
     let settled = false;
-    const result = publisher.publish({ contextGraphId: '1', quads: quads('shared-pca-budget'), publishEpochs: 5 })
-      .then(value => { settled = true; return value; });
+    // Install the clock before the helper creates the production deadline.
+    // The full-publisher tests above separately prove confirmation/event delivery.
+    vi.useFakeTimers();
     try {
-      await observing;
+      const result = warnPcaFallthrough(chain, {
+        kind: 'on-chain', publisherAddress: wallet.address, publishEpochs: 5, tokenAmount: 1n,
+        signer: { address: wallet.address, source: 'chainAdapter',
+          signMessage: message => wallet.signMessage(message),
+          signTypedData: (domain, types, value) => wallet.signTypedData(domain, types, value) },
+      }, 5, { batchId: 1n, txHash: '0x01', blockNumber: 1, blockTimestamp: 1,
+        publisherAddress: wallet.address }, warn).then(() => { settled = true; });
+      expect(account).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(450);
       expect(lock).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(49);
       expect(settled).toBe(false);
-      expect(published).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
-      expect((await result).status).toBe('confirmed');
-      expect(published).toHaveBeenCalledOnce();
-    } finally { vi.useRealTimers(); }
+      // Assert before awaiting: a longer deadline must fail instead of waiting it out.
+      expect(settled).toBe(true);
+      await result;
+      expect(warn).not.toHaveBeenCalled();
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
   });
 
   it('does not infer wallet spending or failed PCA coverage from an escrow-compatible receipt', async () => {
