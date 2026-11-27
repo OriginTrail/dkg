@@ -147,7 +147,9 @@ export class StorageAckDemandActivations {
       return undefined;
     }
     if (outcome.kind === 'again') return this.#now() + this.#retryMinMs;
-    demand.lastWhy = outcome.why;
+    demand.lastWhy = outcome.kind === 'activation-failed'
+      ? outcome.error instanceof Error ? outcome.error.message : String(outcome.error)
+      : `${outcome.authority.outcome} by ${outcome.authority.source} (${outcome.authority.reason})`;
     return this.#now() + Math.min(this.#retryMaxMs, this.#retryMinMs * 2 ** Math.min(demand.retries++, 16));
   }
 }

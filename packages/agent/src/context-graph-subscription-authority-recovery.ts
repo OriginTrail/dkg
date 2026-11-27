@@ -203,7 +203,7 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
   };
   for (const { contextGraphId, revision, candidate } of candidates) {
     const outcome = await recoverPersistedSubscriptionRow(contextGraphId, rowPorts, signal, { snapshot: { row: candidate, revision } });
-    if (outcome.kind === 'retry' && outcome.activationFailed) ports.warn(contextGraphId, new Error(outcome.why));
+    if (outcome.kind === 'activation-failed') ports.warn(contextGraphId, outcome.error);
     if (!ports.row.isCurrent()) return;
   }
 
@@ -342,8 +342,9 @@ export async function promoteDormantContextGraphSubscriptions(
       }, signal, { reason: 'activationCap' });
       signal.throwIfAborted();
       if (!ports.isCurrent(signal)) return 'idle';
-      if (outcome.kind === 'retry' && outcome.activationFailed) {
-        ports.log.warn(ctx, `Could not promote pending context-graph subscription "${contextGraphId}": ${outcome.why}`);
+      if (outcome.kind === 'activation-failed') {
+        const why = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+        ports.log.warn(ctx, `Could not promote pending context-graph subscription "${contextGraphId}": ${why}`);
         return 'rearm';
       }
       if (outcome.kind !== 'activated') { ports.touchStatus(); continue; }
