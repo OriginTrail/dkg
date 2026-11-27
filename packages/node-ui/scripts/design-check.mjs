@@ -107,8 +107,8 @@ function main(argv) {
   if (json) {
     process.stdout.write(JSON.stringify(results, null, 2) + '\n');
   } else {
-    // Off the system first: those need a decision. Then values on the scale written as numbers.
-    for (const [title, pick] of [['Off the design system', (f) => f.offScale], ['On the scale, written as a number (use the token)', (f) => !f.offScale]]) {
+    // What fails first: values not written as the system's tokens. Then heights that match a token, which may be layout.
+    for (const [title, pick] of [['Not on the design system', (f) => f.offScale], ['Heights that match a token (use it if this is a control, badge or row)', (f) => !f.offScale]]) {
       const rows = results.map((r) => ({ file: r.file, findings: r.findings.filter(pick) })).filter((r) => r.findings.length);
       if (!rows.length) continue;
       console.log(`\n── ${title} ──`);
@@ -119,10 +119,10 @@ function main(argv) {
     }
     console.log('');
     if (off.n === 0 && named.n === 0) console.log('design-check: everything is on the design system.');
-    if (named.n) console.log(`design-check: ${named.n} value${named.n === 1 ? '' : 's'} on the scale but written as a number (${named.text}).`);
+    if (named.n) console.log(`design-check: ${named.n} height${named.n === 1 ? '' : 's'} matching a token, to use if it's a control, badge or row (${named.text}).`);
     if (off.n) {
-      console.log(`design-check: ${off.n} value${off.n === 1 ? '' : 's'} off the design system (${off.text}).`);
-      console.log('Each one is either a mistake (use the suggestion) or a new rule. For a new rule, in the same PR:');
+      console.log(`design-check: ${off.n} value${off.n === 1 ? '' : 's'} not on the design system (${off.text}).`);
+      console.log('Each one names the token to use. A value no token has is either a mistake (use the nearest) or a new rule. For a new rule, in the same PR:');
       console.log('  1. add the token to src/ui/styles/00-theme.css (colours: a value for both themes) or the component to src/ui/components/ds/');
       console.log('  2. describe its job in DESIGN.md');
       console.log('  3. show it on the reference page (ui/design-system.html)');

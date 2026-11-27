@@ -139,8 +139,9 @@ describe('design check', () => {
   });
 
   it('keeps a variable defined in a rule to that rule', () => {
+    // Off the scale only, so which definition applied is what's tested (on-scale numbers fail too, as their token).
     const gaps = (css: string) => checkText(system, `<style>${css}</style>`, 'mock.html', { known: new Set(['--gap']), mockup: true })
-      .filter((f: { offScale?: boolean; prop: string }) => f.offScale && f.prop === 'gap')
+      .filter((f: { offScale?: boolean; prop: string; use: string }) => f.offScale && f.prop === 'gap' && f.use.startsWith('nearest'))
       .map((f: { value: string }) => f.value);
     // .a reads the 10px from :root; .b defines its own 8px, which is on the scale.
     expect(gaps(':root { --gap: 10px; } .a { gap: var(--gap); } .b { --gap: 8px; gap: var(--gap); }')).toEqual(['10px']);
@@ -169,20 +170,22 @@ describe('design check', () => {
     expect(found('<script>"<!--"</script>\n<!-- <button>Old</button> -->\n<div style="padding: 10px"></div>')).toEqual(['3 spacing']);
   });
 
-  it('fails an opaque colour off the system, and passes one on it', () => {
+  it('fails every colour written as a literal, a token\'s own value too', () => {
     const off = (prop: string, value: string) => checkDeclaration(system, prop, value, { known: new Set() })
       .filter((f: { kind: string }) => f.kind === 'colour').map((f: { offScale?: boolean }) => Boolean(f.offScale));
-    expect(off('color', '#ffffff')).toEqual([false]);
+    expect(off('color', '#ffffff')).toEqual([true]);
+    expect(off('color', 'var(--text-primary)')).toEqual([]);
     expect(off('background', '#ff00ff')).toEqual([true]);
     expect(off('background', '#7a1f55')).toEqual([true]);
   });
 
-  it("passes every token's own colour, whatever the property's job", () => {
+  it("names a token for every token's own colour, whatever the property's job", () => {
     const tokenColours = system.colours.filter((t: { alpha: number; text: string }) => t.alpha === 1 && !/var\(/.test(t.text));
     expect(tokenColours.length).toBeGreaterThan(10);
+    // Written as a literal it fails, but the fix is a token with exactly that value, never "nearest".
     const off = tokenColours.flatMap((t: { name: string; text: string }) => ['color', 'background', 'border-color'].flatMap((prop) => (
       checkDeclaration(system, prop, t.text, { known: new Set() })
-        .filter((f: { kind: string; offScale?: boolean }) => f.kind === 'colour' && f.offScale)
+        .filter((f: { kind: string; use: string }) => f.kind === 'colour' && !f.use.startsWith('var('))
         .map(() => `${prop}: ${t.text} (${t.name})`)
     )));
     expect(off).toEqual([]);
@@ -291,7 +294,7 @@ describe('design check', () => {
 
   it("resolves a variable's own references where it is defined, as CSS does", () => {
     const pads = (css: string) => checkText(system, `<style>${css}</style>`, 'mock.html', { mockup: true })
-      .filter((f: { offScale?: boolean; prop?: string }) => f.offScale && f.prop === 'padding')
+      .filter((f: { offScale?: boolean; prop?: string; use: string }) => f.offScale && f.prop === 'padding' && f.use.startsWith('nearest'))
       .map((f: { value: string }) => f.value);
     // --pad is computed at :root, with :root's --gap, before .a's --gap applies.
     expect(pads(':root { --gap: 10px; --pad: var(--gap); } .a { --gap: 8px; padding: var(--pad); }')).toEqual(['10px']);
@@ -304,9 +307,10 @@ describe('design check', () => {
     const colours = (css: string) => checkText(system, css, 'x.css', { known: new Set(['--card-bg']) })
       .filter((f: { kind: string; offScale?: boolean }) => f.kind === 'colour' && f.offScale)
       .map((f: { prop?: string; value: string }) => `${f.prop} ${f.value}`);
-    expect(colours('.x { --card-bg: magenta; background: var(--card-bg); }')).toEqual(['--card-bg magenta']);
+    // Where it's defined, and where it's used (resolved as in a mock-up).
+    expect(colours('.x { --card-bg: magenta; background: var(--card-bg); }')).toEqual(['--card-bg magenta', 'background magenta']);
     expect(colours('.x { --card-bg: var(--bg-surface); background: var(--card-bg); }')).toEqual([]);
-    expect(colours('.x { --card-bg: #ffffff; }')).toEqual([]); // a token's value
+    expect(colours('.x { --card-bg: #ffffff; }')).toEqual(['--card-bg #ffffff']); // a token's value, as a literal
   });
 
   it('fails lengths in other units, which the px scales cannot check', () => {
@@ -380,6 +384,16 @@ describe('design check', () => {
     } finally {
       rmSync(pkg, { recursive: true, force: true });
     }
+  });
+
+  it('checks a UI stylesheet\'s own variables where they are used', () => {
+    const off = (css: string) => checkText(system, css, 'src/ui/styles/x.css', { known: new Set(['--gap', '--set-at-runtime']) })
+      .filter((f: { offScale?: boolean }) => f.offScale).map((f: { kind: string; value: string }) => `${f.kind} ${f.value}`);
+    // A size moved into a variable is still that size.
+    expect(off('.x { --gap: 10px; gap: var(--gap); }')).toEqual(['spacing 10px']);
+    // An alias of a token is the token; a variable set at runtime has nothing to check.
+    expect(off('.x { --gap: var(--space-8); gap: var(--gap); }')).toEqual([]);
+    expect(off('.x { gap: var(--set-at-runtime); }')).toEqual([]);
   });
 
   it('keeps checking when a UI stylesheet cannot be read, and reports that sheet itself', () => {
@@ -527,7 +541,10 @@ describe('design check', () => {
       expect(run('.a { color: #ff00ff; }')).toBe(1); // an opaque colour off the system
       expect(run('.a { color: magenta; }')).toBe(1);
       expect(run('.a { padding: var(--space-12); }')).toBe(0);
-      expect(run('.a { padding: 16px; }')).toBe(0); // on the scale, written as a number: a suggestion, not a failure
+      expect(run('.a { padding: 16px; }')).toBe(1); // on the scale, but written as a number: use var(--space-16)
+      expect(run('.a { color: #ffffff; }')).toBe(1); // a token's value, written as a literal
+      expect(run('.a { border-radius: 999px; }')).toBe(1); // a pill written as a number: var(--radius-pill)
+      expect(run('.a { height: 32px; }')).toBe(0); // a height may be layout: a suggestion, not a failure
       expect(run('.a { content: "#ff00ff"; }')).toBe(0);
       expect(run('.a { padding: 0.625rem; }')).toBe(1); // another unit
       expect(run('.a { font-size: 2vw; }')).toBe(1);

@@ -4,10 +4,18 @@
  * Fails when the node UI has a hard-coded colour or corner size instead of a
  * token from styles/00-theme.css. There is no allowance list: if no token
  * fits, add one to 00-theme.css and describe it in DESIGN.md.
+ *
+ * The rules are design:check's own (scripts/design-core.mjs and design-rules.mjs),
+ * so the test and the check can't disagree: stylesheets go through checkText, and
+ * corner values found in TS and TSX go through classify. What this test adds is
+ * reach: it also finds colours and corners in any string in TS and TSX (canvas
+ * colours, CSS built in template strings), not only in style objects.
  */
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
+import { buildSystem, checkText, readTokens } from '../scripts/design-core.mjs';
+import { classify } from '../scripts/design-rules.mjs';
 
 const UI = resolve(__dirname, '../src/ui');
 
@@ -22,24 +30,22 @@ const isPaletteFile = (file: string) => /(^|\/)[\w-]*-colors\.ts$/.test(file);
 /** Local test harness pages and mock data are not product UI. */
 const isIgnored = (file: string) => /(^|\/)__/.test(file) || file.startsWith('mocks/');
 
-const HEX = /#[0-9a-fA-F]{3,8}\b/g;
+const system = buildSystem(readTokens());
 const COLOUR_FN = /\b(?:rgba?|hsla?)\(\s*[\d.]/g;
-const CSS_RADIUS = /radius\s*:\s*([^;{}]+)/g;
 const JS_RADIUS = /borderRadius\s*:\s*(['"`]?)([^,}\n]+?)\1\s*[,}\n]/g;
 /** Hex colours anywhere in code: a quoted value, a var() fallback, a gradient
  *  stop. Not HTML entities (&#10530;) and not issue numbers in comments
  *  (comments are stripped first). */
 const JS_HEX = /(?<![&\w#])#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})(?![\w-])/g;
 
-/** A radius value is hard-coded if it has a non-zero length that isn't a token. */
+/**
+ * A corner value is hard-coded if design:check's corner rule finds a literal in it:
+ * any non-zero length (on the scale or not), a pill written as a number, or another
+ * unit. A bare number is px, as React reads it.
+ */
 function isRawRadius(value: string): boolean {
-  const v = value.replace(/var\([^)]*\)/g, '').replace(/!important/, '').trim();
-  if (!v) return false;
-  return v.split(/[\s/]+/).some((part) => /^-?\d*\.?\d+(px|rem|em)?$/.test(part) && Number.parseFloat(part) !== 0);
-}
-
-function stripCssComments(text: string): string {
-  return text.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
+  const v = value.trim();
+  return classify('border-radius', /^-?\d*\.?\d+$/.test(v) ? `${v}px` : v).length > 0;
 }
 function stripJsComments(text: string): string {
   return text
@@ -65,12 +71,12 @@ function scan(file: string, text: string): Hit[] {
     hits.push({ kind, line, text: text.split('\n')[line - 1].trim().slice(0, 120) });
   };
   if (file.endsWith('.css')) {
-    const css = stripCssComments(text);
-    if (!COLOUR_SOURCES.has(file)) {
-      for (const m of css.matchAll(HEX)) add('colour', m.index!);
-      for (const m of css.matchAll(COLOUR_FN)) add('colour', m.index!);
+    if (COLOUR_SOURCES.has(file)) return hits;
+    // Exactly what design:check reports for this stylesheet's colours and corners.
+    for (const f of checkText(system, text, file, { known: new Set() })) {
+      if (!f.offScale || (f.kind !== 'colour' && f.kind !== 'corner')) continue;
+      hits.push({ kind: f.kind === 'colour' ? 'colour' : 'radius', line: f.line, text: text.split('\n')[f.line - 1].trim().slice(0, 120) });
     }
-    for (const m of css.matchAll(CSS_RADIUS)) if (isRawRadius(m[1])) add('radius', m.index!);
     return hits;
   }
   const js = stripJsComments(text);
@@ -127,9 +133,17 @@ describe('design tokens', { timeout: 20_000 }, () => {
     expect(isRawRadius('var(--radius-card)')).toBe(false);
     expect(isRawRadius('50%')).toBe(false);
     expect(isRawRadius('0')).toBe(false);
+    // A pill written as a number, a big corner and another unit are literals too.
+    expect(isRawRadius('999px')).toBe(true);
+    expect(isRawRadius('120px')).toBe(true);
+    expect(isRawRadius('0.5rem')).toBe(true);
+    expect(isRawRadius('8')).toBe(true);
     expect(scan('styles/x.css', '.a { color: #fff; border-radius: 6px; }').map((h) => h.kind)).toEqual(['colour', 'radius']);
     expect(scan('styles/x.css', '.a { color: var(--text-primary); border-radius: var(--radius-control); }')).toEqual([]);
     expect(scan('styles/00-theme.css', ':root { --x: #fff; }')).toEqual([]);
+    // A colour in a var() fallback is still a literal, and lines are design:check's.
+    expect(scan('styles/x.css', '.a { color: var(--text-primary, #fff); }').map((h) => h.kind)).toEqual(['colour']);
+    expect(scan('styles/x.css', '.a {\n  border-radius: 999px;\n}').map((h) => `${h.line} ${h.kind}`)).toEqual(['2 radius']);
     expect(scan('x.tsx', "const s = { color: '#a0a0a0', borderRadius: 8 };").map((h) => h.kind)).toEqual(['colour', 'radius']);
     expect(scan('x.tsx', "const s = { borderRadius: 'var(--radius-pill)' };")).toEqual([]);
     expect(scan('layer-colors.ts', "export const C = '#94a3b8';")).toEqual([]);

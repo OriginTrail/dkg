@@ -16,7 +16,7 @@ import { styleDeclarations } from './jsx.mjs';
  * A literal value a rule covers. Each kind carries what its rule needs: `n` is the
  * number on the rule's scale (px, or ms for motion) wherever there is one.
  * @typedef {{ kind: 'corner', value: string, n: number }} CornerHit        a border radius in px
- * @typedef {{ kind: 'corner', value: string, pill: true }} PillHit        a 999px corner: the pill token
+ * @typedef {{ kind: 'corner', value: string, pill: true }} PillHit        a corner of 100px or more: the pill token
  * @typedef {{ kind: 'corner', value: string, unit: true }} CornerUnitHit  a radius in another length unit (rem, em, vw …)
  * @typedef {{ kind: 'spacing', value: string, n: number, up: boolean }} SpacingHit  `up` on padding: ties round up
  * @typedef {{ kind: 'spacing', value: string, unit: true }} SpacingUnitHit a space in another length unit
@@ -166,7 +166,7 @@ export function declarations(text, ext) {
  * exceptions applied. Values inside var() are tokens and aren't returned;
  * literals beside them are.
  *
- *   corner       border radius in px (0 and pills of 100px+ aside), a 999px pill, or one in another unit (% aside)
+ *   corner       border radius in px (0 aside), a pill (any corner of 100px or more), or one in another unit (% aside)
  *   spacing      padding, margin and gap over 1px (negative margins aside), or one in another unit (% aside)
  *   type size    font-size, and the size in a `font` shorthand, in px or another unit (1em aside)
  *   weight       a numeric weight off WEIGHTS
@@ -195,7 +195,8 @@ export function classify(prop, value, nodes) {
   const out = [];
   if (/^border(-[a-z]+)*-radius$/.test(p)) {
     for (const n of px()) if (n !== 0 && n < 100) out.push({ kind: 'corner', value: `${n}px`, n });
-    if (words.some((w) => /^(999|9999)px$/i.test(w))) out.push({ kind: 'corner', value: v, pill: true });
+    // A corner of 100px or more rounds any control into a pill: that's --radius-pill.
+    if (px().some((n) => n >= 100)) out.push({ kind: 'corner', value: v, pill: true });
     for (const w of others()) out.push({ kind: 'corner', value: w, unit: true });
   } else if (/^(padding|margin|gap|row-gap|column-gap)(-[a-z]+)*$/.test(p)) {
     for (const n of px()) if (n > 1) out.push({ kind: 'spacing', value: `${n}px`, n, up: p.startsWith('padding') });

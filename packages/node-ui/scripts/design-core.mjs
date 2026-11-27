@@ -277,7 +277,8 @@ function checkColour(system, prop, text) {
       ? `a ${pct}% wash of var(${base.t.name}): use a tint token (--tint-*, --*-bg) if one fits, or color-mix(in srgb, var(${base.t.name}) ${pct}%, transparent)`
       : `no token is close. For a wash, use a tint token (--tint-*, --*-bg) or color-mix() on a token, ${ADD}`;
   } else use = 'no token is close. If the colour has a job of its own, add a token with a value for both themes; if it only needs to stand out, use contrast and weight (DESIGN.md · Principles 2)';
-  return { kind: 'colour', value: text, use, offScale: !exact };
+  // A colour written as a literal fails even when it is a token's value: the token is what to write.
+  return { kind: 'colour', value: text, use, offScale: true };
 }
 
 // ── One declaration ─────────────────────────────────────────────────────────
@@ -444,8 +445,10 @@ export function checkText(system, text, file, { known, mockup = false, keepLine 
     for (let l = 1; l <= lines && !edited; l++) edited = keepLine(l);
     return edited ? [{ line, kind: 'css', value: error.reason, use: `${error.message}. Fix it so the design can be checked`, offScale: true }] : [];
   }
-  // A mock-up's own variables (`--gap: 10px`) are checked where they're used, against the
-  // scale of the property that uses them: `gap: var(--gap)` is a gap of 10px. Every
+  // A file's own variables (`--gap: 10px`), in a mock-up or a UI stylesheet, are checked where
+  // they're used, against the scale of the property that uses them: `gap: var(--gap)` is a
+  // gap of 10px, so moving a size into a variable doesn't hide it. Variables set only at
+  // runtime or in another file have no definition here and stay as they are. Every
   // definition is kept with its scope, so a rule's own definition applies inside it. A
   // mock-up that redefines a node UI token is checked with its own value too, and a
   // redefinition anywhere is reported below.
@@ -454,15 +457,13 @@ export function checkText(system, text, file, { known, mockup = false, keepLine 
   const knownHere = mockup ? new Set([...(known ?? []), ...decls.filter((d) => d.prop.startsWith('--')).map((d) => d.prop)]) : known;
   /** @type {Map<string, { value: string, scope: number }[]>} */
   const defs = new Map();
-  if (mockup) {
-    for (const d of decls) {
-      if (!d.prop.startsWith('--')) continue;
-      // A copy of a token at its own value changes nothing: keep reading it as the token.
-      if (system.themeValues.get(d.prop)?.has(d.value.trim())) continue;
-      const list = defs.get(d.prop) ?? [];
-      list.push({ value: d.value, scope: d.scope });
-      defs.set(d.prop, list);
-    }
+  for (const d of decls) {
+    if (!d.prop.startsWith('--')) continue;
+    // A copy of a token at its own value changes nothing: keep reading it as the token.
+    if (system.themeValues.get(d.prop)?.has(d.value.trim())) continue;
+    const list = defs.get(d.prop) ?? [];
+    list.push({ value: d.value, scope: d.scope });
+    defs.set(d.prop, list);
   }
   for (const d of decls) {
     // A declaration counts as changed when any line it spans is: `padding:\n  10px;` with only the value edited.

@@ -266,9 +266,9 @@ None today.
 `test/design-tokens.test.ts` runs with the normal test suite and fails when the node UI has:
 
 - a hard-coded colour (hex, `rgb()`, `hsl()`) in a stylesheet other than `00-theme.css`, or anywhere in component code, including `var()` fallbacks, gradients and shadows;
-- a hard-coded corner size (`border-radius` / `borderRadius` in px) instead of a `--radius-*` token. `0` and `50%` (circles) are allowed.
+- a hard-coded corner size (`border-radius` / `borderRadius` in px, a bare number or another unit) instead of a `--radius-*` token, a pill written as a number (`999px`, or any corner of 100px or more) included. `0` and `50%` (circles) are allowed.
 
-There are no exceptions. If no token fits, add one (see below). Canvas palettes (`*-colors.ts`) are the only code allowed literal colours, because graph-viz can't read CSS variables.
+It uses the design check's own rules (below), so the two never disagree: stylesheets are read exactly as `design:check` reads them, and the test only adds reach, finding colours and corners in any string in component code, not just in style objects. There are no exceptions. If no token fits, add one (see below). Canvas palettes (`*-colors.ts`) are the only code allowed literal colours, because graph-viz can't read CSS variables.
 - `test/icons.test.ts`: one icon set, and the refresh icon on Refresh and Retry buttons.
 - `test/a11y-rules.test.ts`: names, keyboard access, dialog names and focus rings.
 - `test/feedback-states.test.ts`: loading copy, empty states, the disabled look and form errors.
@@ -296,10 +296,11 @@ pnpm --filter @origintrail-official/dkg-node-ui design:check path/to/mockup.html
 pnpm --filter @origintrail-official/dkg-node-ui design:check --changed
 ```
 
-It reads the scale from `00-theme.css`, so it's never behind the tokens. It checks CSS, TSX and HTML, including a mock-up's `<style>` blocks, `style` attributes and its own variables (a mock-up's surface variable set to `#141414` gets matched to `--bg-surface`). `design:check --changed` looks only at the lines a branch adds against `origin/testnet-canary`; pass another base after it if needed. Every finding comes with a next step:
+It reads the scale from `00-theme.css`, so it's never behind the tokens. It checks CSS, TSX and HTML, including a mock-up's `<style>` blocks, `style` attributes and the variables a file defines (a mock-up's surface variable set to `#141414` gets matched to `--bg-surface`, and a stylesheet's `--gap: 10px` is checked where `gap: var(--gap)` uses it). `design:check --changed` looks only at the lines a branch adds against `origin/testnet-canary`; pass another base after it if needed. Every finding comes with a next step, and every one but heights makes the check exit 1:
 
-- **On the scale, written as a number:** use the token it names. This is allowed in code today, so it doesn't fail.
-- **Off the system:** a colour, size, corner, weight, layer or timing that no token has, or a variable that isn't a token. It names the nearest token. Either use it, or this is a new rule: add the token (or the component) as described in [Adding to the system](#adding-to-the-system), in the same PR. Off-system values make the check exit 1.
+- **On the system, written as a literal:** a colour, size, corner or timing that a token has, written as its value (`16px`, `#ffffff`, `999px`). Use the token it names.
+- **Off the system:** a colour, size, corner, weight, layer or timing that no token has, or a variable that isn't a token. It names the nearest token. Either use it, or this is a new rule: add the token (or the component) as described in [Adding to the system](#adding-to-the-system), in the same PR.
+- **Height:** a height that matches a control, badge or row height names that token. It doesn't fail, because a fixed height is often layout, not a control.
 - **Component (mock-ups only):** markup that redraws something the system has, such as a button without `ds-btn`, a tag instead of `<Badge>`, or a card or dialog without the shared class. In code, `test/ds-classes.test.ts` and `test/button-classes.test.ts` check this.
 
 A mock-up that needs something new is how the system grows: keep the finding, propose the token or component with its job, and add it in the PR that builds the screen.

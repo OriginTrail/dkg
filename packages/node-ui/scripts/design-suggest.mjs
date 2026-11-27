@@ -11,7 +11,7 @@ import { WEIGHTS } from './design-rules.mjs';
  * The scales a suggestion picks from, built from the tokens in 00-theme.css.
  * @typedef {{ radius: Step[], space: Step[], fontSize: Step[], height: Step[], lineHeight: Step[], z: Step[], motion: Step[] }} Scales
  */
-/** What the check reports for one value. `offScale` findings fail it. @typedef {{ kind: string, value: string, use: string, offScale?: boolean }} Finding */
+/** What the check reports for one value. `offScale` findings fail it: a value off the system, or one on it written as a literal instead of its token. @typedef {{ kind: string, value: string, use: string, offScale?: boolean }} Finding */
 
 export const ADD = 'or, if this is a new rule, add a token (DESIGN.md · Adding to the system)';
 
@@ -40,7 +40,8 @@ export function nearest(scale, value, up = false) {
  */
 export function scaleRule(kind, scale, value, unit = 'px', up = false) {
   const hit = scale.find((t) => t.value === value);
-  if (hit) return { kind, use: `var(${hit.name})` };
+  // On the scale but written as a number: it still fails, the token is what to write.
+  if (hit) return { kind, use: `var(${hit.name})`, offScale: true };
   const near = nearest(scale, value, up);
   return { kind, use: near ? `nearest is var(${near.name}) (${near.value}${unit}), ${ADD}` : ADD, offScale: true };
 }
@@ -55,7 +56,7 @@ export function suggest(scales, hit) {
   const { value } = hit;
   switch (hit.kind) {
     case 'corner':
-      if ('pill' in hit) return { kind: hit.kind, value, use: 'var(--radius-pill)' };
+      if ('pill' in hit) return { kind: hit.kind, value, use: 'var(--radius-pill)', offScale: true };
       if ('unit' in hit) return { kind: hit.kind, value, use: `corners are px tokens (--radius-*): work out ${value} in px and use the nearest, ${ADD}`, offScale: true };
       return { value, ...scaleRule(hit.kind, scales.radius, hit.n) };
     case 'spacing':
