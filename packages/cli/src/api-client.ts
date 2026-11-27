@@ -3,7 +3,7 @@ import { normalizeContextGraphIdOrUri } from './context-graph-identifiers.js';
 import type { FinalizedAssertionPublishResponse, KnowledgeAssetPublishResponse } from './knowledge-asset-publish-response.js';
 export type { KnowledgeAssetPublishResponse, ConfirmedCatalogObligationPendingResponseV1, ConfirmedCatalogTransactionResponseV1 } from './knowledge-asset-publish-response.js';
 import type { QueryOptions } from './query-options.js';
-import { shareJobsPath, shareReconciliationPath, type ShareJobsListOptions, type ShareJobsListResult } from './share-job-client-paths.js';
+import { shareJobPath, shareJobsPath, shareReconciliationPath, type ShareJobReference, type ShareJobsListOptions, type ShareJobsListResult } from './share-job-client-paths.js';
 import { publisherJobsPath, type PublisherJobsPageOptions, type PublisherJobsResult } from './publisher-job-client-paths.js';
 import { createEntityClient } from './entity-search/client.js';
 import { createViewSemanticsClient } from './view-semantics-client.js';
@@ -522,6 +522,8 @@ export interface DaemonStatusResponse extends StoreQuadsStatusFields, StoreReach
 
 export interface ApiClientConnectOptions {
   allowConfigFallback?: boolean;
+  /** Explicit connection inputs; omitted values retain environment defaults. 'home' ignores DKG_API_PORT. */
+  connection?: { home?: string; token?: string; port?: number | 'home' };
 }
 
 function daemonNotRunningMessage(selectedHome: string): string {
@@ -697,13 +699,12 @@ export class ApiClient {
   }
 
   static async connect(opts: ApiClientConnectOptions = {}): Promise<ApiClient> {
-    const homeFiles = new DkgHomeFiles();
+    const homeFiles = new DkgHomeFiles(opts.connection?.home);
     const selectedHome = homeFiles.home;
-    const environmentToken = process.env.DKG_AUTH_TOKEN?.trim();
-    const hasEnvPort = process.env.DKG_API_PORT !== undefined && process.env.DKG_API_PORT !== '';
-    const envPort = hasEnvPort
-      ? parseInt(process.env.DKG_API_PORT as string, 10)
-      : null;
+    const environmentToken = (opts.connection?.token ?? process.env.DKG_AUTH_TOKEN)?.trim();
+    const selectedPort = opts.connection?.port ?? process.env.DKG_API_PORT;
+    const hasEnvPort = selectedPort !== undefined && selectedPort !== '' && selectedPort !== 'home';
+    const envPort = hasEnvPort ? parseInt(String(selectedPort), 10) : null;
 
     const filePort = hasEnvPort ? null : await homeFiles.readApiPort();
     let port = envPort ?? filePort;
@@ -1066,8 +1067,8 @@ export class ApiClient {
     return this.get(shareReconciliationPath(input));
   }
 
-  async knowledgeAssetShareJob(jobId: string, options?: { timeoutMs?: number }): Promise<KnowledgeAssetShareJobView> {
-    return this.send(`/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}`, { headers: this.authHeaders() }, options);
+  async knowledgeAssetShareJob(jobId: ShareJobReference, options?: { timeoutMs?: number }): Promise<KnowledgeAssetShareJobView> {
+    return this.send(shareJobPath(jobId), { headers: this.authHeaders() }, options);
   }
 
   async knowledgeAssetCancelShareJob(jobId: string): Promise<{ jobId: string; state: KnowledgeAssetShareJobState }> {

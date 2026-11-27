@@ -3,6 +3,7 @@
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { constants } from 'node:os';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { shareWithClientRule, followShareJob, recoveryWaitSec } from './devnet-soak-rs-share.mjs';
@@ -19,14 +20,7 @@ export async function clientAnswer(work) {
 
 async function connectClient(repoRoot, home, auth) {
   const { ApiClient } = await import(pathToFileURL(join(repoRoot, 'packages/cli/dist/api-client.js')).href);
-  const previous = { DKG_HOME: process.env.DKG_HOME, DKG_AUTH_TOKEN: process.env.DKG_AUTH_TOKEN, DKG_API_PORT: process.env.DKG_API_PORT };
-  process.env.DKG_HOME = home; process.env.DKG_AUTH_TOKEN = auth; delete process.env.DKG_API_PORT;
-  try { return await ApiClient.connect(); }
-  finally {
-    for (const [key, value] of Object.entries(previous)) {
-      if (value === undefined) delete process.env[key]; else process.env[key] = value;
-    }
-  }
+  return ApiClient.connect({ connection: { home, token: auth, port: 'home' } });
 }
 
 function publishCli(cli, home, name, contextGraphId, env) {
@@ -38,7 +32,7 @@ function publishCli(cli, home, name, contextGraphId, env) {
     child.stdout.on('data', data => { out += data; }); child.stderr.on('data', data => { out += data; });
     const finish = result => { if (!settled) { settled = true; resolveResult(result); } };
     child.once('error', error => finish({ rc: 1, out: error.message }));
-    child.once('close', (code, signal) => finish({ rc: code ?? 1, out: out.trimEnd() + (signal ? `\nCLI stopped: ${signal}` : '') }));
+    child.once('close', (code, signal) => finish({ rc: code ?? (signal && constants.signals[signal] ? 128 + constants.signals[signal] : 1), out: out.trimEnd() + (signal ? `\nCLI stopped: ${signal}` : '') }));
   });
 }
 
@@ -63,8 +57,8 @@ export async function runPublisher(options, { now = Date.now, sleep = delay, sig
       const shared = await shareWithClientRule({ contextGraphId: cg, name, quads, progress, log, sleep,
         create: (...args) => clientAnswer(() => client.createKnowledgeAsset(...args)),
         share: (...args) => clientAnswer(() => client.knowledgeAssetShare(...args)),
-        follow: job => followShareJob(job, { api: 'http://local-daemon', auth, budgetMs, log,
-          pollOptions: { getJson: async (_url, options) => client.knowledgeAssetShareJob(job.jobId ?? decodeURIComponent(job.url.split('/').at(-1)), { timeoutMs: options.timeoutMs }) } }),
+        follow: job => followShareJob(job, { budgetMs, log,
+          readJob: (reference, options) => client.knowledgeAssetShareJob(reference, options) }),
       });
       if (shared) {
         const result = await publishCli(cli, home, name, cg, env); rc = result.rc; log(result.out);

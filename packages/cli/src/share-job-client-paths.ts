@@ -26,6 +26,19 @@ export interface ShareJobsListResult {
   complete?: boolean;
 }
 
+export type ShareJobReference = string | { jobId?: string | null; url?: string };
+
+/** Retained recovery URLs stay relative to this client's daemon and canonical job route. */
+export function shareJobPath(reference: ShareJobReference): string {
+  if (typeof reference === 'string') return `${prefix}/${encodeURIComponent(reference)}`;
+  if (reference.jobId) return shareJobPath(reference.jobId);
+  const path = reference.url;
+  if (!path?.startsWith(`${prefix}/`)) throw new Error('Invalid share recovery job URL');
+  const encodedId = path.slice(prefix.length + 1);
+  if (!encodedId || /[/?#]/.test(encodedId)) throw new Error('Invalid share recovery job URL');
+  return shareJobPath(decodeURIComponent(encodedId));
+}
+
 export function shareJobsPath(options?: ShareJobsListOptions): string {
   const params = new URLSearchParams();
   if (options?.contextGraphId) params.set('contextGraphId', options.contextGraphId);

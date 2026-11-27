@@ -29,7 +29,8 @@ const seen = fs.readFileSync(process.env.SOAK_CALLS, 'utf8').trim().split('\\n')
 const answers = JSON.parse(process.env.SOAK_PUBLISH);
 const [exit, text] = answers[Math.min(seen, answers.length) - 1];
 (exit === 0 ? process.stdout : process.stderr).write(text + '\\n');
-process.exit(exit);
+if (typeof exit === 'string') process.kill(process.pid, exit);
+else process.exit(exit);
 `;
 async function collect(child) {
   let stdout = '';
@@ -107,6 +108,21 @@ test('a share the node finishes at once is published, and a failed publish fails
   const refused = await publishOnce(t, { create: [sharedAnswer(201)] }, { publish: [[1, 'VM publish failed']] });
   assert.deepEqual(refused.rows.map((row) => [row.status, row.rc, row.share_retries]), [['fail', 1, 0]]);
   assert.match(refused.rows[0].out, /\nVM publish failed$/);
+});
+
+test('SIGTERM from the CLI is rc=143 and is excused only inside its planned restart window', async t => {
+  const run = await publishOnce(t, { create: [sharedAnswer(201)] }, { publish: [['SIGTERM', '']] });
+  const [row] = run.rows;
+  assert.equal(row.rc, 143);
+  const ts = Date.parse(row.ts) / 1000;
+  const rows = [...attempts(10), row];
+  const window = { node: row.node, stopTs: ts - 1, apiReadyTs: ts + 1, graceSec: 0 };
+  const inside = await summarize(t, rows, window);
+  assert.equal(inside.status, 0);
+  assert.match(inside.Pass.join('\n'), /tolerated 1 failure/);
+  const outside = await summarize(t, rows, { ...window, stopTs: ts + 10, apiReadyTs: ts + 20 });
+  assert.equal(outside.status, 1);
+  assert.match(outside.Fail.join('\n'), /blocking failures=1/);
 });
 
 test('a node whose API cannot be found fails in the CLI\'s words, with the default share fields', async (t) => {

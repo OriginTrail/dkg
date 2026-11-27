@@ -289,6 +289,26 @@ describe('ApiClient', () => {
       expect(existsSync(join(tempDir, 'daemon.pid'))).toBe(false);
     });
 
+    it('connects with explicit home, credentials and port selection without mutating the environment', async () => {
+      process.env.DKG_HOME = '/unused-home'; process.env.DKG_API_PORT = '7777'; process.env.DKG_AUTH_TOKEN = 'environment-token';
+      const before = { ...process.env };
+      await writeFile(join(tempDir, 'config.json'), JSON.stringify({ name: 'explicit-node', apiHost: '100.65.228.120', apiPort: 9200 }));
+      await writeFile(join(tempDir, 'api.port'), '9317\n');
+      await writeFile(join(tempDir, 'auth.token'), 'home-token\n');
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { state: 'succeeded' } });
+      globalThis.fetch = fetch;
+      const connected = await ApiClient.connect({ connection: { home: tempDir, token: 'explicit-token', port: 'home' } });
+      await connected.knowledgeAssetShareJob({ url: '/api/knowledge-assets/swm/share-jobs/job%201' });
+      expect(calls[0].url).toBe('http://100.65.228.120:9317/api/knowledge-assets/swm/share-jobs/job%201');
+      expect((calls[0].opts.headers as Record<string, string>).Authorization).toBe('Bearer explicit-token');
+      const direct = await ApiClient.connect({ connection: { home: tempDir, token: '', port: 7778 } });
+      await direct.knowledgeAssetShareJob('job-2');
+      expect(calls[1].url).toBe('http://127.0.0.1:7778/api/knowledge-assets/swm/share-jobs/job-2');
+      expect((calls[1].opts.headers as Record<string, string>).Authorization).toBe('Bearer home-token');
+      await expect(connected.knowledgeAssetShareJob({ url: 'https://other.example/job-3' })).rejects.toThrow('Invalid share recovery job URL');
+      expect(process.env).toEqual(before);
+    });
+
     it('connect() respects configured apiHost when using the persisted API port', async () => {
       process.env.DKG_HOME = tempDir;
       delete process.env.DKG_API_PORT;

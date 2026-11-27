@@ -86,18 +86,25 @@ export async function getJsonWithin(url, { headers = {}, timeoutMs }) {
  * keeps the last state it was seen in, and `settled` says whether that state is
  * final.
  */
-export async function pollShareRecoveries(jobs, {
-  api,
-  auth = '',
+export async function pollShareRecoveries(jobs, { api, auth = '', getJson = getJsonWithin, ...options }) {
+  const base = String(api ?? '').replace(/\/+$/, '');
+  return pollShareRecoveryJobs(jobs, { ...options,
+    readJob: (job, { timeoutMs }) => getJson(base + job.url, {
+      headers: { Authorization: `Bearer ${auth}` }, timeoutMs,
+    }),
+  });
+}
+
+/** Transport-independent deadline and terminal-state policy over a job reader. */
+export async function pollShareRecoveryJobs(jobs, {
+  readJob,
   budgetMs,
   pollIntervalMs = SHARE_JOB_POLL_INTERVAL_MS,
   requestCapMs = STATUS_REQUEST_CAP_MS,
-  getJson = getJsonWithin,
   now = Date.now,
   sleep = delay,
 }) {
   const deadline = now() + Math.max(0, budgetMs);
-  const base = String(api ?? '').replace(/\/+$/, '');
   let pending = jobs.filter((job) => !SETTLED_STATES.has(job.state));
   polling: while (pending.length > 0) {
     for (const job of pending) {
@@ -105,10 +112,7 @@ export async function pollShareRecoveries(jobs, {
       if (remaining < MIN_STATUS_REQUEST_MS) break polling;
       job.polls = (job.polls ?? 0) + 1;
       try {
-        const view = await getJson(base + job.url, {
-          headers: { Authorization: `Bearer ${auth}` },
-          timeoutMs: Math.min(requestCapMs, remaining),
-        });
+        const view = await readJob(job, { timeoutMs: Math.min(requestCapMs, remaining) });
         job.state = typeof view?.state === 'string' && view.state ? view.state : 'unknown';
         job.attempts = view?.attempts ?? null;
         job.finishedAt = view?.finishedAt ?? null;

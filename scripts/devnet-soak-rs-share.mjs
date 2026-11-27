@@ -25,7 +25,7 @@
 // The Node publisher owns each attempt and its complete log record.
 
 import { setTimeout as delay } from 'node:timers/promises';
-import { pollShareRecoveries } from './lib/swm-soak-accepted-writes.mjs';
+import { pollShareRecoveries, pollShareRecoveryJobs } from './lib/swm-soak-accepted-writes.mjs';
 
 /** How many times a share is sent again after a retryable answer that names no share job. */
 export const SHARE_RETRY_MAX = 5;
@@ -105,12 +105,15 @@ export function describeAnswer(step, answer) {
  * its record for the publish log. `pollOptions` reach pollShareRecoveries
  * (its `getJson`, `now` and `sleep`); `now` also measures the wait.
  */
-export async function followShareJob({ jobId, url }, { api, auth, budgetMs, log = () => {}, pollOptions = {} }) {
+export async function followShareJob({ jobId, url }, { api, auth, readJob, budgetMs, log = () => {}, pollOptions = {} }) {
   const now = pollOptions.now ?? Date.now;
   const label = jobId ?? url;
   log(`[soak] share job ${label} owns the share; following it for up to ${Math.round(budgetMs / 1000)}s`);
   const started = now();
-  const [job] = await pollShareRecoveries([{ jobId, url, state: 'unknown', polls: 0 }], { api, auth, budgetMs, ...pollOptions });
+  const jobs = [{ jobId, url, state: 'unknown', polls: 0 }];
+  const [job] = readJob
+    ? await pollShareRecoveryJobs(jobs, { budgetMs, ...pollOptions, readJob })
+    : await pollShareRecoveries(jobs, { api, auth, budgetMs, ...pollOptions });
   const record = {
     job: jobId,
     state: job.state,
