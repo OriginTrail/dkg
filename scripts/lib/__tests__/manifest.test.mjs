@@ -1,32 +1,47 @@
 /**
- * Unit tests for the pure helpers in `scripts/lib/manifest.mjs`.
- *
- * Daemon-roundtrip behaviour (createImportManifest / markPartitionStatus /
- * loadImportManifest) is covered by the smoke runs in
- * scripts/repro/wm-persistence-regression.mjs — those need a live DKG node
- * and live in the repro suite. This file only tests deterministic pieces.
+ * Tests for `scripts/lib/manifest.mjs`: the pure helpers, and the helper
+ * flows against a mock daemon that keeps the daemon's current Knowledge
+ * Asset rules (see `makeMockDaemon`). The flows also run against a real
+ * daemon in packages/cli/test/import-manifest-live.test.ts.
  *
  * Run via:  node --test scripts/lib/__tests__/manifest.test.mjs
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   IMPORT_NS,
   IMPORT_T,
   IMPORT_P,
+  PAGE_MAX_PARTITIONS,
+  QUERY_PAGE_ROWS,
+  STATUS_BATCH_MAX_BYTES,
   importUri,
   partitionUri,
   statusEventUri,
   buildInitialManifestTriples,
   createImportManifest,
   markPartitionStatus,
+  markPartitionStatuses,
   loadImportManifest,
   pendingPartitions,
   defaultManifestAssertionName,
   partitionDeclared,
+  partitionPages,
+  partitionPageAssertionName,
+  partitionSetHash,
+  statusBatchAssertionName,
 } from '../manifest.mjs';
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+// A real SPARQL engine for the mock daemon's shared memory (the storage package's dependency).
+const oxigraph = createRequire(path.join(REPO_ROOT, 'packages/storage/package.json'))('oxigraph');
+
+const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 
 test('importUri encodes special characters', () => {
   assert.equal(importUri('my-corpus'), 'urn:dkg:import:my-corpus');
@@ -52,6 +67,8 @@ test('IMPORT_NS / IMPORT_T / IMPORT_P shape', () => {
   assert.equal(IMPORT_T.StatusEvent, 'https://ontology.dkg.io/import#StatusEvent');
   assert.equal(IMPORT_P.startedAt, 'https://ontology.dkg.io/import#startedAt');
   assert.equal(IMPORT_P.partition, 'https://ontology.dkg.io/import#partition');
+  assert.equal(IMPORT_P.partitionCount, 'https://ontology.dkg.io/import#partitionCount');
+  assert.equal(IMPORT_P.partitionSetHash, 'https://ontology.dkg.io/import#partitionSetHash');
   assert.equal(IMPORT_P.key, 'https://ontology.dkg.io/import#key');
   assert.equal(IMPORT_P.statusEvent, 'https://ontology.dkg.io/import#statusEvent');
 });
@@ -64,7 +81,7 @@ test('buildInitialManifestTriples emits all expected predicates', () => {
   );
   const importIri = 'urn:dkg:import:my-corpus';
 
-  // The import node itself: rdf:type + startedAt.
+  // The import node itself: rdf:type, startedAt, partition count and set hash.
   const importTypeTriple = triples.find(
     (t) => t.subject === importIri && t.predicate.endsWith('#type'),
   );
@@ -76,10 +93,19 @@ test('buildInitialManifestTriples emits all expected predicates', () => {
   );
   assert.ok(startedAtTriple, 'import node should have startedAt');
   assert.match(startedAtTriple.object, /^"2026-01-15T09:00:00\.000Z"\^\^/);
+  assert.equal(
+    triples.find((t) => t.subject === importIri && t.predicate === IMPORT_P.partitionCount)?.object,
+    '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+  );
+  assert.equal(
+    triples.find((t) => t.subject === importIri && t.predicate === IMPORT_P.partitionSetHash)?.object,
+    `"${partitionSetHash(['b.ts', 'a.ts'])}"`,
+  );
 
-  // Each partition should appear with at least key + initialStatus.
+  // Each partition should appear with its link from the import, key and initialStatus.
   for (const key of ['a.ts', 'b.ts']) {
     const partIri = partitionUri('my-corpus', key);
+    assert.ok(triples.some((t) => t.subject === importIri && t.predicate === IMPORT_P.partition && t.object === partIri));
     const keyTriple = triples.find(
       (t) => t.subject === partIri && t.predicate === IMPORT_P.key,
     );
@@ -107,52 +133,6 @@ test('statusEventUri nests under partitionUri and is unique', () => {
   assert.notEqual(a, b, 'two events on the same partition should differ');
 });
 
-test('round-trip preserves N-Triples literal escapes without double-unescape (regression for CodeQL L138)', async () => {
-  // The previous unquote() used four chained `.replace()` passes; the
-  // `\\` -> `\` pass running after `\"` -> `"` could re-interpret a `\`
-  // left behind by an earlier pass as the start of a new escape sequence.
-  // For instance the literal status string `\n` (backslash + n, two
-  // chars) round-trips through lit() as `"\\n"` in N-Quads. The faulty
-  // chain would turn that back into a newline character. The new
-  // single-pass replacer must give back the original `\n` two-char
-  // string, byte for byte.
-  const client = makeMockClient();
-  const importId = 'escape-corpus';
-  await createImportManifest({
-    client,
-    importId,
-    partitions: ['p1'],
-    subGraphName: 'meta',
-  });
-
-  // Each entry: the literal user-visible status string we want to round
-  // trip. These are the strings whose lit()->unquote() chain is the
-  // double-escape danger zone.
-  const samples = [
-    'backslash\\then-n',      // literal backslash + literal "n"
-    'crlf\\r\\nstuff',        // backslash + "r", backslash + "n"
-    'quote\\"inside',         // backslash + quote
-    'mixed \\\\ and \\n',     // escaped backslash + escaped \n
-    'tab\tinside',            // tab must be escaped as \t, not emitted raw
-    'backspace\binside',      // valid N-Triples \b escape
-    'formfeed\finside',       // valid N-Triples \f escape
-    'nul\u0000inside',        // remaining controls use \uXXXX
-    'plain done',             // baseline, no escapes
-  ];
-
-  for (const status of samples) {
-    await markPartitionStatus({
-      client, importId, partitionKey: 'p1', status, subGraphName: 'meta',
-    });
-    const state = await loadImportManifest({ client, importId, subGraphName: 'meta' });
-    assert.equal(
-      state.partitions[0].status,
-      status,
-      'latest status string must round-trip byte-for-byte through lit/unquote',
-    );
-  }
-});
-
 test('pendingPartitions filters out done', () => {
   const state = [
     { key: 'a', status: 'done' },
@@ -166,533 +146,696 @@ test('pendingPartitions filters out done', () => {
   assert.deepEqual(pending.map((p) => p.key).sort(), ['b', 'c', 'd']);
 });
 
+test('partitionPages sorts the keys and bounds each page by count and size', () => {
+  const keys = ['c', 'a', 'e', 'b', 'd'];
+  assert.deepEqual(partitionPages('pages', keys, { maxPartitions: 2 }), [['a', 'b'], ['c', 'd'], ['e']]);
+  assert.deepEqual(partitionPages('pages', keys), [['a', 'b', 'c', 'd', 'e']], 'small sets fit one page');
+  const long = ['x'.repeat(400), 'y'.repeat(400), 'z'.repeat(400)];
+  const pages = partitionPages('pages', long, { maxBytes: 2_500 });
+  assert.equal(pages.length, 3, 'each partition of about 1.7 KB of N-Quads gets its own page under 2.5 KB');
+  assert.deepEqual(partitionPages('pages', long, { maxBytes: 10 }), long.map((key) => [key]),
+    'a partition larger than the bound still gets a page of its own');
+});
+
+test('manifest asset names are valid, bounded and distinct', () => {
+  const longId = 'corpus/'.repeat(60);
+  const names = [
+    defaultManifestAssertionName(longId),
+    partitionPageAssertionName(longId, 0, ['a']),
+    partitionPageAssertionName(longId, 0, ['b']),
+    partitionPageAssertionName(longId, 1, ['a']),
+    statusBatchAssertionName(longId, statusEventUri(longId, 'a')),
+    statusBatchAssertionName(longId, statusEventUri(longId, 'a')),
+    partitionPageAssertionName(`${longId}x`, 0, ['a']),
+  ];
+  for (const name of names) {
+    assert.ok(name.length <= 256, `${name} is longer than 256 characters`);
+    assert.match(name, /^[A-Za-z0-9._-]+$/);
+  }
+  assert.equal(new Set(names).size, names.length);
+  assert.match(partitionPageAssertionName('short', 3, ['k']), /^import-partitions-short-[0-9a-f]{16}-3-[0-9a-f]{12}$/);
+  assert.match(statusBatchAssertionName('short', statusEventUri('short', 'k')), /^import-status-short-[0-9a-f]{16}-[0-9a-f]{24}$/);
+  // Heads are `import-manifest-…`: no page or status batch of any import can take another import's head name.
+  for (const id of ['alpha', 'alpha-part-0-a49ba8bb2e51', longId]) {
+    assert.equal(partitionPageAssertionName(id, 0, ['p1']).startsWith('import-manifest-'), false);
+    assert.equal(statusBatchAssertionName(id, statusEventUri(id, 'p1')).startsWith('import-manifest-'), false);
+  }
+});
+
 // ---------------------------------------------------------------------------
-// Integration-style tests with a mock DkgClient
-//
-// Codex's PR #642 review correctly noted that a regression in promote-root
-// selection (e.g. omitting `partIri` from `markPartitionStatus.promote`)
-// would never be caught by the pure-helper tests above. These tests model
-// the WM/SWM split as two in-memory triple stores and verify that
-// `loadImportManifest()` reading the SWM store sees the latest status —
-// which it CAN'T unless `markPartitionStatus` promotes the partition root
-// alongside the event root.
+// The helper flows against a mock daemon
 // ---------------------------------------------------------------------------
+
+function httpError(status, body) {
+  return Object.assign(new Error(`HTTP ${status}: ${JSON.stringify(body)}`), { status, body });
+}
 
 /**
- * A minimal stand-in for the daemon and `DkgClient`:
- *   - `wm` holds triples that are visible only to direct write callers.
- *   - `swm` holds triples that have been promoted (= visible to peers /
- *     resumes from another node).
- *   - `promote({entities})` moves all triples whose SUBJECT is in
- *     `entities` from wm to swm — exactly the daemon's contract.
- *   - `query()` runs against swm ONLY when the caller passes
- *     `graphSuffix: '_shared_memory'` — matching the real daemon's
- *     routing. Without that flag, the mock returns the bare data graph
- *     (empty for assertion-API writes), which catches the codex bug
- *     where `loadImportManifest` forgot to opt into SWM routing.
+ * A stand-in for the daemon behind `DkgClient`, keeping the Knowledge Asset
+ * rules the helper has to live with
+ * (`packages/cli/src/daemon/routes/knowledge-assets.ts`):
  *
- * `bindingShape` lets us also exercise the SPARQL 1.1 results-JSON
- * cell shape that the SPARQL-HTTP adapter returns.
+ *   - `swm/share` refuses an `entities` array (400 `KA_ATOMIC_SHARE_REQUIRED`)
+ *     and shares the whole asset;
+ *   - a share seals the asset and empties its draft: a later write is
+ *     refused (409 `KA_WM_LIFECYCLE_REQUIRED`), a second share is a no-op,
+ *     and a create of the same name answers `alreadyExists` with the
+ *     asset's status (a create that carries quads is refused);
+ *   - a create with quads seals them, and with `alsoShareSwm` also shares;
+ *   - every shared asset is its own named graph in shared memory. A query
+ *     without `GRAPH` is answered one asset graph at a time, so a join
+ *     across assets finds nothing, and one with a `UNION` finds nothing at
+ *     all; `GRAPH ?g` ranges over the sub-graph's assets;
+ *   - only `graphSuffix: '_shared_memory'` reads shared memory, and an answer
+ *     above `maxResponseBytes` is refused (413), as the query route caps its
+ *     answers at 10 MiB;
+ *   - `wm/quads` returns an asset's draft;
+ *   - an interrupted share can leave a recovery job owning the asset: until
+ *     `finishRecovery(name)` shares it, as the daemon's worker would, a
+ *     create, write or share of it answers 409 `KA_PROMOTE_RECOVERY_REQUIRED`.
+ *
+ * `ignore: 'limit' | 'cursor'` drops the LIMIT or the paging cursor's FILTER
+ * from every query, as a store that does not honour it would.
+ *
+ * Shared memory is a real SPARQL store, so the helper's queries run as
+ * written. `bindingShape: 'cell'` returns SPARQL 1.1 results-JSON cells, as
+ * the SPARQL-HTTP adapter does; the default is the flat N-Triples form.
  */
-function makeMockClient({
-  bindingShape = 'flat',
-  createAlreadyExists = false,
-  promoteBodyLimitBytes = Infinity,
-} = {}) {
-  /** @type {Set<string>} */
-  const wm = new Set();
-  /** @type {Set<string>} */
-  const swm = new Set();
-  /** @type {string[]} */
-  const calls = [];
-  /** @type {Array<{method:string,path:string,body:unknown}>} */
+function makeMockDaemon({ bindingShape = 'flat', maxResponseBytes = 10 * 1024 * 1024, ignore } = {}) {
+  const store = new oxigraph.Store();
+  /** @type {Map<string, { subGraphName: string, graph: string, draft: Map<string, object>, status: string }>} */
+  const assets = new Map();
+  /** @type {Array<{ method: string, path: string, body: any }>} */
   const requests = [];
-  const state = { wm, swm, calls, requests, createAlreadyExists, promoteBodyLimitBytes };
+  /** @type {Array<{ sparql: string, graphSuffix?: string, subGraphName?: string }>} */
+  const queries = [];
+  /** Failures to inject: the first entry whose `match` accepts a request runs `onMatch`, then throws `error`. */
+  const failures = [];
+  let kaNumber = 0;
 
-  const tripleKey = (t) => `${t.subject}\u0001${t.predicate}\u0001${t.object}`;
+  function record(method, path, body) {
+    const request = { method, path, body };
+    requests.push(request);
+    const index = failures.findIndex((failure) => failure.match(request));
+    if (index >= 0) {
+      const [failure] = failures.splice(index, 1);
+      failure.onMatch?.(request);
+      throw failure.error;
+    }
+  }
+  function refuseWhileRecovering(asset) {
+    if (asset?.recovering) {
+      throw httpError(409, { code: 'KA_PROMOTE_RECOVERY_REQUIRED', error: 'an unfinished share recovery owns this asset' });
+    }
+  }
+
+  const term = (value) => (/^["<_]/.test(value) ? value : `<${value}>`);
+  const line = (t) => `<${t.subject}> <${t.predicate}> ${term(t.object)}`;
+  function write(asset, triples) {
+    if (asset.status !== 'draft-open') {
+      throw httpError(409, { code: 'KA_WM_LIFECYCLE_REQUIRED', error: 'not an active Working Memory draft' });
+    }
+    for (const t of triples) asset.draft.set(line(t), { subject: t.subject, predicate: t.predicate, object: t.object });
+  }
+  function share(asset) {
+    if (asset.status === 'swm-shared') return { swmShared: true, promotedCount: 0, sealed: true };
+    store.load([...asset.draft.keys()].map((l) => `${l} <${asset.graph}> .\n`).join(''), { format: 'application/n-quads' });
+    const promotedCount = asset.draft.size;
+    asset.draft.clear();
+    asset.status = 'swm-shared';
+    return { swmShared: true, promotedCount, sealed: true };
+  }
+  function binding(value) {
+    if (value.termType === 'NamedNode') return bindingShape === 'cell' ? { value: value.value, type: 'uri' } : value.value;
+    if (bindingShape !== 'cell') return value.toString();
+    return {
+      value: value.value,
+      type: 'literal',
+      ...(value.datatype && value.datatype.value !== XSD_STRING ? { datatype: value.datatype.value } : {}),
+    };
+  }
+  function answer(results) {
+    if (results.every((r) => typeof r === 'boolean')) return { result: { boolean: results.some(Boolean) } };
+    const bindings = results.flat().map((row) => Object.fromEntries([...row].map(([name, value]) => [name, binding(value)])));
+    const bytes = Buffer.byteLength(JSON.stringify(bindings), 'utf8');
+    if (bytes > maxResponseBytes) throw httpError(413, { error: `query answer of ${bytes} bytes exceeds ${maxResponseBytes}` });
+    return { result: { bindings } };
+  }
 
   return {
     cgId: 'urn:test:cg',
-    _state: state,
-    insertSwmTriples(triples) {
-      for (const t of triples) swm.add(tripleKey(t));
-    },
+    assets,
+    requests,
+    queries,
+    failures,
+    store,
     async request(method, path, body) {
-      calls.push(`${method} ${path}`);
-      requests.push({ method, path, body });
-      if (state.createAlreadyExists && method === 'POST' && path === '/api/knowledge-assets') {
-        const err = new Error('POST /api/knowledge-assets -> 409: {"error":"already exists"}');
-        err.status = 409;
-        err.body = { error: 'already exists' };
-        throw err;
+      record(method, path, body);
+      const quads = method === 'GET' && path.match(/^\/api\/knowledge-assets\/([^/?]+)\/wm\/quads\?/);
+      if (quads) {
+        const asset = assets.get(decodeURIComponent(quads[1]));
+        if (!asset) throw httpError(404, { error: 'not found' });
+        return { quads: [...asset.draft.values()].map((t) => ({ ...t, graph: '' })), count: asset.draft.size };
       }
-      return { ok: true };
+      if (method !== 'POST' || path !== '/api/knowledge-assets') throw new Error(`unexpected request ${method} ${path}`);
+      const existing = assets.get(body.name);
+      refuseWhileRecovering(existing);
+      if (existing) {
+        if (body.quads) {
+          throw httpError(409, {
+            code: existing.status === 'swm-shared' ? 'KA_WM_LIFECYCLE_REQUIRED' : 'KA_ASSERTION_ALREADY_FINALIZED',
+          });
+        }
+        return { name: body.name, alreadyExists: true, status: existing.status };
+      }
+      const asset = {
+        subGraphName: body.subGraphName,
+        graph: `did:dkg:context-graph:${this.cgId}/${body.subGraphName}/_shared_memory/0xagent/${++kaNumber}`,
+        draft: new Map(),
+        status: 'draft-open',
+      };
+      assets.set(body.name, asset);
+      if (body.quads) {
+        write(asset, body.quads);
+        asset.status = 'wm-sealed';
+      }
+      if (body.alsoShareSwm) return { name: body.name, alreadyExists: false, status: 'swm-shared', ...share(asset) };
+      return { name: body.name, alreadyExists: false, status: asset.status };
     },
-    async writeAssertion({ triples }) {
-      calls.push(`write:${triples.length}`);
-      for (const t of triples) wm.add(tripleKey(t));
+    async writeAssertion({ assertionName, triples }) {
+      record('POST', `/api/knowledge-assets/${assertionName}/wm/write`, { quads: triples });
+      const asset = assets.get(assertionName);
+      if (!asset) throw httpError(404, { error: `Assertion "${assertionName}" not found` });
+      refuseWhileRecovering(asset);
+      write(asset, triples);
+      return triples.length;
     },
     async promote(payload) {
-      const { entities } = payload;
-      const bodyBytes = Buffer.byteLength(JSON.stringify(payload), 'utf8');
-      if (bodyBytes > state.promoteBodyLimitBytes) {
-        const err = new Error(`POST /api/knowledge-assets/:name/swm/share -> 413: body too large (${bodyBytes})`);
-        err.status = 413;
-        throw err;
-      }
-      calls.push(`promote:${entities.length}`);
-      for (const key of [...wm]) {
-        const subject = key.split('\u0001')[0];
-        if (entities.includes(subject)) {
-          swm.add(key);
-          wm.delete(key);
-        }
-      }
-    },
-    async query({ sparql, graphSuffix }) {
-      calls.push(`query:graphSuffix=${graphSuffix ?? ''}`);
-      // We don't run a real SPARQL engine here — we pattern-match the
-      // exact shapes the manifest library sends and serve from the
-      // memory tier the caller asked for. The daemon's REAL routing for
-      // `subGraphName` alone hits the bare data graph (which is empty for
-      // assertion-API-written data); only `graphSuffix: '_shared_memory'`
-      // routes to SWM. Mirroring that here lets tests catch a regression
-      // where the manifest reader drops the SWM hint.
-      const source = graphSuffix === '_shared_memory' ? swm : new Set();
-      const sourceTriples = [...source].map((k) => {
-        const [subject, predicate, object] = k.split('\u0001');
-        return { subject, predicate, object };
-      });
-
-      // Shape 1: `partitionDeclared`'s ASK with two literal IRIs — one
-      // round-trip Boolean instead of materialising the full manifest.
-      // `markPartitionStatus` uses this on every status write, so the mock
-      // has to honour the same semantics as the real daemon's ASK route.
-      const askMatch = sparql.match(
-        /ASK\s*\{\s*<(urn:dkg:import:[^>]+)>\s+imp:partition\s+<([^>]+)>/,
-      );
-      if (askMatch) {
-        const [, importIri, partIri] = askMatch;
-        const present = sourceTriples.some(
-          (t) =>
-            t.subject === importIri &&
-            t.predicate === IMPORT_P.partition &&
-            // Object stored as a bare URI (the manifest library doesn't
-            // bracket-wrap partition objects). Tolerate both shapes in
-            // case a future mock variation does wrap.
-            (t.object === partIri || t.object === `<${partIri}>`),
-        );
-        return { boolean: present };
-      }
-
-      const m = sparql.match(/<(urn:dkg:import:[^>]+)>\s+imp:partition\s+\?part/);
-      if (!m) return { result: { bindings: [] } };
-      const importIri = m[1];
-
-      // Reuse the SWM/empty store + triple set already prepared above
-      // for the ASK path so both query shapes route through the same
-      // mock storage semantics.
-      const triples = sourceTriples;
-      // Build the rows the query would produce.
-      const partitionRoots = triples
-        .filter((t) => t.subject === importIri && t.predicate === IMPORT_P.partition)
-        .map((t) => t.object.replace(/^<|>$/g, ''));
-      const rows = [];
-      for (const part of partitionRoots) {
-        const keyTriple = triples.find(
-          (t) => t.subject === part && t.predicate === IMPORT_P.key,
-        );
-        const initialTriple = triples.find(
-          (t) => t.subject === part && t.predicate === IMPORT_P.initialStatus,
-        );
-        if (!keyTriple || !initialTriple) continue;
-        const eventEdges = triples.filter(
-          (t) => t.subject === part && t.predicate === IMPORT_P.statusEvent,
-        );
-        let latest = null;
-        for (const edge of eventEdges) {
-          const ev = edge.object.replace(/^<|>$/g, '');
-          const statusT = triples.find(
-            (t) => t.subject === ev && t.predicate === IMPORT_P.status,
-          );
-          const recT = triples.find(
-            (t) => t.subject === ev && t.predicate === IMPORT_P.recordedAt,
-          );
-          if (!statusT || !recT) continue;
-          const rec = recT.object;
-          if (!latest || rec > latest.rec || (rec === latest.rec && ev > latest.ev)) {
-            latest = { ev, status: statusT.object, rec };
-          }
-        }
-        const wrap = (s) => (bindingShape === 'cell' ? { value: s, type: 'literal' } : s);
-        rows.push({
-          part: bindingShape === 'cell' ? { value: part, type: 'uri' } : part,
-          key: wrap(keyTriple.object),
-          initial: wrap(initialTriple.object),
-          ...(latest
-            ? { latestStatus: wrap(latest.status), latestRecordedAt: wrap(latest.rec) }
-            : {}),
+      const asset = assets.get(payload.assertionName);
+      // A share seals the draft before it shares, so even a share that then fails leaves the asset sealed.
+      if (asset?.status === 'draft-open' && !Array.isArray(payload.entities)) asset.status = 'wm-sealed';
+      record('POST', `/api/knowledge-assets/${payload.assertionName}/swm/share`, payload);
+      if (Array.isArray(payload.entities)) {
+        throw httpError(400, {
+          code: 'KA_ATOMIC_SHARE_REQUIRED',
+          error: '"entities" selection is not supported; graph-scoped Knowledge Assets are shared atomically',
         });
       }
-      return { result: { bindings: rows } };
+      if (!asset) throw httpError(404, { error: `Assertion "${payload.assertionName}" not found` });
+      refuseWhileRecovering(asset);
+      return share(asset);
+    },
+    finishRecovery(name) {
+      const asset = assets.get(name);
+      asset.recovering = false;
+      share(asset);
+    },
+    async query({ sparql, graphSuffix, subGraphName }) {
+      queries.push({ sparql, graphSuffix, subGraphName });
+      if (ignore === 'limit') sparql = sparql.replace(/\bLIMIT \d+/, '');
+      if (ignore === 'cursor') sparql = sparql.replace(/FILTER\(STR\(\?\w+\) > "[^"]*"\)/, '');
+      const graphs = graphSuffix !== '_shared_memory' ? [] : [...assets.values()]
+        .filter((asset) => asset.status === 'swm-shared' && asset.subGraphName === subGraphName)
+        .map((asset) => oxigraph.namedNode(asset.graph));
+      if (/\bGRAPH\b/i.test(sparql)) return answer([store.query(sparql, { named_graphs: graphs })]);
+      if (/\bUNION\b/i.test(sparql)) return answer([]);
+      return answer(graphs.map((graph) => store.query(sparql, { default_graph: [graph] })));
     },
   };
 }
 
-test('full round-trip: create, mark done, promote, reload — flat bindings', async () => {
-  const client = makeMockClient({ bindingShape: 'flat' });
+async function createManifest(client, importId, partitions, extra = {}) {
+  return createImportManifest({ client, importId, partitions, subGraphName: 'meta', ...extra });
+}
 
-  await createImportManifest({
-    client,
-    importId: 'corpus-2026-01-15',
-    partitions: ['src/foo.ts', 'src/bar.ts', 'src/baz.ts'],
-    subGraphName: 'meta',
-  });
+async function load(client, importId) {
+  return loadImportManifest({ client, importId, subGraphName: 'meta' });
+}
 
-  // After create, all three partitions should be visible in SWM with
-  // their `pending` initial status.
-  let state = await loadImportManifest({
-    client,
-    importId: 'corpus-2026-01-15',
-    subGraphName: 'meta',
-  });
-  assert.equal(state.partitions.length, 3, 'all partitions should be in SWM');
-  assert.deepEqual(
-    state.partitions.map((p) => p.status).sort(),
-    ['pending', 'pending', 'pending'],
-  );
+async function mark(client, importId, partitionKey, status) {
+  return markPartitionStatus({ client, importId, partitionKey, status, subGraphName: 'meta' });
+}
 
-  // Mark one partition done. THIS is the bug Codex flagged: if
-  // markPartitionStatus only promoted the event root and not the
-  // partition root, the `partIri imp:statusEvent evIri` triple would
-  // stay in WM, and `loadImportManifest()` reading SWM would still
-  // see this partition as "pending".
-  await markPartitionStatus({
-    client,
-    importId: 'corpus-2026-01-15',
-    partitionKey: 'src/bar.ts',
-    status: 'done',
-    subGraphName: 'meta',
-  });
+const statuses = (state) => state.partitions.map((p) => [p.key, p.status]);
+const shares = (client) => client.requests.filter((r) => r.path.endsWith('/swm/share') || r.body?.alsoShareSwm === true);
 
-  state = await loadImportManifest({
-    client,
-    importId: 'corpus-2026-01-15',
-    subGraphName: 'meta',
-  });
-  const byKey = Object.fromEntries(state.partitions.map((p) => [p.key, p]));
-  assert.equal(byKey['src/bar.ts'].status, 'done', 'marked partition must read back as done from SWM');
-  assert.equal(byKey['src/foo.ts'].status, 'pending');
-  assert.equal(byKey['src/baz.ts'].status, 'pending');
+test('full round-trip: create, mark, reload — every share is atomic and no asset is shared twice', async () => {
+  const client = makeMockDaemon();
+  const importId = 'corpus-2026-01-15';
 
-  // pendingPartitions sugar should now exclude bar.ts.
-  const remaining = pendingPartitions(state.partitions);
-  assert.equal(remaining.length, 2);
-  assert.ok(remaining.every((p) => p.key !== 'src/bar.ts'));
+  await createManifest(client, importId, ['src/foo.ts', 'src/bar.ts', 'src/baz.ts']);
+  assert.deepEqual(statuses(await load(client, importId)), [
+    ['src/bar.ts', 'pending'], ['src/baz.ts', 'pending'], ['src/foo.ts', 'pending'],
+  ]);
+
+  // Two status changes of one partition: the second can no longer go to an asset that was shared before.
+  await mark(client, importId, 'src/bar.ts', 'in_progress');
+  await new Promise((r) => setTimeout(r, 5));
+  await mark(client, importId, 'src/bar.ts', 'done');
+
+  const state = await load(client, importId);
+  assert.deepEqual(statuses(state), [['src/bar.ts', 'done'], ['src/baz.ts', 'pending'], ['src/foo.ts', 'pending']]);
+  assert.ok(state.partitions.find((p) => p.key === 'src/bar.ts').recordedAt);
+  assert.equal(state.partitions.find((p) => p.key === 'src/foo.ts').recordedAt, null);
+  assert.deepEqual(pendingPartitions(state.partitions).map((p) => p.key), ['src/baz.ts', 'src/foo.ts']);
+
+  for (const request of client.requests) {
+    assert.equal(Array.isArray(request.body?.entities), false, `${request.path} must not select root entities`);
+  }
+  const shared = shares(client).map((r) => r.body.assertionName ?? r.body.name);
+  assert.equal(new Set(shared).size, shared.length, 'each asset is shared exactly once');
+  assert.equal(shared.length, 4, 'head + one page + two status assets');
 });
 
-test('createImportManifest reuses an existing manifest assertion idempotently', async () => {
-  const client = makeMockClient({ createAlreadyExists: true });
-
-  await createImportManifest({
-    client,
-    importId: 'existing-corpus',
-    partitions: ['src/foo.ts', 'src/bar.ts'],
-    subGraphName: 'meta',
-  });
-
-  const state = await loadImportManifest({
-    client,
-    importId: 'existing-corpus',
-    subGraphName: 'meta',
-  });
-  assert.deepEqual(
-    state.partitions.map((p) => [p.key, p.status]),
-    [['src/bar.ts', 'pending'], ['src/foo.ts', 'pending']],
-  );
-  assert.ok(client._state.calls.includes('POST /api/knowledge-assets'));
-  assert.ok(client._state.calls.some((c) => c.startsWith('write:')));
-  assert.ok(client._state.calls.some((c) => c.startsWith('promote:')));
+test('the manifest is a head, partition pages and status assets, each in its own shared graph', async () => {
+  const client = makeMockDaemon();
+  const importId = 'layout';
+  const { assertionName, pageAssertionNames } = await createManifest(client, importId, ['c', 'a', 'b', 'e', 'd'], { maxPartitionsPerPage: 2 });
+  assert.equal(assertionName, defaultManifestAssertionName(importId));
+  assert.deepEqual(pageAssertionNames, [
+    partitionPageAssertionName(importId, 0, ['a', 'b']),
+    partitionPageAssertionName(importId, 1, ['c', 'd']),
+    partitionPageAssertionName(importId, 2, ['e']),
+  ]);
+  const event = await mark(client, importId, 'c', 'done');
+  assert.equal(event.assertionName, statusBatchAssertionName(importId, event.eventUri));
+  assert.deepEqual([...client.assets.keys()], [assertionName, ...pageAssertionNames, event.assertionName]);
+  assert.ok([...client.assets.values()].every((asset) => asset.status === 'swm-shared'));
+  assert.deepEqual(statuses(await load(client, importId)), [['a', 'pending'], ['b', 'pending'], ['c', 'done'], ['d', 'pending'], ['e', 'pending']]);
 });
 
-test('createImportManifest preserves original startedAt when reusing an assertion', async () => {
-  const client = makeMockClient();
-  const importId = 'started-at-reuse';
+test('round-trip preserves N-Triples literal escapes without double-unescape (regression for CodeQL L138)', async () => {
+  // unquote() decodes each escape exactly once: the literal status string
+  // `\n` (backslash + n) must not come back as a newline.
+  const client = makeMockDaemon();
+  const importId = 'escape-corpus';
+  await createManifest(client, importId, ['p1']);
 
-  await createImportManifest({
-    client,
-    importId,
-    partitions: ['src/foo.ts'],
-    subGraphName: 'meta',
-  });
-  const importIri = importUri(importId);
-  const startedAtTriplesBefore = [...client._state.swm].filter((k) => (
-    k.startsWith(`${importIri}\u0001${IMPORT_P.startedAt}\u0001`)
-  ));
-  assert.equal(startedAtTriplesBefore.length, 1);
+  const samples = [
+    'backslash\\then-n',      // literal backslash + literal "n"
+    'crlf\\r\\nstuff',        // backslash + "r", backslash + "n"
+    'quote\\"inside',         // backslash + quote
+    'mixed \\\\ and \\n',     // escaped backslash + escaped \n
+    'tab\tinside',            // tab must be escaped as \t, not emitted raw
+    'backspace\binside',      // valid N-Triples \b escape
+    'formfeed\finside',       // valid N-Triples \f escape
+    'nul\u0000inside',        // remaining controls use \uXXXX
+    'plain done',             // baseline, no escapes
+  ];
 
-  client._state.createAlreadyExists = true;
-  await new Promise((r) => setTimeout(r, 2));
-  await createImportManifest({
-    client,
-    importId,
-    partitions: ['src/foo.ts'],
-    subGraphName: 'meta',
-  });
-
-  const startedAtTriplesAfter = [...client._state.swm].filter((k) => (
-    k.startsWith(`${importIri}\u0001${IMPORT_P.startedAt}\u0001`)
-  ));
-  assert.deepEqual(
-    startedAtTriplesAfter,
-    startedAtTriplesBefore,
-    'retry/reuse must not append a fresh imp:startedAt timestamp',
-  );
-});
-
-test('createImportManifest rejects reuse with a different partition set', async () => {
-  const client = makeMockClient();
-  const importId = 'partition-set-reuse';
-
-  await createImportManifest({
-    client,
-    importId,
-    partitions: ['src/a.ts', 'src/b.ts'],
-    subGraphName: 'meta',
-  });
-
-  client._state.createAlreadyExists = true;
-  await assert.rejects(
-    () => createImportManifest({
-      client,
-      importId,
-      partitions: ['src/a.ts', 'src/c.ts'],
-      subGraphName: 'meta',
-    }),
-    /different partition set/,
-  );
-
-  const state = await loadImportManifest({ client, importId, subGraphName: 'meta' });
-  assert.deepEqual(
-    state.partitions.map((p) => p.key).sort(),
-    ['src/a.ts', 'src/b.ts'],
-    'failed reuse must not union new partitions into the existing manifest',
-  );
-});
-
-test('markPartitionStatus rejects undeclared partition keys', async () => {
-  const client = makeMockClient();
-  const importId = 'declared-partitions-only';
-
-  await createImportManifest({
-    client,
-    importId,
-    partitions: ['src/a.ts'],
-    subGraphName: 'meta',
-  });
-
-  await assert.rejects(
-    () => markPartitionStatus({
-      client,
-      importId,
-      partitionKey: 'src/typo.ts',
-      status: 'done',
-      subGraphName: 'meta',
-    }),
-    /not declared in manifest/,
-  );
-
-  const state = await loadImportManifest({ client, importId, subGraphName: 'meta' });
-  assert.deepEqual(state.partitions.map((p) => [p.key, p.status]), [['src/a.ts', 'pending']]);
+  for (const status of samples) {
+    await mark(client, importId, 'p1', status);
+    await new Promise((r) => setTimeout(r, 2));
+    const state = await load(client, importId);
+    assert.equal(state.partitions[0].status, status, 'latest status string must round-trip byte-for-byte through lit/unquote');
+  }
 });
 
 test('round-trip works with SPARQL 1.1 results-JSON cell bindings too', async () => {
-  // Same flow, but the mock returns `{value, type}` cells instead of
-  // flat strings (mimics the SPARQL-HTTP adapter). loadImportManifest()
-  // must collapse them via unquote()/bareUri() to a usable result.
-  const client = makeMockClient({ bindingShape: 'cell' });
+  const client = makeMockDaemon({ bindingShape: 'cell' });
+  await createManifest(client, 'cell-corpus', ['a.ts', 'b.ts']);
+  await mark(client, 'cell-corpus', 'a.ts', 'done');
 
-  await createImportManifest({
-    client,
-    importId: 'cell-corpus',
-    partitions: ['a.ts', 'b.ts'],
-    subGraphName: 'meta',
-  });
-
-  await markPartitionStatus({
-    client,
-    importId: 'cell-corpus',
-    partitionKey: 'a.ts',
-    status: 'done',
-    subGraphName: 'meta',
-  });
-
-  const state = await loadImportManifest({
-    client,
-    importId: 'cell-corpus',
-    subGraphName: 'meta',
-  });
+  const state = await load(client, 'cell-corpus');
   const byKey = Object.fromEntries(state.partitions.map((p) => [p.key, p]));
   assert.equal(typeof byKey['a.ts'].status, 'string', 'status should be unwrapped to a plain string');
   assert.equal(byKey['a.ts'].status, 'done');
   assert.equal(byKey['b.ts'].status, 'pending');
-  // URI binding (`?part`) should also be a plain string, not a cell object.
   assert.equal(typeof byKey['a.ts'].uri, 'string');
   assert.ok(byKey['a.ts'].uri.startsWith('urn:dkg:import:cell-corpus#part:'));
 });
 
 test('the latest status wins when a partition has multiple events', async () => {
-  const client = makeMockClient();
-
-  await createImportManifest({
-    client,
-    importId: 'multi-event',
-    partitions: ['only.ts'],
-    subGraphName: 'meta',
-  });
-
-  // Three events in order: in_progress → failed (transient) → done.
-  // The SPARQL "max row" pattern in loadImportManifest must return
-  // `done`, not the earlier statuses.
-  await markPartitionStatus({
-    client,
-    importId: 'multi-event',
-    partitionKey: 'only.ts',
-    status: 'in_progress',
-    subGraphName: 'meta',
-  });
-  // Tiny delay so the ISO timestamps differ.
-  await new Promise((r) => setTimeout(r, 5));
-  await markPartitionStatus({
-    client,
-    importId: 'multi-event',
-    partitionKey: 'only.ts',
-    status: 'failed',
-    subGraphName: 'meta',
-  });
-  await new Promise((r) => setTimeout(r, 5));
-  await markPartitionStatus({
-    client,
-    importId: 'multi-event',
-    partitionKey: 'only.ts',
-    status: 'done',
-    subGraphName: 'meta',
-  });
-
-  const state = await loadImportManifest({
-    client,
-    importId: 'multi-event',
-    subGraphName: 'meta',
-  });
-  assert.equal(state.partitions[0].status, 'done');
+  const client = makeMockDaemon();
+  await createManifest(client, 'multi-event', ['only.ts']);
+  for (const status of ['in_progress', 'failed', 'done']) {
+    await mark(client, 'multi-event', 'only.ts', status);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.equal((await load(client, 'multi-event')).partitions[0].status, 'done');
 });
 
 test('same-millisecond status events resolve deterministically by event IRI', async () => {
-  const client = makeMockClient();
+  const client = makeMockDaemon();
   const importId = 'same-ms';
-  const key = 'only.ts';
-  const part = partitionUri(importId, key);
-  const olderByIri = `${part}/event/a`;
-  const newerByIri = `${part}/event/z`;
+  const part = partitionUri(importId, 'only.ts');
   const timestamp = '"2026-01-15T09:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>';
+  await createManifest(client, importId, ['only.ts']);
+  // Two assets written by other processes, with the same `recordedAt`.
+  for (const [suffix, status] of [['z', 'done'], ['a', 'failed']]) {
+    const event = `${part}/event/${suffix}`;
+    await client.request('POST', '/api/knowledge-assets', {
+      contextGraphId: client.cgId, name: `other-${suffix}`, subGraphName: 'meta', alsoShareSwm: true,
+      quads: [
+        { subject: part, predicate: IMPORT_P.statusEvent, object: event },
+        { subject: event, predicate: IMPORT_P.status, object: `"${status}"` },
+        { subject: event, predicate: IMPORT_P.recordedAt, object: timestamp },
+      ],
+    });
+  }
+  assert.equal((await load(client, importId)).partitions[0].status, 'done');
+});
 
-  await createImportManifest({
-    client,
-    importId,
-    partitions: [key],
-    subGraphName: 'meta',
+test('markPartitionStatuses records a batch in one asset, a later entry winning for the same partition', async () => {
+  const client = makeMockDaemon();
+  await createManifest(client, 'batch', ['a', 'b', 'c']);
+  const before = shares(client).length;
+  const recorded = await markPartitionStatuses({
+    client, importId: 'batch', subGraphName: 'meta',
+    statuses: [{ partitionKey: 'a', status: 'in_progress' }, { partitionKey: 'b', status: 'done' }, { partitionKey: 'a', status: 'done' }],
   });
-  client.insertSwmTriples([
-    { subject: part, predicate: IMPORT_P.statusEvent, object: `<${olderByIri}>` },
-    { subject: olderByIri, predicate: IMPORT_P.status, object: '"failed"' },
-    { subject: olderByIri, predicate: IMPORT_P.recordedAt, object: timestamp },
-    { subject: part, predicate: IMPORT_P.statusEvent, object: `<${newerByIri}>` },
-    { subject: newerByIri, predicate: IMPORT_P.status, object: '"done"' },
-    { subject: newerByIri, predicate: IMPORT_P.recordedAt, object: timestamp },
-  ]);
+  assert.equal(shares(client).length - before, 1);
+  assert.equal(new Set(recorded.map((r) => r.assertionName)).size, 1);
+  assert.deepEqual(statuses(await load(client, 'batch')), [['a', 'done'], ['b', 'done'], ['c', 'pending']]);
+});
 
-  const state = await loadImportManifest({
-    client,
-    importId,
-    subGraphName: 'meta',
+test('markPartitionStatuses splits a large batch into assets within the size bound', async () => {
+  const client = makeMockDaemon();
+  const keys = Array.from({ length: 300 }, (_, i) => `deep/path/${String(i).padStart(3, '0')}/${'x'.repeat(120)}`);
+  await createManifest(client, 'big-batch', keys);
+  const recorded = await markPartitionStatuses({
+    client, importId: 'big-batch', subGraphName: 'meta', statuses: keys.map((partitionKey) => ({ partitionKey, status: 'done' })),
   });
-  assert.equal(state.partitions[0].status, 'done');
+  const batches = client.requests.filter((r) => r.body?.alsoShareSwm === true);
+  assert.ok(batches.length > 1, 'expected more than one status asset');
+  for (const batch of batches) {
+    assert.ok(Buffer.byteLength(JSON.stringify(batch.body), 'utf8') <= STATUS_BATCH_MAX_BYTES);
+  }
+  assert.equal(new Set(recorded.map((r) => r.assertionName)).size, batches.length);
+  assert.ok((await load(client, 'big-batch')).partitions.every((p) => p.status === 'done'));
+});
+
+test('a status write whose share did not complete fails instead of looking recorded', async () => {
+  const client = makeMockDaemon();
+  await createManifest(client, 'share-failed', ['a']);
+  // The daemon answers a create whose share failed after the seal with 207, which is not an HTTP error.
+  const request = client.request.bind(client);
+  client.request = async (method, path, body) => (body?.alsoShareSwm
+    ? { created: true, status: 'wm-sealed', errors: [{ phase: 'swm-share', error: 'store busy' }], recoveryJobId: 'job-1' }
+    : request(method, path, body));
+  await assert.rejects(() => mark(client, 'share-failed', 'a', 'done'), /was not shared to shared memory: store busy\. Its recovery job is job-1\./);
+});
+
+test('createImportManifest is a no-op once the manifest is shared', async () => {
+  const client = makeMockDaemon();
+  await createManifest(client, 'again', ['a', 'b']);
+  const before = client.requests.length;
+  const again = await createManifest(client, 'again', ['b', 'a']);
+  assert.equal(client.requests.length, before, 'a complete manifest is left as it is');
+  assert.equal(again.assertionName, defaultManifestAssertionName('again'));
+});
+
+test('createImportManifest resumes an interrupted run and finishes only what is missing', async () => {
+  const client = makeMockDaemon();
+  const keys = ['a', 'b', 'c', 'd', 'e'];
+  const second = partitionPageAssertionName('resume', 1, ['c', 'd']);
+  client.failures.push({ match: (r) => r.path === `/api/knowledge-assets/${second}/swm/share`, error: httpError(503, { code: 'STORE_SCHEDULER_BUSY' }) });
+  await assert.rejects(() => createManifest(client, 'resume', keys, { maxPartitionsPerPage: 2 }), /503/);
+  await assert.rejects(() => load(client, 'resume'), /incomplete in shared memory: 2 of 5 partitions are visible/);
+
+  client.requests.length = 0;
+  await createManifest(client, 'resume', keys, { maxPartitionsPerPage: 2 });
+  assert.deepEqual(client.requests.map((r) => r.path), [
+    '/api/knowledge-assets',
+    `/api/knowledge-assets/${second}/swm/share`,
+    '/api/knowledge-assets',
+    `/api/knowledge-assets/${partitionPageAssertionName('resume', 2, ['e'])}/wm/write`,
+    `/api/knowledge-assets/${partitionPageAssertionName('resume', 2, ['e'])}/swm/share`,
+  ], 'the sealed second page is shared without a write; the head and the first page are left alone');
+  assert.deepEqual(statuses(await load(client, 'resume')), keys.map((key) => [key, 'pending']));
+});
+
+test('a resume waits for a share recovery that owns a page, then finishes the manifest', async () => {
+  const client = makeMockDaemon();
+  const keys = ['a', 'b', 'c', 'd', 'e'];
+  const second = partitionPageAssertionName('recovering', 1, ['c', 'd']);
+  client.failures.push({
+    match: (r) => r.path === `/api/knowledge-assets/${second}/swm/share`,
+    error: httpError(503, { code: 'PROMOTE_RETRYABLE_FAILURE', recoveryState: 'pending' }),
+    onMatch: () => { client.assets.get(second).recovering = true; },
+  });
+  await assert.rejects(() => createManifest(client, 'recovering', keys, { maxPartitionsPerPage: 2 }), /PROMOTE_RETRYABLE_FAILURE/);
+  // While the recovery job owns the page, a resume gets the daemon's answer and shares nothing for that page.
+  await assert.rejects(() => createManifest(client, 'recovering', keys, { maxPartitionsPerPage: 2 }), /KA_PROMOTE_RECOVERY_REQUIRED/);
+  await assert.rejects(() => load(client, 'recovering'), /incomplete in shared memory: 2 of 5 partitions are visible/);
+  client.finishRecovery(second);
+  await createManifest(client, 'recovering', keys, { maxPartitionsPerPage: 2 });
+  assert.deepEqual(statuses(await load(client, 'recovering')), keys.map((key) => [key, 'pending']));
+});
+
+test('createImportManifest preserves the original startedAt when it resumes the head', async () => {
+  const client = makeMockDaemon();
+  const importId = 'started-at-reuse';
+  const head = defaultManifestAssertionName(importId);
+  client.failures.push({ match: (r) => r.path === `/api/knowledge-assets/${head}/swm/share`, error: httpError(503, { code: 'STORE_OPERATION_TIMEOUT' }) });
+  await assert.rejects(() => createManifest(client, importId, ['src/foo.ts']));
+  // The interrupted head is sealed with one startedAt; open it again as a crash before its share would leave it.
+  client.assets.get(head).status = 'draft-open';
+  await new Promise((r) => setTimeout(r, 2));
+  await createManifest(client, importId, ['src/foo.ts']);
+  const startedAt = client.store.match(oxigraph.namedNode(importUri(importId)), oxigraph.namedNode(IMPORT_P.startedAt), null, null);
+  assert.equal(startedAt.length, 1, 'a resumed head must not gain a second imp:startedAt');
+});
+
+test('createImportManifest refuses another partition set over a head that an interrupted run left unshared', async () => {
+  const client = makeMockDaemon();
+  const importId = 'unshared-head';
+  const head = defaultManifestAssertionName(importId);
+  client.failures.push({ match: (r) => r.path === `/api/knowledge-assets/${head}/swm/share`, error: httpError(503, { code: 'STORE_SCHEDULER_BUSY' }) });
+  await assert.rejects(() => createManifest(client, importId, ['a', 'b']), /503/);
+  assert.equal(client.assets.get(head).status, 'wm-sealed');
+
+  client.requests.length = 0;
+  await assert.rejects(() => createManifest(client, importId, ['a', 'c']), /different partition set/);
+  assert.equal(client.assets.get(head).status, 'wm-sealed', 'the old head is not shared');
+  assert.deepEqual(client.requests.filter((r) => r.method === 'POST').map((r) => r.path), ['/api/knowledge-assets'],
+    'nothing is written or shared for the other set');
+
+  // The same set resumes: the sealed head is shared as it is, then the page.
+  await createManifest(client, importId, ['b', 'a']);
+  assert.deepEqual(statuses(await load(client, importId)), [['a', 'pending'], ['b', 'pending']]);
+});
+
+test('a creation that races a conflicting one refuses instead of adding its pages', async () => {
+  const client = makeMockDaemon();
+  const importId = 'race';
+  const head = defaultManifestAssertionName(importId);
+  const request = client.request.bind(client);
+  let raced = false;
+  // The other run completes after this one read no manifest, just before this one creates the head.
+  client.request = async (method, path, body) => {
+    if (!raced && method === 'POST' && path === '/api/knowledge-assets' && body?.name === head) {
+      raced = true;
+      await createManifest(client, importId, ['a', 'b']);
+    }
+    return request(method, path, body);
+  };
+  await assert.rejects(() => createManifest(client, importId, ['a', 'c']), /different partition set/);
+  assert.equal(raced, true);
+  assert.equal(client.assets.has(partitionPageAssertionName(importId, 0, ['a', 'c'])), false, 'no page for the other set');
+  assert.deepEqual(statuses(await load(client, importId)), [['a', 'pending'], ['b', 'pending']]);
+});
+
+test('two creations that write other partition sets into one new head at once both fail', async () => {
+  // Both read the new head's empty draft before either writes, then both write before either shares: the head ends
+  // with two partition-set hashes. Neither run may then write a page, and the importId is refused from then on.
+  const client = makeMockDaemon();
+  const importId = 'mixed-head';
+  const head = defaultManifestAssertionName(importId);
+  const barrier = () => { let open; const promise = new Promise((resolve) => { open = resolve; }); return { promise, open }; };
+  const draftRead = barrier();
+  const bothWritten = barrier();
+  let writes = 0;
+  const request = client.request.bind(client);
+  const write = client.writeAssertion.bind(client);
+  const promote = client.promote.bind(client);
+  client.request = async (method, path, body) => {
+    const answer = await request(method, path, body);
+    if (method === 'GET' && path.startsWith(`/api/knowledge-assets/${head}/wm/quads`)) draftRead.open();
+    return answer;
+  };
+  client.writeAssertion = async (args) => {
+    if (args.assertionName !== head) return write(args);
+    await draftRead.promise;
+    const written = await write(args);
+    if (++writes === 2) bothWritten.open();
+    return written;
+  };
+  client.promote = async (args) => {
+    if (args.assertionName === head) await bothWritten.promise;
+    return promote(args);
+  };
+  const results = await Promise.allSettled([createManifest(client, importId, ['a', 'b']), createManifest(client, importId, ['a', 'c'])]);
+  assert.deepEqual(results.map((r) => r.status), ['rejected', 'rejected']);
+  for (const r of results) assert.match(r.reason.message, /different partition set/);
+  assert.equal([...client.assets.keys()].some((name) => name.startsWith('import-partitions-')), false, 'no page was written');
+  await assert.rejects(() => load(client, importId), /head written for more than one partition set/);
+  await assert.rejects(() => createManifest(client, importId, ['a', 'b']), /different partition set/);
+});
+
+test('two overlapping creations of the same manifest both succeed', async () => {
+  const client = makeMockDaemon();
+  const importId = 'same-race';
+  const head = defaultManifestAssertionName(importId);
+  const request = client.request.bind(client);
+  let raced = false;
+  // The other run shares the head and the page after this one read no manifest.
+  client.request = async (method, path, body) => {
+    if (!raced && method === 'POST' && path === '/api/knowledge-assets' && body?.name === head) {
+      raced = true;
+      await createManifest(client, importId, ['a', 'b']);
+    }
+    return request(method, path, body);
+  };
+  await createManifest(client, importId, ['b', 'a']);
+  assert.equal(raced, true);
+  assert.deepEqual(statuses(await load(client, importId)), [['a', 'pending'], ['b', 'pending']]);
+});
+
+test('an import whose id reads like another import\'s page name keeps both manifests apart', async () => {
+  const client = makeMockDaemon();
+  const lookalike = `alpha-part-0-${partitionSetHash(['p1']).slice(0, 12)}`;
+  await createManifest(client, lookalike, ['q1']);
+  await createManifest(client, 'alpha', ['p1']);
+  assert.deepEqual(statuses(await load(client, 'alpha')), [['p1', 'pending']]);
+  assert.deepEqual(statuses(await load(client, lookalike)), [['q1', 'pending']]);
+});
+
+test('createImportManifest fails instead of succeeding when an asset of another origin holds a page name', async () => {
+  const client = makeMockDaemon();
+  await client.request('POST', '/api/knowledge-assets', {
+    contextGraphId: client.cgId, name: partitionPageAssertionName('squatted', 0, ['a']), subGraphName: 'meta', alsoShareSwm: true,
+    quads: [{ subject: 'urn:other:thing', predicate: 'urn:other:p', object: '"x"' }],
+  });
+  await assert.rejects(() => createManifest(client, 'squatted', ['a']), /1 of 1 partitions of manifest 'squatted' are not visible/);
+});
+
+test('createImportManifest writes the whole head when the interrupted run created it but wrote nothing', async () => {
+  const client = makeMockDaemon();
+  const importId = 'empty-head';
+  const head = defaultManifestAssertionName(importId);
+  client.failures.push({ match: (r) => r.path === `/api/knowledge-assets/${head}/wm/write`, error: httpError(503, { code: 'STORE_OPERATION_TIMEOUT' }) });
+  await assert.rejects(() => createManifest(client, importId, ['a']), /503/);
+  assert.equal(client.assets.get(head).draft.size, 0);
+  await createManifest(client, importId, ['a']);
+  const importNode = oxigraph.namedNode(importUri(importId));
+  assert.equal(client.store.match(importNode, oxigraph.namedNode(IMPORT_P.startedAt), null, null).length, 1);
+  assert.deepEqual(statuses(await load(client, importId)), [['a', 'pending']]);
+});
+
+test('loadImportManifest refuses partitions that the head does not list', async () => {
+  const client = makeMockDaemon();
+  const importId = 'stray-page';
+  await createManifest(client, importId, ['a', 'b']);
+  // A page another partition set left behind, shared late (for example by a share's recovery job).
+  await client.request('POST', '/api/knowledge-assets', {
+    contextGraphId: client.cgId, name: 'stray', subGraphName: 'meta', alsoShareSwm: true,
+    quads: buildInitialManifestTriples(importId, ['a', 'z'], '2026-01-15T09:00:00.000Z')
+      .filter((t) => t.subject !== importUri(importId) || t.predicate === IMPORT_P.partition),
+  });
+  await assert.rejects(() => load(client, importId), /declares partitions its head does not list/);
+});
+
+test('reads are paged, so a manifest and history larger than one query answer still load', async () => {
+  const client = makeMockDaemon({ maxResponseBytes: 512 * 1024 });
+  const keys = Array.from({ length: 2 * QUERY_PAGE_ROWS + 10 }, (_, i) => `src/${String(i).padStart(5, '0')}/${'x'.repeat(60)}.ts`);
+  await createManifest(client, 'paged', keys);
+  await markPartitionStatuses({ client, importId: 'paged', subGraphName: 'meta', statuses: keys.map((partitionKey) => ({ partitionKey, status: 'in_progress' })) });
+  await markPartitionStatuses({ client, importId: 'paged', subGraphName: 'meta', statuses: keys.map((partitionKey) => ({ partitionKey, status: 'done' })) });
+  const unpaged = `SELECT ?ev WHERE { GRAPH ?g { ?part <${IMPORT_P.statusEvent}> ?ev } }`;
+  await assert.rejects(() => client.query({ sparql: unpaged, graphSuffix: '_shared_memory', subGraphName: 'meta' }), /413/,
+    'the whole history is more than one answer may carry');
+  client.queries.length = 0;
+  const state = await load(client, 'paged');
+  assert.equal(state.partitions.length, keys.length);
+  assert.ok(state.partitions.every((p) => p.status === 'done'));
+  const selects = client.queries.filter((q) => /SELECT DISTINCT \?(part|ev)/.test(q.sparql));
+  assert.ok(selects.length >= 6, `expected paged reads, got ${selects.length} queries`);
+  assert.ok(selects.every((q) => q.sparql.includes(`LIMIT ${QUERY_PAGE_ROWS}`) && !/\bOFFSET\b/.test(q.sparql)),
+    'keyset pages: a LIMIT and a cursor, never an OFFSET');
+});
+
+test('a store that ignores LIMIT or the cursor makes the paged reads fail instead of looping', async () => {
+  for (const ignore of ['limit', 'cursor']) {
+    const client = makeMockDaemon({ ignore });
+    const importId = `ignored-${ignore}`;
+    await createManifest(client, importId, Array.from({ length: QUERY_PAGE_ROWS + 1 }, (_, i) => `k${i}`));
+    await assert.rejects(() => load(client, importId), /ignored its LIMIT or its cursor/);
+  }
+});
+
+test('createImportManifest rejects reuse with a different partition set', async () => {
+  const client = makeMockDaemon();
+  const importId = 'partition-set-reuse';
+  await createManifest(client, importId, ['src/a.ts', 'src/b.ts']);
+  for (const partitions of [['src/a.ts', 'src/c.ts'], ['src/a.ts'], ['src/a.ts', 'src/b.ts', 'src/c.ts']]) {
+    await assert.rejects(() => createManifest(client, importId, partitions), /different partition set/);
+  }
+  assert.deepEqual((await load(client, importId)).partitions.map((p) => p.key), ['src/a.ts', 'src/b.ts'],
+    'failed reuse must not union new partitions into the existing manifest');
+});
+
+test('createImportManifest rejects duplicate partition keys', async () => {
+  await assert.rejects(() => createManifest(makeMockDaemon(), 'dupes', ['a', 'b', 'a']), /unique partition keys/);
+});
+
+test('createImportManifest uses sanitized default name for unsafe importIds', async () => {
+  const client = makeMockDaemon();
+  await createManifest(client, 'corpus/2026-q1', ['only.ts']);
+  const creates = client.requests.filter((r) => r.path === '/api/knowledge-assets');
+  assert.equal(creates[0].body.name, defaultManifestAssertionName('corpus/2026-q1'),
+    'createImportManifest must send the sanitized assertion name to the daemon');
+  const state = await load(client, 'corpus/2026-q1');
+  assert.deepEqual(statuses(state), [['only.ts', 'pending']]);
+});
+
+test('markPartitionStatus rejects undeclared partition keys', async () => {
+  const client = makeMockDaemon();
+  await createManifest(client, 'declared-partitions-only', ['src/a.ts']);
+  await assert.rejects(() => mark(client, 'declared-partitions-only', 'src/typo.ts', 'done'),
+    /markPartitionStatus: partition 'src\/typo\.ts' is not declared in manifest 'declared-partitions-only'/);
+  await assert.rejects(() => markPartitionStatuses({
+    client, importId: 'declared-partitions-only', subGraphName: 'meta',
+    statuses: [{ partitionKey: 'src/a.ts', status: 'done' }, { partitionKey: 'src/typo.ts', status: 'done' }],
+  }), /markPartitionStatuses: partition 'src\/typo\.ts' is not declared/);
+  assert.deepEqual(statuses(await load(client, 'declared-partitions-only')), [['src/a.ts', 'pending']]);
+});
+
+test('status writes read the declarations once per manifest, not on every call', async () => {
+  const client = makeMockDaemon();
+  await createManifest(client, 'declarations-once', ['a.ts', 'b.ts', 'c.ts']);
+  client.queries.length = 0;
+  for (const key of ['a.ts', 'b.ts', 'c.ts', 'a.ts']) await mark(client, 'declarations-once', key, 'done');
+  assert.equal(client.queries.length, 1, 'one read of the declared partitions for four status writes');
+  // A key it has not seen is read again before it is refused.
+  await assert.rejects(() => mark(client, 'declarations-once', 'z.ts', 'done'), /not declared/);
+  assert.equal(client.queries.length, 2);
 });
 
 test('loadImportManifest fails loudly when the manifest is missing from SWM', async () => {
-  const client = makeMockClient();
-
-  await assert.rejects(
-    () => loadImportManifest({
-      client,
-      importId: 'missing-corpus',
-      subGraphName: 'meta',
-    }),
-    /No import manifest rows found/,
-  );
+  await assert.rejects(() => load(makeMockDaemon(), 'missing-corpus'), /No import manifest rows found/);
 });
 
-test('loadImportManifest routes the query through SWM (regression for codex L391)', async () => {
-  // The daemon's `/api/query` default routing reads the bare data graph,
-  // not SWM. Manifest data only lives in SWM (via assertion API write +
-  // promote), so `loadImportManifest` MUST explicitly opt into SWM via
-  // `graphSuffix: '_shared_memory'`. Without that hint the read silently
-  // returns zero bindings even on a healthy import — which is exactly
-  // the bug Codex flagged after our last push. This test enforces the
-  // contract by making the mock client return SWM only when the SWM
-  // graphSuffix is supplied, and pinning the call shape.
-  const client = makeMockClient();
-  await createImportManifest({
-    client,
-    importId: 'swm-routed',
-    partitions: ['only.ts'],
-    subGraphName: 'meta',
-  });
-  client._state.calls.length = 0;
-
-  await loadImportManifest({ client, importId: 'swm-routed', subGraphName: 'meta' });
-
-  const queryCalls = client._state.calls.filter((c) => c.startsWith('query:'));
-  assert.equal(queryCalls.length, 1, 'should have made exactly one query');
-  assert.equal(
-    queryCalls[0],
-    'query:graphSuffix=_shared_memory',
-    'loadImportManifest must pass graphSuffix=_shared_memory so the daemon reads SWM',
-  );
-});
-
-test('createImportManifest splits oversized promote payloads on daemon 413', async () => {
-  const client = makeMockClient({ promoteBodyLimitBytes: 1800 });
-  const partitions = Array.from(
-    { length: 24 },
-    (_, i) => `deep/path/${String(i).padStart(2, '0')}/${'x'.repeat(120)}`,
-  );
-
-  await createImportManifest({
-    client,
-    importId: 'large-promote',
-    partitions,
-    subGraphName: 'meta',
-  });
-
-  const promoteCalls = client._state.calls.filter((c) => c.startsWith('promote:'));
-  assert.ok(
-    promoteCalls.length > 1,
-    `expected multiple promote calls after 413 splitting, got ${promoteCalls.join(', ')}`,
-  );
-
-  const state = await loadImportManifest({ client, importId: 'large-promote', subGraphName: 'meta' });
-  assert.equal(state.partitions.length, partitions.length);
+test('every read goes through SWM and matches inside one asset graph', async () => {
+  // The daemon's default `/api/query` routing reads the bare data graph, and
+  // answers a sub-graph query one asset graph at a time: a read without
+  // `graphSuffix: '_shared_memory'` or without `GRAPH ?g` finds nothing.
+  const client = makeMockDaemon();
+  await createManifest(client, 'swm-routed', ['only.ts']);
+  await mark(client, 'swm-routed', 'only.ts', 'done');
+  await partitionDeclared({ client, importId: 'swm-routed', partitionKey: 'only.ts', subGraphName: 'meta' });
+  await load(client, 'swm-routed');
+  assert.ok(client.queries.length > 0);
+  for (const { sparql, graphSuffix } of client.queries) {
+    assert.equal(graphSuffix, '_shared_memory');
+    assert.match(sparql, /GRAPH \?g \{/);
+  }
 });
 
 test('statusEventUri produces strictly increasing suffixes for same-ms calls (regression for codex L84)', () => {
   // Same-millisecond status updates land with identical `recordedAt`
-  // values. Without a monotonic in-process counter in the IRI, two writes
-  // in the same ms would tie on both timestamp AND a random suffix, so
-  // SPARQL's lexicographic tie-breaker would pick a non-deterministic
-  // winner. The implementation embeds a zero-padded counter BEFORE the
-  // random component, guaranteeing call-order ordering for same-process
-  // events.
+  // values. The zero-padded counter BEFORE the random component keeps the
+  // event-IRI tie-breaker in call order for same-process events.
   const ids = [];
   for (let i = 0; i < 50; i++) ids.push(statusEventUri('mono-test', 'p1'));
   for (let i = 1; i < ids.length; i++) {
@@ -701,7 +844,6 @@ test('statusEventUri produces strictly increasing suffixes for same-ms calls (re
       `event #${i} (${ids[i]}) should sort lexicographically after #${i - 1} (${ids[i - 1]})`,
     );
   }
-  // Suffix shape: <ts>-<12-digit counter>-<6-char random>
   for (const id of ids) {
     assert.match(
       id,
@@ -713,12 +855,9 @@ test('statusEventUri produces strictly increasing suffixes for same-ms calls (re
 
 test('defaultManifestAssertionName sanitizes IRI-unsafe importIds (regression for codex L222)', () => {
   // `validateAssertionName` in packages/core/src/constants.ts rejects
-  // `/`, whitespace, and `<>"{}|^\`\\`. `importUri`/`partitionUri` accept
-  // those characters via percent-encoding, so a caller can construct
-  // valid URIs from an importId that the default assertion-name path
-  // can't actually `create`. The sanitizer maps unsafe runs to `-`,
-  // appends a stable hash when the raw id changed, and refuses outright
-  // if no valid characters remain.
+  // `/`, whitespace, and `<>"{}|^\`\\`. The sanitizer maps unsafe runs to
+  // `-`, appends a stable hash when the raw id changed, and refuses
+  // outright if no valid characters remain.
   assert.equal(defaultManifestAssertionName('plain-id'), 'import-manifest-plain-id');
   assert.match(defaultManifestAssertionName('with/slash'), /^import-manifest-with-slash-[0-9a-f]{12}$/);
   assert.match(defaultManifestAssertionName('  trim me  '), /^import-manifest-trim-me-[0-9a-f]{12}$/);
@@ -740,9 +879,6 @@ test('defaultManifestAssertionName sanitizes IRI-unsafe importIds (regression fo
     'different unsafe importIds that sanitize to the same slug must not collide',
   );
 
-  // Length cap: prefix is 16 chars, daemon limit is 256, so slug must be
-  // truncated enough to leave room for the stable hash, and the total
-  // result must stay <=256.
   const longId = 'a'.repeat(500);
   const longResult = defaultManifestAssertionName(longId);
   assert.ok(longResult.length <= 256, `result should fit under 256 chars, got ${longResult.length}`);
@@ -754,8 +890,6 @@ test('defaultManifestAssertionName sanitizes IRI-unsafe importIds (regression fo
     'long importIds that only differ after the visible cutoff must not collide',
   );
 
-  // No valid characters -> throws with a descriptive error instead of a
-  // cryptic 400 later.
   assert.throws(
     () => defaultManifestAssertionName('///'),
     /no characters valid for an assertion name/,
@@ -766,165 +900,38 @@ test('defaultManifestAssertionName sanitizes IRI-unsafe importIds (regression fo
   );
 });
 
-test('createImportManifest uses sanitized default name for unsafe importIds', async () => {
-  // End-to-end: passing an importId with `/` must NOT crash, and the
-  // assertion created on the daemon must use the sanitized name.
-  const client = makeMockClient();
-  await createImportManifest({
-    client,
-    importId: 'corpus/2026-q1',
-    partitions: ['only.ts'],
-    subGraphName: 'meta',
-  });
-  const createRequests = client._state.requests.filter((r) => (
-    r.method === 'POST' && r.path === '/api/knowledge-assets'
-  ));
-  assert.equal(createRequests.length, 1);
-  assert.equal(
-    createRequests[0].body.name,
-    defaultManifestAssertionName('corpus/2026-q1'),
-    'createImportManifest must send the sanitized assertion name to the daemon',
-  );
-
-  const state = await loadImportManifest({
-    client,
-    importId: 'corpus/2026-q1',
-    subGraphName: 'meta',
-  });
-  assert.equal(state.partitions.length, 1);
-  assert.equal(state.partitions[0].key, 'only.ts');
-});
-
 test('manifest helpers reject custom assertionName overrides', async () => {
-  const client = makeMockClient();
-  assert.rejects(
-    () => createImportManifest({
-      client,
-      importId: 'custom-name',
-      partitions: ['a'],
-      subGraphName: 'meta',
-      assertionName: 'custom-assertion',
+  const client = makeMockDaemon();
+  await assert.rejects(
+    () => createManifest(client, 'custom-name', ['a'], { assertionName: 'custom-assertion' }),
+    /no longer accepts `assertionName`/,
+  );
+  await assert.rejects(
+    () => markPartitionStatus({
+      client, importId: 'custom-name', partitionKey: 'a', status: 'done', subGraphName: 'meta', assertionName: 'custom-assertion',
     }),
     /no longer accepts `assertionName`/,
   );
-
-  assert.rejects(
-    () => markPartitionStatus({
-      client,
-      importId: 'custom-name',
-      partitionKey: 'a',
-      status: 'done',
-      subGraphName: 'meta',
-      assertionName: 'custom-assertion',
+  await assert.rejects(
+    () => markPartitionStatuses({
+      client, importId: 'custom-name', statuses: [{ partitionKey: 'a', status: 'done' }], subGraphName: 'meta', assertionName: 'x',
     }),
-    /no longer accepts `assertionName`/,
+    /does not accept `assertionName`/,
   );
 });
 
 test('partitionDeclared returns true for declared partitions, false otherwise', async () => {
-  const client = makeMockClient();
-  await createImportManifest({
-    client,
-    importId: 'pq-test',
-    partitions: ['a.ts', 'b.ts'],
-    subGraphName: 'meta',
-  });
-  assert.equal(
-    await partitionDeclared({
-      client,
-      importId: 'pq-test',
-      partitionKey: 'a.ts',
-      subGraphName: 'meta',
-    }),
-    true,
-  );
-  assert.equal(
-    await partitionDeclared({
-      client,
-      importId: 'pq-test',
-      partitionKey: 'not-declared.ts',
-      subGraphName: 'meta',
-    }),
-    false,
-  );
+  const client = makeMockDaemon();
+  await createManifest(client, 'pq-test', ['a.ts', 'b.ts']);
+  const declared = (partitionKey) => partitionDeclared({ client, importId: 'pq-test', partitionKey, subGraphName: 'meta' });
+  assert.equal(await declared('a.ts'), true);
+  assert.equal(await declared('not-declared.ts'), false);
 });
 
-test('partitionDeclared targets the SWM tier (graphSuffix=_shared_memory)', async () => {
-  const client = makeMockClient();
-  await createImportManifest({
-    client,
-    importId: 'pq-graphsuffix',
-    partitions: ['only.ts'],
-    subGraphName: 'meta',
-  });
-  client._state.calls.length = 0;
-  await partitionDeclared({
-    client,
-    importId: 'pq-graphsuffix',
-    partitionKey: 'only.ts',
-    subGraphName: 'meta',
-  });
-  const queryCalls = client._state.calls.filter((c) => c.startsWith('query:'));
-  // Exactly one query, and it must carry graphSuffix=_shared_memory — without
-  // the SWM hint the daemon would route to the empty bare data graph and a
-  // healthy manifest would look undeclared.
-  assert.equal(queryCalls.length, 1, 'expected exactly one query for ASK');
-  assert.equal(queryCalls[0], 'query:graphSuffix=_shared_memory');
-});
-
-test('markPartitionStatus uses single-row ASK, not full loadImportManifest (was Codex PR #642 quadratic)', async () => {
-  // Regression test for the quadratic-validation finding: previously,
-  // markPartitionStatus loaded the entire manifest via loadImportManifest
-  // on every status write. For bulk imports with N partitions and 2
-  // status writes each, that meant 2N full SWM materialisations. The
-  // ASK rewrite must do exactly one query of one row instead.
-  const client = makeMockClient();
-  await createImportManifest({
-    client,
-    importId: 'pq-no-full-load',
-    partitions: ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts'],
-    subGraphName: 'meta',
-  });
-  client._state.calls.length = 0;
-  await markPartitionStatus({
-    client,
-    importId: 'pq-no-full-load',
-    partitionKey: 'c.ts',
-    status: 'done',
-    subGraphName: 'meta',
-  });
-  const queryCalls = client._state.calls.filter((c) => c.startsWith('query:'));
-  // Pre-fix: markPartitionStatus would have invoked the SELECT-shaped
-  // loadImportManifest query. Post-fix: only the ASK-shape goes out, and
-  // we never materialise the full partition list during a status write.
-  assert.equal(queryCalls.length, 1, `expected exactly one query, got ${queryCalls.length}: ${JSON.stringify(queryCalls)}`);
-  // Verify the status was actually applied so we know the helper didn't
-  // short-circuit on a malformed check.
-  const state = await loadImportManifest({
-    client,
-    importId: 'pq-no-full-load',
-    subGraphName: 'meta',
-  });
-  const part = state.partitions.find((p) => p.key === 'c.ts');
-  assert.equal(part.status, 'done');
-});
-
-test('markPartitionStatus still rejects undeclared partitions via ASK', async () => {
-  const client = makeMockClient();
-  await createImportManifest({
-    client,
-    importId: 'pq-reject',
-    partitions: ['a.ts'],
-    subGraphName: 'meta',
-  });
-  await assert.rejects(
-    () => markPartitionStatus({
-      client,
-      importId: 'pq-reject',
-      partitionKey: 'never-declared.ts',
-      status: 'done',
-      subGraphName: 'meta',
-    }),
-    /not declared in manifest 'pq-reject'/,
-  );
+test('the page size bound defaults to PAGE_MAX_PARTITIONS', async () => {
+  const client = makeMockDaemon();
+  const keys = Array.from({ length: PAGE_MAX_PARTITIONS + 1 }, (_, i) => `k${String(i).padStart(5, '0')}`);
+  const { pageAssertionNames } = await createManifest(client, 'default-pages', keys);
+  assert.equal(pageAssertionNames.length, 2);
+  assert.equal((await load(client, 'default-pages')).partitions.length, keys.length);
 });
