@@ -27,7 +27,7 @@ describe('bounded snapshot recovery overlap', () => {
     expect(discover).not.toHaveBeenCalled(); expect(transfer).not.toHaveBeenCalled();
   });
 
-  it('serializes all transfers when both workers have one supplier', async () => {
+  it.each([2, 4] as const)('serializes all transfers when %s workers have one supplier', async maxLanes => {
     let active = 0, peak = 0;
     const calls: string[][] = [];
     vi.spyOn(execution, 'runExactRecovery').mockImplementation(async request => {
@@ -35,48 +35,51 @@ describe('bounded snapshot recovery overlap', () => {
       await new Promise<void>(resolve => setImmediate(resolve));
       active--; return success(selected(request));
     });
-    const result = await recoverPublicSnapshotExact(host, { ...options(), peerBatches: async function* () { yield ['core-a']; } });
+    const result = await recoverPublicSnapshotExact(host, { ...options(), maxLanes, peerBatches: async function* () { yield ['core-a']; } });
     expect(result.committed).toEqual(new Set(uals)); expect(peak).toBe(1);
     expect(calls.flat().sort()).toEqual([...uals].sort()); expect(calls.every(batch => batch.length <= 10)).toBe(true);
   });
 
-  it('uses at most two disjoint ten-asset streams and preserves every asset, held check and attempt bound', async () => {
-    const gates = [deferred(), deferred()], entered = deferred();
+  it.each([2, 4] as const)('uses at most %s disjoint streams and preserves every asset, held check and attempt bound', async maxLanes => {
+    const gates = Array.from({ length: maxLanes }, deferred), entered = deferred();
+    const peers = Array.from({ length: maxLanes }, (_, i) => `core-${i}`);
     let active = 0, peak = 0;
     const calls: Array<{ peer: string; assets: string[]; timeout: number | undefined }> = [];
     vi.spyOn(execution, 'runExactRecovery').mockImplementation(async request => {
       const index = calls.length; active++; peak = Math.max(peak, active);
       calls.push({ peer: request.remotePeerId, assets: [...selected(request)], timeout: request.options.totalTimeoutMs });
-      if (calls.length === 2) entered.resolve();
-      if (index < 2) await gates[index]!.promise;
+      if (calls.length === maxLanes) entered.resolve();
+      if (index < maxLanes) await gates[index]!.promise;
       active--; return success(selected(request));
     });
     const holds = vi.fn(async () => false);
-    const job = recoverPublicSnapshotExact(host, { ...options(), holds });
+    const job = recoverPublicSnapshotExact(host, { ...options(), maxLanes, holds,
+      peerBatches: async function* () { yield peers; } });
     await entered.promise;
-    expect(calls.map(c => c.peer)).toEqual(['core-a', 'core-b']);
-    expect(active).toBe(2); gates.forEach(g => g.resolve());
+    expect(calls.map(c => c.peer).sort()).toEqual([...peers].sort());
+    expect(active).toBe(maxLanes); gates.forEach(g => g.resolve());
     const result = await job;
-    expect(peak).toBe(2);
+    expect(peak).toBe(maxLanes);
     expect(result).toEqual({ committed: new Set(uals), alreadyPresent: 0 });
     expect(calls.flatMap(c => c.assets).sort()).toEqual([...uals].sort());
     expect(calls.every(c => c.assets.length <= 10 && c.timeout! <= 120_000)).toBe(true);
     expect(holds).toHaveBeenCalledTimes(uals.length);
   });
 
-  it('cancels the other lane and waits for its physical work before reporting a failure', async () => {
+  it.each([2, 4] as const)('cancels sibling lanes and drains physical work after a failure with %s lanes', async maxLanes => {
     const both = deferred(), physical = deferred(); let count = 0, settled = false;
     let siblingAborted: boolean | undefined;
     vi.spyOn(execution, 'runExactRecovery').mockImplementation(async request => {
       const lane = count++;
-      if (count === 2) both.resolve();
+      if (count === maxLanes) both.resolve();
       await both.promise;
       if (lane === 0) throw new Error('first lane failed');
       await physical.promise;
       siblingAborted = request.options.signal?.aborted;
       return success(selected(request));
     });
-    const job = recoverPublicSnapshotExact(host, options());
+    const job = recoverPublicSnapshotExact(host, { ...options(), maxLanes,
+      peerBatches: async function* () { yield Array.from({ length: maxLanes }, (_, i) => `core-${i}`); } });
     job.then(() => { settled = true; }, () => { settled = true; });
     const rejection = expect(job).rejects.toThrow('first lane failed');
     await both.promise;
@@ -85,7 +88,24 @@ describe('bounded snapshot recovery overlap', () => {
     expect(settled).toBe(false);
     physical.resolve(); await rejection;
     expect(siblingAborted).toBe(true);
-    expect(count).toBe(2);
+    expect(count).toBe(maxLanes);
+  });
+
+  it('lets a ready lane drain unclaimed batches while another supplier is slow', async () => {
+    const slow = deferred(), drained = deferred(), calls: string[][] = [];
+    vi.spyOn(execution, 'runExactRecovery').mockImplementation(async request => {
+      const assets = [...selected(request)]; calls.push(assets);
+      if (assets.includes(uals[0]!)) await slow.promise;
+      if (assets.includes(uals[30]!)) drained.resolve();
+      return success(assets);
+    });
+    const job = recoverPublicSnapshotExact(host, options());
+    try {
+      await drained.promise;
+      expect(calls).toHaveLength(4);
+      expect(calls.flat().sort()).toEqual([...uals].sort());
+    } finally { slow.resolve(); }
+    expect((await job).committed).toEqual(new Set(uals));
   });
 
   it('reports whole-job progress including held assets when one lane exhausts its suppliers', async () => {

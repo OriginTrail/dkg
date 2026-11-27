@@ -72,7 +72,7 @@ type ContextGraphLiveAuthorityCoalescerFixture =
 /** The production wiring, macrotask deferral and all. */
 function realDeferralCoalescer(): ContextGraphLiveAuthorityCoalescerFixture {
   return new ContextGraphLiveAuthorityCoalescer<Authority>({
-    isDefinitiveError: (error) => error instanceof ContextGraphLiveAuthorityUnsupportedError,
+    shouldShareError: (error) => error instanceof ContextGraphLiveAuthorityUnsupportedError,
   });
 }
 
@@ -81,7 +81,7 @@ function coalescer(
 ): ContextGraphLiveAuthorityCoalescerFixture {
   return new ContextGraphLiveAuthorityCoalescer<Authority>({
     defer: scheduler.defer,
-    isDefinitiveError: (error) => error instanceof ContextGraphLiveAuthorityUnsupportedError,
+    shouldShareError: (error) => error instanceof ContextGraphLiveAuthorityUnsupportedError,
   });
 }
 
@@ -215,6 +215,28 @@ describe('ContextGraphLiveAuthorityCoalescer', () => {
     });
     expect(exhausted).not.toBe(first);
     expect(exhausted).not.toBe(second);
+  });
+
+  it('delivers physical failures directly when the provider layer owns retry policy', async () => {
+    const scheduler = manualScheduler();
+    const flight = new ContextGraphLiveAuthorityCoalescer<Authority>({
+      defer: scheduler.defer, shouldShareError: () => true,
+    });
+    const { load, calls } = controllableLoader();
+    const callers = [0, 1, 2].map(() => settled(flight.run(KEY, load)));
+    await scheduler.flush();
+    const error = Object.assign(new Error('provider unavailable'), { code: 'NETWORK_ERROR' });
+    calls[0]!.reject(error);
+    await scheduler.flush();
+    expect(callers.every(caller => caller.done && caller.error === error)).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(scheduler.pending()).toBe(0);
+    // A later read still dispatches new work: the failure is not cached.
+    const later = flight.run(KEY, load);
+    await scheduler.flush();
+    expect(calls).toHaveLength(2);
+    calls[1]!.resolve({ id: 'recovered' });
+    await expect(later).resolves.toEqual({ id: 'recovered' });
   });
 
   it('shares one read with every caller of the same turn, and every DEFINITIVE answer', async () => {
@@ -424,7 +446,7 @@ describe('ContextGraphLiveAuthorityCoalescer', () => {
     // classification branches.
     const flight = new ContextGraphLiveAuthorityCoalescer<Authority>({
       defer: scheduler.defer,
-      isDefinitiveError: () => { throw new Error('classifier exploded'); },
+      shouldShareError: () => { throw new Error('classifier exploded'); },
     });
     const { load, calls } = controllableLoader();
 

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { RpcUsageScope } from '@origintrail-official/dkg-chain';
+import { vmReconcilePausesFor } from './internal/vm-reconcile-pauses.js';
 import { startRequestAbortLifecycle } from '@origintrail-official/dkg-core';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
@@ -43,11 +44,13 @@ export class PublicSnapshotSessionMethods extends DKGAgentBase {
     const lifecycle = startRequestAbortLifecycle(3_600_000, [this.workLifetime.signal, options.signal]);
     const { signal } = lifecycle;
     const rpcScope = new RpcUsageScope();
+    let vmPause: ReturnType<ReturnType<typeof vmReconcilePausesFor>['acquire']> | undefined;
     try {
       try {
         const activation = this.waitForContextGraphSubscriptionActivation(contextGraphId, signal);
         if (activation) (await activation).assertCurrent();
       } catch (cause) { throw new Error(ownershipError, { cause }); }
+      vmPause = vmReconcilePausesFor(this).acquire(contextGraphId);
       const subscription = this.subscribedContextGraphs.get(contextGraphId);
       if (subscription && !subscription.subscribed && !subscription.coreHosted) throw new Error('Graph subscription is inactive');
       if (subscription?.onChainId && subscription.onChainId !== onChainId) throw new Error('Graph binding differs from requested snapshot');
@@ -65,6 +68,11 @@ export class PublicSnapshotSessionMethods extends DKGAgentBase {
         asAbortError: reason => new Error(ownershipError, { cause: reason }),
         track: physical => { this.workLifetime.track(physical); },
         operation: async control => {
+          // Finish any admitted pass, retain later nudges, and leave unrelated
+          // graphs runnable. This wait consumes the original job deadline.
+          await vmPause!.wait(signal);
+          control.adoptEquivalentSubscription();
+          control.assertCurrent();
           const assertInitialInventoryCurrent = () => { control.adoptEquivalentSubscription(); control.assertCurrent(); };
           const assertCurrent = () => control.assertCurrent();
           const isCurrent = () => { try { assertCurrent(); return true; } catch { return false; } };
@@ -97,6 +105,6 @@ export class PublicSnapshotSessionMethods extends DKGAgentBase {
             readFresh: observe(assertCurrent) });
         },
       }));
-    } finally { lifecycle.release(); jobs.delete(this); }
+    } finally { lifecycle.release(); jobs.delete(this); vmPause?.release(); }
   }
 }

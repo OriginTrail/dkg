@@ -1,4 +1,5 @@
 /** Agent-owned admission and scheduling for chain-driven VM reconciliation. */
+import { VmReconcilePauses } from './internal/vm-reconcile-pauses.js';
 
 import {
   VmReconcileLocalAdmissionWait,
@@ -61,6 +62,8 @@ type VmReconcileAdmission<T> =
   | { kind: 'full' | 'closed' };
 
 export interface VmReconcileDispatcherOptions {
+  /** Internal foreground owner; queued work is retained within the existing bounds. */
+  pauses?: VmReconcilePauses;
   concurrency?: number;
   maxPending?: number;
   maxForegroundBurst?: number;
@@ -88,6 +91,8 @@ function vmReconcileSourceRank(source: VmReconcileSource): number {
  * looking active to one scheduler while it is only queued in another.
  */
 export class VmReconcileDispatcher<T> {
+  private readonly pauses: VmReconcilePauses;
+  private readonly stopWatchingPauses: () => void;
   private active = 0;
   private queued = 0;
   private sequence = 0;
@@ -127,6 +132,13 @@ export class VmReconcileDispatcher<T> {
     this.maxPending = maxPending;
     this.maxForegroundBurst = maxForegroundBurst;
     this.timerBoundOutstandingLimit = 2 * concurrency;
+    this.pauses = options.pauses ?? new VmReconcilePauses();
+    this.stopWatchingPauses = this.pauses.onResume(() => {
+      this.drain();
+      // A sweep can be waiting for admission with no queued work: a paused
+      // graph cannot use the immediate-run exception to the reserved slot.
+      this.resolvePeriodicStateWaiters();
+    });
   }
 
   /** Enqueue a low-latency chain-event nudge; suppressed until a sweep after failure. */
@@ -269,6 +281,7 @@ export class VmReconcileDispatcher<T> {
   close(): Promise<void> {
     if (!this.closed) {
       this.closed = true;
+      this.stopWatchingPauses();
       const error = new VmReconcileQueueClosedError();
       for (const work of this.pending.splice(0)) {
         const state = this.states.get(work.key);
@@ -371,7 +384,7 @@ export class VmReconcileDispatcher<T> {
     source: VmReconcileSource,
     placement: 'pending' | 'trailing',
   ): VmReconcileDispatchWork<T> | undefined {
-    const immediatelyRunnable = placement === 'pending' && this.active < this.concurrency;
+    const immediatelyRunnable = placement === 'pending' && this.active < this.concurrency && !this.pauses.isPaused(key);
     const periodicTurn = this.foregroundBurst >= this.maxForegroundBurst;
     const reservePendingSlot = source === 'periodic'
       ? !periodicTurn
@@ -416,9 +429,10 @@ export class VmReconcileDispatcher<T> {
 
   private takeNext(): VmReconcileDispatchWork<T> | undefined {
     if (this.pending.length === 0) return undefined;
-    let index = 0;
+    let index = this.pending.findIndex(work => !this.pauses.isPaused(work.key));
+    if (index < 0) return undefined;
     if (this.foregroundBurst >= this.maxForegroundBurst) {
-      const backgroundIndex = this.pending.findIndex((work) => work.source === 'periodic');
+      const backgroundIndex = this.pending.findIndex((work) => work.source === 'periodic' && !this.pauses.isPaused(work.key));
       if (backgroundIndex >= 0) index = backgroundIndex;
     }
     const [work] = this.pending.splice(index, 1);
@@ -451,6 +465,7 @@ export class VmReconcileDispatcher<T> {
       if (!work) return;
       const state = this.stateFor(work.key);
       state.active = work;
+      this.pauses.started(work.key);
       if (work.periodicRequested) state.hold = 'ready';
       const releaseGeneration = state.releaseGeneration;
       this.active += 1;
@@ -482,6 +497,7 @@ export class VmReconcileDispatcher<T> {
         .finally(() => {
           this.active -= 1;
           state.active = undefined;
+          this.pauses.finished(work.key);
           const trailing = state.trailing;
           state.trailing = undefined;
           if (

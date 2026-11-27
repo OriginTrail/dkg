@@ -35,7 +35,7 @@ import { abortError, waitForSignal } from './wait-for-signal.js';
  * owns availability: a waiter that cannot stay for the successor simply
  * detaches and fails closed, without cancelling peers.
  *
- * A JOINER ONLY EVER SHARES A DEFINITIVE ANSWER (the #2666 defect). Draft PR
+ * DEFAULT LIVE-AUTHORITY POLICY: A JOINER ONLY SHARES A DEFINITIVE ANSWER (the #2666 defect). Draft PR
  * #2666 shared the whole bounded agent resolution, so the INITIATOR's 2,500 ms
  * timeout became a VALUE — `{unavailable, chain-access-policy-timeout}` — that
  * its joiners were handed as if it were their own read's outcome. One caller's
@@ -71,10 +71,10 @@ import { abortError, waitForSignal } from './wait-for-signal.js';
  * fake timers must advance them or inject its own `defer`.
  */
 
-/** A settled flight, split by whether a joiner may take the outcome. */
+/** A settled flight, split by whether the selected policy lets joiners take it. */
 type ContextGraphLiveAuthorityFlightOutcome<V> =
   | { readonly kind: 'value'; readonly value: V }
-  | { readonly kind: 'definitive-error'; readonly error: unknown }
+  | { readonly kind: 'shared-error'; readonly error: unknown }
   | { readonly kind: 'indefinite-error'; readonly error: unknown };
 
 interface SequencedFlight<V> {
@@ -286,11 +286,13 @@ export interface ContextGraphLiveAuthorityCoalescerOptions {
    */
   readonly defer?: (dispatch: () => void) => void;
   /**
-   * Classifies a loader rejection a waiter that did not initiate it may still
-   * be answered with. Only deterministic "this read cannot answer" faults
-   * qualify; a transient failure or an abort never does.
+   * Whether a physical loader failure may be delivered to every enrolled
+   * caller. Live authority supplies only its deterministic-error predicate;
+   * block readers share every physical failure so the provider loop alone
+   * owns retry/failover. Unclassified errors retain bounded joiner retries.
+   * Caller cancellation stays local regardless of this predicate.
    */
-  readonly isDefinitiveError?: (error: unknown) => boolean;
+  readonly shouldShareError?: (error: unknown) => boolean;
 }
 
 export interface ContextGraphLiveAuthorityRunOptions {
@@ -333,7 +335,7 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
     >
   >;
 
-  readonly #isDefinitiveError: (error: unknown) => boolean;
+  readonly #shouldShareError: (error: unknown) => boolean;
 
   constructor(options: ContextGraphLiveAuthorityCoalescerOptions = {}) {
     const defer = options.defer ?? ((dispatch) => {
@@ -350,7 +352,7 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
       foreground: partition(),
       background: partition(),
     });
-    this.#isDefinitiveError = options.isDefinitiveError ?? (() => false);
+    this.#shouldShareError = options.shouldShareError ?? (() => false);
   }
 
   /**
@@ -389,8 +391,9 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
         },
         options.signal,
       );
+      options.signal?.throwIfAborted();
       if (outcome.kind === 'value') return outcome.value;
-      if (outcome.kind === 'definitive-error') throw outcome.error;
+      if (outcome.kind === 'shared-error') throw outcome.error;
       // Indefinite: the initiator owns the failure of the read it started.
       if (initiated) throw outcome.error;
       if (retries >= MAX_JOINER_RETRIES) throw joinRetryExhaustedError();
@@ -419,7 +422,7 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
    */
   #classify(error: unknown): ContextGraphLiveAuthorityFlightOutcome<V> {
     try {
-      if (this.#isDefinitiveError(error)) return { kind: 'definitive-error', error };
+      if (this.#shouldShareError(error)) return { kind: 'shared-error', error };
     } catch { /* unclassifiable: fall through */ }
     return { kind: 'indefinite-error', error };
   }

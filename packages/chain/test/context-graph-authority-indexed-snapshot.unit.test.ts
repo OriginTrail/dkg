@@ -418,10 +418,13 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     const pending = snapshots.refresh();
     const rejected = expect(pending).rejects.toThrow('reader lifecycle closed');
     await gate.entered;
-    await snapshots.close();
+    let closed = false;
+    const closing = snapshots.close().then(() => { closed = true; });
     await rejected;
+    expect(closed).toBe(false); // the mock provider deliberately ignores cancellation
     expect(harness.evidence.indexRanges).toEqual([]);
     gate.release();
+    await closing;
   });
 
   it('plans authority-index pages within a 10,000-block provider cap', async () => {
@@ -511,7 +514,9 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
   });
 
   it('gives each sequential adaptive split its own physical RPC deadline', async () => {
-    vi.useFakeTimers();
+    // Block cohorts dispatch on the next timer turn; let their zero-delay
+    // handoffs progress between the explicit physical-deadline advances.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const harness = makeIndexedAuthorityAdapter({
         finalizedNumber: 10_006,
@@ -548,7 +553,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
         let turn = 0;
         turn < 100 && harness.evidence.indexRanges.length < 1;
         turn += 1
-      ) await Promise.resolve();
+      ) await vi.advanceTimersByTimeAsync(1);
       expect(harness.evidence.indexRanges).toEqual([[7, 9_956]]);
 
       // One advance per physical leg. The durable horizon adds a fourth: the
@@ -618,7 +623,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
   });
 
   it('times out one hung physical page and fails over from the durable checkpoint', async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const harness = makeIndexedAuthorityAdapter({
         hangIndexRangeOnce: [17, 26],
@@ -630,7 +635,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
         let turn = 0;
         turn < 100 && harness.evidence.indexRanges.length < 2;
         turn += 1
-      ) await Promise.resolve();
+      ) await vi.advanceTimersByTimeAsync(1);
       expect(harness.evidence.indexRanges).toEqual([[7, 16], [17, 26]]);
 
       await vi.advanceTimersByTimeAsync(RPC_LOG_SCAN_TIMEOUT_MS + 1);
@@ -685,7 +690,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
   });
 
   it('completes three sequential durable pages whose aggregate runtime exceeds 30s', async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const harness = makeIndexedAuthorityAdapter({ indexReadDelayMs: 15_000 });
       const backupReads: string[] = [];
@@ -1029,7 +1034,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
   });
 
   it('bounds the ID-based snapshot network read as a physical durable RPC', async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const harness = makeIndexedAuthorityAdapter();
       const primaryNetworkSignals: AbortSignal[] = [];
@@ -1064,7 +1069,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
         let turn = 0;
         turn < 100 && primaryNetworkSignals.length === 0;
         turn += 1
-      ) await Promise.resolve();
+      ) await vi.advanceTimersByTimeAsync(1);
       expect(primaryNetworkSignals).toHaveLength(1);
 
       await vi.advanceTimersByTimeAsync(RPC_LOG_SCAN_TIMEOUT_MS + 1);

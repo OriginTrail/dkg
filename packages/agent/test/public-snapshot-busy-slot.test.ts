@@ -18,7 +18,7 @@ import {
   countStoredAssets, makeSnapshotAssets, sealSnapshotOf, type SnapshotAsset,
 } from './helpers/public-snapshot-assets.js';
 
-// The node profile under test: one general sync slot and no queue. Admission,
+// The default node profile: one general sync slot and no queue. Admission,
 // the job, its waits, evidence authentication and the atomic store writes are
 // real; only the admitted transfer is a fixture that hands over verified assets.
 const graph = 'busy-slot-snapshot';
@@ -26,7 +26,7 @@ const empty = () => finalizeDurableSyncCompletion(createDurableSyncAccumulator()
 const makeAssets = (count: number) => makeSnapshotAssets(graph, count);
 type Asset = SnapshotAsset;
 
-function makeAgent(assets: Asset[]) {
+function makeAgent(assets: Asset[], maxInflight = 1) {
   let generation = 0;
   const store = new OxigraphStore();
   // A fresh observation on every read, so a long wait never meets an expired snapshot.
@@ -36,7 +36,7 @@ function makeAgent(assets: Asset[]) {
     started: true, workLifetime: new AgentWorkLifetime(), store, node: {},
     contextGraphSubscriptionDormancyById: new Map(),
     waitForContextGraphSubscriptionActivation: LifecycleSyncMethods.prototype.waitForContextGraphSubscriptionActivation,
-    config: { nodeRole: 'edge', syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
+    config: { nodeRole: 'edge', syncGlobalMaxInflight: maxInflight, syncGlobalQueueLimit: 0 },
     log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     subscribedContextGraphs: new Map(),
     getSubscribedContextGraphs: () => agent.subscribedContextGraphs,
@@ -89,7 +89,46 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('public snapshot job on a node with one sync slot and no queue', () => {
+describe('public snapshot job under real node admission with no queue', () => {
+  it('keeps four suppliers within two real admission slots and retries every deferred batch', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const assets = makeAssets(41);
+    const agent = makeAgent(assets, 2);
+    // Observe production exact recovery, including its real node admission.
+    const attempts = vi.spyOn(exactRecovery, 'runExactRecovery');
+    const serve = deliver(agent.store, assets);
+    const requested: string[] = [];
+    let active = 0, peak = 0, release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    // This boundary is BELOW admission: it records concurrency without imposing a cap.
+    const transfer = vi.spyOn(recoveryGraph, 'runAdmittedDurableGraph').mockImplementation(async request => {
+      active++; peak = Math.max(peak, active);
+      requested.push(...exactAssetUalsForSelection(request.options!.exactAssetFetchPolicy!.selection));
+      try { await held; return await serve(request); } finally { active--; }
+    });
+    const job = run(agent, { peers: ['core-a', 'core-b', 'core-c', 'core-d'] });
+    const finished = job.then(value => ({ value }), error => ({ error }));
+    try {
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(peak).toBe(2);
+      expect(active).toBe(2);
+      expect(transfer).toHaveBeenCalledTimes(2);
+      expect(attempts).toHaveBeenCalledTimes(4);
+      for (const result of attempts.mock.results.slice(2)) {
+        expect(await result.value).toMatchObject({ admission: 'local-admission-deferred', result: { deferredBackpressure: 1 } });
+      }
+      expect(agent.vmRecoverySyncAdmissionAvailable).toHaveBeenCalled();
+      expect(agent.vmRecoverySyncAdmissionAvailable.mock.results.some((result: { value: boolean }) => result.value === false)).toBe(true);
+      release();
+      expect(await settle(job)).toMatchObject({ value: { assets: 41, committed: 41, alreadyPresent: 0, current: true } });
+      expect(peak).toBe(2);
+      expect(active).toBe(0);
+      expect(attempts.mock.calls.length).toBeGreaterThan(4);
+      expect(requested.sort()).toEqual(assets.map(asset => asset.ual).sort());
+      expect(await countStoredAssets(agent.store, assets)).toBe(41);
+    } finally { release(); await settle(finished); }
+  });
+
   it('waits while a competing admitted sync holds the slot, then completes', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     const assets = makeAssets(12);

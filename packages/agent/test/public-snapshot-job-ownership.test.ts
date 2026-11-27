@@ -1,4 +1,5 @@
 import { PublicSnapshotSessionMethods } from '../src/public-snapshot-session.js';
+import { vmReconcilePausesFor } from '../src/internal/vm-reconcile-pauses.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import * as exactRecovery from '../src/exact-recovery-execution.js';
@@ -51,6 +52,29 @@ function fixture() {
 }
 const run = (a: any, mode: 'core-cache' | 'rpc-only') => PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a, {...request, mode});
 describe('public snapshot job ownership', () => {
+  it('waits for admitted VM recovery before reading, then resumes queued recovery', async () => {
+    const { a } = fixture(), pauses = vmReconcilePausesFor(a);
+    pauses.started(graph);
+    const job = run(a, 'rpc-only');
+    await new Promise(resolve => setImmediate(resolve));
+    expect(pauses.isPaused(graph)).toBe(true);
+    expect(a.chain.readPublicGraphSnapshot).not.toHaveBeenCalled();
+    pauses.finished(graph);
+    await expect(job).resolves.toMatchObject({ assets: 0, current: true });
+    expect(pauses.isPaused(graph)).toBe(false);
+  });
+
+  it('rejects a rebind during the drain wait before reading or importing', async () => {
+    const { a, invalidate } = fixture(), pauses = vmReconcilePausesFor(a);
+    pauses.started(graph);
+    const job = run(a, 'rpc-only'), rejected = expect(job).rejects.toThrow('ownership');
+    await new Promise(resolve => setImmediate(resolve));
+    invalidate(); pauses.finished(graph); await rejected;
+    expect(a.chain.readPublicGraphSnapshot).not.toHaveBeenCalled();
+    expect(a.store.insert).not.toHaveBeenCalled();
+    expect(pauses.isPaused(graph)).toBe(false);
+  });
+
   it.each(['clear', 'unsubscribe-resubscribe'] as const)('a same-tick %s retires an already-active snapshot owner', async action => {
     const chain = new MockChainAdapter();
     Object.defineProperties(chain, { chainId: { value: 'evm:31337' }, deploymentId: { value: 'test' } });

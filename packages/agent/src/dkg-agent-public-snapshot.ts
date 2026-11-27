@@ -132,7 +132,8 @@ export class PublicSnapshotMethods extends PublicSnapshotSessionMethods {
             });
           }
           return recoverPublicSnapshotExact(DKGAgentBase.createDurableRecoveryCapabilities(this), {
-            ...recovery, deadline, maxLanes: 2,
+            // Independent suppliers share bounded work; node admission still owns capacity.
+            ...recovery, deadline, maxLanes: 4,
             canAdmit: () => this.vmRecoverySyncAdmissionAvailable(contextGraphId),
             holds: createPublicSnapshotHeldAssetCheck(this.store, evidence),
           });

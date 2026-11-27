@@ -12,13 +12,15 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 it('splits contention from actual HTTP work, preserving queue failure and private inputs', async () => {
   vi.stubEnv('DKG_ASYNC_PROMOTE_ADMISSION_TRACE', '1');
   const scheduler = new StorePriorityScheduler({ maxConcurrent: 1, controlId: 'store-control-share', queueWaitTimeoutMs: 2000 });
-  // Each pause is well past the 15 ms the timing checks below need. The client
-  // can take its headers sample late when its event loop is busy, which
-  // shortens the gaps it measures.
+  let headersObserved!: () => void;
+  const clientHeaders = new Promise<void>(resolve => { headersObserved = resolve; });
+  // Keep a generous pause for busy runners, and start the body interval only
+  // after the client has observed the headers.
   const server = createServer(async (_req, res) => {
     await delay(80);
     res.writeHead(200);
     res.write('yes');
+    await clientHeaders;
     await delay(80);
     res.end();
   });
@@ -30,6 +32,7 @@ it('splits contention from actual HTTP work, preserving queue failure and privat
   try {
     const waiter = hold.run(() => scheduler.run('normal', 'private-source-value', async () => {
       const res = await fetch('http://127.0.0.1:' + (server.address() as AddressInfo).port + '/private-path');
+      headersObserved();
       return res.text();
     }, undefined, { storeOperation: 'query' }));
     const initial = hold.snapshot();
@@ -46,7 +49,7 @@ it('splits contention from actual HTTP work, preserving queue failure and privat
     expect(row.lastHttp!.headersAtUnixMs! - row.lastHttp!.sendHeadersAtUnixMs!).toBeGreaterThanOrEqual(15);
     expect(row.lastHttp!.bodyReceivedAtUnixMs! - row.lastHttp!.headersAtUnixMs!).toBeGreaterThanOrEqual(15);
     expect(JSON.stringify(report)).not.toContain('private-');
-  } finally { free();server.closeAllConnections();await new Promise<void>(resolve => server.close(() => resolve())); }
+  } finally { headersObserved();free();server.closeAllConnections();await new Promise<void>(resolve => server.close(() => resolve())); }
 });
 
 it('retains stats on a queue timeout and bounds the store operations retained per holder', async () => {

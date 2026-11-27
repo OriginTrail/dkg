@@ -1060,7 +1060,7 @@ export class EVMChainAdapterBase {
     new ContextGraphLiveAuthorityCoalescer<ContextGraphLiveAuthority | null>({
       // The only deterministic "this read cannot answer" fault; everything else
       // (transport failure, abort) is the initiator's own and is never shared.
-      isDefinitiveError: (error) => error instanceof ContextGraphLiveAuthorityUnsupportedError
+      shouldShareError: (error) => error instanceof ContextGraphLiveAuthorityUnsupportedError
         || (error instanceof Error && error.name === 'ContextGraphLiveAuthorityUnsupportedError'),
     });
   /** Lazily constructed by the base-owned internal accessor below. */
