@@ -19,7 +19,9 @@ const system = buildSystem(readTokens());
 const use = (prop: string, value: string, mockup = false) => checkDeclaration(system, prop, value, { known: new Set(), mockup })
   .map((f: { use: string }) => f.use);
 
-describe('design check', () => {
+// Several tests start the command line (one process per case) or build a git repository, which
+// takes longer than vitest's 5s default on a busy CI runner.
+describe('design check', { timeout: 60_000 }, () => {
   it('names the token for a value on the scale', () => {
     expect(use('padding', '16px')).toEqual(['var(--space-16)']);
     expect(use('border-radius', '6px')).toEqual(['var(--radius-control)']);
