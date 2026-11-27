@@ -1,3 +1,4 @@
+import { recoverDeferredContextGraphSubscriptionAuthorities } from './_helpers/deferred-authority-recovery.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
@@ -11,7 +12,6 @@ import { DKGAgent } from '../src/index.js';
 import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
 import {
   DEFERRED_AUTHORITY_RECOVERY_RETRY_MS,
-  recoverDeferredContextGraphSubscriptionAuthorities,
   wakeDeferredContextGraphSubscriptionAuthorityRecovery,
 } from
   '../src/context-graph-subscription-authority-recovery.js';

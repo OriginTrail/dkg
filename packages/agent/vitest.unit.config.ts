@@ -533,6 +533,7 @@ export default defineConfig({
       "test/context-graph-authority-retry.test.ts",
       "test/context-graph-subscription-name-binding-retry.test.ts",
       "test/context-graph-subscription-name-binding-restart.test.ts",
+    "test/context-graph-subscription-name-binding-retirement.test.ts",
       "test/context-graph-subscription-activation-capacity.test.ts",
       "test/context-graph-access-policy-state.test.ts",
       "test/context-graph-live-authority-fold.test.ts",

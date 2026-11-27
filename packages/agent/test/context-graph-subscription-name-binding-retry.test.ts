@@ -6,7 +6,7 @@ import {
   type NameBindingRetryPorts,
 } from '../src/context-graph-subscription-name-binding-retry.js';
 import { SubscriptionActivationCapacityError } from '../src/context-graph-subscription-activation-capacity.js';
-import { recoverDeferredContextGraphSubscriptionAuthorities } from '../src/context-graph-subscription-authority-recovery.js';
+import { recoverDeferredContextGraphSubscriptionAuthorities } from './_helpers/deferred-authority-recovery.js';
 import type { ContextGraphDormancyReason } from '../src/context-graph-subscription-dormancy.js';
 import type { ContextGraphReadAuthorityDecision } from '../src/context-graph-read-authority.js';
 import type { ContextGraphSub, ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
