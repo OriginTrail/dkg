@@ -62,15 +62,17 @@ function host(rows: ContextGraphSubscriptionRecord[], options: {
       const row = saved.get(id);
       return row === undefined ? null : { ...row };
     },
-    resolveAuthority: async (binding) => {
+    resolveAuthority: async (row) => {
+      const binding = { contextGraphId: row.id, onChainId: row.onChainId, ...(row.onChainHash === undefined ? {} : { onChainHash: row.onChainHash }) };
       checks.push({ binding: { ...binding }, at: Date.now() });
       const next = answers.length > 1 ? answers.shift()! : answers[0] ?? ALLOWED(BigInt(binding.onChainId!));
       return typeof next === 'function' ? next() : next;
     },
-    activate: async (row, onChainId, isCurrent) => {
+    activate: async (row, onChainId, _revision, isCurrent) => {
+      if (!onChainId) throw new Error('expected verified binding');
       const subscription: ContextGraphSub = { syncMode: 'always-on', subscribed: row.subscribed, synced: false, onChainId };
       subscriptions.set(row.id, subscription);
-      if (!isCurrent(subscription)) {
+      if (!isCurrent()) {
         subscriptions.delete(row.id);
         throw new Error('stale');
       }
@@ -78,6 +80,7 @@ function host(rows: ContextGraphSubscriptionRecord[], options: {
       dormancy.delete(row.id);
       activations.push({ id: row.id, onChainId, at: Date.now() });
     },
+    capped: () => {},
     clear: id => { dormancy.delete(id); },
     retire: (id, reason) => {
       dormancy.set(id, reason);
@@ -104,7 +107,7 @@ describe('StorageACK demand activation', () => {
   it('aborts an in-flight authority read at its deadline and releases the slot to another graph', async () => {
     const h = host([row('stalled'), row('ready')]);
     let cancelled = false;
-    h.ports.resolveAuthority = (binding, signal) => binding.contextGraphId === 'ready'
+    h.ports.resolveAuthority = (binding, signal) => binding.id === 'ready'
       ? Promise.resolve(ALLOWED(2n))
       : new Promise((_resolve, reject) => signal.addEventListener('abort', () => {
           cancelled = true; reject(signal.reason);
@@ -218,7 +221,8 @@ describe('StorageACK demand activation', () => {
 
   it('does not let a row whose checks keep failing hold up the next graph', async () => {
     const h = host([row('stuck'), row('next')]);
-    h.ports.resolveAuthority = async (binding) => {
+    h.ports.resolveAuthority = async (row) => {
+      const binding = { contextGraphId: row.id, onChainId: row.onChainId };
       h.checks.push({ binding: { ...binding }, at: Date.now() });
       return binding.contextGraphId === 'stuck' ? UNAVAILABLE : ALLOWED(BigInt(binding.onChainId!));
     };

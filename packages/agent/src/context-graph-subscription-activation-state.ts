@@ -6,7 +6,7 @@ import { accountSubscriptionChanges, type SubscriptionAccountingChange } from '.
 import { rehydratedSubscriptionReachedSafeState, type PersistedContextGraphSubscriptionActivationOptions, type PersistedContextGraphSubscriptionActivationPorts } from './context-graph-subscription-authority-recovery.js';
 import type { ContextGraphSub, ContextGraphSubscriptionRecord, ContextGraphSubscriptionRehydrationInternalStatus } from './dkg-agent-types.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
-import { contextGraphSubscriptionAdmissionPremisesEqual, isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
+import { isAdmittedContextGraphSubscription, sameSubscriptionIntent, sameDurableSubscriptionIntent, contextGraphSubscriptionAdmissionPremisesEqual, isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
 
 type Dormancy = ReadonlyMap<string, ContextGraphDormancyReason>;
 function applyDormancy(dormancy: Map<string, ContextGraphDormancyReason>, id: string, after: ContextGraphDormancyReason | undefined): void {
@@ -20,13 +20,6 @@ export function isCommittedSubscription(
   return Boolean((row?.subscribed || row?.coreHosted) && !dormancy.has(id));
 }
 
-function sameIntent(left: ContextGraphSubscriptionRecord, right: ContextGraphSubscriptionRecord): boolean {
-  return left.id === right.id && left.subscribed === right.subscribed
-    && (left.coreHosted === true) === (right.coreHosted === true) && left.syncScoped === right.syncScoped;
-}
-function sameDurableIntent(left: ContextGraphSubscriptionRecord, right: ContextGraphSubscriptionRecord): boolean {
-  return sameIntent(left, right) && left.onChainId === right.onChainId && left.onChainHash === right.onChainHash;
-}
 type ActivationOutcome = { kind: 'committed'; subscription: ContextGraphSub } | { kind: 'cancelled' };
 type ActivationPhase = { kind: 'queued' } | { kind: 'installing'; subscription: ContextGraphSub }
   | { kind: 'settled'; outcome: ActivationOutcome };
@@ -59,14 +52,14 @@ type TransitionDecision = {
   settlement: ActivationOutcome | undefined;
 };
 function shouldHoldRollingSlot(subscription: ContextGraphSub, persisted: boolean,
-  status: ContextGraphSubscriptionRehydrationInternalStatus | null): boolean {
-  return status?.rehydrationEnabled === true && status.activationCap > 0 && persisted
+  status: ContextGraphSubscriptionRehydrationInternalStatus | null, capExempt: boolean): boolean {
+  return !capExempt && status?.rehydrationEnabled === true && status.activationCap > 0 && persisted
     && subscription.coreHosted !== true && subscription.subscribed
     && !rehydratedSubscriptionReachedSafeState(subscription);
 }
 /** Event semantics are decided once, before any shared collection or waiter is changed. */
 function reduceSubscriptionTransition(event: TransitionEvent, current: {
-  facts: SubscriptionFacts;
+  facts: SubscriptionFacts; capExempt: boolean;
   live: ContextGraphSub | undefined; status: ContextGraphSubscriptionRehydrationInternalStatus | null;
 }): TransitionDecision {
   const normalized = (persisted: boolean, liveActive: boolean, hosted: boolean,
@@ -92,7 +85,7 @@ function reduceSubscriptionTransition(event: TransitionEvent, current: {
     case 'activated':
       return normalized(true, true, event.subscription.coreHosted === true, undefined,
         { kind: 'committed', subscription: event.subscription },
-        shouldHoldRollingSlot(event.subscription, true, current.status) ? 'acquire' : 'release');
+        shouldHoldRollingSlot(event.subscription, true, current.status, current.capExempt) ? 'acquire' : 'release');
     default: {
       const exhaustive: never = event;
       throw new Error(`Unknown subscription transition: ${String(exhaustive)}`);
@@ -119,6 +112,20 @@ export class ContextGraphSubscriptionActivations {
   constructor(private readonly ports: SubscriptionActivationPorts) {}
   private readonly pending = new Map<string, ActivationAttempt>();
   private readonly recoveryReservations = new Set<string>();
+  private readonly capExemptIds = new Set<string>();
+  /** Startup's recent-graph exemptions survive deferred authority and rolling recovery. */
+  setActivationCapExemptIds(ids: Iterable<string>): void {
+    this.capExemptIds.clear();
+    for (const id of ids) this.capExemptIds.add(id);
+  }
+  countsAgainstActivationCap(row: Pick<ContextGraphSubscriptionRecord, 'id' | 'coreHosted'>): boolean {
+    return row.coreHosted !== true && !this.capExemptIds.has(row.id);
+  }
+  canAdmitAutomaticHosting(id: string): boolean {
+    return this.pending.get(id)?.phase.kind !== 'installing'
+      && (!this.ports.contextGraphSubscriptionDormancyById.has(id)
+        || isAdmittedContextGraphSubscription(this.ports.subscribedContextGraphs.get(id)));
+  }
   // Startup uses the same incremental transitions as retries, but only publishes
   // the completed report once the startup lifecycle finishes its authority pass.
   private startupAccounting: ContextGraphSubscriptionRehydrationInternalStatus | null = null;
@@ -146,6 +153,7 @@ export class ContextGraphSubscriptionActivations {
     return this.startupAccounting ? this.completeRehydration() : null;
   }
   reset(rows: readonly ContextGraphSubscriptionRecord[]): void {
+    this.capExemptIds.clear();
     for (const id of this.pending.keys()) this.cancel(id);
     this.ports.contextGraphSubscriptionDormancyById.clear();
     for (const row of rows) this.attemptFor(row);
@@ -168,7 +176,7 @@ export class ContextGraphSubscriptionActivations {
   /** One policy owns slot occupancy during startup, activation commit and readiness changes. */
   private reconcileRollingSlot(id: string, subscription: ContextGraphSub, persisted: boolean): boolean {
     const ports = this.ports, status = this.startupAccounting ?? ports.getStatus();
-    if (shouldHoldRollingSlot(subscription, persisted, status)) {
+    if (shouldHoldRollingSlot(subscription, persisted, status, this.capExemptIds.has(id))) {
       ports.contextGraphSubscriptionRehydrationSlotIds.add(id);
       return false;
     }
@@ -181,8 +189,8 @@ export class ContextGraphSubscriptionActivations {
   }
   private attemptFor(row: ContextGraphSubscriptionRecord): ActivationAttempt {
     const current = this.pending.get(row.id);
-    if (current && (sameDurableIntent(current.intent, row)
-      || (current.repaired && sameDurableIntent(current.repaired, row)))) return current;
+    if (current && (sameDurableSubscriptionIntent(current.intent, row)
+      || (current.repaired && sameDurableSubscriptionIntent(current.repaired, row)))) return current;
     this.cancel(row.id);
     const attempt: ActivationAttempt = { intent: { ...row }, phase: { kind: 'queued' }, listeners: new Set() };
     this.pending.set(row.id, attempt);
@@ -232,7 +240,7 @@ export class ContextGraphSubscriptionActivations {
       const reason = ports.contextGraphSubscriptionDormancyById.get(id);
       const before = { persisted, active: persisted && reason === undefined, hosted: hostedBefore.has(id) };
       return { id, before, decision: reduceSubscriptionTransition(event, {
-        facts: before,
+        facts: before, capExempt: this.capExemptIds.has(id),
         live: ports.subscribedContextGraphs.get(id), status,
       }) };
     });
@@ -268,15 +276,20 @@ export class ContextGraphSubscriptionActivations {
   /** One retry owns installation, repair, network effects, rollback and commit. */
   async activate(row: ContextGraphSubscriptionRecord, ports: PersistedContextGraphSubscriptionActivationPorts,
     options: PersistedContextGraphSubscriptionActivationOptions = {}): Promise<ContextGraphSub> {
-    const reserved = options.respectActivationCap === true && row.coreHosted !== true;
+    const reserved = options.respectActivationCap === true && this.countsAgainstActivationCap(row);
     if (reserved) {
       if (this.recoveryReservations.has(row.id)) throw changed();
       const status = this.startupAccounting ?? this.ports.getStatus();
       const installing = [...this.pending.values()].filter(attempt =>
-        attempt.phase.kind === 'installing' && attempt.phase.subscription.coreHosted !== true
+        attempt.phase.kind === 'installing' && this.countsAgainstActivationCap({ id: attempt.intent.id, coreHosted: attempt.phase.subscription.coreHosted })
         && !this.recoveryReservations.has(attempt.intent.id)).length;
+      const exemptActive = [...this.capExemptIds].filter(id =>
+        this.ports.contextGraphSubscriptionRehydrationAccountedIds.has(id)
+        && isCommittedSubscription(this.ports.subscribedContextGraphs, this.ports.contextGraphSubscriptionDormancyById, id)
+        && this.ports.subscribedContextGraphs.get(id)?.coreHosted !== true).length;
+      const active = Math.max(0, (status?.activated ?? 0) - (status?.hostedActivated ?? 0) - exemptActive);
       if (status && status.activationCap > 0
-        && Math.max(0, status.activated - status.hostedActivated) + installing + this.recoveryReservations.size >= status.activationCap) {
+        && active + installing + this.recoveryReservations.size >= status.activationCap) {
         throw new SubscriptionActivationCapacityError();
       }
       this.recoveryReservations.add(row.id);
@@ -350,7 +363,7 @@ export class ContextGraphSubscriptionActivations {
     // Preserving independent Core custody can add hosting to the saved row.
     // That is not a binding repair of this attempt's member intent; canonical
     // commit still validates the custody transfer before applying it.
-    if (sameIntent(attempt.intent, record)) attempt.repaired = { ...record };
+    if (sameSubscriptionIntent(attempt.intent, record)) attempt.repaired = { ...record };
   }
   /** One owner commits bookkeeping, settles waiters, then publishes activation. */
   private commit(attempt: ActivationAttempt, write: (id: string) => ContextGraphSub): ContextGraphSub {

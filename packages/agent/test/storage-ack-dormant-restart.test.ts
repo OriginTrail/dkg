@@ -12,6 +12,8 @@ import type {
   ContextGraphSubscriptionRecord,
 } from '../src/dkg-agent-types.js';
 import { StorageAckRecentGraphs, STORAGE_ACK_RECENT_GRAPHS_FILE } from '../src/storage-ack-recent-graphs.js';
+import type { ContextGraphDormancyReason } from '../src/context-graph-subscription-dormancy.js';
+import { recoverDeferredContextGraphSubscriptionAuthorities } from '../src/context-graph-subscription-authority-recovery.js';
 import { peekStorageAckDemandActivations } from '../src/storage-ack-demand-activation.js';
 
 /**
@@ -43,8 +45,9 @@ const REQUEST = { contextGraphId: TARGET_ID.toString(), swmGraphId: TARGET, oper
 interface State {
   node: unknown;
   subscribedContextGraphs: Map<string, ContextGraphSub>;
-  contextGraphSubscriptionDormancyById: Map<string, string>;
+  contextGraphSubscriptionDormancyById: Map<string, ContextGraphDormancyReason>;
   isContextGraphSubscriptionCommitted(id: string): boolean;
+  contextGraphSubscriptionRehydrationSlotIds: Set<string>;
 }
 
 function savedRows(): Map<string, ContextGraphSubscriptionRecord> {
@@ -81,6 +84,7 @@ async function startCore(rows: Map<string, ContextGraphSubscriptionRecord>, opti
   authorityBudgetMs?: number;
   activationCap?: number;
   ordinaryGraph?: string;
+  deferTargetAuthority?: boolean;
   /** Reads of hosted graphs other than the target take this long. */
   slowHostedReadsMs?: number;
 } = {}) {
@@ -120,10 +124,16 @@ async function startCore(rows: Map<string, ContextGraphSubscriptionRecord>, opti
   // Network effects are inert here; authority, the cap, activation and persistence are real.
   vi.spyOn(agent, 'installContextGraphSubscription').mockImplementation((id) => state.subscribedContextGraphs.get(id)!);
   const info = vi.spyOn((agent as unknown as { log: { info: (...args: unknown[]) => void } }).log, 'info');
+  const authorityRead = agent.resolveContextGraphSubscriptionBootstrapAuthority.bind(agent);
+  const authority = options.deferTargetAuthority ? vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
+    .mockImplementation((id, request) => id === TARGET ? Promise.resolve({
+      outcome: 'unavailable', source: 'registered-chain', reason: 'chain-name-binding-unavailable',
+      metadataBootstrap: 'eligible', dependency: 'chain',
+    }) : authorityRead(id, request)) : undefined;
   const restartedAt = performance.now();
   await agent.rehydrateContextGraphSubscriptions(null);
   const rehydrationMs = performance.now() - restartedAt;
-  return { agent, state, chain, nameLookup, info, rehydrationMs };
+  return { agent, state, chain, nameLookup, info, rehydrationMs, authority };
 }
 
 /** Ask like a publisher's ACK collector: again after 1, 2 and 4 s while declined. */
@@ -215,6 +225,33 @@ describe('first StorageACK for a dormant graph after a restart', { timeout: 60_0
     expect(core.state.subscribedContextGraphs.get(TARGET)?.coreHosted).not.toBe(true);
     expect(core.state.subscribedContextGraphs.get(ordinary)?.coreHosted).not.toBe(true);
     expect(core.state.contextGraphSubscriptionDormancyById.size).toBe(0);
+  });
+
+  it('keeps a recent graph exempt when startup defers it and ordinary recovery capacity is full', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-recent-deferred-cap-')); dirs.push(dataDir);
+    const ordinary = 'ordinary-member';
+    const rows = new Map<string, ContextGraphSubscriptionRecord>([
+      [TARGET, { id: TARGET, onChainId: TARGET_ID.toString(), subscribed: true, synced: false, syncScoped: true }],
+      [ordinary, { id: ordinary, onChainId: (TARGET_ID + 1n).toString(), subscribed: true, synced: false, syncScoped: true }],
+    ]);
+    const recent = new StorageAckRecentGraphs({ path: join(dataDir, STORAGE_ACK_RECENT_GRAPHS_FILE) });
+    recent.note(TARGET, TARGET_ID.toString()); await recent.whenWritten();
+    const core = await startCore(rows, { dataDir, activationCap: 1, authorityBudgetMs: 0,
+      ordinaryGraph: ordinary, deferTargetAuthority: true });
+    expect(core.state.contextGraphSubscriptionDormancyById.get(TARGET)).toBe('authorityUnavailable');
+    expect(core.state.contextGraphSubscriptionRehydrationSlotIds.has(ordinary)).toBe(true);
+    core.authority!.mockRestore();
+    await recoverDeferredContextGraphSubscriptionAuthorities(new AbortController().signal, {
+      store: { loadAll: async () => [...rows.values()], load: async id => rows.get(id) ?? null },
+      dormancyById: core.state.contextGraphSubscriptionDormancyById,
+      row: core.agent.subscriptionRecoveryRowPorts(() => true)!,
+      getStatus: () => core.agent.contextGraphSubscriptionRehydrationStatus,
+      warn: (_id, error) => { throw error; },
+    });
+    expect(core.state.isContextGraphSubscriptionCommitted(TARGET)).toBe(true);
+    expect(core.state.contextGraphSubscriptionRehydrationSlotIds.has(TARGET)).toBe(false);
+    expect(core.state.contextGraphSubscriptionRehydrationSlotIds.has(ordinary)).toBe(true);
+    expect(core.state.subscribedContextGraphs.get(TARGET)?.coreHosted).not.toBe(true);
   });
 
   it('comes back first at the next restart, ahead of the hosted backlog and outside the cap', async () => {

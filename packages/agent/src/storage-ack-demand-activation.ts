@@ -29,12 +29,9 @@
  * the paced owners, as before.
  */
 
-import { runBoundedOperation, isBoundedOperationTimeoutError } from './bounded-operation.js';
-import { recoverPersistedSubscriptionRow } from './context-graph-subscription-recover-row.js';
-import { unavailableContextGraphReadAuthorityDecision, contextGraphReadAuthorityDependencyOf,
-  type ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
+import { recoverPersistedSubscriptionRow, type SubscriptionRecoveryRowPorts } from './context-graph-subscription-recover-row.js';
+import { SubscriptionRetryExecutor, type SubscriptionRetryRow, type SubscriptionRetryLease } from './subscription-retry-executor.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
-import type { ContextGraphSub, ContextGraphSubscriptionRecord, DurableContextGraphSubscriptionBinding } from './dkg-agent-types.js';
 
 /** Checks (and activations) in flight at the same time. */
 export const STORAGE_ACK_DEMAND_MAX_CONCURRENT = 2;
@@ -58,33 +55,10 @@ export function isStorageAckDemandReason(
   return reason === 'activationCap' || reason === 'authorityUnavailable';
 }
 
-export interface StorageAckDemandActivationPorts {
-  /** Aborts when the node stops. */
+export interface StorageAckDemandActivationPorts extends SubscriptionRecoveryRowPorts {
   readonly signal: AbortSignal;
-  /** This node run still owns subscription state. */
-  isCurrent(): boolean;
-  dormancy(contextGraphId: string): ContextGraphDormancyReason | undefined;
-  revision(contextGraphId: string): number;
-  subscription(contextGraphId: string): ContextGraphSub | undefined;
-  load(contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null>;
-  resolveAuthority(
-    binding: Readonly<DurableContextGraphSubscriptionBinding>,
-    signal: AbortSignal,
-  ): Promise<ContextGraphReadAuthorityDecision>;
-  activate(
-    row: ContextGraphSubscriptionRecord,
-    onChainId: string,
-    isCurrent: (subscription: ContextGraphSub) => boolean,
-  ): Promise<void>;
-  clear(contextGraphId: string, revoked?: boolean): void;
-  /** Record the dormancy a final answer leaves the row in. */
-  retire(contextGraphId: string, reason: ContextGraphDormancyReason): void;
   track(run: Promise<unknown>): void;
-  readonly log: {
-    info(message: string): void;
-    warn(message: string): void;
-    debug(message: string): void;
-  };
+  readonly log: { info(message: string): void; warn(message: string): void; debug(message: string): void };
 }
 
 export interface StorageAckDemandActivationOptions {
@@ -99,223 +73,81 @@ export interface StorageAckDemandActivationOptions {
 }
 
 interface Demand {
-  readonly contextGraphId: string;
   onChainId: string;
   readonly firstAt: number;
   lastAt: number;
+  checks: number;
+  retries: number;
+  lastWhy: string;
 }
 
-type AttemptOutcome =
-  | { kind: 'activated'; reason: DemandReason }
-  /** Authority unavailable, or the activation failed: try again after a growing pause. */
-  | { kind: 'retry'; why: string }
-  /** The row or its state moved under the check. */
-  | { kind: 'again' }
-  | { kind: 'done' };
-
-function pause(ms: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.resolve();
-  return new Promise((resolve) => {
-    const done = (): void => {
-      clearTimeout(timer);
-      signal.removeEventListener('abort', done);
-      resolve();
-    };
-    const timer = setTimeout(done, ms);
-    timer.unref?.();
-    signal.addEventListener('abort', done, { once: true });
-  });
-}
-
-/** Demand activations of one node run. */
+/** Request-specific policy over the same bounded queue used by name-binding recovery. */
 export class StorageAckDemandActivations {
-  readonly #ports: StorageAckDemandActivationPorts;
-  readonly #maxConcurrent: number;
-  readonly #maxRows: number;
+  readonly #executor: SubscriptionRetryExecutor<Demand>;
+  readonly #now: () => number;
   readonly #retryMinMs: number;
   readonly #retryMaxMs: number;
   readonly #idleMs: number;
   readonly #maxMs: number;
-  readonly #checkTimeoutMs: number;
-  readonly #now: () => number;
-  /** Rows a demand activation holds, checking or pausing. */
-  readonly #rows = new Map<string, Demand>();
-  readonly #runs = new Set<Promise<void>>();
-  /** Check slots in use, and the rows waiting for one, first come first served. */
-  #checking = 0;
-  readonly #waiting: Array<() => void> = [];
-
-  constructor(ports: StorageAckDemandActivationPorts, options: StorageAckDemandActivationOptions = {}) {
-    this.#ports = ports;
-    this.#maxConcurrent = options.maxConcurrent ?? STORAGE_ACK_DEMAND_MAX_CONCURRENT;
-    this.#maxRows = options.maxRows ?? STORAGE_ACK_DEMAND_MAX_ROWS;
+  constructor(private readonly ports: StorageAckDemandActivationPorts, options: StorageAckDemandActivationOptions = {}) {
+    this.#now = options.now ?? Date.now;
     this.#retryMinMs = options.retryMinMs ?? STORAGE_ACK_DEMAND_RETRY_MIN_MS;
     this.#retryMaxMs = options.retryMaxMs ?? STORAGE_ACK_DEMAND_RETRY_MAX_MS;
     this.#idleMs = options.idleMs ?? STORAGE_ACK_DEMAND_IDLE_MS;
     this.#maxMs = options.maxMs ?? STORAGE_ACK_DEMAND_MAX_MS;
-    this.#checkTimeoutMs = options.checkTimeoutMs ?? STORAGE_ACK_DEMAND_CHECK_TIMEOUT_MS;
-    this.#now = options.now ?? Date.now;
-  }
-
-  /**
-   * A StorageACK request for `onChainId` found the saved row of
-   * `contextGraphId` dormant. True when a demand activation now owns the row;
-   * false leaves it to the paced owners.
-   */
-  request(contextGraphId: string, onChainId: string): boolean {
-    const ports = this.#ports;
-    if (ports.signal.aborted || !ports.isCurrent()) return false;
-    if (!isStorageAckDemandReason(ports.dormancy(contextGraphId))) return false;
-    const now = this.#now();
-    const known = this.#rows.get(contextGraphId);
-    if (known !== undefined) {
-      known.lastAt = now;
-      known.onChainId = onChainId;
-      return true;
-    }
-    if (this.#rows.size >= this.#maxRows) return false;
-    this.#start({ contextGraphId, onChainId, firstAt: now, lastAt: now });
-    return true;
-  }
-
-  /** Rows a demand activation holds now, checking, waiting or pausing. */
-  get size(): number {
-    return this.#rows.size;
-  }
-
-  /** Settles when no demand activation runs. */
-  async whenIdle(): Promise<void> {
-    while (this.#runs.size > 0) await Promise.allSettled(this.#runs);
-  }
-
-  #start(demand: Demand): void {
-    this.#rows.set(demand.contextGraphId, demand);
-    const run: Promise<void> = this.#run(demand)
-      .catch((error: unknown) => {
-        if (this.#ports.signal.aborted) return;
-        this.#ports.log.warn(
-          `Could not activate persisted context-graph subscription "${demand.contextGraphId}" ` +
-          `for StorageACK requests: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      })
-      .finally(() => {
-        this.#rows.delete(demand.contextGraphId);
-        this.#runs.delete(run);
-      });
-    this.#runs.add(run);
-    this.#ports.track(run);
-  }
-
-  /** Take a check slot; false when the node stops first. */
-  #acquire(signal: AbortSignal): Promise<boolean> {
-    if (signal.aborted) return Promise.resolve(false);
-    if (this.#checking < this.#maxConcurrent) {
-      this.#checking += 1;
-      return Promise.resolve(true);
-    }
-    return new Promise((resolve) => {
-      const grant = (): void => {
-        signal.removeEventListener('abort', cancel);
-        resolve(true);
-      };
-      const cancel = (): void => {
-        const index = this.#waiting.indexOf(grant);
-        if (index >= 0) this.#waiting.splice(index, 1);
-        resolve(false);
-      };
-      this.#waiting.push(grant);
-      signal.addEventListener('abort', cancel, { once: true });
+    this.#executor = new SubscriptionRetryExecutor({
+      signal: ports.signal, isCurrent: () => ports.isCurrent(), now: this.#now,
+      maxRows: options.maxRows ?? STORAGE_ACK_DEMAND_MAX_ROWS,
+      maxConcurrent: options.maxConcurrent ?? STORAGE_ACK_DEMAND_MAX_CONCURRENT,
+      checkTimeoutMs: options.checkTimeoutMs ?? STORAGE_ACK_DEMAND_CHECK_TIMEOUT_MS,
+      track: run => ports.track(run), eligible: row => isStorageAckDemandReason(ports.dormancy(row.id)),
+      attempt: (row, lease) => this.#attempt(row, lease),
+      retired: (row, expired) => {
+        if (expired && this.#executor.current()) ports.log.debug(
+          `StorageACK requests no longer hold persisted context-graph subscription "${row.id}" `
+          + `(${ports.dormancy(row.id)}, ${row.value.checks} check(s)${row.value.lastWhy ? `, last: ${row.value.lastWhy}` : ''}); it is left to paced activation`);
+      },
+      failed: (row, error) => {
+        if (this.#executor.current()) ports.log.warn(`Could not activate persisted context-graph subscription "${row.id}" `
+          + `for StorageACK requests: ${error instanceof Error ? error.message : String(error)}`);
+      },
     });
   }
 
-  /** Hand the slot to the next row waiting for one, if any. */
-  #release(): void {
-    const next = this.#waiting.shift();
-    if (next !== undefined) next();
-    else this.#checking -= 1;
-  }
-
-  #current(): boolean {
-    return !this.#ports.signal.aborted && this.#ports.isCurrent();
-  }
-
-  async #run(demand: Demand): Promise<void> {
-    const ports = this.#ports;
-    const id = demand.contextGraphId;
-    let checks = 0;
-    let retries = 0;
-    let lastWhy = '';
-    for (;;) {
-      if (!this.#current()) return;
-      const reason = ports.dormancy(id);
-      // Active again, or an owner gave a final answer meanwhile.
-      if (!isStorageAckDemandReason(reason)) return;
-      const now = this.#now();
-      if (now - demand.lastAt >= this.#idleMs || now - demand.firstAt >= this.#maxMs) {
-        ports.log.debug(
-          `StorageACK requests no longer hold persisted context-graph subscription "${id}" ` +
-          `(${reason}, ${checks} check(s)${lastWhy ? `, last: ${lastWhy}` : ''}); it is left to paced activation`,
-        );
-        return;
-      }
-      if (!(await this.#acquire(ports.signal))) return;
-      let outcome: AttemptOutcome;
-      try {
-        // Waiting for the slot may have taken a while.
-        const current = ports.dormancy(id);
-        if (!this.#current() || !isStorageAckDemandReason(current)) {
-          outcome = { kind: 'done' };
-        } else {
-          checks += 1;
-          outcome = await this.#attempt(demand, current);
-        }
-      } finally {
-        this.#release();
-      }
-      if (outcome.kind === 'done') return;
-      if (outcome.kind === 'activated') {
-        ports.log.info(
-          `Activated persisted context-graph subscription "${id}" for StorageACK requests ` +
-          `${this.#now() - demand.firstAt} ms after the first (was ${outcome.reason}; ${checks} check(s))`,
-        );
-        return;
-      }
-      // The row moved under the check, or another owner is installing it:
-      // look again shortly, without growing the pause.
-      if (outcome.kind === 'again') {
-        await pause(this.#retryMinMs, ports.signal);
-        continue;
-      }
-      lastWhy = outcome.why;
-      const waitMs = Math.min(this.#retryMaxMs, this.#retryMinMs * 2 ** Math.min(retries, 16));
-      retries += 1;
-      await pause(waitMs, ports.signal);
+  request(id: string, onChainId: string): boolean {
+    if (!this.#executor.current() || !isStorageAckDemandReason(this.ports.dormancy(id))) return false;
+    const now = this.#now(), known = this.#executor.get(id);
+    if (known) {
+      known.value.lastAt = now; known.value.onChainId = onChainId;
+      this.#executor.reschedule(row => row.id === id
+        ? { expiresAt: Math.min(known.value.firstAt + this.#maxMs, now + this.#idleMs) } : undefined);
+      return true;
     }
+    return this.#executor.take(id, { onChainId, firstAt: now, lastAt: now, checks: 0, retries: 0, lastWhy: '' },
+      now + Math.min(this.#maxMs, this.#idleMs));
   }
+  get size(): number { return this.#executor.size; }
+  whenIdle(): Promise<void> { return this.#executor.whenIdle(); }
 
-  async #attempt(demand: Demand, reason: DemandReason): Promise<AttemptOutcome> {
-    const ports = this.#ports;
-    const onChainId = demand.onChainId;
-    const outcome = await recoverPersistedSubscriptionRow(demand.contextGraphId, {
-      ...ports,
-      isCurrent: () => this.#current() && demand.onChainId === onChainId,
-      resolveAuthority: async (row, signal) => {
-        try {
-          return await runBoundedOperation(checkSignal => ports.resolveAuthority({
-            contextGraphId: row.id, onChainId: row.onChainId,
-            ...(row.onChainHash === undefined ? {} : { onChainHash: row.onChainHash }),
-          }, checkSignal), { signal, timeoutMs: this.#checkTimeoutMs, label: 'StorageACK demand authority' });
-        } catch (error) {
-          if (signal.aborted || isBoundedOperationTimeoutError(error)) return undefined;
-          return unavailableContextGraphReadAuthorityDecision('legacy-local', 'unexpected-authority-error',
-            contextGraphReadAuthorityDependencyOf(error));
-        }
-      },
-      capped: () => {}, // Request-driven activation is deliberately exempt from the startup cap.
-      activate: (row, binding, _revision, current) => ports.activate(row, binding ?? onChainId,
-        subscription => current() && ports.subscription(row.id) === subscription),
-    }, ports.signal, { reason, verifiedOnChainId: onChainId });
-    return outcome.kind === 'activated' ? { kind: 'activated', reason } : outcome;
+  async #attempt(row: Readonly<SubscriptionRetryRow<Demand>>, lease: SubscriptionRetryLease): Promise<number | undefined> {
+    const reason = this.ports.dormancy(row.id);
+    if (!isStorageAckDemandReason(reason)) return undefined;
+    const demand = row.value, onChainId = demand.onChainId;
+    demand.checks += 1;
+    const outcome = await recoverPersistedSubscriptionRow(row.id, {
+      ...this.ports,
+      isCurrent: () => lease.isCurrent() && demand.onChainId === onChainId,
+      resolveAuthority: saved => lease.check(signal => this.ports.resolveAuthority(saved, signal)),
+    }, this.ports.signal, { reason, verifiedOnChainId: onChainId });
+    if (outcome.kind === 'done') return undefined;
+    if (outcome.kind === 'activated') {
+      this.ports.log.info(`Activated persisted context-graph subscription "${row.id}" for StorageACK requests `
+        + `${this.#now() - demand.firstAt} ms after the first (was ${reason}; ${demand.checks} check(s))`);
+      return undefined;
+    }
+    if (outcome.kind === 'again') return this.#now() + this.#retryMinMs;
+    demand.lastWhy = outcome.why;
+    return this.#now() + Math.min(this.#retryMaxMs, this.#retryMinMs * 2 ** Math.min(demand.retries++, 16));
   }
 }
 

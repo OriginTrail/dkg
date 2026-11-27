@@ -322,7 +322,7 @@ export async function promoteDormantContextGraphSubscriptions(
         revision: id => ports.contextGraphSubscriptionPersistRevisions.get(id) ?? 0,
         subscription: id => ports.subscribedContextGraphs.get(id),
         load: loadRow,
-        clear: (id, revoked) => ports.recordContextGraphSubscriptionClear(revoked ? [] : [id], revoked ? [id] : []),
+        clear: (id, revoked) => revoked ? ports.recordContextGraphSubscriptionClear([], [id]) : ports.recordContextGraphSubscriptionClear([id]),
         resolveAuthority: row => pass.read(() => ports.resolveAuthority({
           contextGraphId: row.id, onChainId: row.onChainId, onChainHash: row.onChainHash,
         }, signal).catch((error: unknown) => unavailableContextGraphReadAuthorityDecision(

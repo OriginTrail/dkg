@@ -8825,13 +8825,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /**
-   * Activate a saved row left dormant as `authorityUnavailable` once its read
-   * authority answered allowed. Cold registration discovery is the binding
-   * proof: RFC-64 responsibility and the healed durable row become visible
-   * atomically before any sync or gossip side effect is restored. Background
-   * authority recovery and the name-binding retry both activate through it.
-   */
-  /**
    * Hand the rows the startup pass left dormant because their chain name
    * binding could not be read to the retry that asks them again within
    * seconds (context-graph-subscription-name-binding-retry.ts).
@@ -9107,7 +9100,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         (a, b) => (b.subscribed ? 1 : 0) - (a.subscribed ? 1 : 0) || byId(a, b),
       );
       const toActivate = [...recentRows, ...hostedRows, ...userRows];
-      const countsAgainstCap = (row: ContextGraphSubscriptionRecord): boolean => !row.coreHosted && !recent.has(row.id);
+      this.contextGraphSubscriptionActivations.setActivationCapExemptIds(recent.keys());
+      const countsAgainstCap = this.contextGraphSubscriptionActivations.countsAgainstActivationCap.bind(this.contextGraphSubscriptionActivations);
       if (recentRows.length > 0) {
         this.log.info(
           ctx,

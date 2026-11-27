@@ -1,3 +1,4 @@
+import { sameDurableSubscriptionIntent } from './context-graph-subscription-policy.js';
 // SPDX-License-Identifier: Apache-2.0
 import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
 import { SubscriptionActivationCapacityError } from './context-graph-subscription-activation-capacity.js';
@@ -31,11 +32,6 @@ export interface SubscriptionRecoveryRowPorts {
 function hasIntent(row: ContextGraphSubscriptionRecord | null): row is ContextGraphSubscriptionRecord {
   return row !== null && (row.subscribed || row.coreHosted === true);
 }
-function sameRow(left: ContextGraphSubscriptionRecord, right: ContextGraphSubscriptionRecord): boolean {
-  return left.id === right.id && left.onChainId === right.onChainId && left.onChainHash === right.onChainHash
-    && left.subscribed === right.subscribed && (left.coreHosted === true) === (right.coreHosted === true)
-    && left.syncScoped === right.syncScoped;
-}
 
 /** One authority observation may commit only to the exact durable intent it checked. */
 export async function recoverPersistedSubscriptionRow(
@@ -58,7 +54,7 @@ export async function recoverPersistedSubscriptionRow(
   const fresh = await ports.load(id);
   if (!current()) return { kind: 'done' };
   if (!hasIntent(fresh)) { ports.clear(id, fresh !== null); return { kind: 'done' }; }
-  if (ports.revision(id) !== revision || !sameRow(row, fresh)) return { kind: 'again' };
+  if (ports.revision(id) !== revision || !sameDurableSubscriptionIntent(row, fresh)) return { kind: 'again' };
   // Another activation may own a provisional row. Its owner alone commits or rolls it back.
   const live = ports.subscription(id);
   if (live?.subscribed || live?.coreHosted) return { kind: 'again' };

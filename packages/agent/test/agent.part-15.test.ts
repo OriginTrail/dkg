@@ -1343,12 +1343,13 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       expect(reclassified.agent.activatePersistedContextGraphSubscriptionRecord)
         .not.toHaveBeenCalled();
 
-      const concurrentlyActive = createPromotionHarness([
+      // Flags installed during preparation do not confer committed activation.
+      const concurrentlyInstalling = createPromotionHarness([
         { id: 'active-after-authority', subscribed: true, onChainId: '7' },
       ]);
-      concurrentlyActive.agent.resolveContextGraphSubscriptionBootstrapAuthority
+      concurrentlyInstalling.agent.resolveContextGraphSubscriptionBootstrapAuthority
         .mockImplementation(async (contextGraphId: string) => {
-          concurrentlyActive.agent.subscribedContextGraphs.set(contextGraphId, promotionSubscription({ subscribed: true }));
+          concurrentlyInstalling.agent.subscribedContextGraphs.set(contextGraphId, promotionSubscription({ subscribed: true }));
           return {
             outcome: 'allowed',
             source: 'registered-chain',
@@ -1359,15 +1360,15 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         });
       await expect(
         promoteDormantContextGraphSubscriptions(
-          concurrentlyActive.agent,
+          concurrentlyInstalling.agent,
           new AbortController().signal,
         ),
-      ).resolves.toBe('idle');
-      expect(concurrentlyActive.agent.activatePersistedContextGraphSubscriptionRecord)
+      ).resolves.toBe('rearm');
+      expect(concurrentlyInstalling.agent.activatePersistedContextGraphSubscriptionRecord)
         .not.toHaveBeenCalled();
-      expect(concurrentlyActive.agent.contextGraphSubscriptionRehydrationPendingIds.size)
-        .toBe(0);
-      expect(concurrentlyActive.agent.contextGraphSubscriptionDormancyById.size).toBe(0);
+      expect(concurrentlyInstalling.agent.contextGraphSubscriptionRehydrationPendingIds.size)
+        .toBe(1);
+      expect(concurrentlyInstalling.agent.contextGraphSubscriptionDormancyById.size).toBe(1);
 
       const staleBeforePrepare = createPromotionHarness([
         { id: 'stale-before-prepare', subscribed: true, onChainId: '7' },

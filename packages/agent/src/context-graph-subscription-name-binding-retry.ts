@@ -35,14 +35,9 @@
  * leaves the rows held here alone until then.
  */
 
-import {
-  contextGraphReadAuthorityDependencyOf,
-  unavailableContextGraphReadAuthorityDecision,
-  type ContextGraphReadAuthorityDecision,
-} from './context-graph-read-authority.js';
-import { runBoundedOperation, isBoundedOperationTimeoutError } from './bounded-operation.js';
-import { recoverPersistedSubscriptionRow, type SubscriptionRecoveryOutcome, type SubscriptionRecoveryRowPorts } from './context-graph-subscription-recover-row.js';
-import type { ContextGraphSubscriptionRecord } from './dkg-agent-types.js';
+import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
+import { recoverPersistedSubscriptionRow, type SubscriptionRecoveryRowPorts } from './context-graph-subscription-recover-row.js';
+import { SubscriptionRetryExecutor, type SubscriptionRetryRow, type SubscriptionRetryLease } from './subscription-retry-executor.js';
 
 /** Pause after the first unanswered check, and the shortest a wake-up leaves. */
 export const NAME_BINDING_RETRY_FIRST_PAUSE_MS = 1_000;
@@ -81,265 +76,97 @@ export interface NameBindingRetryOptions {
 }
 
 interface HeldRow {
-  readonly contextGraphId: string;
-  readonly since: number;
+  since: number;
   checks: number;
-  /** Unanswered checks so far; the pause grows with them. */
   unanswered: number;
-  /** When the last check ended (when the row was taken, at first). */
   lastCheckAt: number;
-  /** A wake-up brought the last check forward. */
   wokenCheck: boolean;
+  wakeable: boolean;
   last: string;
-  /** Set while the row waits out a pause a wake-up may shorten. */
-  cutPause?: () => void;
 }
 
-/** The name-binding retries of one node run. */
+/** The name-binding retry policy over the shared bounded subscription queue. */
 export class PersistedSubscriptionNameBindingRetry {
-  readonly #ports: NameBindingRetryPorts;
+  readonly #executor: SubscriptionRetryExecutor<HeldRow>;
+  readonly #now: () => number;
   readonly #firstPauseMs: number;
   readonly #maxPauseMs: number;
   readonly #windowMs: number;
-  readonly #maxConcurrent: number;
-  readonly #maxRows: number;
-  readonly #checkTimeoutMs: number;
-  readonly #now: () => number;
-  readonly #rows = new Map<string, HeldRow>();
-  readonly #runs = new Set<Promise<void>>();
-  /** Check slots in use, and the rows waiting for one, first come first served. */
-  #checking = 0;
-  readonly #waiting: Array<() => void> = [];
-
-  constructor(ports: NameBindingRetryPorts, options: NameBindingRetryOptions) {
-    this.#ports = ports;
+  constructor(private readonly ports: NameBindingRetryPorts, options: NameBindingRetryOptions) {
+    this.#now = options.now ?? Date.now;
     this.#firstPauseMs = options.firstPauseMs ?? NAME_BINDING_RETRY_FIRST_PAUSE_MS;
     this.#maxPauseMs = options.maxPauseMs ?? NAME_BINDING_RETRY_MAX_PAUSE_MS;
     this.#windowMs = options.windowMs ?? NAME_BINDING_RETRY_WINDOW_MS;
-    this.#maxConcurrent = options.maxConcurrent ?? NAME_BINDING_RETRY_MAX_CONCURRENT;
-    this.#maxRows = options.maxRows ?? NAME_BINDING_RETRY_MAX_ROWS;
-    this.#checkTimeoutMs = options.checkTimeoutMs;
-    this.#now = options.now ?? Date.now;
-  }
-
-  /**
-   * Take rows the startup pass just left dormant because their chain name
-   * binding could not be read. Returns the ones taken; the rest stay with
-   * background recovery.
-   */
-  take(contextGraphIds: Iterable<string>): string[] {
-    const taken: string[] = [];
-    for (const contextGraphId of contextGraphIds) {
-      if (!this.#current() || this.#rows.size >= this.#maxRows) break;
-      if (this.#rows.has(contextGraphId)) continue;
-      if (this.#ports.dormancy(contextGraphId) !== 'authorityUnavailable') continue;
-      const now = this.#now();
-      this.#start({
-        contextGraphId, since: now, checks: 0, unanswered: 0, lastCheckAt: now, wokenCheck: false, last: 'none',
-      });
-      taken.push(contextGraphId);
-    }
-    return taken;
-  }
-
-  /** Whether this retry asks for the row now; background recovery leaves it alone meanwhile. */
-  holds(contextGraphId: string): boolean {
-    return this.#rows.has(contextGraphId) && this.#current();
-  }
-
-  /**
-   * The chain authority source answered again. A held row waiting out a pause
-   * is asked one first pause after its last check, unless a wake-up brought
-   * that check forward too; the pause after it is not reset. However many
-   * come, wake-ups at most double the checks of the schedule.
-   */
-  wake(): void {
-    for (const held of this.#rows.values()) held.cutPause?.();
-  }
-
-  /** Rows held now, checking, waiting or pausing. */
-  get size(): number {
-    return this.#rows.size;
-  }
-
-  /** The node run this retry belongs to. */
-  get signal(): AbortSignal {
-    return this.#ports.signal;
-  }
-
-  /** Settles when no retry runs. */
-  async whenIdle(): Promise<void> {
-    while (this.#runs.size > 0) await Promise.allSettled(this.#runs);
-  }
-
-  #current(): boolean {
-    return !this.#ports.signal.aborted && this.#ports.isCurrent();
-  }
-
-  #start(held: HeldRow): void {
-    this.#rows.set(held.contextGraphId, held);
-    const run: Promise<void> = this.#run(held)
-      .catch((error: unknown) => {
-        if (!this.#current()) return;
-        this.#ports.log.warn(
-          `Could not ask again for persisted context-graph subscription "${held.contextGraphId}" ` +
-          `left dormant without its chain name binding: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      })
-      .finally(() => {
-        this.#rows.delete(held.contextGraphId);
-        this.#runs.delete(run);
-      });
-    this.#runs.add(run);
-    this.#ports.track(run);
-  }
-
-  async #run(held: HeldRow): Promise<void> {
-    const ports = this.#ports;
-    const id = held.contextGraphId;
-    for (;;) {
-      await this.#pause(held);
-      if (!this.#current() || ports.dormancy(id) !== 'authorityUnavailable') return;
-      if (this.#now() - held.since >= this.#windowMs) {
-        ports.log.info(
-          `Persisted context-graph subscription "${id}" is still dormant ` +
-          `${Math.round((this.#now() - held.since) / 1000)} s after its chain name binding could not be read ` +
-          `(${held.checks} check(s), last: ${held.last}); background authority recovery keeps asking`,
-        );
-        return;
-      }
-      if (!(await this.#acquire(held))) return;
-      let outcome: SubscriptionRecoveryOutcome;
-      try {
-        if (!this.#current() || this.#remaining(held) <= 0 || ports.dormancy(id) !== 'authorityUnavailable') {
-          outcome = { kind: 'done' };
-        } else {
-          held.checks += 1;
-          outcome = await this.#attempt(held);
-        }
-      } finally {
-        this.#release();
-        held.lastCheckAt = this.#now();
-      }
-      if (outcome.kind === 'done') return;
-      if (outcome.kind === 'activated') {
-        ports.log.info(
-          `Activated persisted context-graph subscription "${id}" ` +
-          `${this.#now() - held.since} ms after its chain name binding could not be read at start ` +
-          `(${held.checks} check(s))`,
-        );
-        // Its lookup answered: the other rows may be answered now too.
-        this.wake();
-        return;
-      }
-      if (outcome.kind === 'retry') {
-        if (outcome.activationFailed && outcome.why !== held.last) {
-          ports.log.warn(
-            `Could not activate persisted context-graph subscription "${id}" after its chain name binding ` +
-            `answered: ${outcome.why}; asking again`,
-          );
-        }
-        held.last = outcome.why;
-        held.unanswered += 1;
-      }
-    }
-  }
-
-  /** Wait until the row's next check may start: shortened by a wake-up, ended by a stop. */
-  async #pause(held: HeldRow): Promise<void> {
-    const signal = this.#ports.signal;
-    // None before the first check; then 1, 2, 4 ... s after each unanswered one.
-    const pauseMs = held.checks === 0
-      ? 0
-      : Math.min(this.#maxPauseMs, this.#firstPauseMs * 2 ** Math.min(Math.max(0, held.unanswered - 1), 16));
-    let notBefore = Math.min(held.lastCheckAt + pauseMs, held.since + this.#windowMs);
-    // A check a wake-up brought forward is not followed by another one.
-    let wakeable = !held.wokenCheck;
-    held.wokenCheck = false;
-    for (;;) {
-      const waitMs = notBefore - this.#now();
-      if (waitMs <= 0 || signal.aborted) return;
-      const cut = await new Promise<boolean>((resolve) => {
-        const finish = (wasCut: boolean): void => {
-          clearTimeout(timer);
-          signal.removeEventListener('abort', onAbort);
-          held.cutPause = undefined;
-          resolve(wasCut);
-        };
-        const onAbort = (): void => finish(false);
-        const timer = setTimeout(() => finish(false), waitMs);
-        timer.unref?.();
-        signal.addEventListener('abort', onAbort, { once: true });
-        if (wakeable) held.cutPause = () => finish(true);
-      });
-      if (!cut) return;
-      // Woken: wait out what is left of the first pause, and nothing more.
-      wakeable = false;
-      held.wokenCheck = true;
-      notBefore = Math.min(notBefore, held.lastCheckAt + this.#firstPauseMs);
-    }
-  }
-
-  #remaining(held: HeldRow): number { return held.since + this.#windowMs - this.#now(); }
-
-  /** Take a check slot only within this row's remaining ownership window. */
-  #acquire(held: HeldRow): Promise<boolean> {
-    const signal = this.#ports.signal;
-    if (signal.aborted || this.#remaining(held) <= 0) return Promise.resolve(false);
-    if (this.#checking < this.#maxConcurrent) {
-      this.#checking += 1;
-      return Promise.resolve(true);
-    }
-    return new Promise((resolve) => {
-      const grant = (): void => {
-        clearTimeout(timer);
-        signal.removeEventListener('abort', cancel);
-        resolve(true);
-      };
-      const cancel = (): void => {
-        clearTimeout(timer);
-        signal.removeEventListener('abort', cancel);
-        const index = this.#waiting.indexOf(grant);
-        if (index >= 0) this.#waiting.splice(index, 1);
-        resolve(false);
-      };
-      const timer = setTimeout(cancel, this.#remaining(held));
-      timer.unref?.();
-      this.#waiting.push(grant);
-      signal.addEventListener('abort', cancel, { once: true });
+    this.#executor = new SubscriptionRetryExecutor({
+      signal: ports.signal, isCurrent: () => ports.isCurrent(), now: this.#now,
+      maxRows: options.maxRows ?? NAME_BINDING_RETRY_MAX_ROWS,
+      maxConcurrent: options.maxConcurrent ?? NAME_BINDING_RETRY_MAX_CONCURRENT,
+      checkTimeoutMs: options.checkTimeoutMs, track: run => ports.track(run),
+      eligible: row => ports.dormancy(row.id) === 'authorityUnavailable',
+      attempt: (row, lease) => this.#attempt(row, lease),
+      retired: (row, expired) => {
+        if (!expired || !this.#executor.current()) return;
+        ports.log.info(`Persisted context-graph subscription "${row.id}" is still dormant `
+          + `${Math.round((this.#now() - row.value.since) / 1000)} s after its chain name binding could not be read `
+          + `(${row.value.checks} check(s), last: ${row.value.last}); background authority recovery keeps asking`);
+      },
+      failed: (row, error) => {
+        if (this.#executor.current()) ports.log.warn(`Could not ask again for persisted context-graph subscription "${row.id}" `
+          + `left dormant without its chain name binding: ${error instanceof Error ? error.message : String(error)}`);
+      },
     });
   }
 
-  /** Hand the slot to the next row waiting for one, if any. */
-  #release(): void {
-    const next = this.#waiting.shift();
-    if (next !== undefined) next();
-    else this.#checking -= 1;
-  }
-
-  async #attempt(held: HeldRow): Promise<SubscriptionRecoveryOutcome> {
-    return recoverPersistedSubscriptionRow(held.contextGraphId, {
-      ...this.#ports,
-      isCurrent: () => this.#current() && this.#rows.get(held.contextGraphId) === held && this.#remaining(held) > 0,
-      resolveAuthority: row => this.#check(row, held),
-    }, this.#ports.signal);
-  }
-
-  /** One canonical deadline owner consumes late results from non-cooperative reads. */
-  async #check(row: ContextGraphSubscriptionRecord, held: HeldRow): Promise<ContextGraphReadAuthorityDecision | undefined> {
-    const timeoutMs = Math.min(this.#checkTimeoutMs, this.#remaining(held));
-    if (timeoutMs <= 0 || this.#ports.signal.aborted) return undefined;
-    try {
-      return await runBoundedOperation(signal => this.#ports.resolveAuthority(row, signal), {
-        timeoutMs, signal: this.#ports.signal, label: 'Persisted subscription authority',
-      });
-    } catch (error) {
-      if (this.#ports.signal.aborted || isBoundedOperationTimeoutError(error)) return undefined;
-      return unavailableContextGraphReadAuthorityDecision('legacy-local', 'unexpected-authority-error',
-        contextGraphReadAuthorityDependencyOf(error));
+  take(contextGraphIds: Iterable<string>): string[] {
+    const taken: string[] = [];
+    for (const id of contextGraphIds) {
+      if (this.ports.dormancy(id) !== 'authorityUnavailable') continue;
+      const now = this.#now();
+      if (this.#executor.take(id, { since: now, checks: 0, unanswered: 0, lastCheckAt: now,
+        wokenCheck: false, wakeable: false, last: 'none' }, now + this.#windowMs)) taken.push(id);
     }
+    return taken;
+  }
+  holds(id: string): boolean { return this.#executor.has(id) && this.#executor.current(); }
+  get size(): number { return this.#executor.size; }
+  get signal(): AbortSignal { return this.ports.signal; }
+  whenIdle(): Promise<void> { return this.#executor.whenIdle(); }
+
+  wake(): void {
+    const now = this.#now();
+    this.#executor.reschedule(row => {
+      if (row.checking || row.dueAt <= now || !row.value.wakeable) return undefined;
+      row.value.wakeable = false; row.value.wokenCheck = true;
+      return { dueAt: Math.min(row.dueAt, row.value.lastCheckAt + this.#firstPauseMs) };
+    });
   }
 
+  async #attempt(row: Readonly<SubscriptionRetryRow<HeldRow>>, lease: SubscriptionRetryLease): Promise<number | undefined> {
+    const held = row.value;
+    held.checks += 1;
+    const outcome = await recoverPersistedSubscriptionRow(row.id, {
+      ...this.ports, isCurrent: lease.isCurrent,
+      resolveAuthority: saved => lease.check(signal => this.ports.resolveAuthority(saved, signal)),
+    }, this.ports.signal);
+    held.lastCheckAt = this.#now();
+    if (outcome.kind === 'done') return undefined;
+    if (outcome.kind === 'activated') {
+      this.ports.log.info(`Activated persisted context-graph subscription "${row.id}" `
+        + `${this.#now() - held.since} ms after its chain name binding could not be read at start (${held.checks} check(s))`);
+      this.wake();
+      return undefined;
+    }
+    if (outcome.kind === 'retry') {
+      if (outcome.activationFailed && outcome.why !== held.last) {
+        this.ports.log.warn(`Could not activate persisted context-graph subscription "${row.id}" after its chain name binding `
+          + `answered: ${outcome.why}; asking again`);
+      }
+      held.last = outcome.why; held.unanswered += 1;
+    }
+    held.wakeable = !held.wokenCheck; held.wokenCheck = false;
+    const pause = Math.min(this.#maxPauseMs, this.#firstPauseMs * 2 ** Math.min(Math.max(0, held.unanswered - 1), 16));
+    return held.lastCheckAt + pause;
+  }
 }
 
 const owners = new WeakMap<object, PersistedSubscriptionNameBindingRetry>();

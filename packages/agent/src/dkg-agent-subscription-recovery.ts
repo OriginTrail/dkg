@@ -31,7 +31,7 @@ export class SubscriptionRecoveryMethods extends DKGAgentBase {
         durableSubscriptionBinding: { contextGraphId: row.id, onChainId: row.onChainId, onChainHash: row.onChainHash },
       }).catch((error: unknown) => unavailableContextGraphReadAuthorityDecision(
         'legacy-local', 'unexpected-authority-error', contextGraphReadAuthorityDependencyOf(error))),
-      clear: (id, revoked) => this.recordContextGraphSubscriptionClear(revoked ? [] : [id], revoked ? [id] : []),
+      clear: (id, revoked) => revoked ? this.recordContextGraphSubscriptionClear([], [id]) : this.recordContextGraphSubscriptionClear([id]),
       retire: (id, reason) => { this.transitionContextGraphSubscriptionDormancy(id, reason); touch(); },
       capped: id => {
         this.transitionContextGraphSubscriptionDormancy(id, 'activationCap');
@@ -41,6 +41,13 @@ export class SubscriptionRecoveryMethods extends DKGAgentBase {
     };
   }
 
+  /**
+   * Activate a saved row left dormant as `authorityUnavailable` once its read
+   * authority answered allowed. Cold registration discovery is the binding
+   * proof: RFC-64 responsibility and the healed durable row become visible
+   * atomically before any sync or gossip side effect is restored. Background
+   * authority recovery and the name-binding retry both activate through it.
+   */
   async activateUnavailablePersistedContextGraphSubscription(
     this: DKGAgent,
     row: ContextGraphSubscriptionRecord,
@@ -80,25 +87,19 @@ export class SubscriptionRecoveryMethods extends DKGAgentBase {
     const ctx = createOperationContext('init');
     const owned = <T>(work: () => Promise<T>): Promise<T> => withOwnedRpcRequestContext(
       { requestClass: 'foreground', admissionPriority: 'authority', signal }, work);
+    const shared = this.subscriptionRecoveryRowPorts(() => this.workLifetime.signal === signal
+      && !this.coreHostRecordingsClosed && this.contextGraphSubscriptionRehydrationStatus !== null);
+    if (!shared) return false;
     return requestStorageAckDemandActivation(this, {
-      signal,
-      isCurrent: () => this.workLifetime.signal === signal && !this.coreHostRecordingsClosed
-        && this.contextGraphSubscriptionRehydrationStatus !== null,
-      dormancy: key => this.contextGraphSubscriptionDormancyById.get(key),
-      revision: key => this.contextGraphSubscriptionPersistRevisions.get(key) ?? 0,
-      subscription: key => this.subscribedContextGraphs.get(key),
-      load: key => store.load ? store.load(key) : store.loadAll().then(rows => rows.find(row => row.id === key) ?? null),
-      resolveAuthority: (binding, checkSignal) => owned(() => this.resolveContextGraphSubscriptionBootstrapAuthority(
-        binding.contextGraphId, { allowSubscriptionFallback: false, signal: checkSignal, durableSubscriptionBinding: binding })),
-      activate: (row, binding, current) => owned(() => activateRollingSubscriptionPromotion({
-        activate: this.activatePersistedContextGraphSubscriptionRecord.bind(this),
-        reconcile: this.reconcileRfc64CatalogResponsibilityV1.bind(this),
-      }, row, binding, current)),
-      clear: (key, revoked) => this.recordContextGraphSubscriptionClear(revoked ? [] : [key], revoked ? [key] : []),
-      retire: (key, reason) => {
-        this.transitionContextGraphSubscriptionDormancy(key, reason);
-        const status = this.contextGraphSubscriptionRehydrationStatus;
-        if (status) this.contextGraphSubscriptionRehydrationStatus = { ...status, updatedAt: Date.now() };
+      ...shared, signal,
+      resolveAuthority: (row, checkSignal) => owned(() => shared.resolveAuthority(row, checkSignal)),
+      capped: () => {}, // Current publisher demand bypasses ordinary startup pacing.
+      activate: (row, binding, _revision, current) => {
+        if (!binding) throw new Error('StorageACK demand activation requires a verified binding');
+        return owned(() => activateRollingSubscriptionPromotion({
+          activate: this.activatePersistedContextGraphSubscriptionRecord.bind(this),
+          reconcile: this.reconcileRfc64CatalogResponsibilityV1.bind(this),
+        }, row, binding, subscription => current() && shared.subscription(row.id) === subscription));
       },
       track: run => { lifetime.track(run); },
       log: { info: message => this.log.info(ctx, message), warn: message => this.log.warn(ctx, message),

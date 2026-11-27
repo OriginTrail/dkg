@@ -42,12 +42,12 @@ function fixture(rows: ContextGraphSubscriptionRecord[]) {
 }
 
 describe('authority recovery activation capacity', () => {
-  it('reserves the final slot through asynchronous preparation, while hosted recovery stays exempt', async () => {
+  it.each([true, false])('accounts for installing recovery/rolling work while hosted recovery stays exempt (reserved=%s)', async reserved => {
     const a = row('a'), b = row('b'), hosted = row('hosted', true);
     const f = fixture([a, b, hosted]);
     let release!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; });
-    const first = f.owner.activate(a, f.ports, { respectActivationCap: true, prepare: () => held });
+    const first = f.owner.activate(a, f.ports, { respectActivationCap: reserved, prepare: () => held });
     try {
       expect(f.status().activated).toBe(0);
       await expect(f.owner.activate(b, f.ports, { respectActivationCap: true })).rejects.toBeInstanceOf(SubscriptionActivationCapacityError);
@@ -59,12 +59,12 @@ describe('authority recovery activation capacity', () => {
     expect(f.dormancy.get('b')).toBe('authorityUnavailable');
   });
 
-  it('releases the reserved slot after failed preparation and rolls back the provisional row', async () => {
+  it.each([true, false])('releases failed recovery/rolling installation capacity (reserved=%s)', async reserved => {
     const a = row('a'), b = row('b');
     const f = fixture([a, b]);
     let fail!: (error: Error) => void;
     const held = new Promise<void>((_resolve, reject) => { fail = reject; });
-    const first = f.owner.activate(a, f.ports, { respectActivationCap: true, prepare: () => held });
+    const first = f.owner.activate(a, f.ports, { respectActivationCap: reserved, prepare: () => held });
     const rejected = expect(first).rejects.toThrow('binding repair failed');
     await expect(f.owner.activate(b, f.ports, { respectActivationCap: true })).rejects.toBeInstanceOf(SubscriptionActivationCapacityError);
     fail(new Error('binding repair failed'));
@@ -126,4 +126,18 @@ describe('demand and rolling activation share commit ownership', () => {
     expect(f.status().activated).toBe(failPreparation ? 0 : 1);
     if (failPreparation) expect(f.live.has(target.id)).toBe(false);
   });
+  it('preserves independently accepted hosting when an earlier provisional activation fails', async () => {
+    const a = row('a'), f = fixture([a]);
+    let fail!: (error: Error) => void;
+    const first = f.owner.activate(a, f.ports, { prepare: () => new Promise<void>((_, reject) => { fail = reject; }) });
+    const rejected = expect(first).rejects.toThrow('preparation failed');
+    const hosted = f.live.get('a')!;
+    hosted.coreHosted = true;
+    f.owner.replaceLiveIntent('a', hosted);
+    fail(new Error('preparation failed'));
+    await rejected;
+    expect(f.live.get('a')).toBe(hosted);
+    expect(f.live.get('a')?.coreHosted).toBe(true);
+  });
+
 });

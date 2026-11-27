@@ -150,6 +150,29 @@ describe('automatic Core custody of retained dormant identities', () => {
     });
   });
 
+  it('declines a second ACK while demand preparation is provisional, then admits after commit', async () => {
+    const f = await fixture('capped');
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const prepare = vi.spyOn(f.agent, 'reconcileRfc64CatalogResponsibilityV1').mockImplementation(async id => {
+      if (id === LOCAL) await held;
+    });
+    const request = { contextGraphId: ID, swmGraphId: LOCAL, operation: 'publish' as const };
+    try {
+      await expect(f.agent.ensureStorageAckVmPromotion(request)).resolves.toMatchObject({ ok: false });
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalled());
+      expect(f.state.subscribedContextGraphs.get(LOCAL)?.subscribed).toBe(true);
+      await expect(f.agent.ensureStorageAckVmPromotion(request)).resolves.toMatchObject({ ok: false });
+      expect(f.state.contextGraphSubscriptionDormancyById.get(LOCAL)).toBe('activationCap');
+      expect(f.save).not.toHaveBeenCalled();
+      release(); await peekStorageAckDemandActivations(f.agent)!.whenIdle();
+      await expect(f.agent.ensureStorageAckVmPromotion(request)).resolves.toEqual({ ok: true });
+      await f.drain();
+      expect(f.state.subscribedContextGraphs.get(LOCAL)?.coreHosted).toBe(true);
+      expect(f.rows().find(row => row.id === LOCAL)?.coreHosted).toBe(true);
+    } finally { release(); await peekStorageAckDemandActivations(f.agent)?.whenIdle(); }
+  });
+
   it.each(MODES)('leaves a %s retained row untouched during native promotion backfill', async (mode) => {
     const f = await fixture(mode);
     await seedLedger(f.state);

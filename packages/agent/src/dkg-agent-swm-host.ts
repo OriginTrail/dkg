@@ -15,7 +15,6 @@ import { readLatestMerkleRootAndPublisher } from './ka-latest-root-and-publisher
 import {
   isCanonicalAuthoritativeContextGraphId, localContextGraphIdMatchesCommittedNameHash,
 } from './context-graph-binding-state.js';
-import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
 import { normalizeContextGraphNameHash } from './context-graph-name-candidate.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { createSwmHostModeHandler } from './internal/gossip/host-mode-handler.js';
@@ -1030,8 +1029,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
   /** Automatic hosting cannot activate saved intent that admission left dormant. */
   automaticSwmHostModeAdmissionAllowed(this: DKGAgent, contextGraphId: string): boolean {
     const localId = this.swmHostModeLocalId(contextGraphId);
-    if (!this.contextGraphSubscriptionDormancyById.has(localId)
-      || isAdmittedContextGraphSubscription(this.subscribedContextGraphs.get(localId))) return true;
+    if (this.contextGraphSubscriptionActivations.canAdmitAutomaticHosting(localId)) return true;
     const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
     // Refusal of A cannot retire an operator handler or another slot's owner B.
     if (this.swmHostModeSubscribed.get(hostKey) !== SUBSCRIPTION_SOURCES.MANUAL
@@ -2892,8 +2890,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         }
       }
       const existing = this.subscribedContextGraphs.get(localCgId);
-      if (this.contextGraphSubscriptionDormancyById.has(localCgId)
-        && !isAdmittedContextGraphSubscription(existing)) return 'dormant';
+      if (!this.contextGraphSubscriptionActivations.canAdmitAutomaticHosting(localCgId)) return 'dormant';
       if (existing === undefined) return undefined;
       if (!existing.subscribed) return undefined;
       if (existing.onChainId === undefined) {
@@ -2909,12 +2906,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // a live-then-policy read on its first observation, and an already-recorded
     // row is left untouched whatever the chain says now. Every path that can
     // still RECORD a graph falls through to the fresh reads below.
+
+    const blockedBeforeRead = blocked();
+    if (blockedBeforeRead !== undefined) return blockedBeforeRead;
     if (isCoreHostedPublicCgRecorded(
       this.subscribedContextGraphs.get(localCgId),
       numericStr,
     )) return alreadyRecorded();
-    const blockedBeforeRead = blocked();
-    if (blockedBeforeRead !== undefined) return blockedBeforeRead;
 
     // Existence-gated read when the adapter exposes liveness; otherwise use
     // the ACK-backed compatibility path because signing a StorageACK proves
@@ -2927,9 +2925,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Re-checked after the await: a concurrent first ACK may have recorded it,
     // or rehydration may have activated the namespace's persisted row.
     const existing = this.subscribedContextGraphs.get(localCgId);
-    if (isCoreHostedPublicCgRecorded(existing, numericStr)) return alreadyRecorded();
+
     const blockedAfterRead = blocked();
     if (blockedAfterRead !== undefined) return blockedAfterRead;
+    if (isCoreHostedPublicCgRecorded(existing, numericStr)) return alreadyRecorded();
     if (existing?.onChainId !== undefined && existing.onChainId !== numericStr) {
       // A host-only row for another graph still owes that graph's copies in
       // this namespace. Rebind only once that graph is gone from the chain
