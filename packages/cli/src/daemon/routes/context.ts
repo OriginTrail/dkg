@@ -38,6 +38,7 @@ import type { AdmissionStatsView } from '../http-utils.js';
 import type { EventLoopDelayView } from '../event-loop-delay-monitor.js';
 import type { DaemonLocalLlmService } from '../local-llm-service.js';
 import type { DaemonRouteRpcTransport } from '../rpc-runtime.js';
+import type { ConfiguredSemanticRuntimeService } from '../../semantic-runtime.js';
 import type { Buyer, Gateway, Seller } from '@origintrail-official/dkg-marketplace';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
@@ -164,6 +165,10 @@ export interface RequestContext {
   localLlm?: DaemonLocalLlmService;
   /** Daemon-owned admission + accounting shared by every direct route provider. */
   routeRpcTransport?: DaemonRouteRpcTransport;
+  /** Opt-in WASM semantic runtime owned by the daemon lifecycle. */
+  semanticRuntimeHost?: ConfiguredSemanticRuntimeService | null;
+  /** Lifecycle-owned lazy start; management routes authenticate before calling. */
+  ensureSemanticRuntime?: () => Promise<ConfiguredSemanticRuntimeService | null>;
   /** The marketplace buyer (OT-RFC-27), whose job the daemon runs; absent while the marketplace is off. */
   marketplace?: Buyer;
   /** The buyer's OpenAI-compatible gateway and its access keys; absent while the marketplace is off. */

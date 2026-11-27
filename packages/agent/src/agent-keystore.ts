@@ -46,6 +46,10 @@ export interface WorkspaceEncryptionKeyEntry {
   createdAt: string;
   revokedAt?: string;
   revocationProof?: string;
+  custodyAuthorization?: {
+    enrollment: import('./encryption-key-enrollment.js').EncryptionKeyEnrollment;
+    custodyProof: string;
+  };
 }
 
 /**

@@ -1349,7 +1349,7 @@ export class JoinRequestMethods extends DKGAgentBase {
         WHERE {
           OPTIONAL { GRAPH <${REQUESTER_JOIN_STATE_GRAPH}> { <${subject}> ?p ?o . } }
         }`,
-        [REQUESTER_JOIN_STATE_GRAPH],
+        [REQUESTER_JOIN_STATE_GRAPH], { writtenGraphs: [REQUESTER_JOIN_STATE_GRAPH] },
       );
       if (!updatedAtomically) {
         // Compatibility fallback for custom stores without SPARQL UPDATE.
@@ -2503,7 +2503,7 @@ export class JoinRequestMethods extends DKGAgentBase {
         OPTIONAL { GRAPH <${cgMetaGraph}> { <${requestUri}> <${requestStatus}> ?oldStatus . } }
         OPTIONAL { GRAPH <${cgMetaGraph}> { <${requestUri}> <${decisionTimestamp}> ?oldDecisionTimestamp . } }
       }
-    `, { touchedGraphs: [cgMetaGraph], source: 'join-approval-status' });
+    `, { touchedGraphs: [cgMetaGraph], writtenGraphs: [cgMetaGraph], source: 'join-approval-status' });
     await this.pruneTerminalJoinRequestHistory(contextGraphId);
   }
 
@@ -2791,7 +2791,7 @@ export class JoinRequestMethods extends DKGAgentBase {
           OPTIONAL { GRAPH <${cgMetaGraph}> { <${requestUri}> <${requestStatus}> ?oldStatus . } }
           OPTIONAL { GRAPH <${cgMetaGraph}> { <${requestUri}> <${decisionTimestamp}> ?oldDecisionTimestamp . } }
         }
-      `, { touchedGraphs: [cgMetaGraph], source: `local-join-${status}-status` });
+      `, { touchedGraphs: [cgMetaGraph], writtenGraphs: [cgMetaGraph], source: `local-join-${status}-status` });
     } else {
       // Compatibility fallback for custom stores without SPARQL UPDATE.
       // The curator remains authoritative if a crash lands between these two
@@ -3038,7 +3038,7 @@ export class JoinRequestMethods extends DKGAgentBase {
         OPTIONAL { GRAPH <${cgMetaGraph}> { <${requestUri}> <${requestStatus}> ?oldStatus . } }
         OPTIONAL { GRAPH <${cgMetaGraph}> { <${requestUri}> <${decisionTimestamp}> ?oldDecisionTimestamp . } }
       }
-    `, { touchedGraphs: [cgMetaGraph], source: 'join-rejected' });
+    `, { touchedGraphs: [cgMetaGraph], writtenGraphs: [cgMetaGraph], source: 'join-rejected' });
     await this.pruneTerminalJoinRequestHistory(contextGraphId);
     this.upsertContextGraphMember({
       contextGraphId,

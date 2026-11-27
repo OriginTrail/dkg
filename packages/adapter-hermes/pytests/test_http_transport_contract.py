@@ -90,6 +90,16 @@ def test_authenticated_json_query_preserves_scope_and_explicit_zero_trust(client
     }
 
 
+def test_query_semantics_reaches_the_wire(client, daemon):
+    daemon.reply({"result": {"type": "bindings", "bindings": []}, "semantics": "merged"})
+    result = client.query("SELECT ?s WHERE { ?s ?p ?o }", "team", view="verifiable-memory", semantics="merged")
+    assert result["semantics"] == "merged"
+    assert json.loads(daemon.requests[0].body) == {
+        "sparql": "SELECT ?s WHERE { ?s ?p ?o }", "contextGraphId": "team",
+        "view": "verifiable-memory", "semantics": "merged",
+    }
+
+
 def test_encoded_asset_name_and_publish_options_reach_the_wire(client, daemon):
     daemon.reply({"status": "confirmed", "kaId": "7"})
     result = client.publish_finalized_assertion("notes/one ?#é", "team", sub_graph_name="docs",

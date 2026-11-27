@@ -319,7 +319,9 @@ import { createRequestActor } from './routes/context.js';
 import type { AllowedHttpAuthentication } from '../auth.js';
 import { handleStatusRoutes } from './routes/status.js';
 import { handleBackpressureRoutes } from './routes/backpressure.js';
+import { handleViewSemanticsRoutes } from './routes/view-semantics.js';
 import { handleCpuProfileRoutes } from './routes/cpu-profile.js';
+import { handleReadGraphRoutes } from './routes/read-graphs.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
 import { handleOpenclawRoutes } from './routes/openclaw.js';
 import { handleHermesRoutes } from './routes/hermes.js';
@@ -335,6 +337,7 @@ import { handleQueryRoutes } from './routes/query.js';
 import { handleEntityRoutes } from './routes/entities.js';
 import { handleBoundedQueryRoutes } from './routes/bounded-query.js';
 import { handleCclRoutes } from './routes/ccl.js';
+import { handleSemanticRuntimeRoutes } from './routes/semantic-runtime.js';
 import { handleLocalAgentsRoutes } from './routes/local-agents.js';
 import { handleEpcisRoutes } from './routes/epcis.js';
 import { handlePcaRoutes } from './routes/pca.js';
@@ -392,7 +395,13 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
   await handleBackpressureRoutes(ctx);
   if (res.writableEnded) return;
 
+  await handleViewSemanticsRoutes(ctx);
+  if (res.writableEnded) return;
+
   await handleCpuProfileRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleReadGraphRoutes(ctx);
   if (res.writableEnded) return;
 
   await handleAgentChatRoutes(ctx);
@@ -440,6 +449,9 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
   if (res.writableEnded) return;
 
   await handleCclRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleSemanticRuntimeRoutes(ctx);
   if (res.writableEnded) return;
 
   await handleLocalAgentsRoutes(ctx);

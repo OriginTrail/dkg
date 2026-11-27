@@ -1,4 +1,6 @@
-# Agent shard timing baseline
+# Shard timing baselines
+
+## Agent
 
 `agent-shard-policy.json` owns lane configurations, shard topology, reserved
 overhead, and expected JUnit filenames for both the planner and refresher.
@@ -45,3 +47,57 @@ refresh tool accepts extracted XML or downloaded ZIPs, rejects duplicate or
 failed suites, and does not turn skipped-only tests into zero-cost weights.
 Review the diff and the estimated shard loads before committing it. Do not
 refresh the baseline from arbitrary PR-provided reports in a privileged job.
+
+## CLI and chain
+
+`cli.json` and `chain.json` weight the shards that `plan-vitest-shard.mjs`
+plans for the CLI and chain lanes. For every test file each records the median,
+over the successful runs in `sources`, of its Vitest file duration: the file
+task's `result.duration`, its hooks and tests without import. Vitest prints that
+number on the file's line in the job log and as the JUnit `testsuite` `time`.
+`perFileOverheadMs` is the median import (collection) time per file in those
+runs' Vitest summaries; transform time is cached across files, so it is mostly a
+per-shard cost and is left out. A median over several runs matters for the CLI,
+whose subprocess suites vary by up to two times between runners: the
+knowledge-asset smoke suite took 103 to 200 seconds in the November 2026 source
+runs.
+
+Unlike the agent baseline, skipped-only files are recorded at 0 ms. CI always
+skips them (`blazegraph-integration` and `publisher-findings.local` in the CLI),
+and the 60-second fallback would put two minutes of phantom load on CLI shards.
+New files still get the 60-second fallback until a refresh measures them.
+`estimatedBodyWeightsMs` holds reviewed weights for files that no source run has
+measured yet, passed as `--estimate test/NAME.test.ts=MS`. The planner treats
+them as known, and the refresher refuses an estimate for a file it measured, so
+the next refresh retires them. The current estimates are for the three suites
+split from `knowledge-asset-cli-smoke.test.ts`: each is the sum of its tests'
+median durations in the source runs.
+
+To refresh, put each recent successful run's shard job logs (push or merge
+queue) into a directory of its own. Logs carry the import summary and outlive the
+14-day JUnit artifacts:
+
+```sh
+RUN=RUN_ID
+mkdir -p REPORTS/$RUN
+for job in $(gh api "repos/OriginTrail/dkg/actions/runs/$RUN/jobs?per_page=100" --paginate \
+    --jq '.jobs[] | select(.name | test("^(Bura: cli|Tornado: chain) \\[")) | .id'); do
+  gh api --allow-escape-sequences "repos/OriginTrail/dkg/actions/jobs/$job/logs" > "REPORTS/$RUN/$job.log"
+done
+node scripts/ci/refresh-vitest-timings.mjs cli --output scripts/ci/timings/cli.json \
+  RUN_ID:FULL_COMMIT_SHA:REPORTS/RUN_ID ...
+node scripts/ci/refresh-vitest-timings.mjs chain --output scripts/ci/timings/chain.json \
+  RUN_ID:FULL_COMMIT_SHA:REPORTS/RUN_ID ...
+node --test scripts/lib/__tests__/vitest-shards.test.mjs scripts/lib/__tests__/vitest-timing-refresh.test.mjs
+```
+
+The JUnit artifacts (`gh run download RUN_ID --pattern 'vitest-cli-*'` or
+`--pattern 'vitest-tornado-core-chain-*'`) give the same per-file numbers but no
+import time, so pass `--per-file-overhead-ms` with them. Every run must provide
+each shard report (`cli-1.xml` to `cli-N.xml`, named in the log's `JUNIT report
+written to` line) exactly once, with N taken from `scripts/lib/ci-lanes.mjs`;
+pass `--shards N` for runs of another topology. The refresher rejects failed or
+incomplete shards, files that ran in two shards and unsafe paths. It skips other
+packages' reports and drops measured files that no longer exist. Review the
+estimated shard loads (`node scripts/ci/plan-vitest-shard.mjs cli 1` and so on)
+before committing.

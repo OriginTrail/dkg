@@ -3,28 +3,19 @@
 /* ----- Dashboard "Publishing discount" row (B3) ----- */
 .v10-ws-pca {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 12px;
-  padding-top: 10px;
+  align-items: baseline;
+  gap: var(--space-8);
+  margin-top: var(--space-12);
+  padding-top: var(--space-12);
   border-top: 1px solid var(--border-subtle);
   flex-wrap: wrap;
 }
-.v10-ws-pca-label { font-size: var(--font-size-caption); color: var(--text-tertiary); }
-.v10-ws-pca-value { font-size: var(--font-size-label); font-weight: 600; color: var(--text-secondary); }
+.v10-ws-pca-label { font-size: var(--fs-label); color: var(--text-tertiary); }
+.v10-ws-pca-value { font-size: var(--fs-body); font-weight: 600; color: var(--text-secondary); }
 .v10-ws-pca-value[data-covered='true'] { color: var(--text-success); }
-.v10-ws-pca-cta {
-  margin-left: auto;
-  border: 1px solid var(--border-default);
-  background: var(--bg-surface);
-  color: var(--text-link);
-  font-size: var(--font-size-caption);
-  padding: 4px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-}
-.v10-ws-pca-cta:hover { background: var(--bg-hover); }
+.v10-ws-pca-cta { margin-left: auto; }
 
 /* ----- Settings card line (B3) ----- */
-.v10-pca-settings-line { font-size: var(--font-size-label); color: var(--text-secondary); line-height: 1.5; margin: 0 0 12px; }
+.v10-pca-settings-line { font-size: var(--fs-control); color: var(--text-secondary); line-height: var(--lh-body); margin: 0 0 var(--space-12); }
+.v10-pca-settings-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); }
 

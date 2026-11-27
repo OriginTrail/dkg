@@ -12,7 +12,7 @@ vi.mock('../src/ui/components/Shell/PanelLeft.js', () => ({ PanelLeft: () => Rea
 vi.mock('../src/ui/components/Shell/PanelCenter.js', () => ({ PanelCenter: () => React.createElement('main', { 'data-operational': true }, 'Example balances and spending') }));
 vi.mock('../src/ui/components/Shell/PanelBottom.js', () => ({ PanelBottom: () => React.createElement('footer', { 'data-operational': true }, 'Example activity') }));
 vi.mock('../src/ui/components/Shell/PanelRight.js', () => ({ PanelRight: () => React.createElement('aside', { 'data-operational': true }, 'Integrations ready') }));
-vi.mock('../src/ui/pages/Network.js', () => ({ NetworkPage: () => React.createElement('section', { 'data-operational': true }, 'Example topology') }));
+vi.mock('../src/ui/pages/Network.js', () => ({ NetworkConnections: () => React.createElement('section', { 'data-operational': true }, 'Example topology') }));
 
 let root: Root | null = null;
 beforeEach(() => {

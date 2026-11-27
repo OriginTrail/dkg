@@ -10,8 +10,8 @@ test.describe('Create Context Graph Modal (rc.12)', () => {
     await expect(createProjectModal.submitBtn).not.toHaveText(/Loading agent|Agent unavailable/, { timeout: 15_000 });
   });
 
-  test('modal title is "Create New Context Graph"', async ({ createProjectModal }) => {
-    await expect(createProjectModal.title).toHaveText('Create New Context Graph');
+  test('modal title is "Create new Context Graph"', async ({ createProjectModal }) => {
+    await expect(createProjectModal.title).toHaveText('Create new context graph');
   });
 
   test('name input is visible and accepts text', async ({ createProjectModal }) => {
@@ -73,10 +73,10 @@ test.describe('Create Context Graph Modal (rc.12)', () => {
   test('submit button text is "Create Context Graph"', async ({ createProjectModal }) => {
     await createProjectModal.fill('My Graph');
     const text = await createProjectModal.getSubmitText();
-    expect(text?.trim()).toBe('Create Context Graph');
+    expect(text?.trim()).toBe('Create context graph');
   });
 
-  test('modal subtitle describes context graph purpose', async ({ page }) => {
+  test('modal subtitle describes Context Graph purpose', async ({ page }) => {
     const subtitle = page.locator('.v10-modal-subtitle');
     await expect(subtitle).toBeVisible();
     expect(await subtitle.textContent()).toContain('structured memory');
@@ -96,9 +96,9 @@ test.describe('Create Context Graph Modal (rc.12)', () => {
     expect(await createProjectModal.isAdvancedVisible()).toBe(false);
   });
 
-  test('Advanced settings contains Consensus Quorum dropdown (disabled)', async ({ createProjectModal, page }) => {
+  test('Advanced settings contains Consensus quorum dropdown (disabled)', async ({ createProjectModal, page }) => {
     await createProjectModal.toggleAdvanced();
-    const quorum = page.locator('.v10-form-advanced-body .v10-form-group').filter({ hasText: 'Consensus Quorum' });
+    const quorum = page.locator('.v10-form-advanced-body .v10-form-group').filter({ hasText: 'Consensus quorum' });
     await expect(quorum).toBeVisible();
     expect(await quorum.locator('select').isDisabled()).toBe(true);
   });

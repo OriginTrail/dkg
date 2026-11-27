@@ -77,10 +77,6 @@ export class CreateProjectModal {
     return this.page.locator(sel.modal.formRadio).count();
   }
 
-  async hasLayerPreview() {
-    return this.page.locator(sel.modal.layerPreview).isVisible();
-  }
-
   async hasFirstProjectTip() {
     return this.tip.isVisible();
   }

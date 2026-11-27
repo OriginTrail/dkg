@@ -30,7 +30,7 @@ import {
   getMetrics,
   computePublishACKDigest,
   computeUpdateACKDigest,
-  assertSafeIri,
+  assertSafeIri, isSparqlTermValidationError,
   STORAGE_ACK_DECLINE_CODES,
   DEFAULT_SEND_TIMEOUT_MS,
   boundedDeclineCodeLabel,
@@ -52,6 +52,7 @@ import {
   computeFlatKCMerkleLeafCountV10,
 } from './merkle.js';
 import { parseSimpleNQuads } from './publish-handler.js';
+import { assertNoReceivedProtocolMetadata } from './protocol-metadata.js';
 import { replaceCatalogQuads } from './catalog-persistence.js';
 import { ACKCommitSequence } from './ack-commit-sequence.js';
 import { GraphScopedACKPersistence, assertPersistQuadTermsSafe, type GraphScopedACKPersistenceRequest, type GraphScopedAckCopy, type GraphScopedACKPersistenceResult, type StorageAckPriorVersionRequest } from './graph-scoped-ack-persistence.js';
@@ -888,10 +889,10 @@ export class StorageACKHandler {
    * them and get a discriminated result they must narrow before proceeding.
    *
    * CONTRACT — what stays OUTSIDE these wrappers:
-   *   - `assertSafeIri(...)` on graph/entity IRIs. An unsafe IRI is a
-   *     malformed request (stream reset), NOT a store outage; callers run it
-   *     before invoking the persist helpers so an IRI-injection attempt still
-   *     throws and resets rather than being demoted to a transient decline.
+   *   - `assertSafeIri(...)` on graph/entity IRIs. An unsafe IRI or term is a
+   *     malformed request (stream reset), NOT a store outage; callers check
+   *     before invoking the persist helpers, and a term the store refuses
+   *     (SparqlTermValidationError) is rethrown, never a transient decline.
    *   - `parseSimpleNQuads` / merkle / catalog verification. Only the actual
    *     `store.*` calls (and `loadSWMQuads`, whose internal `store.query`
    *     is tagged `StoreUnavailableError`) run inside the wrapper.
@@ -910,7 +911,7 @@ export class StorageACKHandler {
       const value = await this.runWhileLive(op, signal);
       return { ok: true, value };
     } catch (err) {
-      if (isACKHandlerDeadlineAbort(err)) throw err;
+      if (isACKHandlerDeadlineAbort(err) || isSparqlTermValidationError(err)) throw err;
       signal?.throwIfAborted();
       return { ok: false, decline: this.declineTemporarilyUnavailable(cgId, 'store unavailable', err) };
     }
@@ -1665,7 +1666,7 @@ export class StorageACKHandler {
 
       // Verify merkle root IN-MEMORY before persisting anything to SWM.
       // This prevents untrusted peers from injecting arbitrary quads.
-      const parsed = parseSimpleNQuads(new TextDecoder().decode(intent.stagingQuads));
+      const parsed = assertNoReceivedProtocolMetadata(parseSimpleNQuads(new TextDecoder().decode(intent.stagingQuads)));
       if (parsed.length === 0) {
         throw new Error('stagingQuads present but contained no parseable N-Quads');
       }
@@ -1681,12 +1682,11 @@ export class StorageACKHandler {
       // check below, not by counting subjects.
       //
       // We deliberately do NOT require a count bijection between `rootEntities`
-      // and the payload's root subjects. `rootEntities` is a *selection*, not a
-      // complete enumeration: in the SWM-fallback branch it is the entity filter
-      // passed to `loadSWMQuads`, so a caller may legitimately declare a subset
-      // of the subjects present. The per-entity presence loop below still pins
-      // the one direction that matters for a receiver — every entity the caller
-      // names must actually be in the payload (declared ⊆ actual).
+      // and the payload's root subjects. `rootEntities` is a *selection*: in the
+      // SWM-fallback branch it is the entity filter passed to `loadSWMQuads`, so
+      // a caller may declare a subset of the subjects present. The presence
+      // loop below pins the one direction that matters for a receiver: every
+      // entity the caller names must be in the payload (declared ⊆ actual).
       const uniqueSubjects = new Set(parsed.map(q => q.subject));
       const rootSubjects = new Set(
         [...uniqueSubjects].filter(s => !s.includes('/.well-known/genid/')),
@@ -2260,7 +2260,7 @@ export class StorageACKHandler {
             `${STORAGE_ACK_MAX_STAGING_BYTES} byte limit — rejecting request`,
           );
         }
-        publicQuads = parseSimpleNQuads(new TextDecoder().decode(intent.stagingQuads));
+        publicQuads = assertNoReceivedProtocolMetadata(parseSimpleNQuads(new TextDecoder().decode(intent.stagingQuads)));
         inlineByteLength = intent.stagingQuads.length;
       } else if (graphUpdate.publicTripleCount === 0) {
         publicQuads = [];
@@ -2358,7 +2358,7 @@ export class StorageACKHandler {
           `${STORAGE_ACK_MAX_STAGING_BYTES} byte limit — rejecting request`,
         );
       }
-      const parsed = parseSimpleNQuads(new TextDecoder().decode(intent.stagingQuads));
+      const parsed = assertNoReceivedProtocolMetadata(parseSimpleNQuads(new TextDecoder().decode(intent.stagingQuads)));
       if (parsed.length === 0) {
         throw new Error('UpdateStorageACK: stagingQuads present but contained no parseable N-Quads');
       }

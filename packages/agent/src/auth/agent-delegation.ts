@@ -1,3 +1,4 @@
+import { AGENT_DELEGATION_ABI_TYPES, agentDelegationAbiValues } from '@origintrail-official/dkg-core/graph-computer-protocol';
 import { ethers } from 'ethers';
 
 /**
@@ -115,16 +116,7 @@ export function computeWorkspaceEncryptionKeysAttestationDigest(
  */
 export function computeDelegationDigest(payload: AgentDelegationPayload): Uint8Array {
   const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
-    ['string', 'string', 'address', 'string', 'string', 'uint256', 'uint256'],
-    [
-      'dkg.agent-delegation.v2',
-      payload.scope,
-      payload.agentAddress.toLowerCase(),
-      payload.delegateePeerId ?? '',
-      payload.delegateeOpKey ? payload.delegateeOpKey.toLowerCase() : '',
-      Math.trunc(payload.issuedAtMs),
-      Math.trunc(payload.expiresAtMs ?? 0),
-    ],
+    AGENT_DELEGATION_ABI_TYPES, agentDelegationAbiValues(payload),
   );
   return ethers.getBytes(ethers.keccak256(encoded));
 }

@@ -162,10 +162,10 @@ describe('ConvictionOverview — create→self-coverage wiring', () => {
     }));
 
     const { container, unmount } = await render(React.createElement(ConvictionOverview));
-    await waitForText(container, 'wallet-managed');
+    await waitForText(container, 'Your wallet');
 
-    const card = container.querySelector('[data-testid="pca-account-card"][data-owner-mode="wallet"]');
-    expect(card?.textContent).toContain('PCA #7');
+    const card = container.querySelector('[data-testid="pca-account-row"][data-owner-mode="wallet"]');
+    expect(card?.textContent).toContain('#7');
     expect(container.querySelector('[data-testid="pca-discovered-strip"]')).toBeNull();
     await unmount();
   });

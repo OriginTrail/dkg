@@ -1,5 +1,6 @@
 import { exactRecoveryActionOutcome } from './sync/durable-recovery-action.js';
 import { runGraphOwnedDurableRecovery, type AgentGraphOwnedRecoveryRequest } from './durable-recovery-owned-round.js';
+import { installReadGraphWorkingMemoryIdentity } from './read-graph-view-source.js';
 // SPDX-License-Identifier: Apache-2.0
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 import { isCommittedSubscription, waitForSubscriptionActivation, type OwnedSubscriptionActivation } from './context-graph-subscription-activation-state.js';
@@ -58,14 +59,14 @@ import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate
 import { ProtocolRouter, GossipSubManager, DKGEvent,
   registerExperimentalExactBatchResponder,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
+  PROTOCOL_ACCESS, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_NETWORK_IDENTITY, advertisesSyncProtocol,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceMetaGraphUri,
   contextGraphMetaUri,
   deriveCuratorDidFromCgId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
-  validateSubGraphName, createOperationContext, isSafeIri,
+  validateSubGraphName, createOperationContext, isSafeIri, sparqlIri,
   QuietRetryableHandlerError, type OperationContext,
   InMemoryMessageIdempotencyStore,
   InMemoryProtocolOutboxStore,
@@ -1671,6 +1672,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // reliance on SPARQL result ordering. Then settle the default agent once.
     await this.loadAgentsFromStore();
     await this.reconcileDefaultAgent();
+    // Read graphs map working-memory drafts to agents with the node's own rule.
+    await installReadGraphWorkingMemoryIdentity(this.store, { defaultAgentAddress: this.defaultAgentAddress, peerId: this.peerId });
 
     const network = new LibP2PNetwork(this.node);
     // Local helper: race a lookup against an optional AbortSignal so
@@ -1869,9 +1872,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return accessHandler.handler(data, peerIdObj);
     });
 
+    // The legacy publish protocol (/dkg/10.0.0/publish) is not served. No node
+    // has sent on it since publishing moved to the V10 lifecycle and
+    // StorageACK, so a peer that asks for it is told the protocol is not
+    // supported. The handler stays for what it keeps locally: tentative
+    // publishes journaled by an earlier version are restored, so the chain
+    // poller can still confirm them, and otherwise they expire and their data
+    // is removed.
     const journal = this.config.dataDir ? new PublishJournal(this.config.dataDir) : undefined;
     const publishHandler = new PublishHandler(this.store, this.eventBus, { journal });
-    this.router.register(PROTOCOL_PUBLISH, publishHandler.handler);
     if (journal) {
       try {
         await publishHandler.restorePendingPublishes();
@@ -2204,13 +2213,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         agentPrivateKey: verifySignerKey,
         agentAddress: verifyWallet.address,
         getBatchMerkleRoot: async (cgId: string, batchId: bigint) => {
-          const metaGraph = contextGraphMetaGraphUri(cgId);
+          const metaGraph = sparqlIri(contextGraphMetaGraphUri(cgId));
           const namespaces = ['http://dkg.io/ontology/', 'https://dkg.network/ontology#'];
           // Try typed literal first, fallback to untyped for backward compat.
           for (const ns of namespaces) {
             for (const literal of [`"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${batchId}"`]) {
               const result = await this.store.query(
-                `SELECT ?root WHERE { GRAPH <${metaGraph}> { ?kc <${ns}merkleRoot> ?root . ?kc <${ns}batchId> ${literal} } } LIMIT 1`,
+                `SELECT ?root WHERE { GRAPH ${metaGraph} { ?kc <${ns}merkleRoot> ?root . ?kc <${ns}batchId> ${literal} } } LIMIT 1`,
                 { source: 'agent.verifyProposal.batchMerkleRoot' },
               );
               if (result.type === 'bindings' && result.bindings.length > 0) {
@@ -2228,6 +2237,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         getContextGraphIdOnChain: async (cgId: string) => {
           const onChainId = await this.getContextGraphOnChainId(cgId);
           return onChainId ? BigInt(onChainId) : null;
+        },
+        getSigningDomain: async () => {
+          const [chainId, contractAddress] = await Promise.all([
+            this.chain.getEvmChainId(),
+            this.chain.getKnowledgeAssetsLifecycleAddress(),
+          ]);
+          return { chainId, contractAddress };
         },
       });
       // rc.9 PR-11: migrated onto the Universal Messenger substrate

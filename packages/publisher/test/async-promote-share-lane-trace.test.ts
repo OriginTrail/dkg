@@ -23,22 +23,23 @@ const LABEL_MAPPING: Readonly<Record<string, string>> = {
  * (`list`) and then the payloads of its page (`list.payloads`): the workload's `list` was one read and is now two (+1), its two
  * `listPage` pages are two reads each (+4), and `listForSelector` is one `selectorLookup` (+1). The post-commit sweep finds its one
  * candidate (`recoverPostCommit`, as before) and then decides it in a hold that reads the row again by subject
- * (`recoverPostCommit.payloads`, +1). Every other count is the pre-P4 capture.
+ * (`recoverPostCommit.payloads`, +1). A bound job's commit marker no longer flushes on its own (`commitMarkerDurability`), so
+ * the atomic branch's inline `promoteStarted` makes one flush fewer (-1). Every other count is the pre-P4 capture.
  */
 const BASE = {
   atomic: {
-    total: 94,
+    total: 93,
     trace: {
       'background|publisher.queueUsage': 1,
       'normal|(unlabelled createGraph)': 1,
-      'normal|(unlabelled flush)': 23,
+      'normal|(unlabelled flush)': 22,
       'normal|publisher.asyncPromote': 67,
       'normal|test.share': 2,
     },
     shape: {
       'createGraph|-': 1,
       'deleteByPatternWithoutCount|publisher.asyncPromote.deleteJob': 1,
-      'flush|-': 23,
+      'flush|-': 22,
       'insert|test.share.dataPlane': 1,
       'query|publisher.asyncPromote.claimNext.candidates': 5,
       'query|publisher.asyncPromote.clearTerminalJob': 2,

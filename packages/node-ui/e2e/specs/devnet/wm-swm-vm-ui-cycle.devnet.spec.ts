@@ -173,7 +173,7 @@ async function openProjectTab(page: Page, name: string) {
 }
 
 async function openImportModal(page: Page) {
-  const importBtn = page.locator('button[aria-label="Import into Context Graph"]');
+  const importBtn = page.locator('button[aria-label="Import into context graph"]');
   await expect(importBtn).toBeVisible({ timeout: 10_000 });
   await importBtn.click();
 }

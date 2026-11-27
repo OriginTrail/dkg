@@ -62,7 +62,11 @@ describe('marketplace Operate', () => {
     expect(byTestId(c, `mkt-ask-${FIXTURE_IDS.qwen7b}`)?.textContent).toContain('next epoch: 0.32 µTRAC');
     expect(byTestId(c, `mkt-ask-${FIXTURE_IDS.mistral24b}`)?.getAttribute('data-connector')).toBe('down');
     expect(byTestId(c, 'mkt-ledger-counts')?.textContent).toBe('412 served · 380 sent · 360 landed · 2 refused · 0 missed');
-    expect(byTestId(c, 'mkt-ledger')?.textContent).toContain('proved this epoch ✓');
+    // Profile, sharding table, stake and proof each draw a check icon, named for screen readers.
+    expect(byTestId(c, 'mkt-operate-gate')?.querySelectorAll('svg[aria-label="yes"]').length).toBe(4);
+    expect(byTestId(c, 'mkt-operate-gate')?.textContent).toBe('Core nodeProfileIn the sharding tableStake 50,000 of 50,000 TRAC minimumProved this epoch');
+    expect(byTestId(c, 'mkt-ledger')?.textContent).not.toMatch(/[✓✗]/);
+    expect(byTestId(c, 'mkt-ledger')?.textContent).toContain('Proved this epoch');
     expect(byTestId(c, 'mkt-ledger')?.textContent).toContain('the epoch\'s pool so far 12.5 TRAC');
     expect(byTestId(c, 'mkt-batches')?.textContent).toContain('120 receipts');
     expect(byTestId(c, 'mkt-ended')?.textContent).toContain('gross 1.8 TRAC');

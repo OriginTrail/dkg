@@ -23,7 +23,7 @@ export function localAgentToolbarLabel(
     return `${integration.name} is connecting…`;
   }
   if (integration.status === 'degraded') {
-    return `${integration.name} degraded`;
+    return `${integration.name} partly available`;
   }
   return `${integration.name} is unavailable`;
 }
@@ -154,7 +154,7 @@ export function AgentTabMenu(props: {
       {open && (
         <div
           ref={popoverRef}
-          className={`v10-agent-tab-menu-popover${alignRight ? ' align-right' : ''}`}
+          className={`v10-agent-tab-menu-popover ds-card-nested${alignRight ? ' align-right' : ''}`}
           role="menu"
           onKeyDown={onPopoverKeyDown}
         >

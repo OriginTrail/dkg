@@ -305,8 +305,20 @@ describe('term-canon oracle: fuzz-hardened edge classes (#1386)', () => {
     ]);
   });
 
-  it('datatype IRI \\u escapes are decoded (oxigraph), affecting datatype matching', async () => {
-    await expectMatchesOxigraph([`"x"^^<http://example.org/\\u0041>`]);
+  // Oxigraph decodes a \u escape inside a datatype IRI on an N-Quads load, but
+  // the store adapters refuse an IRI holding a backslash before anything is
+  // loaded. The leaf of the escaped form still matches the decoded one.
+  it('datatype IRI \\u escapes canonicalize to the decoded IRI, and the store refuses the escaped form', async () => {
+    const escaped = `"x"^^<http://example.org/\\u0041>`;
+    expect(canonicalizeObjectTermForHash(escaped)).toBe(canonicalizeObjectTermForHash('"x"^^<http://example.org/A>'));
+    const store = new OxigraphStore();
+    try {
+      await expect(store.insert([{ subject: S, predicate: 'urn:p#0', object: escaped, graph: G }]))
+        .rejects.toMatchObject({ code: 'SPARQL_TERM_INVALID' });
+      expect(await store.countQuads()).toBe(0);
+    } finally {
+      await store.close();
+    }
   });
 
   it('a \\U escape beyond U+10FFFF never throws (the leaf computation must not crash)', () => {

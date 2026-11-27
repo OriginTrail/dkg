@@ -11,6 +11,7 @@ import type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryRe
 
 import type { KnowledgeAssetUpdateIdentity } from '@origintrail-official/dkg-chain';
 import { orderVmRecoveryCandidates } from './vm-recovery-candidate-order.js';
+import { readLatestMerkleRootAndPublisher } from './ka-latest-root-and-publisher.js';
 import {
   isCanonicalAuthoritativeContextGraphId, localContextGraphIdMatchesCommittedNameHash,
 } from './context-graph-binding-state.js';
@@ -273,6 +274,7 @@ import {
   type ReconcilePassTimings,
 } from './chain-reconciler.js';
 import {
+  ContextGraphNameAbsentError,
   ContextGraphOnChainIdUnresolvedError,
   VmReconcileUnavailableError,
   VmReconcileQueueClosedError,
@@ -4268,6 +4270,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           maxForegroundBurst: DKGAgentBase.VM_RECONCILE_MAX_FOREGROUND_BURST,
           discoveryBatchSize: DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE,
           periodicBoundBatchSize: DKGAgentBase.VM_RECONCILE_PERIODIC_BOUND_BATCH_SIZE,
+          absentTargetBackoff: { baseMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS },
         },
       );
       this.vmReconcileScheduling = scheduling;
@@ -4612,7 +4615,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       );
       if (finalized.kind === 'absent') {
         if (acceptedUnregistered) throw new ContextGraphNotFoundError(localCgId);
-        throw new ContextGraphOnChainIdUnresolvedError(localCgId);
+        throw new ContextGraphNameAbsentError(localCgId);
       }
       if (finalized.kind === 'legacy-current' && acceptedUnregistered) {
         throw new ContextGraphNotFoundError(localCgId);
@@ -5298,12 +5301,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // index dirty and forcing a full store scan on the next enumeration. Requiring
       // it (not optional) closes the escape hatch: a future `update(sparql)` here that
       // forgot to declare its graph would silently fall back to dirtying the index.
+      // Each update writes exactly the graphs it names, so they are also its written graphs.
       const update = async (sparql: string, touchedGraphs: readonly string[]): Promise<void> => {
         const updated = await tryUpdateWithTouchedGraphs(
           this.store,
           sparql,
           touchedGraphs,
-          rsHealStoreOptions('materialize', signal),
+          { ...rsHealStoreOptions('materialize', signal), writtenGraphs: touchedGraphs },
         );
         if (!updated) throw new Error('RS heal requires server-side update() support');
       };
@@ -7728,12 +7732,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
         }
       }
 
-      merkleRoot = await this.chain.getLatestMerkleRoot!(kaId);
+      // One batched request for both views, not one each (an ordinal that
+      // stays pending reads them again on every sweep).
+      const latest = await readLatestMerkleRootAndPublisher(this.chain, kaId);
+      merkleRoot = latest.merkleRoot;
+      publisherAddress = latest.publisherAddress;
       cacheKey = this.vmReconcileCacheKey(localCgId, ual, merkleRoot);
-
-      publisherAddress = (this.chain.getLatestMerkleRootPublisher
-        ? await this.chain.getLatestMerkleRootPublisher(kaId)
-        : '') ?? '';
     } catch (err) {
       return unresolvable(err);
     }

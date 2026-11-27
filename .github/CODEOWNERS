@@ -63,3 +63,9 @@ packages/cli/scripts/                     @branarakic @Jurij89 @zsculac
 # the first time around.
 docs/security/                            @branarakic @Jurij89 @zsculac
 SECURITY.md                               @branarakic @Jurij89 @zsculac
+
+# ----------------------------------------------------------------------
+# Node UI design system: the rules, tokens and shared components.
+packages/node-ui/DESIGN.md                @anabevc
+packages/node-ui/src/ui/styles/00-theme.css @anabevc
+packages/node-ui/src/ui/components/ds/    @anabevc

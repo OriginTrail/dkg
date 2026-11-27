@@ -198,12 +198,13 @@ you start 10.0.26 that you installed by hand, run
 
 ## Node.js security releases
 
-Node.js 22.23.4, 24.22.1 and 26.12.1, released on 21 October 2026, fix
-CVE-2026-111497, an out-of-bounds write in the Brotli decoder that Node.js
-bundles. Upgrade Node.js on every host that runs a node to one of these
-releases or a later one on the same line. The 23 and 25 lines get no fix:
-move to 22, 24 or 26. A running node keeps the Node.js it started with, so
-restart it after the upgrade.
+Run every node on Node.js 22.23.5, 24.22.3 or 26.13.1, or a later release on
+the same line. These are the
+[Node.js security releases of 11 November 2026](https://nodejs.org/en/blog/vulnerability/november-2026-security-releases),
+and they include the fixes of the earlier security releases on their line.
+`dkg start` and `dkg doctor` warn when a node runs an older release. The 23
+and 25 lines get no fixes: move to 22, 24 or 26. A running node keeps the
+Node.js it started with, so restart it after the upgrade.
 
 On a host that installs Node.js from NodeSource packages:
 
@@ -217,5 +218,8 @@ Then restart the node: `dkg stop` and `dkg start`, or restart the service that
 runs it. `dkg status` shows the Node.js release the running daemon uses on its
 `Runtime:` line.
 
-From 10.0.26 a node also refuses Brotli-encoded responses on its outbound HTTP
-requests. That is defence in depth and does not replace the upgrade.
+The earlier Node.js security releases of 21 October 2026 (22.23.4, 24.22.1 and
+26.12.1) fixed CVE-2026-111497, an out-of-bounds write in the Brotli decoder
+that Node.js bundles. From 10.0.26 a node also refuses Brotli-encoded responses
+on its outbound HTTP requests. That is defence in depth and does not replace
+the upgrade.

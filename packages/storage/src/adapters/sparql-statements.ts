@@ -12,8 +12,12 @@ import type { AtomicAssetReplacement } from '../atomic-asset-group.js';
  * (`sparql-term-observer.ts`) the moment it renders it: exactly once, and
  * before the adapter admits or dispatches anything. In reject mode the term
  * is reported, then the error is thrown. The same holds for
- * {@link SparqlStatements.checkIris}, which checks the IRIs of the writes
- * whose terms these builders do not render, one method per write.
+ * {@link SparqlStatements.checkIris}, which checks the terms of the writes
+ * these builders do not render, one method per write.
+ *
+ * Each kind of statement renders with its own policy
+ * ({@link ADAPTER_SPARQL_TERM_POLICIES}): queries observe, inserts and the
+ * write checks reject, deletes reject what the grammar refuses.
  */
 import type { SparqlTermPosition } from '@origintrail-official/dkg-core';
 import type { GraphWriteScope } from '../graph-write-gen.js';
@@ -22,7 +26,8 @@ import type { Quad } from '../triple-store.js';
 import { renderBlankNodeSafeDelete } from './blank-node-safe-delete.js';
 import { reportInvalidSparqlTerm } from './sparql-term-observer.js';
 import {
-  ADAPTER_SPARQL_TERM_POLICY,
+  ADAPTER_SPARQL_TERM_POLICIES,
+  type AdapterSparqlTermPolicies,
   type SparqlTermPolicy,
   type SparqlTermRenderer,
   type SparqlTermSite,
@@ -30,14 +35,19 @@ import {
 
 export type SparqlQueryOperation = 'hasGraph' | 'countQuads';
 /**
- * The absolute-IRI check for each write whose terms no builder here renders:
- * an N-Quads insert, or an atomic-replace or RFC-64 update, whose own builder
+ * The term check for each write whose terms no builder here renders: an
+ * N-Quads insert, or an atomic-replace or RFC-64 update, whose own builder
  * checks the rest of the syntax. Each takes the write's own arguments, labels
  * its own operation, and checks every IRI the write carries, a literal's
  * datatype included. It builds nothing, so the write is unchanged.
  */
 export interface WriteIriChecks {
   replaceAssetGroup(assets: readonly AtomicAssetReplacement[]): void;
+  /**
+   * An N-Quads load has no grammar check of its own, so every term is
+   * rendered as {@link SparqlStatements.insertData} renders it, and the
+   * rendering is discarded.
+   */
   insert(quads: readonly Quad[]): void;
   replaceGraph(graphUri: string, quads: readonly Quad[]): void;
   replaceGraphAndSubject(
@@ -103,14 +113,22 @@ export interface SparqlStatements {
 type SparqlUpdateBody = Omit<SparqlUpdatePlan, 'operation'>;
 type SparqlQueryBody = Omit<SparqlQueryPlan, 'operation'>;
 
-/** The adapters' statement factory (see the module comment for its reporting invariant). */
+/**
+ * The adapters' statement factory (see the module comment for its reporting
+ * invariant). `terms` is one policy for every statement, or one per kind.
+ */
 export function sparqlStatements(
   adapter: SparqlTermSite['adapter'],
-  terms: SparqlTermPolicy = ADAPTER_SPARQL_TERM_POLICY,
+  terms: SparqlTermPolicy | AdapterSparqlTermPolicies = ADAPTER_SPARQL_TERM_POLICIES,
 ): SparqlStatements {
+  const policies: AdapterSparqlTermPolicies = 'renderer' in terms
+    ? { query: terms, write: terms, delete: terms }
+    : terms;
   /** A renderer for one statement at `operation` that reports each invalid term. */
-  const renderer = (operation: SparqlTermSite['operation']): SparqlTermRenderer =>
-    terms.renderer({ adapter, operation }, reportInvalidSparqlTerm);
+  const renderer = (
+    policy: SparqlTermPolicy,
+    operation: SparqlTermSite['operation'],
+  ): SparqlTermRenderer => policy.renderer({ adapter, operation }, reportInvalidSparqlTerm);
 
   // The plan's operation comes from the same value that labelled its terms,
   // so the two cannot diverge.
@@ -126,7 +144,8 @@ export function sparqlStatements(
     operation: O,
     render: (renderer: SparqlTermRenderer) => SparqlUpdateBody | null,
   ): SparqlUpdatePlan<O> | null {
-    const body = render(renderer(operation));
+    const policy = operation === 'insert' ? policies.write : policies.delete;
+    const body = render(renderer(policy, operation));
     return body === null ? null : { operation, ...body };
   }
 
@@ -134,7 +153,7 @@ export function sparqlStatements(
     operation: O,
     render: (renderer: SparqlTermRenderer) => SparqlQueryBody,
   ): SparqlQueryPlan<O> {
-    return { operation, ...render(renderer(operation)) };
+    return { operation, ...render(renderer(policies.query, operation)) };
   }
   const graphs = (...graphUris: string[]): GraphWriteScope => ({ kind: 'graphs', graphs: graphUris });
 
@@ -148,7 +167,7 @@ export function sparqlStatements(
     quads: readonly Quad[],
     standalone: readonly Readonly<{ term: string; position: SparqlTermPosition }>[] = [],
   ): void {
-    const render = renderer(operation);
+    const render = renderer(policies.write, operation);
     const graphUris = new Set<string>();
     for (const { term, position } of standalone) {
       if (position === 'graph') graphUris.add(term);
@@ -256,7 +275,17 @@ export function sparqlStatements(
           ]);
         }
       },
-      insert: (quads) => checkIris('insert', quads),
+      insert: (quads) => {
+        const render = renderer(policies.write, 'insert');
+        const graphUris = new Set<string>();
+        for (const q of quads) {
+          render.rdf(q.subject, 'subject', 'allow');
+          render.iri(q.predicate, 'predicate');
+          render.rdf(q.object, 'object', 'allow');
+          if (q.graph) graphUris.add(q.graph);
+        }
+        for (const graphUri of graphUris) render.iri(graphUri, 'graph');
+      },
       replaceGraph: (graphUri, quads) =>
         checkIris('replaceGraph', quads, [{ term: graphUri, position: 'graph' }]),
       replaceGraphAndSubject: (graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads) =>

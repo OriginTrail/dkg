@@ -240,6 +240,21 @@ function addConfirmedPlacement(path: string, kaUal = confirmedUal): void {
 }
 
 /** The versions of the repair rows and how many failure diagnostics remain. */
+/** Whether another process holds the inventory lease of a data directory. */
+function leaseHeld(dataDir: string): boolean {
+  const lease = new DatabaseSync(join(dataDir, 'rfc64-sync', 'inventory-v1.lease.sqlite3'));
+  try {
+    lease.exec('PRAGMA busy_timeout = 0');
+    lease.exec('BEGIN EXCLUSIVE');
+    lease.exec('ROLLBACK');
+    return false;
+  } catch {
+    return true;
+  } finally {
+    lease.close();
+  }
+}
+
 function repairVersionsAndFailures(path: string): { versions: number[]; failures: number } {
   const database = new DatabaseSync(path, { readOnly: true });
   try {
@@ -584,6 +599,48 @@ describe('RFC-64 inventory rollback', () => {
     expect(prepared).toMatchObject({ outcome: 'downgraded', toVersion: 5, removedConfirmedCatalogPlacements: [confirmedUal] });
     expectOpensAsV5(databasePath(dataDir));
     expect(repairVersionsAndFailures(databasePath(dataDir))).toEqual({ versions: [1], failures: 0 });
+  });
+
+  it('runs the work before any change under the lease, and changes nothing when that work fails', async () => {
+    const dataDir = dataDirectory();
+    await writeV6(dataDir);
+    addConfirmedPlacement(databasePath(dataDir));
+    const seen: Array<{ leased: boolean; rows: ReturnType<typeof repairVersionsAndFailures> }> = [];
+    const failure = new Error('the triple store cannot be opened');
+    const failing = async () => {
+      seen.push({ leased: leaseHeld(dataDir), rows: repairVersionsAndFailures(databasePath(dataDir)) });
+      throw failure;
+    };
+
+    const error = await prepareRfc64InventoryForRollbackV1(dataDir, 5, { removeConfirmedCatalogPlacements: true, beforeChange: failing })
+      .then(() => undefined, (caught: unknown) => caught);
+    expect(error).toBe(failure);
+    expect(seen).toEqual([{ leased: true, rows: { versions: [1, 2], failures: 2 } }]);
+    expect(repairVersionsAndFailures(databasePath(dataDir))).toEqual({ versions: [1, 2], failures: 2 });
+    expect(headerUserVersion(databasePath(dataDir))).toBe(INVENTORY_V1_USER_VERSION);
+    expect(leaseHeld(dataDir)).toBe(false);
+
+    let runs = 0;
+    const prepared = await prepareRfc64InventoryForRollbackV1(
+      dataDir, 5, { removeConfirmedCatalogPlacements: true, beforeChange: async () => { runs += 1; } },
+    );
+    prepared.release();
+    expect(runs).toBe(1);
+    expect(prepared).toMatchObject({ outcome: 'downgraded', toVersion: 5, removedConfirmedCatalogPlacements: [confirmedUal] });
+  });
+
+  it('runs that work for a leased store without a database, and not without an inventory', async () => {
+    let runs = 0;
+    const beforeChange = async () => { runs += 1; };
+    const withoutInventory = await prepareRfc64InventoryForRollbackV1(dataDirectory(), 5, { beforeChange });
+    expect(withoutInventory.outcome).toBe('absent');
+    expect(runs).toBe(0);
+    const dataDir = dataDirectory();
+    fs.mkdirSync(join(dataDir, 'rfc64-sync'), { recursive: true, mode: 0o700 });
+    const leased = await prepareRfc64InventoryForRollbackV1(dataDir, 5, { beforeChange });
+    leased.release();
+    expect(leased.outcome).toBe('absent');
+    expect(runs).toBe(1);
   });
 
   it('keeps the confirmed catalog placements for a release that reads them', async () => {

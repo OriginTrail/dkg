@@ -1,3 +1,4 @@
+import type { PublicFinalizeOptions, PublicFinalizeResult, WithFinalizeGuard, WithFinalizeOutcome } from './assertion-finalize-types.js';
 import { queryAssertionHistory } from './assertion-history-query.js';
 import { PublicSnapshotSessionMethods } from './public-snapshot-session.js';
 import type { AssertionPullFromOptions, AssertionPullFromResult, StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
@@ -6,7 +7,7 @@ import { runStorageACKOperation } from './storage-ack-diagnostics.js';
 import { requireStorageACKContextGraphId } from './internal/storage-ack-context-graph.js';
 import { resolveConfiguredNetworkIdentity } from './configured-network-identity.js';
 import { snapshotCoreChainCacheNetworks } from './core-chain-cache-config.js';
-import { assertionLifecycleAuthorCandidates } from '@origintrail-official/dkg-publisher';
+import { viewQueryEngineOptionsOf } from './read-graph-view-source.js';
 import { durableAssertionShareMethods } from './internal/promote/durable-assertion-share.js';
 import { normalizeAgentPreparedCacheConfig } from './prepared-cache-config.js';
 import { PublicSnapshotMethods, PublicCheckpointMethods } from './dkg-agent-public-snapshot.js';
@@ -60,7 +61,7 @@ import {
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
   isTrustLevelQuad,
-  buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, type AuthorAttestationTypedData,
+  buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1,
   buildAssertionSealQuads, buildAssertionPublishReceiptQuads,
   type AssertionSeal,
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
@@ -119,7 +120,7 @@ import {
   isAllocatableKaAuthorV1,
   applyMixins,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, startReadGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
 import {
   normalizeContextGraphDiscoveryScan,
@@ -148,7 +149,7 @@ import {
   FileWorkspacePublicSnapshotStore,
   parseWorkspacePublicSnapshotNQuads,
   type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
-  type PromoteTerminalJobClearer, type PromoteShareReconciler, type TerminalJobClearOutcome,
+  type PromoteJobRetirer, type PromoteTerminalJobClearer, type PromoteShareReconciler, type TerminalJobClearOutcome,
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
@@ -166,7 +167,7 @@ import {
   type WorkspaceAgentRecipientResolverInput,
   type WorkspaceSenderKeyEncryptInput, type DurableRootPromotionIdentity,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
-  DEFAULT_REQUIRED_ACKS,
+  DEFAULT_REQUIRED_ACKS, assertionLifecycleAuthorCandidates,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -381,7 +382,6 @@ import {
   StaleSenderKeyTargetError,
   SwmSenderKeySetupRejectionError,
   SyncAccessDeniedError,
-  type PreSignedAuthorAttestation,
   type AssertionPromoteOptions,
   type LocalSwmSenderKeySendState,
   type LocalSwmSenderKeyReceiveState,
@@ -1163,7 +1163,7 @@ export class DKGAgent extends DKGAgentBase {
         close: () => this.closeRfc64PublicCatalogMutationPersistenceV1(),
       },
       publicCatalog: this.rfc64PublicCatalogOwnerV1,
-      workloads: [bootstrapOwner, projectionOwner, this.createRfc64OwedShareInventoryOwnerV1(resolveCatalogPartition)],
+      workloads: [bootstrapOwner, projectionOwner, this.createRfc64OwedShareInventoryOwnerV1(resolveCatalogPartition), this.createReadGraphWorkloadV1()],
     });
   }
 
@@ -1424,6 +1424,7 @@ export class DKGAgent extends DKGAgentBase {
       store = await createTripleStore({ backend: 'oxigraph' });
       log.warn(ctx, `No dataDir — triple store is in-memory (data will be lost on restart)`);
     }
+    await startReadGraphs(store, { dataDir: config.dataDir, log: message => log.info(ctx, message) });
 
     const nodeRole = config.nodeRole ?? 'edge';
     const eventBus = new TypedEventBus();
@@ -1614,7 +1615,7 @@ export class DKGAgent extends DKGAgentBase {
       log.warn(createOperationContext('init'), `Failed to migrate SWM attribution to agent DID, continuing without: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    const queryEngine = new DKGQueryEngine(agentStore);
+    const queryEngine = new DKGQueryEngine(agentStore, viewQueryEngineOptionsOf(store));
 
     const agent = new DKGAgent(
       resolvedConfig, wallet, node, agentStore, publishedLifecycleWriter, ledgerTimestampWriter, storageAckCopyCleanupWriter, publisher, queryEngine, eventBus, chain,
@@ -3796,6 +3797,20 @@ export class DKGAgent extends DKGAgentBase {
         : undefined;
       return { author, allocateKaNumber };
     };
+    function finalize(contextGraphId: string, name: string, opts: PublicFinalizeOptions & WithFinalizeGuard):
+      Promise<PublicFinalizeResult & WithFinalizeOutcome>;
+    function finalize(contextGraphId: string, name: string, opts?: PublicFinalizeOptions): Promise<PublicFinalizeResult>;
+    async function finalize(contextGraphId: string, name: string, opts?: PublicFinalizeOptions): Promise<PublicFinalizeResult> {
+      if (opts?.layer === 'swm') throw new LegacyKnowledgeAssetReadOnlyError();
+      return agent.assertionFinalize(contextGraphId, name, opts?.agentAddress ?? agentAddress, {
+        guard: opts?.guard,
+        subGraphName: opts?.subGraphName,
+        authorAgentAddress: opts?.authorAgentAddress,
+        preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
+        authorSignTypedData: opts?.authorSignTypedData,
+        schemeVersion: opts?.schemeVersion,
+      });
+    }
     return {
       async create(
         contextGraphId: string,
@@ -3938,51 +3953,7 @@ export class DKGAgent extends DKGAgentBase {
        * same content returns the existing seal without re-signing. A
        * conflicting re-finalize (different content / author) throws.
        */
-      async finalize(
-        contextGraphId: string,
-        name: string,
-        opts?: {
-          subGraphName?: string;
-          agentAddress?: string;
-          authorAgentAddress?: string;
-          preSignedAuthorAttestation?: PreSignedAuthorAttestation;
-          authorSignTypedData?: (
-            typedData: AuthorAttestationTypedData,
-          ) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
-          schemeVersion?: number;
-          /**
-           * @deprecated `"swm"` remains recognizable only so mixed-version
-           * callers get the stable `LEGACY_KA_READ_ONLY` error. New KAs are
-           * sealed in WM and shared atomically; existing root-scoped SWM assets
-           * are readable but cannot be reconstructed, resealed, or migrated.
-           */
-          layer?: 'wm' | 'swm';
-        },
-      ): Promise<{
-        assertionUri: string;
-        merkleRoot: Uint8Array;
-        authorAddress: string;
-        schemeVersion: number;
-        chainId: bigint;
-        kav10Address: string;
-        eip712Digest: string;
-        /** The KA this draft belongs to. */
-        kaUal: string;
-        /** The number this draft will be published as (GH#2958: one above the confirmed version). */
-        assertionVersion: string;
-      }> {
-        const finalizeAgentAddress = opts?.agentAddress ?? agentAddress;
-        if (opts?.layer === 'swm') {
-          throw new LegacyKnowledgeAssetReadOnlyError();
-        }
-        return agent.assertionFinalize(contextGraphId, name, finalizeAgentAddress, {
-          subGraphName: opts?.subGraphName,
-          authorAgentAddress: opts?.authorAgentAddress,
-          preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
-          authorSignTypedData: opts?.authorSignTypedData,
-          schemeVersion: opts?.schemeVersion,
-        });
-      },
+      finalize,
 
       async history(contextGraphId: string, name: string, opts?: { agentAddress?: string; subGraphName?: string; signal?: AbortSignal }): Promise<AssertionHistoryDescriptor | null> {
         let addr = opts?.agentAddress ?? agentAddress;
@@ -4324,7 +4295,7 @@ export class DKGAgent extends DKGAgentBase {
    * `recordCommitMarker` / `recoverOnStartup`) without the assertion
    * subsurface having to leak those methods to user-facing callers.
    */
-  get promoteQueue(): AsyncPromoteQueue & PromoteTerminalJobClearer & PromoteShareReconciler {
+  get promoteQueue(): AsyncPromoteQueue & PromoteTerminalJobClearer & PromoteShareReconciler & PromoteJobRetirer {
     if (!this._promoteQueue) {
       this._promoteQueue = new TripleStoreAsyncPromoteQueue(this.store, this._promoteQueueConfig ?? {});
     }

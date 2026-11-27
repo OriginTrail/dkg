@@ -104,6 +104,29 @@ describe('OxigraphStore persistence', () => {
     await second.close();
   });
 
+  it('writes the snapshot only after flushDelayMs, and at once on flush()', async () => {
+    const path = join(dir, 'store.nq');
+    const hydrated = async () => {
+      const copy = new OxigraphStore(path, { readOnly: true });
+      try { return await copy.countQuads(); } finally { await copy.close(); }
+    };
+
+    // The default delay: the write reaches the file soon after, with no flush().
+    const quick = new OxigraphStore(path);
+    await quick.insert(SAMPLE);
+    await vi.waitFor(async () => expect(existsSync(path) && await hydrated()).toBe(SAMPLE.length), { timeout: 2_000 });
+    await quick.close();
+
+    // A long delay: nothing more reaches the file until flush() or close().
+    const slow = new OxigraphStore(path, { flushDelayMs: 60_000 });
+    await slow.insert([{ subject: 'http://ex.org/late', predicate: 'http://schema.org/name', object: '"Late"', graph: 'http://ex.org/g1' }]);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await hydrated()).toBe(SAMPLE.length);
+    await slow.flush();
+    expect(await hydrated()).toBe(SAMPLE.length + 1);
+    await slow.close();
+  });
+
   it('a corrupt persist file is quarantined and constructor throws loudly', () => {
     const path = join(dir, 'store.nq');
     // Write deliberately invalid N-Quads — Oxigraph's parser will reject.

@@ -203,6 +203,9 @@ export class RecoveryMaterializationOwner {
                   && current !== undefined
                   && current.onChainId !== verifiedOnChainId);
             },
+            // A recovery that reads again a graph this node already holds (its holdings
+            // check timed out, or the peer sent no manifest) must not rewrite every asset.
+            keepHeldCopy: true,
             options: {
               priority: 'background',
               source: 'agent.durableSync.graphScopedMaterialization',
@@ -213,7 +216,8 @@ export class RecoveryMaterializationOwner {
             },
           });
           const storeFinishedAt = Date.now();
-          if (outcome === 'applied') await ports.reconcile(authentication.asset, ctx);
+          // A held copy gets the same twin housekeeping as one the holdings check found.
+          if (outcome === 'applied' || outcome === 'unchanged') await ports.reconcile(authentication.asset, ctx);
           ports.logTiming(ctx, `Recovery store timing: laneWait=${authenticationStartedAt - storeCallStartedAt}ms `
             + `authentication=${authenticationFinishedAt - authenticationStartedAt}ms `
             + `binding=${writeStartedAt - authenticationFinishedAt}ms store=${storeFinishedAt - writeStartedAt}ms `
