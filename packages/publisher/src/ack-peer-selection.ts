@@ -1,3 +1,4 @@
+import type { ACKPeerTrackRecord } from './ack-peer-track-record.js';
 import { PROTOCOL_STORAGE_ACK, isStorageACKProtocol, type StorageACKProtocol } from '@origintrail-official/dkg-core';
 
 export type ACKCapabilitySelectionPolicy =
@@ -18,6 +19,8 @@ export interface ACKCanonicalCandidatePeerSelectionInput {
   capability?: ACKCapabilitySelectionPolicy;
   protocol?: StorageACKProtocol;
   selfPeerId?: string;
+  /** Preference-only history; fresh identity verification decides whether an ACK counts. */
+  history?: { trackRecord: Pick<ACKPeerTrackRecord, 'plan'> };
 }
 
 type ACKCandidateTierName = 'requestedProtocol' | 'confirmedCore' | 'rest';
@@ -177,11 +180,16 @@ export function selectCanonicalACKCandidatePeersWithDiagnostics(
     requestedProtocolPeers: capability?.requestedProtocolPeers,
   });
 
-  const remotePeers = flattenTiers(tiers, preferredACKPeers);
+  const eligibleRemote = flattenTiers(tiers, preferredACKPeers);
+  const plan = input.history?.trackRecord.plan(eligibleRemote);
+  const remotePeers = plan?.peers ?? eligibleRemote;
+  const diagnosticOrder = plan
+    ? [...remotePeers, ...connected.filter(peerId => !remotePeers.includes(peerId))]
+    : connected;
 
   const tierMap = tierByPeer(tiers);
   const selected = new Set(remotePeers);
-  const remoteDiagnostics = connected.map((peerId) => diagnosticForPeer({
+  const remoteDiagnostics = diagnosticOrder.map((peerId) => diagnosticForPeer({
     peerId,
     selected,
     tier: tierMap.get(peerId) ?? 'rest',

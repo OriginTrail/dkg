@@ -27,7 +27,7 @@ import { ethers } from 'ethers';
 import { QuorumUnmetError, assertACKCandidateQuorum, type PeerOutcome } from './ack-errors.js';
 import type { V10ACKMode } from './publisher.js';
 import { hasValidGraphScopedContent } from './graph-publish-envelope.js';
-import { PeerStatusLedger } from './ack-peer-status-ledger.js';
+import { PeerStatusLedger, type ACKPeerOutcomesObserver } from './ack-peer-status-ledger.js';
 import { ACKRoundDiagnostics, type ACKBackoffReason, type ACKDiagnosticSummary } from './ack-diagnostics.js';
 import { createACKRoundLifetime } from './ack-round-lifetime.js';
 
@@ -53,7 +53,7 @@ export interface ACKCollectorDeps {
    * may return a synchronous pool for backward compatibility or await network
    * admission; consumers must always await the result.
    */
-  getConnectedCorePeers: (protocol?: string) => string[] | Promise<string[]>;
+  getConnectedCorePeers: (protocol: string, requiredACKs: number) => string[] | Promise<string[]>;
   /**
    * Boolean ACK signer pre-flight. Backward-compatible legacy entry
    * point — when only this is provided the rejection log surfaces a
@@ -73,6 +73,8 @@ export interface ACKCollectorDeps {
     claimedIdentityId: bigint, options?: { signal?: AbortSignal },
   ) => Promise<ACKVerifyResult>;
   log?: (msg: string) => void;
+  /** Each asked core's outcome once a round is decided (ack-peer-track-record.ts keeps them). */
+  onPeerOutcomes?: ACKPeerOutcomesObserver;
   /**
    * Backoff sleep between transport-error retries and transient
    * SWM-decline retries (#887). Injectable so unit tests can exercise
@@ -223,13 +225,10 @@ function declineLogMessage(message: string): string {
 }
 
 /**
- * ACKCollector implements V10 spec §9.0 Phase 3: collecting 3 core node
- * StorageACKs via direct P2P before the chain TX.
- *
- * Flow:
- * 1. Broadcast PublishIntent via GossipSub (finalization topic)
- * 2. Concurrently dial each known core node on PROTOCOL_STORAGE_ACK
- * 3. First 3 valid ACKs win; verify each signature via ecrecover
+ * ACKCollector implements V10 spec §9.0 Phase 3: collecting core node
+ * StorageACKs via direct P2P before the chain TX. It dials every candidate
+ * core at once; the first `requiredACKs` valid ACKs (signer recovered via
+ * ecrecover and checked on chain) win.
  */
 export class ACKCollector {
   private deps: ACKCollectorDeps;
@@ -243,7 +242,7 @@ export class ACKCollector {
     requiredACKs: number,
   ): Promise<string[]> {
     try {
-      return await this.deps.getConnectedCorePeers(protocol);
+      return await this.deps.getConnectedCorePeers(protocol, requiredACKs);
     } catch (err) {
       if (err instanceof QuorumUnmetError) throw err;
       const message = err instanceof Error ? err.message : String(err);
@@ -963,7 +962,7 @@ export class ACKCollector {
               if (roundIsOver()) return null;
               if (!verdict.valid) {
                 const reason = sanitizeDeclineField(verdict.reason ?? 'unknown', MAX_DECLINE_CODE_CHARS) || 'unknown';
-                peerStatuses.recordACKValidation(peerId, `ACK_VERIFY:${reason}`);
+                peerStatuses.recordSignerFailure(peerId, verdict.reason);
                 getMetrics().ackPeerTotal.add(1, { result: 'rejected' });
                 log(
                   `[ACKCollector] ACK from ${peerId.slice(-8)} rejected: ${reason}` +
@@ -977,10 +976,10 @@ export class ACKCollector {
                 async (span) => {
                   const ok = await this.deps.verifyIdentity!(recoveredAddress, identityId, { signal: lifetime.signal });
                   // Legacy boolean verifier surfaces no structured reason; an
-                  // invalid result maps to the generic registration gate.
-                  span.setAttribute('dkg.verify_result', ok ? 'valid' : 'key-not-registered');
+                  // false can also mean an RPC failure; it cannot prove signer ineligibility.
+                  span.setAttribute('dkg.verify_result', ok ? 'valid' : 'unknown');
                   getMetrics().ackVerifyTotal.add(1, {
-                    result: ok ? 'valid' : 'key-not-registered',
+                    result: ok ? 'valid' : 'unknown',
                   });
                   return ok;
                 },
@@ -988,9 +987,9 @@ export class ACKCollector {
               );
               if (roundIsOver()) return null;
               if (!valid) {
-                peerStatuses.recordACKValidation(peerId, 'ACK_VERIFY:key-not-registered');
+                peerStatuses.recordACKValidation(peerId, 'ACK_VERIFY:unknown');
                 getMetrics().ackPeerTotal.add(1, { result: 'rejected' });
-                log(`[ACKCollector] Signer ${recoveredAddress.slice(0, 10)}... not registered for identity ${identityId} — rejecting ACK from ${peerId.slice(-8)}`);
+                log(`[ACKCollector] Signer ${recoveredAddress.slice(0, 10)}... could not be verified for identity ${identityId} — rejecting ACK from ${peerId.slice(-8)}`);
                 return null;
               }
             }
@@ -1151,7 +1150,7 @@ export class ACKCollector {
       // any `requestACK` loops still sleeping between retries to abandon on
       // wake rather than keep dialing after the caller has its answer.
       roundSettled = true;
-      diagnostics.finish(peerStatuses.counts(corePeers));
+      diagnostics.finish(peerStatuses.settle(corePeers, this.deps.onPeerOutcomes));
       lifetime.dispose();
     }
 

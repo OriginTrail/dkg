@@ -1,3 +1,4 @@
+import { subscriptionRecoveryCoordinatorOf } from './subscription-recovery-owner.js';
 import { exactRecoveryActionOutcome } from './sync/durable-recovery-action.js';
 import { runGraphOwnedDurableRecovery, type AgentGraphOwnedRecoveryRequest } from './durable-recovery-owned-round.js';
 import { installReadGraphWorkingMemoryIdentity } from './read-graph-view-source.js';
@@ -56,7 +57,7 @@ import { captureExactBatchStreamRefusalScope } from './sync/exact-batch-stream-c
 import { createStorageACKRegistrationPlan } from './p2p/storage-ack-registrar.js';
 import { isRedundantLimitedConnection, syncOpenedPeerConnection, syncClosedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
-import { ProtocolRouter, GossipSubManager, DKGEvent,
+import { ProtocolRouter, GossipSubManager, DKGEvent, type KnowledgeAssetConfirmedEvent,
   registerExperimentalExactBatchResponder,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
   PROTOCOL_ACCESS, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
@@ -537,6 +538,9 @@ import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './star
 import {
   projectContextGraphDormancy,
 } from './context-graph-subscription-dormancy.js';
+import {
+  isChainNameBindingUnavailable,
+} from './context-graph-subscription-name-binding-retry.js';
 import {
   activateRollingSubscriptionPromotion,
   createRollingSubscriptionPromotionRuntime,
@@ -3184,6 +3188,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // delivery if a single peer happens to be unreachable.
       });
     });
+    // This node's own confirmed publishes need no chain-event reconcile pass.
+    this.eventBus.on(DKGEvent.KC_CONFIRMED, (data) => {
+      this.rememberOwnConfirmedRegistration(data as KnowledgeAssetConfirmedEvent);
+    });
 
     // Sync from peers already connected (e.g. relay dialed during node.start())
     const alreadyConnected = this.node.libp2p.getPeers();
@@ -3440,6 +3448,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         closingMessage: 'Context Graph subscription authority recovery closing',
       });
     this.contextGraphSubscriptionAuthorityRecoveryRuntime = authorityRecovery;
+    // Before recovery's first pass, which leaves the rows taken here alone.
+    this.retryPersistedSubscriptionNameBindings();
     if (this.getContextGraphSubscriptionRehydrationStatus()
       ?.dormantReasons.authorityUnavailable.length) {
       authorityRecovery.schedule();
@@ -8801,81 +8811,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
     if (!store || !isCurrentRetry()) return;
     const ctx = createOperationContext('init');
+    const row = this.subscriptionRecoveryRowPorts(isCurrentRetry);
+    if (!row) return;
     await recoverDeferredContextGraphSubscriptionAuthorities(signal, {
-      store,
-      dormancyById: this.contextGraphSubscriptionDormancyById,
-      transitionDormancy: this.transitionContextGraphSubscriptionDormancy.bind(this),
-      persistRevisions: this.contextGraphSubscriptionPersistRevisions,
-      subscriptions: this.subscribedContextGraphs,
-      coldCursor,
+      store, dormancyById: this.contextGraphSubscriptionDormancyById, coldCursor,
       getStatus: () => this.contextGraphSubscriptionRehydrationStatus,
-      isCurrent: isCurrentRetry,
-      touchStatus: () => {
-        const current = this.contextGraphSubscriptionRehydrationStatus;
-        if (current !== null) {
-          this.contextGraphSubscriptionRehydrationStatus = {
-            ...current,
-            updatedAt: Date.now(),
-          };
-        }
-      },
-      clearStatus: (contextGraphId) => {
-        this.recordContextGraphSubscriptionClear([contextGraphId]);
-      },
-      resolveAuthority: (row, retrySignal) => (
-        this.resolveContextGraphSubscriptionBootstrapAuthority(row.id, {
-          allowSubscriptionFallback: false,
-          signal: retrySignal,
-          durableSubscriptionBinding: {
-            contextGraphId: row.id,
-            onChainId: row.onChainId,
-            onChainHash: row.onChainHash,
-          },
-        }).catch((error: unknown) => unavailableContextGraphReadAuthorityDecision(
-          'legacy-local',
-          'unexpected-authority-error',
-          contextGraphReadAuthorityDependencyOf(error),
-        ))
-      ),
-      activate: async (row, onChainId, revision) => {
-        await this.activatePersistedContextGraphSubscriptionRecord(row, {
-          onChainId,
-          updateRehydrationStatus: false,
-          prepare: async (subscription, persistRepair) => {
-            // Cold registration discovery is the binding proof. Make RFC-64
-            // responsibility and the healed durable row visible atomically
-            // before any sync or gossip side effect is restored.
-            await this.reconcileRfc64CatalogResponsibilityV1(row.id);
-            if (!isCurrentRetry()) throw new Error('Authority recovery retired');
-            await persistRepair(() => (
-                isCurrentRetry()
-                && this.subscribedContextGraphs.get(row.id) === subscription
-                && this.contextGraphSubscriptionDormancyById.get(row.id)
-                  === 'authorityUnavailable'
-                && (this.contextGraphSubscriptionPersistRevisions.get(row.id) ?? 0)
-                  === revision
-              ),
-            );
-          },
-          isCurrent: (subscription) => (
-            isCurrentRetry()
-            && this.subscribedContextGraphs.get(row.id) === subscription
-            && this.contextGraphSubscriptionDormancyById.get(row.id)
-              === 'authorityUnavailable'
-            && (this.contextGraphSubscriptionPersistRevisions.get(row.id) ?? 0)
-              === revision
-          ),
-        });
-      },
-      warn: (contextGraphId, error) => {
-        this.log.warn(
-          ctx,
-          `Deferred persisted context-graph subscription "${contextGraphId}" after authority recovery: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      },
-      capped: (contextGraphId) => {
-        this.requestContextGraphSubscriptionPromotion(contextGraphId);
-      },
+      row: { ...row, activate: async (...args) => {
+        await row.activate(...args);
+        this.log.info(ctx, `Activated persisted context-graph subscription "${args[0].id}" after authority recovery`);
+      } },
+      warn: (id, error) => this.log.warn(ctx,
+        `Deferred persisted context-graph subscription "${id}" after authority recovery: ${error instanceof Error ? error.message : String(error)}`),
     });
   }
 
@@ -8888,6 +8834,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    */
   async promoteDormantContextGraphSubscriptions(this: DKGAgent, signal: AbortSignal): Promise<'rearm' | 'idle'> {
     return promoteDormantContextGraphSubscriptions({
+      recovery: subscriptionRecoveryCoordinatorOf(this),
       store: this.config.contextGraphSubscriptionStore,
       getStatus: () => this.contextGraphSubscriptionRehydrationStatus,
       isCurrent: (ownerSignal) => this.started
@@ -8975,6 +8922,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     const store = this.config.contextGraphSubscriptionStore;
     this.contextGraphSubscriptionActivations.resetScheduler();
+    this.contextGraphSubscriptionNameBindingRetryIds.clear();
     if (!store) return;
     const ctx = createOperationContext('init');
     let authorityBudget: RehydrationAuthorityBudget | undefined;
@@ -9107,11 +9055,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // operator diagnostics identify the same IDs across restarts.
       const byId = (a: ContextGraphSubscriptionRecord, b: ContextGraphSubscriptionRecord): number =>
         a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-      const hostedRows = rows.filter((r) => r.coreHosted).sort(byId);
-      const userRows = rows.filter((r) => !r.coreHosted).sort(
+      // Rows of the graphs StorageACK requests reached shortly before this
+      // start go first, hosted or not, and outside the cap: publishers are
+      // writing to them now (at most STORAGE_ACK_RECENT_GRAPHS_MAX rows).
+      const recentGraphs = this.storageAckRecentGraphs();
+      await recentGraphs.load();
+      const recent = new Map(recentGraphs.recent().map((entry, rank) => [entry.contextGraphId, rank]));
+      const recentRows = rows.filter((r) => recent.has(r.id))
+        .sort((a, b) => recent.get(a.id)! - recent.get(b.id)!);
+      const hostedRows = rows.filter((r) => r.coreHosted && !recent.has(r.id)).sort(byId);
+      const userRows = rows.filter((r) => !r.coreHosted && !recent.has(r.id)).sort(
         (a, b) => (b.subscribed ? 1 : 0) - (a.subscribed ? 1 : 0) || byId(a, b),
       );
-      const toActivate = [...hostedRows, ...userRows];
+      const toActivate = [...recentRows, ...hostedRows, ...userRows];
+      this.contextGraphSubscriptionActivations.setActivationCapExemptIds(recent.keys());
+      const countsAgainstCap = this.contextGraphSubscriptionActivations.countsAgainstActivationCap.bind(this.contextGraphSubscriptionActivations);
+      if (recentRows.length > 0) {
+        this.log.info(
+          ctx,
+          `Restoring ${recentRows.length} recently ACK-requested context-graph subscription(s) first: ` +
+            recentRows.map((row) => `"${row.id}"`).join(', '),
+        );
+      }
       const dormancyById = this.contextGraphSubscriptionDormancyById;
       let activatedUserRows = 0;
       // #2815: every row's authority may need a chain read, and start() (with
@@ -9142,13 +9107,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // Past the budget, a user row goes to background authority recovery only
       // while the activation cap still has room for it; beyond that it waits
       // for rolling activation unread, as a row beyond the cap always has.
-      // Hosted rows are exempt from the cap and always go to recovery.
+      // Hosted and recently ACK-requested rows are exempt from the cap and
+      // always go to recovery.
       const leaveUnresolved = (row: ContextGraphSubscriptionRecord): void => {
-        if (!row.coreHosted && cap > 0 && activatedUserRows + deferredUserRows >= cap) {
+        if (countsAgainstCap(row) && cap > 0 && activatedUserRows + deferredUserRows >= cap) {
           this.transitionContextGraphSubscriptionDormancy(row.id, 'activationCap');
           return;
         }
-        if (!row.coreHosted) deferredUserRows += 1;
+        if (countsAgainstCap(row)) deferredUserRows += 1;
         this.transitionContextGraphSubscriptionDormancy(row.id, 'authorityUnavailable');
         deferredIds.push(row.id);
       };
@@ -9159,7 +9125,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // A denied/unavailable row therefore cannot consume capacity that a
         // later authorized subscription could use.
         if (
-          !row.coreHosted
+          countsAgainstCap(row)
           && cap > 0
           && activatedUserRows >= cap
         ) {
@@ -9253,6 +9219,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             row.id,
             readAuthority.outcome === 'denied' ? 'authorityDenied' : 'authorityUnavailable',
           );
+          // Its name lookup did not answer in time: asked again within seconds once started.
+          if (isChainNameBindingUnavailable(readAuthority)) this.contextGraphSubscriptionNameBindingRetryIds.add(row.id);
           this.log.warn(
             ctx,
             `Left persisted context-graph subscription "${row.id}" dormant: ` +
@@ -9260,7 +9228,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           );
           continue;
         }
-        if (!row.coreHosted) activatedUserRows += 1;
+        if (countsAgainstCap(row)) activatedUserRows += 1;
         const restorePendingMeta = restrictedApprovalBootstrap;
         const healedOnChainId = readAuthority.outcome === 'allowed'
           ? readAuthority.onChainId?.toString()
@@ -9342,7 +9310,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (unavailableAtStartup > 0) {
         this.log.warn(
           ctx,
-          `${unavailableAtStartup} context-graph subscription(s) left dormant because current read authority was unavailable; retry after restoring the authority source.`,
+          `${unavailableAtStartup} context-graph subscription(s) left dormant because current read authority was unavailable; they are asked again after start.`,
         );
       }
       if (deferredIds.length > 0) {

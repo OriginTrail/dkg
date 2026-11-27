@@ -36,7 +36,7 @@ describe('native catalog applied-head durability', () => {
     const fixture = await setupLiveReceiver();
     const snapshot = join(fixture.receiverDirectory, 'inflight.nq');
     const store = new OxigraphStore(snapshot);
-    const scheduled = vi.spyOn(store as unknown as { scheduleFlush(): void }, 'scheduleFlush')
+    const scheduled = vi.spyOn(store as unknown as { armFlush(): void }, 'armFlush')
       .mockImplementation(() => {});
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
@@ -48,6 +48,9 @@ describe('native catalog applied-head durability', () => {
       await fixture.bootstrap(fixture.genesisAnnouncement, initial);
       await setTransactionTestVmGeneration(store, 'predecessor');
       await store.flush();
+      // A clean flush now does no I/O. Dirty the same predecessor generation
+      // before holding a real older snapshot in flight.
+      await setTransactionTestVmGeneration(store, 'predecessor');
       const captured = new Promise<void>((resolve) => { snapshotBarrier.captured = resolve; });
       snapshotBarrier.path = `${snapshot}.tmp`;
       snapshotBarrier.release = held;

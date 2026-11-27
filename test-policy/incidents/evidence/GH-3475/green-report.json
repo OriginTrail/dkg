@@ -24,7 +24,7 @@
     "updated": 0,
     "didUpdate": false
   },
-  "startTime": 1793292968066,
+  "startTime": 1795096283840,
   "success": true,
   "testResults": [
     {
@@ -36,7 +36,7 @@
           "fullName": "follow-up pull of a peer's own agent profile a Core pulls the agents graph again when its connect-time pull lacked the peer's own profile",
           "status": "passed",
           "title": "a Core pulls the agents graph again when its connect-time pull lacked the peer's own profile",
-          "duration": 2684.9587919999994,
+          "duration": 2715.789916999999,
           "failureMessages": [],
           "meta": {}
         },
@@ -51,8 +51,8 @@
           "meta": {}
         }
       ],
-      "startTime": 1793292975290,
-      "endTime": 1793292977974.9587,
+      "startTime": 1795096292096,
+      "endTime": 1795096294811.79,
       "status": "passed",
       "message": "",
       "name": "<checkout>/packages/agent/test/peer-profile-follow-up-agent.test.ts"

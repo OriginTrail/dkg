@@ -13,6 +13,8 @@
 
 
 import { decodeConvictionCostCovered } from './conviction-cost-covered.js';
+import { decodeKnowledgeAssetRegistration } from './knowledge-asset-registration-log.js';
+import { BlockTimeEstimator } from './receipt-poll-cadence.js';
 export { decodeConvictionCostCovered } from './conviction-cost-covered.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { createOperationalSignerPool, isExternalEvmSigner, operationalPrivateKeyOf, signTransactionOnce, type EvmSigner } from './evm-signer.js';
@@ -633,6 +635,8 @@ export class EVMChainAdapterBase {
    */
   protected readonly contextGraphBoundedAuthorityReadsEnabled: boolean;
   protected readonly receiptFinality: EvmReceiptFinalityReader;
+  /** Block time from the node's own head reads; receipt lookups follow it (receipt-poll-cadence.ts). */
+  protected readonly blockTimes = new BlockTimeEstimator();
 
   protected readonly maxFeePerGasWei?: bigint;
 
@@ -1898,6 +1902,7 @@ export class EVMChainAdapterBase {
       txHash,
       label,
       receiptTimeoutMs: this.receiptTimeoutMs,
+      pollIntervalMs: () => this.blockTimes.receiptPollIntervalMs(),
       getReceipt: (hash, options) => this.getTransactionReceiptWithFailover(hash, options),
       isReceiptEligible: async (receipt, { deadlineMs }) => (
         await this.receiptFinality.read(receipt, { deadlineMs })
@@ -4369,6 +4374,8 @@ export class EVMChainAdapterBase {
     // daemon can return a CONFIRMED post-publish discount (vs the P0 predictive
     // estimate). Absent for a non-PCA publish → the UI badge degrades hidden.
     const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
+    // The KA's Context Graph binding from this receipt, so callers need no read for it.
+    const contextGraphId = decodeKnowledgeAssetRegistration(this.contracts.contextGraphStorage, receipt.logs, kaId);
 
     // waitForReceipt already checked this exact canonical hash and memoized
     // its header; naming the hash makes timestamp reuse explicit and reorg-safe.
@@ -4380,6 +4387,7 @@ export class EVMChainAdapterBase {
     return {
       batchId: kaId,
       kaId: kaId,
+      ...(contextGraphId === undefined ? {} : { contextGraphId }),
       knowledgeAssetsContract: storageAddress,
       startKAId,
       endKAId,
@@ -4545,7 +4553,9 @@ export class EVMChainAdapterBase {
     // challenge block, and finalization reads. A lagging sticky backend would
     // make the head non-monotonic across calls (poller moving backwards / re-
     // scanning), so read canonical-order + preference-transparent.
-    return this.readTipProvider('getBlockNumber', (p) => p.getBlockNumber());
+    const head = await this.readTipProvider('getBlockNumber', (p) => p.getBlockNumber());
+    this.blockTimes.observeHead(head);
+    return head;
   }
 
   /**

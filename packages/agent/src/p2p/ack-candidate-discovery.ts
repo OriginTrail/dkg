@@ -1,10 +1,12 @@
 import { PROTOCOL_STORAGE_ACK, STORAGE_ACK_PROTOCOLS, isStorageACKProtocol, type StorageACKProtocol } from '@origintrail-official/dkg-core';
 import { PeerCapabilityRegistry, type PeerCapabilityRound } from './peer-capability.js';
 import {
+  ACKPeerTrackRecord,
   selectCanonicalACKCandidateUniverse,
   selectCanonicalACKCandidatePeersWithDiagnostics,
   type ACKCanonicalCandidatePeerSelectionInput,
   type ACKCanonicalCandidatePeerSelectionResult,
+  type ACKPeerOutcomeReport,
 } from '@origintrail-official/dkg-publisher';
 
 export interface LocalACKCandidate {
@@ -102,11 +104,20 @@ function scheduleProbeWindow(input: {
 export class ACKCandidateDiscoveryCoordinator {
   private preferredProbeCursor = 0;
   private otherProbeCursor = 0;
+  /** What earlier rounds showed about each core (see `ACKPeerTrackRecord`). */
+  readonly trackRecord: ACKPeerTrackRecord;
 
-  constructor(private readonly registry: PeerCapabilityRegistry) {}
+  constructor(private readonly registry: PeerCapabilityRegistry, trackRecord = new ACKPeerTrackRecord()) {
+    this.trackRecord = trackRecord;
+  }
+
+  /** Keep a finished round's per-core outcomes for the rounds after it. */
+  recordRoundOutcomes(reports: readonly ACKPeerOutcomeReport[]): void {
+    this.trackRecord.record(reports);
+  }
 
   selectCandidates(
-    input: Omit<ACKCanonicalCandidatePeerSelectionInput, 'capability' | 'selfPeerId' | 'localCandidate'>,
+    input: Omit<ACKCanonicalCandidatePeerSelectionInput, 'capability' | 'selfPeerId' | 'localCandidate' | 'history'> & { requiredACKs: number },
     localCandidate: LocalACKCandidate,
     snapshot: ACKCapabilitySnapshot = snapshotACK(this.registry.beginRound()),
   ): ACKCanonicalCandidatePeerSelectionResult {
@@ -116,6 +127,7 @@ export class ACKCandidateDiscoveryCoordinator {
     return selectCanonicalACKCandidatePeersWithDiagnostics({
       ...input,
       localCandidate,
+      history: { trackRecord: this.trackRecord },
       capability: { mode: 'require', corePeers: snapshot.corePeerIds, requestedProtocolPeers },
     });
   }
@@ -187,7 +199,7 @@ export class ACKCandidateDiscoveryCoordinator {
       ackCandidatePeerIds: ports.ackCandidatePeerIds,
       preferredACKPeerIds: ports.preferredACKPeerIds,
       verifiedSameNetworkPeerIds: ports.verifiedSameNetworkPeerIds(),
-      protocol: requestedProtocol,
+      protocol: requestedProtocol, requiredACKs: ports.requiredACKs,
     }, ports.localCandidate, snapshotACK(round));
   }
 }

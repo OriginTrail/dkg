@@ -111,6 +111,7 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
       ? Math.floor(options.flushDelayMs) : DEFAULT_FLUSH_DELAY_MS;
     if (persistPath) {
       this.hydrateSync(persistPath);
+      if (existsSync(persistPath)) this.persistedGeneration = this.dirtyGeneration;
     }
   }
 
@@ -176,27 +177,29 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
 
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private flushing = false;
-  /** Writes begun, and how many of them the last completed dump holds (see persistBarrier). */
-  private writes = 0;
-  private persistedWrites = 0;
-
+  private dirtyGeneration = 0;
+  private persistedGeneration = -1;
   private readonly flushDelayMs: number;
 
   /** The native store for a write. A read-only store refuses before anything changes. */
   private get writable(): OxStore {
     if (this.readOnly) throw new OxigraphStoreReadOnlyError(this.persistPath);
-    this.writes += 1;
+    // A multi-step mutation may throw after changing data, before scheduling.
+    // Track at the write boundary so an explicit barrier still persists it.
+    this.dirtyGeneration += 1;
     return this.store;
   }
 
   private scheduleFlush(): void {
+    this.armFlush();
+  }
+
+  private armFlush(): void {
     if (!this.persistPath || this.flushTimer || this.readOnly) return;
     this.flushTimer = setTimeout(() => {
       this.flushTimer = null;
       // Background flush has no caller to receive errors; log them.
-      // Explicit `flush()`/`close()` callers DO `await` flushNow() and
-      // get the original throw, which is what we want for shutdown
-      // durability — see flushNow()'s docstring.
+      // Explicit flush()/close() await the barrier and receive the error.
       this.flushNow().catch((err) => {
         // eslint-disable-next-line no-console
         console.error(
@@ -234,7 +237,7 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
    * A read-only store never writes: what it loaded may be older than the file.
    */
   private async flushNow(): Promise<void> {
-    if (!this.persistPath || this.flushing || this.readOnly) return;
+    if (!this.persistPath || this.flushing || this.readOnly || this.persistedGeneration === this.dirtyGeneration) return;
     this.flushing = true;
     const dir = dirname(this.persistPath);
     const tmpPath = `${this.persistPath}.tmp`;
@@ -243,7 +246,7 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
       // Capture once before any awaited writes: concurrent mutations cannot mix
       // two graph/seal generations in this snapshot. The native API returns an
       // array; it avoids a complete-store string but still uses memory per quad.
-      const captured = this.writes;
+      const through = this.dirtyGeneration;
       const quads = this.store.match();
 
       // 1+2: write to tmp, fsync to commit bytes.
@@ -259,7 +262,6 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
 
       // 3: atomic rename — POSIX-atomic on the same filesystem.
       await rename(tmpPath, this.persistPath);
-      this.persistedWrites = Math.max(this.persistedWrites, captured);
 
       // 4: fsync the directory so the rename itself survives a power loss.
       // Best-effort: some filesystems / Node versions don't expose dir-fd
@@ -277,6 +279,8 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
       } catch {
         // Best-effort dir fsync — see comment above.
       }
+      this.persistedGeneration = through;
+      if (this.dirtyGeneration > through) this.armFlush();
     } catch (err) {
       // Log here so we see the failure regardless of the caller — but
       // re-throw so explicit callers fail loudly. (Background callers
@@ -682,9 +686,8 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
    * this after the insert — otherwise only the 50ms debounced flush runs,
    * and it can be lost if the daemon dies in that window.
    *
-   * Cancels any pending debounced flush (we'll cover its work) and waits
-   * out any in-flight flushNow() before dumping the current snapshot, so
-   * triples inserted while the previous flush was running aren't dropped.
+   * Drains any in-flight snapshot and persists remaining dirty generations.
+   * A generation already persisted by any caller needs no additional snapshot.
    *
    * THROWS if the underlying write/fsync/rename fails (ENOSPC, EACCES,
    * EROFS, EXDEV, …). Callers that need a durable insert must treat the
@@ -703,9 +706,10 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
     await this.flushNow();
   }
 
-  /** Resolve once every write begun so far is on disk; no dump when none is pending. */
+  /** Persist writes begun so far, using the same generation owner as flush(). */
   async persistBarrier(): Promise<void> {
-    if (this.persistPath && !this.readOnly && this.persistedWrites !== this.writes) await this.flush();
+    if (this.persistPath && !this.readOnly && this.dirtyGeneration > 0
+        && this.persistedGeneration !== this.dirtyGeneration) await this.flush();
   }
 
   /**

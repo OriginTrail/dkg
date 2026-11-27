@@ -5246,9 +5246,10 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     chain.getContextGraphKCCount = async () => 1n;
     chain.getBlockNumber = async () => 100;
     (internals as any).healStrandedScopedKCs = async () => undefined;
-    (internals as any).reconcileChainOrdinal = async () => ({
-      status: 'reconciled', blockNumber: 100,
-    });
+    (internals as any).reconcileChainOrdinal = async () => {
+      await internals.store.insert([{ subject: 'urn:held-watermark:asset', predicate: 'urn:p', object: 'urn:o', graph: 'urn:held-watermark:graph' }]);
+      return { status: 'reconciled', blockNumber: 100 };
+    };
     const flush = vi.fn(async () => undefined);
     internals.store.flush = flush;
     const persistStrict = vi.fn(async () => undefined);
