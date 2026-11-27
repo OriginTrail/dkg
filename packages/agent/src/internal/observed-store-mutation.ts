@@ -1,7 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { readStoreOperationExecutionGeneration, isStoreOperationNotStarted, type Quad, type StoreOperation } from '@origintrail-official/dkg-storage';
 import type { StoreMutation, StoreMutationObserver } from './store-mutation.js';
+
+/** Writes performed by this asynchronous operation, independent of its semantic result. */
+const mutationScopes = new AsyncLocalStorage<{ changed: boolean }>();
+export async function observeStoreMutations<T>(work: () => Promise<T>): Promise<{ result: T; mutated: boolean }> {
+  const parent = mutationScopes.getStore();
+  const scope = { changed: false };
+  try {
+    const result = await mutationScopes.run(scope, work);
+    return { result, mutated: scope.changed };
+  } finally {
+    if (parent && scope.changed) parent.changed = true;
+  }
+}
 
 /**
  * The third argument this factory took before it took an observer, still accepted because the
@@ -46,6 +60,7 @@ export function createObservedStoreMutation(
     mutation?: StoreMutation,
     operation?: StoreOperation,
   ): Promise<T> => {
+    const scope = mutationScopes.getStore();
     const settle = mutation === undefined ? undefined : observer?.begin(mutation);
     let result: T;
     try {
@@ -56,7 +71,7 @@ export function createObservedStoreMutation(
       // not change; every indeterminate outcome must invalidate fail-closed.
       const indeterminate = operation === undefined
         ? mutation !== undefined : !isStoreOperationNotStarted(error, operation);
-      if (indeterminate) invalidate();
+      if (indeterminate) { if (scope) scope.changed = true; invalidate(); }
       const generation = operation === undefined ? undefined : readStoreOperationExecutionGeneration(error, operation);
       const outcome = indeterminate ? 'indeterminate' : 'unchanged';
       if (generation === undefined) settle?.(outcome);
@@ -64,7 +79,7 @@ export function createObservedStoreMutation(
       throw error;
     }
     const didChange = changed(result);
-    if (didChange) invalidate();
+    if (didChange) { if (scope) scope.changed = true; invalidate(); }
     settle?.(didChange ? 'changed' : 'unchanged');
     return result;
   };

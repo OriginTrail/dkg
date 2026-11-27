@@ -1,10 +1,11 @@
-import type { CollectedACK } from './ack-collector.js';
+import type { ACKVerifyReason, CollectedACK } from './ack-collector.js';
 import type { PeerOutcome } from './ack-errors.js';
 
 type PeerStatus =
   | { kind: 'ack'; ack: CollectedACK; latencyMs: number }
   | { kind: 'storage-decline'; code: string; message: string }
   | { kind: 'ack-validation'; reason: string }
+  | { kind: 'signer-verification'; reason: ACKVerifyReason | undefined }
   | { kind: 'protocol-unsupported'; message: string }
   | { kind: 'transport-error'; message: string };
 
@@ -17,7 +18,7 @@ export type ACKPeerRoundOutcome =
   /** A counted ACK, `latencyMs` after the round started (signer check included). */
   | { readonly kind: 'valid'; readonly latencyMs: number }
   /** The chain said this core's ACK signer cannot count (not in the sharding table, key not registered). */
-  | { readonly kind: 'ineligible-signer'; readonly reason: string }
+  | { readonly kind: 'ineligible-signer'; readonly reason: Exclude<ACKVerifyReason, 'rpc-error'> }
   /** It declined, sent an ACK that failed validation, or does not speak the protocol. */
   | { readonly kind: 'declined'; readonly code: string }
   /** No reply: the transport failed or timed out on every attempt. */
@@ -31,9 +32,6 @@ export interface ACKPeerOutcomeReport {
 /** Receives every asked core's outcome once a round is decided. */
 export type ACKPeerOutcomesObserver = (reports: readonly ACKPeerOutcomeReport[]) => void;
 
-/** Chain verdicts on a signer's identity that hold whatever the core signs. */
-const INELIGIBLE_SIGNER_VERDICTS = new Set(['ACK_VERIFY:not-in-sharding-table', 'ACK_VERIFY:key-not-registered']);
-
 export interface ACKCandidateCounts {
   total: number;
   ack: number;
@@ -45,7 +43,7 @@ export interface ACKCandidateCounts {
 }
 
 const counterByStatus = {
-  ack: 'ack', 'storage-decline': 'declined', 'ack-validation': 'invalid',
+  ack: 'ack', 'storage-decline': 'declined', 'ack-validation': 'invalid', 'signer-verification': 'invalid',
   'protocol-unsupported': 'unsupported', 'transport-error': 'transport',
 } satisfies Record<PeerStatus['kind'], Exclude<keyof ACKCandidateCounts, 'total' | 'pending'>>;
 
@@ -73,6 +71,10 @@ export class PeerStatusLedger {
 
   recordACKValidation(peerId: string, reason: string): void {
     this.statuses.set(peerId, { kind: 'ack-validation', reason });
+  }
+
+  recordSignerFailure(peerId: string, reason: ACKVerifyReason | undefined): void {
+    this.statuses.set(peerId, { kind: 'signer-verification', reason });
   }
 
   recordProtocolUnsupported(peerId: string, message: string): void {
@@ -108,12 +110,13 @@ export class PeerStatusLedger {
         case 'ack':
           reports.push({ peerId, outcome: { kind: 'valid', latencyMs: status.latencyMs } });
           break;
-        case 'ack-validation':
-          if (INELIGIBLE_SIGNER_VERDICTS.has(status.reason)) {
+        case 'signer-verification':
+          if (status.reason === 'not-in-sharding-table' || status.reason === 'key-not-registered') {
             reports.push({ peerId, outcome: { kind: 'ineligible-signer', reason: status.reason } });
-          } else if (!status.reason.startsWith('ACK_VERIFY:')) {
-            reports.push({ peerId, outcome: { kind: 'declined', code: status.reason } });
           }
+          break;
+        case 'ack-validation':
+          reports.push({ peerId, outcome: { kind: 'declined', code: status.reason } });
           break;
         case 'storage-decline':
           reports.push({ peerId, outcome: { kind: 'declined', code: status.code } });
@@ -165,6 +168,8 @@ export class PeerStatusLedger {
             protocolSupported: true,
             reason: `STORAGE_ACK_DECLINE:${status.code}`,
           };
+        case 'signer-verification':
+          return { peerId, dialOk: true, protocolSupported: true, reason: `ACK_VERIFY:${status.reason ?? 'unknown'}` };
         case 'ack-validation':
           return {
             peerId,

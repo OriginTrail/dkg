@@ -27,9 +27,9 @@ describe('PeerStatusLedger round outcomes', () => {
     const ledger = new PeerStatusLedger(() => now);
     now = 1_250;
     ledger.recordACK(ack('fast'));
-    ledger.recordACKValidation('non-member', 'ACK_VERIFY:not-in-sharding-table');
-    ledger.recordACKValidation('stale-key', 'ACK_VERIFY:key-not-registered');
-    ledger.recordACKValidation('rpc', 'ACK_VERIFY:rpc-error');
+    ledger.recordSignerFailure('non-member', 'not-in-sharding-table');
+    ledger.recordSignerFailure('stale-key', 'key-not-registered');
+    ledger.recordSignerFailure('rpc', 'rpc-error');
     ledger.recordACKValidation('forger', 'INVALID_SIGNATURE');
     ledger.recordStorageDecline('busy', 'CORE_TEMPORARILY_UNAVAILABLE', 'store saturated');
     ledger.recordProtocolUnsupported('old', 'no handler');
@@ -43,8 +43,8 @@ describe('PeerStatusLedger round outcomes', () => {
 
     expect(reports).toEqual([
       { peerId: 'fast', outcome: { kind: 'valid', latencyMs: 250 } },
-      { peerId: 'non-member', outcome: { kind: 'ineligible-signer', reason: 'ACK_VERIFY:not-in-sharding-table' } },
-      { peerId: 'stale-key', outcome: { kind: 'ineligible-signer', reason: 'ACK_VERIFY:key-not-registered' } },
+      { peerId: 'non-member', outcome: { kind: 'ineligible-signer', reason: 'not-in-sharding-table' } },
+      { peerId: 'stale-key', outcome: { kind: 'ineligible-signer', reason: 'key-not-registered' } },
       { peerId: 'forger', outcome: { kind: 'declined', code: 'INVALID_SIGNATURE' } },
       { peerId: 'busy', outcome: { kind: 'declined', code: 'CORE_TEMPORARILY_UNAVAILABLE' } },
       { peerId: 'old', outcome: { kind: 'declined', code: 'PROTOCOL_UNSUPPORTED' } },
@@ -68,7 +68,7 @@ describe('ACKPeerTrackRecord', () => {
     const record = new ACKPeerTrackRecord();
     record.record([
       { peerId: 'b', outcome: valid(400) },
-      { peerId: 'n', outcome: { kind: 'ineligible-signer', reason: 'ACK_VERIFY:not-in-sharding-table' } },
+      { peerId: 'n', outcome: { kind: 'ineligible-signer', reason: 'not-in-sharding-table' } },
     ]);
     const plan = record.plan(['n', 'a', 'b', 'c'], 2);
     expect(plan.peers).toEqual(['b', 'a', 'c']);
@@ -77,7 +77,7 @@ describe('ACKPeerTrackRecord', () => {
 
   it('keeps such a core while leaving it out would leave fewer candidates than the quorum', () => {
     const record = new ACKPeerTrackRecord();
-    record.record([{ peerId: 'n', outcome: { kind: 'ineligible-signer', reason: 'ACK_VERIFY:not-in-sharding-table' } }]);
+    record.record([{ peerId: 'n', outcome: { kind: 'ineligible-signer', reason: 'not-in-sharding-table' } }]);
     const plan = record.plan(['n', 'a'], 2);
     expect(plan.peers).toEqual(['a', 'n']);
     expect(plan.ineligible.size).toBe(0);
@@ -98,7 +98,7 @@ describe('ACKPeerTrackRecord', () => {
   it('forgets an outcome after the TTL, so a core that joined the sharding table is asked again', () => {
     let now = 0;
     const record = new ACKPeerTrackRecord(() => now);
-    record.record([{ peerId: 'n', outcome: { kind: 'ineligible-signer', reason: 'ACK_VERIFY:not-in-sharding-table' } }]);
+    record.record([{ peerId: 'n', outcome: { kind: 'ineligible-signer', reason: 'not-in-sharding-table' } }]);
     now = ACK_PEER_TRACK_RECORD_TTL_MS - 1;
     expect(record.plan(['n', 'a', 'b'], 2).peers).toEqual(['a', 'b']);
     now = ACK_PEER_TRACK_RECORD_TTL_MS;
@@ -194,7 +194,7 @@ describe('ACK rounds with the track record', () => {
     expect(after[0]).toMatchObject({ sends: ['fast-1', 'fast-2', 'non-member', 'busy', 'slow'] });
     expect(after[1].sends).toEqual(['fast-1', 'fast-2', 'slow', 'busy']);
     expect(after[1].checks).toEqual([3n, 4n]);
-    expect(record.outcome('non-member')).toEqual({ kind: 'ineligible-signer', reason: 'ACK_VERIFY:not-in-sharding-table' });
+    expect(record.outcome('non-member')).toEqual({ kind: 'ineligible-signer', reason: 'not-in-sharding-table' });
     expect(record.outcome('busy')).toEqual({ kind: 'declined', code: 'CORE_TEMPORARILY_UNAVAILABLE' });
   });
 });

@@ -962,7 +962,7 @@ export class ACKCollector {
               if (roundIsOver()) return null;
               if (!verdict.valid) {
                 const reason = sanitizeDeclineField(verdict.reason ?? 'unknown', MAX_DECLINE_CODE_CHARS) || 'unknown';
-                peerStatuses.recordACKValidation(peerId, `ACK_VERIFY:${reason}`);
+                peerStatuses.recordSignerFailure(peerId, verdict.reason);
                 getMetrics().ackPeerTotal.add(1, { result: 'rejected' });
                 log(
                   `[ACKCollector] ACK from ${peerId.slice(-8)} rejected: ${reason}` +
@@ -987,7 +987,7 @@ export class ACKCollector {
               );
               if (roundIsOver()) return null;
               if (!valid) {
-                peerStatuses.recordACKValidation(peerId, 'ACK_VERIFY:key-not-registered');
+                peerStatuses.recordSignerFailure(peerId, 'key-not-registered');
                 getMetrics().ackPeerTotal.add(1, { result: 'rejected' });
                 log(`[ACKCollector] Signer ${recoveredAddress.slice(0, 10)}... not registered for identity ${identityId} — rejecting ACK from ${peerId.slice(-8)}`);
                 return null;

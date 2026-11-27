@@ -1,3 +1,5 @@
+import { DEFAULT_REQUIRED_ACKS } from './ack-collector.js';
+import type { ACKPeerTrackRecord } from './ack-peer-track-record.js';
 import { PROTOCOL_STORAGE_ACK, isStorageACKProtocol, type StorageACKProtocol } from '@origintrail-official/dkg-core';
 
 export type ACKCapabilitySelectionPolicy =
@@ -18,6 +20,9 @@ export interface ACKCanonicalCandidatePeerSelectionInput {
   capability?: ACKCapabilitySelectionPolicy;
   protocol?: StorageACKProtocol;
   selfPeerId?: string;
+  /** Apply round history to eligible remotes before projecting peers and diagnostics. */
+  trackRecord?: Pick<ACKPeerTrackRecord, 'plan'>;
+  requiredACKs?: number;
 }
 
 type ACKCandidateTierName = 'requestedProtocol' | 'confirmedCore' | 'rest';
@@ -132,6 +137,7 @@ function diagnosticForPeer(input: {
   capability?: ACKCapabilitySelectionPolicy;
   corePeers?: ReadonlySet<string>;
   requestedProtocolPeers?: ReadonlySet<string>;
+  ineligible: ReadonlySet<string>;
 }): ACKCanonicalCandidatePeerDiagnostic {
   const protocolMatch = input.requestedProtocolPeers
     ? input.requestedProtocolPeers.has(input.peerId)
@@ -142,6 +148,7 @@ function diagnosticForPeer(input: {
   let reason = selected ? 'selected' : 'not-selected';
   if (!input.allowlisted) reason = 'not-allowlisted';
   else if (input.capability?.mode === 'require' && !input.corePeers?.has(input.peerId)) reason = 'not-core-capable';
+  else if (input.ineligible.has(input.peerId)) reason = 'ineligible-signer';
   else if (!protocolMatch && input.requestedProtocolPeers) reason = selected ? 'selected-protocol-fallback' : 'protocol-fallback';
   return {
     peerId: input.peerId,
@@ -177,13 +184,21 @@ export function selectCanonicalACKCandidatePeersWithDiagnostics(
     requestedProtocolPeers: capability?.requestedProtocolPeers,
   });
 
-  const remotePeers = flattenTiers(tiers, preferredACKPeers);
+  const eligibleRemote = flattenTiers(tiers, preferredACKPeers);
+  const plan = input.trackRecord?.plan(eligibleRemote,
+    Math.max(1, (input.requiredACKs ?? DEFAULT_REQUIRED_ACKS) - Number(input.localCandidate?.available === true)));
+  const remotePeers = plan?.peers ?? eligibleRemote;
+  const ineligible = plan?.ineligible ?? new Set<string>();
+  const diagnosticOrder = plan
+    ? [...remotePeers, ...connected.filter(peerId => !remotePeers.includes(peerId))]
+    : connected;
 
   const tierMap = tierByPeer(tiers);
   const selected = new Set(remotePeers);
-  const remoteDiagnostics = connected.map((peerId) => diagnosticForPeer({
+  const remoteDiagnostics = diagnosticOrder.map((peerId) => diagnosticForPeer({
     peerId,
     selected,
+    ineligible,
     tier: tierMap.get(peerId) ?? 'rest',
     preferred: preferredACKPeers,
     allowlisted:

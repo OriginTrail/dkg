@@ -1,3 +1,4 @@
+import { observeStoreMutations } from './internal/observed-store-mutation.js';
 import type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryReport, SwmConnectedHostCatchupOptions, SwmConnectedHostCatchupResult } from './swm/host-catchup-types.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -4393,11 +4394,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
         scanOrdinal: target.cursor.scanOrdinal,
       };
       let pendingWatermark: number | undefined;
+      let passMutatedStore = false;
       let result: VmReconcileEngineResult;
       let engineTimings: ReconcilePassTimings | undefined;
       const refusedReads = new VmReconcileRefusedSliceReads();
       try {
-        result = await reconcileContextGraph(
+        const observed = await observeStoreMutations(() => reconcileContextGraph(
           this.createVmReconcileDeps(
             localCgId,
             lifecycleGeneration,
@@ -4413,7 +4415,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
           workingCursor,
           localCgId,
           target.onChainCgId,
-        );
+        ));
+        result = observed.result;
+        passMutatedStore = observed.mutated;
       } catch (err) {
         // A rejected pass keeps what it proved (see `reconcileContextGraph`):
         // its held completions and scan position move to the live cursor, so
@@ -4430,16 +4434,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
         throw err;
       }
       if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
-      // The flush makes what this pass wrote durable, and every write before
-      // a watermark that covers it. A pass that only found its ordinals already
-      // in VM (the node's own publish, a copy that gossip or sync stored) and
-      // saves no watermark has nothing to make durable: it skips the
-      // whole-store flush, which on the embedded store holds the store's one
-      // worker for seconds. The pass that later saves the watermark over those
-      // ordinals still flushes first.
+      // Semantic `already` outcomes can repair metadata or follow fetched data.
+      // Observe actual store writes across scan and recovery; only a read-only
+      // pass with no watermark can omit the whole-store durability barrier.
       let flushMs = 0;
       const materialized = result.materialized ?? result.reconciled;
-      if (materialized > 0 || pendingWatermark !== undefined) {
+      if (passMutatedStore || materialized > 0 || pendingWatermark !== undefined) {
         const flushStartedAt = performance.now();
         await this.store.flush?.({
           priority: 'background',

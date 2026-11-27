@@ -5,7 +5,6 @@ import {
   DEFAULT_REQUIRED_ACKS,
   selectCanonicalACKCandidateUniverse,
   selectCanonicalACKCandidatePeersWithDiagnostics,
-  type ACKCanonicalCandidatePeerDiagnostic,
   type ACKCanonicalCandidatePeerSelectionInput,
   type ACKCanonicalCandidatePeerSelectionResult,
   type ACKPeerOutcomeReport,
@@ -102,40 +101,6 @@ function scheduleProbeWindow(input: {
   ];
 }
 
-/**
- * Apply the cores' track record to one selection: remote candidates the chain
- * recently said cannot sign a counted ACK are left out (reason
- * `ineligible-signer`), the rest are put in asking order. The local candidate
- * stays first, and the diagnostics list the selected cores in that order.
- */
-function applyTrackRecord(
-  selection: ACKCanonicalCandidatePeerSelectionResult,
-  localCandidate: LocalACKCandidate,
-  trackRecord: ACKPeerTrackRecord,
-  requiredACKs: number,
-): ACKCanonicalCandidatePeerSelectionResult {
-  const local = localCandidate.available ? localCandidate.peerId : undefined;
-  const remote = selection.peers.filter((peerId) => peerId !== local);
-  // The local candidate counts toward the quorum without a remote ACK.
-  const plan = trackRecord.plan(remote, Math.max(1, requiredACKs - (local === undefined ? 0 : 1)));
-  if (plan.ineligible.size === 0 && plan.peers.every((peerId, index) => peerId === remote[index])) return selection;
-  const order = new Map(plan.peers.map((peerId, index) => [peerId, index]));
-  const diagnostics: ACKCanonicalCandidatePeerDiagnostic[] = selection.diagnostics.map((diagnostic) =>
-    plan.ineligible.has(diagnostic.peerId) && diagnostic.peerId !== local
-      ? { ...diagnostic, selected: false, reason: 'ineligible-signer' }
-      : diagnostic);
-  const rank = (diagnostic: ACKCanonicalCandidatePeerDiagnostic): number => diagnostic.peerId === localCandidate.peerId
-    ? -1
-    : order.get(diagnostic.peerId) ?? Number.MAX_SAFE_INTEGER;
-  return {
-    peers: local === undefined ? plan.peers : [local, ...plan.peers],
-    diagnostics: diagnostics
-      .map((diagnostic, index) => ({ diagnostic, index }))
-      .sort((a, b) => rank(a.diagnostic) - rank(b.diagnostic) || a.index - b.index)
-      .map(({ diagnostic }) => diagnostic),
-  };
-}
-
 /** Bounded ACK discovery and final candidate planning for publish rounds. */
 export class ACKCandidateDiscoveryCoordinator {
   private preferredProbeCursor = 0;
@@ -161,11 +126,13 @@ export class ACKCandidateDiscoveryCoordinator {
     const requestedProtocolPeers = input.protocol && input.protocol !== PROTOCOL_STORAGE_ACK
       ? snapshot.supportByProtocol.get(input.protocol)
       : undefined;
-    return applyTrackRecord(selectCanonicalACKCandidatePeersWithDiagnostics({
+    return selectCanonicalACKCandidatePeersWithDiagnostics({
       ...input,
       localCandidate,
+      trackRecord: this.trackRecord,
+      requiredACKs,
       capability: { mode: 'require', corePeers: snapshot.corePeerIds, requestedProtocolPeers },
-    }), localCandidate, this.trackRecord, requiredACKs);
+    });
   }
 
   async resolveRound(ports: ACKRoundPorts): Promise<ACKCanonicalCandidatePeerSelectionResult> {

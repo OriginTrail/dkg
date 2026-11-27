@@ -32,7 +32,7 @@ describe('ACK candidate selection with the cores\' track record', () => {
   it('leaves out the core whose signer is outside the sharding table and asks fast cores first', async () => {
     const coordinator = coordinatorWithCores();
     coordinator.recordRoundOutcomes([
-      { peerId: 'non-member', outcome: { kind: 'ineligible-signer', reason: 'ACK_VERIFY:not-in-sharding-table' } },
+      { peerId: 'non-member', outcome: { kind: 'ineligible-signer', reason: 'not-in-sharding-table' } },
       { peerId: 'core-a', outcome: { kind: 'valid', latencyMs: 1_290 } },
       { peerId: 'core-b', outcome: { kind: 'valid', latencyMs: 1_100 } },
       { peerId: 'core-d', outcome: { kind: 'declined', code: 'CORE_TEMPORARILY_UNAVAILABLE' } },
@@ -49,7 +49,7 @@ describe('ACK candidate selection with the cores\' track record', () => {
   it('keeps the local candidate first and counts it toward the quorum floor', async () => {
     const coordinator = coordinatorWithCores();
     coordinator.recordRoundOutcomes([
-      { peerId: 'non-member', outcome: { kind: 'ineligible-signer', reason: 'ACK_VERIFY:not-in-sharding-table' } },
+      { peerId: 'non-member', outcome: { kind: 'ineligible-signer', reason: 'not-in-sharding-table' } },
       { peerId: 'core-c', outcome: { kind: 'valid', latencyMs: 300 } },
     ]);
 
@@ -62,7 +62,7 @@ describe('ACK candidate selection with the cores\' track record', () => {
   it('keeps every candidate when leaving the non-members out would leave fewer than the quorum', async () => {
     const coordinator = coordinatorWithCores();
     coordinator.recordRoundOutcomes(CORES.slice(0, 4).map((peerId) => ({
-      peerId, outcome: { kind: 'ineligible-signer' as const, reason: 'ACK_VERIFY:not-in-sharding-table' },
+      peerId, outcome: { kind: 'ineligible-signer' as const, reason: 'not-in-sharding-table' },
     })));
 
     const plan = await round(coordinator, 2);

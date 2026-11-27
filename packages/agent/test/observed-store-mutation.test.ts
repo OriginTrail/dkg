@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { UnsupportedTripleStoreCapabilityError } from '@origintrail-official/dkg-storage';
-import { createObservedStoreMutation } from '../src/internal/observed-store-mutation.js';
+import { createObservedStoreMutation, observeStoreMutations } from '../src/internal/observed-store-mutation.js';
 
 describe('shared observed mutation exception ordering', () => {
   it('does not dispatch if begin throws', async () => {
@@ -31,5 +31,33 @@ describe('shared observed mutation exception ordering', () => {
     });
     await expect(execute(async () => { calls.push('work'); throw failure; }, Boolean, { everything: true }, 'update')).rejects.toBe(failure);
     expect(calls).toEqual(notStarted ? ['begin', 'work', 'unchanged'] : ['begin', 'work', 'invalidate', 'indeterminate']);
+  });
+});
+
+
+describe('operation-scoped mutation observation', () => {
+  it('distinguishes changed writes from read-only and unchanged work', async () => {
+    const execute = createObservedStoreMutation(() => {});
+    await expect(observeStoreMutations(() => execute(async () => 0, n => n > 0)))
+      .resolves.toEqual({ result: 0, mutated: false });
+    await expect(observeStoreMutations(() => execute(async () => 1, n => n > 0)))
+      .resolves.toEqual({ result: 1, mutated: true });
+  });
+  it('keeps indeterminate writes dirty even when their error is handled', async () => {
+    const execute = createObservedStoreMutation(() => {});
+    const result = await observeStoreMutations(async () => {
+      await execute(async () => { throw new Error('response lost'); }, Boolean, { everything: true }, 'update').catch(() => {});
+    });
+    expect(result.mutated).toBe(true);
+  });
+  it('isolates concurrent operations and propagates nested writes to their parent', async () => {
+    const execute = createObservedStoreMutation(() => {});
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const clean = observeStoreMutations(async () => { await held; return 'read-only'; });
+    const dirty = await observeStoreMutations(() => observeStoreMutations(() => execute(async () => true, Boolean)));
+    release();
+    expect(dirty.mutated).toBe(true);
+    expect((await clean).mutated).toBe(false);
   });
 });

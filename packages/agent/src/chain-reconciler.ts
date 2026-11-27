@@ -203,12 +203,12 @@ export interface ReconcilePassTimings {
 export interface ReconcileResult {
   head: number;
   watermark: number;
-  /** Ordinals completed this pass: written by it (`materialized`) or already in VM. */
+  /** Ordinals completed this pass, whether newly promoted or already in VM. */
   reconciled: number;
   /**
-   * The part of `reconciled` this pass wrote to the store itself (`reconciled`
-   * outcomes, recovery included); the rest was already local. Absent from
-   * results built elsewhere, which callers treat as all `reconciled`.
+   * Newly promoted ordinals (`reconciled` outcomes), for telemetry. An `already`
+   * result can still repair metadata or follow recovery writes; this counter
+   * alone is not a durability signal. The host observes store mutations.
    */
   materialized?: number;
   pending: number;
