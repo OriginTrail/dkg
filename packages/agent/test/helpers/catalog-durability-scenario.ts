@@ -32,7 +32,7 @@ export async function runCatalogDurabilityScenario(
   const store = new GraphSetIndexStore(raw);
   // Freeze only the debounced background path. Production flush() remains
   // untouched, and the observed schedule calls prove this fault was reached.
-  const scheduled = vi.spyOn(raw as unknown as { armFlush(): void }, 'armFlush')
+  const scheduled = vi.spyOn(raw as unknown as { scheduleFlush(): void }, 'scheduleFlush')
     .mockImplementation(() => {});
   let persistedAtCas: OxigraphStore | undefined;
   try {

@@ -188,10 +188,6 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
   }
 
   private scheduleFlush(): void {
-    this.armFlush();
-  }
-
-  private armFlush(): void {
     if (!this.persistPath || this.flushTimer || this.readOnly) return;
     this.flushTimer = setTimeout(() => {
       this.flushTimer = null;
@@ -277,7 +273,7 @@ export class OxigraphStore implements TripleStore, ReadGraphCapableAdapter {
         // Best-effort dir fsync — see comment above.
       }
       this.persistedGeneration = through;
-      if (this.dirtyGeneration > through) this.armFlush();
+      if (this.dirtyGeneration > through) this.scheduleFlush();
     } catch (err) {
       // Log here so we see the failure regardless of the caller — but
       // re-throw so explicit callers fail loudly. (Background callers
