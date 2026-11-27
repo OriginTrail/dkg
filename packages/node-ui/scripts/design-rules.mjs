@@ -213,7 +213,9 @@ export function classify(prop, value, nodes) {
     const size = slash === -1
       ? before.find((n) => n.type === 'function' || (n.type === 'word' && /^-?\d*\.?\d+[a-z%]+$/i.test(n.value)))
       : before[before.length - 1];
-    if (size && size.type === 'word') out.push(...classify('font-size', size.value));
+    // Checked as font-size would check it: a word, or a function such as calc() or clamp()
+    // by the literals inside it (a var() is a token, so it adds nothing).
+    if (size && (size.type === 'word' || size.type === 'function')) out.push(...classify('font-size', size.value, [size]));
     // The weight (a number before the size) and line height (after the "/") follow the
     // same rules as font-weight and line-height.
     const weight = before.find((n) => n !== size && n.type === 'word' && /^\d+$/.test(n.value));

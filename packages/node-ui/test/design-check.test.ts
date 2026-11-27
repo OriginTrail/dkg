@@ -337,6 +337,15 @@ describe('design check', () => {
     expect(kinds('500 13px/20px var(--font-sans)')).toEqual(['type size 13px']);
     expect(kinds('500 var(--fs-control)/20px var(--font-sans)')).toEqual([]);
     expect(kinds('500 15px/20px var(--font-sans)')).toEqual(['type size 15px']);
+    // A size written as a function is checked as font-size checks it.
+    expect(kinds('600 calc(15px) sans-serif')).toEqual(['type size 15px']);
+    expect(kinds('600 clamp(13px, 2vw, 15px)/1.9 sans-serif')).toEqual(['type size 13px', 'type size 15px', 'type size 2vw', 'line height 1.9']);
+    expect(kinds('600 clamp(13px, 2vw, 15px) sans-serif')).toEqual(classify('font-size', 'clamp(13px, 2vw, 15px)').map((h: { kind: string; value: string }) => `${h.kind} ${h.value}`));
+    expect(kinds('600 calc(var(--fs-control)) sans-serif')).toEqual([]);
+    // Through a stylesheet, an off-scale functional size fails.
+    const off = (css: string) => checkText(system, css, 'x.css').filter((f: { offScale?: boolean }) => f.offScale).map((f: { kind: string; value: string }) => `${f.kind} ${f.value}`);
+    expect(off('.a { font: 600 calc(15px) sans-serif; }')).toEqual(['type size 15px']);
+    expect(off('.a { font: 600 var(--fs-control)/var(--lh-body) sans-serif; }')).toEqual([]);
     expect(kinds('italic 300 13px/1 sans-serif')).toEqual(['type size 13px', 'weight 300']);
     expect(kinds('inherit')).toEqual([]);
   });
@@ -547,11 +556,14 @@ describe('design check', () => {
       writeFileSync(join(styles, 'a.css'), '.old { padding: 10px; }\n.new { gap: 10px; }\n');
       git('commit', '-q', '-am', 'feature');
       writeFileSync(join(styles, 'b.css'), '.u {\n  padding:\n    10px;\n}\n');
+      // A name git would quote and escape without -z (core.quotePath is on by default).
+      git('config', 'core.quotePath', 'true');
+      writeFileSync(join(styles, 'café.css'), '.c { padding: 10px; }\n');
 
       const run = spawnSync(process.execPath, [SCRIPT, '--changed', 'main', '--json'], { cwd: pkg, encoding: 'utf8', env: { ...process.env, DESIGN_CHECK_PKG: pkg } });
       const results = JSON.parse(run.stdout) as { file: string; findings: { line: number; prop: string; offScale?: boolean }[] }[];
       const found = results.flatMap((r) => r.findings.filter((f) => f.offScale).map((f) => `${r.file}:${f.line} ${f.prop}`));
-      expect(found.sort()).toEqual(['src/ui/styles/a.css:2 gap', 'src/ui/styles/b.css:2 padding']);
+      expect(found.sort()).toEqual(['src/ui/styles/a.css:2 gap', 'src/ui/styles/b.css:2 padding', 'src/ui/styles/café.css:1 padding']);
       expect(run.status).toBe(1);
     } finally {
       rmSync(repo, { recursive: true, force: true });

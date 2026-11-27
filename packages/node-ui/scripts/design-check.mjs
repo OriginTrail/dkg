@@ -46,9 +46,10 @@ function changedLines(base) {
       for (let i = 0; i < count; i++) files.get(current).add(start + i);
     }
   }
-  // Untracked files count in full.
-  const untracked = execFileSync('git', ['ls-files', '--others', '--exclude-standard', '--', UI], { cwd: PKG, encoding: 'utf8' })
-    .split('\n').filter(Boolean).map((f) => join(PKG, f));
+  // Untracked files count in full. -z keeps each name as it is: without it git quotes and
+  // escapes names with non-ASCII or special characters (`"caf\303\251.css"`).
+  const untracked = execFileSync('git', ['ls-files', '-z', '--others', '--exclude-standard', '--', UI], { cwd: PKG, encoding: 'utf8' })
+    .split('\0').filter(Boolean).map((f) => join(PKG, f));
   for (const f of untracked) files.set(f, null);
   return files;
 }
