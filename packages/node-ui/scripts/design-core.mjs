@@ -9,7 +9,7 @@ import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node
 import { fileURLToPath } from 'node:url';
 import { NAMED_COLOURS, parseColour } from './colour.mjs';
 import { CssReadError, cssDeclarations } from './css.mjs';
-import { classify, declarations, lineIndex, resolveVars } from './design-rules.mjs';
+import { classify, declarations, lineIndex, resolveVarsFrom } from './design-rules.mjs';
 import { literalWords, parseValue, varRefs, walkValue } from './css-value.mjs';
 import { readHtml } from './html.mjs';
 import { ADD, suggest } from './design-suggest.mjs';
@@ -19,6 +19,7 @@ export { declarations, parseColour };
 
 /** @typedef {import('./design-suggest.mjs').Scales} Scales */
 /** @typedef {import('./design-suggest.mjs').Finding} Finding */
+/** @typedef {import('./jsx.mjs').Declaration} Declaration */
 /** @typedef {import('./design-suggest.mjs').Step} Step */
 
 /**
@@ -449,88 +450,67 @@ export function checkText(system, text, file, { known, mockup = false, keepLine 
   // they're used, against the scale of the property that uses them: `gap: var(--gap)` is a
   // gap of 10px, so moving a size into a variable doesn't hide it. Variables set only at
   // runtime or in another file have no definition here and stay as they are. Every
-  // definition is kept with its scope, so a rule's own definition applies inside it. A
-  // mock-up that redefines a node UI token is checked with its own value too, and a
-  // redefinition anywhere is reported below.
-  // A mock-up may read the variables it defines; their definitions are what get checked.
+  // definition is kept with its scope (and its declaration, so a value knows which
+  // definitions it came from), and a rule's own definition applies inside it. A file that
+  // redefines a node UI token is checked with its own value too, and the redefinition is
+  // reported below.
+  // A file may read the variables it defines; their definitions are what get checked.
   // Names the caller passes in are for variables defined somewhere else (at runtime).
-  const knownHere = mockup ? new Set([...(known ?? []), ...decls.filter((d) => d.prop.startsWith('--')).map((d) => d.prop)]) : known;
-  /** @type {Map<string, { value: string, scope: number }[]>} */
+  const knownHere = new Set([...(known ?? []), ...decls.filter((d) => d.prop.startsWith('--')).map((d) => d.prop)]);
+  /** @type {Map<string, Declaration[]>} */
   const defs = new Map();
   for (const d of decls) {
     if (!d.prop.startsWith('--')) continue;
     // A copy of a token at its own value changes nothing: keep reading it as the token.
     if (system.themeValues.get(d.prop)?.has(d.value.trim())) continue;
     const list = defs.get(d.prop) ?? [];
-    list.push({ value: d.value, scope: d.scope });
+    list.push(d);
     defs.set(d.prop, list);
   }
-  /** A declaration counts as changed when any line it spans is: `padding:\n  10px;` with only the value edited. @param {{ line: number, endLine: number }} d */
+  /** A declaration counts as changed when any line it spans is: `padding:\n  10px;` with only the value edited. @param {Declaration} d */
   const isChanged = (d) => {
     for (let l = d.line; l <= d.endLine; l++) if (keepLine(l)) return true;
     return false;
   };
-  // With --changed, a variable whose definition changed changes every use of it, through
-  // aliases too (`--pad: var(--gap)`): the line of the first changed definition it depends on.
-  /** @type {Map<string, number | null>} */
-  const changedVia = new Map();
-  /** @param {string} name @param {Set<string>} open @returns {number | null} */
-  const changedLine = (name, open = new Set()) => {
-    if (changedVia.has(name)) return changedVia.get(name) ?? null;
-    if (open.has(name)) return null;
-    open.add(name);
-    let line = null;
-    for (const def of decls) {
-      if (def.prop !== name) continue;
-      if (isChanged(def)) { line = def.line; break; }
-      for (const r of varRefs(parseValue(def.value))) { line = changedLine(r.name, open); if (line !== null) break; }
-      if (line !== null) break;
-    }
-    changedVia.set(name, line);
-    return line;
-  };
   for (const d of decls) {
     const changed = isChanged(d);
-    // An unchanged use is checked when a variable it reads was changed, and reported at that change.
-    let via = null;
-    if (!changed && !d.prop.startsWith('--')) {
-      for (const r of varRefs(parseValue(d.value))) { via = changedLine(r.name); if (via !== null) break; }
-    }
-    if (!changed && via === null) continue;
-    if (via !== null) {
-      /** @type {Set<string>} */
-      const seenVia = new Set();
-      for (const resolved of resolveVars(d.value, defs, d.scope)) {
-        if (resolved === d.value) continue;
-        for (const f of checkDeclaration(system, d.prop, resolved, { known: knownHere, mockup })) {
-          const key = `${f.kind}\0${f.value}\0${f.use}`;
-          if (seenVia.has(key)) continue;
-          seenVia.add(key);
-          findings.push({ line: via, prop: d.prop, ...f, written: d.value, usedAt: d.line });
-        }
-      }
-      continue;
-    }
     // A token set to a value it doesn't have in 00-theme.css, in a mock-up or in the UI's own
     // stylesheets: `.x { --bg-surface: magenta }` changes the system outside the system.
     // (00-theme.css itself is never checked.)
     const themed = system.themeValues.get(d.prop);
-    if (themed && !themed.has(d.value.trim())) {
+    if (changed && themed && !themed.has(d.value.trim())) {
       findings.push({
         line: d.line, prop: d.prop, kind: 'token', value: d.value, offScale: true,
         use: `redefines var(${d.prop}), which is ${[...themed].join(' or ')} in 00-theme.css: use the token as it is, or change it in 00-theme.css and DESIGN.md`,
       });
     }
-    // With several possible definitions, each value it could have is checked, once per finding.
-    const values = defs.size && !d.prop.startsWith('--') ? resolveVars(d.value, defs, d.scope) : [d.value];
+    // What gets checked, and where it's reported. A changed declaration is checked as written
+    // (so a literal or an unknown name in a var() fallback still counts) and with each value
+    // its variables can give it. An unchanged use is checked only through a variable whose
+    // definition changed (--changed), aliases included, and is reported at that definition.
+    /** @type {{ value: string, line: number, usedAt?: number }[]} */
+    const checks = changed ? [{ value: d.value, line: d.line }] : [];
+    if (defs.size && !d.prop.startsWith('--')) {
+      for (const c of resolveVarsFrom(d.value, defs, d.scope)) {
+        if (c.value === d.value) continue;
+        if (changed) { checks.push({ value: c.value, line: d.line }); continue; }
+        const def = c.from.find(isChanged);
+        if (def) checks.push({ value: c.value, line: def.line, usedAt: d.line });
+      }
+    }
+    // With several possible values, each finding is reported once.
     /** @type {Set<string>} */
     const seen = new Set();
-    for (const resolved of values) {
-      for (const f of checkDeclaration(system, d.prop, resolved, { known: knownHere, mockup })) {
-        const key = `${f.kind}\0${f.value}\0${f.use}`;
+    for (const check of checks) {
+      for (const f of checkDeclaration(system, d.prop, check.value, { known: knownHere, mockup })) {
+        const key = `${check.line}\0${f.kind}\0${f.value}\0${f.use}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        findings.push({ line: d.line, prop: d.prop, ...f, ...(resolved !== d.value ? { written: d.value } : {}) });
+        findings.push({
+          line: check.line, prop: d.prop, ...f,
+          ...(check.value !== d.value ? { written: d.value } : {}),
+          ...(check.usedAt ? { usedAt: check.usedAt } : {}),
+        });
       }
     }
   }

@@ -59,6 +59,31 @@ const MAX_CANDIDATES = 16;
  * @returns {string[]} distinct values, `value` itself when nothing resolves
  */
 export function resolveVars(value, defs, scope) {
+  return resolveVarsFrom(value, defs, scope).map((c) => c.value);
+}
+
+/**
+ * resolveVars, with the definitions each value was built from (aliases included), so a
+ * caller can tell which definitions a value depends on: --changed reports a use at the
+ * changed definition it reads. A value reached from several definitions lists them all.
+ * @template {{ value: string, scope: number }} D
+ * @param {string} value
+ * @param {Map<string, D[]>} defs
+ * @param {number} scope
+ * @returns {{ value: string, from: D[] }[]}
+ */
+export function resolveVarsFrom(value, defs, scope) {
+  /** Distinct values, merging where each came from. @param {{ value: string, from: D[] }[]} list */
+  const distinct = (list) => {
+    /** @type {Map<string, Set<D>>} */
+    const by = new Map();
+    for (const c of list) {
+      const from = by.get(c.value) ?? new Set();
+      for (const d of c.from) from.add(d);
+      by.set(c.value, from);
+    }
+    return [...by].map(([v, from]) => ({ value: v, from: [...from] }));
+  };
   /** The definitions that can apply in a scope. @param {string} name @param {number} at */
   const options = (name, at) => {
     const all = defs.get(name) ?? [];
@@ -76,26 +101,29 @@ export function resolveVars(value, defs, scope) {
    * @param {string} text
    * @param {number} at the scope its references are resolved in
    * @param {Set<string>} open variables being resolved further out, so a loop stops
-   * @returns {string[]}
+   * @returns {{ value: string, from: D[] }[]}
    */
   const resolve = (text, at, open) => {
     const refs = varRefs(parseValue(text)).filter((r) => !open.has(r.name) && options(r.name, at).length);
     // The outermost references: one inside another's fallback is replaced with it.
     const outer = refs.filter((r) => !refs.some((o) => o !== r && o.node.start <= r.node.start && r.node.end <= o.node.end));
-    if (!outer.length) return [text];
-    let results = [''];
+    if (!outer.length) return [{ value: text, from: [] }];
+    /** @type {{ value: string, from: D[] }[]} */
+    let results = [{ value: '', from: [] }];
     let last = 0;
     for (const r of outer) {
-      /** @type {Set<string>} */
-      const values = new Set();
-      for (const d of options(r.name, at)) for (const v of resolve(d.value, d.scope, new Set([...open, r.name]))) values.add(v);
+      /** @type {{ value: string, from: D[] }[]} */
+      const values = [];
+      for (const d of options(r.name, at)) {
+        for (const v of resolve(d.value, d.scope, new Set([...open, r.name]))) values.push({ value: v.value, from: [d, ...v.from] });
+      }
       const before = text.slice(last, r.node.start);
-      results = [...new Set(results.flatMap((p) => [...values].map((v) => p + before + v)))].slice(0, MAX_CANDIDATES);
+      results = distinct(results.flatMap((p) => distinct(values).map((v) => ({ value: p.value + before + v.value, from: [...p.from, ...v.from] })))).slice(0, MAX_CANDIDATES);
       last = r.node.end;
     }
-    return results.map((p) => p + text.slice(last));
+    return results.map((p) => ({ value: p.value + text.slice(last), from: p.from }));
   };
-  return [...new Set(resolve(value, scope, new Set()))].slice(0, MAX_CANDIDATES);
+  return distinct(resolve(value, scope, new Set())).slice(0, MAX_CANDIDATES);
 }
 
 /** The line each character index is on, from 1. @param {string} text @returns {(index: number) => number} */

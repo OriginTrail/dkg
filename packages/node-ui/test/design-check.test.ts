@@ -386,6 +386,15 @@ describe('design check', () => {
     }
   });
 
+  it('still checks a var() fallback when the variable resolves', () => {
+    const off = (css: string, file = 'src/ui/styles/x.css') => checkText(system, css, file, { known: new Set() })
+      .filter((f: { offScale?: boolean }) => f.offScale).map((f: { kind: string; value: string }) => `${f.kind} ${f.value}`);
+    expect(off('.x { --local: var(--text-primary); color: var(--local, #ff00ff); }')).toEqual(['colour #ff00ff']);
+    expect(off('.x { --local: var(--space-8); gap: var(--local, var(--not-a-token)); }')).toEqual(['token --not-a-token']);
+    // In a mock-up too.
+    expect(off('<style>.x { --local: var(--text-primary); color: var(--local, #ff00ff); }</style>', 'mock.html')).toEqual(['colour #ff00ff']);
+  });
+
   it('checks the uses of a changed variable definition, reported at the change', () => {
     const found = (css: string, changed: number[]) => checkText(system, css, 'src/ui/styles/x.css', { known: new Set(), keepLine: (l) => changed.includes(l) })
       .filter((f: { offScale?: boolean }) => f.offScale)
