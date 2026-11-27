@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import {
   OxigraphStore,
   QueryWorkStoppedError,
+  QueryWorkTerminationUnconfirmedError,
+  classifyQueryWorkTermination,
   isQueryWorkStoppedError,
   remainingWorkMs,
 } from '../src/index.js';
@@ -24,6 +26,20 @@ describe('work deadline helpers', () => {
       { code: 'QUERY_WORK_STOPPED', outcome: 'stopped' }]) {
       expect(isQueryWorkStoppedError(other)).toBe(false);
     }
+  });
+
+  it('preserves logical termination through diagnostic wrapping and cyclic causes', () => {
+    const ended = new QueryWorkStoppedError('worker', 'not_started', new Error('limit'));
+    const uncertain = new QueryWorkTerminationUnconfirmedError(ended);
+    const wrap = (cause: unknown) => new Error('query diagnostic', { cause: new AggregateError([cause], 'store diagnostic') });
+    expect(classifyQueryWorkTermination(ended)).toBe('confirmed');
+    expect(classifyQueryWorkTermination(wrap(ended))).toBe('confirmed');
+    expect(classifyQueryWorkTermination(uncertain)).toBe('unconfirmed');
+    expect(classifyQueryWorkTermination(wrap(uncertain))).toBe('unconfirmed');
+    expect(classifyQueryWorkTermination(new AggregateError([ended, new Error('still unknown')]))).toBe('unconfirmed');
+    expect(classifyQueryWorkTermination(new AggregateError([ended, ended]))).toBe('confirmed');
+    const cyclic = new Error('cycle'); cyclic.cause = cyclic;
+    expect(classifyQueryWorkTermination(cyclic)).toBeUndefined();
   });
 
   it('measures what is left of a deadline, never below 1 ms', () => {

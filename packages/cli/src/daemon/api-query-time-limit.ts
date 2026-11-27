@@ -1,6 +1,6 @@
 import type { ServerResponse } from 'node:http';
 import { startRequestAbortLifecycle } from '@origintrail-official/dkg-core';
-import { isQueryWorkStoppedError } from '@origintrail-official/dkg-storage';
+import { classifyQueryWorkTermination } from '@origintrail-official/dkg-storage';
 import { jsonResponse } from './http-utils.js';
 
 /**
@@ -104,8 +104,7 @@ export function startApiQueryTimeLimit(limitMs: number, caller: AbortSignal): Ap
  * reported that it stopped the query's work, or never started it.
  */
 export function respondQueryTimeLimitExceeded(res: ServerResponse, limitMs: number, error: unknown): void {
-  const stopped = isQueryWorkStoppedError(error)
-    || isQueryWorkStoppedError((error as { cause?: unknown } | null)?.cause);
+  const stopped = classifyQueryWorkTermination(error) === 'confirmed';
   jsonResponse(res, 504, {
     code: QUERY_TIME_LIMIT_EXCEEDED_CODE,
     error: stopped

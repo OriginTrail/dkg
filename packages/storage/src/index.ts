@@ -184,6 +184,9 @@ export {
 } from './store-operation-timeout.js';
 export {
   QUERY_WORK_STOPPED_CODE,
+  QUERY_WORK_TERMINATION_UNCONFIRMED_CODE,
+  QueryWorkTerminationUnconfirmedError,
+  classifyQueryWorkTermination,
   QueryWorkStoppedError,
   isQueryWorkStoppedError,
   remainingWorkMs,

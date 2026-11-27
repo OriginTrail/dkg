@@ -1,4 +1,4 @@
-import { isQueryWorkStoppedError } from './query-work-stop.js';
+import { classifyQueryWorkTermination, QueryWorkTerminationUnconfirmedError } from './query-work-stop.js';
 import { readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import { createHash } from 'node:crypto';
@@ -252,8 +252,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     ]).catch((error: unknown) => {
       // Promise.all can surface a queued sibling's not_started result while
       // the other read is still terminating. It cannot certify the whole query.
-      if (isQueryWorkStoppedError(error)) throw new AggregateError([error],
-        'A component read ended; termination of all query reads is unconfirmed');
+      if (classifyQueryWorkTermination(error) !== undefined) throw new QueryWorkTerminationUnconfirmedError(error);
       throw error;
     });
     return this.hydrateQueryResult(mergeQueryResults(original, placeholder), options);

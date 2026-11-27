@@ -151,7 +151,7 @@ describe('/api/query answers for its time limit', () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it('does not certify a rewritten query while its running sibling awaits termination', async () => {
+  it.each(['direct', 'cause', 'aggregate'] as const)('does not certify a rewritten query while a sibling awaits termination (%s)', async wrapper => {
     const inner = new OxigraphStore();
     const store = new SharedMemoryLiteralBlobStore(inner, { blobDir: '/unused-stopped-query', thresholdBytes: 8 });
     let completeTermination!: () => void;
@@ -166,7 +166,13 @@ describe('/api/query answers for its time limit', () => {
     try {
       await handleQueryRoutes(routeContext('/api/query', new RequestStub({
         sparql: `SELECT ?s WHERE { ?s <urn:p> "${'x'.repeat(100)}" }`, timeoutMs: 1_000,
-      }), res, { query: (sparql: string, options: QueryOptions) => store.query(sparql, options) }));
+      }), res, { query: async (sparql: string, options: QueryOptions) => {
+        try { return await store.query(sparql, options); } catch (error) {
+          if (wrapper === 'cause') throw new Error('query diagnostic', { cause: error });
+          if (wrapper === 'aggregate') throw new AggregateError([error], 'query diagnostic');
+          throw error;
+        }
+      } }));
       expect(physical).toHaveBeenCalledTimes(2);
       expect(replaceWorker).toHaveBeenCalledOnce();
       expect(physical.mock.calls.every(call => call[1]?.signal?.aborted)).toBe(true);

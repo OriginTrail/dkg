@@ -50,6 +50,40 @@ export function isQueryWorkStoppedError(
     && (shaped.outcome === 'not_started' || shaped.outcome === 'stopped');
 }
 
+export const QUERY_WORK_TERMINATION_UNCONFIRMED_CODE = 'QUERY_WORK_TERMINATION_UNCONFIRMED' as const;
+
+/** A component ended, but the logical read cannot certify all of its work ended. */
+export class QueryWorkTerminationUnconfirmedError extends Error {
+  readonly code = QUERY_WORK_TERMINATION_UNCONFIRMED_CODE;
+  constructor(cause: unknown) {
+    super('Termination of all query reads is unconfirmed', { cause });
+    this.name = 'QueryWorkTerminationUnconfirmedError';
+  }
+}
+
+/** Shared boundary classification; diagnostic wrappers do not confer termination.
+ * A logical read's explicit result takes precedence over its component cause.
+ * Aggregated failures confirm termination only when every component confirms it. */
+export function classifyQueryWorkTermination(error: unknown): 'confirmed' | 'unconfirmed' | undefined {
+  const visited = new Set<object>();
+  const classify = (value: unknown): 'confirmed' | 'unconfirmed' | undefined => {
+    if (!value || typeof value !== 'object' || visited.has(value)) return undefined;
+    visited.add(value);
+    try {
+      const shaped = value as { code?: unknown; cause?: unknown; errors?: unknown };
+      if (shaped.code === QUERY_WORK_TERMINATION_UNCONFIRMED_CODE) return 'unconfirmed';
+      if (isQueryWorkStoppedError(value)) return 'confirmed';
+      if (Array.isArray(shaped.errors) && shaped.errors.length > 0) {
+        const outcomes = shaped.errors.map(classify);
+        if (outcomes.every(outcome => outcome === 'confirmed')) return 'confirmed';
+        return outcomes.some(outcome => outcome !== undefined) ? 'unconfirmed' : undefined;
+      }
+      return classify(shaped.cause);
+    } finally { visited.delete(value); }
+  };
+  return classify(error);
+}
+
 /**
  * Whole milliseconds left before `workDeadline`, never below 1, or undefined
  * when the read has no limit. A store bound may only be shortened by it.
