@@ -1,6 +1,6 @@
 import { SubscriptionRecoveryCoordinator } from '../src/subscription-recovery-owner.js';
 import { PersistedSubscriptionNameBindingRetry } from '../src/context-graph-subscription-name-binding-retry.js';
-import type { SubscriptionRecoveryRowPorts } from '../src/context-graph-subscription-recover-row.js';
+import type { SubscriptionRecoverySchedulingPorts } from '../src/context-graph-subscription-recover-row.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ContextGraphSubscriptionActivations, isCommittedSubscription } from '../src/context-graph-subscription-activation-state.js';
 import { StorageAckDemandActivations } from '../src/storage-ack-demand-activation.js';
@@ -222,7 +222,7 @@ describe('one recovery owner across scheduling policies', () => {
       return allowed;
     });
     const prepare = vi.fn(async () => { if (phase === 'preparation' && prepare.mock.calls.length === 1) await preparing; });
-    const ports: SubscriptionRecoveryRowPorts = {
+    const ports: SubscriptionRecoverySchedulingPorts = {
       recovery, isCurrent: () => !controller.signal.aborted,
       dormancy: id => f.dormancy.get(id), revision: () => 0, subscription: id => f.live.get(id),
       load: async () => ({ ...target }), resolveAuthority,

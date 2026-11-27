@@ -38,7 +38,7 @@ import { CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS } from './dkg-agent-const
 
 import { checkSubscriptionAuthority } from './subscription-authority-check.js';
 import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
-import { recoverPersistedSubscriptionRow, type SubscriptionRecoveryRowPorts } from './context-graph-subscription-recover-row.js';
+import { recoverPersistedSubscriptionRow, type SubscriptionRecoverySchedulingPorts } from './context-graph-subscription-recover-row.js';
 import { SubscriptionRetryExecutor, type SubscriptionRetryRow, type SubscriptionRetryLease } from './subscription-retry-executor.js';
 
 /** Pause after the first unanswered check, and the shortest a wake-up leaves. */
@@ -59,7 +59,7 @@ export function isChainNameBindingUnavailable(
   return authority.outcome === 'unavailable' && authority.reason === 'chain-name-binding-unavailable';
 }
 
-export interface NameBindingRetryPorts extends SubscriptionRecoveryRowPorts {
+export interface NameBindingRetryPorts extends SubscriptionRecoverySchedulingPorts {
   /** Aborts when the node stops. */
   readonly signal: AbortSignal;
   track(run: Promise<unknown>): void;
@@ -148,9 +148,9 @@ export class PersistedSubscriptionNameBindingRetry {
     const held = row.value;
     held.checks += 1;
     const outcome = await recoverPersistedSubscriptionRow(row.id, {
-      ...this.ports, isCurrent: lease.isCurrent,
+      ...this.ports,
       resolveAuthority: saved => checkSubscriptionAuthority(lease, signal => this.ports.resolveAuthority(saved, signal)),
-    }, lease.owner);
+    }, lease);
     held.lastCheckAt = this.#now();
     if (outcome.kind === 'done') return undefined;
     if (outcome.kind === 'activated') {

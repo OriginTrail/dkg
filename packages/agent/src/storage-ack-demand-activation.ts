@@ -30,7 +30,7 @@
  */
 
 import { checkSubscriptionAuthority } from './subscription-authority-check.js';
-import { recoverPersistedSubscriptionRow, type SubscriptionRecoveryRowPorts } from './context-graph-subscription-recover-row.js';
+import { recoverPersistedSubscriptionRow, type SubscriptionRecoverySchedulingPorts } from './context-graph-subscription-recover-row.js';
 import { SubscriptionRetryExecutor, type SubscriptionRetryRow, type SubscriptionRetryLease } from './subscription-retry-executor.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 
@@ -56,7 +56,7 @@ export function isStorageAckDemandReason(
   return reason === 'activationCap' || reason === 'authorityUnavailable';
 }
 
-export interface StorageAckDemandActivationPorts extends SubscriptionRecoveryRowPorts {
+export interface StorageAckDemandActivationPorts extends SubscriptionRecoverySchedulingPorts {
   readonly signal: AbortSignal;
   track(run: Promise<unknown>): void;
   readonly log: { info(message: string): void; warn(message: string): void; debug(message: string): void };
@@ -138,9 +138,9 @@ export class StorageAckDemandActivations {
     demand.checks += 1;
     const outcome = await recoverPersistedSubscriptionRow(row.id, {
       ...this.ports,
-      isCurrent: () => lease.isCurrent() && demand.onChainId === onChainId,
       resolveAuthority: saved => checkSubscriptionAuthority(lease, signal => this.ports.resolveAuthority(saved, signal)),
-    }, lease.owner, { reason, verifiedOnChainId: onChainId });
+    }, { signal: lease.signal, isCurrent: () => lease.isCurrent() && demand.onChainId === onChainId },
+    { reason, verifiedOnChainId: onChainId });
     if (outcome.kind === 'done') return undefined;
     if (outcome.kind === 'activated') {
       this.ports.log.info(`Activated persisted context-graph subscription "${row.id}" for StorageACK requests `
