@@ -5,17 +5,19 @@
 // of a member's subscription. The judgements are in ../qa/member-sharing.mjs.
 
 import { brief, sleep, waitFor } from './devnet.mjs';
-import { foldRead, foldSubscription, freshSubscription, inScope, judgeHeld, listingObservation, pairHeld, sharedMemoryScope } from '../qa/member-sharing.mjs';
+import { describe, foldRead, foldSubscription, freshSubscription, inScope, judgeHeld, listingObservation, pairHeld, shareAdmission, sharedMemoryScope } from '../qa/member-sharing.mjs';
 import { parseObservation } from '../qa/query-observation.mjs';
 
 /**
- * `config` is { boundMs, definitionMs, syncedMs, stamp, predicate }: the bound
- * of a pair, the deadlines of a subscription, the run's stamp (in every
- * subject and asset name) and the predicate every write uses.
+ * `config` is { boundMs, definitionMs, syncedMs, stamp, predicate, note,
+ * shareRetryMs }: the bound of a pair, the deadlines of a subscription, the
+ * run's stamp (in every subject and asset name), the predicate every write
+ * uses, where an answer worth keeping goes, and how long a share that was not
+ * admitted waits to be sent again (the Retry-After of that answer).
  */
 export function createObservation(devnet, config) {
   const { api } = devnet;
-  const { boundMs, definitionMs, syncedMs, stamp, predicate } = config;
+  const { boundMs, definitionMs, syncedMs, stamp, predicate, note = () => {}, shareRetryMs = 1000 } = config;
   let sequence = 0;
 
   // Each node's history with each graph's definition: whether anything ever
@@ -33,22 +35,59 @@ export function createObservation(devnet, config) {
   /** Whether anything so far showed `node` holding `graph`'s definition: true, false (its observed subscription never did), or undefined. */
   const definitionSeen = (node, graph) => definitions.get(definitionKey(node, graph));
 
+  const shareJobPath = job => `/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(job)}`;
+
+  /**
+   * The job of a share, once the node's answers lead to one: { jobId } or
+   * { error }. A node whose store is busy can answer before it knows, and a
+   * client then does what docs/build/async-jobs.md says (shareAdmission): a job
+   * that may exist is read and the share is not sent again, as it may well run;
+   * a share that was not admitted is sent again unchanged. Either has the bound
+   * of a pair to come to a job, and only then does the write count as failed.
+   * Each such answer is noted under `label`: a store that busy is worth seeing,
+   * whatever became of the share.
+   */
+  async function admitShare(author, name, body, { pollMs, label }) {
+    const end = Date.now() + boundMs;
+    for (;;) {
+      const queued = await api(author, 'POST', `/api/knowledge-assets/${name}/swm/share-async`, body);
+      const answer = shareAdmission(queued.status, queued.json);
+      if (answer.kind === 'job') return { jobId: answer.jobId };
+      if (answer.kind === 'not-admitted' && Date.now() + shareRetryMs < end) {
+        note(`${label}: its share was answered 503 not_admitted (phase ${answer.phase}): sending it again`);
+        await sleep(shareRetryMs);
+      } else if (answer.kind === 'indeterminate') {
+        note(`${label}: its share was answered 503 indeterminate (phase ${answer.phase}): reading job ${answer.jobId}, not sending it again`);
+        const asked = Date.now();
+        const seen = await waitFor(async () => {
+          const view = await api(author, 'GET', shareJobPath(answer.jobId));
+          return { ok: view.status === 200, view };
+        }, end - Date.now(), pollMs);
+        if (seen.ok) {
+          note(`${label}: job ${answer.jobId} was there ${Math.round((Date.now() - asked) / 1000)} s later`);
+          return { jobId: answer.jobId };
+        }
+        return { error: `the share's admission stayed indeterminate: job ${answer.jobId} was not seen within ${Math.round(boundMs / 1000)} s (${brief(seen.view)})` };
+      } else return { error: `the share was not accepted: ${brief(queued)}` };
+    }
+  }
+
   /**
    * Creates an asset and shares it through the asynchronous share job, as a
-   * client does, and waits for the job to end. Resolves to { doneAt } (the time
-   * a write's bound starts from) or { error, code } (the refusal's code, if any).
+   * client does (admitShare), and waits for the job to end. `label` names it in
+   * a note. Resolves to { doneAt } (the time a write's bound starts from) or
+   * { error, code } (the refusal's code, if any).
    */
-  async function createAndShare(author, { contextGraphId, name, quads, subGraphName }, { createTimeoutMs, jobTimeoutMs, pollMs }) {
+  async function createAndShare(author, { contextGraphId, name, quads, subGraphName }, { createTimeoutMs, jobTimeoutMs, pollMs, label = name }) {
     const scope = subGraphName ? { subGraphName } : {};
     const created = await api(author, 'POST', '/api/knowledge-assets', {
       contextGraphId, name, ...scope, quads, finalize: true, alsoShareSwm: false,
     }, { timeoutMs: createTimeoutMs });
     if (created.status !== 200 && created.status !== 201) return { error: `the author refused the asset: ${brief(created)}`, code: created.json?.code };
-    const queued = await api(author, 'POST', `/api/knowledge-assets/${name}/swm/share-async`, { contextGraphId, entities: 'all', ...scope });
-    const job = queued.json?.jobId;
-    if (queued.status !== 200 || !job) return { error: `the share was not accepted: ${brief(queued)}` };
+    const admitted = await admitShare(author, name, { contextGraphId, entities: 'all', ...scope }, { pollMs, label });
+    if (admitted.error) return { error: admitted.error };
     const finished = await waitFor(async () => {
-      const view = await api(author, 'GET', `/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(job)}`);
+      const view = await api(author, 'GET', shareJobPath(admitted.jobId));
       return { ok: ['succeeded', 'failed'].includes(view.json?.state), view };
     }, jobTimeoutMs, pollMs);
     const state = finished.view?.json?.state;
@@ -70,7 +109,7 @@ export function createObservation(devnet, config) {
    * the author's history with the definition: a write the node accepted was
    * made while the author held it.
    */
-  async function write(author, graph, sub, what) {
+  async function write(author, graph, sub, what, caseId) {
     sequence += 1;
     const record = {
       author, graph, sub, what, sequence,
@@ -81,7 +120,7 @@ export function createObservation(devnet, config) {
     const outcome = await createAndShare(author, {
       contextGraphId: graph.id, name: `i3251-${stamp.toLowerCase()}-${sequence}`, subGraphName: sub,
       quads: [{ subject: record.subject, predicate, object: `"${record.value}"`, graph: '' }],
-    }, { createTimeoutMs: 120_000, jobTimeoutMs: 120_000, pollMs: 1000 });
+    }, { createTimeoutMs: 120_000, jobTimeoutMs: 120_000, pollMs: 1000, label: `${caseId === undefined ? '' : `case ${caseId}: `}${describe(record)}` });
     if (!outcome.error) {
       record.doneAt = outcome.doneAt;
       noteDefinition(author, graph, true);
@@ -164,7 +203,7 @@ export function createObservation(devnet, config) {
 
   /** A write, and at once the watch of the nodes that must hold it (a handle, see watch). */
   async function writeAndWatch(caseId, author, graph, sub, what, nodes) {
-    const record = await write(author, graph, sub, what);
+    const record = await write(author, graph, sub, what, caseId);
     return watch(nodes.map(node => ({ caseId, record, node })));
   }
 

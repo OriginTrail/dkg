@@ -205,21 +205,38 @@ export const LARGE_ASSET_MAX_TRIPLES = 10_000;
  * attempts of up to 128,000, 256,000 and 256,000 triples stay under it).
  */
 export const LARGE_GRAPH_MAX_TRIPLES = 256_000;
+/**
+ * The most triples the large graph of a later attempt carries when the owner
+ * writes it: it already holds the first one, of about as many, its own writes
+ * are among those case 6 waits for and slow down the more it holds, and a
+ * node's store has stalled at about 340,000 triples.
+ */
+export const OWNER_LARGE_GRAPH_MAX_TRIPLES = 128_000;
+
+/**
+ * `size` ({ assets, triples per asset }) with no more assets than keep it
+ * within what the owner can take on a later attempt: at least one, and `size`
+ * itself when it fits.
+ */
+export function ownerLargeSize(size, maxTriples = OWNER_LARGE_GRAPH_MAX_TRIPLES) {
+  if (size.assets * size.triples <= maxTriples) return size;
+  return { assets: Math.max(1, Math.floor(maxTriples / size.triples)), triples: size.triples };
+}
 
 /**
  * The size of the large graph for case 6's next attempt, from what member 2's
  * trace measured on the last: its transfer of `size` ({ assets, triples per
  * asset }) held the general slot for `heldMs` (from the transfer's admission
  * to the last trace line that shows it holding; null when nothing held it),
- * and the writes needed it held for `neededMs` from that admission (to their
- * last receipt; null when no write was made). A transfer holds the slot about
- * as long as its triples take to arrive, so the next graph carries `margin`
- * times the triples that hold the slot through `neededMs` at the rate
- * measured, at least `minGrowth` times the last graph's (all that is known
- * without a rate), and at most `maxTriples` (or the last graph's, if that is
- * more). They are spread over as few assets as `maxTriplesPerAsset` allows:
- * a node writes fewer, larger assets faster. Returns { assets, triples
- * (per asset), expectedHoldMs (at the rate measured; null without one) }.
+ * and the next one must hold it for `neededMs` from its admission. A transfer
+ * holds the slot about as long as its triples take to arrive, so the next graph
+ * carries `margin` times the triples that hold the slot through `neededMs` at
+ * the rate measured, at least `minGrowth` times the last graph's (all that is
+ * known without a rate), and at most `maxTriples` (or the last graph's, if that
+ * is more). They are spread over as few assets as `maxTriplesPerAsset` allows:
+ * a node writes fewer, larger assets faster, and their transfer holds the slot
+ * longer. Returns { assets, triples (per asset), expectedHoldMs (at the rate
+ * measured; null without one) }.
  */
 export function nextLargeSize(size, { heldMs = null, neededMs = null } = {}, {
   margin = 1.5, minGrowth = 1, maxTriplesPerAsset = LARGE_ASSET_MAX_TRIPLES, maxTriples = LARGE_GRAPH_MAX_TRIPLES,

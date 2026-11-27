@@ -4,7 +4,7 @@ import test from 'node:test';
 import { traceAdmissions } from '../qa/admission-trace.mjs';
 import {
   admissionsBySlot, attemptVerdict, besideTransfer, busySlotCovered, heldTransfer, LARGE_ASSET_MAX_TRIPLES, LARGE_GRAPH_MAX_TRIPLES, nextLargeSize,
-  receivedWhileHeld, singleSlotProblem, transferChain, transferSettled, TRANSFER_READMIT_MS,
+  OWNER_LARGE_GRAPH_MAX_TRIPLES, ownerLargeSize, receivedWhileHeld, singleSlotProblem, transferChain, transferSettled, TRANSFER_READMIT_MS,
 } from '../qa/busy-slot.mjs';
 
 // Member 2's intended general pool: one slot, no queue (as the trace records it).
@@ -302,6 +302,15 @@ test('the next attempt\'s large graph is sized from the rate the last transfer h
   const defaults = nextLargeSize({ assets: 64, triples: 2000 }, { heldMs: 5_000, neededMs: 60_000 });
   assert.ok(defaults.triples <= LARGE_ASSET_MAX_TRIPLES && defaults.assets * defaults.triples <= LARGE_GRAPH_MAX_TRIPLES + defaults.assets, JSON.stringify(defaults));
   assert.deepEqual(nextLargeSize({ assets: 64, triples: 2000 }, { heldMs: 11_900, neededMs: 21_000 }), { assets: 26, triples: 9847, expectedHoldMs: 23_802 });
+});
+
+test('a later large graph the owner writes keeps to what it can take, in the same assets', () => {
+  assert.deepEqual(ownerLargeSize({ assets: 26, triples: 9847, expectedHoldMs: 70_000 }), { assets: 12, triples: 9847 });
+  assert.ok(12 * 9847 <= OWNER_LARGE_GRAPH_MAX_TRIPLES && 13 * 9847 > OWNER_LARGE_GRAPH_MAX_TRIPLES);
+  // One that fits stays as it is, and a limit below one asset still writes that asset.
+  const fits = { assets: 16, triples: 8000, expectedHoldMs: 30_000 };
+  assert.equal(ownerLargeSize(fits), fits);
+  assert.deepEqual(ownerLargeSize({ assets: 26, triples: 9847 }, 5000), { assets: 1, triples: 9847 });
 });
 
 test('another admission at the same time as one of the transfer\'s own contradicts the one-slot policy; one between them does not', () => {

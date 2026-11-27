@@ -119,3 +119,119 @@ test('the observation layer keeps each member\'s history with the definition; a 
     assert.equal(verdict(write), 'FAIL', lines.join('\n'));
   }
 });
+
+/**
+ * A node's share route, as a test scripts it: `posts` answers each share in
+ * turn and `reads` each read of a job (the last of either repeats). Returns the
+ * observation with the notes it made, and the requests it sent.
+ */
+function shareNode({ posts, reads = [], boundMs = 1_000, shareRetryMs = 20 }) {
+  const reply = (status, json) => ({ status, json, text: JSON.stringify(json) });
+  const sent = [];
+  const notes = [];
+  let posted = 0;
+  let read = 0;
+  const devnet = {
+    async api(node, method, path, body) {
+      sent.push({ method, path, body });
+      if (path === '/api/knowledge-assets') return reply(201, { created: body.name });
+      if (path.endsWith('/swm/share-async')) {
+        if (posted >= 50) throw new Error('the share was sent again without a bound');
+        return reply(...posts[Math.min(posted++, posts.length - 1)]);
+      }
+      return reply(...reads[Math.min(read++, reads.length - 1)]);
+    },
+  };
+  const io = createObservation(devnet, { boundMs, definitionMs: 90_000, syncedMs: 90_000, stamp: 'S', predicate: LABEL, shareRetryMs, note: text => notes.push(text) });
+  return { io, sent, notes, shares: () => sent.filter(request => request.path.endsWith('/swm/share-async')) };
+}
+const AUTHOR = { number: 9, label: 'node9 (member2)' };
+const GRAPH = { id: 'g', key: 'public', resolved: 'g' };
+const unsure = [503, { code: 'PROMOTE_ADMISSION_UNAVAILABLE', retryable: true, phase: 'persist', admissionOutcome: 'indeterminate', jobId: 'j-1' }];
+const notAdmitted = [503, { code: 'PROMOTE_ADMISSION_UNAVAILABLE', retryable: true, phase: 'lock', admissionOutcome: 'not_admitted' }];
+const accepted = [200, { jobId: 'j-1' }];
+const absent = [404, { error: 'Promote job not found: j-1' }];
+const queued = [200, { state: 'queued' }];
+const succeeded = [200, { state: 'succeeded' }];
+const share = io => io.createAndShare(AUTHOR, { contextGraphId: 'g', name: 'asset', quads: [] }, { createTimeoutMs: 1_000, jobTimeoutMs: 1_000, pollMs: 10, label: 'case 5: a write' });
+
+test('a share whose admission is indeterminate is not sent again: its job is read, and the write goes on when it is there', async () => {
+  // As on a healthy node with a busy store: the job is not there yet, then runs and succeeds.
+  const node = shareNode({ posts: [unsure], reads: [absent, absent, queued, succeeded] });
+  const outcome = await share(node.io);
+  assert.equal(outcome.error, undefined);
+  assert.equal(typeof outcome.doneAt, 'number');
+  assert.equal(node.shares().length, 1);
+  assert.ok(node.sent.filter(request => request.method === 'GET').every(request => request.path === '/api/knowledge-assets/swm/share-jobs/j-1'));
+  assert.equal(node.notes.length, 2, JSON.stringify(node.notes));
+  assert.equal(node.notes[0], 'case 5: a write: its share was answered 503 indeterminate (phase persist): reading job j-1, not sending it again');
+  assert.match(node.notes[1], /^case 5: a write: job j-1 was there \d+ s later$/);
+});
+
+test('a share whose job never shows within the bound fails the write, and is still never sent again', async () => {
+  const node = shareNode({ posts: [unsure], reads: [absent], boundMs: 100 });
+  const started = Date.now();
+  const outcome = await share(node.io);
+  assert.match(outcome.error, /^the share's admission stayed indeterminate: job j-1 was not seen within 0 s \(HTTP 404 /);
+  assert.ok(Date.now() - started >= 80, 'it had its bound');
+  assert.equal(node.shares().length, 1);
+  assert.equal(node.notes.length, 1);
+});
+
+test('a job found after an indeterminate answer is judged as any other: one that failed fails the write', async () => {
+  const node = shareNode({ posts: [unsure], reads: [[200, { state: 'failed', lastError: { message: 'no quorum' } }]] });
+  const outcome = await share(node.io);
+  assert.match(outcome.error, /^the share job ended failed: .*no quorum/);
+  assert.equal(node.shares().length, 1);
+});
+
+test('a share that was not admitted is sent again unchanged, within the bound, and each such answer is noted', async () => {
+  const node = shareNode({ posts: [notAdmitted, notAdmitted, accepted], reads: [succeeded] });
+  const outcome = await node.io.createAndShare(AUTHOR, { contextGraphId: 'g', name: 'asset', subGraphName: 's', quads: [] }, { createTimeoutMs: 1_000, jobTimeoutMs: 1_000, pollMs: 10, label: 'case 5: a write' });
+  assert.equal(outcome.error, undefined);
+  assert.deepEqual(node.shares().map(request => request.body), Array(3).fill({ contextGraphId: 'g', entities: 'all', subGraphName: 's' }));
+  assert.deepEqual(node.notes, Array(2).fill('case 5: a write: its share was answered 503 not_admitted (phase lock): sending it again'));
+});
+
+test('a share still not admitted when the bound runs out fails the write, with the node\'s answer', async () => {
+  const node = shareNode({ posts: [notAdmitted], boundMs: 100 });
+  const outcome = await share(node.io);
+  assert.match(outcome.error, /^the share was not accepted: HTTP 503 .*"admissionOutcome":"not_admitted"/);
+  assert.ok(node.shares().length >= 2 && node.shares().length <= 6, `sent ${node.shares().length} time(s)`);
+});
+
+test('a resend that meets the first share, or an unsure answer, follows the job it is told of', async () => {
+  const running = shareNode({ posts: [notAdmitted, [409, { existingJobId: 'j-2' }]], reads: [succeeded] });
+  assert.equal((await share(running.io)).error, undefined);
+  assert.equal(running.sent.at(-1).path, '/api/knowledge-assets/swm/share-jobs/j-2');
+  const then = shareNode({ posts: [notAdmitted, unsure], reads: [absent, succeeded] });
+  assert.equal((await share(then.io)).error, undefined);
+  assert.equal(then.shares().length, 2);
+});
+
+test('any other answer to a share fails the write at once, with no note', async () => {
+  for (const answer of [[500, { error: 'boom' }], [503, { code: 'STORE_SCHEDULER_BUSY', retryable: true }], [400, { code: 'KA_ATOMIC_SHARE_REQUIRED' }]]) {
+    const node = shareNode({ posts: [answer] });
+    const outcome = await share(node.io);
+    assert.match(outcome.error, /^the share was not accepted: HTTP /);
+    assert.equal(node.shares().length, 1);
+    assert.deepEqual(node.notes, []);
+  }
+});
+
+test('a write names its case and itself in the note of its share, and counts as written once the job ran', async () => {
+  const node = shareNode({ posts: [unsure], reads: [absent, succeeded] });
+  const handle = await node.io.writeAndWatch(5, AUTHOR, GRAPH, 's', 'member2 later, sub-graph', []);
+  await handle.done;
+  assert.match(node.notes[0], /^case 5: "member2 later, sub-graph \(1\)" by node9 \(member2\) in public\/s: its share was answered 503 indeterminate/);
+  // The bound of the pairs of this write starts when its job ended.
+  const record = await node.io.write(AUTHOR, GRAPH, null, 'no case');
+  assert.equal(record.error, null);
+  assert.equal(typeof record.doneAt, 'number');
+  assert.match(node.notes.at(-1), /^"no case \(2\)" by node9 \(member2\) in public root: job j-1 was there \d+ s later$/);
+  // One that never shows is a write that failed, with its reason, and its pairs are not read.
+  const lost = shareNode({ posts: [unsure], reads: [absent], boundMs: 50 });
+  const failed = await lost.io.write(AUTHOR, GRAPH, null, 'lost');
+  assert.match(failed.error, /stayed indeterminate/);
+  assert.equal(failed.doneAt, null);
+});
